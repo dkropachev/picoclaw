@@ -43,6 +43,7 @@ var (
 const (
 	repositoryReviewControllerInterval = 5 * time.Second
 	repositoryReviewQuotaProbeTimeout  = 30 * time.Second
+	repositoryReviewMaximumFiles       = 100_000
 	// Repository reviews run a planning call before managed review children and
 	// reserve the end of the workflow deadline for durable checkpoint cleanup.
 	repositoryReviewWorkflowMinTimeout = 15 * time.Minute
@@ -1197,7 +1198,11 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 
 	activeSnapshot, ok := c.activeRunSnapshot(id, runID)
 	if !ok {
-		c.finishAutomationRun(id, runID, nil, errors.New("repository review active run is unavailable"), false)
+		c.finishAutomationRun(
+			id, runID, nil,
+			errors.New("repository review active run is unavailable"),
+			false, nil,
+		)
 		return
 	}
 	store, cfg := activeSnapshot.store, activeSnapshot.config
@@ -1206,7 +1211,7 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		if err == nil {
 			err = errors.New("repository review automation disappeared before execution")
 		}
-		c.finishAutomationRun(id, runID, nil, err, false)
+		c.finishAutomationRun(id, runID, nil, err, false, nil)
 		return
 	}
 	priceIndex := repositoryReviewAccountingIndex(nil, automation)
@@ -1216,20 +1221,22 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 	if c.runBatch != nil {
 		result, runErr := c.runBatch(runCtx, automation, runID, observeUsage)
 		runErr = repositoryReviewJoinCommitError(automation, result, runErr)
-		checkpointed := runErr == nil && result != nil && result.Status == workflows.RunStatusSucceeded
-		c.finishAutomationRun(id, runID, result, runErr, checkpointed)
+		_, remainingFound := repositoryReviewRemainingFiles(result, nil)
+		checkpointed := runErr == nil && result != nil &&
+			result.Status == workflows.RunStatusSucceeded && remainingFound
+		c.finishAutomationRun(id, runID, result, runErr, checkpointed, nil)
 		return
 	}
 
 	_, workflowStore, executor, err := c.handler.workflowRuntimeFromConfig(runCtx, cfg)
 	if err != nil {
-		c.finishAutomationRun(id, runID, nil, err, false)
+		c.finishAutomationRun(id, runID, nil, err, false, nil)
 		return
 	}
 	defer closeWorkflowRuntime(executor)
 	workflow, err := repositoryReviewParseWorkflow([]byte(workflows.RepositoryBugFinderWorkflowYAML))
 	if err != nil {
-		c.finishAutomationRun(id, runID, nil, err, false)
+		c.finishAutomationRun(id, runID, nil, err, false, nil)
 		return
 	}
 	executor.DefaultTimeout = repositoryReviewEffectiveWorkflowTimeout(executor.DefaultTimeout)
@@ -1277,14 +1284,16 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 	})
 	runErr = errors.Join(runErr, repositoryReviewValidateExecutionCommit(automation, result))
 	checkpointed := false
+	var persistedRun *workflows.Run
 	if persisted, persistedErr := workflowStore.GetRun(context.Background(), runID); persistedErr == nil {
+		persistedRun = persisted
 		runErr = errors.Join(runErr, repositoryReviewValidatePersistedScope(automation, persisted))
 		c.recordManagedChildOutcomes(id, runID, persisted, priceIndex)
 		checkpointed = runErr == nil && repositoryReviewRunCheckpointed(persisted, result)
 	}
 	cancel()
 	<-monitorDone
-	c.finishAutomationRun(id, runID, result, runErr, checkpointed)
+	c.finishAutomationRun(id, runID, result, runErr, checkpointed, persistedRun)
 }
 
 func repositoryReviewEffectiveWorkflowTimeout(configured time.Duration) time.Duration {
@@ -2168,20 +2177,184 @@ func repositoryReviewRunCheckpointed(
 		return false
 	}
 	record := repositoryReviewRunStep(run, "record")
-	if record.Status == workflows.RunStatusSucceeded && strings.TrimSpace(record.Error) == "" {
-		if recordedRun, ok := record.Outputs["run"].(map[string]any); ok && len(recordedRun) > 0 {
-			return true
+	if record.Status == workflows.RunStatusSucceeded {
+		if strings.TrimSpace(record.Error) != "" {
+			return false
 		}
+		durableRemaining, durableRemainingFound := repositoryReviewDurableRecordRemainingFiles(run)
+		remaining, remainingFound := repositoryReviewRemainingFiles(result, run)
+		return durableRemainingFound && remainingFound && remaining == durableRemaining
 	}
 	plan := repositoryReviewRunStep(run, "plan")
 	resultStep := repositoryReviewRunStep(run, "result")
-	pending := repositoryReviewInt(plan.Outputs["pendingCount"])
-	if pending == 0 {
-		pending = repositoryReviewInt(plan.Outputs["pending_count"])
+	pending, pendingFound := repositoryReviewOutputNonnegativeInt(
+		plan.Outputs, "pendingCount", "pending_count",
+	)
+	durableRemaining, durableRemainingFound := repositoryReviewDurableResultRemainingFiles(run)
+	remaining, remainingFound := repositoryReviewRemainingFiles(result, run)
+	return plan.Status == workflows.RunStatusSucceeded && strings.TrimSpace(plan.Error) == "" &&
+		pendingFound && pending == 0 &&
+		resultStep.Status == workflows.RunStatusSucceeded && strings.TrimSpace(resultStep.Error) == "" &&
+		durableRemainingFound && durableRemaining == 0 && remainingFound && remaining == 0
+}
+
+func repositoryReviewRemainingFiles(
+	result *workflows.RunResult,
+	run *workflows.Run,
+) (int, bool) {
+	topLevel, topLevelFound, topLevelConflict := repositoryReviewTopLevelRemainingFilesDetailed(result)
+	if topLevelConflict {
+		return 0, false
 	}
-	return pending == 0 && resultStep.Status == workflows.RunStatusSucceeded &&
-		strings.TrimSpace(resultStep.Error) == "" &&
-		repositoryReviewInt(result.Outputs["remainingFiles"]) == 0
+	record, recordFound := repositoryReviewDurableRecordRemainingFiles(run)
+	persistedResult, persistedResultFound := repositoryReviewDurableResultRemainingFiles(run)
+	remaining := 0
+	found := false
+	for _, source := range []struct {
+		value int
+		found bool
+	}{
+		{value: topLevel, found: topLevelFound},
+		{value: record, found: recordFound},
+		{value: persistedResult, found: persistedResultFound},
+	} {
+		if !source.found {
+			continue
+		}
+		if found && remaining != source.value {
+			return 0, false
+		}
+		remaining = source.value
+		found = true
+	}
+	return remaining, found
+}
+
+func repositoryReviewTopLevelRemainingFilesDetailed(
+	result *workflows.RunResult,
+) (int, bool, bool) {
+	if result == nil {
+		return 0, false, false
+	}
+	return repositoryReviewOutputNonnegativeIntDetailed(
+		result.Outputs, "remainingFiles", "remaining_files",
+	)
+}
+
+func repositoryReviewDurableRecordRemainingFiles(run *workflows.Run) (int, bool) {
+	record := repositoryReviewRunStep(run, "record")
+	if record.Status != workflows.RunStatusSucceeded || strings.TrimSpace(record.Error) != "" {
+		return 0, false
+	}
+	recordedRun, ok := record.Outputs["run"].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	return repositoryReviewOutputNonnegativeInt(recordedRun, "remaining_files")
+}
+
+func repositoryReviewDurableResultRemainingFiles(run *workflows.Run) (int, bool) {
+	result := repositoryReviewRunStep(run, "result")
+	if result.Status != workflows.RunStatusSucceeded || strings.TrimSpace(result.Error) != "" {
+		return 0, false
+	}
+	recordedRun, ok := result.Outputs["run"].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	return repositoryReviewOutputNonnegativeInt(recordedRun, "remaining_files")
+}
+
+func repositoryReviewOutputNonnegativeInt(
+	values map[string]any,
+	keys ...string,
+) (int, bool) {
+	parsed, found, conflict := repositoryReviewOutputNonnegativeIntDetailed(values, keys...)
+	return parsed, found && !conflict
+}
+
+func repositoryReviewOutputNonnegativeIntDetailed(
+	values map[string]any,
+	keys ...string,
+) (int, bool, bool) {
+	parsed := 0
+	found := false
+	for _, key := range keys {
+		value, exists := values[key]
+		if !exists {
+			continue
+		}
+		if candidate, ok := repositoryReviewNonnegativeInt(value); ok {
+			if found && candidate != parsed {
+				return 0, true, true
+			}
+			parsed = candidate
+			found = true
+		}
+	}
+	return parsed, found, false
+}
+
+func repositoryReviewNonnegativeInt(value any) (int, bool) {
+	maximum := uint64(repositoryReviewMaximumFiles)
+	fromSigned := func(number int64) (int, bool) {
+		if number < 0 || uint64(number) > maximum {
+			return 0, false
+		}
+		return int(number), true
+	}
+	fromUnsigned := func(number uint64) (int, bool) {
+		if number > maximum {
+			return 0, false
+		}
+		return int(number), true
+	}
+	fromFloat := func(number float64) (int, bool) {
+		if math.IsNaN(number) || math.IsInf(number, 0) || number < 0 ||
+			math.Trunc(number) != number || number > float64(maximum) {
+			return 0, false
+		}
+		converted := int(number)
+		return converted, true
+	}
+
+	switch number := value.(type) {
+	case int:
+		if number < 0 || uint64(number) > maximum {
+			return 0, false
+		}
+		return number, true
+	case int8:
+		return fromSigned(int64(number))
+	case int16:
+		return fromSigned(int64(number))
+	case int32:
+		return fromSigned(int64(number))
+	case int64:
+		return fromSigned(number)
+	case uint:
+		return fromUnsigned(uint64(number))
+	case uint8:
+		return fromUnsigned(uint64(number))
+	case uint16:
+		return fromUnsigned(uint64(number))
+	case uint32:
+		return fromUnsigned(uint64(number))
+	case uint64:
+		return fromUnsigned(number)
+	case float32:
+		return fromFloat(float64(number))
+	case float64:
+		return fromFloat(number)
+	case json.Number:
+		parsed, err := number.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return fromSigned(parsed)
+	default:
+		return 0, false
+	}
 }
 
 func (c *repositoryReviewController) finishAutomationRun(
@@ -2189,6 +2362,7 @@ func (c *repositoryReviewController) finishAutomationRun(
 	result *workflows.RunResult,
 	runErr error,
 	checkpointed bool,
+	persistedRun *workflows.Run,
 ) {
 	activeSnapshot, activeFound := c.activeRunSnapshot(id, runID)
 	if !activeFound {
@@ -2258,7 +2432,7 @@ func (c *repositoryReviewController) finishAutomationRun(
 					candidate.Progress.TotalBatches,
 					candidate.Progress.CompletedBatches,
 				)
-				applyRepositoryReviewRunProgress(candidate, result)
+				applyRepositoryReviewRunProgress(candidate, result, persistedRun)
 				applyRepositoryReviewOutcome(candidate, outcome)
 			}
 			if runErr == nil && result != nil && result.Status == workflows.RunStatusSucceeded && !checkpointed {
@@ -2370,6 +2544,7 @@ func (c *repositoryReviewController) activeRunSnapshot(
 func applyRepositoryReviewRunProgress(
 	automation *repoaudit.RepositoryReviewAutomation,
 	result *workflows.RunResult,
+	persistedRun *workflows.Run,
 ) {
 	if automation == nil || result == nil {
 		return
@@ -2389,11 +2564,7 @@ func applyRepositoryReviewRunProgress(
 			automation.ScopeSelection = &scopeSelection
 		}
 	}
-	remaining := repositoryReviewInt(result.Outputs["remainingFiles"])
-	if remaining == 0 {
-		remaining = repositoryReviewInt(result.Outputs["remaining_files"])
-	}
-	if remaining >= 0 {
+	if remaining, ok := repositoryReviewRemainingFiles(result, persistedRun); ok {
 		automation.Progress.RemainingFiles = remaining
 	}
 	reviewed := repositoryReviewInt(result.Outputs["reviewedFiles"])

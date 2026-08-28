@@ -387,9 +387,15 @@ interfaces owned by their existing feature specifications.
    actual token usage, cost, and latency. Completion releases the projection;
    accounting persistence failure fails closed.
 8. A completed batch counts only after the qualified record step persisted a
-   run or the authoritative no-op result was verified. The controller then
-   merges campaign-scoped ledger outcomes and either completes, safely pauses,
-   or atomically admits the next bounded batch.
+   run with an explicit valid nonnegative integer `remaining_files`, or an
+   authoritative no-op has both an explicit zero pending count and an explicit
+   valid zero persisted-result remaining count. A successful record's persisted
+   `remaining_files` is authoritative; a valid top-level `remainingFiles` or
+   `remaining_files` projection must agree with persisted record/result evidence.
+   Missing, malformed, negative, fractional, contradictory, and above-domain
+   values never imply zero and never overwrite prior progress. The controller then merges
+   campaign-scoped ledger outcomes and either completes, safely pauses, or
+   atomically admits the next bounded batch.
 9. The monitor only reconciles orphaned active runs after launcher failure; it
    does not poll account limits or auto-resume a guard pause. Explicit Resume
    causes the next worker pickup to fetch current telemetry and evaluate again.
@@ -503,7 +509,10 @@ interfaces owned by their existing feature specifications.
   worker starts. A workflow commit that differs from `resolved_commit_sha`
   fails the batch and cannot count as a verified checkpoint.
 - A workflow that reports success without a verified durable record/no-op
-  checkpoint becomes `failed`, so incomplete work is never counted as a batch.
+  checkpoint becomes `failed`. A successful record without its durable
+  nonnegative integer remaining count and a no-op without both explicit zeros
+  are unverified. Conflicting top-level and persisted counts also fail closed,
+  so incomplete or ambiguous work is never counted as a batch.
 - A failed campaign remains explicitly resumable through the commit-selection
   fence. Resume appends a workflow run to that campaign and preserves its
   counters and durable checkpoints; Run again remains the explicit new-campaign

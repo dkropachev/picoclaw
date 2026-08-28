@@ -2417,19 +2417,205 @@ func TestRepositoryReviewCheckpointRequiresDurableRecordOrVerifiedNoop(t *testin
 	}
 	recordSuccess := &workflows.Run{Steps: map[string]workflows.StepExecution{
 		"find_bugs/record": {
-			Status:  workflows.RunStatusSucceeded,
-			Outputs: map[string]any{"run": map[string]any{"id": "wr_checkpoint"}},
+			Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{"run": map[string]any{
+				"id": "wr_checkpoint", "remaining_files": 0,
+			}},
 		},
 	}}
 	if !repositoryReviewRunCheckpointed(recordSuccess, result) {
 		t.Fatal("durable record was not counted as a checkpoint")
 	}
+	for name, value := range map[string]any{
+		"missing":        nil,
+		"malformed":      "0",
+		"negative":       -1,
+		"nonintegral":    0.5,
+		"wrong alias":    map[string]any{"remainingFiles": 0},
+		"non-map record": true,
+	} {
+		recorded := map[string]any{"remaining_files": value}
+		if mapped, ok := value.(map[string]any); ok {
+			recorded = mapped
+		}
+		var durable any = recorded
+		if name == "non-map record" {
+			durable = value
+		}
+		if name == "missing" {
+			recorded = map[string]any{"id": "wr_checkpoint"}
+			durable = recorded
+		}
+		run := &workflows.Run{Steps: map[string]workflows.StepExecution{
+			"find_bugs/record": {
+				Status:  workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"run": durable},
+			},
+		}}
+		if repositoryReviewRunCheckpointed(run, result) {
+			t.Fatalf("%s durable count was counted as a checkpoint", name)
+		}
+	}
 	noop := &workflows.Run{Steps: map[string]workflows.StepExecution{
-		"find_bugs/plan":   {Status: workflows.RunStatusSucceeded, Outputs: map[string]any{"pendingCount": 0}},
-		"find_bugs/result": {Status: workflows.RunStatusSucceeded},
+		"find_bugs/plan": {Status: workflows.RunStatusSucceeded, Outputs: map[string]any{"pendingCount": 0}},
+		"find_bugs/result": {
+			Status:  workflows.RunStatusSucceeded,
+			Outputs: map[string]any{"run": map[string]any{"remaining_files": 0}},
+		},
 	}}
 	if !repositoryReviewRunCheckpointed(noop, result) {
 		t.Fatal("verified no-op result was not counted as a checkpoint")
+	}
+	noopWith := func(pending, remaining map[string]any) bool {
+		persistedRun := make(map[string]any)
+		if value, valid := repositoryReviewOutputNonnegativeInt(
+			remaining, "remainingFiles", "remaining_files",
+		); valid {
+			persistedRun["remaining_files"] = value
+		} else if value, exists := remaining["remainingFiles"]; exists {
+			persistedRun["remaining_files"] = value
+		} else if value, exists := remaining["remaining_files"]; exists {
+			persistedRun["remaining_files"] = value
+		}
+		return repositoryReviewRunCheckpointed(
+			&workflows.Run{Steps: map[string]workflows.StepExecution{
+				"find_bugs/plan": {
+					Status: workflows.RunStatusSucceeded, Outputs: pending,
+				},
+				"find_bugs/result": {
+					Status:  workflows.RunStatusSucceeded,
+					Outputs: map[string]any{"run": persistedRun},
+				},
+			}},
+			&workflows.RunResult{Status: workflows.RunStatusSucceeded, Outputs: remaining},
+		)
+	}
+	for name, values := range map[string]struct {
+		pending   map[string]any
+		remaining map[string]any
+	}{
+		"missing pending": {
+			pending: map[string]any{}, remaining: map[string]any{"remainingFiles": 0},
+		},
+		"malformed pending": {
+			pending: map[string]any{"pendingCount": "0"}, remaining: map[string]any{"remainingFiles": 0},
+		},
+		"negative pending": {
+			pending: map[string]any{"pendingCount": -1}, remaining: map[string]any{"remainingFiles": 0},
+		},
+		"missing remaining": {
+			pending: map[string]any{"pendingCount": 0}, remaining: map[string]any{},
+		},
+		"malformed remaining": {
+			pending: map[string]any{"pendingCount": 0}, remaining: map[string]any{"remainingFiles": "0"},
+		},
+		"negative remaining": {
+			pending: map[string]any{"pendingCount": 0}, remaining: map[string]any{"remainingFiles": -1},
+		},
+		"nonintegral remaining": {
+			pending: map[string]any{"pendingCount": 0}, remaining: map[string]any{"remainingFiles": 0.5},
+		},
+		"positive remaining": {
+			pending: map[string]any{"pendingCount": 0}, remaining: map[string]any{"remainingFiles": 1},
+		},
+	} {
+		if noopWith(values.pending, values.remaining) {
+			t.Fatalf("%s was counted as an explicit no-op checkpoint", name)
+		}
+	}
+	if !noopWith(
+		map[string]any{"pendingCount": "invalid", "pending_count": float64(0)},
+		map[string]any{"remainingFiles": false, "remaining_files": float64(0)},
+	) {
+		t.Fatal("valid snake-case zero aliases were not counted as an explicit no-op checkpoint")
+	}
+	for _, contradiction := range []struct {
+		durable int
+		project int
+	}{{durable: 5, project: 0}, {durable: 0, project: 5}} {
+		contradictory := &workflows.Run{Steps: map[string]workflows.StepExecution{
+			"find_bugs/record": {
+				Status: workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"run": map[string]any{
+					"remaining_files": contradiction.durable,
+				}},
+			},
+		}}
+		if repositoryReviewRunCheckpointed(
+			contradictory,
+			&workflows.RunResult{
+				Status:  workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"remainingFiles": contradiction.project},
+			},
+		) {
+			t.Fatalf("contradictory durable=%d projected=%d checkpointed", contradiction.durable, contradiction.project)
+		}
+	}
+	for _, contradiction := range []struct {
+		durable int
+		project int
+	}{{durable: 5, project: 0}, {durable: 0, project: 5}} {
+		contradictoryNoop := &workflows.Run{Steps: map[string]workflows.StepExecution{
+			"find_bugs/plan": {
+				Status:  workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"pendingCount": 0},
+			},
+			"find_bugs/result": {
+				Status: workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"run": map[string]any{
+					"remaining_files": contradiction.durable,
+				}},
+			},
+		}}
+		if repositoryReviewRunCheckpointed(
+			contradictoryNoop,
+			&workflows.RunResult{
+				Status:  workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"remainingFiles": contradiction.project},
+			},
+		) {
+			t.Fatalf(
+				"contradictory no-op durable=%d projected=%d checkpointed",
+				contradiction.durable, contradiction.project,
+			)
+		}
+	}
+	for _, contradiction := range []struct {
+		record int
+		result int
+	}{{record: 5, result: 0}, {record: 0, result: 5}} {
+		contradictoryPersisted := &workflows.Run{Steps: map[string]workflows.StepExecution{
+			"find_bugs/record": {
+				Status: workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"run": map[string]any{
+					"remaining_files": contradiction.record,
+				}},
+			},
+			"find_bugs/result": {
+				Status: workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"run": map[string]any{
+					"remaining_files": contradiction.result,
+				}},
+			},
+		}}
+		if repositoryReviewRunCheckpointed(
+			contradictoryPersisted,
+			&workflows.RunResult{
+				Status:  workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"remainingFiles": contradiction.record},
+			},
+		) {
+			t.Fatalf(
+				"contradictory persisted record=%d result=%d checkpointed",
+				contradiction.record, contradiction.result,
+			)
+		}
+	}
+	if noopWith(
+		map[string]any{"pendingCount": 0, "pending_count": 1},
+		map[string]any{"remainingFiles": 0},
+	) {
+		t.Fatal("contradictory pending aliases were counted as a no-op checkpoint")
 	}
 }
 
