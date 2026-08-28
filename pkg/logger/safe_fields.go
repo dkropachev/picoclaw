@@ -365,6 +365,58 @@ const (
 	DiagnosticMessageWorkflowTriggerEvaluationFailed
 	DiagnosticMessageWorkflowFailedToRetainWorkflowTriggerRuntime
 	DiagnosticMessageWorkflowRunFailed
+	DiagnosticMessageEventingPRWorkspaceLocalCIIsUnavailable
+	DiagnosticMessageEventingPRWorkspaceImplementationIsUnavailable
+	DiagnosticMessageEventingEventWorkflowWorkerIterationFailed
+	DiagnosticMessageEventingEventRetentionMaintenanceFailed
+	DiagnosticMessageEventingPrunedExpiredDurableEvents
+	DiagnosticMessageEventingGitHubNotificationPollingFailed
+	DiagnosticMessageEventingStoredGitHubNotifications
+	DiagnosticMessageConfigHotReloadEnabled
+	DiagnosticMessageGatewayShuttingDown
+	DiagnosticMessageConfigReloadSkippedAnotherReloadIsInProgress
+	DiagnosticMessageConfigReloadFailed
+	DiagnosticMessageConfigManualReloadTriggeredViaReloadEndpoint
+	DiagnosticMessageConfigErrorLoadingConfigForManualReload
+	DiagnosticMessageConfigValidationFailed
+	DiagnosticMessageConfigManualReloadFailed
+	DiagnosticMessageLoggerErrorEnablingFileLogging
+	DiagnosticMessageConfigManualReloadCompletedSuccessfully
+	DiagnosticMessageLoggerLogLevelSet
+	DiagnosticMessageGatewayWritePIDFileFailed
+	DiagnosticMessageAgentInitialized
+	DiagnosticMessageGatewayStartupFailed
+	DiagnosticMessageGatewayStartedWithoutAConfiguredModelAlias
+	DiagnosticMessageConfigFileChangedReloading
+	DiagnosticMessageConfigProviderConfigurationAndServicesReloadedSuccessfully
+	DiagnosticMessageLoggerLogLevelChangingFromCurrent
+	DiagnosticMessageProviderNewModelSelectedRecreatingProvider
+	DiagnosticMessageProviderErrorCreatingNewProvider
+	DiagnosticMessageGatewayStoppingAllServices
+	DiagnosticMessageAgentErrorReloadingAgentLoop
+	DiagnosticMessageGatewayAttemptingToRestartServicesWithOldProviderAndConfig
+	DiagnosticMessageGatewayFailedToRestartServices
+	DiagnosticMessageGatewayPreflightingAndRestartingAllServicesWithNewConfiguration
+	DiagnosticMessageGatewayErrorRestartingServices
+	DiagnosticMessageVoiceChannelVoiceCapabilities
+	DiagnosticMessageDeviceFailedToRestartDeviceService
+	DiagnosticMessageVoiceTranscriptionReEnabledAgentLevel
+	DiagnosticMessageVoiceTranscriptionDisabled
+	DiagnosticMessageVoiceTranscriptionEnabledAgentLevel
+	DiagnosticMessageDeviceErrorStartingDeviceService
+	DiagnosticMessageConfigFileChangeDetected
+	DiagnosticMessageConfigErrorLoadingNewConfig
+	DiagnosticMessageConfigUsingPreviousValidConfig
+	DiagnosticMessageConfigNewConfigValidationFailed
+	DiagnosticMessageConfigFileValidatedAndLoaded
+	DiagnosticMessageConfigPreviousReloadStillInProgressSkipping
+	DiagnosticMessageGatewayFailedToStopRuntimeProducersCleanly
+	DiagnosticMessageGatewayAgentLoopDidNotStopCleanly
+	DiagnosticMessageGatewayAgentRuntimeDidNotDrainCleanly
+	DiagnosticMessageGatewayChannelEventAdmissionDidNotCloseCleanly
+	DiagnosticMessageGatewayFailedToStopRuntimeDependenciesCleanly
+	DiagnosticMessageGatewayStopped
+	DiagnosticMessagePRWorkspaceRepairFailed
 )
 
 var diagnosticMessageLabels = [...]string{
@@ -643,6 +695,58 @@ var diagnosticMessageLabels = [...]string{
 	"Workflow trigger evaluation failed",
 	"Failed to retain workflow trigger runtime",
 	"Workflow run failed",
+	"PR workspace local CI is unavailable",
+	"PR workspace implementation is unavailable",
+	"Event workflow worker iteration failed",
+	"Event retention maintenance failed",
+	"Pruned expired durable events",
+	"GitHub notification polling failed",
+	"Stored GitHub notifications",
+	"Config hot reload enabled",
+	"Shutting down...",
+	"Config reload skipped: another reload is in progress",
+	"Config reload failed",
+	"Manual reload triggered via /reload endpoint",
+	"Error loading config for manual reload",
+	"Config validation failed",
+	"Manual reload failed",
+	"error enabling file logging",
+	"Manual reload completed successfully",
+	"Log level set",
+	"write pid file failed",
+	"Agent initialized",
+	"Gateway startup failed",
+	"Gateway started without a configured model alias",
+	"🔄 Config file changed, reloading...",
+	"  ✓ Provider, configuration, and services reloaded successfully (thread-safe)",
+	"Log level changing from current",
+	" New model selected, recreating provider...",
+	"  ⚠ Error creating new provider",
+	"  Stopping all services...",
+	"  ⚠ Error reloading agent loop",
+	"  Attempting to restart services with old provider and config...",
+	"  ⚠ Failed to restart services",
+	"  Preflighting and restarting all services with new configuration...",
+	"  ⚠ Error restarting services",
+	"Channel voice capabilities",
+	"Failed to restart device service",
+	"Transcription re-enabled (agent-level)",
+	"Transcription disabled",
+	"Transcription enabled (agent-level)",
+	"Error starting device service",
+	"🔍 Config file change detected",
+	"⚠ Error loading new config",
+	"  Using previous valid config",
+	"  ⚠ New config validation failed",
+	"✓ Config file validated and loaded",
+	"⚠ Previous config reload still in progress, skipping",
+	"Failed to stop runtime producers cleanly",
+	"Agent loop did not stop cleanly",
+	"Agent runtime did not drain cleanly",
+	"Channel event admission did not close cleanly",
+	"Failed to stop runtime dependencies cleanly",
+	"✓ Gateway stopped",
+	"PR workspace repair failed",
 }
 
 // FieldKey selects one fixed structured key and its required value type.
@@ -764,6 +868,7 @@ const (
 	FieldFallback
 	FieldHasSummary
 	FieldCacheSensitive
+	FieldLogLevel
 )
 
 type safeFieldKind uint8
@@ -809,6 +914,11 @@ const (
 	// SafeEnumDeveloper is reserved from the provider-neutral role census for
 	// the deferred Agent history/lifecycle slice.
 	SafeEnumDeveloper
+	SafeEnumDebug
+	SafeEnumInfo
+	SafeEnumWarn
+	SafeEnumError
+	SafeEnumFatal
 )
 
 var safeEnumLabels = [...]string{
@@ -838,6 +948,11 @@ var safeEnumLabels = [...]string{
 	"process",
 	"unknown",
 	"developer",
+	"debug",
+	"info",
+	"warn",
+	"error",
+	"fatal",
 }
 
 // SafeField is one opaque typed field constructor result.
@@ -1170,6 +1285,12 @@ func safeEnumAllowed(key FieldKey, value SafeEnumValue) bool {
 		case SafeEnumInProcess, SafeEnumProcess, SafeEnumUnknown:
 			return true
 		}
+	case FieldLogLevel:
+		switch value {
+		case SafeEnumUnknown, SafeEnumDebug, SafeEnumInfo, SafeEnumWarn,
+			SafeEnumError, SafeEnumFatal:
+			return true
+		}
 	}
 	return false
 }
@@ -1391,6 +1512,8 @@ func safeFieldSpec(key FieldKey) (string, safeFieldKind) {
 		return "has_summary", safeFieldKindBool
 	case FieldCacheSensitive:
 		return "cache_sensitive", safeFieldKindBool
+	case FieldLogLevel:
+		return "log_level", safeFieldKindEnum
 	default:
 		return "", 0
 	}

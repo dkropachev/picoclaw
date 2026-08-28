@@ -125,6 +125,8 @@ const (
 	ObservationDomainIdentityReason
 	ObservationDomainIdentityScope
 	ObservationDomainIdentityToolSurface
+	ObservationDomainConfigPath
+	ObservationDomainHomePath
 )
 
 var observationDomainLabels = [...]string{
@@ -197,6 +199,8 @@ var observationDomainLabels = [...]string{
 	"identity.reason",
 	"identity.scope",
 	"identity.tool_surface",
+	"config_path",
+	"home_path",
 }
 
 // ObservationFieldPrefix selects one fixed family of structured log keys.
@@ -282,6 +286,8 @@ const (
 	ObservationPrefixIdentityReason
 	ObservationPrefixIdentityScope
 	ObservationPrefixIdentityToolSurface
+	ObservationPrefixConfigPath
+	ObservationPrefixHomePath
 )
 
 var observationPrefixLabels = [...]string{
@@ -361,6 +367,8 @@ var observationPrefixLabels = [...]string{
 	"identity_reason",
 	"identity_scope",
 	"identity_tool_surface",
+	"config_path",
+	"home_path",
 }
 
 // ErrorClass is a trusted, fixed classification supplied by an error owner.
@@ -511,8 +519,28 @@ func ObserveBytes(domain ObservationDomain, value []byte) Observation {
 // ObservePath classifies a path lexically and digests its exact bytes. It does
 // not resolve, authorize, stat, or follow the path.
 func ObservePath(value string) Observation {
+	return observePath(ObservationDomainPath, ObservationPrefixPath, value)
+}
+
+// ObserveConfigPath classifies a gateway config path without sharing a field
+// prefix or digest domain with another path in the same safe record.
+func ObserveConfigPath(value string) Observation {
+	return observePath(ObservationDomainConfigPath, ObservationPrefixConfigPath, value)
+}
+
+// ObserveHomePath classifies a gateway home path without sharing a field
+// prefix or digest domain with another path in the same safe record.
+func ObserveHomePath(value string) Observation {
+	return observePath(ObservationDomainHomePath, ObservationPrefixHomePath, value)
+}
+
+func observePath(
+	domain ObservationDomain,
+	prefix ObservationFieldPrefix,
+	value string,
+) Observation {
 	if len(value) > maxObservationBytes {
-		return unavailableObservation(ObservationPrefixPath, "unknown", reasonByteLimit)
+		return unavailableObservation(prefix, "unknown", reasonByteLimit)
 	}
 	class := classifyObservationPath(value)
 	validUTF8 := utf8.ValidString(value)
@@ -525,13 +553,13 @@ func ObservePath(value string) Observation {
 		count = 0
 	}
 	return completeObservation(
-		ObservationPrefixPath,
+		prefix,
 		class,
 		len(value),
 		runes,
 		validUTF8,
 		count,
-		observationDigest(ObservationDomainPath, "path", []byte(value)),
+		observationDigest(domain, "path", []byte(value)),
 		true,
 	)
 }
@@ -988,6 +1016,10 @@ func prefixForDomain(domain ObservationDomain) (ObservationFieldPrefix, bool) {
 		return ObservationPrefixIdentityScope, true
 	case ObservationDomainIdentityToolSurface:
 		return ObservationPrefixIdentityToolSurface, true
+	case ObservationDomainConfigPath:
+		return ObservationPrefixConfigPath, true
+	case ObservationDomainHomePath:
+		return ObservationPrefixHomePath, true
 	default:
 		return 0, false
 	}

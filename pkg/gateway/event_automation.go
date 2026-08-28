@@ -252,9 +252,13 @@ func newEventAutomationServiceWithRuntime(
 	if prLocalCI == nil && reviewRuntime.agentLoop != nil && reviewRuntime.agentID != "" {
 		prLocalCI, err = newPRWorkspaceLocalCIRuntime(cfg)
 		if err != nil {
-			logger.WarnCF("eventing", "PR workspace local CI is unavailable", map[string]any{
-				"error": err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentEventing,
+				logger.DiagnosticMessageEventingPRWorkspaceLocalCIIsUnavailable,
+				logger.NewSafeFields(
+					gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 			prLocalCI = nil
 		}
 	}
@@ -356,9 +360,13 @@ func newEventAutomationServiceWithRuntime(
 			acquireRuntime,
 		)
 		if err != nil {
-			logger.WarnCF("eventing", "PR workspace implementation is unavailable", map[string]any{
-				"error": err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentEventing,
+				logger.DiagnosticMessageEventingPRWorkspaceImplementationIsUnavailable,
+				logger.NewSafeFields(
+					gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 			implementationRuntime = nil
 		}
 	}
@@ -1028,9 +1036,13 @@ func runEventRetentionWorker(
 			maintenanceCtx, releaseRuntime, err = acquireRuntime(ctx)
 			if err != nil {
 				if ctx.Err() == nil {
-					logger.WarnCF("eventing", "Event retention maintenance failed", map[string]any{
-						"error": err.Error(),
-					})
+					logger.WarnSafeCF(
+						logger.ComponentEventing,
+						logger.DiagnosticMessageEventingEventRetentionMaintenanceFailed,
+						logger.NewSafeFields(
+							gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+						),
+					)
 				}
 				return
 			}
@@ -1045,16 +1057,24 @@ func runEventRetentionWorker(
 		)
 		if err != nil {
 			if ctx.Err() == nil {
-				logger.WarnCF("eventing", "Event retention maintenance failed", map[string]any{
-					"error": err.Error(),
-				})
+				logger.WarnSafeCF(
+					logger.ComponentEventing,
+					logger.DiagnosticMessageEventingEventRetentionMaintenanceFailed,
+					logger.NewSafeFields(
+						gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
+				)
 			}
 			return
 		}
 		if pruned > 0 {
-			logger.DebugCF("eventing", "Pruned expired durable events", map[string]any{
-				"count": pruned,
-			})
+			logger.DebugSafeCF(
+				logger.ComponentEventing,
+				logger.DiagnosticMessageEventingPrunedExpiredDurableEvents,
+				logger.NewSafeFields(
+					logger.SafeInt(logger.FieldCount, int(pruned)),
+				),
+			)
 		}
 	}
 
@@ -1094,23 +1114,25 @@ func runGitHubNotificationPollWorker(
 		result, err := poller.Poll(ctx)
 		if err != nil {
 			if ctx.Err() == nil {
-				logger.WarnCF(
-					"eventing",
-					"GitHub notification polling failed",
-					map[string]any{"error": err.Error()},
+				logger.WarnSafeCF(
+					logger.ComponentEventing,
+					logger.DiagnosticMessageEventingGitHubNotificationPollingFailed,
+					logger.NewSafeFields(
+						gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
 				)
 			}
 			return
 		}
 		if result.Inserted > 0 {
-			logger.DebugCF(
-				"eventing",
-				"Stored GitHub notifications",
-				map[string]any{
-					"notifications": result.Notifications,
-					"matched":       result.Matched,
-					"inserted":      result.Inserted,
-				},
+			logger.DebugSafeCF(
+				logger.ComponentEventing,
+				logger.DiagnosticMessageEventingStoredGitHubNotifications,
+				logger.NewSafeFields(
+					logger.SafeInt(logger.FieldNotificationCount, result.Notifications),
+					logger.SafeInt(logger.FieldMatchedCount, result.Matched),
+					logger.SafeInt(logger.FieldInsertedCount, result.Inserted),
+				),
 			)
 		}
 	}
@@ -1236,10 +1258,14 @@ func runEventAutomationWorker(
 	for {
 		processed, err := process(ctx)
 		if err != nil && ctx.Err() == nil {
-			logger.WarnCF("eventing", "Event workflow worker iteration failed", map[string]any{
-				"worker": name,
-				"error":  err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentEventing,
+				logger.DiagnosticMessageEventingEventWorkflowWorkerIterationFailed,
+				logger.NewSafeFields(
+					gatewayDiagnosticWorkerField(name),
+					gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		}
 		if ctx.Err() != nil {
 			return
