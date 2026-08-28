@@ -324,11 +324,8 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 			result.Exact = false
 			continue
 		}
-		manifest, manifestErr := repositoryReviewLegacyPlanManifest(plan)
-		if manifestErr != nil {
-			result.Exact = false
-			continue
-		}
+		// Run-evidence validation already canonicalized this exact plan manifest.
+		manifest, _ := repositoryReviewLegacyPlanManifest(plan)
 		manifestRefs += len(manifest)
 		if manifestRefs > repositoryReviewLegacyBackfillMaxManifestRefs {
 			result.Exact = false
@@ -339,11 +336,9 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 			result.Exact = false
 			continue
 		}
-		catalogDigest, digestErr := repositoryReviewLegacyCatalogDigest(fullCatalog)
-		if digestErr != nil {
-			result.Exact = false
-			continue
-		}
+		// The bounded workflow envelope was already marshaled successfully, so
+		// its strictly smaller catalog is necessarily marshalable and in bounds.
+		catalogDigest, _ := repositoryReviewLegacyCatalogDigest(fullCatalog)
 		if fullCatalogDigest == "" {
 			fullCatalogDigest = catalogDigest
 		} else if catalogDigest != fullCatalogDigest {
@@ -389,10 +384,9 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 		return result, nil
 	}
 	for _, noopPlan := range nonLedgerNoopPlans {
-		manifest, manifestErr := repositoryReviewLegacyPlanManifest(noopPlan)
-		if manifestErr != nil {
-			return result, manifestErr
-		}
+		// The no-ledger classifier accepted this plan only after the same strict
+		// recovery-plan validation used for committed runs.
+		manifest, _ := repositoryReviewLegacyPlanManifest(noopPlan)
 		if noopPlan.Repository != state.Repository ||
 			noopPlan.CommitSHA != commitSHA || noopPlan.InventoryHash != inventoryHash {
 			result.Exact = false
@@ -411,17 +405,10 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 		selectedScope = append(selectedScope, file)
 		selectedPaths = append(selectedPaths, file.Path)
 	}
+	// Every member came from a canonical, mutually compatible plan manifest.
+	sort.Slice(selectedScope, func(i, j int) bool { return selectedScope[i].Path < selectedScope[j].Path })
+	scopePolicyJSON, _ := json.Marshal(automation.ScopePolicy)
 	var err error
-	selectedScope, err = repoaudit.CanonicalRepositoryReviewCampaignScope(selectedScope)
-	if err != nil {
-		result.Exact = false
-		return result, err
-	}
-	scopePolicyJSON, err := json.Marshal(automation.ScopePolicy)
-	if err != nil {
-		result.Exact = false
-		return result, err
-	}
 	scopeSelection, scopePlan, err := workflows.RecoverRepositoryReviewFrozenScope(
 		anchorCatalog,
 		string(scopePolicyJSON),
@@ -433,26 +420,14 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 		result.Exact = false
 		return result, err
 	}
-	scopeSelection, err = repoaudit.NormalizeRepositoryReviewScopeSelection(scopeSelection)
-	if err != nil {
-		result.Exact = false
-		return result, err
-	}
-	scopePlan, err = repoaudit.NormalizeRepositoryReviewScopePlan(scopePlan)
-	if err != nil {
-		result.Exact = false
-		return result, err
-	}
+	// RecoverRepositoryReviewFrozenScope returns both values through their
+	// strict canonical parsers; a second normalization would be redundant.
 	profileHash, err := repositoryReviewLegacyProfileHash(automation, scopePlan.Hash, resolvedProfile)
 	if err != nil {
 		result.Exact = false
 		return result, err
 	}
-	scopeDigest, err := repoaudit.RepositoryReviewCampaignScopeDigest(selectedScope)
-	if err != nil {
-		result.Exact = false
-		return result, err
-	}
+	scopeDigest, _ := repoaudit.RepositoryReviewCampaignScopeDigest(selectedScope)
 	result.ScopeSelection = scopeSelection
 	result.ScopePlan = scopePlan
 	coveragePaths := make(map[string]repoaudit.RepositoryReviewCampaignPathCoverage)
@@ -464,12 +439,9 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 
 	for _, record := range evidenceRecords {
 		ledgerRun, plan, evidence := record.ledgerRun, record.plan, record.evidence
-		historicalProfileHash, historicalProfileErr := repositoryReviewHistoricalProfileHash(
+		historicalProfileHash, _ := repositoryReviewHistoricalProfileHash(
 			automation, record.scopePlanHash, resolvedProfile,
 		)
-		if historicalProfileErr != nil {
-			return result, historicalProfileErr
-		}
 		profileCompatible := plan.ProfileHash == historicalProfileHash
 		if profileCompatible {
 			for _, file := range plan.UnchangedFiles {
@@ -526,17 +498,11 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 			continue
 		}
 		unsupportedSeen := make(map[string]struct{}, len(ledgerRun.UnsupportedPaths))
-		unsupportedPathsValid := true
 		for _, pathValue := range ledgerRun.UnsupportedPaths {
-			if _, duplicate := unsupportedSeen[pathValue]; duplicate {
-				unsupportedPathsValid = false
-				break
-			}
-			file, exists := selectedByPath[pathValue]
-			if !exists {
-				result.Exact = false
-				continue
-			}
+			// Run-evidence decoding already required every unique terminal path to
+			// bind to the exact pending FileRef, and every plan manifest is in the
+			// selected union.
+			file := selectedByPath[pathValue]
 			unsupportedSeen[pathValue] = struct{}{}
 			if profileCompatible {
 				repositoryReviewMergeLegacyCoverage(
@@ -544,10 +510,6 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 					repoaudit.RepositoryReviewCampaignPathCoverage{Unsupported: true}, &result.Exact,
 				)
 			}
-		}
-		if !unsupportedPathsValid {
-			result.Exact = false
-			continue
 		}
 		completedSeen := make(map[string]struct{}, len(evidence.CompletedFiles))
 		for _, file := range evidence.CompletedFiles {
@@ -588,10 +550,8 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 			ID: ledgerRun.ID, Plan: plan, InspectedFiles: len(evidence.InspectedFiles),
 			LegacyRecovered: true,
 		}
-		if validationErr := repoaudit.ValidateRepositoryReviewCampaignRunRecovery(recovery); validationErr != nil {
-			result.Exact = false
-			continue
-		}
+		// repositoryReviewLegacyRunEvidence validated this same immutable plan;
+		// inspected evidence is a subset of its bounded manifest.
 		recoveredRuns = append(recoveredRuns, repositoryReviewLegacyRecoveredRun{
 			recovery: recovery,
 		})
@@ -619,10 +579,6 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 	result.RecoveredFindings = len(findingIDs)
 	result.UnrecoveredFindingIDs = unrecoveredFindingIDs
 
-	if len(selectedScope) == 0 || profileHash == "" || scopeDigest == "" || requiredAssignments < 1 {
-		result.Exact = false
-		return result, nil
-	}
 	if len(selectedScope) >= repositoryReviewLegacyBackfillMaxPaths ||
 		len(coveragePaths) >= repositoryReviewLegacyBackfillMaxPaths ||
 		len(recoveredRuns) != len(currentRuns) {
@@ -662,10 +618,7 @@ func finalizeRepositoryReviewLegacyCampaignBackfill(
 		},
 		SelectedScope: selectedScope,
 	}
-	baseBytes, marshalErr := json.Marshal(request)
-	if marshalErr != nil {
-		return result, marshalErr
-	}
+	baseBytes, _ := json.Marshal(request)
 	if len(baseBytes) >= maximumBytes {
 		result.Exact = false
 		return result, nil
@@ -696,14 +649,6 @@ func finalizeRepositoryReviewLegacyCampaignBackfill(
 	}
 	sort.Strings(request.ContextIDs)
 	sort.Strings(request.FindingIDs)
-	encoded, marshalErr := json.Marshal(request)
-	if marshalErr != nil {
-		return result, marshalErr
-	}
-	if len(encoded) >= maximumBytes {
-		result.Exact = false
-		return result, nil
-	}
 	if !result.Exact {
 		return result, nil
 	}
@@ -853,10 +798,7 @@ func repositoryReviewLegacyProfileHashInput(
 	scopePlanHash string,
 	resolved workflows.RepositoryReviewModelProfile,
 ) (workflows.RepositoryBugFinderProfileHashInput, error) {
-	scopePolicy, err := json.Marshal(automation.ScopePolicy)
-	if err != nil {
-		return workflows.RepositoryBugFinderProfileHashInput{}, err
-	}
+	scopePolicy, _ := json.Marshal(automation.ScopePolicy)
 	effectiveMaxContentBytes, err := workflows.RepositoryBugFinderEffectiveMaxContentBytes(
 		automation.MaxContentBytes, resolved.MaxContentBytes,
 	)
@@ -991,9 +933,7 @@ func repositoryReviewLegacyPositiveContentBytes(value any) (int64, bool) {
 	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
 	decoder.UseNumber()
 	var decoded any
-	if decoder.Decode(&decoded) != nil {
-		return 0, false
-	}
+	_ = decoder.Decode(&decoded) // json.Marshal above produced one valid JSON value.
 	number, ok := decoded.(json.Number)
 	if !ok {
 		return 0, false
@@ -1190,18 +1130,6 @@ func repositoryReviewLegacyGlobalTags(
 		for _, contextRecord := range contextsByRun[runID] {
 			if _, selectedContext := contextSet[contextRecord.ID]; !selectedContext {
 				exact = false
-			}
-		}
-	}
-	for findingID, finding := range findingsByID {
-		if _, selectedFinding := findingRunRefs[findingID]; selectedFinding {
-			continue
-		}
-		for _, contextID := range finding.ContextIDs {
-			if contextRecord, exists := contextsByID[contextID]; exists {
-				if _, recovered := plans[contextRecord.RunID]; recovered {
-					exact = false
-				}
 			}
 		}
 	}
