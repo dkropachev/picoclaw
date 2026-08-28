@@ -343,25 +343,27 @@ func (al *AgentLoop) runTurn(
 		// Check if parent turn has ended (SubTurn support from HEAD)
 		if ts.parentTurnState != nil && ts.IsParentEnded() {
 			if !ts.critical {
-				logger.InfoCF(
-					"agent",
-					"Parent turn ended, non-critical SubTurn exiting gracefully",
-					map[string]any{
-						"agent_id":  ts.agentID,
-						"iteration": iteration,
-						"turn_id":   ts.turnID,
-					},
+				logger.InfoSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentParentTurnEndedNonCriticalSubTurnExitingGracefully,
+					logger.NewSafeFields(
+						agentDiagnosticAgentField(ts.agentID),
+						logger.SafeInt(logger.FieldIteration, iteration),
+						agentDiagnosticTurnField(ts.turnID),
+						logger.SafeBool(logger.FieldGracefulTerminal, true),
+					),
 				)
 				break
 			}
-			logger.InfoCF(
-				"agent",
-				"Parent turn ended, critical SubTurn continues running",
-				map[string]any{
-					"agent_id":  ts.agentID,
-					"iteration": iteration,
-					"turn_id":   ts.turnID,
-				},
+			logger.InfoSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentParentTurnEndedCriticalSubTurnContinuesRunning,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(ts.agentID),
+					logger.SafeInt(logger.FieldIteration, iteration),
+					agentDiagnosticTurnField(ts.turnID),
+					logger.SafeBool(logger.FieldGracefulTerminal, false),
+				),
 			)
 		}
 
@@ -401,13 +403,16 @@ func (al *AgentLoop) runTurn(
 					ts.recordPersistedMessage(pm)
 					ts.ingestMessage(turnCtx, al, pm)
 				}
-				logger.InfoCF("agent", "Injected steering message into context",
-					map[string]any{
-						"agent_id":    ts.agent.ID,
-						"iteration":   iteration,
-						"content_len": len(pm.Content),
-						"media_count": len(pm.Media),
-					})
+				logger.InfoSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentInjectedSteeringMessageIntoContext,
+					logger.NewSafeFields(
+						agentDiagnosticAgentField(ts.agent.ID),
+						logger.SafeInt(logger.FieldIteration, iteration),
+						logger.SafeInt64(logger.FieldContentBytes, int64(len(pm.Content))),
+						logger.SafeInt(logger.FieldMediaCount, len(pm.Media)),
+					),
+				)
 			}
 			al.emitEvent(
 				runtimeevents.KindAgentSteeringInjected,
@@ -425,12 +430,15 @@ func (al *AgentLoop) runTurn(
 		// Always sync messages into exec.messages so CallLLM sees the updated state
 		exec.messages = messages
 
-		logger.DebugCF("agent", "LLM iteration",
-			map[string]any{
-				"agent_id":  ts.agent.ID,
-				"iteration": iteration,
-				"max":       ts.agent.MaxIterations,
-			})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageLLMIteration,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				logger.SafeInt(logger.FieldIteration, iteration),
+				logger.SafeInt(logger.FieldMaxIterations, ts.agent.MaxIterations),
+			),
+		)
 
 		// Execute LLM call via Pipeline
 		if ts.hardAbortRequested() {
@@ -633,13 +641,16 @@ func (al *AgentLoop) selectCandidates(
 			HasMedia:    messagesHaveMedia(history),
 		})
 		if strings.TrimSpace(selection.Target) != "" {
-			logger.InfoCF("agent", "Model router selected target",
-				map[string]any{
-					"agent_id": agent.ID,
-					"router":   selection.RouterName,
-					"target":   selection.Target,
-					"block":    selection.BlockID,
-				})
+			logger.InfoSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentModelRouterSelectedTarget,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(agent.ID),
+					agentDiagnosticRouteField(selection.RouterName),
+					agentDiagnosticModelField(selection.Target),
+					agentDiagnosticReasonField(selection.BlockID),
+				),
+			)
 			candidates, model, activeRouter, routerSelection = selectTarget(selection.Target)
 			return candidates, model, false, activeRouter, routerSelection
 		}
@@ -652,23 +663,29 @@ func (al *AgentLoop) selectCandidates(
 
 	_, usedLight, score := agent.Router.SelectModel(userMsg, history, agent.Model)
 	if !usedLight {
-		logger.DebugCF("agent", "Model routing: primary model selected",
-			map[string]any{
-				"agent_id":  agent.ID,
-				"score":     score,
-				"threshold": agent.Router.Threshold(),
-			})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentModelRoutingPrimaryModelSelected,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(agent.ID),
+				logger.SafeFloat64(logger.FieldScore, score),
+				logger.SafeFloat64(logger.FieldThreshold, agent.Router.Threshold()),
+			),
+		)
 		candidates, model, activeRouter, routerSelection = selectPrimary()
 		return candidates, model, false, activeRouter, routerSelection
 	}
 
-	logger.InfoCF("agent", "Model routing: light model selected",
-		map[string]any{
-			"agent_id":    agent.ID,
-			"light_model": agent.Router.LightModel(),
-			"score":       score,
-			"threshold":   agent.Router.Threshold(),
-		})
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentModelRoutingLightModelSelected,
+		logger.NewSafeFields(
+			agentDiagnosticAgentField(agent.ID),
+			agentDiagnosticLightModelField(agent.Router.LightModel()),
+			logger.SafeFloat64(logger.FieldScore, score),
+			logger.SafeFloat64(logger.FieldThreshold, agent.Router.Threshold()),
+		),
+	)
 	if agent.LightAccountRouter != nil {
 		selection := agent.LightAccountRouter.Select(sessionKey, reason)
 		return selection.Candidates, resolvedCandidateModel(
@@ -793,9 +810,11 @@ func (al *AgentLoop) resolveContextManagerWithContext(ctx context.Context) Conte
 	}
 	factory, ok := lookupContextManager(name)
 	if !ok {
-		logger.WarnCF("agent", "Unknown context manager, falling back to legacy", map[string]any{
-			"name": name,
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentUnknownContextManagerFallingBackToLegacy,
+			logger.NewSafeFields(agentDiagnosticContextManagerField(name)),
+		)
 		return &legacyContextManager{al: al}
 	}
 	var cm ContextManager
@@ -816,13 +835,13 @@ func (al *AgentLoop) resolveContextManagerWithContext(ctx context.Context) Conte
 		err = fmt.Errorf("context manager %q factory returned nil", name)
 	}
 	if err != nil {
-		logger.WarnCF(
-			"agent",
-			"Failed to create context manager, falling back to legacy",
-			map[string]any{
-				"name":  name,
-				"error": err.Error(),
-			},
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToCreateContextManagerFallingBackToLegacy,
+			logger.NewSafeFields(
+				agentDiagnosticContextManagerField(name),
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
 		)
 		return &legacyContextManager{al: al}
 	}

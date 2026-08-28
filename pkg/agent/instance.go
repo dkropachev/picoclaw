@@ -87,8 +87,13 @@ func (guard *agentInstanceConstructionGuard) cleanupPanic() {
 		return
 	}
 	if closeErr := guard.partial.Close(); closeErr != nil {
-		logger.WarnCF("agent", "Failed to close partially constructed agent",
-			map[string]any{"error": closeErr.Error()})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToClosePartiallyConstructedAgent,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, closeErr),
+			),
+		)
 	}
 	panic(recovered)
 }
@@ -276,16 +281,18 @@ func NewAgentInstanceWithExecutionPolicy(
 		cfg.Tools.Adaptation,
 		toolAdaptation,
 	)
-	logger.DebugCF("agent", "Resolved tool adaptation profile", map[string]any{
-		"model":                 toolModel,
-		"provider":              toolProvider,
-		"enabled":               toolAdaptation.Enabled,
-		"visible_tool_surface":  toolAdaptation.VisibleToolSurface,
-		"runtime_downgrade":     toolAdaptation.RuntimeDowngrade,
-		"runtime_promotion":     toolAdaptation.RuntimePromotion,
-		"cache_sensitive":       toolAdaptation.CacheSensitive,
-		"apply_visible_changes": toolAdaptation.ApplyVisibleChanges,
-	})
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentResolvedToolAdaptationProfile,
+		logger.NewSafeFields(
+			agentDiagnosticModelField(toolModel),
+			agentDiagnosticProviderField(toolProvider),
+			agentDiagnosticToolSurfaceField(toolAdaptation.VisibleToolSurface),
+			agentDiagnosticReasonField(toolAdaptation.ApplyVisibleChanges),
+			logger.SafeBool(logger.FieldEnabled, toolAdaptation.Enabled),
+			logger.SafeBool(logger.FieldCacheSensitive, toolAdaptation.CacheSensitive),
+		),
+	)
 
 	restrict := defaults.RestrictToWorkspace
 	readRestrict := restrict && !defaults.AllowReadOutsideWorkspace
@@ -458,8 +465,14 @@ func NewAgentInstanceWithExecutionPolicy(
 			allowReadPaths,
 		)
 		if err != nil {
-			logger.ErrorCF("agent", "Failed to initialize exec tool; continuing without exec",
-				map[string]any{"error": err.Error()})
+			logger.ErrorSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToInitializeExecToolContinuingWithoutExec,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+					logger.SafeBool(logger.FieldFallback, true),
+				),
+			)
 		} else {
 			toolsRegistry.Register(execTool)
 			if mayUseCodexCompatibleTools {
@@ -692,8 +705,15 @@ func NewAgentInstanceWithExecutionPolicy(
 			)
 		}
 		if len(lightCandidates) == 0 {
-			logger.WarnCF("agent", "Routing light model not found; routing disabled",
-				map[string]any{"light_model": rc.LightModel, "agent_id": agentID})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentRoutingLightModelNotFoundRoutingDisabled,
+				logger.NewSafeFields(
+					agentDiagnosticLightModelField(rc.LightModel),
+					agentDiagnosticAgentField(agentID),
+					logger.SafeBool(logger.FieldAvailable, false),
+				),
+			)
 		} else {
 			router = routing.New(routing.RouterConfig{
 				LightModel: rc.LightModel,
@@ -1118,10 +1138,14 @@ func compilePatterns(patterns []string) []*regexp.Regexp {
 	for _, p := range patterns {
 		re, err := regexp.Compile(p)
 		if err != nil {
-			logger.WarnCF("agent", "invalid path pattern in compilePatterns", map[string]any{
-				"pattern": p,
-				"error":   err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentInvalidPathPatternInCompilePatterns,
+				logger.NewSafeFields(
+					agentDiagnosticRegexField(p),
+					agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+				),
+			)
 			continue
 		}
 		compiled = append(compiled, re)
@@ -1190,8 +1214,14 @@ func closeAgentResource(name string, closeResource func() error) (err error) {
 func initSessionStore(dir string) session.SessionStore {
 	store, err := memory.NewJSONLStore(dir)
 	if err != nil {
-		logger.WarnCF("agent", "Memory JSONL store init failed; falling back to json sessions",
-			map[string]any{"error": err.Error()})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMemoryJSONLStoreInitFailedFallingBackToJSONSessions,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				logger.SafeBool(logger.FieldFallback, true),
+			),
+		)
 		return session.NewSessionManager(dir)
 	}
 
@@ -1199,12 +1229,24 @@ func initSessionStore(dir string) session.SessionStore {
 		// Migration failure means the store could not write data.
 		// Fall back to SessionManager to avoid a split state where
 		// some sessions are in JSONL and others remain in JSON.
-		logger.WarnCF("agent", "Memory migration failed; falling back to json sessions",
-			map[string]any{"error": merr.Error()})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMemoryMigrationFailedFallingBackToJSONSessions,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, merr),
+				logger.SafeBool(logger.FieldFallback, true),
+			),
+		)
 		store.Close()
 		return session.NewSessionManager(dir)
 	} else if n > 0 {
-		logger.InfoCF("agent", "Memory migrated to JSONL", map[string]any{"sessions_migrated": n})
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMemoryMigratedToJSONL,
+			logger.NewSafeFields(
+				logger.SafeInt(logger.FieldCompletedCount, n),
+			),
+		)
 	}
 
 	return session.NewJSONLBackend(store)

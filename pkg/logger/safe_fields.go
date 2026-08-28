@@ -244,6 +244,127 @@ const (
 	DiagnosticMessageAgentTrackedSubagentTurnTerminalPanicRecovered
 	DiagnosticMessageAgentTrackedSubagentResultPumpPanicRecovered
 	DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered
+	DiagnosticMessageAgentAccountRouterModelAliasesAreInvalid
+	DiagnosticMessageAgentAccountRouterAccountHasNoRunnableModelAlias
+	DiagnosticMessageAgentFailedToRefreshMCPStatusForCommand
+	DiagnosticMessageAgentFailedToInitializeMCPRuntimeForCommand
+	DiagnosticMessageAgentFailedToInitializeEvolutionBridge
+	DiagnosticMessageAgentFailedToSubscribeEvolutionBridgeToRuntimeEvents
+	DiagnosticMessageAgentFailedToActivateEvolutionBridge
+	DiagnosticMessageAgentFailedToInitializeAgentActivityRecorder
+	DiagnosticMessageAgentFailedToInstallSharedRecursionToolCatalog
+	DiagnosticMessageVoiceTTSSendTTSEnabledButNoTTSProviderConfigured
+	DiagnosticMessageAgentFailedToCreateWebSearchTool
+	DiagnosticMessageAgentFailedToCreateWebFetchTool
+	DiagnosticMessageAgentSpawnSpawnStatusToolsRequireSubagentToBeEnabled
+	DiagnosticMessageAgentMCPIsEnabledButNoServersAreConfiguredSkippingMCPInitialization
+	DiagnosticMessageAgentNoMCPServersSelectedAfterApplyingPerAgentMCPServerAllowlists
+	DiagnosticMessageAgentMCPIsEnabledButNoValidServersAreConfiguredSkippingMCPInitialization
+	DiagnosticMessageAgentFailedToInitializeMCPGeneration
+	DiagnosticMessageAgentMCPAdmissionProjectionFailedAfterCatalogCommit
+	DiagnosticMessageAgentMCPPromptPreparationFailedAfterCatalogCommit
+	DiagnosticMessageAgentMCPPromptPublicationWasIncomplete
+	DiagnosticMessageAgentMCPFactoryCatalogInstalledSuccessfully
+	DiagnosticMessageAgentMCPPostCommitPublicationPanickedRetainedCommittedManager
+	DiagnosticMessageAgentMediaFileTooLargeSkipping
+	DiagnosticMessageAgentFailedToOpenMediaFile
+	DiagnosticMessageAgentFailedToEncodeMediaFile
+	DiagnosticMessageAgentFailedToCloseBase64Encoder
+	DiagnosticMessageAgentSkippedStaleHistoricalMediaRef
+	DiagnosticMessageFailedToResolveMediaRef
+	DiagnosticMessageAgentFailedToStatMediaFile
+	DiagnosticMessageAgentReasoningPublishSkippedTimeoutCancel
+	DiagnosticMessageAgentFailedToPublishReasoningBestEffort
+	DiagnosticMessageAgentPicoReasoningPublishSkippedTimeoutCancel
+	DiagnosticMessageAgentFailedToPublishPicoReasoningBestEffort
+	DiagnosticMessageAgentFailedToPublishPicoReasoning
+	DiagnosticMessageAgentFailedToPublishPicoInterimAssistantContent
+	DiagnosticMessageAgentFailedToSerializePicoToolCalls
+	DiagnosticMessageAgentFailedToPublishPicoToolCalls
+	DiagnosticMessageAgentSkippedOutboundMessageToolAlreadySentToSameChat
+	DiagnosticMessageAgentPublishedOutboundResponse
+	DiagnosticMessageAgentContinuingQueuedSteeringAfterTurnEnd
+	DiagnosticMessageAgentFailedToBuildSteeringContinuationTarget
+	DiagnosticMessageAgentFailedToContinueQueuedSteering
+	DiagnosticMessageVoiceFailedToSendTranscriptionFeedback
+	DiagnosticMessageVoiceTranscriptionFailed
+	DiagnosticMessageAgentMaxTokensGreaterThanOrEqualToBudgetUsing50PercentFallback
+	DiagnosticMessageSeahorseBootstrapSnapshot
+	DiagnosticMessageAgentFailedToParseAgentMDFrontmatter
+	DiagnosticMessageAgentFailedToCloseEvolutionRuntimeSubscription
+	DiagnosticMessageAgentEvolutionFinalizeTurnFailed
+	DiagnosticMessageAgentNoValidEvolutionColdPathScheduleTimesConfigured
+	DiagnosticMessageAgentColdPathRunFailed
+	DiagnosticMessageGitWorkspaceFailedToReleaseGitWorkspaceLocks
+	DiagnosticMessageGitWorkspaceFailedToReconcileGitWorkspaceRetention
+	DiagnosticMessageGitWorkspaceFailedToInitializeGitWorkspaceManager
+	DiagnosticMessageAgentFailedToClosePartiallyConstructedAgent
+	DiagnosticMessageAgentResolvedToolAdaptationProfile
+	DiagnosticMessageAgentFailedToInitializeExecToolContinuingWithoutExec
+	DiagnosticMessageAgentRoutingLightModelNotFoundRoutingDisabled
+	DiagnosticMessageAgentInvalidPathPatternInCompilePatterns
+	DiagnosticMessageAgentMemoryJSONLStoreInitFailedFallingBackToJSONSessions
+	DiagnosticMessageAgentMemoryMigrationFailedFallingBackToJSONSessions
+	DiagnosticMessageAgentMemoryMigratedToJSONL
+	DiagnosticMessageAgentUnsubscribeEventsUnexpectedTypeInSubscriptionMap
+	DiagnosticMessageAgentMediaTurnRoutingSelectedModel
+	DiagnosticMessageAgentProactiveCompressionContextBudgetExceededBeforeLLMCall
+	DiagnosticMessageAgentProactiveCompactFailed
+	DiagnosticMessageAgentTrimmedRebuiltHistoryAfterProactiveCompaction
+	DiagnosticMessageAgentContextStillExceedsBudgetAfterProactiveCompactionRebuild
+	DiagnosticMessageAgentChannelStreamingConfigDecodeFailed
+	DiagnosticMessageAgentConfiguredStreamingNotUsed
+	DiagnosticMessageAgentConfiguredStreamingEnabled
+	DiagnosticMessageAgentChatStreamUpdateFailedAfterVisibleOutput
+	DiagnosticMessageAgentChatStreamUpdateFailedBeforeVisibleOutputRetryingWithChat
+	DiagnosticMessageAgentChatStreamFailedBeforeVisibleOutputRetryingWithChat
+	DiagnosticMessageAgentStreamUpdateFailed
+	DiagnosticMessageAgentStreamReasoningUpdateFailed
+	DiagnosticMessageAgentStreamFinalFlushFailedAfterVisibleOutput
+	DiagnosticMessageAgentStreamFinalFlushFailed
+	DiagnosticMessageAgentConfiguredStreamingCompleted
+	DiagnosticMessageAgentUnregisteredPromptSourceAllowedInCompatibilityMode
+	DiagnosticMessageAgentFailedToRegisterBuiltinPromptSource
+	DiagnosticMessageAgentRecursionAdmissionProjectionFailedAfterCatalogCommit
+	DiagnosticMessageAgentFailedToCloseAgent
+	DiagnosticMessageAgentCreatedImplicitMainAgentNoAgentsListConfigured
+	DiagnosticMessageAgentRegisteredAgent
+	DiagnosticMessageAgentHardAbortTriggered
+	DiagnosticMessageAgentSteeringMessageEnqueued
+	DiagnosticMessageAgentThinkingLevelIsSetButCurrentProviderDoesNotSupportItIgnoring
+	DiagnosticMessageAgentMDDeclaresUnknownMCPServerNames
+	DiagnosticMessageAgentMDDeclaresUnregisteredToolNames
+	DiagnosticMessageAgentUnknownContextManagerFallingBackToLegacy
+	DiagnosticMessageAgentFailedToCreateContextManagerFallingBackToLegacy
+	DiagnosticMessageAgentParentTurnEndedNonCriticalSubTurnExitingGracefully
+	DiagnosticMessageAgentParentTurnEndedCriticalSubTurnContinuesRunning
+	DiagnosticMessageAgentInjectedSteeringMessageIntoContext
+	DiagnosticMessageAgentModelRouterSelectedTarget
+	DiagnosticMessageAgentModelRoutingPrimaryModelSelected
+	DiagnosticMessageAgentModelRoutingLightModelSelected
+	DiagnosticMessageWorkflowFailedToAcquireRuntimeEventWorkflowRuntime
+	DiagnosticMessageWorkflowFailedToListRuntimeEventWorkflows
+	DiagnosticMessageWorkflowRuntimeEventSkippedUntilRevalidated
+	DiagnosticMessageWorkflowRuntimeEventTriggerEvaluationFailed
+	DiagnosticMessageWorkflowFailedToRetainRuntimeEventWorkflowRuntime
+	DiagnosticMessageWorkflowRuntimeEventRunFailed
+	DiagnosticMessageWorkflowScheduledWorkflowSkippedUntilRevalidated
+	DiagnosticMessageWorkflowInvalidWorkflowScheduleSkipped
+	DiagnosticMessageWorkflowFailedToSubscribeWorkflowRuntimeEvents
+	DiagnosticMessageWorkflowFailedToAcquireScheduledWorkflowRuntime
+	DiagnosticMessageWorkflowScheduledWorkflowHasNoBoundDefinitionSnapshot
+	DiagnosticMessageWorkflowScheduledWorkflowContextIsInvalid
+	DiagnosticMessageWorkflowScheduledWorkflowRunFailed
+	DiagnosticMessageWorkflowScheduledWorkflowGenerationChangedBeforeAdmission
+	DiagnosticMessageWorkflowFailedToComputeNextWorkflowSchedule
+	DiagnosticMessageWorkflowFailedToRefreshWorkflowSchedules
+	DiagnosticMessageWorkflowFailedToDeliverHandledWorkflowMedia
+	DiagnosticMessageWorkflowFailedToAcquireWorkflowTriggerRuntime
+	DiagnosticMessageWorkflowFailedToListWorkflows
+	DiagnosticMessageWorkflowSkippedUntilRevalidated
+	DiagnosticMessageWorkflowTriggerEvaluationFailed
+	DiagnosticMessageWorkflowFailedToRetainWorkflowTriggerRuntime
+	DiagnosticMessageWorkflowRunFailed
 )
 
 var diagnosticMessageLabels = [...]string{
@@ -401,6 +522,127 @@ var diagnosticMessageLabels = [...]string{
 	"Tracked subagent turn-terminal panic recovered",
 	"Tracked subagent result-pump panic recovered",
 	"Tracked subagent steering-rescue panic recovered",
+	"Account router model aliases are invalid",
+	"Account router account has no runnable model alias",
+	"Failed to refresh MCP status for command",
+	"Failed to initialize MCP runtime for command",
+	"Failed to initialize evolution bridge",
+	"Failed to subscribe evolution bridge to runtime events",
+	"Failed to activate evolution bridge",
+	"Failed to initialize agent activity recorder",
+	"Failed to install shared recursion tool catalog",
+	"send_tts enabled but no TTS provider configured",
+	"Failed to create web search tool",
+	"Failed to create web fetch tool",
+	"spawn/spawn_status tools require subagent to be enabled",
+	"MCP is enabled but no servers are configured, skipping MCP initialization",
+	"No MCP servers selected after applying per-agent mcpServers allowlists",
+	"MCP is enabled but no valid servers are configured, skipping MCP initialization",
+	"Failed to initialize MCP generation",
+	"MCP admission projection failed after catalog commit",
+	"MCP prompt preparation failed after catalog commit",
+	"MCP prompt publication was incomplete",
+	"MCP factory catalog installed successfully",
+	"MCP post-commit publication panicked; retained committed manager",
+	"Media file too large, skipping",
+	"Failed to open media file",
+	"Failed to encode media file",
+	"Failed to close base64 encoder",
+	"Skipped stale historical media ref",
+	"Failed to resolve media ref",
+	"Failed to stat media file",
+	"Reasoning publish skipped (timeout/cancel)",
+	"Failed to publish reasoning (best-effort)",
+	"Pico reasoning publish skipped (timeout/cancel)",
+	"Failed to publish pico reasoning (best-effort)",
+	"Failed to publish pico reasoning",
+	"Failed to publish pico interim assistant content",
+	"Failed to serialize pico tool calls",
+	"Failed to publish pico tool calls",
+	"Skipped outbound (message tool already sent to same chat)",
+	"Published outbound response",
+	"Continuing queued steering after turn end",
+	"Failed to build steering continuation target",
+	"Failed to continue queued steering",
+	"Failed to send transcription feedback",
+	"Transcription failed",
+	"MaxTokens >= budget, using 50% fallback",
+	"bootstrap snapshot",
+	"Failed to parse AGENT.md frontmatter",
+	"Failed to close evolution runtime subscription",
+	"Evolution finalize turn failed",
+	"No valid evolution cold path schedule times configured",
+	"Cold path run failed",
+	"Failed to release git workspace locks",
+	"Failed to reconcile git workspace retention",
+	"Failed to initialize git workspace manager",
+	"Failed to close partially constructed agent",
+	"Resolved tool adaptation profile",
+	"Failed to initialize exec tool; continuing without exec",
+	"Routing light model not found; routing disabled",
+	"invalid path pattern in compilePatterns",
+	"Memory JSONL store init failed; falling back to json sessions",
+	"Memory migration failed; falling back to json sessions",
+	"Memory migrated to JSONL",
+	"UnsubscribeEvents: unexpected type in subscription map",
+	"Media turn routing selected model",
+	"Proactive compression: context budget exceeded before LLM call",
+	"Proactive compact failed",
+	"Trimmed rebuilt history after proactive compaction",
+	"Context still exceeds budget after proactive compaction rebuild",
+	"channel streaming config decode failed",
+	"configured streaming not used",
+	"configured streaming enabled",
+	"ChatStream update failed after visible output",
+	"ChatStream update failed before visible output; retrying with Chat",
+	"ChatStream failed before visible output; retrying with Chat",
+	"stream update failed",
+	"stream reasoning update failed",
+	"stream final flush failed after visible output",
+	"stream final flush failed",
+	"configured streaming completed",
+	"Unregistered prompt source allowed in compatibility mode",
+	"Failed to register builtin prompt source",
+	"Recursion admission projection failed after catalog commit",
+	"Failed to close agent",
+	"Created implicit main agent (no agents.list configured)",
+	"Registered agent",
+	"Hard abort triggered",
+	"Steering message enqueued",
+	"thinking_level is set but current provider does not support it, ignoring",
+	"AGENT.md declares unknown MCP server names",
+	"AGENT.md declares unregistered tool names",
+	"Unknown context manager, falling back to legacy",
+	"Failed to create context manager, falling back to legacy",
+	"Parent turn ended, non-critical SubTurn exiting gracefully",
+	"Parent turn ended, critical SubTurn continues running",
+	"Injected steering message into context",
+	"Model router selected target",
+	"Model routing: primary model selected",
+	"Model routing: light model selected",
+	"Failed to acquire runtime-event workflow runtime",
+	"Failed to list runtime-event workflows",
+	"Runtime-event workflow skipped until revalidated",
+	"Workflow runtime-event trigger evaluation failed",
+	"Failed to retain runtime-event workflow runtime",
+	"Runtime-event workflow run failed",
+	"Scheduled workflow skipped until revalidated",
+	"Invalid workflow schedule skipped",
+	"Failed to subscribe workflow runtime events",
+	"Failed to acquire scheduled workflow runtime",
+	"Scheduled workflow has no bound definition snapshot",
+	"Scheduled workflow context is invalid",
+	"Scheduled workflow run failed",
+	"Scheduled workflow generation changed before admission",
+	"Failed to compute next workflow schedule",
+	"Failed to refresh workflow schedules",
+	"Failed to deliver handled workflow media",
+	"Failed to acquire workflow trigger runtime",
+	"Failed to list workflows",
+	"Workflow skipped until revalidated",
+	"Workflow trigger evaluation failed",
+	"Failed to retain workflow trigger runtime",
+	"Workflow run failed",
 }
 
 // FieldKey selects one fixed structured key and its required value type.

@@ -55,18 +55,25 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	if !ts.opts.NoHistory {
 		toolDefs := filterToolsByTurnProfile(ts.agent.Tools.ToProviderDefs(), ts.profile)
 		if isOverContextBudget(ts.agent.ContextWindow, messages, toolDefs, ts.agent.MaxTokens) {
-			logger.WarnCF("agent", "Proactive compression: context budget exceeded before LLM call",
-				map[string]any{"session_key": ts.sessionKey})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentProactiveCompressionContextBudgetExceededBeforeLLMCall,
+				logger.NewSafeFields(agentDiagnosticSessionField(ts.sessionKey)),
+			)
 			routerSelectReason = accountrouter.SelectReasonCompression
 			if err := p.ContextManager.Compact(ctx, &CompactRequest{
 				SessionKey: ts.sessionKey,
 				Reason:     ContextCompressReasonProactive,
 				Budget:     ts.agent.ContextWindow,
 			}); err != nil {
-				logger.WarnCF("agent", "Proactive compact failed", map[string]any{
-					"session_key": ts.sessionKey,
-					"error":       err.Error(),
-				})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentProactiveCompactFailed,
+					logger.NewSafeFields(
+						agentDiagnosticSessionField(ts.sessionKey),
+						agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
+				)
 			}
 			ts.refreshRestorePointFromSession(ts.agent)
 			if resp, err := p.ContextManager.Assemble(ctx, &AssembleRequest{
@@ -103,22 +110,29 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 				ts.agent.MaxTokens,
 			)
 			if dropped := originalHistoryCount - len(history); dropped > 0 {
-				logger.WarnCF("agent", "Trimmed rebuilt history after proactive compaction", map[string]any{
-					"session_key":     ts.sessionKey,
-					"dropped_msgs":    dropped,
-					"remaining_msgs":  len(history),
-					"context_window":  ts.agent.ContextWindow,
-					"max_tokens":      ts.agent.MaxTokens,
-					"still_overlimit": !fit,
-				})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentTrimmedRebuiltHistoryAfterProactiveCompaction,
+					logger.NewSafeFields(
+						agentDiagnosticSessionField(ts.sessionKey),
+						logger.SafeInt(logger.FieldDroppedCount, dropped),
+						logger.SafeInt(logger.FieldRemainingCount, len(history)),
+						logger.SafeInt(logger.FieldContextWindow, ts.agent.ContextWindow),
+						logger.SafeInt(logger.FieldMaxTokens, ts.agent.MaxTokens),
+						logger.SafeBool(logger.FieldSuccess, fit),
+					),
+				)
 			} else if !fit {
-				logger.WarnCF("agent", "Context still exceeds budget "+
-					"after proactive compaction rebuild", map[string]any{
-					"session_key":    ts.sessionKey,
-					"history_msgs":   len(history),
-					"context_window": ts.agent.ContextWindow,
-					"max_tokens":     ts.agent.MaxTokens,
-				})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentContextStillExceedsBudgetAfterProactiveCompactionRebuild,
+					logger.NewSafeFields(
+						agentDiagnosticSessionField(ts.sessionKey),
+						logger.SafeInt(logger.FieldHistoryMessageCount, len(history)),
+						logger.SafeInt(logger.FieldContextWindow, ts.agent.ContextWindow),
+						logger.SafeInt(logger.FieldMaxTokens, ts.agent.MaxTokens),
+					),
+				)
 			}
 		}
 	}

@@ -100,8 +100,14 @@ func applyThinkingOption(
 		return
 	}
 	if warnUnsupported {
-		logger.WarnCF("agent", "thinking_level is set but current provider does not support it, ignoring",
-			map[string]any{"agent_id": agentID, "thinking_level": string(settings.level)})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentThinkingLevelIsSetButCurrentProviderDoesNotSupportItIgnoring,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(agentID),
+				agentDiagnosticReasonField(string(settings.level)),
+			),
+		)
 	}
 }
 

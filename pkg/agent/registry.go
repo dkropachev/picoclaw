@@ -81,7 +81,11 @@ func NewAgentRegistryWithExecutionPolicy(
 			policy,
 		)
 		registry.agents["main"] = instance
-		logger.InfoCF("agent", "Created implicit main agent (no agents.list configured)", nil)
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentCreatedImplicitMainAgentNoAgentsListConfigured,
+			logger.NewSafeFields(),
+		)
 	} else {
 		for i := range agentConfigs {
 			ac := &agentConfigs[i]
@@ -94,13 +98,15 @@ func NewAgentRegistryWithExecutionPolicy(
 				policy,
 			)
 			registry.agents[id] = instance
-			logger.InfoCF("agent", "Registered agent",
-				map[string]any{
-					"agent_id":  id,
-					"name":      ac.Name,
-					"workspace": instance.Workspace,
-					"model":     instance.Model,
-				})
+			logger.InfoSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentRegisteredAgent,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(id),
+					agentDiagnosticWorkspaceField(instance.Workspace),
+					agentDiagnosticModelField(instance.Model),
+				),
+			)
 		}
 	}
 
@@ -249,8 +255,14 @@ func (r *AgentRegistry) Close() {
 	defer r.mu.RUnlock()
 	for _, agent := range r.agents {
 		if err := agent.Close(); err != nil {
-			logger.WarnCF("agent", "Failed to close agent",
-				map[string]any{"agent_id": agent.ID, "error": err.Error()})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToCloseAgent,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(agent.ID),
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		}
 	}
 }

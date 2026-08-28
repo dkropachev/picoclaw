@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -92,10 +91,11 @@ func (al *AgentLoop) UnsubscribeEvents(id uint64) {
 	}
 	sub, ok := value.(legacyEventSubscription)
 	if !ok {
-		logger.WarnCF("agent", "UnsubscribeEvents: unexpected type in subscription map", map[string]any{
-			"id":   id,
-			"type": fmt.Sprintf("%T", value),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentUnsubscribeEventsUnexpectedTypeInSubscriptionMap,
+			logger.NewSafeFields(),
+		)
 		return
 	}
 	sub.cancel()

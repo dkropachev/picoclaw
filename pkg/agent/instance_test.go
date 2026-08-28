@@ -519,23 +519,30 @@ func TestAgentInstanceConstructionGuardCleansPartialResourcesAndPreservesPanic(t
 	}
 	store := &agentInstanceCloseSessionStore{
 		SessionStore: session.NewSessionManager(t.TempDir()),
-		closeErr:     errors.New("partial session close failed"),
+		closeErr:     errors.New("partial session close failed P015B2B_SECRET"),
 	}
 	sentinel := errors.New("construction panic")
 	var recovered any
-	func() {
-		defer func() { recovered = recover() }()
-		guard := &agentInstanceConstructionGuard{partial: AgentInstance{
-			Tools: registry, Sessions: store,
-		}}
-		defer guard.cleanupPanic()
-		panic(sentinel)
-	}()
+	records, raw := captureP015HookRecords(t, func() {
+		func() {
+			defer func() { recovered = recover() }()
+			guard := &agentInstanceConstructionGuard{partial: AgentInstance{
+				Tools: registry, Sessions: store,
+			}}
+			defer guard.cleanupPanic()
+			panic(sentinel)
+		}()
+	})
 	if recovered != sentinel {
 		t.Fatalf("recovered panic = %v, want %v", recovered, sentinel)
 	}
 	if registry.Count() != 0 || store.closeCalls.Load() != 1 {
 		t.Fatalf("partial cleanup = tools:%d sessions:%d", registry.Count(), store.closeCalls.Load())
+	}
+	assertP015CanariesAbsent(t, raw, "partial session close failed P015B2B_SECRET")
+	record := p015B2BCatalogRecord(t, records, "Failed to close partially constructed agent")
+	if record["error_class"] != "internal" || record["error_digest"] == nil {
+		t.Fatalf("partial-construction cleanup diagnostic = %#v", record)
 	}
 }
 

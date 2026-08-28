@@ -190,14 +190,18 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 	exec.llmModelName = resolvedModelName
 	exec.usedLight = false
 
-	logger.InfoCF("agent", "Media turn routing selected model", map[string]any{
-		"agent_id":       ts.agent.ID,
-		"reason":         routeReason,
-		"model":          exec.activeModel,
-		"model_name":     exec.llmModelName,
-		"candidates":     len(exec.activeCandidates),
-		"messages_count": len(exec.callMessages),
-	})
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentMediaTurnRoutingSelectedModel,
+		logger.NewSafeFields(
+			agentDiagnosticAgentField(ts.agent.ID),
+			agentDiagnosticReasonField(routeReason),
+			agentDiagnosticModelField(exec.activeModel),
+			agentDiagnosticProviderModelField(exec.llmModelName),
+			logger.SafeInt(logger.FieldModelCount, len(exec.activeCandidates)),
+			logger.SafeInt(logger.FieldMessageCount, len(exec.callMessages)),
+		),
+	)
 
 	return nil
 }

@@ -100,24 +100,38 @@ func resolveMediaRefs(
 
 			localPath, meta, err := store.ResolveWithMeta(ref)
 			if err != nil {
-				fields := map[string]any{
-					"ref":   ref,
-					"error": err.Error(),
-				}
 				if idx < currentTurnStart {
-					logger.DebugCF("agent", "Skipped stale historical media ref", fields)
+					logger.DebugSafeCF(
+						logger.ComponentAgent,
+						logger.DiagnosticMessageAgentSkippedStaleHistoricalMediaRef,
+						logger.NewSafeFields(
+							agentDiagnosticMediaRefField(ref),
+							agentDiagnosticErrorField(logger.ErrorClassNotFound, err),
+						),
+					)
 				} else {
-					logger.WarnCF("agent", "Failed to resolve media ref", fields)
+					logger.WarnSafeCF(
+						logger.ComponentAgent,
+						logger.DiagnosticMessageFailedToResolveMediaRef,
+						logger.NewSafeFields(
+							agentDiagnosticMediaRefField(ref),
+							agentDiagnosticErrorField(logger.ErrorClassNotFound, err),
+						),
+					)
 				}
 				continue
 			}
 
 			info, err := os.Stat(localPath)
 			if err != nil {
-				logger.WarnCF("agent", "Failed to stat media file", map[string]any{
-					"path":  localPath,
-					"error": err.Error(),
-				})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentFailedToStatMediaFile,
+					logger.NewSafeFields(
+						agentDiagnosticPathField(localPath),
+						agentDiagnosticErrorField(logger.ErrorClassNotFound, err),
+					),
+				)
 				continue
 			}
 
@@ -152,20 +166,28 @@ func resolveMediaRefs(
 // Returns empty string if the file exceeds maxSize or encoding fails.
 func encodeImageToDataURL(localPath, mime string, info os.FileInfo, maxSize int) string {
 	if info.Size() > int64(maxSize) {
-		logger.WarnCF("agent", "Media file too large, skipping", map[string]any{
-			"path":     localPath,
-			"size":     info.Size(),
-			"max_size": maxSize,
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMediaFileTooLargeSkipping,
+			logger.NewSafeFields(
+				agentDiagnosticPathField(localPath),
+				logger.SafeInt64(logger.FieldBytes, info.Size()),
+				logger.SafeInt64(logger.FieldLimitBytes, int64(maxSize)),
+			),
+		)
 		return ""
 	}
 
 	f, err := os.Open(localPath)
 	if err != nil {
-		logger.WarnCF("agent", "Failed to open media file", map[string]any{
-			"path":  localPath,
-			"error": err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToOpenMediaFile,
+			logger.NewSafeFields(
+				agentDiagnosticPathField(localPath),
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 		return ""
 	}
 	defer f.Close()
@@ -180,17 +202,25 @@ func encodeImageToDataURL(localPath, mime string, info os.FileInfo, maxSize int)
 	_, copyErr := io.Copy(encoder, f)
 	closeErr := encoder.Close()
 	if copyErr != nil {
-		logger.WarnCF("agent", "Failed to encode media file", map[string]any{
-			"path":  localPath,
-			"error": copyErr.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToEncodeMediaFile,
+			logger.NewSafeFields(
+				agentDiagnosticPathField(localPath),
+				agentDiagnosticErrorField(logger.ErrorClassInternal, copyErr),
+			),
+		)
 		return ""
 	}
 	if closeErr != nil {
-		logger.WarnCF("agent", "Failed to close base64 encoder", map[string]any{
-			"path":  localPath,
-			"error": closeErr.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToCloseBase64Encoder,
+			logger.NewSafeFields(
+				agentDiagnosticPathField(localPath),
+				agentDiagnosticErrorField(logger.ErrorClassInternal, closeErr),
+			),
+		)
 		return ""
 	}
 

@@ -148,10 +148,14 @@ func NewPromptRegistry() *PromptRegistry {
 	}
 	for _, desc := range builtinPromptSources() {
 		if err := r.RegisterSource(desc); err != nil {
-			logger.WarnCF("agent", "Failed to register builtin prompt source", map[string]any{
-				"source": desc.ID,
-				"error":  err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToRegisterBuiltinPromptSource,
+				logger.NewSafeFields(
+					agentDiagnosticPromptSourceField(string(desc.ID)),
+					agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+				),
+			)
 		}
 	}
 	return r
@@ -512,12 +516,16 @@ func (r *PromptRegistry) warnUnregisteredPromptSource(part PromptPart) {
 	if warned {
 		return
 	}
-	logger.WarnCF("agent", "Unregistered prompt source allowed in compatibility mode", map[string]any{
-		"source": sourceID,
-		"layer":  part.Layer,
-		"slot":   part.Slot,
-		"part":   part.ID,
-	})
+	logger.WarnSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentUnregisteredPromptSourceAllowedInCompatibilityMode,
+		logger.NewSafeFields(
+			agentDiagnosticPromptSourceField(string(sourceID)),
+			agentDiagnosticPromptLayerField(string(part.Layer)),
+			agentDiagnosticPromptSlotField(string(part.Slot)),
+			agentDiagnosticPromptPartField(part.ID),
+		),
+	)
 }
 
 func promptPlacementAllowed(allowed []PromptPlacement, placement PromptPlacement) bool {

@@ -41,16 +41,16 @@ func TestSafeLoggerClosedEnumsAreExhaustive(t *testing.T) {
 		DiagnosticMessageToolCall != 22 || DiagnosticMessageHookCloseFailed != 54 ||
 		DiagnosticMessageAgentAccountRouterReselectedAfterContextCompression != 55 ||
 		DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered != 153 ||
-		len(diagnosticMessageLabels) != 154 {
+		DiagnosticMessageWorkflowRunFailed != 274 || len(diagnosticMessageLabels) != 275 {
 		t.Fatalf(
 			"message wire moved: first=%d last=%d labels=%d",
 			DiagnosticMessageEvent,
-			DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered,
+			DiagnosticMessageWorkflowRunFailed,
 			len(diagnosticMessageLabels),
 		)
 	}
 	seenMessages := make(map[string]DiagnosticMessageID)
-	for message := DiagnosticMessageEvent; message <= DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered; message++ {
+	for message := DiagnosticMessageEvent; message <= DiagnosticMessageWorkflowRunFailed; message++ {
 		label, ok := diagnosticMessageLabel(message)
 		if !ok || label == "" {
 			t.Fatalf("message %d invalid", message)
@@ -63,7 +63,7 @@ func TestSafeLoggerClosedEnumsAreExhaustive(t *testing.T) {
 	if _, ok := diagnosticMessageLabel(0); ok {
 		t.Fatal("zero message accepted")
 	}
-	if _, ok := diagnosticMessageLabel(DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered + 1); ok {
+	if _, ok := diagnosticMessageLabel(DiagnosticMessageWorkflowRunFailed + 1); ok {
 		t.Fatal("message after append-only tail accepted")
 	}
 }
@@ -303,6 +303,685 @@ func TestP015b2aDiagnosticMessageWireManifest(t *testing.T) {
 				label,
 				ok,
 				expectedLabel,
+			)
+		}
+	}
+}
+
+func TestP015b2bDiagnosticMessageWireManifest(t *testing.T) {
+	type expectedMessage struct {
+		id    DiagnosticMessageID
+		wire  int
+		label string
+	}
+	expected := [...]expectedMessage{
+		{
+			id:    DiagnosticMessageAgentAccountRouterModelAliasesAreInvalid,
+			wire:  154,
+			label: "Account router model aliases are invalid",
+		},
+		{
+			id:    DiagnosticMessageAgentAccountRouterAccountHasNoRunnableModelAlias,
+			wire:  155,
+			label: "Account router account has no runnable model alias",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToRefreshMCPStatusForCommand,
+			wire:  156,
+			label: "Failed to refresh MCP status for command",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToInitializeMCPRuntimeForCommand,
+			wire:  157,
+			label: "Failed to initialize MCP runtime for command",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToInitializeEvolutionBridge,
+			wire:  158,
+			label: "Failed to initialize evolution bridge",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToSubscribeEvolutionBridgeToRuntimeEvents,
+			wire:  159,
+			label: "Failed to subscribe evolution bridge to runtime events",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToActivateEvolutionBridge,
+			wire:  160,
+			label: "Failed to activate evolution bridge",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToInitializeAgentActivityRecorder,
+			wire:  161,
+			label: "Failed to initialize agent activity recorder",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToInstallSharedRecursionToolCatalog,
+			wire:  162,
+			label: "Failed to install shared recursion tool catalog",
+		},
+		{
+			id:    DiagnosticMessageVoiceTTSSendTTSEnabledButNoTTSProviderConfigured,
+			wire:  163,
+			label: "send_tts enabled but no TTS provider configured",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToCreateWebSearchTool,
+			wire:  164,
+			label: "Failed to create web search tool",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToCreateWebFetchTool,
+			wire:  165,
+			label: "Failed to create web fetch tool",
+		},
+		{
+			id:    DiagnosticMessageAgentSpawnSpawnStatusToolsRequireSubagentToBeEnabled,
+			wire:  166,
+			label: "spawn/spawn_status tools require subagent to be enabled",
+		},
+		{
+			id:    DiagnosticMessageAgentMCPIsEnabledButNoServersAreConfiguredSkippingMCPInitialization,
+			wire:  167,
+			label: "MCP is enabled but no servers are configured, skipping MCP initialization",
+		},
+		{
+			id:    DiagnosticMessageAgentNoMCPServersSelectedAfterApplyingPerAgentMCPServerAllowlists,
+			wire:  168,
+			label: "No MCP servers selected after applying per-agent mcpServers allowlists",
+		},
+		{
+			id:    DiagnosticMessageAgentMCPIsEnabledButNoValidServersAreConfiguredSkippingMCPInitialization,
+			wire:  169,
+			label: "MCP is enabled but no valid servers are configured, skipping MCP initialization",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToInitializeMCPGeneration,
+			wire:  170,
+			label: "Failed to initialize MCP generation",
+		},
+		{
+			id:    DiagnosticMessageAgentMCPAdmissionProjectionFailedAfterCatalogCommit,
+			wire:  171,
+			label: "MCP admission projection failed after catalog commit",
+		},
+		{
+			id:    DiagnosticMessageAgentMCPPromptPreparationFailedAfterCatalogCommit,
+			wire:  172,
+			label: "MCP prompt preparation failed after catalog commit",
+		},
+		{
+			id:    DiagnosticMessageAgentMCPPromptPublicationWasIncomplete,
+			wire:  173,
+			label: "MCP prompt publication was incomplete",
+		},
+		{
+			id:    DiagnosticMessageAgentMCPFactoryCatalogInstalledSuccessfully,
+			wire:  174,
+			label: "MCP factory catalog installed successfully",
+		},
+		{
+			id:    DiagnosticMessageAgentMCPPostCommitPublicationPanickedRetainedCommittedManager,
+			wire:  175,
+			label: "MCP post-commit publication panicked; retained committed manager",
+		},
+		{
+			id:    DiagnosticMessageAgentMediaFileTooLargeSkipping,
+			wire:  176,
+			label: "Media file too large, skipping",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToOpenMediaFile,
+			wire:  177,
+			label: "Failed to open media file",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToEncodeMediaFile,
+			wire:  178,
+			label: "Failed to encode media file",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToCloseBase64Encoder,
+			wire:  179,
+			label: "Failed to close base64 encoder",
+		},
+		{
+			id:    DiagnosticMessageAgentSkippedStaleHistoricalMediaRef,
+			wire:  180,
+			label: "Skipped stale historical media ref",
+		},
+		{
+			id:    DiagnosticMessageFailedToResolveMediaRef,
+			wire:  181,
+			label: "Failed to resolve media ref",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToStatMediaFile,
+			wire:  182,
+			label: "Failed to stat media file",
+		},
+		{
+			id:    DiagnosticMessageAgentReasoningPublishSkippedTimeoutCancel,
+			wire:  183,
+			label: "Reasoning publish skipped (timeout/cancel)",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToPublishReasoningBestEffort,
+			wire:  184,
+			label: "Failed to publish reasoning (best-effort)",
+		},
+		{
+			id:    DiagnosticMessageAgentPicoReasoningPublishSkippedTimeoutCancel,
+			wire:  185,
+			label: "Pico reasoning publish skipped (timeout/cancel)",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToPublishPicoReasoningBestEffort,
+			wire:  186,
+			label: "Failed to publish pico reasoning (best-effort)",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToPublishPicoReasoning,
+			wire:  187,
+			label: "Failed to publish pico reasoning",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToPublishPicoInterimAssistantContent,
+			wire:  188,
+			label: "Failed to publish pico interim assistant content",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToSerializePicoToolCalls,
+			wire:  189,
+			label: "Failed to serialize pico tool calls",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToPublishPicoToolCalls,
+			wire:  190,
+			label: "Failed to publish pico tool calls",
+		},
+		{
+			id:    DiagnosticMessageAgentSkippedOutboundMessageToolAlreadySentToSameChat,
+			wire:  191,
+			label: "Skipped outbound (message tool already sent to same chat)",
+		},
+		{
+			id:    DiagnosticMessageAgentPublishedOutboundResponse,
+			wire:  192,
+			label: "Published outbound response",
+		},
+		{
+			id:    DiagnosticMessageAgentContinuingQueuedSteeringAfterTurnEnd,
+			wire:  193,
+			label: "Continuing queued steering after turn end",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToBuildSteeringContinuationTarget,
+			wire:  194,
+			label: "Failed to build steering continuation target",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToContinueQueuedSteering,
+			wire:  195,
+			label: "Failed to continue queued steering",
+		},
+		{
+			id:    DiagnosticMessageVoiceFailedToSendTranscriptionFeedback,
+			wire:  196,
+			label: "Failed to send transcription feedback",
+		},
+		{
+			id:    DiagnosticMessageVoiceTranscriptionFailed,
+			wire:  197,
+			label: "Transcription failed",
+		},
+		{
+			id:    DiagnosticMessageAgentMaxTokensGreaterThanOrEqualToBudgetUsing50PercentFallback,
+			wire:  198,
+			label: "MaxTokens >= budget, using 50% fallback",
+		},
+		{
+			id:    DiagnosticMessageSeahorseBootstrapSnapshot,
+			wire:  199,
+			label: "bootstrap snapshot",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToParseAgentMDFrontmatter,
+			wire:  200,
+			label: "Failed to parse AGENT.md frontmatter",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToCloseEvolutionRuntimeSubscription,
+			wire:  201,
+			label: "Failed to close evolution runtime subscription",
+		},
+		{
+			id:    DiagnosticMessageAgentEvolutionFinalizeTurnFailed,
+			wire:  202,
+			label: "Evolution finalize turn failed",
+		},
+		{
+			id:    DiagnosticMessageAgentNoValidEvolutionColdPathScheduleTimesConfigured,
+			wire:  203,
+			label: "No valid evolution cold path schedule times configured",
+		},
+		{
+			id:    DiagnosticMessageAgentColdPathRunFailed,
+			wire:  204,
+			label: "Cold path run failed",
+		},
+		{
+			id:    DiagnosticMessageGitWorkspaceFailedToReleaseGitWorkspaceLocks,
+			wire:  205,
+			label: "Failed to release git workspace locks",
+		},
+		{
+			id:    DiagnosticMessageGitWorkspaceFailedToReconcileGitWorkspaceRetention,
+			wire:  206,
+			label: "Failed to reconcile git workspace retention",
+		},
+		{
+			id:    DiagnosticMessageGitWorkspaceFailedToInitializeGitWorkspaceManager,
+			wire:  207,
+			label: "Failed to initialize git workspace manager",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToClosePartiallyConstructedAgent,
+			wire:  208,
+			label: "Failed to close partially constructed agent",
+		},
+		{
+			id:    DiagnosticMessageAgentResolvedToolAdaptationProfile,
+			wire:  209,
+			label: "Resolved tool adaptation profile",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToInitializeExecToolContinuingWithoutExec,
+			wire:  210,
+			label: "Failed to initialize exec tool; continuing without exec",
+		},
+		{
+			id:    DiagnosticMessageAgentRoutingLightModelNotFoundRoutingDisabled,
+			wire:  211,
+			label: "Routing light model not found; routing disabled",
+		},
+		{
+			id:    DiagnosticMessageAgentInvalidPathPatternInCompilePatterns,
+			wire:  212,
+			label: "invalid path pattern in compilePatterns",
+		},
+		{
+			id:    DiagnosticMessageAgentMemoryJSONLStoreInitFailedFallingBackToJSONSessions,
+			wire:  213,
+			label: "Memory JSONL store init failed; falling back to json sessions",
+		},
+		{
+			id:    DiagnosticMessageAgentMemoryMigrationFailedFallingBackToJSONSessions,
+			wire:  214,
+			label: "Memory migration failed; falling back to json sessions",
+		},
+		{
+			id:    DiagnosticMessageAgentMemoryMigratedToJSONL,
+			wire:  215,
+			label: "Memory migrated to JSONL",
+		},
+		{
+			id:    DiagnosticMessageAgentUnsubscribeEventsUnexpectedTypeInSubscriptionMap,
+			wire:  216,
+			label: "UnsubscribeEvents: unexpected type in subscription map",
+		},
+		{
+			id:    DiagnosticMessageAgentMediaTurnRoutingSelectedModel,
+			wire:  217,
+			label: "Media turn routing selected model",
+		},
+		{
+			id:    DiagnosticMessageAgentProactiveCompressionContextBudgetExceededBeforeLLMCall,
+			wire:  218,
+			label: "Proactive compression: context budget exceeded before LLM call",
+		},
+		{
+			id:    DiagnosticMessageAgentProactiveCompactFailed,
+			wire:  219,
+			label: "Proactive compact failed",
+		},
+		{
+			id:    DiagnosticMessageAgentTrimmedRebuiltHistoryAfterProactiveCompaction,
+			wire:  220,
+			label: "Trimmed rebuilt history after proactive compaction",
+		},
+		{
+			id:    DiagnosticMessageAgentContextStillExceedsBudgetAfterProactiveCompactionRebuild,
+			wire:  221,
+			label: "Context still exceeds budget after proactive compaction rebuild",
+		},
+		{
+			id:    DiagnosticMessageAgentChannelStreamingConfigDecodeFailed,
+			wire:  222,
+			label: "channel streaming config decode failed",
+		},
+		{
+			id:    DiagnosticMessageAgentConfiguredStreamingNotUsed,
+			wire:  223,
+			label: "configured streaming not used",
+		},
+		{
+			id:    DiagnosticMessageAgentConfiguredStreamingEnabled,
+			wire:  224,
+			label: "configured streaming enabled",
+		},
+		{
+			id:    DiagnosticMessageAgentChatStreamUpdateFailedAfterVisibleOutput,
+			wire:  225,
+			label: "ChatStream update failed after visible output",
+		},
+		{
+			id:    DiagnosticMessageAgentChatStreamUpdateFailedBeforeVisibleOutputRetryingWithChat,
+			wire:  226,
+			label: "ChatStream update failed before visible output; retrying with Chat",
+		},
+		{
+			id:    DiagnosticMessageAgentChatStreamFailedBeforeVisibleOutputRetryingWithChat,
+			wire:  227,
+			label: "ChatStream failed before visible output; retrying with Chat",
+		},
+		{
+			id:    DiagnosticMessageAgentStreamUpdateFailed,
+			wire:  228,
+			label: "stream update failed",
+		},
+		{
+			id:    DiagnosticMessageAgentStreamReasoningUpdateFailed,
+			wire:  229,
+			label: "stream reasoning update failed",
+		},
+		{
+			id:    DiagnosticMessageAgentStreamFinalFlushFailedAfterVisibleOutput,
+			wire:  230,
+			label: "stream final flush failed after visible output",
+		},
+		{
+			id:    DiagnosticMessageAgentStreamFinalFlushFailed,
+			wire:  231,
+			label: "stream final flush failed",
+		},
+		{
+			id:    DiagnosticMessageAgentConfiguredStreamingCompleted,
+			wire:  232,
+			label: "configured streaming completed",
+		},
+		{
+			id:    DiagnosticMessageAgentUnregisteredPromptSourceAllowedInCompatibilityMode,
+			wire:  233,
+			label: "Unregistered prompt source allowed in compatibility mode",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToRegisterBuiltinPromptSource,
+			wire:  234,
+			label: "Failed to register builtin prompt source",
+		},
+		{
+			id:    DiagnosticMessageAgentRecursionAdmissionProjectionFailedAfterCatalogCommit,
+			wire:  235,
+			label: "Recursion admission projection failed after catalog commit",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToCloseAgent,
+			wire:  236,
+			label: "Failed to close agent",
+		},
+		{
+			id:    DiagnosticMessageAgentCreatedImplicitMainAgentNoAgentsListConfigured,
+			wire:  237,
+			label: "Created implicit main agent (no agents.list configured)",
+		},
+		{
+			id:    DiagnosticMessageAgentRegisteredAgent,
+			wire:  238,
+			label: "Registered agent",
+		},
+		{
+			id:    DiagnosticMessageAgentHardAbortTriggered,
+			wire:  239,
+			label: "Hard abort triggered",
+		},
+		{
+			id:    DiagnosticMessageAgentSteeringMessageEnqueued,
+			wire:  240,
+			label: "Steering message enqueued",
+		},
+		{
+			id:    DiagnosticMessageAgentThinkingLevelIsSetButCurrentProviderDoesNotSupportItIgnoring,
+			wire:  241,
+			label: "thinking_level is set but current provider does not support it, ignoring",
+		},
+		{
+			id:    DiagnosticMessageAgentMDDeclaresUnknownMCPServerNames,
+			wire:  242,
+			label: "AGENT.md declares unknown MCP server names",
+		},
+		{
+			id:    DiagnosticMessageAgentMDDeclaresUnregisteredToolNames,
+			wire:  243,
+			label: "AGENT.md declares unregistered tool names",
+		},
+		{
+			id:    DiagnosticMessageAgentUnknownContextManagerFallingBackToLegacy,
+			wire:  244,
+			label: "Unknown context manager, falling back to legacy",
+		},
+		{
+			id:    DiagnosticMessageAgentFailedToCreateContextManagerFallingBackToLegacy,
+			wire:  245,
+			label: "Failed to create context manager, falling back to legacy",
+		},
+		{
+			id:    DiagnosticMessageAgentParentTurnEndedNonCriticalSubTurnExitingGracefully,
+			wire:  246,
+			label: "Parent turn ended, non-critical SubTurn exiting gracefully",
+		},
+		{
+			id:    DiagnosticMessageAgentParentTurnEndedCriticalSubTurnContinuesRunning,
+			wire:  247,
+			label: "Parent turn ended, critical SubTurn continues running",
+		},
+		{
+			id:    DiagnosticMessageAgentInjectedSteeringMessageIntoContext,
+			wire:  248,
+			label: "Injected steering message into context",
+		},
+		{
+			id:    DiagnosticMessageAgentModelRouterSelectedTarget,
+			wire:  249,
+			label: "Model router selected target",
+		},
+		{
+			id:    DiagnosticMessageAgentModelRoutingPrimaryModelSelected,
+			wire:  250,
+			label: "Model routing: primary model selected",
+		},
+		{
+			id:    DiagnosticMessageAgentModelRoutingLightModelSelected,
+			wire:  251,
+			label: "Model routing: light model selected",
+		},
+		{
+			id:    DiagnosticMessageWorkflowFailedToAcquireRuntimeEventWorkflowRuntime,
+			wire:  252,
+			label: "Failed to acquire runtime-event workflow runtime",
+		},
+		{
+			id:    DiagnosticMessageWorkflowFailedToListRuntimeEventWorkflows,
+			wire:  253,
+			label: "Failed to list runtime-event workflows",
+		},
+		{
+			id:    DiagnosticMessageWorkflowRuntimeEventSkippedUntilRevalidated,
+			wire:  254,
+			label: "Runtime-event workflow skipped until revalidated",
+		},
+		{
+			id:    DiagnosticMessageWorkflowRuntimeEventTriggerEvaluationFailed,
+			wire:  255,
+			label: "Workflow runtime-event trigger evaluation failed",
+		},
+		{
+			id:    DiagnosticMessageWorkflowFailedToRetainRuntimeEventWorkflowRuntime,
+			wire:  256,
+			label: "Failed to retain runtime-event workflow runtime",
+		},
+		{
+			id:    DiagnosticMessageWorkflowRuntimeEventRunFailed,
+			wire:  257,
+			label: "Runtime-event workflow run failed",
+		},
+		{
+			id:    DiagnosticMessageWorkflowScheduledWorkflowSkippedUntilRevalidated,
+			wire:  258,
+			label: "Scheduled workflow skipped until revalidated",
+		},
+		{
+			id:    DiagnosticMessageWorkflowInvalidWorkflowScheduleSkipped,
+			wire:  259,
+			label: "Invalid workflow schedule skipped",
+		},
+		{
+			id:    DiagnosticMessageWorkflowFailedToSubscribeWorkflowRuntimeEvents,
+			wire:  260,
+			label: "Failed to subscribe workflow runtime events",
+		},
+		{
+			id:    DiagnosticMessageWorkflowFailedToAcquireScheduledWorkflowRuntime,
+			wire:  261,
+			label: "Failed to acquire scheduled workflow runtime",
+		},
+		{
+			id:    DiagnosticMessageWorkflowScheduledWorkflowHasNoBoundDefinitionSnapshot,
+			wire:  262,
+			label: "Scheduled workflow has no bound definition snapshot",
+		},
+		{
+			id:    DiagnosticMessageWorkflowScheduledWorkflowContextIsInvalid,
+			wire:  263,
+			label: "Scheduled workflow context is invalid",
+		},
+		{
+			id:    DiagnosticMessageWorkflowScheduledWorkflowRunFailed,
+			wire:  264,
+			label: "Scheduled workflow run failed",
+		},
+		{
+			id:    DiagnosticMessageWorkflowScheduledWorkflowGenerationChangedBeforeAdmission,
+			wire:  265,
+			label: "Scheduled workflow generation changed before admission",
+		},
+		{
+			id:    DiagnosticMessageWorkflowFailedToComputeNextWorkflowSchedule,
+			wire:  266,
+			label: "Failed to compute next workflow schedule",
+		},
+		{
+			id:    DiagnosticMessageWorkflowFailedToRefreshWorkflowSchedules,
+			wire:  267,
+			label: "Failed to refresh workflow schedules",
+		},
+		{
+			id:    DiagnosticMessageWorkflowFailedToDeliverHandledWorkflowMedia,
+			wire:  268,
+			label: "Failed to deliver handled workflow media",
+		},
+		{
+			id:    DiagnosticMessageWorkflowFailedToAcquireWorkflowTriggerRuntime,
+			wire:  269,
+			label: "Failed to acquire workflow trigger runtime",
+		},
+		{
+			id:    DiagnosticMessageWorkflowFailedToListWorkflows,
+			wire:  270,
+			label: "Failed to list workflows",
+		},
+		{
+			id:    DiagnosticMessageWorkflowSkippedUntilRevalidated,
+			wire:  271,
+			label: "Workflow skipped until revalidated",
+		},
+		{
+			id:    DiagnosticMessageWorkflowTriggerEvaluationFailed,
+			wire:  272,
+			label: "Workflow trigger evaluation failed",
+		},
+		{
+			id:    DiagnosticMessageWorkflowFailedToRetainWorkflowTriggerRuntime,
+			wire:  273,
+			label: "Failed to retain workflow trigger runtime",
+		},
+		{
+			id:    DiagnosticMessageWorkflowRunFailed,
+			wire:  274,
+			label: "Workflow run failed",
+		},
+	}
+
+	const firstWireID = 154
+	if len(expected) != 121 {
+		t.Fatalf("test manifest has %d messages; want 121", len(expected))
+	}
+	for offset, item := range expected {
+		numericID := firstWireID + offset
+		if int(item.id) != item.wire || item.wire != numericID {
+			t.Fatalf(
+				"named P015b2b diagnostic message at offset %d = %d with declared wire %d; want wire %d",
+				offset,
+				item.id,
+				item.wire,
+				numericID,
+			)
+		}
+		label, ok := diagnosticMessageLabel(DiagnosticMessageID(numericID))
+		if !ok || label != item.label {
+			t.Fatalf(
+				"P015b2b diagnostic message wire %d = %q, %v; want %q",
+				numericID,
+				label,
+				ok,
+				item.label,
+			)
+		}
+	}
+
+	sharedSourceMessages := [...]struct {
+		sources string
+		id      DiagnosticMessageID
+		wire    int
+		label   string
+	}{
+		{"B028/B044", DiagnosticMessageFailedToResolveMediaRef, 181, "Failed to resolve media ref"},
+		{"B071-B078", DiagnosticMessageAgentConfiguredStreamingNotUsed, 223, "configured streaming not used"},
+		{
+			"B118/B124",
+			DiagnosticMessageWorkflowFailedToAcquireScheduledWorkflowRuntime,
+			261,
+			"Failed to acquire scheduled workflow runtime",
+		},
+		{
+			"B095",
+			DiagnosticMessageAgentFailedToEnqueueSteeringMessage,
+			129,
+			"Failed to enqueue steering message",
+		},
+		{"B105", DiagnosticMessageLLMIteration, 15, "LLM iteration"},
+	}
+	for _, item := range sharedSourceMessages {
+		label, ok := diagnosticMessageLabel(item.id)
+		if int(item.id) != item.wire || !ok || label != item.label {
+			t.Errorf(
+				"shared source message %s = wire %d label %q, %v; want wire %d label %q",
+				item.sources,
+				item.id,
+				label,
+				ok,
+				item.wire,
+				item.label,
 			)
 		}
 	}

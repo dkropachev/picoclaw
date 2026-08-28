@@ -17,10 +17,12 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 	}
 	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
 	if err != nil {
-		logger.WarnCF(
-			"workflow",
-			"Failed to acquire workflow trigger runtime",
-			map[string]any{"error": err.Error()},
+		logger.WarnSafeCF(
+			logger.ComponentWorkflow,
+			logger.DiagnosticMessageWorkflowFailedToAcquireWorkflowTriggerRuntime,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
 		)
 		return false
 	}
@@ -39,7 +41,13 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 	localOpts := []workflows.LocalOption{workflows.WithDefinitionsDir(definitionsDir)}
 	defs, err := workflows.ListLocal(ctx, workspace, localOpts...)
 	if err != nil {
-		logger.WarnCF("workflow", "Failed to list workflows", map[string]any{"error": err.Error()})
+		logger.WarnSafeCF(
+			logger.ComponentWorkflow,
+			logger.DiagnosticMessageWorkflowFailedToListWorkflows,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 		return false
 	}
 	if len(defs) == 0 {
@@ -63,10 +71,13 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 			localOpts...,
 		)
 		if err != nil {
-			logger.WarnCF(
-				"workflow",
-				"Workflow skipped until revalidated",
-				map[string]any{"ref": def.Ref, "error": err.Error()},
+			logger.WarnSafeCF(
+				logger.ComponentWorkflow,
+				logger.DiagnosticMessageWorkflowSkippedUntilRevalidated,
+				logger.NewSafeFields(
+					agentDiagnosticWorkflowField(def.Ref),
+					agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+				),
 			)
 			continue
 		}
@@ -76,10 +87,13 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 			event,
 		)
 		if err != nil {
-			logger.WarnCF(
-				"workflow",
-				"Workflow trigger evaluation failed",
-				map[string]any{"ref": def.Ref, "error": err.Error()},
+			logger.WarnSafeCF(
+				logger.ComponentWorkflow,
+				logger.DiagnosticMessageWorkflowTriggerEvaluationFailed,
+				logger.NewSafeFields(
+					agentDiagnosticWorkflowField(def.Ref),
+					agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+				),
 			)
 			continue
 		}
@@ -94,10 +108,13 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 		executor := al.newWorkflowExecutor(workspace, defaultAgent)
 		workflowCtx, releaseWorkflow, err := al.retainRuntimeUse(ctx)
 		if err != nil {
-			logger.WarnCF(
-				"workflow",
-				"Failed to retain workflow trigger runtime",
-				map[string]any{"ref": def.Ref, "error": err.Error()},
+			logger.WarnSafeCF(
+				logger.ComponentWorkflow,
+				logger.DiagnosticMessageWorkflowFailedToRetainWorkflowTriggerRuntime,
+				logger.NewSafeFields(
+					agentDiagnosticWorkflowField(def.Ref),
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
 			)
 			continue
 		}
@@ -118,7 +135,14 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 				Session:     m.Session,
 				Delivery:    m.Delivery,
 			}); err != nil {
-				logger.WarnCF("workflow", "Workflow run failed", map[string]any{"ref": ref, "error": err.Error()})
+				logger.WarnSafeCF(
+					logger.ComponentWorkflow,
+					logger.DiagnosticMessageWorkflowRunFailed,
+					logger.NewSafeFields(
+						agentDiagnosticWorkflowField(ref),
+						agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
+				)
 			}
 		}(workflowCtx, releaseWorkflow, def.Ref, workflow, match)
 	}

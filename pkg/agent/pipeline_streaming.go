@@ -29,12 +29,17 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 	}
 	streamProvider, ok := exec.activeProvider.(providers.StreamingProvider)
 	if !ok {
-		logger.DebugCF("agent", "configured streaming not used", map[string]any{
-			"agent_id": ts.agent.ID,
-			"channel":  ts.channel,
-			"model":    exec.activeModel,
-			"reason":   "provider_not_streaming",
-		})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentConfiguredStreamingNotUsed,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				agentDiagnosticChannelField(ts.channel),
+				agentDiagnosticModelField(exec.activeModel),
+				agentDiagnosticReasonField("provider_not_streaming"),
+				logger.SafeEnum(logger.FieldReason, logger.SafeEnumUnavailable),
+			),
+		)
 		return nil, false, nil
 	}
 
@@ -57,13 +62,18 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		)
 	}
 	if !streamerOK || streamer == nil {
-		logger.DebugCF("agent", "configured streaming not used", map[string]any{
-			"agent_id": ts.agent.ID,
-			"channel":  ts.channel,
-			"chat_id":  ts.chatID,
-			"model":    exec.activeModel,
-			"reason":   "streamer_unavailable",
-		})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentConfiguredStreamingNotUsed,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				agentDiagnosticChannelField(ts.channel),
+				agentDiagnosticChatField(ts.chatID),
+				agentDiagnosticModelField(exec.activeModel),
+				agentDiagnosticReasonField("streamer_unavailable"),
+				logger.SafeEnum(logger.FieldReason, logger.SafeEnumUnavailable),
+			),
+		)
 		return nil, false, nil
 	}
 	if admissionErr := admitWorkflowAgentCall(ts.opts.callAdmission); admissionErr != nil {
@@ -78,12 +88,17 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		ts:        ts,
 	}
 
-	logger.DebugCF("agent", "configured streaming enabled", map[string]any{
-		"agent_id": ts.agent.ID,
-		"channel":  ts.channel,
-		"chat_id":  ts.chatID,
-		"model":    exec.llmModel,
-	})
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentConfiguredStreamingEnabled,
+		logger.NewSafeFields(
+			agentDiagnosticAgentField(ts.agent.ID),
+			agentDiagnosticChannelField(ts.channel),
+			agentDiagnosticChatField(ts.chatID),
+			agentDiagnosticModelField(exec.llmModel),
+			logger.SafeBool(logger.FieldStreaming, true),
+		),
+	)
 
 	chunkCount := 0
 	firstChunkAt := time.Time{}
@@ -131,17 +146,30 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 	logConfiguredStreamingSummary(ts, exec, chunkCount, firstChunkAt, lastChunkAt, streamErr)
 	if streamErr == nil {
 		if updateErr := publisher.Err(); updateErr != nil {
-			logFields := map[string]any{
-				"agent_id": ts.agent.ID,
-				"channel":  ts.channel,
-				"model":    exec.llmModel,
-				"error":    updateErr.Error(),
-			}
 			if publisher.Published() {
-				logger.WarnCF("agent", "ChatStream update failed after visible output", logFields)
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentChatStreamUpdateFailedAfterVisibleOutput,
+					logger.NewSafeFields(
+						agentDiagnosticAgentField(ts.agent.ID),
+						agentDiagnosticChannelField(ts.channel),
+						agentDiagnosticModelField(exec.llmModel),
+						agentDiagnosticErrorField(logger.ErrorClassTransport, updateErr),
+					),
+				)
 				return nil, true, configuredStreamingVisibleError{err: updateErr}
 			}
-			logger.WarnCF("agent", "ChatStream update failed before visible output; retrying with Chat", logFields)
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentChatStreamUpdateFailedBeforeVisibleOutputRetryingWithChat,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(ts.agent.ID),
+					agentDiagnosticChannelField(ts.channel),
+					agentDiagnosticModelField(exec.llmModel),
+					agentDiagnosticErrorField(logger.ErrorClassTransport, updateErr),
+					logger.SafeBool(logger.FieldFallback, true),
+				),
+			)
 			publisher.Cancel(ctx)
 			fallbackResponse, err := exec.activeProvider.Chat(
 				ctx,
@@ -158,12 +186,17 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 	}
 	if streamErr != nil {
 		if !publisher.Published() {
-			logger.WarnCF("agent", "ChatStream failed before visible output; retrying with Chat", map[string]any{
-				"agent_id": ts.agent.ID,
-				"channel":  ts.channel,
-				"model":    exec.llmModel,
-				"error":    streamErr.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentChatStreamFailedBeforeVisibleOutputRetryingWithChat,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(ts.agent.ID),
+					agentDiagnosticChannelField(ts.channel),
+					agentDiagnosticModelField(exec.llmModel),
+					agentDiagnosticErrorField(logger.ErrorClassProvider, streamErr),
+					logger.SafeBool(logger.FieldFallback, true),
+				),
+			)
 			publisher.Cancel(ctx)
 			fallbackResponse, err := exec.activeProvider.Chat(
 				ctx,
@@ -195,23 +228,34 @@ func logConfiguredStreamingSummary(
 	lastChunkAt time.Time,
 	streamErr error,
 ) {
-	fields := map[string]any{
-		"chunks": chunkCount,
-	}
+	// Use one closed field shape for this stable sink. Missing state is encoded
+	// as empty identity observations, zero span, and the sealed none error.
+	agentID := ""
+	channel := ""
 	if ts != nil {
-		fields["agent_id"] = ts.agent.ID
-		fields["channel"] = ts.channel
+		agentID = ts.agent.ID
+		channel = ts.channel
 	}
+	model := ""
 	if exec != nil {
-		fields["model"] = exec.llmModel
+		model = exec.llmModel
 	}
+	chunkSpan := int64(0)
 	if !firstChunkAt.IsZero() && !lastChunkAt.IsZero() {
-		fields["chunk_span_ms"] = lastChunkAt.Sub(firstChunkAt).Milliseconds()
+		chunkSpan = lastChunkAt.Sub(firstChunkAt).Milliseconds()
 	}
-	if streamErr != nil {
-		fields["error"] = streamErr.Error()
-	}
-	logger.DebugCF("agent", "configured streaming completed", fields)
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentConfiguredStreamingCompleted,
+		logger.NewSafeFields(
+			logger.SafeInt(logger.FieldChunkCount, chunkCount),
+			agentDiagnosticAgentField(agentID),
+			agentDiagnosticChannelField(channel),
+			agentDiagnosticModelField(model),
+			logger.SafeInt64(logger.FieldChunkSpanMilliseconds, chunkSpan),
+			agentDiagnosticErrorField(logger.ErrorClassProvider, streamErr),
+		),
+	)
 }
 
 type configuredStreamingVisibleError struct {
@@ -249,21 +293,29 @@ func finalizeConfiguredStreamingLLM(
 	visibleBeforeFinalize := publisher.Published()
 	if err := publisher.Finalize(ctx, content, contextUsage); err != nil {
 		if visibleBeforeFinalize {
-			logger.WarnCF("agent", "stream final flush failed after visible output", map[string]any{
-				"agent_id": ts.agent.ID,
-				"channel":  ts.channel,
-				"model":    exec.llmModel,
-				"error":    err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentStreamFinalFlushFailedAfterVisibleOutput,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(ts.agent.ID),
+					agentDiagnosticChannelField(ts.channel),
+					agentDiagnosticModelField(exec.llmModel),
+					agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+				),
+			)
 			return configuredStreamingVisibleError{err: err}
 		}
 		publisher.Cancel(ctx)
-		logger.WarnCF("agent", "stream final flush failed", map[string]any{
-			"agent_id": ts.agent.ID,
-			"channel":  ts.channel,
-			"model":    exec.llmModel,
-			"error":    err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentStreamFinalFlushFailed,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				agentDiagnosticChannelField(ts.channel),
+				agentDiagnosticModelField(exec.llmModel),
+				agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+			),
+		)
 		return err
 	}
 	return nil
@@ -280,39 +332,59 @@ func cancelConfiguredStreamingLLM(ctx context.Context, exec *turnExecution) {
 
 func (p *Pipeline) configuredStreamingEligible(ts *turnState, exec *turnExecution) bool {
 	if p == nil || ts == nil || exec == nil || p.Bus == nil {
-		logger.DebugCF("agent", "configured streaming not used", map[string]any{
-			"reason": "missing_pipeline_state",
-		})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentConfiguredStreamingNotUsed,
+			logger.NewSafeFields(
+				agentDiagnosticReasonField("missing_pipeline_state"),
+				logger.SafeEnum(logger.FieldReason, logger.SafeEnumUnavailable),
+			),
+		)
 		return false
 	}
 	if strings.TrimSpace(ts.channel) == "" || strings.TrimSpace(ts.chatID) == "" {
-		logger.DebugCF("agent", "configured streaming not used", map[string]any{
-			"agent_id": ts.agent.ID,
-			"channel":  ts.channel,
-			"chat_id":  ts.chatID,
-			"model":    exec.activeModel,
-			"reason":   "missing_channel_context",
-		})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentConfiguredStreamingNotUsed,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				agentDiagnosticChannelField(ts.channel),
+				agentDiagnosticChatField(ts.chatID),
+				agentDiagnosticModelField(exec.activeModel),
+				agentDiagnosticReasonField("missing_channel_context"),
+				logger.SafeEnum(logger.FieldReason, logger.SafeEnumUnavailable),
+			),
+		)
 		return false
 	}
 	if !ts.opts.SendResponse && !ts.opts.AllowInterimPicoPublish {
-		logger.DebugCF("agent", "configured streaming not used", map[string]any{
-			"agent_id": ts.agent.ID,
-			"channel":  ts.channel,
-			"chat_id":  ts.chatID,
-			"model":    exec.activeModel,
-			"reason":   "turn_output_disabled",
-		})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentConfiguredStreamingNotUsed,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				agentDiagnosticChannelField(ts.channel),
+				agentDiagnosticChatField(ts.chatID),
+				agentDiagnosticModelField(exec.activeModel),
+				agentDiagnosticReasonField("turn_output_disabled"),
+				logger.SafeEnum(logger.FieldReason, logger.SafeEnumDenied),
+			),
+		)
 		return false
 	}
 	if len(exec.activeCandidates) != 1 {
-		logger.DebugCF("agent", "configured streaming not used", map[string]any{
-			"agent_id":   ts.agent.ID,
-			"channel":    ts.channel,
-			"model":      exec.activeModel,
-			"candidates": len(exec.activeCandidates),
-			"reason":     "fallback_candidates_enabled",
-		})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentConfiguredStreamingNotUsed,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				agentDiagnosticChannelField(ts.channel),
+				agentDiagnosticModelField(exec.activeModel),
+				logger.SafeInt(logger.FieldModelCount, len(exec.activeCandidates)),
+				agentDiagnosticReasonField("fallback_candidates_enabled"),
+				logger.SafeEnum(logger.FieldReason, logger.SafeEnumSkipped),
+			),
+		)
 		return false
 	}
 	if exec.activeModelConfig == nil || !exec.activeModelConfig.Streaming.Enabled {
@@ -322,27 +394,37 @@ func (p *Pipeline) configuredStreamingEligible(ts *turnState, exec *turnExecutio
 			modelName = exec.activeModelConfig.ModelName
 			modelStreaming = exec.activeModelConfig.Streaming.Enabled
 		}
-		logger.DebugCF("agent", "configured streaming not used", map[string]any{
-			"agent_id":         ts.agent.ID,
-			"channel":          ts.channel,
-			"model":            exec.activeModel,
-			"model_name":       modelName,
-			"model_streaming":  modelStreaming,
-			"has_model_config": exec.activeModelConfig != nil,
-			"reason":           "model_streaming_disabled",
-		})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentConfiguredStreamingNotUsed,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				agentDiagnosticChannelField(ts.channel),
+				agentDiagnosticModelField(exec.activeModel),
+				agentDiagnosticProviderModelField(modelName),
+				logger.SafeBool(logger.FieldStreaming, modelStreaming),
+				logger.SafeBool(logger.FieldAvailable, exec.activeModelConfig != nil),
+				agentDiagnosticReasonField("model_streaming_disabled"),
+				logger.SafeEnum(logger.FieldReason, logger.SafeEnumDenied),
+			),
+		)
 		return false
 	}
 	channelStreaming, ok := p.channelStreamingConfig(ts.channel)
 	if !ok || !channelStreaming.Enabled {
-		logger.DebugCF("agent", "configured streaming not used", map[string]any{
-			"agent_id":           ts.agent.ID,
-			"channel":            ts.channel,
-			"model":              exec.activeModel,
-			"channel_streaming":  channelStreaming.Enabled,
-			"has_channel_config": ok,
-			"reason":             "channel_streaming_disabled",
-		})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentConfiguredStreamingNotUsed,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				agentDiagnosticChannelField(ts.channel),
+				agentDiagnosticModelField(exec.activeModel),
+				logger.SafeBool(logger.FieldStreaming, channelStreaming.Enabled),
+				logger.SafeBool(logger.FieldAvailable, ok),
+				agentDiagnosticReasonField("channel_streaming_disabled"),
+				logger.SafeEnum(logger.FieldReason, logger.SafeEnumDenied),
+			),
+		)
 		return false
 	}
 	return true
@@ -358,10 +440,14 @@ func (p *Pipeline) channelStreamingConfig(channelName string) (config.StreamingC
 	}
 	decoded, err := ch.GetDecoded()
 	if err != nil {
-		logger.WarnCF("agent", "channel streaming config decode failed", map[string]any{
-			"channel": channelName,
-			"error":   err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentChannelStreamingConfigDecodeFailed,
+			logger.NewSafeFields(
+				agentDiagnosticChannelField(channelName),
+				agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+			),
+		)
 		return config.StreamingConfig{}, false
 	}
 	return streamingConfigFromDecodedSettings(decoded)
@@ -410,11 +496,15 @@ func (p *streamingChunkPublisher) Update(ctx context.Context, accumulated string
 	}
 	if err := p.streamer.Update(ctx, accumulated); err != nil {
 		p.err = err
-		logger.WarnCF("agent", "stream update failed", map[string]any{
-			"channel": p.channel,
-			"chat_id": p.chatID,
-			"error":   err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentStreamUpdateFailed,
+			logger.NewSafeFields(
+				agentDiagnosticChannelField(p.channel),
+				agentDiagnosticChatField(p.chatID),
+				agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+			),
+		)
 		return
 	}
 	p.published = true
@@ -433,11 +523,15 @@ func (p *streamingChunkPublisher) UpdateReasoning(ctx context.Context, accumulat
 	}
 	if err := reasoningStreamer.UpdateReasoning(ctx, accumulated); err != nil {
 		p.err = err
-		logger.WarnCF("agent", "stream reasoning update failed", map[string]any{
-			"channel": p.channel,
-			"chat_id": p.chatID,
-			"error":   err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentStreamReasoningUpdateFailed,
+			logger.NewSafeFields(
+				agentDiagnosticChannelField(p.channel),
+				agentDiagnosticChatField(p.chatID),
+				agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+			),
+		)
 		return
 	}
 	p.reasoningPublished = true

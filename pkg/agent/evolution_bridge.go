@@ -97,9 +97,13 @@ func newEvolutionBridge(
 	}
 	if cfg.Evolution.RunsColdPathAutomatically() {
 		bridge.coldPathRunner = evolution.NewColdPathRunnerWithErrorHandler(bridge, func(err error) {
-			logger.WarnCF("agent", "Cold path run failed", map[string]any{
-				"error": err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentColdPathRunFailed,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		})
 	}
 	if cfg.Evolution.RunsColdPathScheduled() {
@@ -247,9 +251,13 @@ func (b *evolutionBridge) Close() error {
 
 	if b.runtimeSub != nil {
 		if err := b.runtimeSub.Close(); err != nil {
-			logger.WarnCF("agent", "Failed to close evolution runtime subscription", map[string]any{
-				"error": err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToCloseEvolutionRuntimeSubscription,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		}
 		<-b.runtimeSub.Done()
 	}
@@ -355,11 +363,15 @@ func (b *evolutionBridge) handleTurnEndAsync(meta EventMeta, payload TurnEndPayl
 	go func() {
 		defer b.wg.Done()
 		if err := b.runtime.FinalizeTurn(b.bgCtx, input); err != nil {
-			logger.WarnCF("agent", "Evolution finalize turn failed", map[string]any{
-				"error":     err.Error(),
-				"turn_id":   input.TurnID,
-				"workspace": input.Workspace,
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentEvolutionFinalizeTurnFailed,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+					agentDiagnosticTurnField(input.TurnID),
+					agentDiagnosticWorkspaceField(input.Workspace),
+				),
+			)
 			return
 		}
 		if b.coldPathRunner != nil && b.cfg.RunsColdPathAfterTurn() {
@@ -412,9 +424,13 @@ func (b *evolutionBridge) startScheduledColdPath(workspace string, times []strin
 	b.rememberScheduledColdPathWorkspace(workspace)
 	schedule := parseColdPathSchedule(times)
 	if len(schedule) == 0 {
-		logger.WarnCF("agent", "No valid evolution cold path schedule times configured", map[string]any{
-			"times": times,
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentNoValidEvolutionColdPathScheduleTimesConfigured,
+			logger.NewSafeFields(
+				logger.SafeInt(logger.FieldCount, len(times)),
+			),
+		)
 		return
 	}
 

@@ -286,11 +286,15 @@ func buildAccountRouterWithAliases(
 		return nil
 	}
 	if err := validateModelAliasReferences(cfg, primaryAlias, fallbackAliases); err != nil {
-		logger.WarnCF("agent", "Account router model aliases are invalid", map[string]any{
-			"router":      accountRef,
-			"model_alias": primaryAlias,
-			"error":       err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentAccountRouterModelAliasesAreInvalid,
+			logger.NewSafeFields(
+				agentDiagnosticRouteField(accountRef),
+				agentDiagnosticModelField(primaryAlias),
+				agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+			),
+		)
 		return nil
 	}
 	accountNames := accountRouterAccountNames(routerCfg)
@@ -306,12 +310,16 @@ func buildAccountRouterWithAliases(
 			executionPolicies...,
 		)
 		if err != nil {
-			logger.WarnCF("agent", "Account router account has no runnable model alias", map[string]any{
-				"router":      accountRef,
-				"account_ref": concreteAccount,
-				"model_alias": primaryAlias,
-				"error":       err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentAccountRouterAccountHasNoRunnableModelAlias,
+				logger.NewSafeFields(
+					agentDiagnosticRouteField(accountRef),
+					agentDiagnosticAccountField(concreteAccount),
+					agentDiagnosticModelField(primaryAlias),
+					agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+				),
+			)
 			continue
 		}
 		rpm := 0

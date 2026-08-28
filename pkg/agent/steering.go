@@ -254,21 +254,29 @@ func (al *AgentLoop) reportSteeringEnqueue(
 	err error,
 ) {
 	if err != nil {
-		logger.WarnCF("agent", "Failed to enqueue steering message", map[string]any{
-			"error": err.Error(),
-			"role":  msg.Role,
-			"scope": normalizeSteeringScope(scope),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToEnqueueSteeringMessage,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				logger.SafeEnum(logger.FieldRole, agentDiagnosticRoleEnum(msg.Role)),
+				agentDiagnosticScopeField(normalizeSteeringScope(scope)),
+			),
+		)
 		return
 	}
 
-	logger.DebugCF("agent", "Steering message enqueued", map[string]any{
-		"role":        msg.Role,
-		"content_len": len(msg.Content),
-		"media_count": len(msg.Media),
-		"queue_len":   queueDepth,
-		"scope":       normalizeSteeringScope(scope),
-	})
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentSteeringMessageEnqueued,
+		logger.NewSafeFields(
+			logger.SafeEnum(logger.FieldRole, agentDiagnosticRoleEnum(msg.Role)),
+			logger.SafeInt64(logger.FieldContentBytes, int64(len(msg.Content))),
+			logger.SafeInt(logger.FieldMediaCount, len(msg.Media)),
+			logger.SafeInt(logger.FieldQueueDepth, queueDepth),
+			agentDiagnosticScopeField(normalizeSteeringScope(scope)),
+		),
+	)
 
 	meta := HookMeta{
 		Source:    "Steer",
@@ -670,12 +678,16 @@ func (al *AgentLoop) HardAbort(sessionKey string) error {
 		return fmt.Errorf("turn is still initializing for session %s", sessionKey)
 	}
 
-	logger.InfoCF("agent", "Hard abort triggered", map[string]any{
-		"session_key":            sessionKey,
-		"turn_id":                ts.turnID,
-		"depth":                  ts.depth,
-		"restore_history_length": ts.restorePointHistoryLength(),
-	})
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentHardAbortTriggered,
+		logger.NewSafeFields(
+			agentDiagnosticSessionField(sessionKey),
+			agentDiagnosticTurnField(ts.turnID),
+			logger.SafeInt(logger.FieldDepth, ts.depth),
+			logger.SafeInt(logger.FieldHistoryMessageCount, ts.restorePointHistoryLength()),
+		),
+	)
 
 	// requestHardAbort atomically marks every nonterminal descendant before
 	// invoking any provider/turn/owned-context cancellation.
