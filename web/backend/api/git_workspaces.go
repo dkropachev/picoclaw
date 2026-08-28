@@ -72,10 +72,10 @@ var (
 )
 
 type gitWorkspaceManagerAPI interface {
-	Stats(context.Context) (gitworkspace.Stats, error)
-	Reconcile(context.Context) (gitworkspace.ReconcileResult, error)
-	CleanupIgnored(context.Context, string) (gitworkspace.CleanupResult, error)
-	Drop(context.Context, string) (gitworkspace.WorkspaceInfo, error)
+	Stats(ctx context.Context) (gitworkspace.Stats, error)
+	Reconcile(ctx context.Context) (gitworkspace.ReconcileResult, error)
+	CleanupIgnored(ctx context.Context, id string) (gitworkspace.CleanupResult, error)
+	Drop(ctx context.Context, id string) (gitworkspace.WorkspaceInfo, error)
 }
 
 type gitWorkspaceActionRequest struct {
@@ -340,7 +340,7 @@ func (h *Handler) handleCleanupGitWorkspace(w http.ResponseWriter, r *http.Reque
 	if !requirePublicGitWorkspaceID(w, id) {
 		return
 	}
-	manager, workspace, ok := h.loadMutableGitWorkspace(w, r, id)
+	manager, _, ok := h.loadMutableGitWorkspace(w, r, id)
 	if !ok {
 		return
 	}
@@ -349,9 +349,8 @@ func (h *Handler) handleCleanupGitWorkspace(w http.ResponseWriter, r *http.Reque
 		h.writeGitWorkspaceMutationFailure(w, r, manager, id, "cleanup")
 		return
 	}
-	workspace = result.Workspace
 	writeCollectionJSON(w, http.StatusOK, map[string]any{
-		"workspace":            gitWorkspaceDetailFromInfo(workspace),
+		"workspace":            gitWorkspaceDetailFromInfo(result.Workspace),
 		"before_ignored_bytes": result.Before,
 		"after_ignored_bytes":  result.After,
 	})
@@ -429,8 +428,7 @@ func (h *Handler) handlePutGitWorkspaceSettings(w http.ResponseWriter, r *http.R
 		return
 	}
 	cfg.GitWorkspaces.MaxTotalSizeBytes = request.Settings.MaxTotalSizeBytes
-	cfg.GitWorkspaces.IgnoredCleanupDelaySeconds =
-		request.Settings.IgnoredCleanupDelaySeconds
+	cfg.GitWorkspaces.IgnoredCleanupDelaySeconds = request.Settings.IgnoredCleanupDelaySeconds
 	cfg.GitWorkspaces.DropDelaySeconds = request.Settings.DropDelaySeconds
 	nextRevision, err := h.saveConfigIfRevision(h.configPath, cfg, revision)
 	if err != nil {

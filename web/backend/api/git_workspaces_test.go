@@ -194,15 +194,15 @@ func TestGitWorkspaceCollectionSchemasQueriesPagingAndSuggestions(t *testing.T) 
 		{`agent = "worker"`, "222222222222"},
 		{`time > "2026-08-27T12:30:00Z"`, "222222222222"},
 	} {
-		query, err := collectionquery.Parse(test.query, gitWorkspaceHistoryCollectionSchema)
-		if err != nil {
-			t.Fatal(err)
+		query, parseErr := collectionquery.Parse(test.query, gitWorkspaceHistoryCollectionSchema)
+		if parseErr != nil {
+			t.Fatal(parseErr)
 		}
-		page, err := pageGitWorkspaceHistory(history, collectionListRequest{
+		page, pageErr := pageGitWorkspaceHistory(history, collectionListRequest{
 			Query: query, Limit: 200, Now: base,
 		})
-		if err != nil || page.Total != 1 || page.Items[0].ID != test.want {
-			t.Fatalf("history query %q = %#v, %v", test.query, page, err)
+		if pageErr != nil || page.Total != 1 || page.Items[0].ID != test.want {
+			t.Fatalf("history query %q = %#v, %v", test.query, page, pageErr)
 		}
 	}
 	defaultHistory, err := collectionquery.Parse("", gitWorkspaceHistoryCollectionSchema)
@@ -574,7 +574,8 @@ func TestGitWorkspaceMutationStatesAndRacesUseSafeCodes(t *testing.T) {
 		{"became dropped", fakeGitWorkspaceStatsResult{stats: base}, "git_workspace_dropped", http.StatusConflict},
 		{"became missing", fakeGitWorkspaceStatsResult{stats: missing}, "git_workspace_not_found", http.StatusNotFound},
 		{
-			"unclassified", fakeGitWorkspaceStatsResult{err: errors.New("PRIVATE-RACE")},
+			"unclassified",
+			fakeGitWorkspaceStatsResult{err: errors.New("PRIVATE-RACE")},
 			"git_workspace_cleanup_failed", http.StatusConflict,
 		},
 	} {
@@ -1328,6 +1329,7 @@ func TestConfigSignatureTracksEffectiveGitWorkspaceRuntime(t *testing.T) {
 		{"drop delay", func(cfg *config.Config) { cfg.GitWorkspaces.DropDelaySeconds++ }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			cfg := newConfig()
 			test.mutate(cfg)
 			if got := computeConfigSignature(cfg); got == baseline {
