@@ -1153,6 +1153,34 @@ func TestRepositoryReviewLegacyCampaignBackfillRejectsRunProjectionAndUnsupporte
 	}
 }
 
+func TestRepositoryReviewLegacyCampaignBackfillRejectsTamperedUnreviewedUnsupportedFile(t *testing.T) {
+	fixture := newRepositoryReviewBackfillFixture(t, 2, repositoryReviewBackfillRunSpec{
+		inspected: []int{0}, occurrences: 0,
+	})
+	runID := fixture.automation.RunIDs[0]
+	workflowRun := fixture.runs[runID]
+	review := workflowRun.Steps["find_bugs/review"]
+	children := review.Outputs["managed_children"].([]map[string]any)
+	scope := children[0]["scope"].([]map[string]any)
+	forgedUnsupported := maps.Clone(scope[1])
+	forgedUnsupported["contentComplete"] = false
+	forgedUnsupported["contentUnavailable"] = "binary"
+	children = append(children, map[string]any{
+		"required": false, "valid": false, "scope": []map[string]any{forgedUnsupported},
+	})
+	review.Outputs["managed_children"] = children
+	workflowRun.Steps["find_bugs/review"] = review
+
+	prepared, err := prepareRepositoryReviewLegacyCampaignBackfill(
+		t.Context(), fixture.automation, fixture.state,
+		repoaudit.NewRepositoryReviewCampaignID(),
+		repositoryReviewBackfillLoader{runs: fixture.runs, err: map[string]error{}},
+	)
+	if err != nil || prepared.Available || prepared.Exact {
+		t.Fatalf("tampered unsupported recovery = %#v err=%v", prepared, err)
+	}
+}
+
 func TestRepositoryReviewLegacyCampaignRecoveryCrashPhasesAreIdempotent(t *testing.T) {
 	for _, phase := range []string{"install", "begin", "reconcile"} {
 		t.Run(phase, func(t *testing.T) {

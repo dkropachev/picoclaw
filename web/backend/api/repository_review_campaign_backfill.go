@@ -461,7 +461,18 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 				)
 			}
 		}
+		ledgerUnsupported := make(map[string]repoaudit.FileRef, len(ledgerRun.UnsupportedPaths))
+		for _, pathValue := range ledgerRun.UnsupportedPaths {
+			if file, exists := selectedByPath[pathValue]; exists {
+				ledgerUnsupported[pathValue] = file
+			}
+		}
+		unsupportedEvidenceValid := true
 		for _, unsupported := range evidence.UnsupportedFiles {
+			if ledgerUnsupported[unsupported.Path] != unsupported.FileRef {
+				unsupportedEvidenceValid = false
+				break
+			}
 			// Run-evidence validation matched the durable Record projection, which
 			// binds this exact terminal FileRef to ledger UnsupportedPaths.
 			if profileCompatible {
@@ -470,6 +481,10 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 					repoaudit.RepositoryReviewCampaignPathCoverage{Unsupported: true}, &result.Exact,
 				)
 			}
+		}
+		if !unsupportedEvidenceValid {
+			result.Exact = false
+			continue
 		}
 		unsupportedSeen := make(map[string]struct{}, len(ledgerRun.UnsupportedPaths))
 		for _, pathValue := range ledgerRun.UnsupportedPaths {
