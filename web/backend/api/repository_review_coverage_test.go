@@ -3363,8 +3363,8 @@ func TestRepositoryReviewCampaignAdmissionReadsLedgerAndFencesFinalCAS(t *testin
 		}
 		if _, startErr := controller.startAutomation(
 			t.Context(), automation.ID, automation.Version, false, "start",
-		); startErr == nil {
-			t.Fatal("corrupt repository ledger was accepted")
+		); startErr == nil || !strings.Contains(startErr.Error(), "unexpected end of JSON") {
+			t.Fatalf("corrupt repository ledger error=%v", startErr)
 		}
 	})
 
@@ -3489,6 +3489,62 @@ func TestRepositoryReviewCampaignAdmissionReadsLedgerAndFencesFinalCAS(t *testin
 			t.Fatalf("newer campaign=%#v found=%v err=%v", current, found, err)
 		}
 	})
+}
+
+func TestRepositoryReviewCampaignAdmissionResetsBudgetAndHonorsStoppedController(t *testing.T) {
+	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := testRepositoryReviewAutomation()
+	input.Usage = repoaudit.RepositoryReviewTokenUsage{
+		PromptTokens: 4, CompletionTokens: 1, TotalTokens: 5,
+	}
+	input.EstimatedCostUSD = 0.25
+	automation, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := handler.repositoryReviewControllerInstance()
+	controller.runBatch = func(
+		ctx context.Context,
+		_ repoaudit.RepositoryReviewAutomation,
+		_ string,
+		_ workflows.AgentUsageObserver,
+	) (*workflows.RunResult, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	started, err := controller.startAutomation(
+		t.Context(), automation.ID, automation.Version, true, "start",
+	)
+	if err != nil || started.Usage.TotalTokens != 0 || started.EstimatedCostUSD != 0 {
+		t.Fatalf("budget reset admission=%#v err=%v", started, err)
+	}
+
+	stoppedController := newRepositoryReviewController(handler)
+	stoppedController.stopped = true
+	stoppedController.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return strings.Repeat("a", 40), nil
+	}
+	second := testRepositoryReviewAutomation()
+	second.Repository = "https://github.com/acme/stopped.git"
+	second, err = store.CreateAutomation(t.Context(), second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, startErr := stoppedController.startAutomation(
+		t.Context(), second.ID, second.Version, false, "start",
+	); !errors.Is(startErr, context.Canceled) {
+		t.Fatalf("stopped campaign admission error=%v", startErr)
+	}
 }
 
 func TestApplyRepositoryReviewOutcomeUsesExactCampaignMetrics(t *testing.T) {
