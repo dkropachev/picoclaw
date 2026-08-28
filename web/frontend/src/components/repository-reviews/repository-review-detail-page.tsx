@@ -39,7 +39,10 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 
-import { repositoryReviewFileProgressLabel } from "./repository-review-file-progress"
+import {
+  repositoryReviewFileProgressLabel,
+  repositoryReviewInspectedFilesLabel,
+} from "./repository-review-file-progress"
 
 const fullCommitSHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu
 
@@ -234,7 +237,7 @@ export function RepositoryReviewDetailPage({
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <Metric
                 label="Inspected files"
-                value={review.progress.inspected_files}
+                value={repositoryReviewInspectedFilesLabel(review)}
               />
               <Metric
                 label="Fully reviewed files"
@@ -267,6 +270,13 @@ export function RepositoryReviewDetailPage({
               acknowledges the file. Finding occurrences may be retained from
               partial inspection before a file is fully reviewed.
             </p>
+
+            {repositoryReviewInspectedFilesLabel(review) === "Unknown" && (
+              <p className="text-muted-foreground text-sm">
+                Inspected-file coverage is unknown for legacy campaigns until
+                their durable evidence is recovered.
+              </p>
+            )}
 
             <section aria-labelledby="review-usage" className="space-y-3">
               <h2 id="review-usage" className="font-semibold">
@@ -698,12 +708,14 @@ function DetailRows({ rows }: { rows: Array<[string, string]> }) {
   )
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function Metric({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="border-border rounded-lg border p-3">
       <p className="text-muted-foreground text-xs">{label}</p>
       <p className="mt-1 text-lg font-medium tabular-nums">
-        {new Intl.NumberFormat().format(value)}
+        {typeof value === "number"
+          ? new Intl.NumberFormat().format(value)
+          : value}
       </p>
     </div>
   )

@@ -4,10 +4,13 @@ import {
   type RepositoryReviewFileProgressSource,
   repositoryReviewFileProgress,
   repositoryReviewFileProgressLabel,
+  repositoryReviewInspectedFilesLabel,
 } from "./repository-review-file-progress"
 
 const review = {
   status: "running",
+  run_ids: ["legacy-run"],
+  started_at: "2026-08-28T00:00:00Z",
   progress: {
     stage: "waiting",
     completed_batches: 0,
@@ -36,6 +39,42 @@ const review = {
 } satisfies RepositoryReviewFileProgressSource
 
 describe("repositoryReviewFileProgress", () => {
+  // Campaign inspection did not exist in the legacy counter model, so a
+  // missing coverage envelope must not be rendered as a measured zero.
+  it("labels exact, lower-bound, and unavailable inspection coverage", () => {
+    expect(repositoryReviewInspectedFilesLabel(review)).toBe("Unknown")
+    expect(
+      repositoryReviewInspectedFilesLabel({
+        ...review,
+        status: "idle",
+        run_ids: [],
+        started_at: undefined,
+      }),
+    ).toBe(0)
+    expect(
+      repositoryReviewInspectedFilesLabel({
+        ...review,
+        progress: {
+          ...review.progress,
+          coverage_available: true,
+          coverage_exact: false,
+          inspected_files: 3,
+        },
+      }),
+    ).toBe("At least 3")
+    expect(
+      repositoryReviewInspectedFilesLabel({
+        ...review,
+        progress: {
+          ...review.progress,
+          coverage_available: true,
+          coverage_exact: true,
+          inspected_files: 4,
+        },
+      }),
+    ).toBe(4)
+  })
+
   it("does not report a false 100 percent before the first checkpoint", () => {
     expect(repositoryReviewFileProgress(review)).toEqual({
       resolved: 0,
