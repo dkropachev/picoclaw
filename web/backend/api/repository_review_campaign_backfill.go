@@ -631,6 +631,27 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 	if !result.Exact {
 		return result, nil
 	}
+	return finalizeRepositoryReviewLegacyCampaignBackfill(
+		result, state, campaignID, commitSHA, inventoryHash, profileHash, scopeDigest,
+		requiredAssignments, selectedScope, coveragePaths, recoveredRuns,
+		repositoryReviewLegacyBackfillMaxBytes,
+	)
+}
+
+func finalizeRepositoryReviewLegacyCampaignBackfill(
+	result repositoryReviewLegacyCampaignBackfill,
+	state repoaudit.RepositoryState,
+	campaignID string,
+	commitSHA string,
+	inventoryHash string,
+	profileHash string,
+	scopeDigest string,
+	requiredAssignments int,
+	selectedScope []repoaudit.FileRef,
+	coveragePaths map[string]repoaudit.RepositoryReviewCampaignPathCoverage,
+	recoveredRuns []repositoryReviewLegacyRecoveredRun,
+	maximumBytes int,
+) (repositoryReviewLegacyCampaignBackfill, error) {
 	request := repoaudit.ReconcileCampaignRequest{
 		Repository: state.Repository, ExpectedReviewVersion: state.ReviewVersion,
 		Coverage: repoaudit.RepositoryReviewCampaignCoverage{
@@ -645,7 +666,7 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 	if marshalErr != nil {
 		return result, marshalErr
 	}
-	if len(baseBytes) >= repositoryReviewLegacyBackfillMaxBytes {
+	if len(baseBytes) >= maximumBytes {
 		result.Exact = false
 		return result, nil
 	}
@@ -659,7 +680,7 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 			Recovery: recovered.recovery, ContextIDs: recovered.contextIDs,
 			FindingIDs: recovered.findingIDs,
 		})
-		if estimatedBytes+len(candidateBytes)+1024 >= repositoryReviewLegacyBackfillMaxBytes {
+		if estimatedBytes+len(candidateBytes)+1024 >= maximumBytes {
 			result.Exact = false
 			request.Coverage.Exact = false
 			continue
@@ -679,7 +700,7 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 	if marshalErr != nil {
 		return result, marshalErr
 	}
-	if len(encoded) >= repositoryReviewLegacyBackfillMaxBytes {
+	if len(encoded) >= maximumBytes {
 		result.Exact = false
 		return result, nil
 	}
