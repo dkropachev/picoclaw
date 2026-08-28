@@ -144,6 +144,14 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 		h.handleGetRepositoryReviewAutomationFinding,
 	)
 	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/repository-findings",
+		h.handleListRepositoryReviewRepositoryFindingsCollection,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/repository-findings/{finding_id}",
+		h.handleGetRepositoryReviewAutomationRepositoryFinding,
+	)
+	mux.HandleFunc(
 		"PATCH /api/repository-reviews/automations/{automation_id}/findings/{finding_id}",
 		h.handleUpdateRepositoryReviewAutomationFinding,
 	)

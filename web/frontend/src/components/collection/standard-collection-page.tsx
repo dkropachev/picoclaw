@@ -6,6 +6,7 @@ import type {
   CollectionBulkDeleteResponse,
   CollectionQuerySchema,
 } from "@/api/collection"
+import { CollectionContextBar } from "@/components/collection/collection-context-bar"
 import { CollectionResults } from "@/components/collection/collection-results"
 import { CollectionSelectionBar } from "@/components/collection/collection-selection-bar"
 import { CollectionShell } from "@/components/collection/collection-shell"
@@ -41,6 +42,26 @@ export interface StandardCollectionBulkDeleteConfirmation {
   actionLabel?: ReactNode
 }
 
+export interface StandardCollectionPageContext {
+  backLabel: string
+  onBack: () => void
+  identity?: ReactNode
+  status?: ReactNode
+}
+
+export interface StandardCollectionSelectionState {
+  selectedIDs: ReadonlySet<string>
+  selectedCount: number
+  clearSelection: () => void
+}
+
+export interface StandardCollectionSelectionOptions<T> {
+  disabled?: boolean
+  maximumSelected?: number
+  isItemSelectable?: (item: T) => boolean
+  renderActions?: (state: StandardCollectionSelectionState) => ReactNode
+}
+
 export interface StandardCollectionPageProps<T> {
   definition: CollectionDefinition<T>
   search: StandardCollectionPageSearch
@@ -52,6 +73,7 @@ export interface StandardCollectionPageProps<T> {
   loading?: boolean
   fetching?: boolean
   error?: unknown
+  context?: StandardCollectionPageContext
   onRefresh?: () => void | Promise<unknown>
   hasNextPage?: boolean
   loadingMore?: boolean
@@ -60,12 +82,14 @@ export interface StandardCollectionPageProps<T> {
   addAction?: ReactNode
   onBulkDelete?: (ids: string[]) => Promise<CollectionBulkDeleteResponse>
   isItemSelectable?: (item: T) => boolean
+  selection?: StandardCollectionSelectionOptions<T>
   afterBulkDelete?: (
     response: CollectionBulkDeleteResponse,
   ) => void | Promise<unknown>
   bulkDeleteConfirmation?: StandardCollectionBulkDeleteConfirmation
   emptyTitle?: string
   emptyDescription?: ReactNode
+  beforeResults?: ReactNode
 }
 
 export function StandardCollectionPage<T>({
@@ -79,6 +103,7 @@ export function StandardCollectionPage<T>({
   loading,
   fetching,
   error,
+  context,
   onRefresh,
   hasNextPage,
   loadingMore,
@@ -87,10 +112,12 @@ export function StandardCollectionPage<T>({
   addAction,
   onBulkDelete,
   isItemSelectable,
+  selection,
   afterBulkDelete,
   bulkDeleteConfirmation,
   emptyTitle,
   emptyDescription,
+  beforeResults,
 }: StandardCollectionPageProps<T>) {
   const state = useCollectionRouteState({
     collectionKey: definition.key,
@@ -129,6 +156,16 @@ export function StandardCollectionPage<T>({
           : "Invalid collection query",
     }
   }, [error])
+  const selectionEnabled = Boolean(selection || onBulkDelete)
+  const itemSelectable = selection?.isItemSelectable ?? isItemSelectable
+  const selectionState = useMemo<StandardCollectionSelectionState>(
+    () => ({
+      selectedIDs: state.selectedIDs,
+      selectedCount: state.selectedCount,
+      clearSelection: state.clearSelection,
+    }),
+    [state.clearSelection, state.selectedCount, state.selectedIDs],
+  )
 
   const removeSelected = async () => {
     if (!onBulkDelete) return
@@ -191,47 +228,55 @@ export function StandardCollectionPage<T>({
           ) : undefined
         }
         toolbar={
-          <CollectionToolbar
-            activeQuery={state.query}
-            defaultQuery={definition.defaultQuery}
-            schema={schema}
-            queryError={queryError}
-            disabled={deleting}
-            onApplyQuery={state.applyQuery}
-            view={state.view}
-            supportedViews={state.supportedViews}
-            recentQueries={state.recentQueries}
-            onClearHistory={state.clearHistory}
-            onViewChange={state.setView}
-          />
+          <>
+            {context && <CollectionContextBar {...context} />}
+            <CollectionToolbar
+              activeQuery={state.query}
+              defaultQuery={definition.defaultQuery}
+              schema={schema}
+              queryError={queryError}
+              disabled={deleting}
+              onApplyQuery={state.applyQuery}
+              view={state.view}
+              supportedViews={state.supportedViews}
+              recentQueries={state.recentQueries}
+              onClearHistory={state.clearHistory}
+              onViewChange={state.setView}
+            />
+          </>
         }
         selectionBar={
-          onBulkDelete ? (
+          selectionEnabled ? (
             <CollectionSelectionBar
               selectedCount={state.selectedCount}
               deleting={deleting}
+              disabled={selection?.disabled}
               message={bulkMessage}
-              onDelete={() => setConfirmOpen(true)}
+              onDelete={onBulkDelete ? () => setConfirmOpen(true) : undefined}
               onClear={() => {
                 setBulkMessage("")
                 state.clearSelection()
               }}
-            />
+            >
+              {selection?.renderActions?.(selectionState)}
+            </CollectionSelectionBar>
           ) : undefined
         }
       >
+        {beforeResults && <div className="mb-3 space-y-3">{beforeResults}</div>}
         <CollectionResults
           definition={definition}
           items={items}
           view={state.view}
           selection={
-            onBulkDelete
+            selectionEnabled
               ? {
                   selectedIDs: state.selectedIDs,
-                  failuresByID: state.failuresByID,
-                  disabled: deleting,
-                  isItemDisabled: isItemSelectable
-                    ? (item) => !isItemSelectable(item)
+                  failuresByID: onBulkDelete ? state.failuresByID : undefined,
+                  disabled: deleting || selection?.disabled,
+                  maximumSelected: selection?.maximumSelected,
+                  isItemDisabled: itemSelectable
+                    ? (item) => !itemSelectable(item)
                     : undefined,
                   onSelectionChange: state.setSelection,
                 }

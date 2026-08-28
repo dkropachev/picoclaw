@@ -7,6 +7,10 @@ import {
   repositoryReviewRepositoryViews,
 } from "@/components/repository-reviews/repository-review-repositories-route-state"
 import {
+  normalizeRepositoryReviewRepositoryFindingsSearch,
+  repositoryReviewParentNavigationState,
+} from "@/components/repository-reviews/repository-review-route-state"
+import {
   type CollectionRouteSearch,
   collectionRouteSearchIsCanonical,
   normalizeCollectionRouteSearch,
@@ -93,7 +97,11 @@ function RepositoryReviewRepositoriesRoutePage() {
         void navigate({
           to: "/repository-reviews/repositories/$id/findings",
           params: { id: repository.id },
-          search: { ...search, scope: "all", offset: 0 },
+          search: normalizeRepositoryReviewRepositoryFindingsSearch({}),
+          state: repositoryReviewParentNavigationState(
+            search,
+            repositoryReviewRepositoryDefaultQuery,
+          ),
         })
       }
     />

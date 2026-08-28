@@ -97,6 +97,72 @@ describe("StandardCollectionPage", () => {
       failures: [],
     })
   })
+
+  it("renders nested context, leading content, and feature selection actions without deletion", async () => {
+    const user = userEvent.setup()
+    const onBack = vi.fn()
+    const onOperate = vi.fn()
+
+    render(
+      <StandardCollectionPage
+        definition={definition}
+        search={{ q: definition.defaultQuery }}
+        onSearchChange={vi.fn()}
+        items={[thing]}
+        context={{
+          backLabel: "Parent collection",
+          onBack,
+          identity: "Parent identity",
+          status: "ready",
+        }}
+        beforeResults={<div>Scoped collection notice</div>}
+        selection={{
+          maximumSelected: 1,
+          renderActions: ({ selectedIDs, clearSelection }) => (
+            <button
+              type="button"
+              onClick={() => {
+                onOperate([...selectedIDs])
+                clearSelection()
+              }}
+            >
+              Operate on selection
+            </button>
+          ),
+        }}
+      />,
+    )
+
+    expect(screen.getByText("Parent identity")).toBeVisible()
+    expect(screen.getByText("ready")).toBeVisible()
+    expect(screen.getByText("Scoped collection notice")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Parent collection" }))
+    expect(onBack).toHaveBeenCalledOnce()
+
+    await user.click(itemElement())
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull()
+    await user.click(
+      screen.getByRole("button", { name: "Operate on selection" }),
+    )
+    expect(onOperate).toHaveBeenCalledWith([thing.id])
+    expect(screen.queryByText("1 selected")).toBeNull()
+  })
+
+  it("does not change custom selection while a feature action is pending", async () => {
+    const user = userEvent.setup()
+    render(
+      <StandardCollectionPage
+        definition={definition}
+        search={{ q: definition.defaultQuery }}
+        onSearchChange={vi.fn()}
+        items={[thing]}
+        selection={{ disabled: true, renderActions: () => null }}
+      />,
+    )
+
+    await user.click(itemElement())
+    expect(screen.queryByText("1 selected")).toBeNull()
+  })
 })
 
 function renderPage({

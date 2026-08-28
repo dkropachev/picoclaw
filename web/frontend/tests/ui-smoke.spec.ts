@@ -110,6 +110,7 @@ const smokeRoutes = [
   "/repository-reviews/rra_smoke/findings/rfn_smoke_3/link-issue",
   "/repository-reviews/rra_smoke/issues",
   "/repository-reviews/rra_smoke/issues/rrid_smoke_1",
+  "/repository-reviews/rra_smoke/issues/rrid_smoke_1/edit",
   "/model-evaluations",
   "/logs",
   "/agent/agents",
@@ -491,6 +492,99 @@ const mockCollectionSchemas = {
     ["created", "timestamp"],
     ["updated", "timestamp"],
   ]),
+  reviewRunFindings: collectionSchema(
+    [
+      ["id", "string"],
+      ["repository", "string"],
+      ["title", "string"],
+      ["path", "string"],
+      ["symbol", "string"],
+      ["severity", "enum", ["critical", "high", "medium", "low"]],
+      ["status", "enum", ["open", "dismissed", "posted"]],
+      [
+        "run_status",
+        "enum",
+        [
+          "pending",
+          "processing",
+          "failed",
+          "associated_new",
+          "associated_existing",
+          "needs_review",
+        ],
+      ],
+      [
+        "association",
+        "enum",
+        ["unassociated", "new", "existing", "needs_review"],
+      ],
+      ["contributors", "string"],
+      ["created", "timestamp"],
+      ["updated", "timestamp"],
+    ],
+    [
+      { field: "severity", direction: "DESC" },
+      { field: "updated", direction: "DESC" },
+    ],
+  ),
+  reviewRepositoryFindings: collectionSchema(
+    [
+      ["id", "string"],
+      ["repository", "string"],
+      ["title", "string"],
+      ["path", "string"],
+      ["symbol", "string"],
+      ["severity", "enum", ["critical", "high", "medium", "low"]],
+      ["match", "enum", ["new", "known", "provisional"]],
+      [
+        "lifecycle",
+        "enum",
+        ["open", "resolution_pending", "resolved", "regressed", "dismissed"],
+      ],
+      ["issue", "enum", ["none", "draft", "open", "closed", "unknown"]],
+      [
+        "validation",
+        "enum",
+        [
+          "not_requested",
+          "pending",
+          "running",
+          "confirmed",
+          "not_fixed",
+          "inconclusive",
+          "failed",
+        ],
+      ],
+      ["occurrences", "number"],
+      ["commits", "number"],
+      ["created", "timestamp"],
+      ["updated", "timestamp"],
+    ],
+    [
+      { field: "severity", direction: "DESC" },
+      { field: "updated", direction: "DESC" },
+    ],
+  ),
+  reviewIssues: collectionSchema(
+    [
+      ["id", "string"],
+      ["repository", "string"],
+      ["title", "string"],
+      ["generation", "string"],
+      [
+        "state",
+        "enum",
+        ["generating", "failed", "editing", "publishing", "posted", "unknown"],
+      ],
+      ["origin", "enum", ["ai_generated", "linked", "discovered", "legacy"]],
+      ["canonical", "boolean"],
+      ["publishable", "boolean"],
+      ["findings", "number"],
+      ["created", "timestamp"],
+      ["updated", "timestamp"],
+    ],
+    { field: "updated", direction: "DESC" },
+  ),
   skills: collectionSchema([
     ["name", "string"],
     ["source", "enum", ["workspace", "global", "builtin"]],
@@ -857,7 +951,9 @@ function collectionSchema(
   fields: Array<
     [string, "string" | "enum" | "boolean" | "number" | "timestamp", string[]?]
   >,
-  defaultOrder?: { field: string; direction: "ASC" | "DESC" },
+  defaultOrder?:
+    | { field: string; direction: "ASC" | "DESC" }
+    | Array<{ field: string; direction: "ASC" | "DESC" }>,
 ) {
   return {
     fields: fields.map(([name, type, suggestedValues]) => ({
@@ -875,7 +971,13 @@ function collectionSchema(
         ? { suggested_values: suggestedValues ?? ["draft", "running"] }
         : {}),
     })),
-    ...(defaultOrder ? { default_order: [defaultOrder] } : {}),
+    ...(defaultOrder
+      ? {
+          default_order: Array.isArray(defaultOrder)
+            ? defaultOrder
+            : [defaultOrder],
+        }
+      : {}),
   }
 }
 
@@ -2190,6 +2292,87 @@ const repositoryReviewIssuesFixture: RepositoryReviewIssueDraft[] = [
     updated_at: "2026-08-26T12:04:30Z",
   },
 ]
+
+function repositoryReviewRunFindingSummary(finding: RepositoryReviewFinding) {
+  const runStatus = finding.run_finding_status ?? "pending"
+  const association =
+    runStatus === "associated_new"
+      ? "new"
+      : runStatus === "associated_existing"
+        ? "existing"
+        : runStatus === "needs_review"
+          ? "needs_review"
+          : "unassociated"
+  return {
+    id: finding.id,
+    repository: finding.repository,
+    path: finding.file.path,
+    line: finding.line,
+    severity: finding.severity,
+    title: finding.title,
+    symbol: finding.symbol,
+    status: finding.status,
+    run_finding_status: runStatus,
+    association,
+    repository_finding_id: finding.repository_finding_id,
+    contributors: [
+      ...new Set([
+        ...(finding.observations ?? []).map(
+          (observation) => observation.reviewer || observation.model,
+        ),
+        ...finding.models,
+      ]),
+    ],
+    created_at: finding.created_at,
+    updated_at: finding.updated_at,
+  }
+}
+
+function repositoryFindingCollectionSummary(finding: RepositoryFinding) {
+  const latest = finding.path_symbol_history.at(-1)
+  return {
+    id: finding.id,
+    repository: finding.repository,
+    canonical_title: finding.canonical_title,
+    canonical_severity: finding.canonical_severity,
+    path: latest?.path,
+    symbol: latest?.symbol,
+    match_state: finding.match_state,
+    lifecycle: finding.lifecycle,
+    issue: {
+      url: finding.issue.url,
+      state: finding.issue.state,
+      snapshot_at: finding.issue.snapshot_at,
+      conflict: finding.issue.conflict,
+    },
+    validation_state: finding.validation_state,
+    occurrence_count:
+      finding.occurrence_count ?? finding.review_finding_ids.length,
+    found_commit_count:
+      finding.found_commit_count ?? finding.found_commits.length,
+    created_at: finding.created_at,
+    updated_at: finding.updated_at,
+  }
+}
+
+function repositoryReviewIssueCollectionSummary(
+  issue: RepositoryReviewIssueDraft,
+) {
+  return {
+    id: issue.id,
+    repository: issue.repository,
+    finding_count: issue.finding_ids.length,
+    origin: issue.origin ?? "legacy",
+    generation_id: issue.generation_id,
+    canonical: issue.canonical ?? false,
+    publishable: issue.publishable ?? false,
+    title: issue.title,
+    state: issue.state,
+    version: issue.version,
+    created_at: issue.created_at,
+    updated_at: issue.updated_at,
+  }
+}
 
 interface RepositoryReviewMockState {
   automation: RepositoryReviewAutomation
@@ -6113,31 +6296,45 @@ async function mockRepositoryReviewAutomationRequest(
   }
 
   if (path === `${automationRoot}/findings` && method === "GET") {
-    const offset = Number(url.searchParams.get("offset") ?? 0)
+    const cursor = Number(url.searchParams.get("cursor") ?? 0)
+    const offset = Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0
     const limit = Number(url.searchParams.get("limit") ?? 50)
-    const scope = url.searchParams.get("scope") === "all" ? "all" : "current"
     const findings = state.findings.slice(offset, offset + limit)
-    const repositoryFindings =
-      scope === "all"
-        ? state.repositoryFindings.slice(offset, offset + limit)
-        : []
     return json(route, {
       automation: state.automation,
       repository: state.summary,
-      findings,
-      repository_findings: repositoryFindings,
-      repository_finding_total:
-        scope === "all" ? state.repositoryFindings.length : 0,
-      repository_finding_offset: scope === "all" ? offset : 0,
-      contexts: state.contexts.filter((context) =>
-        findings.some((finding) => finding.context_ids.includes(context.id)),
-      ),
-      scope,
-      offset,
+      findings: findings.map(repositoryReviewRunFindingSummary),
       total: state.findings.length,
-      ...(offset + findings.length < state.findings.length
-        ? { next_offset: offset + findings.length }
-        : {}),
+      next_cursor:
+        offset + findings.length < state.findings.length
+          ? String(offset + findings.length)
+          : "",
+      canonical_query:
+        url.searchParams.get("query") ??
+        "ALL ORDER BY severity DESC, updated DESC",
+      query_schema: mockCollectionSchemas.reviewRunFindings,
+      capabilities,
+    })
+  }
+
+  if (path === `${automationRoot}/repository-findings` && method === "GET") {
+    const cursor = Number(url.searchParams.get("cursor") ?? 0)
+    const offset = Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0
+    const limit = Number(url.searchParams.get("limit") ?? 50)
+    const findings = state.repositoryFindings.slice(offset, offset + limit)
+    return json(route, {
+      automation: state.automation,
+      repository: state.summary,
+      repository_findings: findings.map(repositoryFindingCollectionSummary),
+      total: state.repositoryFindings.length,
+      next_cursor:
+        offset + findings.length < state.repositoryFindings.length
+          ? String(offset + findings.length)
+          : "",
+      canonical_query:
+        url.searchParams.get("query") ??
+        "ALL ORDER BY severity DESC, updated DESC",
+      query_schema: mockCollectionSchemas.reviewRepositoryFindings,
       capabilities,
     })
   }
@@ -6272,19 +6469,28 @@ async function mockRepositoryReviewAutomationRequest(
     const findingID = decodeURIComponent(findingMatch[1]!)
     const finding = findFinding(findingID)
     if (!finding) {
-      const repositoryFinding = findRepositoryFinding(findingID)
-      const detail = repositoryFinding
-        ? repositoryFindingDetail(repositoryFinding)
-        : undefined
-      return detail
-        ? json(route, detail)
-        : json(route, { code: "not_found" }, 404)
+      return json(route, { code: "not_found" }, 404)
     }
     if (method === "PATCH") {
       finding.status = body?.status === "dismissed" ? "dismissed" : "open"
       finding.version += 1
     }
     return json(route, findingDetail(finding))
+  }
+
+  const repositoryFindingMatch = path.match(
+    new RegExp(`^${automationRoot}/repository-findings/([^/]+)$`),
+  )
+  if (repositoryFindingMatch && method === "GET") {
+    const repositoryFinding = findRepositoryFinding(
+      decodeURIComponent(repositoryFindingMatch[1]!),
+    )
+    const detail = repositoryFinding
+      ? repositoryFindingDetail(repositoryFinding)
+      : undefined
+    return detail
+      ? json(route, detail)
+      : json(route, { code: "not_found" }, 404)
   }
 
   if (path === `${automationRoot}/issues/generations` && method === "POST") {
@@ -6416,7 +6622,8 @@ async function mockRepositoryReviewAutomationRequest(
   }
 
   if (path === `${automationRoot}/issues` && method === "GET") {
-    const offset = Number(url.searchParams.get("offset") ?? 0)
+    const cursor = Number(url.searchParams.get("cursor") ?? 0)
+    const offset = Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0
     const limit = Number(url.searchParams.get("limit") ?? 50)
     const generationID = url.searchParams.get("generation_id") ?? undefined
     const filtered = generationID
@@ -6426,12 +6633,15 @@ async function mockRepositoryReviewAutomationRequest(
     return json(route, {
       automation: state.automation,
       repository: state.summary,
-      issues,
-      offset,
+      issues: issues.map(repositoryReviewIssueCollectionSummary),
       total: filtered.length,
-      ...(offset + issues.length < filtered.length
-        ? { next_offset: offset + issues.length }
-        : {}),
+      next_cursor:
+        offset + issues.length < filtered.length
+          ? String(offset + issues.length)
+          : "",
+      canonical_query:
+        url.searchParams.get("query") ?? "ALL ORDER BY updated DESC",
+      query_schema: mockCollectionSchemas.reviewIssues,
       ...(generationID ? { generation_id: generationID } : {}),
       capabilities,
     })
@@ -6552,6 +6762,59 @@ for (const routePath of smokeRoutes) {
   })
 }
 
+for (const collection of [
+  {
+    title: "run findings",
+    route: `/repository-reviews/${repositoryReviewAutomationID}/findings`,
+    defaultQuery: "ALL ORDER BY severity DESC, updated DESC",
+  },
+  {
+    title: "repository findings",
+    route: `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings`,
+    defaultQuery: "ALL ORDER BY severity DESC, updated DESC",
+  },
+  {
+    title: "issue previews",
+    route: `/repository-reviews/${repositoryReviewAutomationID}/issues?generation_id=rig_smoke_existing`,
+    defaultQuery: "ALL ORDER BY updated DESC",
+  },
+] as const) {
+  test(`repository review ${collection.title} use every standard collection view`, async ({
+    page,
+  }) => {
+    const errors = collectPageErrors(page)
+    await gotoMockedRoute(page, collection.route)
+    await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+    await expect(
+      page.locator('[data-slot="collection-results"] [data-item-id]').first(),
+    ).toBeVisible()
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("q"))
+      .toBe(collection.defaultQuery)
+
+    for (const view of ["list", "table", "grid"] as const) {
+      await page
+        .getByRole("button", {
+          name: `${view[0]!.toUpperCase()}${view.slice(1)} view`,
+        })
+        .click()
+      await expect(
+        page.getByRole("button", {
+          name: `${view[0]!.toUpperCase()}${view.slice(1)} view`,
+        }),
+      ).toHaveAttribute("aria-pressed", "true")
+      expect(new URL(page.url()).searchParams.get("view")).toBe(view)
+      await expect(
+        page.locator('[data-slot="collection-results"]'),
+      ).toBeVisible()
+    }
+
+    await expectNoHorizontalOverflow(page)
+    await expectNoSeriousA11yViolations(page)
+    expect(errors).toEqual([])
+  })
+}
+
 test("repository review routing preserves run context through repository finding generation and subset publication", async ({
   page,
 }) => {
@@ -6637,9 +6900,9 @@ test("repository review routing preserves run context through repository finding
   await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
   const restoredRunFindingsURL = new URL(page.url())
   expect(restoredRunFindingsURL.searchParams.get("q")).toBe(
-    "ORDER BY repository ASC",
+    "ALL ORDER BY severity DESC, updated DESC",
   )
-  expect(restoredRunFindingsURL.searchParams.get("scope")).toBe("current")
+  expect(restoredRunFindingsURL.searchParams.get("scope")).toBeNull()
 
   await page.getByRole("button", { name: "View repository findings" }).click()
   await expect(page).toHaveURL(
@@ -6686,7 +6949,7 @@ test("repository review routing preserves run context through repository finding
   )
   const restoredURL = new URL(page.url())
   expect(restoredURL.searchParams.get("q")).toBe("ORDER BY repository ASC")
-  expect(restoredURL.searchParams.get("scope")).toBe("all")
+  expect(restoredURL.searchParams.get("scope")).toBeNull()
 
   const generationRequest = requests.find((request) =>
     request.path.endsWith("/issues/generations"),
@@ -6786,6 +7049,138 @@ test("legacy repository review results redirect to the standard collection", asy
     /\/repository-reviews\?q=status(?:\+|%20)%3D(?:\+|%20)running&view=grid$/,
   )
   await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+})
+
+test("legacy repository finding scope and offset normalize to cursor collections", async ({
+  page,
+}) => {
+  const collectionRequests: URL[] = []
+  page.on("request", (request) => {
+    const url = new URL(request.url())
+    if (
+      url.pathname ===
+        `/api/repository-reviews/automations/${repositoryReviewAutomationID}/findings` ||
+      url.pathname ===
+        `/api/repository-reviews/automations/${repositoryReviewAutomationID}/repository-findings`
+    ) {
+      collectionRequests.push(url)
+    }
+  })
+
+  const legacyQuery = "ALL ORDER BY repository ASC"
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/${repositoryReviewAutomationID}/findings?${new URLSearchParams(
+      {
+        q: legacyQuery,
+        scope: "current",
+        offset: "75",
+        view: "grid",
+      },
+    ).toString()}`,
+  )
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  await expect
+    .poll(() => {
+      const current = new URL(page.url())
+      return {
+        path: current.pathname,
+        q: current.searchParams.get("q"),
+        view: current.searchParams.get("view"),
+        scope: current.searchParams.get("scope"),
+        offset: current.searchParams.get("offset"),
+      }
+    })
+    .toEqual({
+      path: `/repository-reviews/${repositoryReviewAutomationID}/findings`,
+      q: legacyQuery,
+      view: "grid",
+      scope: null,
+      offset: null,
+    })
+  const currentRequest = collectionRequests.findLast((request) =>
+    request.pathname.endsWith("/findings"),
+  )
+  expect(currentRequest?.searchParams.get("query")).toBe(legacyQuery)
+  expect(currentRequest?.searchParams.has("cursor")).toBe(false)
+  expect(currentRequest?.searchParams.has("offset")).toBe(false)
+  expect(currentRequest?.searchParams.has("scope")).toBe(false)
+
+  await page.goto(
+    `/repository-reviews/${repositoryReviewAutomationID}/findings?${new URLSearchParams(
+      {
+        q: legacyQuery,
+        scope: "all",
+        offset: "75",
+        view: "table",
+      },
+    ).toString()}`,
+  )
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  await expect
+    .poll(() => {
+      const current = new URL(page.url())
+      return {
+        path: current.pathname,
+        q: current.searchParams.get("q"),
+        view: current.searchParams.get("view"),
+        scope: current.searchParams.get("scope"),
+        offset: current.searchParams.get("offset"),
+      }
+    })
+    .toEqual({
+      path: `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings`,
+      q: legacyQuery,
+      view: "table",
+      scope: null,
+      offset: null,
+    })
+  const allRequest = collectionRequests.findLast((request) =>
+    request.pathname.endsWith("/repository-findings"),
+  )
+  expect(allRequest?.searchParams.get("query")).toBe(legacyQuery)
+  expect(allRequest?.searchParams.has("cursor")).toBe(false)
+  expect(allRequest?.searchParams.has("offset")).toBe(false)
+  expect(allRequest?.searchParams.has("scope")).toBe(false)
+})
+
+test("issue preview detail opens its dedicated editor and preserves collection state", async ({
+  page,
+}) => {
+  const search = new URLSearchParams({
+    q: "ALL ORDER BY updated DESC",
+    view: "grid",
+    generation_id: "rig_smoke_existing",
+  })
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/${repositoryReviewAutomationID}/issues/${repositoryReviewIssueOneID}?${search.toString()}`,
+  )
+
+  await page.getByRole("button", { name: "Edit", exact: true }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/${repositoryReviewAutomationID}/issues/${repositoryReviewIssueOneID}/edit`,
+    ),
+  )
+  await expect(
+    page.getByRole("heading", { name: "Edit issue preview" }),
+  ).toBeVisible()
+  await expect(page.getByRole("button", { name: "Save preview" })).toBeVisible()
+  expect(new URL(page.url()).searchParams.get("q")).toBe(
+    "ALL ORDER BY updated DESC",
+  )
+  expect(new URL(page.url()).searchParams.get("view")).toBe("grid")
+  expect(new URL(page.url()).searchParams.get("generation_id")).toBe(
+    "rig_smoke_existing",
+  )
+
+  await page.getByRole("button", { name: "Cancel", exact: true }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/${repositoryReviewAutomationID}/issues/${repositoryReviewIssueOneID}(?:\\?|$)`,
+    ),
+  )
 })
 
 test("sidebar navigation survives collection query canonicalization", async ({

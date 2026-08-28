@@ -7,7 +7,7 @@ import {
   IconTrash,
 } from "@tabler/icons-react"
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import ReactMarkdown from "react-markdown"
 import rehypeSanitize from "rehype-sanitize"
 import remarkGfm from "remark-gfm"
@@ -19,7 +19,6 @@ import {
   getRepositoryReviewAutomationIssue,
   publishRepositoryReviewAutomationIssue,
   regenerateRepositoryReviewAutomationIssue,
-  updateRepositoryReviewAutomationIssue,
 } from "@/api/repository-reviews"
 import { CollectionDetailShell } from "@/components/collection"
 import { githubRepositoryPath } from "@/components/repository-reviews/repository-review-actions"
@@ -35,14 +34,13 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Textarea } from "@/components/ui/textarea"
 
 export function RepositoryReviewIssuePage({
   automationID,
   draftID,
   onBack,
   onDeleted,
+  onEdit,
   onOpenFinding,
   onManageLink,
 }: {
@@ -50,13 +48,10 @@ export function RepositoryReviewIssuePage({
   draftID: string
   onBack: () => void
   onDeleted: () => void
+  onEdit: () => void
   onOpenFinding: (findingID: string) => void
   onManageLink: (findingID: string) => void
 }) {
-  const [editing, setEditing] = useState(false)
-  const [title, setTitle] = useState("")
-  const [body, setBody] = useState("")
-  const [labels, setLabels] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
   const query = useQuery({
     queryKey: ["repository-review-issue", automationID, draftID],
@@ -77,30 +72,6 @@ export function RepositoryReviewIssuePage({
   const notFound =
     query.error instanceof RepositoryReviewAPIError &&
     query.error.status === 404
-  useEffect(() => {
-    if (!issue) return
-    setTitle(issue.title)
-    setBody(issue.body)
-    setLabels(issue.labels?.join(", ") ?? "")
-  }, [issue])
-  const save = useMutation({
-    mutationFn: () =>
-      updateRepositoryReviewAutomationIssue(automationID, draftID, {
-        title: title.trim(),
-        body: body.trim(),
-        labels: parseLabels(labels),
-        expected_version: issue?.version ?? 0,
-      }),
-    onSuccess: async () => {
-      setEditing(false)
-      await query.refetch()
-      toast.success("Issue preview saved.")
-    },
-    onError: (error) =>
-      toast.error(
-        error instanceof Error ? error.message : "Preview save failed.",
-      ),
-  })
   const regenerate = useMutation({
     mutationFn: () =>
       regenerateRepositoryReviewAutomationIssue(automationID, draftID, {
@@ -181,13 +152,6 @@ export function RepositoryReviewIssuePage({
     (detail?.capabilities?.can_publish ??
       issue?.publishable ??
       new Set(["editing", "publishing", "unknown"]).has(issue?.state ?? ""))
-  const dirty = Boolean(
-    issue &&
-    (title.trim() !== issue.title ||
-      body.trim() !== issue.body ||
-      parseLabels(labels).join("\u0000") !==
-        (issue.labels ?? []).join("\u0000")),
-  )
   const externalURL = safeHTTPSURL(issue?.external_url)
 
   return (
@@ -223,12 +187,12 @@ export function RepositoryReviewIssuePage({
               >
                 <IconRefresh />
               </Button>
-              {editable && !editing && (
+              {editable && (
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
-                  onClick={() => setEditing(true)}
+                  onClick={onEdit}
                 >
                   <IconEdit /> Edit
                 </Button>
@@ -400,104 +364,36 @@ export function RepositoryReviewIssuePage({
               )}
             </section>
 
-            {editing ? (
-              <section aria-labelledby="edit-preview" className="space-y-4">
-                <h2 id="edit-preview" className="font-semibold">
-                  Edit preview
+            <section aria-labelledby="rendered-preview" className="space-y-4">
+              <div>
+                <h2 id="rendered-preview" className="text-xl font-semibold">
+                  {issue.title || "Untitled preview"}
                 </h2>
-                <label
-                  htmlFor="repository-review-issue-title"
-                  className="grid gap-2 text-sm"
-                >
-                  <span className="font-medium">Title</span>
-                  <Input
-                    id="repository-review-issue-title"
-                    value={title}
-                    onChange={(event) => setTitle(event.target.value)}
-                  />
-                </label>
-                <label
-                  htmlFor="repository-review-issue-body"
-                  className="grid gap-2 text-sm"
-                >
-                  <span className="font-medium">
-                    GitHub-flavored Markdown body
-                  </span>
-                  <Textarea
-                    id="repository-review-issue-body"
-                    className="min-h-80 font-mono text-xs"
-                    value={body}
-                    onChange={(event) => setBody(event.target.value)}
-                  />
-                </label>
-                <label
-                  htmlFor="repository-review-issue-labels"
-                  className="grid gap-2 text-sm"
-                >
-                  <span className="font-medium">Labels · comma separated</span>
-                  <Input
-                    id="repository-review-issue-labels"
-                    value={labels}
-                    onChange={(event) => setLabels(event.target.value)}
-                  />
-                </label>
-                <div className="flex justify-end gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={save.isPending}
-                    onClick={() => {
-                      setEditing(false)
-                      setTitle(issue.title)
-                      setBody(issue.body)
-                      setLabels(issue.labels?.join(", ") ?? "")
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    type="button"
-                    disabled={
-                      save.isPending || !dirty || !title.trim() || !body.trim()
-                    }
-                    onClick={() => save.mutate()}
-                  >
-                    {save.isPending ? "Saving…" : "Save preview"}
-                  </Button>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {issue.labels?.map((label) => (
+                    <Badge key={label} variant="secondary">
+                      {label}
+                    </Badge>
+                  ))}
                 </div>
-              </section>
-            ) : (
-              <section aria-labelledby="rendered-preview" className="space-y-4">
-                <div>
-                  <h2 id="rendered-preview" className="text-xl font-semibold">
-                    {issue.title || "Untitled preview"}
-                  </h2>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {issue.labels?.map((label) => (
-                      <Badge key={label} variant="secondary">
-                        {label}
-                      </Badge>
-                    ))}
-                  </div>
+              </div>
+              {issue.body ? (
+                <div className="prose dark:prose-invert prose-pre:overflow-x-auto border-border max-w-none rounded-lg border p-4 [overflow-wrap:anywhere]">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    rehypePlugins={[rehypeSanitize]}
+                  >
+                    {issue.body}
+                  </ReactMarkdown>
                 </div>
-                {issue.body ? (
-                  <div className="prose dark:prose-invert prose-pre:overflow-x-auto border-border max-w-none rounded-lg border p-4 [overflow-wrap:anywhere]">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      rehypePlugins={[rehypeSanitize]}
-                    >
-                      {issue.body}
-                    </ReactMarkdown>
-                  </div>
-                ) : (
-                  <div className="border-border rounded-lg border border-dashed p-8 text-center text-sm">
-                    {issue.state === "generating"
-                      ? "The AI-written preview is still generating."
-                      : "No generated preview is available."}
-                  </div>
-                )}
-              </section>
-            )}
+              ) : (
+                <div className="border-border rounded-lg border border-dashed p-8 text-center text-sm">
+                  {issue.state === "generating"
+                    ? "The AI-written preview is still generating."
+                    : "No generated preview is available."}
+                </div>
+              )}
+            </section>
 
             <div className="border-border flex flex-wrap items-center justify-end gap-2 border-t pt-4">
               {externalURL && (
@@ -516,7 +412,7 @@ export function RepositoryReviewIssuePage({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={regenerate.isPending || editing}
+                  disabled={regenerate.isPending}
                   onClick={() => regenerate.mutate()}
                 >
                   <IconSparkles />{" "}
@@ -532,7 +428,6 @@ export function RepositoryReviewIssuePage({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={editing}
                   onClick={() => setDeleteOpen(true)}
                 >
                   <IconTrash /> Delete preview
@@ -542,7 +437,7 @@ export function RepositoryReviewIssuePage({
                 <Button
                   type="button"
                   size="sm"
-                  disabled={editing || dirty || publish.isPending}
+                  disabled={publish.isPending}
                   onClick={() => publish.mutate()}
                 >
                   <IconBrandGithub />
@@ -607,17 +502,6 @@ function DetailRow({
       </dd>
     </div>
   )
-}
-
-function parseLabels(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(",")
-        .map((label) => label.trim())
-        .filter(Boolean),
-    ),
-  ]
 }
 
 function profileSnapshotLabel(

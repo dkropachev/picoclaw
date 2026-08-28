@@ -3,11 +3,20 @@ import { createFileRoute } from "@tanstack/react-router"
 import { RepositoryReviewDetailPage } from "@/components/repository-reviews/repository-review-detail-page"
 import {
   collectionSearchFromReviewSearch,
-  normalizeRepositoryReviewRouteSearch,
+  normalizeRepositoryReviewIssuesSearch,
+  normalizeRepositoryReviewRunFindingsSearch,
+  repositoryReviewDefaultQuery,
+  repositoryReviewParentNavigationState,
+  repositoryReviewViews,
 } from "@/components/repository-reviews/repository-review-route-state"
+import { normalizeCollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
 export const Route = createFileRoute("/repository-reviews_/$id")({
-  validateSearch: normalizeRepositoryReviewRouteSearch,
+  validateSearch: (raw: Record<string, unknown>) =>
+    normalizeCollectionRouteSearch(raw, {
+      defaultQuery: repositoryReviewDefaultQuery,
+      supportedViews: repositoryReviewViews,
+    }),
   component: RepositoryReviewDetailRoute,
 })
 
@@ -28,14 +37,22 @@ function RepositoryReviewDetailRoute() {
         void navigate({
           to: "/repository-reviews/$id/findings",
           params: { id },
-          search,
+          search: normalizeRepositoryReviewRunFindingsSearch({}),
+          state: repositoryReviewParentNavigationState(
+            search,
+            repositoryReviewDefaultQuery,
+          ),
         })
       }
       onIssues={() =>
         void navigate({
           to: "/repository-reviews/$id/issues",
           params: { id },
-          search,
+          search: normalizeRepositoryReviewIssuesSearch({}),
+          state: repositoryReviewParentNavigationState(
+            search,
+            repositoryReviewDefaultQuery,
+          ),
         })
       }
     />

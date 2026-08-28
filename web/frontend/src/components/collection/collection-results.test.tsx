@@ -93,6 +93,15 @@ describe("CollectionResults", () => {
     expect(onOpen).toHaveBeenCalledWith(things[2])
   })
 
+  it("does not clear a pending feature selection with Escape", async () => {
+    const user = userEvent.setup()
+    render(<SelectableResults initialSelected={["b"]} disabled />)
+
+    item("b").focus()
+    await user.keyboard("{Escape}")
+    expect(selectedIDs()).toEqual(["b"])
+  })
+
   it("opens on double-click and exposes item actions only by context menu", async () => {
     const user = userEvent.setup()
     const onOpen = vi.fn()
@@ -223,6 +232,7 @@ function SelectableResults({
   failuresByID,
   maximumSelected,
   additive = false,
+  disabled = false,
   isItemDisabled,
   onOpenItem = vi.fn(),
 }: {
@@ -235,6 +245,7 @@ function SelectableResults({
   >
   maximumSelected?: number
   additive?: boolean
+  disabled?: boolean
   isItemDisabled?: (item: Thing) => boolean
   onOpenItem?: (item: Thing) => void
 }) {
@@ -248,6 +259,7 @@ function SelectableResults({
       selection={{
         selectedIDs: selected,
         additive,
+        disabled,
         failuresByID,
         maximumSelected,
         isItemDisabled,

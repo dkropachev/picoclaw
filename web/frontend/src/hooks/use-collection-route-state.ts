@@ -109,16 +109,30 @@ export function useCollectionRouteState({
   const safeDefaultView = supportedViews.includes(defaultView)
     ? defaultView
     : (supportedViews[0] ?? "list")
-  const [preferredView, setPreferredView] = useState<CollectionView>(() =>
-    readCollectionViewPreference(
+  const [preferredViewState, setPreferredViewState] = useState(() => ({
+    key: collectionKey,
+    value: readCollectionViewPreference(
       collectionKey,
       supportedViews,
       safeDefaultView,
     ),
-  )
-  const [recentQueries, setRecentQueries] = useState<string[]>(() =>
-    readRecentCollectionQueries(collectionKey),
-  )
+  }))
+  const preferredView =
+    preferredViewState.key === collectionKey
+      ? preferredViewState.value
+      : readCollectionViewPreference(
+          collectionKey,
+          supportedViews,
+          safeDefaultView,
+        )
+  const [recentQueriesState, setRecentQueriesState] = useState(() => ({
+    key: collectionKey,
+    values: readRecentCollectionQueries(collectionKey),
+  }))
+  const recentQueries =
+    recentQueriesState.key === collectionKey
+      ? recentQueriesState.values
+      : readRecentCollectionQueries(collectionKey)
   const [selectionSnapshot, setSelectionSnapshot] = useState(() => {
     const memory = selectionMemory.get(memoryKey)
     return {
@@ -127,7 +141,7 @@ export function useCollectionRouteState({
       failuresByID: new Map(memory?.failuresByID ?? []),
     }
   })
-  const previousQueryRef = useRef(query)
+  const previousRouteRef = useRef({ collectionKey, query })
   const scrollNodeRef = useRef<HTMLDivElement | null>(null)
   const scrollFrameRef = useRef<number | null>(null)
 
@@ -144,8 +158,32 @@ export function useCollectionRouteState({
     (supportedViews.includes(preferredView) ? preferredView : safeDefaultView)
 
   useEffect(() => {
-    if (previousQueryRef.current === query) return
-    previousQueryRef.current = query
+    const previous = previousRouteRef.current
+    const collectionChanged = previous.collectionKey !== collectionKey
+    const queryChanged = previous.query !== query
+    if (!collectionChanged && !queryChanged) return
+    previousRouteRef.current = { collectionKey, query }
+    if (collectionChanged) {
+      const memory = selectionMemory.get(memoryKey)
+      setSelectionSnapshot({
+        key: memoryKey,
+        selectedIDs: new Set(memory?.selectedIDs ?? []),
+        failuresByID: new Map(memory?.failuresByID ?? []),
+      })
+      setPreferredViewState({
+        key: collectionKey,
+        value: readCollectionViewPreference(
+          collectionKey,
+          supportedViews,
+          safeDefaultView,
+        ),
+      })
+      setRecentQueriesState({
+        key: collectionKey,
+        values: readRecentCollectionQueries(collectionKey),
+      })
+      return
+    }
     clearCollectionSelectionMemory(collectionKey)
     const next = {
       key: memoryKey,
@@ -157,7 +195,7 @@ export function useCollectionRouteState({
       failuresByID: next.failuresByID,
     })
     setSelectionSnapshot(next)
-  }, [collectionKey, memoryKey, query])
+  }, [collectionKey, memoryKey, query, safeDefaultView, supportedViews])
 
   useEffect(
     () => () => {
@@ -235,7 +273,7 @@ export function useCollectionRouteState({
   const setView = useCallback(
     (nextView: CollectionView) => {
       if (!supportedViews.includes(nextView)) return
-      setPreferredView(nextView)
+      setPreferredViewState({ key: collectionKey, value: nextView })
       writeCollectionViewPreference(collectionKey, nextView)
       onSearchChange({ q: query, view: nextView }, true)
     },
@@ -247,13 +285,17 @@ export function useCollectionRouteState({
       const nextQuery =
         truncateCollectionQuery(successfulQuery.trim()) ||
         truncateCollectionQuery(defaultQuery.trim())
-      setRecentQueries((current) => {
+      setRecentQueriesState((current) => {
+        const currentValues =
+          current.key === collectionKey
+            ? current.values
+            : readRecentCollectionQueries(collectionKey)
         const next = [
           nextQuery,
-          ...current.filter((candidate) => candidate !== nextQuery),
+          ...currentValues.filter((candidate) => candidate !== nextQuery),
         ].slice(0, maximumRecentCollectionQueries)
         writeRecentCollectionQueries(collectionKey, next)
-        return next
+        return { key: collectionKey, values: next }
       })
     },
     [collectionKey, defaultQuery, query],
@@ -285,7 +327,7 @@ export function useCollectionRouteState({
   )
 
   const clearHistory = useCallback(() => {
-    setRecentQueries([])
+    setRecentQueriesState({ key: collectionKey, values: [] })
     writeRecentCollectionQueries(collectionKey, [])
   }, [collectionKey])
 

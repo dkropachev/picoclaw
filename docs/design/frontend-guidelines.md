@@ -63,13 +63,13 @@ files. The short version is:
 `web/frontend/ui-rules.config.json` to enforce deterministic rules that are
 cheap enough for every pull request:
 
-| Rule                                                                                                  | Reason                                                                         |
-| ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| No direct `fetch(...)` outside `src/api/**`.                                                          | Keeps auth redirects, credential handling, and error semantics centralized.    |
-| No inline `style=` without nearby `ui-rule-allow dynamic-style`.                                      | Prevents layout drift while allowing measured geometry and dynamic dimensions. |
-| No raw hex colors outside approved rendering exceptions.                                              | Keeps UI color choices tied to tokens and avoids one-off palettes.             |
-| Every `standard` manifest surface registers required routes and reaches the shared `CollectionShell`. | Prevents feature-local collection infrastructure and route regressions.        |
-| Standard list import closures do not import configured legacy cards.                                  | Keeps migrated surfaces on the shared presentation path.                       |
+| Rule                                                                                              | Reason                                                                         |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| No direct `fetch(...)` outside `src/api/**`.                                                      | Keeps auth redirects, credential handling, and error semantics centralized.    |
+| No inline `style=` without nearby `ui-rule-allow dynamic-style`.                                  | Prevents layout drift while allowing measured geometry and dynamic dimensions. |
+| No raw hex colors outside approved rendering exceptions.                                          | Keeps UI color choices tied to tokens and avoids one-off palettes.             |
+| Every `standard` manifest surface registers required routes and reaches `StandardCollectionPage`. | Prevents feature-local collection infrastructure and route regressions.        |
+| Standard list import closures do not import configured legacy cards.                              | Keeps migrated surfaces on the shared presentation path.                       |
 
 `web/frontend/scripts/check-collection-delta.mjs` provides the base/head gate.
 It rejects newly registered legacy collections, prevents a standard surface

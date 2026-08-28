@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor, within } from "@testing-library/react"
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { type ReactElement, useState } from "react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -9,6 +15,9 @@ import type {
   RepositoryReviewAutomation,
   RepositoryReviewFinding,
   RepositoryReviewIssueDraft,
+  RepositoryReviewIssueSummary,
+  RepositoryReviewRepositoryFindingSummary,
+  RepositoryReviewRunFindingSummary,
   RepositoryReviewSummary,
 } from "@/api/repository-reviews"
 import {
@@ -18,29 +27,37 @@ import {
   generateRepositoryReviewIssues,
   getRepositoryReviewAutomation,
   getRepositoryReviewAutomationFinding,
-  getRepositoryReviewAutomationFindings,
   getRepositoryReviewAutomationIssue,
+  getRepositoryReviewAutomationRepositoryFinding,
   getRepositoryReviewCommitOptions,
   linkRepositoryReviewIssue,
+  listRepositoryReviewAutomationFindingsPage,
+  listRepositoryReviewAutomationIssuesPage,
+  listRepositoryReviewAutomationRepositoryFindingsPage,
   publishRepositoryReviewAutomationIssue,
+  publishRepositoryReviewIssues,
   regenerateRepositoryReviewAutomationIssue,
+  reserveRepositoryReviewValidations,
   restartRepositoryReviewAutomation,
   resumeRepositoryReviewAutomation,
   retryRepositoryReviewRunFindingStatuses,
   startRepositoryReviewAutomation,
   unlinkRepositoryReviewIssue,
+  updateRepositoryReviewAutomationIssue,
 } from "@/api/repository-reviews"
 import { type ThreadSummary, createThread } from "@/api/threads"
 import { RepositoryReviewDetailPage } from "@/components/repository-reviews/repository-review-detail-page"
 import { RepositoryReviewFindingPage } from "@/components/repository-reviews/repository-review-finding-page"
 import { RepositoryReviewFindingsPage } from "@/components/repository-reviews/repository-review-findings-page"
+import { RepositoryReviewIssueEditorPage } from "@/components/repository-reviews/repository-review-issue-editor-page"
 import { RepositoryReviewIssuePage } from "@/components/repository-reviews/repository-review-issue-page"
+import { RepositoryReviewIssuesPage } from "@/components/repository-reviews/repository-review-issues-page"
 import { RepositoryReviewLinkIssuePage } from "@/components/repository-reviews/repository-review-link-issue-page"
 import { RepositoryReviewRepositoryFindingsPage } from "@/components/repository-reviews/repository-review-repository-findings-page"
 import { switchChatSessionAndSend } from "@/features/chat/controller"
 import { resetCollectionRouteStateMemoryForTests } from "@/hooks/use-collection-route-state"
 
-import type { RepositoryReviewRouteSearch } from "./repository-review-route-state"
+import type { RepositoryReviewCollectionSearch } from "./repository-review-route-state"
 
 vi.mock("@/api/repository-reviews", () => ({
   RepositoryReviewAPIError: class RepositoryReviewAPIError extends Error {
@@ -54,8 +71,11 @@ vi.mock("@/api/repository-reviews", () => ({
   generateRepositoryReviewIssues: vi.fn(),
   getRepositoryReviewAutomation: vi.fn(),
   getRepositoryReviewAutomationFinding: vi.fn(),
+  getRepositoryReviewAutomationRepositoryFinding: vi.fn(),
   getRepositoryReviewAutomationIssue: vi.fn(),
-  getRepositoryReviewAutomationFindings: vi.fn(),
+  listRepositoryReviewAutomationFindingsPage: vi.fn(),
+  listRepositoryReviewAutomationRepositoryFindingsPage: vi.fn(),
+  listRepositoryReviewAutomationIssuesPage: vi.fn(),
   getRepositoryReviewCommitOptions: vi.fn(),
   startRepositoryReviewAutomation: vi.fn(),
   pauseRepositoryReviewAutomation: vi.fn(),
@@ -66,6 +86,7 @@ vi.mock("@/api/repository-reviews", () => ({
   deleteRepositoryReviewAutomationIssue: vi.fn(),
   regenerateRepositoryReviewAutomationIssue: vi.fn(),
   publishRepositoryReviewAutomationIssue: vi.fn(),
+  publishRepositoryReviewIssues: vi.fn(),
   postRepositoryReviewFinding: vi.fn(),
   reserveRepositoryReviewValidations: vi.fn(),
   resolveRepositoryReviewPossibleDuplicate: vi.fn(),
@@ -252,6 +273,55 @@ const issue: RepositoryReviewIssueDraft = {
   updated_at: "2026-08-26T00:00:00Z",
 }
 
+const findingSummary: RepositoryReviewRunFindingSummary = {
+  id: finding.id,
+  repository: finding.repository,
+  path: finding.file.path,
+  line: finding.line,
+  severity: finding.severity,
+  title: finding.title,
+  symbol: finding.symbol,
+  status: finding.status,
+  run_finding_status: finding.run_finding_status!,
+  association: "existing",
+  repository_finding_id: finding.repository_finding_id,
+  contributors: finding.models,
+  created_at: finding.created_at,
+  updated_at: finding.updated_at,
+}
+
+const repositoryFindingSummary: RepositoryReviewRepositoryFindingSummary = {
+  id: repositoryFinding.id,
+  repository: repositoryFinding.repository,
+  canonical_title: repositoryFinding.canonical_title,
+  canonical_severity: repositoryFinding.canonical_severity,
+  path: finding.file.path,
+  symbol: finding.symbol,
+  match_state: repositoryFinding.match_state,
+  lifecycle: repositoryFinding.lifecycle,
+  issue: repositoryFinding.issue,
+  validation_state: repositoryFinding.validation_state,
+  occurrence_count: 1,
+  found_commit_count: 1,
+  created_at: repositoryFinding.created_at,
+  updated_at: repositoryFinding.updated_at,
+}
+
+const issueSummary: RepositoryReviewIssueSummary = {
+  id: issue.id,
+  repository: issue.repository,
+  finding_count: issue.finding_ids.length,
+  origin: issue.origin!,
+  generation_id: issue.generation_id,
+  canonical: true,
+  publishable: true,
+  title: issue.title,
+  state: issue.state,
+  version: issue.version,
+  created_at: issue.created_at,
+  updated_at: issue.updated_at,
+}
+
 const linkedIssue: RepositoryReviewIssueDraft = {
   ...issue,
   id: "draft_linked",
@@ -278,15 +348,14 @@ describe("routed repository review pages", () => {
     vi.resetAllMocks()
     resetCollectionRouteStateMemoryForTests()
     vi.mocked(getRepositoryReviewAutomation).mockResolvedValue(automation)
-    vi.mocked(getRepositoryReviewAutomationFindings).mockResolvedValue({
+    vi.mocked(listRepositoryReviewAutomationFindingsPage).mockResolvedValue({
       automation,
       repository: repositorySummary,
-      findings: [finding],
-      repository_findings: [repositoryFinding],
-      repository_finding_total: 1,
-      scope: "current",
-      offset: 0,
+      findings: [findingSummary],
       total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY severity DESC, updated DESC",
+      query_schema: { fields: [] },
       capabilities: { can_generate: true, github: true },
     })
     vi.mocked(getRepositoryReviewAutomationFinding).mockResolvedValue({
@@ -311,6 +380,33 @@ describe("routed repository review pages", () => {
       ],
       capabilities: { github: true, can_generate: true, can_link_issue: true },
     })
+    vi.mocked(
+      getRepositoryReviewAutomationRepositoryFinding,
+    ).mockImplementation((...args) =>
+      getRepositoryReviewAutomationFinding(...args),
+    )
+    vi.mocked(
+      listRepositoryReviewAutomationRepositoryFindingsPage,
+    ).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      repository_findings: [repositoryFindingSummary],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY severity DESC, updated DESC",
+      query_schema: { fields: [] },
+      capabilities: { can_generate: true, github: true },
+    })
+    vi.mocked(listRepositoryReviewAutomationIssuesPage).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      issues: [issueSummary],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY updated DESC",
+      query_schema: { fields: [] },
+      capabilities: { github: true, can_publish: true },
+    })
     vi.mocked(getRepositoryReviewAutomationIssue).mockResolvedValue({
       automation,
       repository: repositorySummary,
@@ -328,6 +424,18 @@ describe("routed repository review pages", () => {
       generation_id: "rrig_1",
       issues: [issue],
       results: [{ id: finding.id, draft_id: issue.id, success: true }],
+    })
+    vi.mocked(publishRepositoryReviewIssues).mockResolvedValue({
+      results: [
+        {
+          draft_id: issue.id,
+          success: true,
+          outcome: "posted",
+        },
+      ],
+    })
+    vi.mocked(reserveRepositoryReviewValidations).mockResolvedValue({
+      validation_jobs: [],
     })
     vi.mocked(retryRepositoryReviewRunFindingStatuses).mockResolvedValue({
       automation,
@@ -700,11 +808,7 @@ describe("routed repository review pages", () => {
     renderPage(
       <RepositoryReviewRepositoryFindingsPage
         automationID={automation.id}
-        search={{
-          q: "ORDER BY repository ASC",
-          scope: "all",
-          offset: 0,
-        }}
+        search={{ q: "ORDER BY repository ASC" }}
         onSearchChange={vi.fn()}
         onBack={vi.fn()}
         onOpenFinding={vi.fn()}
@@ -749,17 +853,12 @@ describe("routed repository review pages", () => {
     renderPage(
       <RepositoryReviewFindingsPage
         automationID={automation.id}
-        search={{
-          q: "ORDER BY repository ASC",
-          scope: "current",
-          offset: 0,
-        }}
+        search={{ q: "ORDER BY repository ASC" }}
         onSearchChange={vi.fn()}
         onBack={vi.fn()}
         onOpenFinding={vi.fn()}
         onOpenRepositoryFindings={vi.fn()}
         onOpenRepositoryFinding={vi.fn()}
-        onGenerated={vi.fn()}
         onOpenThread={onOpenThread}
       />,
     )
@@ -812,11 +911,7 @@ describe("routed repository review pages", () => {
     renderPage(
       <RepositoryReviewFindingsPage
         automationID={automation.id}
-        search={{
-          q: "ORDER BY repository ASC",
-          scope: "all",
-          offset: 0,
-        }}
+        search={{ q: "ORDER BY repository ASC" }}
         onSearchChange={vi.fn()}
         onBack={vi.fn()}
         onOpenFinding={vi.fn()}
@@ -827,9 +922,9 @@ describe("routed repository review pages", () => {
     )
 
     await screen.findByText(finding.title)
-    expect(getRepositoryReviewAutomationFindings).toHaveBeenCalledWith(
+    expect(listRepositoryReviewAutomationFindingsPage).toHaveBeenCalledWith(
       automation.id,
-      { scope: "current", offset: 0, limit: 50 },
+      { query: "ORDER BY repository ASC", cursor: undefined, limit: 50 },
       expect.any(AbortSignal),
     )
     expect(
@@ -847,11 +942,7 @@ describe("routed repository review pages", () => {
     renderPage(
       <RepositoryReviewFindingsPage
         automationID={automation.id}
-        search={{
-          q: "ORDER BY repository ASC",
-          scope: "current",
-          offset: 0,
-        }}
+        search={{ q: "ORDER BY repository ASC" }}
         onSearchChange={vi.fn()}
         onBack={vi.fn()}
         onOpenFinding={vi.fn()}
@@ -881,25 +972,26 @@ describe("routed repository review pages", () => {
       run_finding_status: "failed",
       issue_draft_id: undefined,
     }
-    vi.mocked(getRepositoryReviewAutomationFindings).mockResolvedValue({
+    const failedFindingSummary: RepositoryReviewRunFindingSummary = {
+      ...findingSummary,
+      run_finding_status: "failed",
+      association: "unassociated",
+      repository_finding_id: undefined,
+    }
+    vi.mocked(listRepositoryReviewAutomationFindingsPage).mockResolvedValue({
       automation: { ...automation, status: "failed" },
       repository: repositorySummary,
-      findings: [failedFinding],
-      repository_findings: [],
-      repository_finding_total: 0,
-      scope: "current",
-      offset: 0,
+      findings: [failedFindingSummary],
       total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY severity DESC, updated DESC",
+      query_schema: { fields: [] },
     })
     const user = userEvent.setup()
     renderPage(
       <RepositoryReviewFindingsPage
         automationID={automation.id}
-        search={{
-          q: "ORDER BY repository ASC",
-          scope: "current",
-          offset: 0,
-        }}
+        search={{ q: "ORDER BY repository ASC" }}
         onSearchChange={vi.fn()}
         onBack={vi.fn()}
         onOpenFinding={vi.fn()}
@@ -926,16 +1018,16 @@ describe("routed repository review pages", () => {
   })
 
   it("drafts a canonical issue from a selected repository finding", async () => {
-    vi.mocked(getRepositoryReviewAutomationFindings).mockResolvedValue({
+    vi.mocked(
+      listRepositoryReviewAutomationRepositoryFindingsPage,
+    ).mockResolvedValue({
       automation,
       repository: repositorySummary,
-      findings: [finding],
-      repository_findings: [repositoryFinding],
-      repository_finding_total: 1,
-      repository_finding_offset: 0,
-      scope: "all",
-      offset: 0,
+      repository_findings: [repositoryFindingSummary],
       total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY severity DESC, updated DESC",
+      query_schema: { fields: [] },
       capabilities: { can_generate: true, github: true },
     })
     vi.mocked(getRepositoryReviewAutomationFinding).mockResolvedValue({
@@ -952,11 +1044,7 @@ describe("routed repository review pages", () => {
     renderPage(
       <RepositoryReviewRepositoryFindingsPage
         automationID={automation.id}
-        search={{
-          q: "ORDER BY repository ASC",
-          scope: "all",
-          offset: 0,
-        }}
+        search={{ q: "ORDER BY repository ASC" }}
         onSearchChange={vi.fn()}
         onBack={vi.fn()}
         onOpenFinding={vi.fn()}
@@ -980,9 +1068,169 @@ describe("routed repository review pages", () => {
     )
   })
 
+  it("clears a repository-finding selection after queueing validation", async () => {
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewRepositoryFindingsPage
+        automationID={automation.id}
+        search={{ q: "ALL ORDER BY severity DESC, updated DESC" }}
+        onSearchChange={vi.fn()}
+        onBack={vi.fn()}
+        onOpenFinding={vi.fn()}
+        onGenerated={vi.fn()}
+      />,
+    )
+
+    const item = (
+      await screen.findByText(repositoryFinding.canonical_title)
+    ).closest("[data-item-id]")!
+    await user.click(item)
+    expect(screen.getByText("1 selected", { exact: true })).toBeVisible()
+    await user.click(
+      screen.getByRole("button", { name: "Validate resolutions" }),
+    )
+
+    await waitFor(() =>
+      expect(reserveRepositoryReviewValidations).toHaveBeenCalledWith(
+        automation.id,
+        [repositoryFinding.id],
+      ),
+    )
+    await waitFor(() =>
+      expect(
+        screen.queryByText("1 selected", { exact: true }),
+      ).not.toBeInTheDocument(),
+    )
+  })
+
+  it("publishes explicitly selected previews and clears reconciled selection", async () => {
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewIssuesPage
+        automationID={automation.id}
+        search={{ q: "ALL ORDER BY updated DESC" }}
+        onSearchChange={vi.fn()}
+        onBack={vi.fn()}
+        onOpenIssue={vi.fn()}
+      />,
+    )
+
+    const item = (await screen.findByText(issue.title)).closest(
+      "[data-item-id]",
+    )!
+    await user.click(item)
+    await user.click(screen.getByRole("button", { name: "Post selected" }))
+
+    await waitFor(() =>
+      expect(publishRepositoryReviewIssues).toHaveBeenCalledWith(
+        automation.id,
+        {
+          issues: [{ id: issue.id, expected_version: issue.version }],
+          confirmed: true,
+        },
+      ),
+    )
+    expect(await screen.findByText("Posting outcomes")).toBeVisible()
+    expect(screen.getByText(`${issue.id}: posted`)).toBeVisible()
+    expect(
+      screen.queryByText("1 selected", { exact: true }),
+    ).not.toBeInTheDocument()
+  })
+
+  it("saves issue-preview edits through the dedicated version-fenced editor", async () => {
+    const savedIssue = {
+      ...issue,
+      title: "Updated lost-update diagnosis",
+      version: issue.version + 1,
+    }
+    vi.mocked(updateRepositoryReviewAutomationIssue).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      issue: savedIssue,
+      finding,
+      capabilities: { github: true, can_edit: true },
+    })
+    const onSaved = vi.fn()
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewIssueEditorPage
+        automationID={automation.id}
+        draftID={issue.id}
+        onBack={vi.fn()}
+        onSaved={onSaved}
+      />,
+    )
+
+    const title = await screen.findByRole("textbox", { name: "Title" })
+    await user.clear(title)
+    await user.type(title, savedIssue.title)
+    await user.click(screen.getByRole("button", { name: "Save preview" }))
+
+    await waitFor(() =>
+      expect(updateRepositoryReviewAutomationIssue).toHaveBeenCalledWith(
+        automation.id,
+        issue.id,
+        {
+          title: savedIssue.title,
+          body: issue.body,
+          labels: issue.labels,
+          expected_version: issue.version,
+        },
+      ),
+    )
+    expect(onSaved).toHaveBeenCalledWith(savedIssue)
+  })
+
+  it("resets the issue editor when the routed draft identity changes", async () => {
+    const secondIssue = {
+      ...issue,
+      id: "issue_2",
+      title: "Second issue preview",
+      version: issue.version + 1,
+    }
+    vi.mocked(getRepositoryReviewAutomationIssue).mockImplementation(
+      async (_automationID, draftID) => ({
+        automation,
+        repository: repositorySummary,
+        issue: draftID === secondIssue.id ? secondIssue : issue,
+        finding,
+        capabilities: { github: true, can_edit: true },
+      }),
+    )
+
+    function IdentityHarness() {
+      const [draftID, setDraftID] = useState(issue.id)
+      return (
+        <>
+          <button type="button" onClick={() => setDraftID(secondIssue.id)}>
+            Switch draft
+          </button>
+          <RepositoryReviewIssueEditorPage
+            automationID={automation.id}
+            draftID={draftID}
+            onBack={vi.fn()}
+            onSaved={vi.fn()}
+          />
+        </>
+      )
+    }
+
+    const user = userEvent.setup()
+    renderPage(<IdentityHarness />)
+    expect(await screen.findByRole("textbox", { name: "Title" })).toHaveValue(
+      issue.title,
+    )
+    await user.click(screen.getByRole("button", { name: "Switch draft" }))
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue(
+        secondIssue.title,
+      ),
+    )
+  })
+
   it("polls active findings and stops polling after the review becomes terminal", async () => {
     let requestCount = 0
-    vi.mocked(getRepositoryReviewAutomationFindings).mockImplementation(
+    vi.mocked(listRepositoryReviewAutomationFindingsPage).mockImplementation(
       async () => {
         requestCount += 1
         return {
@@ -991,12 +1239,11 @@ describe("routed repository review pages", () => {
             status: requestCount === 1 ? "running" : "completed",
           },
           repository: repositorySummary,
-          findings: [finding],
-          repository_findings: [repositoryFinding],
-          repository_finding_total: 1,
-          scope: "current",
-          offset: 0,
+          findings: [findingSummary],
           total: 1,
+          next_cursor: "",
+          canonical_query: "ALL ORDER BY severity DESC, updated DESC",
+          query_schema: { fields: [] },
           capabilities: { can_generate: true, github: true },
         }
       },
@@ -1004,33 +1251,32 @@ describe("routed repository review pages", () => {
     const view = renderPage(
       <RepositoryReviewFindingsPage
         automationID={automation.id}
-        search={{
-          q: "ORDER BY repository ASC",
-          scope: "current",
-          offset: 0,
-        }}
+        search={{ q: "ORDER BY repository ASC" }}
         onSearchChange={vi.fn()}
         onBack={vi.fn()}
         onOpenFinding={vi.fn()}
         onOpenRepositoryFindings={vi.fn()}
         onOpenRepositoryFinding={vi.fn()}
-        onGenerated={vi.fn()}
         onOpenThread={vi.fn()}
       />,
     )
 
     await waitFor(() =>
-      expect(getRepositoryReviewAutomationFindings).toHaveBeenCalledTimes(1),
+      expect(listRepositoryReviewAutomationFindingsPage).toHaveBeenCalledTimes(
+        1,
+      ),
     )
     await waitFor(
       () =>
-        expect(getRepositoryReviewAutomationFindings).toHaveBeenCalledTimes(2),
+        expect(
+          listRepositoryReviewAutomationFindingsPage,
+        ).toHaveBeenCalledTimes(2),
       { timeout: 3_000 },
     )
     expect(await screen.findByText("completed", { exact: true })).toBeVisible()
 
     await new Promise((resolve) => setTimeout(resolve, 2_200))
-    expect(getRepositoryReviewAutomationFindings).toHaveBeenCalledTimes(2)
+    expect(listRepositoryReviewAutomationFindingsPage).toHaveBeenCalledTimes(2)
     view.unmount()
   }, 8_000)
 
@@ -1042,18 +1288,21 @@ describe("routed repository review pages", () => {
       fingerprint: "fingerprint-2",
       issue_draft_id: undefined,
     }
-    vi.mocked(getRepositoryReviewAutomationFindings).mockImplementation(
+    const secondFindingSummary: RepositoryReviewRunFindingSummary = {
+      ...findingSummary,
+      id: secondFinding.id,
+      title: secondFinding.title,
+    }
+    vi.mocked(listRepositoryReviewAutomationFindingsPage).mockImplementation(
       async (_automationID, input) => {
-        const offset = input?.offset ?? 0
+        const nextPage = input?.cursor === "cursor-2"
         return {
           automation,
-          findings: offset === 50 ? [secondFinding] : [finding],
-          repository_findings: [],
-          repository_finding_total: 0,
-          scope: "current",
-          offset,
+          findings: nextPage ? [secondFindingSummary] : [findingSummary],
           total: 51,
-          ...(offset === 50 ? {} : { next_offset: 50 }),
+          next_cursor: nextPage ? "" : "cursor-2",
+          canonical_query: "ALL ORDER BY severity DESC, updated DESC",
+          query_schema: { fields: [] },
           capabilities: { can_generate: true, github: true },
         }
       },
@@ -1065,11 +1314,11 @@ describe("routed repository review pages", () => {
       "[data-item-id]",
     )!
     await user.click(first)
-    await user.click(screen.getByRole("button", { name: "Next findings" }))
+    await user.click(screen.getByRole("button", { name: "Load more" }))
     const second = (await screen.findByText(secondFinding.title)).closest(
       "[data-item-id]",
     )!
-    await user.click(second)
+    fireEvent.click(second, { ctrlKey: true })
     expect(screen.getByText("2 selected", { exact: true })).toBeVisible()
     expect(
       screen.getByRole("button", { name: "Discuss with AI" }),
@@ -1643,6 +1892,7 @@ describe("routed repository review pages", () => {
         draftID={issue.id}
         onBack={vi.fn()}
         onDeleted={vi.fn()}
+        onEdit={vi.fn()}
         onOpenFinding={vi.fn()}
         onManageLink={vi.fn()}
       />,
@@ -1668,6 +1918,7 @@ describe("routed repository review pages", () => {
         draftID={issue.id}
         onBack={vi.fn()}
         onDeleted={vi.fn()}
+        onEdit={vi.fn()}
         onOpenFinding={onOpenFinding}
         onManageLink={vi.fn()}
       />,
@@ -1706,6 +1957,7 @@ describe("routed repository review pages", () => {
         draftID={linkedIssue.id}
         onBack={vi.fn()}
         onDeleted={vi.fn()}
+        onEdit={vi.fn()}
         onOpenFinding={vi.fn()}
         onManageLink={onManageLink}
       />,
@@ -1735,6 +1987,7 @@ describe("routed repository review pages", () => {
         draftID={issue.id}
         onBack={vi.fn()}
         onDeleted={onDeleted}
+        onEdit={vi.fn()}
         onOpenFinding={vi.fn()}
         onManageLink={vi.fn()}
       />,
@@ -1798,6 +2051,7 @@ describe("routed repository review pages", () => {
         draftID={preservedIssue.id}
         onBack={vi.fn()}
         onDeleted={vi.fn()}
+        onEdit={vi.fn()}
         onOpenFinding={vi.fn()}
         onManageLink={vi.fn()}
       />,
@@ -1859,6 +2113,7 @@ describe("routed repository review pages", () => {
         draftID={legacyIssue.id}
         onBack={vi.fn()}
         onDeleted={vi.fn()}
+        onEdit={vi.fn()}
         onOpenFinding={vi.fn()}
         onManageLink={vi.fn()}
       />,
@@ -1905,6 +2160,7 @@ describe("routed repository review pages", () => {
         draftID={generatingIssue.id}
         onBack={vi.fn()}
         onDeleted={vi.fn()}
+        onEdit={vi.fn()}
         onOpenFinding={vi.fn()}
         onManageLink={vi.fn()}
       />,
@@ -1971,6 +2227,7 @@ function repositoryReviewRouteElement(
       draftID={issue.id}
       onBack={vi.fn()}
       onDeleted={vi.fn()}
+      onEdit={vi.fn()}
       onOpenFinding={vi.fn()}
       onManageLink={vi.fn()}
     />
@@ -1978,10 +2235,8 @@ function repositoryReviewRouteElement(
 }
 
 function FindingsPagingHarness() {
-  const [search, setSearch] = useState<RepositoryReviewRouteSearch>({
+  const [search, setSearch] = useState<RepositoryReviewCollectionSearch>({
     q: "ORDER BY repository ASC",
-    scope: "current",
-    offset: 0,
   })
   return (
     <RepositoryReviewFindingsPage
@@ -1992,7 +2247,6 @@ function FindingsPagingHarness() {
       onOpenFinding={vi.fn()}
       onOpenRepositoryFindings={vi.fn()}
       onOpenRepositoryFinding={vi.fn()}
-      onGenerated={vi.fn()}
       onOpenThread={vi.fn()}
     />
   )

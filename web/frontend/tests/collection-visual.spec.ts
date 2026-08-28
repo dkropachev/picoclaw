@@ -159,22 +159,57 @@ for (const target of [
   })
 }
 
-const repositoryReviewStates = [
+const repositoryReviewCollectionStates = [
+  {
+    key: "repository-review-findings",
+    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/findings`,
+  },
+  {
+    key: "repository-review-repository-findings",
+    route: `/repository-reviews/repositories/${repositoryReviewVisualIDs.automation}/findings`,
+  },
+  {
+    key: "repository-review-issues",
+    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/issues?generation_id=${repositoryReviewVisualIDs.generation}`,
+  },
+] as const
+
+for (const target of repositoryReviewCollectionStates) {
+  for (const view of ["list", "table", "grid"] as const) {
+    for (const theme of ["light", "dark"] as const) {
+      test(`${target.key} ${view} is stable in ${theme} theme`, async ({
+        page,
+      }) => {
+        const errors = collectPageErrors(page)
+        const separator = target.route.includes("?") ? "&" : "?"
+        await openCollection(
+          page,
+          `${target.route}${separator}view=${view}`,
+          theme,
+        )
+        await expect(
+          page.getByRole("button", { name: `${capitalize(view)} view` }),
+        ).toHaveAttribute("aria-pressed", "true")
+        await expect(
+          page.locator('[data-slot="collection-results"]'),
+        ).toBeVisible()
+        await assertVisualContract(page, errors)
+        await expect(page.locator("#main-content")).toHaveScreenshot(
+          `${target.key}-${view}-${theme}.png`,
+        )
+      })
+    }
+  }
+}
+
+const repositoryReviewDetailStates = [
   {
     key: "repository-review-detail",
     route: `/repository-reviews/${repositoryReviewVisualIDs.automation}`,
   },
   {
-    key: "repository-review-findings",
-    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/findings?scope=current`,
-  },
-  {
     key: "repository-review-finding",
     route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/findings/${repositoryReviewVisualIDs.finding}`,
-  },
-  {
-    key: "repository-review-issues",
-    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/issues?generation_id=${repositoryReviewVisualIDs.generation}`,
   },
   {
     key: "repository-review-issue-detail",
@@ -182,7 +217,7 @@ const repositoryReviewStates = [
   },
 ] as const
 
-for (const target of repositoryReviewStates) {
+for (const target of repositoryReviewDetailStates) {
   for (const theme of ["light", "dark"] as const) {
     test(`${target.key} is stable in ${theme} theme`, async ({ page }) => {
       const errors = collectPageErrors(page)

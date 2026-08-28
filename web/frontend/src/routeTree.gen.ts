@@ -113,6 +113,7 @@ import { Route as AgentAgentsIdCapabilitiesRouteImport } from './routes/agent/ag
 import { Route as AgentAgentsIdActivityRouteImport } from './routes/agent/agents_.$id_.activity'
 import { Route as AccountsRoutersIdEditRouteImport } from './routes/accounts_.routers_.$id_.edit'
 import { Route as RepositoryReviewsRepositoriesIdFindingsFindingIdRouteImport } from './routes/repository-reviews_.repositories_.$id_.findings_.$findingId'
+import { Route as RepositoryReviewsIdIssuesDraftIdEditRouteImport } from './routes/repository-reviews_.$id_.issues_.$draftId_.edit'
 import { Route as RepositoryReviewsIdFindingsFindingIdLinkIssueRouteImport } from './routes/repository-reviews_.$id_.findings_.$findingId_.link-issue'
 import { Route as AgentMcpServersNameEditRouteImport } from './routes/agent/mcp_.servers_.$name_.edit'
 import { Route as RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRouteImport } from './routes/repository-reviews_.repositories_.$id_.findings_.$findingId_.link-issue'
@@ -668,6 +669,12 @@ const RepositoryReviewsRepositoriesIdFindingsFindingIdRoute =
     path: '/repository-reviews/repositories/$id/findings/$findingId',
     getParentRoute: () => rootRouteImport,
   } as any)
+const RepositoryReviewsIdIssuesDraftIdEditRoute =
+  RepositoryReviewsIdIssuesDraftIdEditRouteImport.update({
+    id: '/repository-reviews_/$id_/issues_/$draftId_/edit',
+    path: '/repository-reviews/$id/issues/$draftId/edit',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const RepositoryReviewsIdFindingsFindingIdLinkIssueRoute =
   RepositoryReviewsIdFindingsFindingIdLinkIssueRouteImport.update({
     id: '/repository-reviews_/$id_/findings_/$findingId_/link-issue',
@@ -792,6 +799,7 @@ export interface FileRoutesByFullPath {
   '/repository-reviews/repositories/$id/findings': typeof RepositoryReviewsRepositoriesIdFindingsRoute
   '/agent/mcp/servers/$name/edit': typeof AgentMcpServersNameEditRoute
   '/repository-reviews/$id/findings/$findingId/link-issue': typeof RepositoryReviewsIdFindingsFindingIdLinkIssueRoute
+  '/repository-reviews/$id/issues/$draftId/edit': typeof RepositoryReviewsIdIssuesDraftIdEditRoute
   '/repository-reviews/repositories/$id/findings/$findingId': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdRoute
   '/repository-reviews/repositories/$id/findings/$findingId/link-issue': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute
 }
@@ -901,6 +909,7 @@ export interface FileRoutesByTo {
   '/repository-reviews/repositories/$id/findings': typeof RepositoryReviewsRepositoriesIdFindingsRoute
   '/agent/mcp/servers/$name/edit': typeof AgentMcpServersNameEditRoute
   '/repository-reviews/$id/findings/$findingId/link-issue': typeof RepositoryReviewsIdFindingsFindingIdLinkIssueRoute
+  '/repository-reviews/$id/issues/$draftId/edit': typeof RepositoryReviewsIdIssuesDraftIdEditRoute
   '/repository-reviews/repositories/$id/findings/$findingId': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdRoute
   '/repository-reviews/repositories/$id/findings/$findingId/link-issue': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute
 }
@@ -1011,6 +1020,7 @@ export interface FileRoutesById {
   '/repository-reviews_/repositories_/$id_/findings': typeof RepositoryReviewsRepositoriesIdFindingsRoute
   '/agent/mcp_/servers_/$name_/edit': typeof AgentMcpServersNameEditRoute
   '/repository-reviews_/$id_/findings_/$findingId_/link-issue': typeof RepositoryReviewsIdFindingsFindingIdLinkIssueRoute
+  '/repository-reviews_/$id_/issues_/$draftId_/edit': typeof RepositoryReviewsIdIssuesDraftIdEditRoute
   '/repository-reviews_/repositories_/$id_/findings_/$findingId': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdRoute
   '/repository-reviews_/repositories_/$id_/findings_/$findingId_/link-issue': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute
 }
@@ -1122,6 +1132,7 @@ export interface FileRouteTypes {
     | '/repository-reviews/repositories/$id/findings'
     | '/agent/mcp/servers/$name/edit'
     | '/repository-reviews/$id/findings/$findingId/link-issue'
+    | '/repository-reviews/$id/issues/$draftId/edit'
     | '/repository-reviews/repositories/$id/findings/$findingId'
     | '/repository-reviews/repositories/$id/findings/$findingId/link-issue'
   fileRoutesByTo: FileRoutesByTo
@@ -1231,6 +1242,7 @@ export interface FileRouteTypes {
     | '/repository-reviews/repositories/$id/findings'
     | '/agent/mcp/servers/$name/edit'
     | '/repository-reviews/$id/findings/$findingId/link-issue'
+    | '/repository-reviews/$id/issues/$draftId/edit'
     | '/repository-reviews/repositories/$id/findings/$findingId'
     | '/repository-reviews/repositories/$id/findings/$findingId/link-issue'
   id:
@@ -1340,6 +1352,7 @@ export interface FileRouteTypes {
     | '/repository-reviews_/repositories_/$id_/findings'
     | '/agent/mcp_/servers_/$name_/edit'
     | '/repository-reviews_/$id_/findings_/$findingId_/link-issue'
+    | '/repository-reviews_/$id_/issues_/$draftId_/edit'
     | '/repository-reviews_/repositories_/$id_/findings_/$findingId'
     | '/repository-reviews_/repositories_/$id_/findings_/$findingId_/link-issue'
   fileRoutesById: FileRoutesById
@@ -1414,6 +1427,7 @@ export interface RootRouteChildren {
   RepositoryReviewsRepositoriesIdEditRoute: typeof RepositoryReviewsRepositoriesIdEditRoute
   RepositoryReviewsRepositoriesIdFindingsRoute: typeof RepositoryReviewsRepositoriesIdFindingsRoute
   RepositoryReviewsIdFindingsFindingIdLinkIssueRoute: typeof RepositoryReviewsIdFindingsFindingIdLinkIssueRoute
+  RepositoryReviewsIdIssuesDraftIdEditRoute: typeof RepositoryReviewsIdIssuesDraftIdEditRoute
   RepositoryReviewsRepositoriesIdFindingsFindingIdRoute: typeof RepositoryReviewsRepositoriesIdFindingsFindingIdRoute
   RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute: typeof RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute
 }
@@ -2148,6 +2162,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RepositoryReviewsRepositoriesIdFindingsFindingIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/repository-reviews_/$id_/issues_/$draftId_/edit': {
+      id: '/repository-reviews_/$id_/issues_/$draftId_/edit'
+      path: '/repository-reviews/$id/issues/$draftId/edit'
+      fullPath: '/repository-reviews/$id/issues/$draftId/edit'
+      preLoaderRoute: typeof RepositoryReviewsIdIssuesDraftIdEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/repository-reviews_/$id_/findings_/$findingId_/link-issue': {
       id: '/repository-reviews_/$id_/findings_/$findingId_/link-issue'
       path: '/repository-reviews/$id/findings/$findingId/link-issue'
@@ -2371,6 +2392,8 @@ const rootRouteChildren: RootRouteChildren = {
     RepositoryReviewsRepositoriesIdFindingsRoute,
   RepositoryReviewsIdFindingsFindingIdLinkIssueRoute:
     RepositoryReviewsIdFindingsFindingIdLinkIssueRoute,
+  RepositoryReviewsIdIssuesDraftIdEditRoute:
+    RepositoryReviewsIdIssuesDraftIdEditRoute,
   RepositoryReviewsRepositoriesIdFindingsFindingIdRoute:
     RepositoryReviewsRepositoriesIdFindingsFindingIdRoute,
   RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute:

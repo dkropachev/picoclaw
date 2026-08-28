@@ -84,7 +84,8 @@ review is active. Before the first finding checkpoint it displays an empty
 in-progress Findings state rather than hiding the route.
 
 The Findings route contains only run findings attributable to the selected
-automation's recorded run IDs and campaign start. It is paged and polls for new
+automation's recorded run IDs and campaign start. It uses the shared typed query
+and cursor-paging controls, supports List, Table, and Grid, and polls for new
 checkpoints while the review remains active.
 
 The Findings page shows compact finding summaries. Open a finding for its complete
@@ -118,10 +119,13 @@ Discussion creates a separate reviewing thread seeded with the exact
 finding and context provenance. Returning from chat does not generate, link,
 or publish an issue; each of those effects still requires an explicit action.
 
-Collection query/view, finding offset, explicit selection, and in-memory scroll
-are preserved through finding, discussion, repository-finding, and issue routes.
-Browser Back restores that state. The former **Results** sidebar destination is
-gone; old `/repository-reviews/results` links return to the review collection.
+Each run-finding, repository-finding, and issue-preview collection preserves its
+own query, view, explicit selection, loaded cursor pages, and in-memory scroll
+through detail and action routes. Browser Back restores that state without
+overwriting the parent collection's query. Legacy `scope` links still reach the
+correct run or repository collection; legacy offsets normalize to the first
+canonical cursor page. The former **Results** sidebar destination is gone; old
+`/repository-reviews/results` links return to the review collection.
 
 ## Draft Issue Previews
 
@@ -135,6 +139,10 @@ A per-attempt OS lock also prevents two processes from dispatching the same
 reservation. A partial failure keeps successful previews
 and opens the saved Issue previews route filtered or highlighted by that
 generation.
+
+Issue previews use the same List, Table, and Grid collection controls. Open a
+preview for its rendered diagnosis and provenance, or use its dedicated Edit
+route for version-fenced title, body, and label changes before publication.
 
 Every writer call is private, ephemeral, no-history, no-cache, no-tools, and
 structured. A new **Draft issue** or **Post issue** action resolves the currently

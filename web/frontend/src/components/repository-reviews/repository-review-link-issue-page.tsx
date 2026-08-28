@@ -7,7 +7,7 @@ import {
   RepositoryReviewAPIError,
   type RepositoryReviewIssueCandidate,
   findRepositoryReviewIssueCandidates,
-  getRepositoryReviewAutomationFinding,
+  getRepositoryReviewAutomationRepositoryFinding,
   linkRepositoryReviewIssue,
   unlinkRepositoryReviewIssue,
 } from "@/api/repository-reviews"
@@ -50,7 +50,11 @@ export function RepositoryReviewLinkIssuePage({
   const query = useQuery({
     queryKey: ["repository-review-finding", automationID, findingID],
     queryFn: ({ signal }) =>
-      getRepositoryReviewAutomationFinding(automationID, findingID, signal),
+      getRepositoryReviewAutomationRepositoryFinding(
+        automationID,
+        findingID,
+        signal,
+      ),
     retry: false,
   })
   const detail =

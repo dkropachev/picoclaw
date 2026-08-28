@@ -1,15 +1,29 @@
-import { createFileRoute } from "@tanstack/react-router"
+import { createFileRoute, redirect } from "@tanstack/react-router"
 
 import { RepositoryReviewLinkIssuePage } from "@/components/repository-reviews/repository-review-link-issue-page"
-import { normalizeRepositoryReviewRouteSearch } from "@/components/repository-reviews/repository-review-route-state"
+import {
+  normalizeRepositoryReviewIssuesSearch,
+  normalizeRepositoryReviewRepositoryFindingsSearch,
+  repositoryReviewDefaultQuery,
+  repositoryReviewParentNavigationState,
+  repositoryReviewSearchHasLegacyPaging,
+} from "@/components/repository-reviews/repository-review-route-state"
 
 export const Route = createFileRoute(
   "/repository-reviews_/repositories_/$id_/findings_/$findingId_/link-issue",
 )({
-  validateSearch: (raw: Record<string, unknown>) => ({
-    ...normalizeRepositoryReviewRouteSearch(raw),
-    scope: "all" as const,
-  }),
+  validateSearch: normalizeRepositoryReviewRepositoryFindingsSearch,
+  beforeLoad: ({ params, location }) => {
+    const raw = Object.fromEntries(new URLSearchParams(location.searchStr))
+    if (!repositoryReviewSearchHasLegacyPaging(raw)) return
+    throw redirect({
+      to: "/repository-reviews/repositories/$id/findings/$findingId/link-issue",
+      params: { id: params.id, findingId: params.findingId },
+      search: normalizeRepositoryReviewRepositoryFindingsSearch(raw),
+      state: true,
+      replace: true,
+    })
+  },
   component: RepositoryReviewRepositoryLinkIssueRoute,
 })
 
@@ -22,6 +36,7 @@ function RepositoryReviewRepositoryLinkIssueRoute() {
       to: "/repository-reviews/repositories/$id/findings/$findingId",
       params: { id, findingId },
       search,
+      state: true,
     })
   return (
     <RepositoryReviewLinkIssuePage
@@ -32,7 +47,11 @@ function RepositoryReviewRepositoryLinkIssueRoute() {
         void navigate({
           to: "/repository-reviews/$id/issues/$draftId",
           params: { id, draftId: draftID },
-          search,
+          search: normalizeRepositoryReviewIssuesSearch({}),
+          state: repositoryReviewParentNavigationState(
+            {},
+            repositoryReviewDefaultQuery,
+          ),
         })
       }
     />

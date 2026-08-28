@@ -40,6 +40,14 @@ func newAgentCapabilitiesTestHarness(
 	return harness
 }
 
+func TestSafeCapabilityIdentifierRejectsEmptyAndPathSeparators(t *testing.T) {
+	for _, value := range []string{"", "nested/tool", `nested\tool`} {
+		if safeCapabilityIdentifier(value) {
+			t.Fatalf("unsafe capability identifier %q was accepted", value)
+		}
+	}
+}
+
 func decodeAgentCapabilitiesResponse(
 	t *testing.T,
 	recorder *httptest.ResponseRecorder,

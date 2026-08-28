@@ -167,6 +167,102 @@ const querySchemas = {
     field("findings", "number"),
     field("updated", "timestamp"),
   ]),
+  reviewRunFindings: schema(
+    [
+      field("id", "string"),
+      field("repository", "string"),
+      field("title", "string"),
+      field("path", "string"),
+      field("symbol", "string"),
+      field("severity", "enum", ["critical", "high", "medium", "low"]),
+      field("status", "enum", ["open", "dismissed", "posted"]),
+      field("run_status", "enum", [
+        "pending",
+        "processing",
+        "failed",
+        "associated_new",
+        "associated_existing",
+        "needs_review",
+      ]),
+      field("association", "enum", [
+        "unassociated",
+        "new",
+        "existing",
+        "needs_review",
+      ]),
+      field("contributors", "string"),
+      field("created", "timestamp"),
+      field("updated", "timestamp"),
+    ],
+    [
+      { field: "severity", direction: "DESC" },
+      { field: "updated", direction: "DESC" },
+    ],
+  ),
+  reviewRepositoryFindings: schema(
+    [
+      field("id", "string"),
+      field("repository", "string"),
+      field("title", "string"),
+      field("path", "string"),
+      field("symbol", "string"),
+      field("severity", "enum", ["critical", "high", "medium", "low"]),
+      field("match", "enum", ["new", "known", "provisional"]),
+      field("lifecycle", "enum", [
+        "open",
+        "resolution_pending",
+        "resolved",
+        "regressed",
+        "dismissed",
+      ]),
+      field("issue", "enum", ["none", "draft", "open", "closed", "unknown"]),
+      field("validation", "enum", [
+        "not_requested",
+        "pending",
+        "running",
+        "confirmed",
+        "not_fixed",
+        "inconclusive",
+        "failed",
+      ]),
+      field("occurrences", "number"),
+      field("commits", "number"),
+      field("created", "timestamp"),
+      field("updated", "timestamp"),
+    ],
+    [
+      { field: "severity", direction: "DESC" },
+      { field: "updated", direction: "DESC" },
+    ],
+  ),
+  reviewIssues: schema(
+    [
+      field("id", "string"),
+      field("repository", "string"),
+      field("title", "string"),
+      field("generation", "string"),
+      field("state", "enum", [
+        "generating",
+        "failed",
+        "editing",
+        "publishing",
+        "posted",
+        "unknown",
+      ]),
+      field("origin", "enum", [
+        "ai_generated",
+        "linked",
+        "discovered",
+        "legacy",
+      ]),
+      field("canonical", "boolean", ["true", "false"]),
+      field("publishable", "boolean", ["true", "false"]),
+      field("findings", "number"),
+      field("created", "timestamp"),
+      field("updated", "timestamp"),
+    ],
+    { field: "updated", direction: "DESC" },
+  ),
   reviewProfiles: schema([
     field("id", "string"),
     field("name", "string"),
@@ -1219,6 +1315,7 @@ const repositoryReviewFindings = [
     issue_draft_id: repositoryReviewVisualIDs.issue,
     repository_finding_id: repositoryReviewVisualIDs.repositoryFinding,
     repository_match_state: "known",
+    run_finding_status: "associated_existing",
     version: 3,
     created_at: "2026-08-25T14:05:00Z",
     updated_at: "2026-08-25T14:10:00Z",
@@ -1253,6 +1350,7 @@ const repositoryReviewFindings = [
     issue_draft_id: repositoryReviewVisualIDs.failedIssue,
     repository_finding_id: "rrf_visual_2",
     repository_match_state: "known",
+    run_finding_status: "associated_existing",
     version: 2,
     created_at: "2026-08-25T14:12:00Z",
     updated_at: "2026-08-25T14:15:00Z",
@@ -1378,6 +1476,63 @@ const repositoryReviewIssues = [
     updated_at: "2026-08-25T14:15:00Z",
   },
 ]
+
+const repositoryReviewRunFindingSummaries = repositoryReviewFindings.map(
+  (finding) => ({
+    id: finding.id,
+    repository: finding.repository,
+    path: finding.file.path,
+    line: finding.line,
+    severity: finding.severity,
+    title: finding.title,
+    symbol: finding.symbol,
+    status: finding.status,
+    run_finding_status: finding.run_finding_status,
+    association: "existing",
+    repository_finding_id: finding.repository_finding_id,
+    contributors: finding.models,
+    created_at: finding.created_at,
+    updated_at: finding.updated_at,
+  }),
+)
+
+const repositoryFindingSummaries = repositoryFindings.map((finding) => {
+  const latest = finding.path_symbol_history.at(-1)
+  return {
+    id: finding.id,
+    repository: finding.repository,
+    canonical_title: finding.canonical_title,
+    canonical_severity: finding.canonical_severity,
+    path: latest?.path,
+    symbol: latest?.symbol,
+    match_state: finding.match_state,
+    lifecycle: finding.lifecycle,
+    issue: {
+      state: finding.issue.state,
+      snapshot_at: finding.issue.snapshot_at,
+    },
+    validation_state: finding.validation_state,
+    occurrence_count: finding.review_finding_ids.length,
+    found_commit_count: finding.found_commits.length,
+    created_at: finding.created_at,
+    updated_at: finding.updated_at,
+  }
+})
+
+const repositoryReviewIssueSummaries = repositoryReviewIssues.map((issue) => ({
+  id: issue.id,
+  repository: issue.repository,
+  finding_count: issue.finding_ids.length,
+  origin: issue.origin,
+  generation_id: issue.generation_id,
+  canonical: issue.canonical,
+  publishable: issue.publishable,
+  title: issue.title,
+  state: issue.state,
+  version: issue.version,
+  created_at: issue.created_at,
+  updated_at: issue.updated_at,
+}))
 
 const repositoryReviewCapabilities = {
   github: true,
@@ -1705,35 +1860,92 @@ export async function installCollectionVisualMocks(
         return json(route, repositoryReviewAutomation)
       }
       if (path === `${reviewRoot}/findings`) {
-        const scope =
-          url.searchParams.get("scope") === "all" ? "all" : "current"
         return json(route, {
           automation: repositoryReviewAutomation,
           repository: repositoryReviewSummary,
-          findings: repositoryReviewFindings,
-          repository_findings: repositoryFindings,
-          repository_finding_total: repositoryFindings.length,
-          contexts: repositoryReviewContexts,
-          scope,
-          offset: 0,
-          total: repositoryReviewFindings.length,
+          findings:
+            state === "empty" ? [] : repositoryReviewRunFindingSummaries,
+          total:
+            state === "empty" ? 0 : repositoryReviewRunFindingSummaries.length,
+          next_cursor: "",
+          canonical_query:
+            url.searchParams.get("query") ??
+            "ALL ORDER BY severity DESC, updated DESC",
+          query_schema: querySchemas.reviewRunFindings,
+          capabilities: repositoryReviewCapabilities,
+        })
+      }
+      if (path === `${reviewRoot}/repository-findings`) {
+        return json(route, {
+          automation: repositoryReviewAutomation,
+          repository: repositoryReviewSummary,
+          repository_findings:
+            state === "empty" ? [] : repositoryFindingSummaries,
+          total: state === "empty" ? 0 : repositoryFindingSummaries.length,
+          next_cursor: "",
+          canonical_query:
+            url.searchParams.get("query") ??
+            "ALL ORDER BY severity DESC, updated DESC",
+          query_schema: querySchemas.reviewRepositoryFindings,
           capabilities: repositoryReviewCapabilities,
         })
       }
       if (path === `${reviewRoot}/issues`) {
         const generationID = url.searchParams.get("generation_id")
         const issues = generationID
-          ? repositoryReviewIssues.filter(
+          ? repositoryReviewIssueSummaries.filter(
               (issue) => issue.generation_id === generationID,
             )
-          : repositoryReviewIssues
+          : repositoryReviewIssueSummaries
         return json(route, {
           automation: repositoryReviewAutomation,
           repository: repositoryReviewSummary,
-          issues,
-          offset: 0,
-          total: issues.length,
+          issues: state === "empty" ? [] : issues,
+          total: state === "empty" ? 0 : issues.length,
+          next_cursor: "",
+          canonical_query:
+            url.searchParams.get("query") ?? "ALL ORDER BY updated DESC",
+          query_schema: querySchemas.reviewIssues,
           ...(generationID ? { generation_id: generationID } : {}),
+          capabilities: repositoryReviewCapabilities,
+        })
+      }
+      const repositoryFindingPrefix = `${reviewRoot}/repository-findings/`
+      if (path.startsWith(repositoryFindingPrefix)) {
+        const findingID = decodeURIComponent(
+          path.slice(repositoryFindingPrefix.length),
+        )
+        const repositoryFinding = repositoryFindings.find(
+          (candidate) => candidate.id === findingID,
+        )
+        if (!repositoryFinding) {
+          return json(
+            route,
+            { code: "not_found", message: "Repository finding not found" },
+            404,
+          )
+        }
+        const occurrences = repositoryReviewFindings.filter((finding) =>
+          repositoryFinding.review_finding_ids.includes(finding.id),
+        )
+        const finding = occurrences.at(-1)!
+        return json(route, {
+          automation: repositoryReviewAutomation,
+          repository: repositoryReviewSummary,
+          finding,
+          action_finding: finding,
+          repository_finding: repositoryFinding,
+          occurrences,
+          contexts: repositoryReviewContexts.filter((context) =>
+            occurrences.some((occurrence) =>
+              occurrence.context_ids.includes(context.id),
+            ),
+          ),
+          issue: repositoryReviewIssues.find((issue) =>
+            occurrences.some((occurrence) =>
+              issue.finding_ids.includes(occurrence.id),
+            ),
+          ),
           capabilities: repositoryReviewCapabilities,
         })
       }
@@ -1983,11 +2195,19 @@ function field(
 
 function schema(
   fields: ReturnType<typeof field>[],
-  defaultOrder?: { field: string; direction: "ASC" | "DESC" },
+  defaultOrder?:
+    | { field: string; direction: "ASC" | "DESC" }
+    | Array<{ field: string; direction: "ASC" | "DESC" }>,
 ) {
   return {
     fields,
-    ...(defaultOrder ? { default_order: [defaultOrder] } : {}),
+    ...(defaultOrder
+      ? {
+          default_order: Array.isArray(defaultOrder)
+            ? defaultOrder
+            : [defaultOrder],
+        }
+      : {}),
   }
 }
 
@@ -2075,6 +2295,13 @@ function modelOptions() {
 }
 
 function isCollectionList(path: string) {
+  if (
+    /^\/api\/repository-reviews\/automations\/[^/]+\/(findings|repository-findings|issues)$/u.test(
+      path,
+    )
+  ) {
+    return true
+  }
   return [
     "/api/model-aliases",
     "/api/accounts",

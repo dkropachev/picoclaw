@@ -317,14 +317,11 @@
       "owningSpec": "docs/features/repository-reviews.md",
       "implementationGlobs": [
         "src/routes/repository-reviews.tsx",
-        "src/routes/repository-reviews_.$id*.tsx",
+        "src/routes/repository-reviews_.$id.tsx",
+        "src/routes/repository-reviews_.$id_.report.tsx",
         "src/routes/repository-reviews_.results.tsx",
         "src/components/repository-reviews/repository-review-runs-page.tsx",
-        "src/components/repository-reviews/repository-review-detail-page.tsx",
-        "src/components/repository-reviews/repository-review-findings-page.tsx",
-        "src/components/repository-reviews/repository-review-finding-page.tsx",
-        "src/components/repository-reviews/repository-review-issues-page.tsx",
-        "src/components/repository-reviews/repository-review-issue-page.tsx"
+        "src/components/repository-reviews/repository-review-detail-page.tsx"
       ],
       "capabilities": ["query", "pagination", "detail", "related"],
       "views": ["list", "table", "grid"],
@@ -336,8 +333,51 @@
           "/repository-reviews/:id/findings",
           "/repository-reviews/:id/findings/:findingId",
           "/repository-reviews/:id/issues",
-          "/repository-reviews/:id/issues/:draftId"
+          "/repository-reviews/:id/issues/:draftId",
+          "/repository-reviews/:id/issues/:draftId/edit"
         ]
+      }
+    },
+    {
+      "key": "repository-review-run-findings",
+      "route": "/repository-reviews/:id/findings",
+      "owningSpec": "docs/features/repository-reviews.md",
+      "implementationGlobs": [
+        "src/routes/repository-reviews_.$id_.findings.tsx",
+        "src/routes/repository-reviews_.$id_.findings_.$findingId.tsx",
+        "src/routes/repository-reviews_.$id_.findings_.$findingId_.link-issue.tsx",
+        "src/components/repository-reviews/repository-review-findings-page.tsx",
+        "src/components/repository-reviews/repository-review-finding-page.tsx",
+        "src/components/repository-reviews/repository-review-route-state.ts",
+        "src/components/repository-reviews/repository-review-run-finding-status.ts"
+      ],
+      "capabilities": ["query", "pagination", "selection", "detail", "related"],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/repository-reviews/:id/findings",
+        "detail": "/repository-reviews/:id/findings/:findingId",
+        "related": ["/repository-reviews/repositories/:id/findings/:findingId"]
+      }
+    },
+    {
+      "key": "repository-review-issue-previews",
+      "route": "/repository-reviews/:id/issues",
+      "owningSpec": "docs/features/repository-reviews.md",
+      "implementationGlobs": [
+        "src/routes/repository-reviews_.$id_.issues*.tsx",
+        "src/components/repository-reviews/repository-review-issues-page.tsx",
+        "src/components/repository-reviews/repository-review-issue-page.tsx",
+        "src/components/repository-reviews/repository-review-issue-editor-page.tsx",
+        "src/components/repository-reviews/repository-review-route-state.ts"
+      ],
+      "capabilities": ["query", "pagination", "selection", "detail", "edit"],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/repository-reviews/:id/issues",
+        "detail": "/repository-reviews/:id/issues/:draftId",
+        "edit": "/repository-reviews/:id/issues/:draftId/edit"
       }
     },
     {
@@ -382,12 +422,12 @@
         "src/routes/repository-reviews_.repositories_.$id_.findings*.tsx",
         "src/components/repository-reviews/repository-review-repository-findings-page.tsx",
         "src/components/repository-reviews/repository-review-finding-page.tsx",
-        "src/components/repository-reviews/repository-review-link-issue-page.tsx"
+        "src/components/repository-reviews/repository-review-link-issue-page.tsx",
+        "src/components/repository-reviews/repository-review-route-state.ts"
       ],
-      "capabilities": ["pagination", "selection", "detail", "related"],
-      "views": ["list"],
-      "status": "exempt",
-      "exemptionReason": "The canonical ledger is a repository-scoped related collection whose backend contract exposes one fixed paged list view.",
+      "capabilities": ["query", "pagination", "selection", "detail", "related"],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
       "routes": {
         "list": "/repository-reviews/repositories/:id/findings",
         "detail": "/repository-reviews/repositories/:id/findings/:findingId",

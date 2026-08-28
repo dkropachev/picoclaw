@@ -522,7 +522,7 @@ function useCollectionInteractions<T>({
                 selectAllLoaded()
                 return
               }
-              if (event.key === "Escape" && selection) {
+              if (event.key === "Escape" && selection && !selection.disabled) {
                 event.preventDefault()
                 selection.onSelectionChange(new Set())
               }
