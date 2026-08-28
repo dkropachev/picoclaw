@@ -6958,7 +6958,7 @@ test("notification inbox opens the exact development action target", async ({
   await page.getByRole("button", { name: "Open required action" }).click()
   await expect(page).toHaveURL(
     new RegExp(
-      `/development/${developmentWorkspaceID}\\?tab=overview&panel=publication&entity=gate-1$`,
+      `/development/${developmentWorkspaceID}\\?tab=overview&panel=publication&entity=gate-1&q=ORDER\\+BY\\+updated\\+DESC$`,
     ),
   )
   await expectNoHorizontalOverflow(page)
