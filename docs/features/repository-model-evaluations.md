@@ -45,6 +45,11 @@ explicitly AI-judged comparison report that survives process restarts.
 - Trust boundary: repository paths/content and every model output are untrusted
   data. AI may rank or narrow safe candidates but may never invent a path,
   widen structured scope, alter a blob identity, or select beyond a quota.
+- Shared native boundary: model-probe `select` and `subset` operations remain
+  strict and reject every unknown candidate ID. Only the repository review's
+  separate initial `filter` operation may discard a well-formed unknown planner
+  ID, record bounded counts, and fall back to its trusted prefixes and hard
+  scope; frozen review replay is strict again.
 
 ## Requirements
 

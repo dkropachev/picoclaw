@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -818,6 +819,16 @@ func TestNativeRepositoryEvaluationSelectionRejectsUntrustedInputs(t *testing.T)
 		{
 			name: "unknown AI ID",
 			args: map[string]any{
+				"candidates": candidateMaps,
+				"aiSelection": map[string]any{
+					"candidateIds": []string{"cand_" + strings.Repeat("0", 64)},
+				},
+			},
+			want: reposcope.ErrUnknownCandidate,
+		},
+		{
+			name: "malformed AI ID",
+			args: map[string]any{
 				"candidates":  candidateMaps,
 				"aiSelection": map[string]any{"candidateIds": []string{"pkg/service.go"}},
 			},
@@ -1043,6 +1054,12 @@ func TestNativeRepositoryEvaluationSubsetUsesOnlyValidatedOpaqueIDs(t *testing.T
 		},
 		{
 			name: "unknown requested ID", args: map[string]any{
+				"candidates":    candidateMaps,
+				"candidate_ids": []string{"cand_" + strings.Repeat("0", 64)},
+			}, want: reposcope.ErrUnknownCandidate,
+		},
+		{
+			name: "malformed requested ID", args: map[string]any{
 				"candidates": candidateMaps, "candidate_ids": []string{"cand_unknown"},
 			}, want: reposcope.ErrUnknownCandidate,
 		},
@@ -1568,6 +1585,174 @@ func TestNativeRepositoryEvaluationAICandidatePoolIsBoundedDiverseAndStable(t *t
 	}
 }
 
+func TestNativeRepositoryEvaluationFilterRecoversInitialPlannerUnknownCandidates(t *testing.T) {
+	fixture := newRepositoryEvaluationFixture(t)
+	args := fixture.catalogArgs()
+	args["full_output"] = true
+	catalog, err := nativeRepositoryEvaluationCatalog(context.Background(), args, fixture.exec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates := repositoryEvaluationCandidates(t, catalog["candidates"])
+	service := repositoryEvaluationCandidateByPath(t, candidates, "pkg/service.go")
+	python := repositoryEvaluationCandidateByPath(t, candidates, "scripts/tool.py")
+	router := repositoryEvaluationCandidateByPath(t, candidates, "hotpath/router.go")
+	unknownExact := "cand_" + strings.Repeat("0", 64)
+	unknownHotpath := "cand_" + strings.Repeat("f", 64)
+	for _, candidate := range candidates {
+		if candidate.ID == unknownExact || candidate.ID == unknownHotpath {
+			t.Fatalf("test unknown candidate ID collided with %q", candidate.Path)
+		}
+	}
+
+	plannerWarnings := make([]any, repositoryEvaluationScopeWarnings)
+	for index := range plannerWarnings {
+		plannerWarnings[index] = fmt.Sprintf("planner-warning-%02d", index)
+	}
+	mixed, err := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{},
+		"commit": fixture.commit,
+		"planner": map[string]any{
+			"includePrefixes": []any{}, "excludePrefixes": []any{},
+			"candidateIds":        []any{python.ID, unknownExact, service.ID},
+			"hotpathCandidateIds": []any{}, "rationale": "Keep exact requested files.",
+			"warnings": plannerWarnings,
+		},
+	})
+	if err != nil {
+		t.Fatalf("mixed known and unknown planner IDs failed: %v", err)
+	}
+	mixedSelection := mixed["scopeSelection"].(map[string]any)
+	wantKnownIDs := []string{service.ID, python.ID}
+	sort.Strings(wantKnownIDs)
+	if !reflect.DeepEqual(mixedSelection["candidate_ids"], wantKnownIDs) ||
+		!reflect.DeepEqual(mixed["selectedPaths"], []string{"pkg/service.go", "scripts/tool.py"}) {
+		t.Fatalf("sanitized mixed scope selection=%#v paths=%#v", mixedSelection, mixed["selectedPaths"])
+	}
+	mixedPlan := mixed["scopePlan"].(map[string]any)
+	warnings := mixedPlan["warnings"].([]string)
+	if len(warnings) != repositoryEvaluationScopeWarnings ||
+		warnings[repositoryEvaluationScopeWarnings-2] != "planner-warning-30" ||
+		!strings.Contains(warnings[repositoryEvaluationScopeWarnings-1], "1 unknown exact candidate IDs") ||
+		!strings.Contains(warnings[repositoryEvaluationScopeWarnings-1], "0 unknown hotpath candidate IDs") ||
+		strings.Contains(strings.Join(warnings, "\n"), unknownExact) {
+		t.Fatalf("bounded native recovery warnings=%#v", warnings)
+	}
+
+	replayed, err := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{},
+		"commit": fixture.commit, "scope_planned": true,
+		"frozen_selection": mixedSelection, "frozen_plan": mixedPlan,
+	})
+	if err != nil || !reflect.DeepEqual(replayed["scopeSelection"], mixedSelection) ||
+		!reflect.DeepEqual(replayed["scopePlan"], mixedPlan) ||
+		!reflect.DeepEqual(replayed["selectedPaths"], mixed["selectedPaths"]) {
+		t.Fatalf("sanitized frozen replay=%#v err=%v, want initial=%#v", replayed, err, mixed)
+	}
+	tamperedPlan := cloneMap(mixedPlan)
+	tamperedWarnings := append([]string(nil), warnings...)
+	tamperedWarnings[len(tamperedWarnings)-1] = strings.Replace(
+		tamperedWarnings[len(tamperedWarnings)-1], "1 unknown exact", "2 unknown exact", 1,
+	)
+	tamperedPlan["warnings"] = tamperedWarnings
+	if _, tamperErr := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{},
+		"commit": fixture.commit, "scope_planned": true,
+		"frozen_selection": mixedSelection, "frozen_plan": tamperedPlan,
+	}); tamperErr == nil || !strings.Contains(tamperErr.Error(), "does not match") {
+		t.Fatalf("tampered native recovery warning error=%v", tamperErr)
+	}
+
+	legacyInitial, err := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{},
+		"commit": fixture.commit,
+		"planner": map[string]any{
+			"includePrefixes": []any{}, "excludePrefixes": []any{},
+			"candidateIds": []any{service.ID}, "hotpathCandidateIds": []any{},
+			"rationale": "Legacy exact selection.", "warnings": []any{"legacy warning"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySelection := legacyInitial["scopeSelection"].(map[string]any)
+	legacyPlan := cloneMap(legacyInitial["scopePlan"].(map[string]any))
+	legacyPlan["hash"] = nativeRepositoryEvaluationPlanHash(
+		[]string{service.ID}, []string{}, []string{}, []string{},
+		legacyInitial["acceptedCandidateIds"].([]string),
+		legacyInitial["selectedPaths"].([]string),
+		"Legacy exact selection.",
+	)
+	if _, legacyErr := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{},
+		"commit": fixture.commit, "scope_planned": true,
+		"frozen_selection": legacySelection, "frozen_plan": legacyPlan,
+	}); legacyErr != nil {
+		t.Fatalf("legacy warning-unbound frozen plan was not accepted: %v", legacyErr)
+	}
+
+	unknownOnly, err := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"],
+		"hard_scope": map[string]any{"codeTypes": []any{"code"}},
+		"commit":     fixture.commit,
+		"planner": map[string]any{
+			"includePrefixes": []any{"pkg"}, "excludePrefixes": []any{},
+			"candidateIds": []any{unknownExact}, "hotpathCandidateIds": []any{},
+			"rationale": "Use the trusted package prefix.", "warnings": []any{},
+		},
+	})
+	if err != nil || !reflect.DeepEqual(unknownOnly["selectedPaths"], []string{"pkg/service.go"}) {
+		t.Fatalf("unknown-only trusted prefix fallback=%#v err=%v", unknownOnly, err)
+	}
+	unknownOnlySelection := unknownOnly["scopeSelection"].(map[string]any)
+	if ids := unknownOnlySelection["candidate_ids"].([]string); len(ids) != 0 {
+		t.Fatalf("unknown-only selection retained IDs=%#v", ids)
+	}
+
+	hotpathFallback, err := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"],
+		"hard_scope": map[string]any{"codeTypes": []any{"hotpath-code"}},
+		"commit":     fixture.commit,
+		"planner": map[string]any{
+			"includePrefixes": []any{}, "excludePrefixes": []any{},
+			"candidateIds": []any{}, "hotpathCandidateIds": []any{unknownHotpath},
+			"rationale": "Use native hotpath classification.", "warnings": []any{},
+		},
+	})
+	if err != nil || !reflect.DeepEqual(hotpathFallback["selectedPaths"], []string{router.Path}) {
+		t.Fatalf("unknown hotpath trusted hard-scope fallback=%#v err=%v", hotpathFallback, err)
+	}
+	hotpathPlan := hotpathFallback["scopePlan"].(map[string]any)
+	hotpathWarnings := hotpathPlan["warnings"].([]string)
+	if len(hotpathWarnings) != 1 ||
+		!strings.Contains(hotpathWarnings[0], "1 unknown hotpath candidate IDs") ||
+		strings.Contains(hotpathWarnings[0], unknownHotpath) {
+		t.Fatalf("unknown hotpath warning=%#v", hotpathWarnings)
+	}
+
+	for _, test := range []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "exact", field: "candidate_ids", value: unknownExact},
+		{name: "hotpath", field: "hotpath_candidate_ids", value: unknownHotpath},
+	} {
+		t.Run("frozen unknown "+test.name, func(t *testing.T) {
+			invalidFrozen := cloneMap(mixedSelection)
+			invalidFrozen[test.field] = []string{test.value}
+			_, filterErr := nativeRepositoryEvaluationFilter(map[string]any{
+				"candidates": catalog["candidates"], "hard_scope": map[string]any{},
+				"commit": fixture.commit, "scope_planned": true,
+				"frozen_selection": invalidFrozen, "frozen_plan": mixedPlan,
+			})
+			if !errors.Is(filterErr, reposcope.ErrUnknownCandidate) {
+				t.Fatalf("frozen unknown %s error=%v", test.name, filterErr)
+			}
+		})
+	}
+}
+
 func TestNativeRepositoryEvaluationFilterEnforcesHotpathPromotionAndHardTypes(t *testing.T) {
 	fixture := newRepositoryEvaluationFixture(t)
 	args := fixture.catalogArgs()
@@ -1749,6 +1934,10 @@ func TestNativeRepositoryEvaluationFilterEnforcesHotpathPromotionAndHardTypes(t 
 	extraSelectionField["extra"] = true
 	invalidSelectionArray := cloneMap(selection)
 	invalidSelectionArray["candidate_ids"] = "invalid"
+	nullSelectionArray := cloneMap(selection)
+	nullSelectionArray["candidate_ids"] = nil
+	invalidSelectionItem := cloneMap(selection)
+	invalidSelectionItem["candidate_ids"] = []any{true}
 	noncanonicalSelection := cloneMap(selection)
 	noncanonicalSelection["include_prefixes"] = []any{" pkg/ "}
 	for _, test := range []struct {
@@ -1759,6 +1948,8 @@ func TestNativeRepositoryEvaluationFilterEnforcesHotpathPromotionAndHardTypes(t 
 		{name: "missing selection field", value: missingSelectionField},
 		{name: "extra selection field", value: extraSelectionField},
 		{name: "invalid selection array", value: invalidSelectionArray},
+		{name: "null selection array", value: nullSelectionArray},
+		{name: "invalid selection item", value: invalidSelectionItem},
 		{name: "noncanonical selection", value: noncanonicalSelection},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1798,6 +1989,11 @@ func TestNativeRepositoryEvaluationFilterEnforcesHotpathPromotionAndHardTypes(t 
 		nativeRepositoryEvaluationStringsEqual([]string{"a"}, []string{"b"}) {
 		t.Fatal("different frozen strings compared equal")
 	}
+	if !nativeRepositoryEvaluationHasReservedWarning([]string{
+		"  NATIVE SCOPE VALIDATION ignored one candidate  ",
+	}) {
+		t.Fatal("reserved native warning was not recognized")
+	}
 	if _, err := nativeRepositoryEvaluationPlannerWarnings(map[string]any{
 		"warnings": "invalid",
 	}); err == nil {
@@ -1829,6 +2025,13 @@ func TestNativeRepositoryEvaluationFilterEnforcesHotpathPromotionAndHardTypes(t 
 		{name: "too many warnings", warnings: tooManyWarnings, want: "too many"},
 		{name: "empty warning", warnings: []any{" "}, want: "invalid warning"},
 		{name: "duplicate warning", warnings: []any{"same", " same "}, want: "duplicate"},
+		{
+			name: "reserved native warning",
+			warnings: []any{
+				"native scope validation ignored 9 unknown exact candidate IDs",
+			},
+			want: "reserved",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := nativeRepositoryEvaluationFilter(map[string]any{
@@ -1851,7 +2054,7 @@ func TestNativeRepositoryEvaluationFilterEnforcesHotpathPromotionAndHardTypes(t 
 		name    string
 		planner map[string]any
 	}{
-		{name: "unknown hotpath", planner: map[string]any{"hotpathCandidateIds": []any{"cand_" + strings.Repeat("0", 64)}}},
+		{name: "malformed hotpath", planner: map[string]any{"hotpathCandidateIds": []any{"cand_unknown"}}},
 		{name: "duplicate hotpath", planner: map[string]any{"hotpathCandidateIds": []any{promoted, promoted}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2196,7 +2399,6 @@ func TestNativeRepositoryEvaluationFilterValidatesPlannerAndCandidates(t *testin
 	tampered[0] = cloneMap(candidateMaps[0])
 	tampered[0]["inventoryId"] = "tampered"
 	duplicateCandidates := append(append([]map[string]any(nil), candidateMaps...), candidateMaps[0])
-	unknownID := "cand_" + strings.Repeat("0", 64)
 	tests := []struct {
 		name string
 		args map[string]any
@@ -2219,8 +2421,33 @@ func TestNativeRepositoryEvaluationFilterValidatesPlannerAndCandidates(t *testin
 			"candidates": candidateMaps,
 			"planner":    map[string]any{"candidateIds": []string{implementation.ID, implementation.ID}},
 		}, want: reposcope.ErrDuplicateCandidate},
-		{name: "unknown exact ID", args: map[string]any{
-			"candidates": candidateMaps, "planner": map[string]any{"candidateIds": []string{unknownID}},
+		{name: "scalar exact ID", args: map[string]any{
+			"candidates": candidateMaps, "planner": map[string]any{"candidateIds": implementation.ID},
+		}},
+		{name: "null exact IDs", args: map[string]any{
+			"candidates": candidateMaps, "planner": map[string]any{"candidateIds": nil},
+		}},
+		{name: "conflicting exact ID aliases", args: map[string]any{
+			"candidates": candidateMaps,
+			"planner": map[string]any{
+				"candidateIds": []string{}, "candidate_ids": []string{implementation.ID},
+			},
+		}},
+		{name: "object exact ID", args: map[string]any{
+			"candidates": candidateMaps,
+			"planner":    map[string]any{"candidateIds": []any{map[string]any{"id": implementation.ID}}},
+		}},
+		{name: "boolean exact ID", args: map[string]any{
+			"candidates": candidateMaps, "planner": map[string]any{"candidateIds": []any{true}},
+		}},
+		{name: "scalar hotpath ID", args: map[string]any{
+			"candidates": candidateMaps, "planner": map[string]any{"hotpathCandidateIds": implementation.ID},
+		}},
+		{name: "malformed exact ID", args: map[string]any{
+			"candidates": candidateMaps,
+			"planner": map[string]any{
+				"candidateIds": []string{"cand_" + strings.Repeat("g", 64)},
+			},
 		}, want: reposcope.ErrUnknownCandidate},
 		{name: "non-code hotpath", args: map[string]any{
 			"candidates": candidateMaps, "planner": map[string]any{"hotpathCandidateIds": []string{testCandidate.ID}},
