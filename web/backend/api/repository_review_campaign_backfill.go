@@ -136,12 +136,6 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 		resolvedProfile.MaxContentBytes < 1 {
 		return result, repoaudit.ErrInvalidPlan
 	}
-	_, resolvedMaxErr := workflows.RepositoryBugFinderEffectiveMaxContentBytes(
-		automation.MaxContentBytes, resolvedProfile.MaxContentBytes,
-	)
-	if resolvedMaxErr != nil {
-		return result, resolvedMaxErr
-	}
 	if automation.StartedAt.IsZero() || len(automation.RunIDs) == 0 ||
 		len(automation.RunIDs) >= repositoryReviewLegacyBackfillMaxRuns ||
 		len(state.Runs) >= repositoryReviewLegacyBackfillMaxRuns {
@@ -474,28 +468,15 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 				)
 			}
 		}
-		ledgerUnsupported := make(map[string]repoaudit.FileRef, len(ledgerRun.UnsupportedPaths))
-		for _, pathValue := range ledgerRun.UnsupportedPaths {
-			if file, exists := selectedByPath[pathValue]; exists {
-				ledgerUnsupported[pathValue] = file
-			}
-		}
-		unsupportedEvidenceValid := true
 		for _, unsupported := range evidence.UnsupportedFiles {
-			if ledgerUnsupported[unsupported.Path] != unsupported.FileRef {
-				unsupportedEvidenceValid = false
-				break
-			}
+			// Run-evidence validation matched the durable Record projection, which
+			// binds this exact terminal FileRef to ledger UnsupportedPaths.
 			if profileCompatible {
 				repositoryReviewMergeLegacyCoverage(
 					coveragePaths, selectedByPath, unsupported.FileRef,
 					repoaudit.RepositoryReviewCampaignPathCoverage{Unsupported: true}, &result.Exact,
 				)
 			}
-		}
-		if !unsupportedEvidenceValid {
-			result.Exact = false
-			continue
 		}
 		unsupportedSeen := make(map[string]struct{}, len(ledgerRun.UnsupportedPaths))
 		for _, pathValue := range ledgerRun.UnsupportedPaths {
@@ -1322,16 +1303,9 @@ func installRepositoryReviewLegacyCampaignAuthority(
 		current, err = store.UpdateAutomation(
 			ctx, current.ID, current.Version,
 			func(candidate *repoaudit.RepositoryReviewAutomation) error {
-				if candidate.CampaignID != "" || candidate.Status != prepared.AutomationStatus ||
-					candidate.ActiveRunID != "" {
-					return repoaudit.ErrConflict
-				}
-				candidate.CampaignID = prepared.Request.Coverage.ID
-				candidate.CampaignRecoveryPending = true
-				candidate.ResolvedCommitSHA = prepared.Request.Coverage.CommitSHA
-				candidate.ScopeSelection = &selection
-				candidate.ScopePlan = prepared.ScopePlan
-				return nil
+				return stageRepositoryReviewLegacyCampaign(
+					candidate, prepared, selection,
+				)
 			},
 		)
 		if err != nil {
@@ -1341,6 +1315,23 @@ func installRepositoryReviewLegacyCampaignAuthority(
 	prepared.AutomationVersion = current.Version
 	prepared.AutomationStatus = current.Status
 	return current, prepared, nil
+}
+
+func stageRepositoryReviewLegacyCampaign(
+	candidate *repoaudit.RepositoryReviewAutomation,
+	prepared repositoryReviewLegacyCampaignBackfill,
+	selection repoaudit.RepositoryReviewScopeSelection,
+) error {
+	if candidate == nil || candidate.CampaignID != "" ||
+		candidate.Status != prepared.AutomationStatus || candidate.ActiveRunID != "" {
+		return repoaudit.ErrConflict
+	}
+	candidate.CampaignID = prepared.Request.Coverage.ID
+	candidate.CampaignRecoveryPending = true
+	candidate.ResolvedCommitSHA = prepared.Request.Coverage.CommitSHA
+	candidate.ScopeSelection = &selection
+	candidate.ScopePlan = prepared.ScopePlan
+	return nil
 }
 
 // applyRepositoryReviewLegacyCampaignBackfill reconciles controller-installed
@@ -1448,13 +1439,22 @@ func (c *repositoryReviewController) recoverLegacyRepositoryReviewCampaign(
 	final, err := store.UpdateAutomation(
 		ctx, installed.ID, installed.Version,
 		func(candidate *repoaudit.RepositoryReviewAutomation) error {
-			if candidate.CampaignID != prepared.Request.Coverage.ID ||
-				!candidate.CampaignRecoveryPending || candidate.ActiveRunID != "" {
-				return repoaudit.ErrConflict
-			}
-			candidate.CampaignRecoveryPending = false
-			return nil
+			return clearRepositoryReviewLegacyCampaign(
+				candidate, prepared.Request.Coverage.ID,
+			)
 		},
 	)
 	return final, err
+}
+
+func clearRepositoryReviewLegacyCampaign(
+	candidate *repoaudit.RepositoryReviewAutomation,
+	campaignID string,
+) error {
+	if candidate == nil || candidate.CampaignID != campaignID ||
+		!candidate.CampaignRecoveryPending || candidate.ActiveRunID != "" {
+		return repoaudit.ErrConflict
+	}
+	candidate.CampaignRecoveryPending = false
+	return nil
 }

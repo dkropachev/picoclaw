@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -331,6 +333,59 @@ func TestRepositoryReviewResetCampaignAuthorityCoverage(t *testing.T) {
 	}
 }
 
+func TestRepositoryReviewLegacyStageAndClearHelpersCoverage(t *testing.T) {
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	prepared := repositoryReviewLegacyCampaignBackfill{
+		AutomationStatus: repoaudit.RepositoryReviewAutomationPaused,
+		Request: repoaudit.ReconcileCampaignRequest{
+			Coverage: repoaudit.RepositoryReviewCampaignCoverage{
+				ID: campaignID, CommitSHA: strings.Repeat("a", 40),
+			},
+		},
+		ScopePlan: repoaudit.RepositoryReviewScopePlan{
+			CommitSHA: strings.Repeat("a", 40), Hash: strings.Repeat("b", 64),
+		},
+	}
+	selection := repoaudit.RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
+	for name, candidate := range map[string]*repoaudit.RepositoryReviewAutomation{
+		"nil":             nil,
+		"campaign exists": {CampaignID: repoaudit.NewRepositoryReviewCampaignID(), Status: prepared.AutomationStatus},
+		"wrong status":    {Status: repoaudit.RepositoryReviewAutomationFailed},
+		"active":          {Status: prepared.AutomationStatus, ActiveRunID: "run"},
+	} {
+		t.Run("stage "+name, func(t *testing.T) {
+			if err := stageRepositoryReviewLegacyCampaign(candidate, prepared, selection); !errors.Is(
+				err, repoaudit.ErrConflict,
+			) {
+				t.Fatalf("stage error=%v", err)
+			}
+		})
+	}
+	valid := &repoaudit.RepositoryReviewAutomation{Status: prepared.AutomationStatus}
+	if err := stageRepositoryReviewLegacyCampaign(valid, prepared, selection); err != nil ||
+		valid.CampaignID != campaignID || !valid.CampaignRecoveryPending || valid.ScopeSelection == nil {
+		t.Fatalf("valid stage=%#v err=%v", valid, err)
+	}
+	for name, candidate := range map[string]*repoaudit.RepositoryReviewAutomation{
+		"nil":         nil,
+		"wrong ID":    {CampaignID: repoaudit.NewRepositoryReviewCampaignID(), CampaignRecoveryPending: true},
+		"not pending": {CampaignID: campaignID},
+		"active":      {CampaignID: campaignID, CampaignRecoveryPending: true, ActiveRunID: "run"},
+	} {
+		t.Run("clear "+name, func(t *testing.T) {
+			if err := clearRepositoryReviewLegacyCampaign(candidate, campaignID); !errors.Is(
+				err, repoaudit.ErrConflict,
+			) {
+				t.Fatalf("clear error=%v", err)
+			}
+		})
+	}
+	if err := clearRepositoryReviewLegacyCampaign(valid, campaignID); err != nil ||
+		valid.CampaignRecoveryPending {
+		t.Fatalf("valid clear=%#v err=%v", valid, err)
+	}
+}
+
 func TestRepositoryReviewLegacyProfileWrapperErrorCoverage(t *testing.T) {
 	automation := testRepositoryReviewAutomation()
 	automation.MaxContentBytes = 1024
@@ -483,6 +538,62 @@ func TestRepositoryReviewLegacyAdapterRemainingErrorsCoverage(t *testing.T) {
 			fixture.automation.ResolvedCommitSHA, repositoryReviewRecoveryProfileForEdges(fixture),
 		); err == nil {
 			t.Fatal("corrupt repository recovery error=nil")
+		}
+	})
+}
+
+func TestRepositoryReviewLegacyPersistenceFailureCoverage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory mode enforcement is POSIX-specific")
+	}
+	prepare := func(t *testing.T) (repositoryReviewBackfillFixture, repositoryReviewLegacyCampaignBackfill) {
+		t.Helper()
+		fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
+			inspected: []int{0}, occurrences: 1,
+		})
+		prepared, err := prepareRepositoryReviewLegacyCampaignBackfill(
+			t.Context(), fixture.automation, fixture.state,
+			repoaudit.NewRepositoryReviewCampaignID(), fixture.runStore,
+			repositoryReviewRecoveryProfileForEdges(fixture),
+		)
+		if err != nil || !prepared.Available {
+			t.Fatalf("prepare=%#v err=%v", prepared, err)
+		}
+		return fixture, prepared
+	}
+	lockWrites := func(t *testing.T, workspace string) {
+		t.Helper()
+		directory := filepath.Join(workspace, "repository_reviews")
+		if err := os.Chmod(directory, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
+	}
+
+	t.Run("install save", func(t *testing.T) {
+		fixture, prepared := prepare(t)
+		lockWrites(t, fixture.workspace)
+		if _, _, err := installRepositoryReviewLegacyCampaignAuthority(
+			t.Context(), fixture.store, prepared,
+		); err == nil {
+			t.Fatal("read-only install error=nil")
+		}
+	})
+
+	t.Run("adapter apply save", func(t *testing.T) {
+		fixture, prepared := prepare(t)
+		installed, _, err := installRepositoryReviewLegacyCampaignAuthority(
+			t.Context(), fixture.store, prepared,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lockWrites(t, fixture.workspace)
+		if _, err := (&repositoryReviewController{}).recoverLegacyRepositoryReviewCampaign(
+			t.Context(), fixture.store, fixture.workspace, installed,
+			fixture.automation.ResolvedCommitSHA, repositoryReviewRecoveryProfileForEdges(fixture),
+		); err == nil {
+			t.Fatal("read-only adapter error=nil")
 		}
 	})
 }
@@ -1030,6 +1141,33 @@ func TestRepositoryReviewLegacyPrepareManagedUnsupportedCoverage(t *testing.T) {
 	if err != nil || !prepared.Available || prepared.UnsupportedFiles != 1 ||
 		prepared.InspectedFiles != 1 {
 		t.Fatalf("managed unsupported recovery=%#v err=%v", prepared, err)
+	}
+
+	// Preserve workflow evidence but remove its terminal path from the durable
+	// record. This reaches the explicit workflow-vs-ledger unsupported fence.
+	mismatchState := cloneRepositoryReviewBackfillStateForCoverage(t, state)
+	mismatchRun := mismatchState.Runs[0]
+	mismatchRun.UnsupportedCount = 0
+	mismatchRun.UnsupportedPaths = nil
+	mismatchRun.UnreviewedFiles = len(plan.PendingFiles)
+	mismatchRun.UnreviewedPaths = []string{reviewable.Path, unsupportedFile.Path}
+	mismatchRun.RemainingFiles = len(plan.PendingFiles)
+	sort.Strings(mismatchRun.UnreviewedPaths)
+	mismatchState.Runs[0] = mismatchRun
+	mismatchWorkflow := cloneRepositoryReviewBackfillRunForCoverage(t, workflowRun)
+	recordStep := mismatchWorkflow.Steps["find_bugs/record"]
+	recordStep.Outputs["run"] = mismatchRun
+	mismatchWorkflow.Steps["find_bugs/record"] = recordStep
+	prepared, err = prepareRepositoryReviewLegacyCampaignBackfill(
+		t.Context(), automation, mismatchState, repoaudit.NewRepositoryReviewCampaignID(),
+		repositoryReviewMoreRawLoader{
+			runs: map[string]*workflows.Run{mismatchWorkflow.ID: mismatchWorkflow},
+			err:  map[string]error{},
+		},
+		profile,
+	)
+	if err != nil || prepared.Available || prepared.Exact {
+		t.Fatalf("unsupported mismatch recovery=%#v err=%v", prepared, err)
 	}
 }
 
