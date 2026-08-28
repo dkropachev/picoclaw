@@ -17,12 +17,11 @@ import (
 )
 
 const (
-	repositoryReviewLegacyBackfillMaxRuns         = 1_000
-	repositoryReviewLegacyBackfillMaxPaths        = 100_000
-	repositoryReviewLegacyBackfillMaxBytes        = 32 << 20
-	repositoryReviewLegacyBackfillMaxRunBytes     = 8 << 20
-	repositoryReviewLegacyBackfillMaxSourceBytes  = 256 << 20
-	repositoryReviewLegacyBackfillMaxManifestRefs = 2_000_000
+	repositoryReviewLegacyBackfillMaxRuns        = 1_000
+	repositoryReviewLegacyBackfillMaxPaths       = 100_000
+	repositoryReviewLegacyBackfillMaxBytes       = 32 << 20
+	repositoryReviewLegacyBackfillMaxRunBytes    = 8 << 20
+	repositoryReviewLegacyBackfillMaxSourceBytes = 256 << 20
 )
 
 type repositoryReviewWorkflowRunLoader interface {
@@ -157,7 +156,6 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 	currentRuns := make([]repoaudit.ReviewRun, 0, len(configuredRuns))
 	nonLedgerNoopPlans := make([]repoaudit.Plan, 0)
 	sourceBytes := 0
-	manifestRefs := 0
 	seenLedgerRuns := make(map[string]struct{}, len(state.Runs))
 	currentLedgerRuns := make(map[string]struct{}, len(configuredRuns))
 	for _, run := range state.Runs {
@@ -320,11 +318,6 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 		}
 		// Run-evidence validation already canonicalized this exact plan manifest.
 		manifest, _ := repositoryReviewLegacyPlanManifest(plan)
-		manifestRefs += len(manifest)
-		if manifestRefs > repositoryReviewLegacyBackfillMaxManifestRefs {
-			result.Exact = false
-			return result, nil
-		}
 		fullCatalog, scopePlanHash, scopeValid := repositoryReviewLegacyScopeEvidence(workflowRun, manifest)
 		if !scopeValid {
 			result.Exact = false
