@@ -13,6 +13,14 @@ const pilots = [
   { key: "accounts", route: "/accounts" },
   { key: "account-routers", route: "/accounts/routers" },
   { key: "event-sources", route: "/event-sources" },
+  {
+    key: "development-repository-assignments",
+    route: "/development/repositories",
+  },
+  {
+    key: "development-workflow-configurations",
+    route: "/development/workflow-configurations",
+  },
   { key: "git-workspaces", route: "/agent/git-workspaces" },
   {
     key: "git-workspace-history",

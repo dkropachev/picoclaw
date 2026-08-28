@@ -106,6 +106,11 @@ The authenticated scoped APIs are split by ownership:
 - `GET`/`PUT /api/development/repositories` owns verified repository
   descriptors and exact assignments, and projects name/deferred-policy
   summaries for selectable configurations.
+- `/api/development/workflow-configurations/items*` owns typed paged
+  configuration summaries and revision-fenced ID-addressed item writes;
+- `/api/development/repository-assignments*` owns typed paged assignment
+  summaries, backend-issued opaque item IDs, revision-fenced CRUD, and explicit
+  partial bulk deletion.
 
 Both writes use the same exact full-config revision compare-and-swap fence,
 preserve the other endpoint's fields server-side, and report whether a gateway

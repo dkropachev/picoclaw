@@ -8,6 +8,7 @@ import {
   collectionUTF8BytePositionToUTF16Offset,
   maximumCollectionPageSize,
   maximumCollectionQueryBytes,
+  projectCollectionQuerySchema,
   truncateCollectionQuery,
 } from "@/api/collection"
 import { launcherFetch } from "@/api/http"
@@ -108,4 +109,133 @@ describe("collection API foundation", () => {
       signal: controller.signal,
     })
   })
+
+  it("projects a closed, bounded collection query schema", () => {
+    expect(
+      projectCollectionQuerySchema(
+        {
+          fields: [
+            {
+              name: "status",
+              type: "enum",
+              operators: ["=", "!=", "IN", "NOT IN"],
+              sortable: true,
+              suggested_values: ["ready", "running"],
+            },
+            {
+              name: "count",
+              type: "number",
+              operators: ["=", ">", "<="],
+              sortable: true,
+            },
+          ],
+          default_order: [{ field: "status", direction: "ASC" }],
+        },
+        [{ field: "status", direction: "ASC" }],
+      ),
+    ).toEqual({
+      fields: [
+        {
+          name: "status",
+          type: "enum",
+          operators: ["=", "!=", "IN", "NOT IN"],
+          sortable: true,
+          suggested_values: ["ready", "running"],
+        },
+        {
+          name: "count",
+          type: "number",
+          operators: ["=", ">", "<="],
+          sortable: true,
+        },
+      ],
+    })
+  })
+
+  it.each([
+    [
+      "wrong order",
+      (schema: QuerySchemaFixture) => {
+        schema.default_order[0] = { field: "status", direction: "DESC" }
+      },
+    ],
+    [
+      "duplicate field",
+      (schema: QuerySchemaFixture) => {
+        schema.fields.push({ ...schema.fields[0]! })
+      },
+    ],
+    [
+      "type-incompatible operator",
+      (schema: QuerySchemaFixture) => {
+        schema.fields[0]!.operators = [">"]
+      },
+    ],
+    [
+      "duplicate operator",
+      (schema: QuerySchemaFixture) => {
+        schema.fields[0]!.operators = ["=", "="]
+      },
+    ],
+    [
+      "noncanonical field",
+      (schema: QuerySchemaFixture) => {
+        schema.fields[0]!.name = "Status"
+      },
+    ],
+    [
+      "untrimmed suggestion",
+      (schema: QuerySchemaFixture) => {
+        schema.fields[0]!.suggested_values = [" ready"]
+      },
+    ],
+    [
+      "duplicate suggestion",
+      (schema: QuerySchemaFixture) => {
+        schema.fields[0]!.suggested_values = ["ready", "READY"]
+      },
+    ],
+    [
+      "control suggestion",
+      (schema: QuerySchemaFixture) => {
+        schema.fields[0]!.suggested_values = ["ready\nnow"]
+      },
+    ],
+  ])("rejects a %s in collection query schemas", (_name, mutate) => {
+    const schema = querySchemaFixture()
+    mutate(schema)
+    expect(() =>
+      projectCollectionQuerySchema(schema, [
+        { field: "status", direction: "ASC" },
+      ]),
+    ).toThrow(
+      expect.objectContaining({ code: "malformed_response", status: 502 }),
+    )
+  })
 })
+
+interface QuerySchemaFixture {
+  fields: Array<{
+    name: string
+    type: string
+    operators: string[]
+    sortable: boolean
+    suggested_values?: string[]
+  }>
+  default_order: Array<{ field: string; direction: "ASC" | "DESC" }>
+}
+
+function querySchemaFixture(): QuerySchemaFixture {
+  return {
+    fields: [
+      {
+        name: "status",
+        type: "enum",
+        operators: ["=", "!="],
+        sortable: true,
+        suggested_values: ["ready"],
+      },
+    ],
+    default_order: [{ field: "status", direction: "ASC" }],
+  }
+}

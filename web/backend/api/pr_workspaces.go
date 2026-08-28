@@ -37,6 +37,7 @@ func pathTraversesPRWorkspace(requestPath string) bool {
 		"/api/push-subscriptions",
 		prLifecycleWorkflowConfigurationsPath,
 		prLifecycleRepositoryAssignmentsPath,
+		prLifecycleRepositoryAssignmentCollectionPath,
 	}
 	segments := make([]string, 0, strings.Count(requestPath, "/"))
 	for _, segment := range strings.Split(requestPath, "/") {

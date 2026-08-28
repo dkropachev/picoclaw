@@ -76,6 +76,8 @@ continues to fail locally until a concrete model is configured.
 
 | `FR-LAUNCHER-027` | MUST | The authenticated launcher registers the Git Workspace inventory, direct detail, operational history, scoped settings, reconcile, cleanup, and drop routes owned by `FR-GITWS`. The generic config form does not duplicate Git Workspace policy. Scoped settings writes use the shared same-origin config-mutation boundary and exact config revision, while the gateway restart signature includes effective maximum size, ignored-cleanup delay, and drop delay so a running manager never appears to have applied changed policy. | Git Workspace administration must be routed and revision-safe without duplicating settings or reporting unapplied runtime limits as active. |
 
+| `FR-LAUNCHER-028` | MUST | The authenticated launcher registers the feature-owned `/api/development/repository-assignments*` and `/api/development/workflow-configurations/items*` collection/item APIs and the standard `/development/repositories*` and `/development/workflow-configurations*` browser routes. Mutations pass through the shared same-origin boundary, strict JSON decoding, exact full-config revision fencing, and one compare-and-swap save. Aggregate lifecycle-settings endpoints remain available but no longer draw collection lists; old Workflow configuration `?config=` URLs receive no compatibility rendering. | Development administration needs shared collection behavior and direct links without weakening the existing full-config concurrency boundary or retaining a second aggregate editor. |
+
 ## Data And State Model
 
 Account collection identity is a fixed-length base64url SHA-256 digest over the
@@ -137,6 +139,15 @@ an explicit branch label stays on the rail, while an unlabeled return adds no
 visible text. Return rails are remeasured with the responsive bands, preserve
 their workflow edge mode, and expose one semantic "returns to" relationship to
 assistive technology without duplicating the visual connector.
+
+The item collection projections are deliberately smaller than those aggregate
+settings snapshots. Repository-assignment IDs are backend-issued opaque
+base64url identities for the canonical provider/repository pair. Workflow
+configuration IDs remain stable kebab-case identities. List cursors bind typed
+queries and final IDs; direct item routes load exact item endpoints. A mutation
+rebuilds and validates the complete lifecycle candidate before its single
+revision-fenced save, so item administration cannot silently replace nudging,
+scope thresholds, assignments, or another configuration.
 
 ## Surface Ownership
 
@@ -215,6 +226,8 @@ Owns: HTTP GET /api/development/repositories
 Owns: HTTP PUT /api/development/repositories
 Owns: HTTP GET /api/development/workflow-configurations
 Owns: HTTP PUT /api/development/workflow-configurations
+Owns: HTTP * /api/development/workflow-configurations/items*
+Owns: HTTP * /api/development/repository-assignments*
 Owns: TEST cmd/picoclaw/internal/auth/* *
 Owns: TEST cmd/picoclaw/internal/cliui/* *
 Owns: TEST cmd/picoclaw/internal/config/* *
@@ -247,6 +260,8 @@ Owns: TEST web/backend/api/weixin*
 | HTTP | `/api/notifications*`, `/api/notification-views`, `/api/notification-settings`, `/api/push-subscriptions*` | Authenticated inbox, saved-view, privacy-setting, SSE refresh, and revision-fenced device management proxies. | `FR-LAUNCHER-024` |
 | HTTP | `GET/PUT /api/development/workflow-configurations` | Read or revision-fenced replace workflow configurations, default selection, nudge bounds, and scope thresholds while preserving assignments. | `FR-LAUNCHER-011`, `FR-LAUNCHER-022` |
 | HTTP | `GET/PUT /api/development/repositories` | Read verified repository descriptors and safe configuration summaries or revision-fenced replace repositories and assignments while preserving workflow configuration. | `FR-LAUNCHER-011`, `FR-LAUNCHER-022` |
+| HTTP/UI | `/api/development/repository-assignments*`; `/development/repositories*` | Authenticated typed query/cursor assignment collection, opaque-ID detail, revision-fenced CRUD/bulk deletion, and standard list/new/detail/edit routes. | `FR-LAUNCHER-011`, `FR-LAUNCHER-028` |
+| HTTP/UI | `/api/development/workflow-configurations/items*`; `/development/workflow-configurations*` | Authenticated typed query/cursor configuration collection, direct item reads/writes, and standard list/new/detail/edit routes with routed gate editor context. | `FR-LAUNCHER-011`, `FR-LAUNCHER-028` |
 | UI | `/development*` | Mutually exclusive intake, portfolio, aggregate workspace, read-only code evidence, workflow configurations, repositories, and lifecycle settings. | `FR-LAUNCHER-009`, `FR-LAUNCHER-021`, `FR-LAUNCHER-022` |
 | UI/PWA | `/notifications*`, manifest, service worker | Sortable attention backlog, saved queries, device controls, app badge, privacy-minimal push, and authenticated deep links. | `FR-LAUNCHER-009`, `FR-LAUNCHER-024` |
 | HTTP/UI | `/api/accounts*`; `/accounts`, `/accounts/new`, `/accounts/{id}`, `/accounts/{id}/edit` | Secret-free typed query/cursor account inventory, direct opaque-ID detail, routed provider onboarding and exact-identity renewal, confirmed logout, and detail-owned sanitized usage limits. | `FR-LAUNCHER-004`, `FR-LAUNCHER-026` |
@@ -352,6 +367,7 @@ removes or resolves the durable inbox item.
 | `FR-LAUNCHER-025` | [web/backend/api/collection_apis_test.go](../../web/backend/api/collection_apis_test.go), [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/frontend/src/api/models.test.ts](../../web/frontend/src/api/models.test.ts), [web/frontend/scripts/check-collection-delta.test.mjs](../../web/frontend/scripts/check-collection-delta.test.mjs), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 | `FR-LAUNCHER-026` | [web/backend/api/accounts_test.go](../../web/backend/api/accounts_test.go), [web/frontend/src/api/accounts.test.ts](../../web/frontend/src/api/accounts.test.ts), [web/frontend/src/components/credentials/account-auth-editor-page.test.tsx](../../web/frontend/src/components/credentials/account-auth-editor-page.test.tsx), [web/frontend/src/routes/-accounts-route.test.tsx](../../web/frontend/src/routes/-accounts-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 | `FR-LAUNCHER-027` | [web/backend/api/git_workspaces_test.go](../../web/backend/api/git_workspaces_test.go), [web/frontend/src/api/git-workspaces.test.ts](../../web/frontend/src/api/git-workspaces.test.ts), [web/frontend/src/components/agent/git-workspaces](../../web/frontend/src/components/agent/git-workspaces), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
+| `FR-LAUNCHER-028` | [web/backend/api/pr_lifecycle_collections_test.go](../../web/backend/api/pr_lifecycle_collections_test.go), [web/frontend/src/api/pr-lifecycle-repository-assignments.test.ts](../../web/frontend/src/api/pr-lifecycle-repository-assignments.test.ts), [web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts](../../web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts), [web/frontend/src/components/pr-workspaces/pr-lifecycle-collection-route-state.test.ts](../../web/frontend/src/components/pr-workspaces/pr-lifecycle-collection-route-state.test.ts), [web/frontend/src/routes/-development-admin-route.test.tsx](../../web/frontend/src/routes/-development-admin-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 
 ## Implementation Anchors
 

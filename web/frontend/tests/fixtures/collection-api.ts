@@ -48,6 +48,24 @@ const querySchemas = {
     field("repositories", "number"),
     field("poll_notifications", "boolean", ["true", "false"]),
   ]),
+  developmentRepositoryAssignments: schema(
+    [
+      field("repository", "string"),
+      field("configuration", "string", ["default", "automated-review"]),
+      field("default_branch", "string", ["main", "release"]),
+    ],
+    { field: "repository", direction: "ASC" },
+  ),
+  developmentWorkflowConfigurations: schema(
+    [
+      field("id", "string", ["default", "automated-review"]),
+      field("name", "string"),
+      field("is_default", "boolean", ["true", "false"]),
+      field("bindings", "number"),
+      field("deferred_issues", "enum", ["off", "ask", "automatic"]),
+    ],
+    { field: "name", direction: "ASC" },
+  ),
   aliases: schema([
     field("name", "string"),
     field("model", "string"),
@@ -401,6 +419,62 @@ const eligibleEventChannelAdapters = [
     channel_enabled: true,
   },
 ] as const
+
+export const developmentAdminVisualIDs = {
+  picoclaw: "Vkv3iKEbkMfo1PVdQHYM6x0QjgzAWBog3Bth79rGdVg",
+  launcher: "VogbVnIeaaq1a1DEqicX1PdL-EoLT9LF5Z_jDIJutOA",
+  automation: "xL9ecJ15Rm1erpekUuu5T5pMRxvmYK-2Lc9U1M4sdWk",
+} as const
+
+const developmentRepositoryAssignments = [
+  {
+    id: developmentAdminVisualIDs.picoclaw,
+    repository: "sipeed/picoclaw",
+    configuration: "automated-review",
+    default_branch: "main",
+  },
+  {
+    id: developmentAdminVisualIDs.launcher,
+    repository: "octo/launcher",
+    configuration: "default",
+    default_branch: "main",
+  },
+  {
+    id: developmentAdminVisualIDs.automation,
+    repository: "automation/rules",
+    configuration: "automated-review",
+    default_branch: "release",
+  },
+] as const
+
+const developmentWorkflowConfigurations = [
+  {
+    id: "automated-review",
+    name: "Automated review",
+    is_default: false,
+    bindings: 8,
+    deferred_issues: "automatic",
+  },
+  {
+    id: "default",
+    name: "Default",
+    is_default: true,
+    bindings: 0,
+    deferred_issues: "ask",
+  },
+  {
+    id: "strict-release",
+    name: "Strict release",
+    is_default: false,
+    bindings: 3,
+    deferred_issues: "off",
+  },
+] as const
+
+const developmentAdminEffects = {
+  gateway_effect: "applied",
+  deferred_policy_effect: "applied",
+} as const
 
 export const gitWorkspaceVisualIDs = {
   primary: "gw-111111111111",
@@ -1341,6 +1415,32 @@ export async function installCollectionVisualMocks(
             eligible_channel_adapters: eligibleEventChannelAdapters,
             config_revision: "cfg-visual-1",
           })
+        case "/api/development/repository-assignments":
+          return json(route, {
+            repository_assignments:
+              state === "empty" ? [] : developmentRepositoryAssignments,
+            total:
+              state === "empty" ? 0 : developmentRepositoryAssignments.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY repository ASC",
+            query_schema: querySchemas.developmentRepositoryAssignments,
+            config_revision: "cfg-development-visual-1",
+            effects: developmentAdminEffects,
+          })
+        case "/api/development/workflow-configurations/items":
+          return json(route, {
+            workflow_configurations:
+              state === "empty" ? [] : developmentWorkflowConfigurations,
+            total:
+              state === "empty" ? 0 : developmentWorkflowConfigurations.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY name ASC",
+            query_schema: querySchemas.developmentWorkflowConfigurations,
+            config_revision: "cfg-development-visual-1",
+            effects: developmentAdminEffects,
+          })
         case "/api/git-workspaces":
           return json(route, {
             workspaces: state === "empty" ? [] : gitWorkspaces,
@@ -1892,6 +1992,8 @@ function isCollectionList(path: string) {
     "/api/accounts",
     "/api/account-routers",
     "/api/event-sources",
+    "/api/development/repository-assignments",
+    "/api/development/workflow-configurations/items",
     "/api/git-workspaces",
     "/api/git-workspaces/history",
     "/api/model-routers",

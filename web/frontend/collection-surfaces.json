@@ -230,26 +230,49 @@
       "route": "/development/repositories",
       "owningSpec": "docs/features/event-automation.md",
       "implementationGlobs": [
-        "src/routes/development_.repositories.tsx",
-        "src/components/pr-workspaces/pr-lifecycle-repository-assignments-page.tsx"
+        "src/routes/development_.repositories*.tsx",
+        "src/api/pr-lifecycle-repository-assignments.ts",
+        "src/components/pr-workspaces/pr-lifecycle-collection-route-state.ts",
+        "src/components/pr-workspaces/pr-lifecycle-admin-collections.tsx"
       ],
-      "capabilities": ["create", "edit"],
-      "views": ["list"],
-      "status": "legacy",
-      "routes": { "list": "/development/repositories" }
+      "capabilities": [
+        "query",
+        "pagination",
+        "selection",
+        "bulk-delete",
+        "create",
+        "detail",
+        "edit"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/development/repositories",
+        "new": "/development/repositories/new",
+        "detail": "/development/repositories/:id",
+        "edit": "/development/repositories/:id/edit"
+      }
     },
     {
       "key": "development-workflow-configurations",
       "route": "/development/workflow-configurations",
       "owningSpec": "docs/features/event-automation.md",
       "implementationGlobs": [
-        "src/routes/development_.workflow-configurations.tsx",
+        "src/routes/development_.workflow-configurations*.tsx",
+        "src/api/pr-lifecycle-workflow-configurations.ts",
+        "src/components/pr-workspaces/pr-lifecycle-collection-route-state.ts",
+        "src/components/pr-workspaces/pr-lifecycle-admin-collections.tsx",
         "src/components/pr-workspaces/pr-lifecycle-workflow-configurations-page.tsx"
       ],
-      "capabilities": ["create", "edit"],
-      "views": ["list"],
-      "status": "legacy",
-      "routes": { "list": "/development/workflow-configurations" }
+      "capabilities": ["query", "pagination", "create", "detail", "edit"],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/development/workflow-configurations",
+        "new": "/development/workflow-configurations/new",
+        "detail": "/development/workflow-configurations/:id",
+        "edit": "/development/workflow-configurations/:id/edit"
+      }
     },
     {
       "key": "event-sources",

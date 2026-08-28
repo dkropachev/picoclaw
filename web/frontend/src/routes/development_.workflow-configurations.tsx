@@ -1,61 +1,59 @@
-import { createFileRoute } from "@tanstack/react-router"
+import { createFileRoute, useLocation } from "@tanstack/react-router"
+import { useCallback, useEffect, useMemo } from "react"
 
-import type { PRLifecycleDecisionPoint } from "@/api/pr-lifecycle-flow"
-import { PRLifecycleWorkflowConfigurationsPage } from "@/components/pr-workspaces/pr-lifecycle-workflow-configurations-page"
-
-function normalizeSearch(raw: Record<string, unknown>) {
-  const config =
-    typeof raw.config === "string" && raw.config ? raw.config : undefined
-  const flow: "review" | "implementation" =
-    raw.flow === "implementation" ? "implementation" : "review"
-  const gate =
-    typeof raw.gate === "string" && /^pr\.[a-z0-9.-]+$/u.test(raw.gate)
-      ? (raw.gate as PRLifecycleDecisionPoint)
-      : undefined
-  return { ...(config ? { config } : {}), flow, ...(gate ? { gate } : {}) }
-}
+import { PRLifecycleWorkflowConfigurationsCollectionPage } from "@/components/pr-workspaces/pr-lifecycle-admin-collections"
+import { normalizeWorkflowConfigurationsSearch } from "@/components/pr-workspaces/pr-lifecycle-collection-route-state"
+import {
+  type CollectionRouteSearch,
+  collectionRouteSearchIsCanonical,
+} from "@/hooks/use-collection-route-state"
 
 function DevelopmentWorkflowConfigurationsRoutePage() {
-  const search = Route.useSearch()
+  const location = useLocation({
+    select: ({ pathname, search }) => ({ pathname, search }),
+  })
+  const routeSearch = Route.useSearch()
   const navigate = Route.useNavigate()
+  const search = useMemo(
+    () => normalizeWorkflowConfigurationsSearch({ ...routeSearch }),
+    [routeSearch],
+  )
+  useEffect(() => {
+    if (location.pathname !== "/development/workflow-configurations") return
+    if (!collectionRouteSearchIsCanonical({ ...location.search }, search)) {
+      void navigate({ search, replace: true })
+    }
+  }, [location.pathname, location.search, navigate, search])
+  const changeSearch = useCallback(
+    (next: CollectionRouteSearch, replace = false) => {
+      if (location.pathname === "/development/workflow-configurations") {
+        void navigate({ search: next, replace })
+      }
+    },
+    [location.pathname, navigate],
+  )
   return (
-    <PRLifecycleWorkflowConfigurationsPage
-      page={search.config ? "config" : "configs"}
-      initialConfigID={search.config}
-      initialDecisionPoint={search.gate}
-      activeFlowID={search.flow}
-      onBack={() =>
-        void navigate(
-          search.config
-            ? {
-                to: "/development/workflow-configurations",
-                search: { flow: search.flow },
-              }
-            : { to: "/development" },
-        )
-      }
-      onConfigChange={(config) =>
+    <PRLifecycleWorkflowConfigurationsCollectionPage
+      search={search}
+      onSearchChange={changeSearch}
+      onOpen={(configuration) =>
         void navigate({
-          to: "/development/workflow-configurations",
-          search: config
-            ? { config, flow: search.flow }
-            : { flow: search.flow },
+          to: "/development/workflow-configurations/$id",
+          params: { id: configuration.id },
+          search,
         })
       }
-      onDecisionPointChange={(gate) =>
+      onEdit={(configuration) =>
         void navigate({
-          to: "/development/workflow-configurations",
-          search: {
-            ...(search.config ? { config: search.config } : {}),
-            flow: search.flow,
-            ...(gate ? { gate } : {}),
-          },
+          to: "/development/workflow-configurations/$id/edit",
+          params: { id: configuration.id },
+          search: { ...search, flow: "review" },
         })
       }
-      onFlowChange={(flow) =>
+      onNew={() =>
         void navigate({
-          to: "/development/workflow-configurations",
-          search: { ...(search.config ? { config: search.config } : {}), flow },
+          to: "/development/workflow-configurations/new",
+          search,
         })
       }
     />
@@ -63,6 +61,6 @@ function DevelopmentWorkflowConfigurationsRoutePage() {
 }
 
 export const Route = createFileRoute("/development_/workflow-configurations")({
-  validateSearch: normalizeSearch,
+  validateSearch: normalizeWorkflowConfigurationsSearch,
   component: DevelopmentWorkflowConfigurationsRoutePage,
 })
