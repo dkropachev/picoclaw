@@ -829,9 +829,82 @@ func TestRepositoryReviewLegacyCampaignRecoveryAdapterClearsDurableMarker(t *tes
 		updated.ScopeSelection == nil || updated.Version <= fixture.automation.Version {
 		t.Fatalf("recovered automation = %#v err=%v", updated, err)
 	}
+	if !updated.Progress.CoverageAvailable || !updated.Progress.CoverageExact ||
+		updated.Progress.SelectedFiles != 1 || updated.Progress.InspectedFiles != 1 ||
+		updated.Progress.ReviewedFiles != 0 || updated.Progress.RemainingFiles != 1 ||
+		updated.Progress.UnsupportedFiles != 0 || updated.Progress.Findings != 1 ||
+		updated.Progress.FindingAggregates != 0 || updated.Progress.PendingFindingMappings != 1 {
+		t.Fatalf("recovered public metrics = %#v", updated.Progress)
+	}
 	state, found, err := fixture.store.ResolveRepositoryState(updated.Repository, updated.RunIDs)
 	if err != nil || !found || state.CurrentCampaign == nil || !state.CurrentCampaign.Exact {
 		t.Fatalf("recovered state = %#v found=%v err=%v", state, found, err)
+	}
+}
+
+func TestRepositoryReviewRecoveredBaselineDoesNotCountAsFirstBatchProgress(t *testing.T) {
+	fixture := newRepositoryReviewBackfillFixture(
+		t, 2,
+		repositoryReviewBackfillRunSpec{selected: []int{0}, inspected: []int{0}, complete: true},
+		repositoryReviewBackfillRunSpec{selected: []int{1}, inspected: []int{1}},
+	)
+	resolved := workflows.RepositoryReviewModelProfile{
+		Revision: "legacy-automation-profile", AccountRef: fixture.automation.EffectiveAccountRef,
+		ReviewerModels:  fixture.automation.ReviewerModels,
+		MaxContentBytes: int(fixture.automation.MaxContentBytes),
+	}
+	controller := newRepositoryReviewController(nil)
+	recovered, err := controller.recoverLegacyRepositoryReviewCampaign(
+		t.Context(), fixture.store, fixture.workspace, fixture.automation,
+		fixture.automation.ResolvedCommitSHA, resolved,
+	)
+	if err != nil || recovered.Progress.ReviewedFiles != 1 ||
+		recovered.Progress.RemainingFiles != 1 || !recovered.Progress.CoverageExact {
+		t.Fatalf("recovered baseline = %#v err=%v", recovered.Progress, err)
+	}
+
+	runID := "wr_first_zero_progress"
+	running, err := fixture.store.UpdateAutomation(
+		t.Context(), recovered.ID, recovered.Version,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			candidate.Status = repoaudit.RepositoryReviewAutomationRunning
+			candidate.PauseReason = ""
+			candidate.PauseDetail = ""
+			candidate.ActiveRunID = runID
+			candidate.RunIDs = append(candidate.RunIDs, runID)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.mu.Lock()
+	controller.active[running.ID] = &repositoryReviewActiveRun{runID: runID, store: fixture.store}
+	controller.mu.Unlock()
+	controller.finishAutomationRun(
+		running.ID,
+		runID,
+		&workflows.RunResult{
+			RunID: runID, Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{"remainingFiles": 1, "reviewedFiles": 0},
+		},
+		nil,
+		true,
+		&workflows.Run{Steps: map[string]workflows.StepExecution{
+			"find_bugs/record": {
+				Status: workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"run": map[string]any{
+					"remaining_files": 1, "reviewed_files": 0, "unsupported_files": 0,
+				}},
+			},
+		}},
+	)
+	paused, found, err := fixture.store.GetAutomation(t.Context(), running.ID)
+	if err != nil || !found || paused.Status != repoaudit.RepositoryReviewAutomationPaused ||
+		paused.PauseReason != repoaudit.RepositoryReviewPauseNoProgress ||
+		paused.Progress.ReviewedFiles != 1 || paused.Progress.RemainingFiles != 1 ||
+		paused.Progress.CompletedBatches != running.Progress.CompletedBatches+1 {
+		t.Fatalf("first recovered batch = %#v found=%v err=%v", paused, found, err)
 	}
 }
 

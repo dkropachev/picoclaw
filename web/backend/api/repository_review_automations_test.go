@@ -1245,10 +1245,23 @@ func TestRepositoryReviewAutomationLegacyRecoveryCannotFallThroughWithoutScope(t
 	}
 }
 
-func TestRepositoryReviewAutomationLegacyAutomaticHandoffCannotRunWithoutRecovery(t *testing.T) {
+func TestRepositoryReviewAutomationLegacyAutomaticHandoffUsesRealRecoveryAdapter(t *testing.T) {
 	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
 	controller := handler.repositoryReviewControllerInstance()
+	if controller.recoverCampaign == nil {
+		t.Fatal("production legacy recovery adapter is not wired")
+	}
+	previousRunners := newWorkflowRuntimeRunners
+	t.Cleanup(func() { newWorkflowRuntimeRunners = previousRunners })
+	newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
+		return workflowRuntimeRunners{Agents: &repositoryReviewRecoveryProfileRunner{
+			profile: workflows.RepositoryReviewModelProfile{
+				Revision: "sha256:resolved-profile", AccountRef: "resolved-account",
+				ReviewerModels: []string{"cheap"}, MaxContentBytes: 65536,
+			},
+		}}
+	}
 	commit := strings.Repeat("9", 40)
 	controller.resolveCommit = func(
 		context.Context,
@@ -1287,7 +1300,7 @@ func TestRepositoryReviewAutomationLegacyAutomaticHandoffCannotRunWithoutRecover
 	}
 	if _, startErr := controller.startAutomation(
 		t.Context(), automation.ID, automation.Version, false, "start",
-	); startErr == nil || !strings.Contains(startErr.Error(), "recovery is unavailable") {
+	); !errors.Is(startErr, os.ErrNotExist) {
 		t.Fatalf("automatic legacy handoff error = %v", startErr)
 	}
 	current, found, err := store.GetAutomation(t.Context(), automation.ID)

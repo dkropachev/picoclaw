@@ -836,18 +836,6 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		automation.UpdatedAt.Before(automation.CreatedAt) {
 		return ErrInvalidAutomation
 	}
-	if automation.CampaignRecoveryPending &&
-		(automation.CampaignID == "" || len(automation.RunIDs) == 0 || automation.StartedAt.IsZero() ||
-			automation.ActiveRunID != "" || !automation.CompletedAt.IsZero() ||
-			automation.ScopeSelection == nil || automation.ScopePlan.Hash == "" ||
-			automation.ScopePlan.CommitSHA == "" ||
-			automation.ScopePlan.CommitSHA != automation.ResolvedCommitSHA ||
-			(automation.Status != RepositoryReviewAutomationPaused &&
-				automation.Status != RepositoryReviewAutomationFailed &&
-				(automation.Status != RepositoryReviewAutomationIdle ||
-					!strings.EqualFold(strings.TrimSpace(automation.Progress.Stage), "next batch queued")))) {
-		return fmt.Errorf("%w: invalid campaign recovery state", ErrInvalidAutomation)
-	}
 	if automation.ProfileID == "" {
 		if automation.ProfileVersion != 0 {
 			return fmt.Errorf("%w: profile version requires a profile", ErrInvalidAutomation)

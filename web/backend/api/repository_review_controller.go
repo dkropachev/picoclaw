@@ -144,7 +144,7 @@ type repositoryReviewController struct {
 
 func newRepositoryReviewController(handler *Handler) *repositoryReviewController {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &repositoryReviewController{
+	controller := &repositoryReviewController{
 		handler:              handler,
 		ctx:                  ctx,
 		cancel:               cancel,
@@ -158,6 +158,8 @@ func newRepositoryReviewController(handler *Handler) *repositoryReviewController
 		monitorEvery:         repositoryReviewControllerInterval,
 		progressEvery:        time.Second,
 	}
+	controller.recoverCampaign = controller.recoverLegacyRepositoryReviewCampaign
+	return controller
 }
 
 func (h *Handler) repositoryReviewControllerInstance() *repositoryReviewController {

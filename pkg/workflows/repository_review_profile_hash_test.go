@@ -269,7 +269,7 @@ func TestRepositoryBugFinderProfileHelpersRejectMalformedBoundaryValues(t *testi
 	if _, err := RepositoryBugFinderProfileHash(invalid); err == nil {
 		t.Fatal("zero content profile hash was accepted")
 	}
-	if _, err := RepositoryBugFinderRequiredAssignments(make([]string, 9), false); err == nil {
+	if _, err := RepositoryBugFinderRequiredAssignments(make([]string, 33), false); err == nil {
 		t.Fatal("oversized reviewer denominator was accepted")
 	}
 	if got, err := RepositoryBugFinderEffectiveMaxContentBytes(0, 1024); err != nil || got != 1024 {
