@@ -74,6 +74,8 @@ continues to fail locally until a concrete model is configured.
 
 | `FR-LAUNCHER-026` | MUST | Authenticated `GET /api/accounts` accepts the shared bounded `query`, opaque `cursor`, and `limit` contract and returns registered credential-account summaries with `total`, `next_cursor`, `canonical_query`, and a typed `query_schema`; `GET /api/accounts/{id}` directly resolves the backend-issued fixed-length opaque account ID. List and detail projections contain only ID, provider, canonical credential reference, lifecycle status, auth method, and RFC3339-or-empty expiry, and never expose tokens, secrets, email, upstream account metadata, project metadata, or unrelated auth-store entries. The UI uses the standard List/Table/Grid collection at `/accounts`, routed onboarding at `/accounts/new`, direct detail at `/accounts/{id}`, and exact-identity renewal at `/accounts/{id}/edit`; provider options exist only on New, account selection/bulk deletion is absent, logout remains a confirmed item action, and sanitized Codex/Copilot usage limits remain on detail. Existing OAuth login, renewal, logout, and limit endpoints remain mutation authorities. | Account inventory needs stable deep links and server-authoritative filtering without exposing credential material, presenting provider options as resources, or allowing collection infrastructure to mutate credentials. |
 
+| `FR-LAUNCHER-027` | MUST | The authenticated launcher registers the Git Workspace inventory, direct detail, operational history, scoped settings, reconcile, cleanup, and drop routes owned by `FR-GITWS`. The generic config form does not duplicate Git Workspace policy. Scoped settings writes use the shared same-origin config-mutation boundary and exact config revision, while the gateway restart signature includes effective maximum size, ignored-cleanup delay, and drop delay so a running manager never appears to have applied changed policy. | Git Workspace administration must be routed and revision-safe without duplicating settings or reporting unapplied runtime limits as active. |
+
 ## Data And State Model
 
 Account collection identity is a fixed-length base64url SHA-256 digest over the
@@ -248,6 +250,7 @@ Owns: TEST web/backend/api/weixin*
 | UI | `/development*` | Mutually exclusive intake, portfolio, aggregate workspace, read-only code evidence, workflow configurations, repositories, and lifecycle settings. | `FR-LAUNCHER-009`, `FR-LAUNCHER-021`, `FR-LAUNCHER-022` |
 | UI/PWA | `/notifications*`, manifest, service worker | Sortable attention backlog, saved queries, device controls, app badge, privacy-minimal push, and authenticated deep links. | `FR-LAUNCHER-009`, `FR-LAUNCHER-024` |
 | HTTP/UI | `/api/accounts*`; `/accounts`, `/accounts/new`, `/accounts/{id}`, `/accounts/{id}/edit` | Secret-free typed query/cursor account inventory, direct opaque-ID detail, routed provider onboarding and exact-identity renewal, confirmed logout, and detail-owned sanitized usage limits. | `FR-LAUNCHER-004`, `FR-LAUNCHER-026` |
+| HTTP/UI | `/api/git-workspaces*`; `/agent/git-workspaces*` | Authenticated composition of the feature-owned standard inventory, direct maintenance, operational history, and revision-fenced global limits; effective policy participates in gateway restart detection. | `FR-LAUNCHER-011`, `FR-LAUNCHER-027` |
 | HTTP | `/api/config*`, `/api/models*`, `/api/oauth*`, `/api/system*`, `/api/agents*`, `/api/workflows*` | Existing authenticated management surfaces retain their scoped contracts and shared mutation fencing. | `FR-LAUNCHER-001` through `FR-LAUNCHER-012` |
 
 | HTTP/UI | `/api/model-aliases*`; `/models/aliases*` | Name-addressed typed query/list/detail/CRUD, revision-fenced explicit-name bulk delete, catalog templates on creation only, and standard collection/detail/editor routes. | `FR-LAUNCHER-025` |
@@ -348,6 +351,7 @@ removes or resolves the durable inbox item.
 
 | `FR-LAUNCHER-025` | [web/backend/api/collection_apis_test.go](../../web/backend/api/collection_apis_test.go), [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/frontend/src/api/models.test.ts](../../web/frontend/src/api/models.test.ts), [web/frontend/scripts/check-collection-delta.test.mjs](../../web/frontend/scripts/check-collection-delta.test.mjs), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 | `FR-LAUNCHER-026` | [web/backend/api/accounts_test.go](../../web/backend/api/accounts_test.go), [web/frontend/src/api/accounts.test.ts](../../web/frontend/src/api/accounts.test.ts), [web/frontend/src/components/credentials/account-auth-editor-page.test.tsx](../../web/frontend/src/components/credentials/account-auth-editor-page.test.tsx), [web/frontend/src/routes/-accounts-route.test.tsx](../../web/frontend/src/routes/-accounts-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
+| `FR-LAUNCHER-027` | [web/backend/api/git_workspaces_test.go](../../web/backend/api/git_workspaces_test.go), [web/frontend/src/api/git-workspaces.test.ts](../../web/frontend/src/api/git-workspaces.test.ts), [web/frontend/src/components/agent/git-workspaces](../../web/frontend/src/components/agent/git-workspaces), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 
 ## Implementation Anchors
 
@@ -356,10 +360,12 @@ removes or resolves the durable inbox item.
 - [web/backend/api/pr_workspace_proxy.go](../../web/backend/api/pr_workspace_proxy.go)
 - [web/backend/api/pr_lifecycle_workflow_configurations.go](../../web/backend/api/pr_lifecycle_workflow_configurations.go)
 - [web/backend/api/gateway.go](../../web/backend/api/gateway.go)
+- [web/backend/api/git_workspaces.go](../../web/backend/api/git_workspaces.go)
 - [web/backend/main.go](../../web/backend/main.go)
 - [web/backend/middleware](../../web/backend/middleware)
 - [pkg/config/mutation.go](../../pkg/config/mutation.go)
 - [web/frontend/src/components/app-sidebar.tsx](../../web/frontend/src/components/app-sidebar.tsx)
+- [web/frontend/src/components/agent/git-workspaces](../../web/frontend/src/components/agent/git-workspaces)
 - [web/frontend/src/routes/development.tsx](../../web/frontend/src/routes/development.tsx)
 - [web/frontend/src/routes/development_.new.tsx](../../web/frontend/src/routes/development_.new.tsx)
 - [web/frontend/src/routes/development_.$workspaceID.tsx](../../web/frontend/src/routes/development_.$workspaceID.tsx)

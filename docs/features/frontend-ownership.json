@@ -79,7 +79,7 @@
       "patterns": [
         "web/frontend/src/api/git-workspaces.ts",
         "web/frontend/src/components/agent/git-workspaces/**",
-        "web/frontend/src/routes/agent/git-workspaces.tsx"
+        "web/frontend/src/routes/agent/git-workspaces*.tsx"
       ]
     },
     {

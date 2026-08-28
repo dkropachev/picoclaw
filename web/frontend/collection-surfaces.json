@@ -509,12 +509,40 @@
       "owningSpec": "docs/features/git-workspaces.md",
       "implementationGlobs": [
         "src/routes/agent/git-workspaces.tsx",
-        "src/components/agent/git-workspaces/**"
+        "src/routes/agent/git-workspaces_.$id.tsx",
+        "src/routes/agent/git-workspaces_.history.tsx",
+        "src/routes/agent/git-workspaces_.settings.tsx",
+        "src/api/git-workspaces.ts",
+        "src/components/agent/git-workspaces/git-workspace-route-state.ts",
+        "src/components/agent/git-workspaces/git-workspace-collections.tsx",
+        "src/components/agent/git-workspaces/git-workspace-detail-page.tsx",
+        "src/components/agent/git-workspaces/git-workspace-settings-page.tsx"
       ],
-      "capabilities": ["detail"],
-      "views": ["list"],
-      "status": "legacy",
-      "routes": { "list": "/agent/git-workspaces" }
+      "capabilities": ["query", "pagination", "detail", "related", "settings"],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/agent/git-workspaces",
+        "detail": "/agent/git-workspaces/:id",
+        "related": ["/agent/git-workspaces/history"],
+        "settings": "/agent/git-workspaces/settings"
+      }
+    },
+    {
+      "key": "git-workspace-history",
+      "route": "/agent/git-workspaces/history",
+      "owningSpec": "docs/features/git-workspaces.md",
+      "implementationGlobs": [
+        "src/routes/agent/git-workspaces_.history.tsx",
+        "src/api/git-workspaces.ts",
+        "src/components/agent/git-workspaces/git-workspace-route-state.ts",
+        "src/components/agent/git-workspaces/git-workspace-collections.tsx"
+      ],
+      "capabilities": ["query", "pagination"],
+      "views": ["list", "table"],
+      "status": "exempt",
+      "exemptionReason": "Git workspace history is an operational maintenance log rendered with shared collection primitives, not an administrative inventory.",
+      "routes": { "list": "/agent/git-workspaces/history" }
     },
     {
       "key": "event-ledger",

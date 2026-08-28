@@ -45,6 +45,11 @@ const smokeEventSourceIDs = {
   channel: "MLlxF-61ul3LWbQ4FYizmxMV4hRFb0pm7lh1O4uJ7gs",
 } as const
 
+const smokeGitWorkspaceIDs = {
+  primary: "gw-444444444444",
+  locked: "gw-555555555555",
+} as const
+
 const smokeWorkflowDefinitionIDs: Record<string, string> = {
   "workflows/code-review.yml": "W41H3aj_ymqpg1aP8Vs6TJXUddSpYgjW7VRRcTHj_-I",
   "workflows/github-issue-triage.yml":
@@ -93,6 +98,9 @@ const smokeRoutes = [
   "/logs",
   "/agent/agents",
   "/agent/git-workspaces",
+  `/agent/git-workspaces/${smokeGitWorkspaceIDs.primary}`,
+  "/agent/git-workspaces/history",
+  "/agent/git-workspaces/settings",
   "/agent/mcp/servers",
   "/agent/tools",
   `/agent/tools/${smokeSkillToolIDs.tool}`,
@@ -483,6 +491,24 @@ const mockCollectionSchemas = {
     ["updated", "timestamp"],
     ["completed", "timestamp"],
   ]),
+  gitWorkspaces: collectionSchema([
+    ["id", "string"],
+    ["repository", "string"],
+    ["branch", "string"],
+    ["status", "enum", ["available", "locked", "dropped"]],
+    ["locked", "boolean", ["true", "false"]],
+    ["dirty", "boolean", ["true", "false"]],
+    ["size", "number"],
+    ["ignored", "number"],
+    ["updated", "timestamp"],
+  ]),
+  gitWorkspaceHistory: collectionSchema([
+    ["action", "string"],
+    ["workspace", "string"],
+    ["repository", "string"],
+    ["agent", "string"],
+    ["time", "timestamp"],
+  ]),
 }
 
 const defaultOAuthProviders: OAuthProviderStatus[] = [
@@ -777,52 +803,160 @@ function collectionSchema(
   }
 }
 
+const gitWorkspacePrivateCanary = "controller-private-workspace-must-not-render"
+
+const gitWorkspaceDetails = [
+  {
+    id: smokeGitWorkspaceIDs.primary,
+    repository: "github.com/sipeed/picoclaw.git",
+    repository_id: "gw-666666666666",
+    remote_url: "https://github.com/sipeed/picoclaw.git",
+    branch: "main",
+    current_branch: "main",
+    ref: "main",
+    path: "/tmp/picoclaw-git-workspaces/checkouts/gw-444444444444",
+    status: "available",
+    locked: false,
+    dirty: false,
+    size: 4_194_304,
+    ignored: 524_288,
+    created: "2026-07-15T10:00:00Z",
+    updated: "2026-07-16T12:00:00Z",
+    last_work: "2026-07-16T12:00:00Z",
+    last_cleaned: undefined as string | undefined,
+  },
+  {
+    id: smokeGitWorkspaceIDs.locked,
+    repository: "github.com/octo/launcher.git",
+    repository_id: "gw-777777777777",
+    remote_url: "https://github.com/octo/launcher.git",
+    branch: "feature/collections",
+    current_branch: "feature/collections",
+    ref: "feature/collections",
+    path: "/tmp/picoclaw-git-workspaces/checkouts/gw-555555555555",
+    status: "locked",
+    locked: true,
+    dirty: true,
+    size: 2_097_152,
+    ignored: 65_536,
+    created: "2026-07-15T11:00:00Z",
+    updated: "2026-07-16T11:55:00Z",
+    last_work: "2026-07-16T11:55:00Z",
+    last_cleaned: undefined as string | undefined,
+    locked_by: {
+      agent_id: "reviewer",
+      locked_at: "2026-07-16T11:50:00Z",
+      heartbeat_at: "2026-07-16T11:55:00Z",
+    },
+  },
+]
+
+const gitWorkspaceSummaries = gitWorkspaceDetails.map(
+  ({
+    id,
+    repository,
+    branch,
+    status,
+    locked,
+    dirty,
+    size,
+    ignored,
+    updated,
+  }) => ({
+    id,
+    repository,
+    branch,
+    status,
+    locked,
+    dirty,
+    size,
+    ignored,
+    updated,
+  }),
+)
+
+const gitWorkspaceHistory = [
+  {
+    id: "dddddddddddd",
+    action: "cleaned_ignored",
+    workspace: smokeGitWorkspaceIDs.primary,
+    repository: "github.com/sipeed/picoclaw.git",
+    agent: "main",
+    time: "2026-07-16T12:02:00Z",
+  },
+  {
+    id: "eeeeeeeeeeee",
+    action: "acquired",
+    workspace: smokeGitWorkspaceIDs.locked,
+    repository: "github.com/octo/launcher.git",
+    agent: "reviewer",
+    time: "2026-07-16T11:50:00Z",
+  },
+]
+
 const gitWorkspaceResponse = {
-  root_dir: "/tmp/picoclaw-git-workspaces",
-  max_total_size_bytes: 21474836480,
-  ignored_cleanup_delay_seconds: 86400,
-  drop_delay_seconds: 2592000,
-  total_size_bytes: 4096,
-  ignored_bytes: 512,
-  repository_count: 1,
-  workspace_count: 1,
-  locked_workspace_count: 0,
-  repositories: [
-    {
-      id: "gw-repo",
-      remote_url: "https://example.test/repo.git",
-      first_seen_at: "2026-07-16T12:00:00Z",
-      last_seen_at: "2026-07-16T12:00:00Z",
-      workspace_count: 1,
-      locked_count: 0,
-      size_bytes: 4096,
-      ignored_bytes: 512,
-    },
-  ],
-  workspaces: [
-    {
-      id: "gw-workspace",
-      repo_id: "gw-repo",
-      remote_url: "https://example.test/repo.git",
-      path: "/tmp/picoclaw-git-workspaces/checkouts/repo-gw-workspace",
-      current_branch: "main",
-      dirty: false,
-      size_bytes: 4096,
-      ignored_bytes: 512,
-      created_at: "2026-07-16T12:00:00Z",
-      updated_at: "2026-07-16T12:00:00Z",
-      status: "available",
-    },
-  ],
-  history: [
-    {
-      id: "hist-1",
-      time: "2026-07-16T12:00:00Z",
-      action: "allocated",
-      repo_id: "gw-repo",
-      workspace_id: "gw-workspace",
-    },
-  ],
+  workspaces: gitWorkspaceSummaries,
+  total: gitWorkspaceSummaries.length,
+  next_cursor: "",
+  canonical_query: "ORDER BY updated DESC",
+  query_schema: {
+    ...mockCollectionSchemas.gitWorkspaces,
+    default_order: [{ field: "updated", direction: "DESC" }],
+  },
+  max_total_size_bytes: 21_474_836_480,
+  total_size_bytes: 6_291_456,
+  ignored_bytes: 589_824,
+  repository_count: 2,
+  workspace_count: 2,
+  locked_workspace_count: 1,
+  ignored_cleanup_delay_seconds: 86_400,
+  drop_delay_seconds: 2_592_000,
+}
+
+const gitWorkspaceHistoryResponse = {
+  history: gitWorkspaceHistory,
+  total: gitWorkspaceHistory.length,
+  next_cursor: "",
+  canonical_query: "ORDER BY time DESC",
+  query_schema: {
+    ...mockCollectionSchemas.gitWorkspaceHistory,
+    default_order: [{ field: "time", direction: "DESC" }],
+  },
+}
+
+const gitWorkspaceSettingsResponse = {
+  configured: {
+    max_total_size_bytes: 0,
+    ignored_cleanup_delay_seconds: 0,
+    drop_delay_seconds: 0,
+  },
+  effective: {
+    max_total_size_bytes: 21_474_836_480,
+    ignored_cleanup_delay_seconds: 86_400,
+    drop_delay_seconds: 2_592_000,
+  },
+  config_revision: "sha256:git-workspace-settings-1",
+  effects: {
+    launcher_effect: "applied",
+    catalog_effect: "applied",
+    gateway_effect: "applied",
+  },
+}
+
+function gitWorkspaceSummaryFromDetail(
+  workspace: (typeof gitWorkspaceDetails)[number],
+) {
+  return {
+    id: workspace.id,
+    repository: workspace.repository,
+    branch: workspace.branch,
+    status: workspace.status,
+    locked: workspace.locked,
+    dirty: workspace.dirty,
+    size: workspace.size,
+    ignored: workspace.ignored,
+    updated: workspace.updated,
+  }
 }
 
 const eventResponse = {
@@ -2379,6 +2513,11 @@ interface MockLauncherApiOptions {
   }>
   workflowEventPayloadRequests?: string[]
   workflowCancelReasons?: string[]
+  gitWorkspaceRequests?: Array<{
+    method: string
+    path: string
+    body: Record<string, unknown> | null
+  }>
 }
 
 async function mockLauncherApis(
@@ -2404,6 +2543,10 @@ async function mockLauncherApis(
   let currentEventSourceRevision = 1
   const currentSkills = structuredClone(skillsResponse.skills)
   const currentTools = structuredClone(toolsResponse.tools)
+  const currentGitWorkspaceDetails = structuredClone(gitWorkspaceDetails)
+  let currentGitWorkspaceSettings = structuredClone(
+    gitWorkspaceSettingsResponse,
+  )
   let activeDevelopmentSession: MockWorkflowDevelopmentSession | null = null
   let workflowDefinitions = [
     {
@@ -3056,6 +3199,149 @@ async function mockLauncherApis(
         }
 
         return json(route, { code: "unsupported_event_source_request" }, 405)
+      }
+
+      if (
+        path === "/api/git-workspaces" ||
+        path.startsWith("/api/git-workspaces/")
+      ) {
+        const rawBody = request.postData()
+        const body = rawBody
+          ? (request.postDataJSON() as Record<string, unknown>)
+          : null
+        if (method !== "GET") {
+          options.gitWorkspaceRequests?.push({ method, path, body })
+        }
+        const summaries = currentGitWorkspaceDetails.map(
+          gitWorkspaceSummaryFromDetail,
+        )
+        const activeSummaries = summaries.filter(
+          (workspace) => workspace.status !== "dropped",
+        )
+        const inventoryResponse = () => ({
+          ...gitWorkspaceResponse,
+          workspaces: structuredClone(summaries),
+          total: summaries.length,
+          workspace_count: activeSummaries.length,
+          locked_workspace_count: activeSummaries.filter(
+            (workspace) => workspace.locked,
+          ).length,
+          total_size_bytes: activeSummaries.reduce(
+            (total, workspace) => total + workspace.size,
+            0,
+          ),
+          ignored_bytes: activeSummaries.reduce(
+            (total, workspace) => total + workspace.ignored,
+            0,
+          ),
+          canonical_query:
+            url.searchParams.get("query") ?? "ORDER BY updated DESC",
+        })
+
+        if (method === "GET" && path === "/api/git-workspaces") {
+          return json(route, inventoryResponse())
+        }
+        if (method === "GET" && path === "/api/git-workspaces/history") {
+          return json(route, {
+            ...gitWorkspaceHistoryResponse,
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY time DESC",
+          })
+        }
+        if (path === "/api/git-workspaces/settings") {
+          if (method === "GET") {
+            return json(route, structuredClone(currentGitWorkspaceSettings))
+          }
+          if (method === "PUT") {
+            const settings = body?.settings as
+              | typeof gitWorkspaceSettingsResponse.configured
+              | undefined
+            if (!settings) {
+              return json(
+                route,
+                {
+                  code: "invalid_git_workspace_settings",
+                  message: "Settings are required",
+                },
+                400,
+              )
+            }
+            currentGitWorkspaceSettings = {
+              ...currentGitWorkspaceSettings,
+              configured: structuredClone(settings),
+              effective: structuredClone(settings),
+              config_revision: "sha256:git-workspace-settings-2",
+            }
+            return json(route, structuredClone(currentGitWorkspaceSettings))
+          }
+        }
+        if (method === "POST" && path === "/api/git-workspaces/reconcile") {
+          return json(route, {
+            cleaned: [],
+            dropped: [],
+            stats: inventoryResponse(),
+          })
+        }
+        if (method === "POST" && path === "/api/git-workspaces/cleanup") {
+          const workspaceID = String(body?.workspace_id ?? "")
+          const workspace = currentGitWorkspaceDetails.find(
+            (candidate) => candidate.id === workspaceID,
+          )
+          if (!workspace || workspace.locked) {
+            return json(
+              route,
+              { code: "git_workspace_locked", message: "Workspace is locked" },
+              409,
+            )
+          }
+          const before = workspace.ignored
+          workspace.ignored = 0
+          workspace.updated = "2026-07-16T12:03:00Z"
+          workspace.last_cleaned = workspace.updated
+          return json(route, {
+            workspace: structuredClone(workspace),
+            before_ignored_bytes: before,
+            after_ignored_bytes: 0,
+          })
+        }
+        const detailMatch = path.match(/^\/api\/git-workspaces\/([^/]+)$/)
+        if (detailMatch) {
+          const workspaceID = decodeURIComponent(detailMatch[1])
+          const workspace = currentGitWorkspaceDetails.find(
+            (candidate) => candidate.id === workspaceID,
+          )
+          if (!workspace) {
+            return json(
+              route,
+              {
+                code: "git_workspace_not_found",
+                message: "Git workspace not found",
+              },
+              404,
+            )
+          }
+          if (method === "GET") {
+            return json(route, {
+              workspace: structuredClone(workspace),
+              root_dir: "/tmp/picoclaw-git-workspaces",
+            })
+          }
+          if (method === "DELETE") {
+            if (workspace.locked) {
+              return json(
+                route,
+                {
+                  code: "git_workspace_locked",
+                  message: "Workspace is locked",
+                },
+                409,
+              )
+            }
+            workspace.status = "dropped"
+            return json(route, { workspace: structuredClone(workspace) })
+          }
+        }
+        return json(route, { code: "unsupported_git_workspace_request" }, 405)
       }
 
       if (
@@ -8582,6 +8868,158 @@ test("tool adaptation worst-state row fits a narrow mobile viewport", async ({
   await expect(mobileMetrics.getByText("Cache")).toBeVisible()
   await expect(mobileMetrics.getByText("Flexible")).toBeVisible()
 
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("git workspace inventory and history use canonical routed collections", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const publicGitWorkspaceBodies: string[] = []
+  page.on("response", async (response) => {
+    const url = new URL(response.url())
+    if (
+      url.pathname.startsWith("/api/git-workspaces") &&
+      response.request().method() === "GET"
+    ) {
+      publicGitWorkspaceBodies.push(await response.text())
+    }
+  })
+  await gotoMockedRoute(page, "/agent/git-workspaces?tab=history&view=grid")
+
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe("ORDER BY updated DESC")
+  const normalized = new URL(page.url())
+  expect(normalized.searchParams.get("tab")).toBeNull()
+  expect(normalized.searchParams.get("view")).toBe("grid")
+  await expect(page.locator("body")).not.toContainText(
+    gitWorkspacePrivateCanary,
+  )
+
+  const workspace = page.locator(
+    `[data-item-id="${smokeGitWorkspaceIDs.primary}"]`,
+  )
+  await expect(workspace).toBeVisible()
+  await workspace.focus()
+  await page.keyboard.press("Enter")
+  await expect
+    .poll(() => new URL(page.url()).pathname)
+    .toBe(`/agent/git-workspaces/${smokeGitWorkspaceIDs.primary}`)
+  await expect(
+    page.locator('[data-slot="collection-detail-shell"]'),
+  ).toBeVisible()
+  await expect(page.getByText("Checkout", { exact: true })).toBeVisible()
+
+  await page.goBack()
+  await expect
+    .poll(() => new URL(page.url()).pathname)
+    .toBe("/agent/git-workspaces")
+  const restored = new URL(page.url())
+  expect(restored.searchParams.get("q")).toBe("ORDER BY updated DESC")
+  expect(restored.searchParams.get("view")).toBe("grid")
+  await expect(workspace).toBeVisible()
+
+  await page.goto("/agent/git-workspaces/history")
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe("ORDER BY time DESC")
+  await expect(page.getByRole("button", { name: "Grid view" })).toHaveCount(0)
+  await expect(
+    page.getByText("Cleaned ignored", { exact: true }).first(),
+  ).toBeVisible()
+  await expect(page.locator("body")).not.toContainText(
+    gitWorkspacePrivateCanary,
+  )
+  expect(publicGitWorkspaceBodies.join("\n")).not.toContain(
+    gitWorkspacePrivateCanary,
+  )
+  expect(publicGitWorkspaceBodies.join("\n")).not.toContain("session_key")
+  expect(publicGitWorkspaceBodies.join("\n")).not.toContain("reservation")
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("git workspace maintenance and settings require explicit actions", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const requests: NonNullable<MockLauncherApiOptions["gitWorkspaceRequests"]> =
+    []
+  await gotoMockedRoute(
+    page,
+    `/agent/git-workspaces/${smokeGitWorkspaceIDs.primary}`,
+    { gitWorkspaceRequests: requests },
+  )
+
+  await page.getByRole("button", { name: "Clean ignored files" }).click()
+  const cleanDialog = page.getByRole("alertdialog", {
+    name: "Clean ignored files?",
+  })
+  await expect(cleanDialog).toBeVisible()
+  expect(requests).toEqual([])
+  await cleanDialog.getByRole("button", { name: "Clean", exact: true }).click()
+  await expect.poll(() => requests.length).toBe(1)
+  expect(requests[0]).toEqual({
+    method: "POST",
+    path: "/api/git-workspaces/cleanup",
+    body: { workspace_id: smokeGitWorkspaceIDs.primary },
+  })
+
+  await page.getByRole("button", { name: "Drop workspace" }).click()
+  const dropDialog = page.getByRole("alertdialog", {
+    name: "Drop local checkout?",
+  })
+  await expect(dropDialog).toBeVisible()
+  expect(requests).toHaveLength(1)
+  await dropDialog.getByRole("button", { name: "Drop", exact: true }).click()
+  await expect
+    .poll(() => new URL(page.url()).pathname)
+    .toBe("/agent/git-workspaces")
+  expect(requests.at(-1)).toEqual({
+    method: "DELETE",
+    path: `/api/git-workspaces/${smokeGitWorkspaceIDs.primary}`,
+    body: null,
+  })
+
+  await page.goto(`/agent/git-workspaces/${smokeGitWorkspaceIDs.locked}`)
+  await expect(page.getByText("Locked", { exact: true }).first()).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Clean ignored files" }),
+  ).toBeDisabled()
+  await expect(
+    page.getByRole("button", { name: "Drop workspace" }),
+  ).toBeDisabled()
+
+  await page.goto("/agent/git-workspaces/settings")
+  const maximum = page.getByLabel("Maximum total size (bytes)")
+  await expect(maximum).toHaveValue("0")
+  await maximum.fill("10737418240")
+  await page.getByRole("button", { name: "Save settings" }).click()
+  await expect.poll(() => requests.length).toBe(3)
+  expect(requests[2]).toEqual({
+    method: "PUT",
+    path: "/api/git-workspaces/settings",
+    body: {
+      expected_config_revision: "sha256:git-workspace-settings-1",
+      settings: {
+        max_total_size_bytes: 10_737_418_240,
+        ignored_cleanup_delay_seconds: 0,
+        drop_delay_seconds: 0,
+      },
+    },
+  })
+  await page
+    .locator("[data-sonner-toaster]")
+    .evaluateAll((toasters) => toasters.forEach((toast) => toast.remove()))
+  await expect(page.locator("body")).not.toContainText(
+    gitWorkspacePrivateCanary,
+  )
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
