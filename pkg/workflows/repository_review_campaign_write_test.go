@@ -189,8 +189,8 @@ func TestNativeRepositoryReviewCampaignEvidenceIncludesEveryChild(t *testing.T) 
 	}, plan)
 	if err != nil || len(evidence.ReviewEvidence) != 2 ||
 		!evidence.ReviewEvidence[0].Successful || evidence.ReviewEvidence[1].Successful ||
-		evidence.ReviewEvidence[0].AssignmentID != "managed-000001" ||
-		evidence.ReviewEvidence[1].AssignmentID != "managed-000002" ||
+		evidence.ReviewEvidence[0].AssignmentID != "legacy-managed-child-000001" ||
+		evidence.ReviewEvidence[1].AssignmentID != "legacy-managed-child-000002" ||
 		!reflect.DeepEqual(evidence.InspectedFiles, []repoaudit.FileRef{first, second}) ||
 		len(evidence.CompletedFiles) != 0 {
 		t.Fatalf("campaign evidence=%#v err=%v", evidence, err)
@@ -210,15 +210,16 @@ func TestNativeRepositoryReviewCampaignTransientUnavailableEvidenceRemainsPendin
 		"managed_children":  []map[string]any{},
 		"unavailable_files": nativeRepositoryReviewFileMaps([]repoaudit.FileRef{file}),
 	}, plan)
-	if err != nil || len(evidence.ReviewEvidence) != 4 || len(evidence.InspectedFiles) != 0 ||
-		len(evidence.CompletedFiles) != 0 {
+	if err != nil || evidence.ReviewEvidence == nil || evidence.InspectedFiles == nil ||
+		evidence.CompletedFiles == nil || len(evidence.ReviewEvidence) != 4 ||
+		len(evidence.InspectedFiles) != 0 || len(evidence.CompletedFiles) != 0 {
 		t.Fatalf("transient evidence=%#v err=%v", evidence, err)
 	}
-	for index, child := range evidence.ReviewEvidence {
+	for _, child := range evidence.ReviewEvidence {
 		if !child.Required || child.Successful ||
-			!strings.HasSuffix(child.AssignmentID, []string{"-001", "-002", "-003", "-004"}[index]) ||
+			!strings.HasPrefix(child.AssignmentID, "legacy-managed-child-") ||
 			!reflect.DeepEqual(child.ScopeFiles, []repoaudit.FileRef{file}) {
-			t.Fatalf("transient child %d=%#v", index, child)
+			t.Fatalf("transient child=%#v", child)
 		}
 	}
 }
@@ -322,15 +323,24 @@ func TestNativeRepositoryReviewCampaignEvidenceHandlesPartialAndMalformedChildre
 		})
 	}
 
-	for name, child := range map[string]map[string]any{
-		"invalid acknowledgement": {
-			"index": 1, "required": true, "valid": true, "scope": completeScope,
-			"model": map[string]any{"selected": "review-a"},
-			"structured": map[string]any{
-				"summary": "reviewed", "reviewedFiles": []any{"missing.go"},
-				"findings": []any{}, "residualRisks": []any{},
-			},
+	invalidAcknowledgement := map[string]any{
+		"index": 1, "required": true, "valid": true, "scope": completeScope,
+		"model": map[string]any{"selected": "review-a"},
+		"structured": map[string]any{
+			"summary": "reviewed", "reviewedFiles": []any{"missing.go"},
+			"findings": []any{}, "residualRisks": []any{},
 		},
+	}
+	evidence, err := nativeRepositoryReviewRecordEvidence(map[string]any{
+		"managed_children": []map[string]any{invalidAcknowledgement},
+	}, plan)
+	if err != nil || len(evidence.ReviewEvidence) != 1 ||
+		evidence.ReviewEvidence[0].Successful || len(evidence.Observations) != 0 ||
+		len(evidence.InspectedFiles) != 0 || len(evidence.CompletedFiles) != 0 {
+		t.Fatalf("downgraded acknowledgement=%#v err=%v", evidence, err)
+	}
+
+	for name, child := range map[string]map[string]any{
 		"missing model": {
 			"index": 1, "required": true, "valid": true, "scope": completeScope,
 			"structured": validOutput,
@@ -345,18 +355,15 @@ func TestNativeRepositoryReviewCampaignEvidenceHandlesPartialAndMalformedChildre
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			evidence, err := nativeRepositoryReviewRecordEvidence(map[string]any{
+			if malformedEvidence, malformedErr := nativeRepositoryReviewRecordEvidence(map[string]any{
 				"managed_children": []map[string]any{child},
-			}, plan)
-			if err != nil || len(evidence.ReviewEvidence) != 1 ||
-				evidence.ReviewEvidence[0].Successful || len(evidence.Observations) != 0 ||
-				len(evidence.InspectedFiles) != 0 || len(evidence.CompletedFiles) != 0 {
-				t.Fatalf("downgraded evidence=%#v err=%v", evidence, err)
+			}, plan); malformedErr == nil {
+				t.Fatalf("malformed valid child accepted: %#v", malformedEvidence)
 			}
 		})
 	}
 
-	evidence, err := nativeRepositoryReviewRecordEvidence(map[string]any{
+	evidence, err = nativeRepositoryReviewRecordEvidence(map[string]any{
 		"managed_children": []map[string]any{{
 			"index": 1, "required": true, "valid": true, "scope": completeScope,
 			"model": map[string]any{"default": "default-reviewer"}, "structured": validOutput,
@@ -387,13 +394,6 @@ func TestNativeRepositoryReviewCampaignEvidenceBoundaryHelpers(t *testing.T) {
 		if ok != test.want || test.want && index != 1 {
 			t.Fatalf("child index %#v = (%d, %v), want valid=%v", test.value, index, ok, test.want)
 		}
-	}
-	sentinel := errors.New("sentinel")
-	if got := firstNonNilError(nil, sentinel); !errors.Is(got, sentinel) {
-		t.Fatalf("first nonnil error=%v", got)
-	}
-	if got := firstNonNilError(nil); got == nil {
-		t.Fatal("empty error list returned nil")
 	}
 }
 

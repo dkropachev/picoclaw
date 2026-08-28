@@ -64,16 +64,14 @@ func TestRepositoryReviewWorkflowEventEndpointScrubsCampaignAuthority(t *testing
 
 func TestRepositoryReviewWorkflowRunProjectionDeeplyScrubsCampaignAuthority(t *testing.T) {
 	const canary = "rrc_api_projection_canary"
-	if scrubRepositoryReviewCampaignRun(nil) != nil ||
-		scrubRepositoryReviewCampaignMap(nil) != nil {
-		t.Fatal("nil campaign projections were materialized")
-	}
+	snapshot := &workflowRunPrivacySnapshot{}
 	ordinary := &workflows.Run{
 		WorkflowRef: "workflows/ordinary.yml",
 		Inputs:      map[string]any{"campaign_id": canary},
 	}
-	if projected := scrubRepositoryReviewCampaignRun(ordinary); projected != ordinary ||
-		projected.Inputs["campaign_id"] != canary {
+	if projected := snapshot.projectRunForBrowser(
+		t.Context(), nil, ordinary,
+	); projected.Inputs["campaign_id"] != canary {
 		t.Fatalf("ordinary workflow projection=%#v", projected)
 	}
 
@@ -100,7 +98,7 @@ func TestRepositoryReviewWorkflowRunProjectionDeeplyScrubsCampaignAuthority(t *t
 			"record": {Outputs: map[string]any{"campaignId": canary, "safe": "step"}},
 		},
 	}
-	projected := scrubRepositoryReviewCampaignRun(run)
+	projected := snapshot.projectRunForBrowser(t.Context(), nil, run)
 	if projected == run || projected.Inputs["campaign_id"] != nil ||
 		projected.Inputs["nested"].(map[string]any)["campaignId"] != nil ||
 		projected.Inputs["nested"].(map[string]any)["safe"] != "input" ||
