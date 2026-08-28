@@ -485,13 +485,13 @@ func runGoCoverage(
 		return cmd.CombinedOutput()
 	}
 	// The guard tests detached base and head worktrees. A synchronization fix
-	// in head cannot change the historical base test, so retry only an exact
-	// cleanup-only failure from base once. Head failures are always final.
-	out, err, retried := runCoverageCommandWithCleanupRetry(label, run)
+	// in head cannot change a known historical base test race, so retry only an
+	// exact recognized failure from base once. Head failures are always final.
+	out, err, retried := runCoverageCommandWithBaselineRetry(label, run)
 	if retried {
 		fmt.Fprintf(
 			os.Stderr,
-			"coverage delta: retried %s (%s) after known TempDir cleanup race\n",
+			"coverage delta: retried %s (%s) after known baseline test race\n",
 			label,
 			ref,
 		)
@@ -511,16 +511,138 @@ func runGoCoverage(
 	return profile, nil
 }
 
-func runCoverageCommandWithCleanupRetry(
+func runCoverageCommandWithBaselineRetry(
 	label string,
 	run func() ([]byte, error),
 ) ([]byte, error, bool) {
 	out, err := run()
-	if err == nil || label != "base" || !isKnownCoverageTempDirCleanupRace(out) {
+	if err == nil || label != "base" || !isKnownCoverageBaselineFlake(out) {
 		return out, err, false
 	}
 	out, err = run()
 	return out, err, true
+}
+
+func isKnownCoverageBaselineFlake(out []byte) bool {
+	return isKnownCoverageTempDirCleanupRace(out) ||
+		isKnownRepositoryModelEvaluationCancellationRace(out)
+}
+
+func isKnownRepositoryModelEvaluationCancellationRace(out []byte) bool {
+	const (
+		batchCancellationTest     = "TestRepositoryModelEvaluationControllerBatchFailureAndRunningCancellation"
+		batchCancellationSubtest  = batchCancellationTest + "/running_cancellation"
+		cancellationRestartTest   = "TestRepositoryModelEvaluationControllerCancellationAndRestart"
+		controllerTestFile        = "repository_model_evaluation_controller_test.go"
+		evaluationsTestFile       = "repository_model_evaluations_test.go"
+		failedPackage             = "github.com/sipeed/picoclaw/web/backend/api"
+		staleTransitionDiagnostic = "cancel status=409 body={\"code\":\"stale_repository_model_evaluation\",\"message\":\"invalid repository evaluation status transition\"}"
+		staleStateDiagnostic      = "cancel status=409 body={\"code\":\"stale_repository_model_evaluation\",\"message\":\"repository evaluation state changed\"}"
+	)
+
+	var (
+		failureMarkers  []string
+		diagnostics     []string
+		packageFailures int
+		failurePackage  string
+	)
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "--- FAIL:") {
+			name, ok := coverageFailedTestName(line)
+			if !ok {
+				return false
+			}
+			failureMarkers = append(failureMarkers, name)
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "FAIL" {
+			packageFailures++
+			failurePackage = fields[1]
+		}
+		if coverageGoTestDiagnostic(line) {
+			diagnostics = append(diagnostics, line)
+		}
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") ||
+			strings.Contains(line, "[build failed]") ||
+			strings.Contains(line, "[setup failed]") {
+			return false
+		}
+	}
+	if scanner.Err() != nil || packageFailures != 1 || failurePackage != failedPackage ||
+		len(diagnostics) != 1 {
+		return false
+	}
+
+	switch {
+	case len(failureMarkers) == 2 &&
+		failureMarkers[0] == batchCancellationTest &&
+		failureMarkers[1] == batchCancellationSubtest:
+		return isExactCoverageTestDiagnostic(
+			diagnostics[0],
+			controllerTestFile,
+			staleTransitionDiagnostic,
+		)
+	case len(failureMarkers) == 1 && failureMarkers[0] == cancellationRestartTest:
+		return isExactCoverageTestDiagnostic(
+			diagnostics[0],
+			evaluationsTestFile,
+			staleStateDiagnostic,
+		)
+	default:
+		return false
+	}
+}
+
+func coverageGoTestDiagnostic(line string) bool {
+	goSuffix := strings.Index(line, ".go:")
+	if goSuffix < 0 {
+		return false
+	}
+	lineAndDiagnostic := line[goSuffix+len(".go:"):]
+	separator := strings.Index(lineAndDiagnostic, ": ")
+	if separator <= 0 {
+		return false
+	}
+	for _, character := range lineAndDiagnostic[:separator] {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func coverageFailedTestName(line string) (string, bool) {
+	const prefix = "--- FAIL: "
+	if !strings.HasPrefix(line, prefix) {
+		return "", false
+	}
+	nameAndDuration := strings.TrimPrefix(line, prefix)
+	durationIndex := strings.LastIndex(nameAndDuration, " (")
+	if durationIndex <= 0 || !strings.HasSuffix(nameAndDuration, ")") {
+		return "", false
+	}
+	return nameAndDuration[:durationIndex], true
+}
+
+func isExactCoverageTestDiagnostic(line, file, diagnostic string) bool {
+	prefix := file + ":"
+	if !strings.HasPrefix(line, prefix) {
+		return false
+	}
+	lineAndDiagnostic := strings.TrimPrefix(line, prefix)
+	separator := strings.Index(lineAndDiagnostic, ": ")
+	if separator <= 0 || lineAndDiagnostic[separator+2:] != diagnostic {
+		return false
+	}
+	lineNumber := lineAndDiagnostic[:separator]
+	for _, character := range lineNumber {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func isKnownCoverageTempDirCleanupRace(out []byte) bool {
@@ -570,6 +692,9 @@ func isKnownCoverageTempDirCleanupRace(out []byte) bool {
 			):
 				workflowCleanupFailure++
 			}
+		}
+		if coverageGoTestDiagnostic(line) && !strings.Contains(line, cleanupPrefix) {
+			return false
 		}
 		fields := strings.Fields(line)
 		if len(fields) >= 2 && fields[0] == "FAIL" {

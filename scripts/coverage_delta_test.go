@@ -269,6 +269,25 @@ func knownWorkflowTempDirCleanupRaceOutput() string {
 	}, "\n")
 }
 
+func knownRepositoryModelEvaluationBatchCancellationRaceOutput() string {
+	return strings.Join([]string{
+		"--- FAIL: TestRepositoryModelEvaluationControllerBatchFailureAndRunningCancellation (0.11s)",
+		"    --- FAIL: TestRepositoryModelEvaluationControllerBatchFailureAndRunningCancellation/running_cancellation (0.06s)",
+		"        repository_model_evaluation_controller_test.go:1304: cancel status=409 body={\"code\":\"stale_repository_model_evaluation\",\"message\":\"invalid repository evaluation status transition\"}",
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/web/backend/api\t203.005s",
+	}, "\n")
+}
+
+func knownRepositoryModelEvaluationCancellationRestartRaceOutput() string {
+	return strings.Join([]string{
+		"--- FAIL: TestRepositoryModelEvaluationControllerCancellationAndRestart (0.06s)",
+		"    repository_model_evaluations_test.go:859: cancel status=409 body={\"code\":\"stale_repository_model_evaluation\",\"message\":\"repository evaluation state changed\"}",
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/web/backend/api\t203.005s",
+	}, "\n")
+}
+
 func TestKnownCoverageTempDirCleanupRace(t *testing.T) {
 	agentCleanupRace := knownAgentTempDirCleanupRaceOutput()
 	workflowCleanupRace := knownWorkflowTempDirCleanupRaceOutput()
@@ -413,6 +432,231 @@ func TestKnownCoverageTempDirCleanupRace(t *testing.T) {
 	}
 }
 
+func TestKnownCoverageTempDirCleanupRaceRejectsExtraTestingDiagnostic(t *testing.T) {
+	for name, output := range map[string]string{
+		"agent":    knownAgentTempDirCleanupRaceOutput(),
+		"workflow": knownWorkflowTempDirCleanupRaceOutput(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			output += "\n    testing.go:1400: unrelated framework failure"
+			if isKnownCoverageTempDirCleanupRace([]byte(output)) {
+				t.Fatal("cleanup race with an extra testing diagnostic was accepted")
+			}
+			if isKnownCoverageBaselineFlake([]byte(output)) {
+				t.Fatal("baseline classifier accepted an extra testing diagnostic")
+			}
+		})
+	}
+}
+
+func TestKnownRepositoryModelEvaluationCancellationRace(t *testing.T) {
+	batchCancellation := knownRepositoryModelEvaluationBatchCancellationRaceOutput()
+	cancellationRestart := knownRepositoryModelEvaluationCancellationRestartRaceOutput()
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "batch running cancellation",
+			output: batchCancellation,
+			want:   true,
+		},
+		{
+			name:   "cancellation and restart",
+			output: cancellationRestart,
+			want:   true,
+		},
+		{
+			name: "additional failing test",
+			output: batchCancellation + "\n" +
+				"--- FAIL: TestRepositoryModelEvaluationControllerLeaseLoss (0.01s)",
+		},
+		{
+			name: "additional test diagnostic",
+			output: cancellationRestart + "\n" +
+				"    repository_model_evaluations_test.go:900: unrelated assertion",
+		},
+		{
+			name: "batch additional testing diagnostic",
+			output: batchCancellation + "\n" +
+				"    testing.go:1369: TempDir RemoveAll cleanup: directory not empty",
+		},
+		{
+			name: "restart additional testing diagnostic",
+			output: cancellationRestart + "\n" +
+				"    testing.go:1369: TempDir RemoveAll cleanup: directory not empty",
+		},
+		{
+			name: "additional failed package",
+			output: cancellationRestart + "\n" +
+				"FAIL\tgithub.com/sipeed/picoclaw/pkg/workflows\t0.01s",
+		},
+		{
+			name: "wrong stale transition message",
+			output: strings.Replace(
+				batchCancellation,
+				"invalid repository evaluation status transition",
+				"repository evaluation state changed",
+				1,
+			),
+		},
+		{
+			name: "wrong stale state message",
+			output: strings.Replace(
+				cancellationRestart,
+				"repository evaluation state changed",
+				"invalid repository evaluation status transition",
+				1,
+			),
+		},
+		{
+			name: "wrong package",
+			output: strings.Replace(
+				batchCancellation,
+				"github.com/sipeed/picoclaw/web/backend/api",
+				"github.com/sipeed/picoclaw/pkg/repoeval",
+				1,
+			),
+		},
+		{
+			name: "wrong subtest marker",
+			output: strings.Replace(
+				batchCancellation,
+				"/running_cancellation",
+				"/batch_failure",
+				1,
+			),
+		},
+		{
+			name: "wrong diagnostic file",
+			output: strings.Replace(
+				cancellationRestart,
+				"repository_model_evaluations_test.go",
+				"repository_model_evaluation_controller_test.go",
+				1,
+			),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := isKnownRepositoryModelEvaluationCancellationRace([]byte(test.output))
+			if got != test.want {
+				t.Fatalf(
+					"isKnownRepositoryModelEvaluationCancellationRace() = %t, want %t",
+					got,
+					test.want,
+				)
+			}
+			if got && !isKnownCoverageBaselineFlake([]byte(test.output)) {
+				t.Fatal("recognized cancellation race was rejected by baseline classifier")
+			}
+		})
+	}
+}
+
+func TestRunCoverageCommandRetriesOnlyKnownBaselineFlakes(t *testing.T) {
+	batchCancellation := knownRepositoryModelEvaluationBatchCancellationRaceOutput()
+	cancellationRestart := knownRepositoryModelEvaluationCancellationRestartRaceOutput()
+	tests := []struct {
+		name         string
+		label        string
+		output       string
+		wantRetried  bool
+		wantAttempts int
+	}{
+		{
+			name:         "base batch running cancellation",
+			label:        "base",
+			output:       batchCancellation,
+			wantRetried:  true,
+			wantAttempts: 2,
+		},
+		{
+			name:         "base cancellation and restart",
+			label:        "base",
+			output:       cancellationRestart,
+			wantRetried:  true,
+			wantAttempts: 2,
+		},
+		{
+			name:  "base additional failure",
+			label: "base",
+			output: cancellationRestart + "\n" +
+				"--- FAIL: TestRepositoryModelEvaluationControllerLeaseLoss (0.01s)",
+			wantAttempts: 1,
+		},
+		{
+			name:  "base wrong message",
+			label: "base",
+			output: strings.Replace(
+				batchCancellation,
+				"invalid repository evaluation status transition",
+				"repository evaluation state changed",
+				1,
+			),
+			wantAttempts: 1,
+		},
+		{
+			name:  "base wrong package",
+			label: "base",
+			output: strings.Replace(
+				cancellationRestart,
+				"github.com/sipeed/picoclaw/web/backend/api",
+				"github.com/sipeed/picoclaw/web/backend",
+				1,
+			),
+			wantAttempts: 1,
+		},
+		{
+			name:         "head batch running cancellation",
+			label:        "head",
+			output:       batchCancellation,
+			wantAttempts: 1,
+		},
+		{
+			name:         "head cancellation and restart",
+			label:        "head",
+			output:       cancellationRestart,
+			wantAttempts: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			wantErr := errors.New("exit status 1")
+			attempts := 0
+			out, err, retried := runCoverageCommandWithBaselineRetry(
+				test.label,
+				func() ([]byte, error) {
+					attempts++
+					if attempts == 1 {
+						return []byte(test.output), wantErr
+					}
+					return []byte("ok"), nil
+				},
+			)
+			if retried != test.wantRetried || attempts != test.wantAttempts {
+				t.Fatalf(
+					"runCoverageCommandWithBaselineRetry() retried=%t attempts=%d, want retried=%t attempts=%d",
+					retried,
+					attempts,
+					test.wantRetried,
+					test.wantAttempts,
+				)
+			}
+			if test.wantRetried {
+				if err != nil || string(out) != "ok" {
+					t.Fatalf("retry result = (%q, %v), want (ok, nil)", out, err)
+				}
+				return
+			}
+			if !errors.Is(err, wantErr) || string(out) != test.output {
+				t.Fatalf("non-retry result = (%q, %v), want original failure", out, err)
+			}
+		})
+	}
+}
+
 func TestRunCoverageCommandRetriesKnownCleanupRaceOnce(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -423,7 +667,7 @@ func TestRunCoverageCommandRetriesKnownCleanupRaceOnce(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			attempts := 0
-			out, err, retried := runCoverageCommandWithCleanupRetry(
+			out, err, retried := runCoverageCommandWithBaselineRetry(
 				"base",
 				func() ([]byte, error) {
 					attempts++
@@ -435,7 +679,7 @@ func TestRunCoverageCommandRetriesKnownCleanupRaceOnce(t *testing.T) {
 			)
 			if err != nil || string(out) != "ok" || !retried || attempts != 2 {
 				t.Fatalf(
-					"runCoverageCommandWithCleanupRetry() = (%q, %v, %t), attempts = %d",
+					"runCoverageCommandWithBaselineRetry() = (%q, %v, %t), attempts = %d",
 					out,
 					err,
 					retried,
@@ -457,7 +701,7 @@ func TestRunCoverageCommandDoesNotRetryHeadCleanupRace(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			wantErr := errors.New("exit status 1")
 			attempts := 0
-			out, err, retried := runCoverageCommandWithCleanupRetry(
+			out, err, retried := runCoverageCommandWithBaselineRetry(
 				"head",
 				func() ([]byte, error) {
 					attempts++
@@ -467,7 +711,7 @@ func TestRunCoverageCommandDoesNotRetryHeadCleanupRace(t *testing.T) {
 			if !errors.Is(err, wantErr) || string(out) != test.output ||
 				retried || attempts != 1 {
 				t.Fatalf(
-					"runCoverageCommandWithCleanupRetry() = (%q, %v, %t), attempts = %d",
+					"runCoverageCommandWithBaselineRetry() = (%q, %v, %t), attempts = %d",
 					out,
 					err,
 					retried,
@@ -482,7 +726,7 @@ func TestRunCoverageCommandPreservesFunctionalSecondAttempt(t *testing.T) {
 	wantErr := errors.New("exit status 1")
 	wantOutput := "--- FAIL: TestLeaseLoss (0.01s)"
 	attempts := 0
-	out, err, retried := runCoverageCommandWithCleanupRetry(
+	out, err, retried := runCoverageCommandWithBaselineRetry(
 		"base",
 		func() ([]byte, error) {
 			attempts++
@@ -495,7 +739,7 @@ func TestRunCoverageCommandPreservesFunctionalSecondAttempt(t *testing.T) {
 	if !errors.Is(err, wantErr) || string(out) != wantOutput ||
 		!retried || attempts != 2 {
 		t.Fatalf(
-			"runCoverageCommandWithCleanupRetry() = (%q, %v, %t), attempts = %d",
+			"runCoverageCommandWithBaselineRetry() = (%q, %v, %t), attempts = %d",
 			out,
 			err,
 			retried,
@@ -508,7 +752,7 @@ func TestRunCoverageCommandDoesNotRetryKnownCleanupRaceTwice(t *testing.T) {
 	cleanupRace := []byte(knownAgentTempDirCleanupRaceOutput())
 	wantErr := errors.New("exit status 1")
 	attempts := 0
-	out, err, retried := runCoverageCommandWithCleanupRetry(
+	out, err, retried := runCoverageCommandWithBaselineRetry(
 		"base",
 		func() ([]byte, error) {
 			attempts++
@@ -518,7 +762,7 @@ func TestRunCoverageCommandDoesNotRetryKnownCleanupRaceTwice(t *testing.T) {
 	if !errors.Is(err, wantErr) || string(out) != string(cleanupRace) ||
 		!retried || attempts != 2 {
 		t.Fatalf(
-			"runCoverageCommandWithCleanupRetry() = (%q, %v, %t), attempts = %d",
+			"runCoverageCommandWithBaselineRetry() = (%q, %v, %t), attempts = %d",
 			out,
 			err,
 			retried,
@@ -530,7 +774,7 @@ func TestRunCoverageCommandDoesNotRetryKnownCleanupRaceTwice(t *testing.T) {
 func TestRunCoverageCommandDoesNotRetryUnrelatedFailure(t *testing.T) {
 	wantErr := errors.New("exit status 1")
 	attempts := 0
-	out, err, retried := runCoverageCommandWithCleanupRetry(
+	out, err, retried := runCoverageCommandWithBaselineRetry(
 		"base",
 		func() ([]byte, error) {
 			attempts++
@@ -540,7 +784,7 @@ func TestRunCoverageCommandDoesNotRetryUnrelatedFailure(t *testing.T) {
 	if !errors.Is(err, wantErr) || string(out) != "--- FAIL: TestLeaseLoss (0.01s)" ||
 		retried || attempts != 1 {
 		t.Fatalf(
-			"runCoverageCommandWithCleanupRetry() = (%q, %v, %t), attempts = %d",
+			"runCoverageCommandWithBaselineRetry() = (%q, %v, %t), attempts = %d",
 			out,
 			err,
 			retried,

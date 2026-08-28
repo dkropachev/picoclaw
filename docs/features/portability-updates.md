@@ -108,9 +108,11 @@ credentialed release publishing.
 - Coverage comparison fails on any global uncovered-debt increase or an impacted
   feature increase beyond ten statements; a percentage or covered-count drop
   caused only by deleting code is not a failure.
-- Coverage comparison retries either exact recognized base TempDir cleanup race
-  at most once and preserves the second attempt's result; all head,
-  unrecognized, or repeated failures remain visible.
+- Coverage comparison retries an exact recognized baseline race at most once:
+  either supported TempDir cleanup signature or one of the two pinned repository
+  model-evaluation cancellation signatures. The classifier rejects any extra
+  test diagnostic, failure marker, or failed package and preserves the second
+  attempt's result; all head, unrecognized, or repeated failures remain visible.
 
 ## Acceptance Evidence
 
