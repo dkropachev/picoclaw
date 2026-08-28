@@ -281,4 +281,17 @@ func TestRepositoryBugFinderProfileHelpersRejectMalformedBoundaryValues(t *testi
 	if _, err := nativeRepositoryBugFinderProfileHash(json.Number("1")); err == nil {
 		t.Fatal("non-object native profile was accepted")
 	}
+	if names, err := nativeRepositoryBugFinderProfileNames(nil); err != nil || names != nil {
+		t.Fatalf("nil native model list = %#v, %v", names, err)
+	}
+	for name, value := range map[string]any{
+		"empty model":     []any{""},
+		"duplicate model": []any{"provider/model-a", "provider/model-a"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := nativeRepositoryBugFinderProfileNames(value); err == nil {
+				t.Fatal("invalid native model list was accepted")
+			}
+		})
+	}
 }

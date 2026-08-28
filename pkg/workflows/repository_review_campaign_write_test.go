@@ -92,6 +92,70 @@ func TestNativeRepositoryReviewCampaignPlanDerivesTrustedAssignmentDenominator(t
 	}
 }
 
+func TestNativeRepositoryReviewCampaignPlanRejectsUntrustedAuthorityAndRouting(t *testing.T) {
+	workspace := t.TempDir()
+	repository := filepath.Join(workspace, "repo")
+	if err := os.MkdirAll(repository, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(repository, "service.go"), "package service\n")
+	gitCmd(t, repository, "init")
+	gitCmd(t, repository, "config", "user.email", "test@example.com")
+	gitCmd(t, repository, "config", "user.name", "Test User")
+	gitCmd(t, repository, "add", "service.go")
+	gitCmd(t, repository, "commit", "-m", "initial")
+	exec := ExecutionContext{
+		WorkspaceDir: workspace, WorkflowRef: RepositoryBugFinderWorkflowRef,
+		RunID: "campaign-plan-boundaries",
+	}
+	inventory, _, err := RunNativeFunction(context.Background(), "git.inventory", map[string]any{
+		"working_directory": repository, "target": "all",
+	}, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	args := map[string]any{
+		"action": "plan", "working_directory": repository,
+		"commit": inventory["commit"], "inventory_hash": inventory["inventoryHash"],
+		"files": inventory["selectedFiles"], "campaign_id": campaignID,
+		"profile": NewRepositoryBugFinderProfileHashInput(
+			"account", "all", "Find bugs.", `{}`, strings.Repeat("d", 64),
+			"review-a", "sha256:graph", []string{"review-a"}, false, 524288,
+		),
+		"resolved_reviewer_models": []string{"review-a"},
+		"authoritative":            true,
+	}
+	foreignExec := exec
+	foreignExec.WorkflowRef = "workflows/untrusted.yml"
+	if _, _, callErr := RunNativeFunction(
+		context.Background(), "review.repository", args, foreignExec,
+	); callErr == nil || !strings.Contains(callErr.Error(), "campaign authority") {
+		t.Fatalf("foreign workflow campaign error = %v", callErr)
+	}
+	invalidID := cloneMap(args)
+	invalidID["campaign_id"] = "rrc_invalid!"
+	if _, _, callErr := RunNativeFunction(
+		context.Background(), "review.repository", invalidID, exec,
+	); callErr == nil || !strings.Contains(callErr.Error(), "campaign authority") {
+		t.Fatalf("invalid campaign ID error = %v", callErr)
+	}
+	invalidProfile := cloneMap(args)
+	invalidProfile["profile"] = map[string]any{"models": 7}
+	if _, _, callErr := RunNativeFunction(
+		context.Background(), "review.repository", invalidProfile, exec,
+	); callErr == nil || !strings.Contains(callErr.Error(), "profile model list") {
+		t.Fatalf("invalid campaign profile error = %v", callErr)
+	}
+	emptyCohort := cloneMap(args)
+	emptyCohort["resolved_reviewer_models"] = []string{}
+	if _, _, callErr := RunNativeFunction(
+		context.Background(), "review.repository", emptyCohort, exec,
+	); callErr == nil || !strings.Contains(callErr.Error(), "reviewer count") {
+		t.Fatalf("empty campaign reviewer cohort error = %v", callErr)
+	}
+}
+
 func TestNativeRepositoryReviewCampaignEvidenceIncludesEveryChild(t *testing.T) {
 	first := repoaudit.FileRef{
 		Path: "a.go", BlobSHA: strings.Repeat("a", 40), SizeBytes: 1, Category: "code", Mode: "100644",
@@ -156,6 +220,43 @@ func TestNativeRepositoryReviewCampaignTransientUnavailableEvidenceRemainsPendin
 			!reflect.DeepEqual(child.ScopeFiles, []repoaudit.FileRef{file}) {
 			t.Fatalf("transient child %d=%#v", index, child)
 		}
+	}
+}
+
+func TestNativeRepositoryReviewCampaignEvidenceSortsMultiFileResults(t *testing.T) {
+	file := func(pathValue, digest string) repoaudit.FileRef {
+		return repoaudit.FileRef{
+			Path: pathValue, BlobSHA: strings.Repeat(digest, 40), SizeBytes: 1,
+			Category: "code", Mode: "100644",
+		}
+	}
+	first, second := file("a.go", "a"), file("b.go", "b")
+	third, fourth := file("c.go", "c"), file("d.go", "d")
+	scope := nativeRepositoryReviewFileMaps([]repoaudit.FileRef{second, first})
+	for index := range scope {
+		scope[index]["contentComplete"] = true
+	}
+	evidence, err := nativeRepositoryReviewRecordEvidence(map[string]any{
+		"managed_children": []map[string]any{{
+			"index": 1, "required": true, "valid": true, "scope": scope,
+			"model": map[string]any{"selected": "review-a"},
+			"structured": map[string]any{
+				"summary": "reviewed", "reviewedFiles": []any{"b.go", "a.go"},
+				"findings": []any{}, "residualRisks": []any{},
+			},
+		}},
+		"unavailable_files": nativeRepositoryReviewFileMaps([]repoaudit.FileRef{fourth, third}),
+	}, repoaudit.Plan{
+		CampaignID: repoaudit.NewRepositoryReviewCampaignID(), RequiredAssignments: 1,
+		PendingFiles: []repoaudit.FileRef{first, second, third, fourth},
+	})
+	if err != nil ||
+		!reflect.DeepEqual(evidence.InspectedFiles, []repoaudit.FileRef{first, second}) ||
+		!reflect.DeepEqual(evidence.CompletedFiles, []repoaudit.FileRef{first, second}) ||
+		len(evidence.ReviewEvidence) != 3 ||
+		evidence.ReviewEvidence[1].ScopeFiles[0].Path != "c.go" ||
+		evidence.ReviewEvidence[2].ScopeFiles[0].Path != "d.go" {
+		t.Fatalf("sorted campaign evidence=%#v err=%v", evidence, err)
 	}
 }
 

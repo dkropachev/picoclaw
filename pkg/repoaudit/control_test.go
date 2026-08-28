@@ -692,6 +692,17 @@ func TestRepositoryReviewAutomationFileProgress(t *testing.T) {
 			resolved: 3, total: 10, percent: 30,
 		},
 		{
+			name: "completed exact campaign resolves the selected scope",
+			automation: RepositoryReviewAutomation{
+				Status: RepositoryReviewAutomationCompleted,
+				Progress: RepositoryReviewProgress{
+					CoverageAvailable: true, CoverageExact: true, SelectedFiles: 10,
+					ReviewedFiles: 2, UnsupportedFiles: 1, RemainingFiles: 7,
+				},
+			},
+			resolved: 10, total: 10, percent: 100,
+		},
+		{
 			name: "inexact campaign lower bound does not override operational scope",
 			automation: RepositoryReviewAutomation{
 				Status:         RepositoryReviewAutomationRunning,
