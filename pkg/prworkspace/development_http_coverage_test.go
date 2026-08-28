@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 type developmentCatalogResolver struct {
@@ -92,15 +93,8 @@ func TestDevelopmentHTTPCollectionCatalogAndConversation(t *testing.T) {
 	}
 
 	query := url.Values{
-		"repository": {"octo/repo"},
-		"phase":      {string(PhaseCharter)},
-		"ownership":  {"owned"},
-		"limit":      {"1"},
-	}
-	if parsed, err := listFilterFromQuery(url.Values{
-		"state": {string(ExecutionQueued)}, "needs_action": {"false"},
-	}); err != nil || parsed.State != ExecutionQueued || parsed.NeedsAction == nil || *parsed.NeedsAction {
-		t.Fatalf("valid state/action filter = %#v, %v", parsed, err)
+		"query": {`repository = "octo/repo" AND phase = charter`},
+		"limit": {"1"},
 	}
 	response := developmentHTTPRequest(
 		t,
@@ -113,8 +107,8 @@ func TestDevelopmentHTTPCollectionCatalogAndConversation(t *testing.T) {
 		t.Fatalf("list response = %d %s", response.Code, response.Body.String())
 	}
 	var page struct {
-		Workspaces []Workspace `json:"workspaces"`
-		NextCursor string      `json:"next_cursor"`
+		Workspaces []developmentWorkspaceCollectionSummary `json:"workspaces"`
+		NextCursor string                                  `json:"next_cursor"`
 	}
 	if err := json.Unmarshal(
 		response.Body.Bytes(),
@@ -127,7 +121,10 @@ func TestDevelopmentHTTPCollectionCatalogAndConversation(t *testing.T) {
 		t,
 		handler,
 		http.MethodGet,
-		RuntimeRoutePrefix+"?cursor="+url.QueryEscape(page.NextCursor),
+		RuntimeRoutePrefix+"?"+url.Values{
+			"query":  {`repository = "octo/repo" AND phase = charter`},
+			"cursor": {page.NextCursor},
+		}.Encode(),
 		"",
 	)
 	if response.Code != http.StatusOK {
@@ -212,7 +209,7 @@ func TestDevelopmentHTTPBoundaryAndFilterValidation(t *testing.T) {
 		{http.MethodGet, RuntimeRoutePrefix + "?ownership=wrong", "", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "?needs_action=wrong", "", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "?limit=0", "", http.StatusBadRequest},
-		{http.MethodGet, RuntimeRoutePrefix + "?limit=101", "", http.StatusBadRequest},
+		{http.MethodGet, RuntimeRoutePrefix + "?limit=201", "", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "?limit=words", "", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "?cursor=not-base64", "", http.StatusBadRequest},
 		{http.MethodPost, RuntimeRoutePrefix, `{`, http.StatusBadRequest},
@@ -240,15 +237,6 @@ func TestDevelopmentHTTPBoundaryAndFilterValidation(t *testing.T) {
 		t.Fatalf("trailing slash status = %d", response.Code)
 	}
 
-	for _, candidate := range []string{
-		strings.Repeat("x", 1025),
-		"e30",
-		url.QueryEscape("not-json"),
-	} {
-		if _, err := decodeWorkspaceCursor(candidate); err == nil {
-			t.Fatalf("invalid cursor %q accepted", candidate)
-		}
-	}
 	for _, phase := range []Phase{
 		PhaseIntake,
 		PhaseCharter,
@@ -359,5 +347,95 @@ func TestDevelopmentHTTPConfigurationAndAutonomousReadiness(t *testing.T) {
 	}
 	if _, err := (*Service)(nil).VerifyConfiguredRepository(t.Context(), "repository"); err == nil {
 		t.Fatal("nil service repository verify accepted")
+	}
+}
+
+func TestDevelopmentWorkspaceOpaqueIDsRequireCanonicalLowercase(t *testing.T) {
+	if !validOpaqueID("devw_abcdefabcdefabcdefabcdefabcdefab", "devw_") {
+		t.Fatal("canonical lowercase workspace ID was rejected")
+	}
+	if validOpaqueID("devw_ABCDEFABCDEFABCDEFABCDEFABCDEFAB", "devw_") {
+		t.Fatal("uppercase workspace ID was accepted")
+	}
+}
+
+func TestDevelopmentWorkspaceValidationHelperFailureBoundaries(t *testing.T) {
+	if validateResolveRequest(ResolveRequest{
+		PullRequestURL: "https://github.com/acme/repo/pull/1",
+		Repository:     "mixed",
+	}) == nil {
+		t.Fatal("mixed pull request resolution input was accepted")
+	}
+	if validateResolveRequest(ResolveRequest{}) == nil {
+		t.Fatal("empty provider resolution input was accepted")
+	}
+	if err := validateResolveRequest(ResolveRequest{
+		ProviderOrigin: "https://github.com",
+		Repository:     "acme/repo",
+		PullNumber:     1,
+	}); err != nil {
+		t.Fatalf("valid provider resolution input = %v", err)
+	}
+
+	if validateProviderSnapshot(ProviderSnapshot{}) == nil {
+		t.Fatal("empty provider snapshot was accepted")
+	}
+	baseSnapshot := ProviderSnapshot{
+		Provider: "github", ProviderOrigin: "https://github.com",
+		RepositoryID: "repo", Repository: "acme/repo", SourceID: "source",
+		HeadRepositoryID: "head", HeadRepository: "acme/repo",
+		HeadSHA: "head-sha", BaseSHA: "base-sha", ObservedAt: time.Now().UTC(),
+	}
+	pickup := baseSnapshot
+	pickup.Intent = IntentPickupPR
+	pickup.SourceKind = SourcePullRequest
+	if validateProviderSnapshot(pickup) == nil {
+		t.Fatal("pickup snapshot without PR identity was accepted")
+	}
+	feature := baseSnapshot
+	feature.Intent = IntentImplementFeature
+	feature.SourceKind = SourcePullRequest
+	if validateProviderSnapshot(feature) == nil {
+		t.Fatal("feature snapshot with pull-request source was accepted")
+	}
+
+	if validateCharterDraft(CharterDraftOutput{}) == nil {
+		t.Fatal("empty charter draft was accepted")
+	}
+	invalidClarification := CharterDraftOutput{
+		Type: PRTypeFeature, Goal: "Goal", AcceptanceCriteria: []string{"Done"},
+		ClarificationNeeded: true,
+	}
+	if validateCharterDraft(invalidClarification) == nil {
+		t.Fatal("inconsistent clarification draft was accepted")
+	}
+	tooMany := invalidClarification
+	tooMany.ClarificationNeeded = false
+	tooMany.AcceptanceCriteria = make([]string, maxCharterItems+1)
+	if validateCharterDraft(tooMany) == nil {
+		t.Fatal("oversized charter list was accepted")
+	}
+	invalidItem := invalidClarification
+	invalidItem.ClarificationNeeded = false
+	invalidItem.AcceptanceCriteria = []string{""}
+	if validateCharterDraft(invalidItem) == nil {
+		t.Fatal("empty charter item was accepted")
+	}
+
+	if validPRType("invalid") || validFindingDisposition("invalid") {
+		t.Fatal("invalid PR type or finding disposition was accepted")
+	}
+	if validCorrection(Correction{Kind: "invalid"}) {
+		t.Fatal("invalid correction kind was accepted")
+	}
+	if validCorrection(Correction{Kind: CorrectionFactual, Applicability: "invalid"}) {
+		t.Fatal("invalid correction applicability was accepted")
+	}
+	if !validCorrection(Correction{
+		Kind: CorrectionFactual, Applicability: CorrectionReviewOnly,
+		TargetType: "finding", TargetID: "finding-1", OriginalClaim: "old",
+		Correction: "new",
+	}) {
+		t.Fatal("valid correction was rejected")
 	}
 }

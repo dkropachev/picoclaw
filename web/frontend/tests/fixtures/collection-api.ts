@@ -66,6 +66,42 @@ const querySchemas = {
     ],
     { field: "name", direction: "ASC" },
   ),
+  developmentWorkspaces: schema(
+    [
+      field("id", "string"),
+      field("intent", "enum", ["implement_feature", "pickup_pr"]),
+      field("source", "enum", ["issue", "brief", "pull_request"]),
+      field("repository", "string"),
+      field("title", "string"),
+      field("phase", "enum", [
+        "intake",
+        "charter",
+        "planning",
+        "review",
+        "triage",
+        "implementation",
+        "validation",
+        "completion_audit",
+        "publication",
+        "complete",
+      ]),
+      field("execution_state", "enum", [
+        "queued",
+        "running",
+        "waiting_gate",
+        "waiting_user",
+        "succeeded",
+        "failed",
+        "blocked",
+        "canceled",
+        "stale",
+        "unknown",
+      ]),
+      field("created", "timestamp"),
+      field("updated", "timestamp"),
+    ],
+    { field: "updated", direction: "DESC" },
+  ),
   aliases: schema([
     field("name", "string"),
     field("model", "string"),
@@ -475,6 +511,48 @@ const developmentAdminEffects = {
   gateway_effect: "applied",
   deferred_policy_effect: "applied",
 } as const
+
+export const developmentWorkspaceVisualIDs = {
+  review: `devw_${"1".repeat(32)}`,
+  feature: `devw_${"2".repeat(32)}`,
+  brief: `devw_${"3".repeat(32)}`,
+} as const
+
+const developmentWorkspaces = [
+  {
+    id: developmentWorkspaceVisualIDs.review,
+    intent: "pickup_pr",
+    source: "pull_request",
+    repository: "octo/launcher",
+    title: "Pull request #418",
+    phase: "completion_audit",
+    execution_state: "waiting_user",
+    created: "2026-08-24T10:00:00Z",
+    updated: "2026-08-25T14:24:00Z",
+  },
+  {
+    id: developmentWorkspaceVisualIDs.feature,
+    intent: "implement_feature",
+    source: "issue",
+    repository: "sipeed/picoclaw",
+    title: "Issue #932",
+    phase: "implementation",
+    execution_state: "running",
+    created: "2026-08-23T09:15:00Z",
+    updated: "2026-08-25T13:48:00Z",
+  },
+  {
+    id: developmentWorkspaceVisualIDs.brief,
+    intent: "implement_feature",
+    source: "brief",
+    repository: "automation/rules",
+    title: "Feature brief",
+    phase: "complete",
+    execution_state: "succeeded",
+    created: "2026-08-20T16:30:00Z",
+    updated: "2026-08-24T18:45:00Z",
+  },
+] as const
 
 export const gitWorkspaceVisualIDs = {
   primary: "gw-111111111111",
@@ -1428,6 +1506,15 @@ export async function installCollectionVisualMocks(
             config_revision: "cfg-development-visual-1",
             effects: developmentAdminEffects,
           })
+        case "/api/development-workspaces":
+          return json(route, {
+            workspaces: state === "empty" ? [] : developmentWorkspaces,
+            total: state === "empty" ? 0 : developmentWorkspaces.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY updated DESC",
+            query_schema: querySchemas.developmentWorkspaces,
+          })
         case "/api/development/workflow-configurations/items":
           return json(route, {
             workflow_configurations:
@@ -1992,6 +2079,7 @@ function isCollectionList(path: string) {
     "/api/accounts",
     "/api/account-routers",
     "/api/event-sources",
+    "/api/development-workspaces",
     "/api/development/repository-assignments",
     "/api/development/workflow-configurations/items",
     "/api/git-workspaces",

@@ -1,3 +1,9 @@
+import {
+  type CollectionQueryField,
+  type CollectionQueryFieldType,
+  type CollectionQuerySchema,
+  collectionListURL,
+} from "@/api/collection"
 import { launcherFetch } from "@/api/http"
 
 export type DevelopmentWorkspaceIntent = "implement_feature" | "pickup_pr"
@@ -58,6 +64,18 @@ export interface DevelopmentWorkspaceSummary {
   version: number
   created_at: string
   updated_at: string
+}
+
+export interface DevelopmentWorkspaceCollectionSummary {
+  id: string
+  intent: DevelopmentWorkspaceIntent
+  source: DevelopmentWorkspaceSourceKind
+  repository: string
+  title: string
+  phase: DevelopmentWorkspacePhase
+  execution_state: DevelopmentWorkspaceExecutionState
+  created: string
+  updated: string
 }
 
 export type DevelopmentWorkspaceSource =
@@ -173,8 +191,11 @@ export interface DevelopmentWorkspace extends DevelopmentWorkspaceSummary {
 }
 
 export interface DevelopmentWorkspacePage {
-  workspaces: DevelopmentWorkspaceSummary[]
+  workspaces: DevelopmentWorkspaceCollectionSummary[]
+  total: number
   next_cursor?: string
+  canonical_query: string
+  query_schema: CollectionQuerySchema
 }
 
 export interface ConfiguredDevelopmentRepository {
@@ -245,18 +266,28 @@ export interface DevelopmentCodeDiff {
 
 export class DevelopmentWorkspaceAPIError extends Error {
   readonly status: number
-  readonly code: string
+  readonly code?: string
+  readonly position?: number
 
-  constructor(code: string, status: number, message = code) {
+  constructor(
+    code: string | undefined,
+    status: number,
+    message = code ?? "Request failed.",
+    position?: number,
+  ) {
     super(message)
     this.name = "DevelopmentWorkspaceAPIError"
     this.status = status
     this.code = code
+    this.position = position
   }
 }
 
 const apiRoot = "/api/development-workspaces"
 const maximumResponseBytes = 8 << 20
+const maximumErrorResponseBytes = 1 << 20
+const maximumErrorMessageBytes = 1024
+const developmentWorkspaceIDPattern = /^devw_[0-9a-f]{32}$/u
 
 export function createDevelopmentRequestID(): string {
   const random = globalThis.crypto?.randomUUID?.().replaceAll("-", "")
@@ -265,25 +296,34 @@ export function createDevelopmentRequestID(): string {
 }
 
 export async function listDevelopmentWorkspaces(
-  params: { limit?: number; cursor?: string } = {},
+  params: { query?: string; limit?: number; cursor?: string } = {},
   signal?: AbortSignal,
 ): Promise<DevelopmentWorkspacePage> {
-  const query = new URLSearchParams()
-  if (params.limit != null) query.set("limit", String(params.limit))
-  if (params.cursor) query.set("cursor", params.cursor)
   const value = await requestJSON<unknown>(
-    `${apiRoot}${query.size > 0 ? `?${query.toString()}` : ""}`,
+    collectionListURL(apiRoot, params),
     undefined,
     signal,
   )
   if (!isRecord(value) || !Array.isArray(value.workspaces)) malformed()
+  onlyKeys(value, [
+    "workspaces",
+    "total",
+    "next_cursor",
+    "canonical_query",
+    "query_schema",
+  ])
+  const workspaces = value.workspaces.map(projectWorkspaceCollectionSummary)
+  rejectDuplicateStrings(workspaces.map((workspace) => workspace.id))
+  const total = nonnegativeInteger(value.total)
+  if (total < workspaces.length) malformed()
   return {
-    workspaces: value.workspaces.map((workspace) =>
-      projectWorkspaceSummary(workspace),
-    ),
-    ...(typeof value.next_cursor === "string"
-      ? { next_cursor: value.next_cursor }
-      : {}),
+    workspaces,
+    total,
+    canonical_query: canonicalCollectionQuery(value.canonical_query),
+    query_schema: projectDevelopmentWorkspaceQuerySchema(value.query_schema),
+    ...(value.next_cursor === undefined || value.next_cursor === ""
+      ? {}
+      : { next_cursor: opaqueCursor(value.next_cursor) }),
   }
 }
 
@@ -344,9 +384,12 @@ export async function getDevelopmentWorkspace(
   workspaceID: string,
   signal?: AbortSignal,
 ): Promise<DevelopmentWorkspace> {
-  return projectWorkspace(
+  if (!developmentWorkspaceIDPattern.test(workspaceID)) malformed()
+  const workspace = projectWorkspace(
     await requestJSON<unknown>(workspacePath(workspaceID), undefined, signal),
   )
+  if (workspace.id !== workspaceID) malformed()
+  return workspace
 }
 
 export async function getDevelopmentConversation(
@@ -593,6 +636,7 @@ function codeQuery(input: {
 }
 
 function workspacePath(workspaceID: string): string {
+  if (!developmentWorkspaceIDPattern.test(workspaceID)) malformed()
   return `${apiRoot}/${encodeURIComponent(workspaceID)}`
 }
 
@@ -602,19 +646,30 @@ async function requestJSON<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const response = await launcherFetch(path, { ...init, signal })
-  const text = await boundedResponseText(response)
+  const text = await boundedResponseText(
+    response,
+    response.ok ? maximumResponseBytes : maximumErrorResponseBytes,
+  )
   let value: unknown
   try {
     value = text === "" ? null : JSON.parse(text)
   } catch {
+    if (!response.ok) {
+      throw safeDevelopmentWorkspaceError(response.status)
+    }
     throw new DevelopmentWorkspaceAPIError("malformed_response", 502)
   }
   if (!response.ok) {
+    if (!jsonContentType(response.headers.get("Content-Type"))) {
+      throw safeDevelopmentWorkspaceError(response.status)
+    }
     const error = isRecord(value) ? value : undefined
+    const code = safeErrorCode(error?.code)
     throw new DevelopmentWorkspaceAPIError(
-      optionalString(error?.code) ?? "request_failed",
+      code,
       response.status,
-      optionalString(error?.message) ?? "Request failed.",
+      safeErrorMessage(error?.message),
+      validQueryPosition(error?.position),
     )
   }
   if (!jsonContentType(response.headers.get("Content-Type"))) malformed()
@@ -629,16 +684,314 @@ export async function requestDevelopmentJSON<T>(
   return requestJSON<T>(path, init, signal)
 }
 
-async function boundedResponseText(response: Response): Promise<string> {
+async function boundedResponseText(
+  response: Response,
+  maximumBytes: number,
+): Promise<string> {
   const declared = Number(response.headers.get("Content-Length"))
-  if (Number.isFinite(declared) && declared > maximumResponseBytes) {
+  if (Number.isFinite(declared) && declared > maximumBytes) {
+    if (!response.ok) throw safeDevelopmentWorkspaceError(response.status)
     throw new DevelopmentWorkspaceAPIError("response_too_large", 502)
   }
   const text = await response.text()
-  if (new TextEncoder().encode(text).byteLength > maximumResponseBytes) {
+  if (new TextEncoder().encode(text).byteLength > maximumBytes) {
+    if (!response.ok) throw safeDevelopmentWorkspaceError(response.status)
     throw new DevelopmentWorkspaceAPIError("response_too_large", 502)
   }
   return text
+}
+
+function safeDevelopmentWorkspaceError(
+  status: number,
+): DevelopmentWorkspaceAPIError {
+  return new DevelopmentWorkspaceAPIError(
+    undefined,
+    status,
+    `Request failed with status ${status}.`,
+  )
+}
+
+function safeErrorCode(value: unknown): string | undefined {
+  return typeof value === "string" && /^[a-z0-9_.-]{1,64}$/u.test(value)
+    ? value
+    : undefined
+}
+
+function safeErrorMessage(value: unknown): string {
+  const raw = typeof value === "string" ? value : "Request failed."
+  const normalized = raw.replace(/[\r\n\t]+/gu, " ").trim()
+  return truncateUTF8(normalized || "Request failed.", maximumErrorMessageBytes)
+}
+
+function truncateUTF8(value: string, maximumBytes: number): string {
+  let bytes = 0
+  let result = ""
+  for (const character of value) {
+    const width = new TextEncoder().encode(character).byteLength
+    if (bytes + width > maximumBytes) break
+    bytes += width
+    result += character
+  }
+  return result
+}
+
+function projectWorkspaceCollectionSummary(
+  value: unknown,
+): DevelopmentWorkspaceCollectionSummary {
+  if (!isRecord(value)) malformed()
+  onlyKeys(value, [
+    "id",
+    "intent",
+    "source",
+    "repository",
+    "title",
+    "phase",
+    "execution_state",
+    "created",
+    "updated",
+  ])
+  const id = boundedString(value.id, 37)
+  if (!developmentWorkspaceIDPattern.test(id)) malformed()
+  const intent = enumField(value, "intent", intents)
+  const source = enumField(value, "source", sourceKinds)
+  if (
+    (intent === "pickup_pr") !== (source === "pull_request") ||
+    (intent === "implement_feature" && source === "pull_request")
+  ) {
+    malformed()
+  }
+  const created = rfc3339Timestamp(value.created)
+  const updated = rfc3339Timestamp(value.updated)
+  if (Date.parse(created) > Date.parse(updated)) malformed()
+  return {
+    id,
+    intent,
+    source,
+    repository: boundedPublicText(value.repository),
+    title: boundedPublicText(value.title),
+    phase: enumField(value, "phase", phases),
+    execution_state: enumField(value, "execution_state", executionStates),
+    created,
+    updated,
+  }
+}
+
+const developmentWorkspaceSchemaFields: Readonly<
+  Record<string, CollectionQueryFieldType>
+> = {
+  id: "string",
+  intent: "enum",
+  source: "enum",
+  repository: "string",
+  title: "string",
+  phase: "enum",
+  execution_state: "enum",
+  created: "timestamp",
+  updated: "timestamp",
+}
+const developmentWorkspaceEnumSuggestions: Readonly<
+  Record<string, readonly string[]>
+> = {
+  intent: ["implement_feature", "pickup_pr"],
+  source: ["issue", "brief", "pull_request"],
+  phase: [
+    "intake",
+    "charter",
+    "planning",
+    "review",
+    "triage",
+    "implementation",
+    "validation",
+    "completion_audit",
+    "publication",
+    "complete",
+  ],
+  execution_state: [
+    "queued",
+    "running",
+    "waiting_gate",
+    "waiting_user",
+    "succeeded",
+    "failed",
+    "blocked",
+    "canceled",
+    "stale",
+    "unknown",
+  ],
+}
+const meaningfulOperators: Record<CollectionQueryFieldType, readonly string[]> =
+  {
+    string: ["=", "!=", "~", "!~", "IN", "NOT IN"],
+    enum: ["=", "!=", "IN", "NOT IN"],
+    boolean: ["=", "!=", "IN", "NOT IN"],
+    number: ["=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN"],
+    timestamp: ["=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN"],
+  }
+
+function projectDevelopmentWorkspaceQuerySchema(
+  value: unknown,
+): CollectionQuerySchema {
+  if (!isRecord(value) || !Array.isArray(value.fields)) malformed()
+  onlyKeys(value, ["fields", "default_order"])
+  if (
+    value.fields.length !==
+      Object.keys(developmentWorkspaceSchemaFields).length ||
+    !Array.isArray(value.default_order) ||
+    value.default_order.length !== 1
+  ) {
+    malformed()
+  }
+  const fields = value.fields.map(projectDevelopmentWorkspaceQueryField)
+  rejectDuplicateStrings(fields.map((field) => field.name))
+  if (
+    Object.keys(developmentWorkspaceSchemaFields).some(
+      (name) => !fields.some((field) => field.name === name),
+    )
+  ) {
+    malformed()
+  }
+  const order = value.default_order[0]
+  if (!isRecord(order)) malformed()
+  onlyKeys(order, ["field", "direction"])
+  if (order.field !== "updated" || order.direction !== "DESC") malformed()
+  return { fields }
+}
+
+function projectDevelopmentWorkspaceQueryField(
+  value: unknown,
+): CollectionQueryField {
+  if (!isRecord(value)) malformed()
+  onlyKeys(value, ["name", "type", "operators", "sortable", "suggested_values"])
+  const name = boundedString(value.name, 64)
+  const expectedType = developmentWorkspaceSchemaFields[name]
+  if (
+    !expectedType ||
+    value.type !== expectedType ||
+    value.sortable !== true ||
+    !Array.isArray(value.operators)
+  ) {
+    malformed()
+  }
+  const operators = value.operators.map((operator) =>
+    boundedString(operator, 16),
+  )
+  rejectDuplicateStrings(operators)
+  const expectedOperators = meaningfulOperators[expectedType]
+  if (
+    operators.length !== expectedOperators.length ||
+    expectedOperators.some((operator) => !operators.includes(operator))
+  ) {
+    malformed()
+  }
+  const rawSuggestions = value.suggested_values ?? []
+  if (!Array.isArray(rawSuggestions) || rawSuggestions.length > 100) {
+    malformed()
+  }
+  const suggestions = rawSuggestions.map((suggestion) => {
+    const projected = boundedString(suggestion, 256)
+    if (projected !== projected.trim() || /\p{Cc}/u.test(projected)) malformed()
+    return projected
+  })
+  if (
+    new Set(suggestions.map((suggestion) => suggestion.toLowerCase())).size !==
+    suggestions.length
+  ) {
+    malformed()
+  }
+  const enumSuggestions = developmentWorkspaceEnumSuggestions[name]
+  if (
+    enumSuggestions &&
+    (suggestions.length !== enumSuggestions.length ||
+      enumSuggestions.some((suggestion) => !suggestions.includes(suggestion)))
+  ) {
+    malformed()
+  }
+  return {
+    name,
+    type: expectedType,
+    operators,
+    sortable: true,
+    ...(suggestions.length > 0 ? { suggested_values: suggestions } : {}),
+  }
+}
+
+function boundedPublicText(value: unknown): string {
+  const projected = boundedString(value, 1024)
+  if (projected !== projected.trim()) malformed()
+  return projected
+}
+
+function boundedString(value: unknown, maximumBytes: number): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    hasUnpairedSurrogate(value) ||
+    new TextEncoder().encode(value).byteLength > maximumBytes
+  ) {
+    malformed()
+  }
+  return value
+}
+
+function canonicalCollectionQuery(value: unknown): string {
+  const query = boundedString(value, 4096)
+  if (/\p{Cc}/u.test(query)) malformed()
+  return query
+}
+
+function opaqueCursor(value: unknown): string {
+  const cursor = boundedString(value, 4096)
+  if (/\p{Cc}/u.test(cursor)) malformed()
+  return cursor
+}
+
+function rfc3339Timestamp(value: unknown): string {
+  const timestamp = boundedString(value, 64)
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u.test(
+      timestamp,
+    ) ||
+    Number.isNaN(Date.parse(timestamp))
+  ) {
+    malformed()
+  }
+  return timestamp
+}
+
+function nonnegativeInteger(value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) malformed()
+  return Number(value)
+}
+
+function onlyKeys(value: Record<string, unknown>, keys: readonly string[]) {
+  const allowed = new Set(keys)
+  if (Object.keys(value).some((key) => !allowed.has(key))) malformed()
+}
+
+function rejectDuplicateStrings(values: readonly string[]) {
+  if (new Set(values).size !== values.length) malformed()
+}
+
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (next < 0xdc00 || next > 0xdfff) return true
+      index += 1
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true
+    }
+  }
+  return false
+}
+
+function validQueryPosition(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) &&
+    Number(value) >= 0 &&
+    Number(value) <= 4096
+    ? Number(value)
+    : undefined
 }
 
 function projectWorkspace(value: unknown): DevelopmentWorkspace {
@@ -775,8 +1128,10 @@ function projectWorkspaceSummary(
         : sourceKind === "pull_request" && sourceNumber
           ? `Pull request #${sourceNumber}`
           : repository)
+  const id = stringField(value, "id")
+  if (!developmentWorkspaceIDPattern.test(id)) malformed()
   return {
-    id: stringField(value, "id"),
+    id,
     intent,
     source_kind: sourceKind,
     repository,

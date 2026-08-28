@@ -6,6 +6,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/collectionquery"
 )
 
 // GuardPRWorkspaceCanonicalPaths prevents net/http's ServeMux from redirecting
@@ -66,7 +68,12 @@ const (
 	prWorkspaceRuntimePath   = "/runtime/eventing/development-workspaces"
 	prWorkspaceMaxBodyBytes  = 1 << 20
 	prWorkspaceMaxQueryBytes = 8 << 10
-	prWorkspaceReadTimeout   = 10 * time.Second
+	// A collection query and cursor are independently bounded after URL
+	// decoding. Allow their worst-case percent-encoded wire representation at
+	// the launcher; the authoritative runtime still validates both decoded
+	// values and rejects every parameter outside query, cursor, and limit.
+	prWorkspaceMaxListQueryBytes = 3*(collectionquery.MaxQueryBytes+collectionquery.MaxCursorBytes) + 64
+	prWorkspaceReadTimeout       = 10 * time.Second
 	// Review and implementation deliberately run several bounded AI rounds in
 	// one mutation. A ten-minute reverse-proxy deadline can cancel a healthy
 	// lifecycle run just before its durable aggregate mutation, especially when
@@ -172,11 +179,15 @@ func (h *Handler) handleDevelopmentNotificationProxy(w http.ResponseWriter, r *h
 
 func (h *Handler) handlePRWorkspaceProxy(w http.ResponseWriter, r *http.Request) {
 	setPRWorkspaceResponseHeaders(w)
+	maximumQueryBytes := prWorkspaceMaxQueryBytes
+	if r != nil && r.URL != nil && r.Method == http.MethodGet && r.URL.Path == prWorkspaceAPIPath {
+		maximumQueryBytes = prWorkspaceMaxListQueryBytes
+	}
 	if r == nil || r.URL == nil || r.URL.Fragment != "" || r.URL.ForceQuery ||
 		r.URL.EscapedPath() != r.URL.Path ||
 		(r.URL.Path != prWorkspaceAPIPath && !strings.HasPrefix(r.URL.Path, prWorkspaceAPIPath+"/")) ||
 		strings.Contains(r.URL.Path, "//") || strings.Contains(r.URL.Path, "/./") ||
-		strings.Contains(r.URL.Path, "/../") || len(r.URL.RawQuery) > prWorkspaceMaxQueryBytes {
+		strings.Contains(r.URL.Path, "/../") || len(r.URL.RawQuery) > maximumQueryBytes {
 		writePRWorkspaceAPIError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}

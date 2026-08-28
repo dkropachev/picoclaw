@@ -5,10 +5,10 @@
 PicoClaw administrative collections use one shared presentation and interaction
 system. Standard surfaces include Accounts, Account Routers, Model Aliases,
 Model Routers, MCP Servers, Agents, Model Evaluations, Skills, Tools, Event
-Sources, Workflow Definitions, Git Workspaces, Development Repository
-Assignments, and Development Workflow Configurations. New collection surfaces,
-and legacy collection surfaces when materially changed, must adopt this
-contract.
+Sources, Workflow Definitions, Git Workspaces, Development Workspaces,
+Development Repository Assignments, and Development Workflow Configurations.
+New collection surfaces, and legacy collection surfaces when materially
+changed, must adopt this contract.
 
 This standard does not apply to intrinsically unique experiences such as chat,
 logs, code viewers, diagrams, result reports, marketplace search, or a single
@@ -147,6 +147,7 @@ Canonical pilot routes:
 | Workflow Runs         | `/agent/workflows/runs`         | None                     | `/agent/workflows/runs/:id` | Operational exemption; shared List/Table only                        |
 | Git Workspaces        | `/agent/git-workspaces`         | None                     | `/agent/git-workspaces/:id` | History at `/history`; global limits at `/settings`                  |
 | Git Workspace History | `/agent/git-workspaces/history` | None                     | None                        | Operational exemption; shared List/Table only                        |
+| Development Workspaces | `/development` | `/development/new` | `/development/:id` | Workspace-owned Overview, Changes, Files, and Activity views |
 | Repository Assignments | `/development/repositories` | `/development/repositories/new` | `/development/repositories/:id` | `/:id/edit` |
 | Workflow Configurations | `/development/workflow-configurations` | `/development/workflow-configurations/new` | `/development/workflow-configurations/:id` | `/:id/edit` |
 
@@ -221,6 +222,14 @@ aggregate endpoint remains the authority for shared lifecycle settings. Their
 summaries expose stable ID, name, default state, binding count, and deferred
 issue mode. Both collections default to compact List and support List, Table,
 and Grid.
+
+Development workspaces use `/api/development-workspaces` for the typed paged
+inventory and the existing `/api/development-workspaces/:id` aggregate for
+direct detail. Summaries expose ID, intent, source, repository, title, phase,
+execution state, created time, and updated time and default to
+`ORDER BY updated DESC`. The list supports List, Table, and Grid without
+selection or deletion; intake remains the dedicated New route, and the routed
+workspace retains its specialized lifecycle, chat, code, and activity views.
 
 ## Governance And Evidence
 

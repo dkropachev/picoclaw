@@ -1,6 +1,5 @@
 import {
   IconAlertTriangle,
-  IconArrowLeft,
   IconBrandGithub,
   IconFileText,
   IconGitPullRequest,
@@ -17,7 +16,7 @@ import {
   createDevelopmentWorkspace,
   listDevelopmentRepositories,
 } from "@/api/development-workspaces"
-import { PageHeader } from "@/components/page-header"
+import { CollectionDetailShell } from "@/components/collection"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -161,28 +160,14 @@ export function DevelopmentIntakePage({
           brief.trim().length > 0
 
   return (
-    <div
-      className="bg-background flex h-full min-h-0 flex-col"
-      data-testid="development-intake"
-    >
-      <PageHeader title="New development work">
-        <Button
-          type="button"
-          variant="outline"
-          aria-label="Back to development"
-          title="Back to development"
-          onClick={onBack}
-        >
-          <IconArrowLeft />
-          <span className="hidden sm:inline">Development</span>
-        </Button>
-      </PageHeader>
-
-      <div className="min-h-0 flex-1 overflow-auto px-4 pb-8 md:px-6">
-        <form
-          onSubmit={submit}
-          className="mx-auto flex w-full max-w-3xl flex-col gap-4"
-        >
+    <div className="h-full min-h-0" data-testid="development-intake">
+      <CollectionDetailShell
+        title="New development work"
+        onBack={onBack}
+        backLabel="All development workspaces"
+        contentClassName="max-w-3xl"
+      >
+        <form onSubmit={submit} className="flex w-full flex-col gap-4 pb-4">
           <fieldset className="space-y-3">
             <legend className="text-sm font-medium">
               What do you want to do?
@@ -374,7 +359,7 @@ export function DevelopmentIntakePage({
             </div>
           )}
         </form>
-      </div>
+      </CollectionDetailShell>
     </div>
   )
 }

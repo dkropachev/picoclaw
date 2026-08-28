@@ -2,16 +2,12 @@ package prworkspace
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"mime"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
@@ -152,24 +148,7 @@ func (handler *HTTPHandler) ServeHTTP(response http.ResponseWriter, request *htt
 func (handler *HTTPHandler) serveRoot(response http.ResponseWriter, request *http.Request) {
 	switch request.Method {
 	case http.MethodGet:
-		filter, err := listFilterFromQuery(request.URL.Query())
-		if err != nil {
-			writeHTTPResult(response, Aggregate{}, err)
-			return
-		}
-		page, err := handler.service.List(request.Context(), filter)
-		if err != nil {
-			writeHTTPResult(response, Aggregate{}, err)
-			return
-		}
-		result := struct {
-			Workspaces []Workspace `json:"workspaces"`
-			NextCursor string      `json:"next_cursor,omitempty"`
-		}{Workspaces: page.Workspaces}
-		if page.Next != nil {
-			result.NextCursor = encodeWorkspaceCursor(*page.Next)
-		}
-		writeHTTPJSON(response, http.StatusOK, result)
+		handler.serveWorkspaceCollection(response, request)
 	case http.MethodPost:
 		var body struct {
 			Intent DevelopmentIntent `json:"intent"`
@@ -330,6 +309,10 @@ func (handler *HTTPHandler) serveWorkspace(
 	workspaceID string,
 	tail []string,
 ) {
+	if len(tail) == 0 && request.URL.RawQuery != "" {
+		writeHTTPError(response, http.StatusBadRequest, "invalid_query", nil)
+		return
+	}
 	if len(tail) == 0 {
 		if request.Method != http.MethodGet {
 			writeHTTPMethod(response, http.MethodGet)
@@ -1269,90 +1252,6 @@ func workspaceRouteSegments(path string) ([]string, bool) {
 		}
 	}
 	return segments, true
-}
-
-func listFilterFromQuery(values url.Values) (ListFilter, error) {
-	allowed := map[string]bool{
-		"repository": true, "phase": true, "state": true, "ownership": true,
-		"needs_action": true, "limit": true, "cursor": true,
-	}
-	for key, entries := range values {
-		if !allowed[key] || len(entries) != 1 {
-			return ListFilter{}, ErrInvalid
-		}
-	}
-	filter := ListFilter{Repository: values.Get("repository")}
-	if raw := values.Get("phase"); raw != "" {
-		filter.Phase = Phase(raw)
-		if !validPhase(filter.Phase) {
-			return ListFilter{}, ErrInvalid
-		}
-	}
-	if raw := values.Get("state"); raw != "" {
-		filter.State = ExecutionState(raw)
-		if !validExecutionState(filter.State) {
-			return ListFilter{}, ErrInvalid
-		}
-	}
-	if raw := values.Get("ownership"); raw != "" {
-		owned := raw == "owned"
-		if !owned && raw != "external" {
-			return ListFilter{}, ErrInvalid
-		}
-		filter.Owned = &owned
-	}
-	if raw := values.Get("needs_action"); raw != "" {
-		value, err := strconv.ParseBool(raw)
-		if err != nil {
-			return ListFilter{}, ErrInvalid
-		}
-		filter.NeedsAction = &value
-	}
-	if raw := values.Get("limit"); raw != "" {
-		limit, err := strconv.Atoi(raw)
-		if err != nil || limit < 1 || limit > 100 {
-			return ListFilter{}, ErrInvalid
-		}
-		filter.Limit = limit
-	}
-	if raw := values.Get("cursor"); raw != "" {
-		cursor, err := decodeWorkspaceCursor(raw)
-		if err != nil {
-			return ListFilter{}, ErrInvalid
-		}
-		filter.AfterUpdated, filter.AfterID = cursor.UpdatedAt, cursor.ID
-	}
-	return filter, nil
-}
-
-func encodeWorkspaceCursor(cursor WorkspaceCursor) string {
-	raw, _ := json.Marshal(struct {
-		UpdatedAt time.Time `json:"updated_at"`
-		ID        string    `json:"id"`
-	}{cursor.UpdatedAt, cursor.ID})
-	return base64.RawURLEncoding.EncodeToString(raw)
-}
-
-func decodeWorkspaceCursor(value string) (WorkspaceCursor, error) {
-	if len(value) > 1024 {
-		return WorkspaceCursor{}, ErrInvalid
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil {
-		return WorkspaceCursor{}, err
-	}
-	var decoded struct {
-		UpdatedAt time.Time `json:"updated_at"`
-		ID        string    `json:"id"`
-	}
-	if err = json.Unmarshal(
-		raw,
-		&decoded,
-	); err != nil || decoded.UpdatedAt.IsZero() ||
-		!validOpaqueID(decoded.ID, "devw_") {
-		return WorkspaceCursor{}, ErrInvalid
-	}
-	return WorkspaceCursor{UpdatedAt: decoded.UpdatedAt, ID: decoded.ID}, nil
 }
 
 func decodeHTTPBody(response http.ResponseWriter, request *http.Request, target any) bool {

@@ -78,6 +78,8 @@ continues to fail locally until a concrete model is configured.
 
 | `FR-LAUNCHER-028` | MUST | The authenticated launcher registers the feature-owned `/api/development/repository-assignments*` and `/api/development/workflow-configurations/items*` collection/item APIs and the standard `/development/repositories*` and `/development/workflow-configurations*` browser routes. Mutations pass through the shared same-origin boundary, strict JSON decoding, exact full-config revision fencing, and one compare-and-swap save. Aggregate lifecycle-settings endpoints remain available but no longer draw collection lists; old Workflow configuration `?config=` URLs receive no compatibility rendering. | Development administration needs shared collection behavior and direct links without weakening the existing full-config concurrency boundary or retaining a second aggregate editor. |
 
+| `FR-LAUNCHER-029` | MUST | The authenticated launcher proxies the feature-owned typed Development workspace list contract without narrowing its valid bounded query/cursor transport, and `/development` uses the standard shared collection while `/development/new` and `/development/:id` retain dedicated intake and aggregate detail. Canonical collection `q`/`view` survives routed New/detail navigation independently of workspace tab and evidence state. | Workspace inventory needs server paging and stable Back navigation without changing launcher authentication, direct aggregate authority, or specialized workspace behavior. |
+
 ## Data And State Model
 
 Account collection identity is a fixed-length base64url SHA-256 digest over the
@@ -256,7 +258,7 @@ Owns: TEST web/backend/api/weixin*
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
-| HTTP | `/api/development-workspaces*` | Authenticated, canonical, bounded proxy for the matching protected gateway tree; mutations require same-origin provenance and JSON. | `FR-LAUNCHER-021`, `FR-LAUNCHER-022` |
+| HTTP/UI | `/api/development-workspaces*`; `/development*` | Authenticated bounded proxy plus standard typed workspace inventory, dedicated intake, and direct specialized aggregate detail with independent collection/detail URL state. | `FR-LAUNCHER-021`, `FR-LAUNCHER-022`, `FR-LAUNCHER-029` |
 | HTTP | `/api/notifications*`, `/api/notification-views`, `/api/notification-settings`, `/api/push-subscriptions*` | Authenticated inbox, saved-view, privacy-setting, SSE refresh, and revision-fenced device management proxies. | `FR-LAUNCHER-024` |
 | HTTP | `GET/PUT /api/development/workflow-configurations` | Read or revision-fenced replace workflow configurations, default selection, nudge bounds, and scope thresholds while preserving assignments. | `FR-LAUNCHER-011`, `FR-LAUNCHER-022` |
 | HTTP | `GET/PUT /api/development/repositories` | Read verified repository descriptors and safe configuration summaries or revision-fenced replace repositories and assignments while preserving workflow configuration. | `FR-LAUNCHER-011`, `FR-LAUNCHER-022` |
@@ -368,11 +370,13 @@ removes or resolves the durable inbox item.
 | `FR-LAUNCHER-026` | [web/backend/api/accounts_test.go](../../web/backend/api/accounts_test.go), [web/frontend/src/api/accounts.test.ts](../../web/frontend/src/api/accounts.test.ts), [web/frontend/src/components/credentials/account-auth-editor-page.test.tsx](../../web/frontend/src/components/credentials/account-auth-editor-page.test.tsx), [web/frontend/src/routes/-accounts-route.test.tsx](../../web/frontend/src/routes/-accounts-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 | `FR-LAUNCHER-027` | [web/backend/api/git_workspaces_test.go](../../web/backend/api/git_workspaces_test.go), [web/frontend/src/api/git-workspaces.test.ts](../../web/frontend/src/api/git-workspaces.test.ts), [web/frontend/src/components/agent/git-workspaces](../../web/frontend/src/components/agent/git-workspaces), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 | `FR-LAUNCHER-028` | [web/backend/api/pr_lifecycle_collections_test.go](../../web/backend/api/pr_lifecycle_collections_test.go), [web/frontend/src/api/pr-lifecycle-repository-assignments.test.ts](../../web/frontend/src/api/pr-lifecycle-repository-assignments.test.ts), [web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts](../../web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts), [web/frontend/src/components/pr-workspaces/pr-lifecycle-collection-route-state.test.ts](../../web/frontend/src/components/pr-workspaces/pr-lifecycle-collection-route-state.test.ts), [web/frontend/src/routes/-development-admin-route.test.tsx](../../web/frontend/src/routes/-development-admin-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
+| `FR-LAUNCHER-029` | [pkg/prworkspace/http_collection_test.go](../../pkg/prworkspace/http_collection_test.go), [web/backend/api/pr_workspaces_test.go](../../web/backend/api/pr_workspaces_test.go), [web/frontend/src/api/development-workspaces.test.ts](../../web/frontend/src/api/development-workspaces.test.ts), [web/frontend/src/routes/-development-collection-route.test.tsx](../../web/frontend/src/routes/-development-collection-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 
 ## Implementation Anchors
 
 - [web/backend/api/router.go](../../web/backend/api/router.go)
 - [web/backend/api/pr_workspaces.go](../../web/backend/api/pr_workspaces.go)
+- [pkg/prworkspace/http_collection.go](../../pkg/prworkspace/http_collection.go)
 - [web/backend/api/pr_workspace_proxy.go](../../web/backend/api/pr_workspace_proxy.go)
 - [web/backend/api/pr_lifecycle_workflow_configurations.go](../../web/backend/api/pr_lifecycle_workflow_configurations.go)
 - [web/backend/api/gateway.go](../../web/backend/api/gateway.go)
@@ -388,6 +392,7 @@ removes or resolves the durable inbox item.
 - [web/frontend/src/routes/notifications.tsx](../../web/frontend/src/routes/notifications.tsx)
 - [web/frontend/src/routes/notifications_.$notificationID.tsx](../../web/frontend/src/routes/notifications_.$notificationID.tsx)
 - [web/frontend/src/api/development-workspaces.ts](../../web/frontend/src/api/development-workspaces.ts)
+- [web/frontend/src/components/development-workspaces/development-workspace-collection-route-state.ts](../../web/frontend/src/components/development-workspaces/development-workspace-collection-route-state.ts)
 - [web/frontend/src/api/notifications.ts](../../web/frontend/src/api/notifications.ts)
 - [web/frontend/src/api/pr-lifecycle-workflow-configurations.ts](../../web/frontend/src/api/pr-lifecycle-workflow-configurations.ts)
 - [web/frontend/src/api/pr-lifecycle-repository-assignments.ts](../../web/frontend/src/api/pr-lifecycle-repository-assignments.ts)

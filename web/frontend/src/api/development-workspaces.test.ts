@@ -6,6 +6,7 @@ import {
   createDevelopmentWorkspace,
   getDevelopmentCodeDiff,
   getDevelopmentConversation,
+  getDevelopmentWorkspace,
   listDevelopmentRepositories,
   listDevelopmentWorkspaces,
   reconcileDevelopmentPublication,
@@ -31,6 +32,17 @@ const summary = {
   created_at: "2026-08-24T10:00:00Z",
   updated_at: "2026-08-24T10:05:00Z",
 } as const
+const collectionSummary = {
+  id: workspaceID,
+  intent: "implement_feature",
+  source: "issue",
+  repository: "octo/repo",
+  title: "Improve retry feedback",
+  phase: "implementation",
+  execution_state: "running",
+  created: "2026-08-24T10:00:00Z",
+  updated: "2026-08-24T10:05:00Z",
+} as const
 
 function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
@@ -39,13 +51,113 @@ function jsonResponse(value: unknown, status = 200): Response {
   })
 }
 
+function developmentWorkspaceQuerySchema() {
+  const stringOperators = ["=", "!=", "~", "!~", "IN", "NOT IN"]
+  const enumOperators = ["=", "!=", "IN", "NOT IN"]
+  const timestampOperators = ["=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN"]
+  return {
+    fields: [
+      {
+        name: "id",
+        type: "string",
+        operators: stringOperators,
+        sortable: true,
+        suggested_values: [workspaceID],
+      },
+      {
+        name: "intent",
+        type: "enum",
+        operators: enumOperators,
+        sortable: true,
+        suggested_values: ["implement_feature", "pickup_pr"],
+      },
+      {
+        name: "source",
+        type: "enum",
+        operators: enumOperators,
+        sortable: true,
+        suggested_values: ["issue", "brief", "pull_request"],
+      },
+      {
+        name: "repository",
+        type: "string",
+        operators: stringOperators,
+        sortable: true,
+        suggested_values: ["octo/repo"],
+      },
+      {
+        name: "title",
+        type: "string",
+        operators: stringOperators,
+        sortable: true,
+        suggested_values: ["Improve retry feedback"],
+      },
+      {
+        name: "phase",
+        type: "enum",
+        operators: enumOperators,
+        sortable: true,
+        suggested_values: [
+          "intake",
+          "charter",
+          "planning",
+          "review",
+          "triage",
+          "implementation",
+          "validation",
+          "completion_audit",
+          "publication",
+          "complete",
+        ],
+      },
+      {
+        name: "execution_state",
+        type: "enum",
+        operators: enumOperators,
+        sortable: true,
+        suggested_values: [
+          "queued",
+          "running",
+          "waiting_gate",
+          "waiting_user",
+          "succeeded",
+          "failed",
+          "blocked",
+          "canceled",
+          "stale",
+          "unknown",
+        ],
+      },
+      {
+        name: "created",
+        type: "timestamp",
+        operators: timestampOperators,
+        sortable: true,
+      },
+      {
+        name: "updated",
+        type: "timestamp",
+        operators: timestampOperators,
+        sortable: true,
+      },
+    ],
+    default_order: [{ field: "updated", direction: "DESC" }],
+  }
+}
+
 describe("development workspace API", () => {
   beforeEach(() => mockedLauncherFetch.mockReset())
 
   it("lists workspaces and configured implementation repositories", async () => {
     mockedLauncherFetch
       .mockResolvedValueOnce(
-        jsonResponse({ workspaces: [summary], next_cursor: "next+/=" }),
+        jsonResponse({
+          workspaces: [collectionSummary],
+          total: 1,
+          next_cursor: "next+/=",
+          canonical_query: "ALL ORDER BY updated DESC",
+          query_schema: developmentWorkspaceQuerySchema(),
+        }),
       )
       .mockResolvedValueOnce(
         jsonResponse({
@@ -61,11 +173,21 @@ describe("development workspace API", () => {
       )
 
     await expect(
-      listDevelopmentWorkspaces({ limit: 50, cursor: "cursor+/=" }),
-    ).resolves.toEqual({ workspaces: [summary], next_cursor: "next+/=" })
+      listDevelopmentWorkspaces({
+        query: "phase = implementation ORDER BY updated DESC",
+        limit: 50,
+        cursor: "cursor+/=",
+      }),
+    ).resolves.toEqual({
+      workspaces: [collectionSummary],
+      total: 1,
+      next_cursor: "next+/=",
+      canonical_query: "ALL ORDER BY updated DESC",
+      query_schema: { fields: developmentWorkspaceQuerySchema().fields },
+    })
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       1,
-      "/api/development-workspaces?limit=50&cursor=cursor%2B%2F%3D",
+      "/api/development-workspaces?query=phase+%3D+implementation+ORDER+BY+updated+DESC&cursor=cursor%2B%2F%3D&limit=50",
       { signal: undefined },
     )
     await expect(listDevelopmentRepositories()).resolves.toEqual({
@@ -77,6 +199,184 @@ describe("development workspace API", () => {
           can_implement: true,
         },
       ],
+    })
+  })
+
+  it("rejects unsafe collection identities and noncanonical query schemas", async () => {
+    const invalidID = {
+      workspaces: [{ ...collectionSummary, id: "devw_unsafe" }],
+      total: 1,
+      canonical_query: "ALL ORDER BY updated DESC",
+      query_schema: developmentWorkspaceQuerySchema(),
+    }
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(invalidID))
+    await expect(listDevelopmentWorkspaces()).rejects.toMatchObject({
+      code: "malformed_response",
+      status: 502,
+    })
+
+    const invalidSchema = developmentWorkspaceQuerySchema()
+    invalidSchema.default_order[0] = {
+      field: "updated",
+      direction: "ASC",
+    }
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        workspaces: [collectionSummary],
+        total: 1,
+        canonical_query: "ALL ORDER BY updated DESC",
+        query_schema: invalidSchema,
+      }),
+    )
+    await expect(listDevelopmentWorkspaces()).rejects.toMatchObject({
+      code: "malformed_response",
+      status: 502,
+    })
+  })
+
+  it("preserves bounded UTF-8 collection query error positions", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          code: "invalid_query",
+          message: "Unexpected operator",
+          position: 17,
+        },
+        400,
+      ),
+    )
+    await expect(
+      listDevelopmentWorkspaces({ query: "title !! retry" }),
+    ).rejects.toMatchObject({
+      code: "invalid_query",
+      status: 400,
+      position: 17,
+      message: "Unexpected operator",
+    })
+  })
+
+  it("normalizes and bounds structured error data", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          code: "invalid_query",
+          message: `Unexpected\noperator\t${"💡".repeat(400)}`,
+          position: 7,
+        },
+        400,
+      ),
+    )
+    try {
+      await listDevelopmentWorkspaces({ query: "title !! retry" })
+      throw new Error("expected request failure")
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "invalid_query",
+        status: 400,
+        position: 7,
+      })
+      expect((error as Error).message).not.toMatch(/[\r\n\t]/u)
+      expect(
+        new TextEncoder().encode((error as Error).message).byteLength,
+      ).toBeLessThanOrEqual(1024)
+    }
+  })
+
+  it("drops invalid error codes and query positions", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          code: "UNSAFE code",
+          message: "Safe message",
+          position: 4097,
+        },
+        422,
+      ),
+    )
+    await expect(listDevelopmentWorkspaces()).rejects.toMatchObject({
+      code: undefined,
+      status: 422,
+      position: undefined,
+      message: "Safe message",
+    })
+  })
+
+  it("uses safe bounded fallbacks for malformed and oversized error bodies", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      new Response("<html>private upstream failure</html>", {
+        status: 502,
+        headers: { "Content-Type": "text/html" },
+      }),
+    )
+    await expect(listDevelopmentWorkspaces()).rejects.toMatchObject({
+      code: undefined,
+      status: 502,
+      message: "Request failed with status 502.",
+    })
+
+    mockedLauncherFetch.mockResolvedValueOnce(
+      new Response("x".repeat((1 << 20) + 1), {
+        status: 503,
+        headers: { "Content-Type": "text/plain" },
+      }),
+    )
+    await expect(listDevelopmentWorkspaces()).rejects.toMatchObject({
+      code: undefined,
+      status: 503,
+      message: "Request failed with status 503.",
+    })
+
+    mockedLauncherFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          code: "invalid_query",
+          message: "private non-JSON response metadata",
+        }),
+        {
+          status: 502,
+          headers: { "Content-Type": "text/plain" },
+        },
+      ),
+    )
+    await expect(listDevelopmentWorkspaces()).rejects.toMatchObject({
+      code: undefined,
+      status: 502,
+      message: "Request failed with status 502.",
+    })
+  })
+
+  it("rejects successful JSON with a non-JSON content type", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          workspaces: [],
+          total: 0,
+          canonical_query: "ALL ORDER BY updated DESC",
+          query_schema: developmentWorkspaceQuerySchema(),
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "text/plain" },
+        },
+      ),
+    )
+    await expect(listDevelopmentWorkspaces()).rejects.toMatchObject({
+      code: "malformed_response",
+      status: 502,
+    })
+  })
+
+  it("binds direct detail responses to the requested workspace ID", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ...summary,
+        id: `devw_${"2".repeat(32)}`,
+        source: { kind: "issue", url: "" },
+      }),
+    )
+    await expect(getDevelopmentWorkspace(workspaceID)).rejects.toMatchObject({
+      code: "malformed_response",
+      status: 502,
     })
   })
 

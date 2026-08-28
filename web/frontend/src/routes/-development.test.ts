@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 
+import { developmentWorkspacesDefaultQuery } from "@/components/development-workspaces/development-workspace-collection-route-state"
 import { normalizeDevelopmentWorkspaceSearch } from "@/routes/development_.$workspaceID"
 import { normalizeNewDevelopmentSearch } from "@/routes/development_.new"
 
@@ -12,6 +13,7 @@ describe("development workspace search", () => {
         revision: "candidate:2+/=",
       }),
     ).toEqual({
+      q: developmentWorkspacesDefaultQuery,
       tab: "changes",
       path: "src/retry copy.ts",
       revision: "candidate:2+/=",
@@ -22,7 +24,7 @@ describe("development workspace search", () => {
         path: "src/retry.ts",
         revision: "candidate:2",
       }),
-    ).toEqual({ tab: "overview" })
+    ).toEqual({ q: developmentWorkspacesDefaultQuery, tab: "overview" })
   })
 
   it("rejects traversal, absolute paths, control characters, and repeated state", () => {
@@ -38,7 +40,7 @@ describe("development workspace search", () => {
           path,
           revision: "candidate:2",
         }),
-      ).toEqual({ tab: "files" })
+      ).toEqual({ q: developmentWorkspacesDefaultQuery, tab: "files" })
     }
     expect(
       normalizeDevelopmentWorkspaceSearch({
@@ -46,7 +48,7 @@ describe("development workspace search", () => {
         path: ["src/retry.ts"],
         revision: ["candidate:2"],
       }),
-    ).toEqual({ tab: "overview" })
+    ).toEqual({ q: developmentWorkspacesDefaultQuery, tab: "overview" })
   })
 
   it("keeps only allowlisted required-action deep links on overview", () => {
@@ -57,6 +59,7 @@ describe("development workspace search", () => {
         entity: `pgr_${"a".repeat(32)}`,
       }),
     ).toEqual({
+      q: developmentWorkspacesDefaultQuery,
       tab: "overview",
       panel: "publication",
       entity: `pgr_${"a".repeat(32)}`,
@@ -67,7 +70,7 @@ describe("development workspace search", () => {
         panel: "private-panel",
         entity: "../../secret",
       }),
-    ).toEqual({ tab: "files" })
+    ).toEqual({ q: developmentWorkspacesDefaultQuery, tab: "files" })
   })
 })
 
@@ -77,7 +80,10 @@ describe("new development search", () => {
       normalizeNewDevelopmentSearch({
         issue: "https://github.com/octo/repo/issues/42",
       }),
-    ).toEqual({ issue: "https://github.com/octo/repo/issues/42" })
+    ).toEqual({
+      q: developmentWorkspacesDefaultQuery,
+      issue: "https://github.com/octo/repo/issues/42",
+    })
   })
 
   it("rejects unsafe, non-issue, repeated, and oversized issue state", () => {
@@ -88,7 +94,34 @@ describe("new development search", () => {
       ["https://github.com/octo/repo/issues/42"],
       `https://github.com/${"a".repeat(4096)}/issues/1`,
     ]) {
-      expect(normalizeNewDevelopmentSearch({ issue })).toEqual({})
+      expect(normalizeNewDevelopmentSearch({ issue })).toEqual({
+        q: developmentWorkspacesDefaultQuery,
+      })
     }
+  })
+
+  it("preserves canonical collection state alongside issue and detail state", () => {
+    expect(
+      normalizeNewDevelopmentSearch({
+        q: "phase = implementation ORDER BY updated DESC",
+        view: "grid",
+        issue: "https://github.com/octo/repo/issues/42",
+      }),
+    ).toEqual({
+      q: "phase = implementation ORDER BY updated DESC",
+      view: "grid",
+      issue: "https://github.com/octo/repo/issues/42",
+    })
+    expect(
+      normalizeDevelopmentWorkspaceSearch({
+        q: "phase = implementation ORDER BY updated DESC",
+        view: "table",
+        tab: "activity",
+      }),
+    ).toEqual({
+      q: "phase = implementation ORDER BY updated DESC",
+      view: "table",
+      tab: "activity",
+    })
   })
 })

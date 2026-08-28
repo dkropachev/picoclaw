@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen } from "@testing-library/react"
+import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ReactNode } from "react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  DevelopmentWorkspaceAPIError,
   getDevelopmentWorkspace,
   listDevelopmentWorkspaces,
 } from "@/api/development-workspaces"
@@ -86,6 +87,22 @@ const workspace = {
   publications: [],
   summary: "Candidate ready for validation.",
 }
+const collectionWorkspace = {
+  id: workspaceID,
+  intent: "implement_feature" as const,
+  source: "issue" as const,
+  repository: "octo/repo",
+  title: "Improve retry feedback",
+  phase: "validation" as const,
+  execution_state: "running" as const,
+  created: "2026-08-24T10:00:00Z",
+  updated: "2026-08-24T10:05:00Z",
+}
+const collectionMetadata = {
+  total: 1,
+  canonical_query: "ALL ORDER BY updated DESC",
+  query_schema: { fields: [] },
+}
 
 function renderWithClient(node: ReactNode) {
   const queryClient = new QueryClient({
@@ -100,7 +117,8 @@ describe("development workspace pages", () => {
     vi.mocked(listDevelopmentWorkspaces).mockReset()
     vi.mocked(getDevelopmentWorkspace).mockReset()
     vi.mocked(listDevelopmentWorkspaces).mockResolvedValue({
-      workspaces: [workspace],
+      workspaces: [collectionWorkspace],
+      ...collectionMetadata,
     })
     vi.mocked(getDevelopmentWorkspace).mockResolvedValue(workspace)
   })
@@ -111,15 +129,24 @@ describe("development workspace pages", () => {
     const onOpenWorkspace = vi.fn()
     renderWithClient(
       <DevelopmentPortfolioPage
+        search={{ q: "ORDER BY updated DESC" }}
+        onSearchChange={vi.fn()}
         onCreate={onCreate}
         onOpenWorkspace={onOpenWorkspace}
       />,
     )
 
-    await user.click(
-      await screen.findByRole("button", { name: /Improve retry feedback/ }),
-    )
+    await user.dblClick(await screen.findByLabelText("Improve retry feedback"))
     expect(onOpenWorkspace).toHaveBeenCalledWith(workspaceID)
+    expect(
+      screen.getByRole("region", { name: "Development workspaces list" }),
+    ).toBeVisible()
+    expect(
+      screen.queryByPlaceholderText("Filter by title, repository, or phase"),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText("Feature", { exact: true })).toBeNull()
+    expect(screen.getByText("Validation", { exact: true })).toBeVisible()
+    expect(screen.getByText("Running", { exact: true })).toBeVisible()
     await user.click(screen.getByRole("button", { name: "New work" }))
     expect(onCreate).toHaveBeenCalled()
   })
@@ -129,28 +156,40 @@ describe("development workspace pages", () => {
     vi.mocked(listDevelopmentWorkspaces)
       .mockReset()
       .mockResolvedValueOnce({
-        workspaces: [workspace],
+        workspaces: [collectionWorkspace],
+        ...collectionMetadata,
         next_cursor: "next+/=",
       })
       .mockResolvedValueOnce({
         workspaces: [
+          collectionWorkspace,
           {
-            ...workspace,
+            ...collectionWorkspace,
             id: `devw_${"2".repeat(32)}`,
             title: "Second page feature",
           },
         ],
+        ...collectionMetadata,
+        total: 2,
       })
     renderWithClient(
-      <DevelopmentPortfolioPage onCreate={vi.fn()} onOpenWorkspace={vi.fn()} />,
+      <DevelopmentPortfolioPage
+        search={{ q: "ORDER BY updated DESC" }}
+        onSearchChange={vi.fn()}
+        onCreate={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
     )
 
-    await user.click(
-      await screen.findByRole("button", { name: "Load more workspaces" }),
-    )
+    await user.click(await screen.findByRole("button", { name: "Load more" }))
     expect(await screen.findByText("Second page feature")).toBeVisible()
+    expect(screen.getAllByText("Improve retry feedback")).toHaveLength(1)
     expect(listDevelopmentWorkspaces).toHaveBeenLastCalledWith(
-      { limit: 100, cursor: "next+/=" },
+      {
+        query: "ORDER BY updated DESC",
+        limit: 50,
+        cursor: "next+/=",
+      },
       expect.any(AbortSignal),
     )
   })
@@ -171,6 +210,11 @@ describe("development workspace pages", () => {
     expect(
       await screen.findByText("Candidate ready for validation."),
     ).toBeVisible()
+    expect(
+      screen
+        .getByTestId("development-workspace")
+        .querySelector('[data-slot="collection-detail-shell"]'),
+    ).toBeInTheDocument()
     expect(screen.getByText("42 passed")).toBeVisible()
     expect(screen.getByText(`Chat for ${workspaceID}`)).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Changes" }))
@@ -198,5 +242,56 @@ describe("development workspace pages", () => {
     ).not.toBeInTheDocument()
     await user.click(trigger)
     expect(await screen.findByText(`Chat for ${workspaceID}`)).toBeVisible()
+  })
+
+  it("shows an immediate shared not-found boundary without retrying", async () => {
+    vi.mocked(getDevelopmentWorkspace).mockRejectedValue(
+      new DevelopmentWorkspaceAPIError(
+        "development_workspace_not_found",
+        404,
+        "Development workspace not found",
+      ),
+    )
+    renderWithClient(
+      <DevelopmentWorkspacePage
+        workspaceID={workspaceID}
+        tab="overview"
+        onBack={vi.fn()}
+        onTabChange={vi.fn()}
+        onPathChange={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText("Item not found")).toBeVisible()
+    expect(getDevelopmentWorkspace).toHaveBeenCalledTimes(1)
+  })
+
+  it("shows a retryable shared error boundary", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getDevelopmentWorkspace)
+      .mockRejectedValueOnce(
+        new DevelopmentWorkspaceAPIError(
+          "development_workspaces_unavailable",
+          503,
+          "Development workspaces are unavailable",
+        ),
+      )
+      .mockResolvedValueOnce(workspace)
+    renderWithClient(
+      <DevelopmentWorkspacePage
+        workspaceID={workspaceID}
+        tab="overview"
+        onBack={vi.fn()}
+        onTabChange={vi.fn()}
+        onPathChange={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText("Details could not be loaded")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Retry" }))
+    await waitFor(() =>
+      expect(screen.getByText("Candidate ready for validation.")).toBeVisible(),
+    )
+    expect(getDevelopmentWorkspace).toHaveBeenCalledTimes(2)
   })
 })
