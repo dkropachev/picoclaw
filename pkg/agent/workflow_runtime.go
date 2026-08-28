@@ -682,6 +682,11 @@ func (r *workflowAgentRunner) RunAgent(
 	if r == nil || r.loop == nil {
 		return nil, fmt.Errorf("agent loop not configured")
 	}
+	if req.Output != nil {
+		if err := req.Output.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	requestUsage := newWorkflowAgentUsageAccumulator(req.UsageObserver)
 	req.UsageObserver = requestUsage.Observe
 	defer func() {

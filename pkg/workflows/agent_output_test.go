@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -213,6 +214,192 @@ func TestValidateAgentStructuredOutputChecksArrayItemSchema(t *testing.T) {
 	}
 	if result.Error == "" {
 		t.Fatalf("structured output error is empty")
+	}
+}
+
+func TestValidateAgentStructuredOutputEnforcesNestedStringPattern(t *testing.T) {
+	contract := &AgentOutputContract{Format: "json", Schema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"candidateIds": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "string", "pattern": `^cand_[0-9a-f]{64}$`,
+				},
+			},
+		},
+	}}
+	validID := "cand_" + strings.Repeat("a", 64)
+	if result := ValidateAgentStructuredOutput(
+		`{"candidateIds":["`+validID+`","`+validID+`"]}`,
+		contract,
+	); !result.Valid {
+		t.Fatalf("valid patterned IDs were rejected: %#v", result)
+	}
+	for _, value := range []string{
+		"cand_unknown",
+		"cand_" + strings.Repeat("A", 64),
+		validID + "suffix",
+		"prefix" + validID,
+	} {
+		result := ValidateAgentStructuredOutput(
+			`{"candidateIds":["`+validID+`","`+value+`"]}`,
+			contract,
+		)
+		if result.Valid || !strings.Contains(result.Error, "$.candidateIds[1] must match pattern") {
+			t.Fatalf("pattern mismatch %q result=%#v", value, result)
+		}
+	}
+}
+
+func TestValidateAgentStructuredOutputRejectsInvalidPatternSchema(t *testing.T) {
+	for _, pattern := range []any{1, "["} {
+		result := ValidateAgentStructuredOutput(`"value"`, &AgentOutputContract{
+			Format: "json",
+			Schema: map[string]any{"type": "string", "pattern": pattern},
+		})
+		if result.Valid || !strings.Contains(result.Error, "pattern") {
+			t.Fatalf("invalid pattern %#v result=%#v", pattern, result)
+		}
+	}
+}
+
+func TestParseAgentOutputContractRejectsHiddenInvalidPatterns(t *testing.T) {
+	for _, schema := range []map[string]any{
+		{
+			"type": "object",
+			"properties": map[string]any{
+				"optional": map[string]any{"type": "string", "pattern": "["},
+			},
+		},
+		{
+			"type":  "array",
+			"items": map[string]any{"type": "string", "pattern": "["},
+		},
+		{
+			"type":                 "object",
+			"additionalProperties": map[string]any{"type": "string", "pattern": "["},
+		},
+	} {
+		if _, err := ParseAgentOutputContract(map[string]any{
+			"format": "json", "schema": schema,
+		}); err == nil || !strings.Contains(err.Error(), "RE2") {
+			t.Fatalf("hidden invalid pattern schema=%#v error=%v", schema, err)
+		}
+	}
+}
+
+func TestParseAgentOutputContractRejectsPatternPreflightBoundaries(t *testing.T) {
+	deep := map[string]any{"type": "string", "pattern": "safe"}
+	for range maxAgentOutputSchemaDepth + 1 {
+		deep = map[string]any{"type": "array", "items": deep}
+	}
+	for _, schema := range []map[string]any{
+		deep,
+		{"type": "object", "additionalProperties": "not-a-schema"},
+	} {
+		if _, err := ParseAgentOutputContract(map[string]any{
+			"format": "json", "schema": schema,
+		}); err == nil {
+			t.Fatalf("invalid preflight schema was accepted: %#v", schema)
+		}
+	}
+	if err := validateJSONSchemaPattern(
+		"safe", map[string]any{"pattern": "safe"}, "$", map[string]*regexp.Regexp{},
+	); err == nil || !strings.Contains(err.Error(), "not compiled") {
+		t.Fatalf("missing compiled pattern error=%v", err)
+	}
+}
+
+func TestAgentOutputPatternValidationHelperBoundaries(t *testing.T) {
+	if err := (*AgentOutputContract)(nil).Validate(); err != nil {
+		t.Fatalf("nil contract validation error=%v", err)
+	}
+	contract := &AgentOutputContract{Format: "json", Schema: map[string]any{
+		"type": "string", "pattern": "safe",
+	}}
+	if err := contract.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := contract.Validate(); err != nil {
+		t.Fatalf("cached contract validation error=%v", err)
+	}
+	if err := validateJSONSchemaValue("value", map[string]any{
+		"type": "string", "pattern": "[",
+	}, "$"); err == nil {
+		t.Fatal("invalid direct schema pattern was accepted")
+	}
+	if err := validateJSONSchemaValueWithPatterns(
+		"value", map[string]any{}, "$", map[string]*regexp.Regexp{},
+	); err != nil {
+		t.Fatalf("empty schema validation error=%v", err)
+	}
+	if err := validateJSONSchemaPattern(
+		"value", map[string]any{}, "$", map[string]*regexp.Regexp{},
+	); err != nil {
+		t.Fatalf("unconfigured pattern validation error=%v", err)
+	}
+	if err := validateJSONSchemaAdditionalProperties(
+		map[string]any{"extra": "value"}, nil,
+		map[string]any{"additionalProperties": map[string]any{}},
+		"$", map[string]*regexp.Regexp{},
+	); err != nil {
+		t.Fatalf("empty additional schema validation error=%v", err)
+	}
+}
+
+func TestValidateAgentStructuredOutputEnforcesTypelessRE2Pattern(t *testing.T) {
+	contract, err := ParseAgentOutputContract(map[string]any{
+		"format": "json",
+		"schema": map[string]any{"pattern": `^safe-[0-9]+$`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := ValidateAgentStructuredOutput(`"safe-42"`, contract); !result.Valid {
+		t.Fatalf("typeless matching pattern was rejected: %#v", result)
+	}
+	if result := ValidateAgentStructuredOutput(`"unsafe"`, contract); result.Valid {
+		t.Fatalf("typeless mismatching pattern was accepted: %#v", result)
+	}
+	if result := ValidateAgentStructuredOutput(`42`, contract); !result.Valid {
+		t.Fatalf("pattern incorrectly constrained a non-string instance: %#v", result)
+	}
+	if _, err := ParseAgentOutputContract(map[string]any{
+		"format": "json",
+		"schema": map[string]any{"type": "string", "pattern": `^(?!admin$).+$`},
+	}); err == nil || !strings.Contains(err.Error(), "RE2") {
+		t.Fatalf("unsupported ECMA lookahead error=%v", err)
+	}
+	if _, err := ParseAgentOutputContract(map[string]any{
+		"format": "json",
+		"schema": map[string]any{
+			"type": "string", "pattern": strings.Repeat("x", maxAgentOutputPatternBytes+1),
+		},
+	}); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("oversized pattern error=%v", err)
+	}
+}
+
+func TestValidateAgentStructuredOutputEnforcesPatternOnAdditionalProperties(t *testing.T) {
+	contract := &AgentOutputContract{Format: "json", Schema: map[string]any{
+		"type": "object",
+		"additionalProperties": map[string]any{
+			"type": "string", "pattern": `^[a-z]+$`,
+		},
+	}}
+	if result := ValidateAgentStructuredOutput(
+		`{"first":"valid","second":"also"}`,
+		contract,
+	); !result.Valid {
+		t.Fatalf("valid patterned additional properties were rejected: %#v", result)
+	}
+	result := ValidateAgentStructuredOutput(
+		`{"first":"valid","second":"NOT-VALID"}`,
+		contract,
+	)
+	if result.Valid || !strings.Contains(result.Error, "$.second must match pattern") {
+		t.Fatalf("invalid patterned additional property result=%#v", result)
 	}
 }
 
