@@ -14,7 +14,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	threadstore "github.com/sipeed/picoclaw/pkg/threads"
-	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 func (al *AgentLoop) buildContinuationTarget(msg bus.InboundMessage) (*continuationTarget, error) {
@@ -336,34 +335,50 @@ func (al *AgentLoop) processMessageWithPreparation(
 		msg = al.prepareInboundMessageForAgent(ctx, msg)
 	}
 
-	// Add message preview to log (show full content for error messages)
-	var logContent string
-	if strings.Contains(msg.Content, "Error:") || strings.Contains(msg.Content, "error") {
-		logContent = msg.Content // Full content for errors
-	} else {
-		logContent = utils.Truncate(msg.Content, 80)
-	}
-	logger.InfoCF(
-		"agent",
-		fmt.Sprintf("Processing message from %s:%s: %s", msg.Channel, msg.SenderID, logContent),
-		map[string]any{
-			"channel":     msg.Channel,
-			"chat_id":     msg.ChatID,
-			"sender_id":   msg.SenderID,
-			"session_key": msg.SessionKey,
-		},
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageInboundMessage,
+		logger.NewSafeFields(
+			agentDiagnosticChannelField(msg.Channel),
+			agentDiagnosticChatField(msg.ChatID),
+			agentDiagnosticSenderField(msg.SenderID),
+			agentDiagnosticSessionField(msg.SessionKey),
+			logger.SafeInt(logger.FieldMediaCount, len(msg.Media)),
+			logger.SafeObservation(
+				logger.ObservationPrefixMessageGraph,
+				logger.ObserveText(logger.ObservationDomainMessageGraph, msg.Content),
+			),
+		),
+	)
+	logger.DebugSensitiveCF(
+		logger.DiagnosticPolicy{},
+		logger.ComponentAgent,
+		logger.DiagnosticMessageInboundMessage,
+		logger.NewSafeFields(
+			agentDiagnosticChannelField(msg.Channel),
+			agentDiagnosticChatField(msg.ChatID),
+			agentDiagnosticSenderField(msg.SenderID),
+			agentDiagnosticSessionField(msg.SessionKey),
+			logger.SafeInt(logger.FieldMediaCount, len(msg.Media)),
+		),
+		logger.SensitivityInboundMessage,
+		logger.ObservationDomainMessageGraph,
+		msg.Content,
 	)
 
-	logger.InfoCF("agent", "Routed message",
-		map[string]any{
-			"agent_id":           agent.ID,
-			"scope_key":          scopeKey,
-			"session_key":        sessionKey,
-			"matched_by":         route.MatchedBy,
-			"route_agent":        route.AgentID,
-			"route_channel":      route.Channel,
-			"route_main_session": allocation.MainSessionKey,
-		})
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentRoutedMessage,
+		logger.NewSafeFields(
+			agentDiagnosticAgentField(agent.ID),
+			agentDiagnosticScopeField(scopeKey),
+			agentDiagnosticSessionField(sessionKey),
+			agentDiagnosticRouteField(route.MatchedBy),
+			agentDiagnosticRouteAgentField(route.AgentID),
+			agentDiagnosticRouteChannelField(route.Channel),
+			agentDiagnosticRouteSessionField(allocation.MainSessionKey),
+		),
+	)
 
 	opts := processOptions{
 		Dispatch: DispatchRequest{
@@ -409,11 +424,14 @@ func (al *AgentLoop) processMessageWithPreparation(
 
 	if pending := al.takePendingSkills(opts.Dispatch.SessionKey); len(pending) > 0 {
 		opts.ForcedSkills = append(opts.ForcedSkills, pending...)
-		logger.InfoCF("agent", "Applying pending skill override",
-			map[string]any{
-				"session_key": opts.Dispatch.SessionKey,
-				"skills":      strings.Join(pending, ","),
-			})
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentApplyingPendingSkillOverride,
+			logger.NewSafeFields(
+				agentDiagnosticSessionField(opts.Dispatch.SessionKey),
+				logger.SafeInt(logger.FieldSkillCount, len(pending)),
+			),
+		)
 	}
 
 	return al.runAgentLoop(ctx, agent, opts)
@@ -454,11 +472,14 @@ func (al *AgentLoop) processSystemMessage(
 		)
 	}
 
-	logger.InfoCF("agent", "Processing system message",
-		map[string]any{
-			"sender_id": msg.SenderID,
-			"chat_id":   msg.ChatID,
-		})
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentProcessingSystemMessage,
+		logger.NewSafeFields(
+			agentDiagnosticSenderField(msg.SenderID),
+			agentDiagnosticChatField(msg.ChatID),
+		),
+	)
 
 	// Parse origin channel from chat_id (format: "channel:chat_id")
 	var originChannel, originChatID string
@@ -479,12 +500,15 @@ func (al *AgentLoop) processSystemMessage(
 
 	// Skip internal channels - only log, don't send to user
 	if constants.IsInternalChannel(originChannel) {
-		logger.InfoCF("agent", "Subagent completed (internal channel)",
-			map[string]any{
-				"sender_id":   msg.SenderID,
-				"content_len": len(content),
-				"channel":     originChannel,
-			})
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentSubagentCompletedInternalChannel,
+			logger.NewSafeFields(
+				agentDiagnosticSenderField(msg.SenderID),
+				agentDiagnosticChannelField(originChannel),
+				logger.SafeInt64(logger.FieldContentBytes, int64(len(content))),
+			),
+		)
 		return "", nil
 	}
 

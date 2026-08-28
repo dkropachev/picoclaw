@@ -30,7 +30,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
-	"github.com/sipeed/picoclaw/pkg/utils"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
@@ -279,10 +278,12 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				if ctx.Err() != nil {
 					return nil
 				}
-				logger.WarnCF(
-					"agent",
-					"Failed to acquire inbound message runtime",
-					map[string]any{"error": err.Error()},
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentFailedToAcquireInboundMessageRuntime,
+					logger.NewSafeFields(
+						agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
 				)
 				continue
 			}
@@ -442,13 +443,16 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 								msg.Context.TurnUXID,
 							)
 						}
-						logger.WarnCF("agent", "Failed to enqueue steering message",
-							map[string]any{
-								"error":       enqueueErr.Error(),
-								"channel":     msg.Channel,
-								"chat_id":     msg.ChatID,
-								"session_key": sessionKey,
-							})
+						logger.WarnSafeCF(
+							logger.ComponentAgent,
+							logger.DiagnosticMessageAgentFailedToEnqueueSteeringMessage,
+							logger.NewSafeFields(
+								agentDiagnosticErrorField(logger.ErrorClassInternal, enqueueErr),
+								agentDiagnosticChannelField(msg.Channel),
+								agentDiagnosticChatField(msg.ChatID),
+								agentDiagnosticSessionField(sessionKey),
+							),
+						)
 					}
 					releaseInbound()
 					continue
@@ -463,15 +467,15 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			)
 			if err != nil {
 				releaseInbound()
-				logger.WarnCF(
-					"agent",
-					"Failed to retain inbound message runtime",
-					map[string]any{
-						"error":       err.Error(),
-						"channel":     msg.Channel,
-						"chat_id":     msg.ChatID,
-						"session_key": sessionKey,
-					},
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentFailedToRetainInboundMessageRuntime,
+					logger.NewSafeFields(
+						agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+						agentDiagnosticChannelField(msg.Channel),
+						agentDiagnosticChatField(msg.ChatID),
+						agentDiagnosticSessionField(sessionKey),
+					),
 				)
 				continue
 			}
@@ -514,14 +518,16 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 
 				defer func() {
 					if r := recover(); r != nil {
-						logger.RecoverPanicNoExit(r)
-						logger.ErrorCF("agent", "Worker goroutine panicked",
-							map[string]any{
-								"session_key": sessionKey,
-								"channel":     m.Channel,
-								"chat_id":     m.ChatID,
-								"panic":       fmt.Sprintf("%v", r),
-							})
+						logger.ErrorSafeCF(
+							logger.ComponentAgent,
+							logger.DiagnosticMessageAgentWorkerGoroutinePanicked,
+							logger.NewSafeFields(
+								agentDiagnosticSessionField(sessionKey),
+								agentDiagnosticChannelField(m.Channel),
+								agentDiagnosticChatField(m.ChatID),
+								agentDiagnosticPanicField(r),
+							),
+						)
 					}
 				}()
 				defer func() { <-al.workerSem }() // Release slot
@@ -730,26 +736,35 @@ func (al *AgentLoop) closeQuiescedResources() {
 	evolution := al.currentEvolutionBridge()
 	if evolution != nil {
 		if err := evolution.Close(); err != nil {
-			logger.ErrorCF("agent", "Failed to close evolution bridge",
-				map[string]any{
-					"error": err.Error(),
-				})
+			logger.ErrorSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToCloseEvolutionBridge,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		}
 	}
 
 	if err := closeContextManager(al.contextManager); err != nil {
-		logger.ErrorCF("agent", "Failed to close context manager",
-			map[string]any{
-				"error": err.Error(),
-			})
+		logger.ErrorSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToCloseContextManager,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 	}
 	al.GetRegistry().Close()
 	if mcpManager != nil {
 		if err := mcpManager.Close(); err != nil {
-			logger.ErrorCF("agent", "Failed to close MCP manager",
-				map[string]any{
-					"error": err.Error(),
-				})
+			logger.ErrorSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToCloseMCPManager,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		}
 	}
 	al.hookRuntime.close(al)
@@ -757,10 +772,13 @@ func (al *AgentLoop) closeQuiescedResources() {
 	al.closeAgentActivityRecorder()
 	if al.runtimeEvents != nil && al.ownsRuntimeEvents {
 		if err := al.runtimeEvents.Close(); err != nil {
-			logger.ErrorCF("agent", "Failed to close runtime event bus",
-				map[string]any{
-					"error": err.Error(),
-				})
+			logger.ErrorSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToCloseRuntimeEventBus,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		}
 	}
 }
@@ -901,9 +919,11 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				logger.RecoverPanicNoExit(r)
-				logger.ErrorCF("agent", "Panic during registry creation",
-					map[string]any{"panic": r})
+				logger.ErrorSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentPanicDuringRegistryCreation,
+					logger.NewSafeFields(agentDiagnosticPanicField(r)),
+				)
 				registry = nil
 			}
 		}()
@@ -940,8 +960,13 @@ func (al *AgentLoop) reloadProviderAndConfig(
 
 	newEvolution, evolutionErr := newEvolutionBridge(registry, cfg, provider)
 	if evolutionErr != nil {
-		logger.WarnCF("agent", "Failed to reinitialize evolution bridge during reload",
-			map[string]any{"error": evolutionErr.Error()})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToReinitializeEvolutionBridgeDuringReload,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, evolutionErr),
+			),
+		)
 	}
 	evolutionInstalled := false
 	defer func() {
@@ -952,15 +977,25 @@ func (al *AgentLoop) reloadProviderAndConfig(
 			"reload candidate evolution bridge",
 			newEvolution.Close,
 		); closeErr != nil {
-			logger.WarnCF("agent", "Failed to close reloaded evolution candidate",
-				map[string]any{"error": closeErr.Error()})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToCloseReloadedEvolutionCandidate,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, closeErr),
+				),
+			)
 		}
 	}()
 	if newEvolution != nil {
 		newEvolution.setCurrentCheck(al.isCurrentEvolutionBridge)
 		if err := newEvolution.subscribeRuntimeEvents(al.runtimeEvents.Channel()); err != nil {
-			logger.WarnCF("agent", "Failed to subscribe reloaded evolution bridge to runtime events",
-				map[string]any{"error": err.Error()})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToSubscribeReloadedEvolutionBridgeToRuntimeEvents,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		}
 	}
 
@@ -1033,8 +1068,13 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	// remains paused, closing the previous generation first so Seahorse cannot
 	// retain stale engines or SQLite handles after workspace/topology changes.
 	if err := closeContextManager(oldContextManager); err != nil {
-		logger.WarnCF("agent", "Failed to close previous context manager during reload",
-			map[string]any{"error": err.Error()})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToClosePreviousContextManagerDuringReload,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 	}
 	newContextManager := al.resolveContextManagerWithContext(runtimeCtx)
 	al.mu.Lock()
@@ -1043,14 +1083,24 @@ func (al *AgentLoop) reloadProviderAndConfig(
 
 	if oldEvolution != nil {
 		if err := oldEvolution.Close(); err != nil {
-			logger.WarnCF("agent", "Failed to close previous evolution bridge during reload",
-				map[string]any{"error": err.Error()})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToClosePreviousEvolutionBridgeDuringReload,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		}
 	}
 	if newEvolution != nil {
 		if err := newEvolution.activate(al); err != nil {
-			logger.WarnCF("agent", "Failed to activate reloaded evolution bridge",
-				map[string]any{"error": err.Error()})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToActivateReloadedEvolutionBridge,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		}
 	}
 	al.refreshRuntimeEventLogger(cfg)
@@ -1060,8 +1110,13 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	al.hookRuntime.reset(al)
 	configureHookManagerFromConfig(al.hooks, cfg)
 	if err := al.ensureHooksInitializedForGeneration(runtimeCtx, cfg); err != nil {
-		logger.WarnCF("agent", "Configured hooks failed to reinitialize after reload",
-			map[string]any{"error": err.Error()})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentConfiguredHooksFailedToReinitializeAfterReload,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 	}
 	// Runtime uses are paused and the old context/evolution owners are closed.
 	// Release every old compatibility-source tool lease before its borrowed MCP
@@ -1069,13 +1124,23 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	oldRegistry.Close()
 	if oldMCPManager != nil {
 		if err := oldMCPManager.Close(); err != nil {
-			logger.WarnCF("agent", "Failed to close previous MCP manager during reload",
-				map[string]any{"error": err.Error()})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToClosePreviousMCPManagerDuringReload,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		}
 	}
 	if err := al.ensureMCPInitializedForGeneration(runtimeCtx, cfg, registry); err != nil {
-		logger.WarnCF("agent", "MCP failed to reinitialize after reload",
-			map[string]any{"error": err.Error()})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMCPFailedToReinitializeAfterReload,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 	}
 	// Close old provider after releasing the lock
 	// This prevents blocking readers while closing
@@ -1085,10 +1150,13 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		}
 	}
 
-	logger.InfoCF("agent", "Provider and config reloaded successfully",
-		map[string]any{
-			"model": cfg.Agents.Defaults.GetModelName(),
-		})
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentProviderAndConfigReloadedSuccessfully,
+		logger.NewSafeFields(
+			agentDiagnosticModelField(cfg.Agents.Defaults.GetModelName()),
+		),
+	)
 
 	if !hasOldProvider {
 		return nil, nil
@@ -1183,10 +1251,12 @@ func (al *AgentLoop) runAgentLoop(
 		!constants.IsInternalChannel(opts.Dispatch.Channel()) {
 		channelKey := fmt.Sprintf("%s:%s", opts.Dispatch.Channel(), opts.Dispatch.ChatID())
 		if recordErr := al.RecordLastChannel(channelKey); recordErr != nil {
-			logger.WarnCF(
-				"agent",
-				"Failed to record last channel",
-				map[string]any{"error": recordErr.Error()},
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToRecordLastChannel,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, recordErr),
+				),
 			)
 		}
 	}
@@ -1219,11 +1289,14 @@ func (al *AgentLoop) runAgentLoop(
 
 	for _, followUp := range result.followUps {
 		if pubErr := al.bus.PublishInbound(ctx, followUp); pubErr != nil {
-			logger.WarnCF("agent", "Failed to publish follow-up after turn",
-				map[string]any{
-					"turn_id": ts.turnID,
-					"error":   pubErr.Error(),
-				})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToPublishFollowUpAfterTurn,
+				logger.NewSafeFields(
+					agentDiagnosticTurnField(ts.turnID),
+					agentDiagnosticErrorField(logger.ErrorClassTransport, pubErr),
+				),
+			)
 		}
 	}
 
@@ -1257,14 +1330,37 @@ func (al *AgentLoop) runAgentLoop(
 	}
 
 	if result.finalContent != "" {
-		responsePreview := utils.Truncate(result.finalContent, 120)
-		logger.InfoCF("agent", fmt.Sprintf("Response: %s", responsePreview),
-			map[string]any{
-				"agent_id":     agent.ID,
-				"session_key":  opts.Dispatch.SessionKey,
-				"iterations":   ts.currentIteration(),
-				"final_length": len(result.finalContent),
-			})
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageModelResponse,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(agent.ID),
+				agentDiagnosticSessionField(opts.Dispatch.SessionKey),
+				logger.SafeInt(logger.FieldIteration, ts.currentIteration()),
+				logger.SafeInt64(logger.FieldContentBytes, int64(len(result.finalContent))),
+				logger.SafeObservation(
+					logger.ObservationPrefixModelResponse,
+					logger.ObserveText(
+						logger.ObservationDomainModelResponse,
+						result.finalContent,
+					),
+				),
+			),
+		)
+		logger.DebugSensitiveCF(
+			logger.DiagnosticPolicy{},
+			logger.ComponentAgent,
+			logger.DiagnosticMessageModelResponse,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(agent.ID),
+				agentDiagnosticSessionField(opts.Dispatch.SessionKey),
+				logger.SafeInt(logger.FieldIteration, ts.currentIteration()),
+				logger.SafeInt64(logger.FieldContentBytes, int64(len(result.finalContent))),
+			),
+			logger.SensitivityModelResponse,
+			logger.ObservationDomainModelResponse,
+			result.finalContent,
+		)
 	}
 	if opts.resultModelName != nil {
 		*opts.resultModelName = strings.TrimSpace(result.modelName)
@@ -1311,10 +1407,6 @@ func (al *AgentLoop) resolveCurrentRuntimeAgent(
 // resolveContextManager selects the ContextManager implementation based on config.
 
 // GetStartupInfo returns information about loaded tools and skills for logging.
-
-// formatMessagesForLog formats messages for logging
-
-// formatToolsForLog formats tool definitions for logging
 
 // summarizeSession summarizes the conversation history for a session.
 // findNearestUserMessage finds the nearest user message to the given index.

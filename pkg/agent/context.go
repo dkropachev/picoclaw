@@ -18,7 +18,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
-	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type ContextBuilder struct {
@@ -54,12 +53,12 @@ func (cb *ContextBuilder) WithToolDiscovery(useBM25, useRegex bool) *ContextBuil
 			useBM25:  useBM25,
 			useRegex: useRegex,
 		}); err != nil {
-			logger.WarnCF(
-				"agent",
-				"Failed to register tool discovery prompt contributor",
-				map[string]any{
-					"error": err.Error(),
-				},
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToRegisterToolDiscoveryPromptContributor,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+				),
 			)
 		}
 	}
@@ -71,12 +70,12 @@ func (cb *ContextBuilder) WithThreadPolicy(cfg *config.Config) *ContextBuilder {
 		if err := cb.RegisterPromptContributor(threadPolicyPromptContributor{
 			cfg: cfg,
 		}); err != nil {
-			logger.WarnCF(
-				"agent",
-				"Failed to register thread policy prompt contributor",
-				map[string]any{
-					"error": err.Error(),
-				},
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToRegisterThreadPolicyPromptContributor,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+				),
 			)
 		}
 	}
@@ -98,12 +97,13 @@ func (cb *ContextBuilder) WithAgentDiscovery(
 			agentID:  agentID,
 			discover: discover,
 		}); err != nil {
-			logger.WarnCF(
-				"agent",
-				"Failed to register agent discovery prompt contributor",
-				map[string]any{
-					"error": err.Error(),
-				},
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToRegisterAgentDiscoveryPromptContributor,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(agentID),
+					agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+				),
 			)
 		}
 	}
@@ -264,13 +264,17 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 	stack := NewPromptStack(cb.promptRegistryOrDefault())
 	add := func(part PromptPart) {
 		if err := stack.Add(part); err != nil {
-			logger.WarnCF("agent", "Skipping invalid prompt part", map[string]any{
-				"id":     part.ID,
-				"layer":  part.Layer,
-				"slot":   part.Slot,
-				"source": part.Source.ID,
-				"error":  err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentSkippingInvalidPromptPart,
+				logger.NewSafeFields(
+					agentDiagnosticPromptPartField(part.ID),
+					agentDiagnosticPromptLayerField(string(part.Layer)),
+					agentDiagnosticPromptSlotField(string(part.Slot)),
+					agentDiagnosticPromptSourceField(string(part.Source.ID)),
+					agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+				),
+			)
 		}
 	}
 
@@ -402,10 +406,13 @@ func (cb *ContextBuilder) BuildSystemPromptWithCache() string {
 	cb.existedAtCache = baseline.existed
 	cb.skillFilesAtCache = baseline.skillFiles
 
-	logger.DebugCF("agent", "System prompt cached",
-		map[string]any{
-			"length": len(prompt),
-		})
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentSystemPromptCached,
+		logger.NewSafeFields(
+			logger.SafeInt64(logger.FieldTotalBytes, int64(len(prompt))),
+		),
+	)
 
 	return prompt
 }
@@ -555,7 +562,11 @@ func (cb *ContextBuilder) InvalidateCache() {
 	cb.existedAtCache = nil
 	cb.skillFilesAtCache = nil
 
-	logger.DebugCF("agent", "System prompt cache invalidated", nil)
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentSystemPromptCacheInvalidated,
+		logger.NewSafeFields(),
+	)
 }
 
 // sourcePaths returns non-skill workspace source files tracked for cache
@@ -760,7 +771,14 @@ func skillFilesChangedSince(skillRoots []string, filesAtCache map[string]time.Ti
 			return true
 		}
 		if err != nil && !errors.Is(err, errWalkStop) && !os.IsNotExist(err) {
-			logger.DebugCF("agent", "skills walk error", map[string]any{"error": err.Error()})
+			logger.DebugSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentSkillsWalkError,
+				logger.NewSafeFields(
+					agentDiagnosticPathField(root),
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 			return true
 		}
 	}
@@ -905,9 +923,13 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 	}
 	if !req.SuppressDefaultSystemPrompt {
 		if contributedParts, err := cb.promptRegistryOrDefault().Collect(context.Background(), req); err != nil {
-			logger.WarnCF("agent", "Prompt contributor collection failed", map[string]any{
-				"error": err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentPromptContributorCollectionFailed,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		} else {
 			promptParts = append(promptParts, contributedParts...)
 		}
@@ -919,13 +941,17 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 				continue
 			}
 			if err := cb.promptRegistryOrDefault().ValidatePart(overlay); err != nil {
-				logger.WarnCF("agent", "Skipping invalid prompt overlay", map[string]any{
-					"id":     overlay.ID,
-					"layer":  overlay.Layer,
-					"slot":   overlay.Slot,
-					"source": overlay.Source.ID,
-					"error":  err.Error(),
-				})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentSkippingInvalidPromptOverlay,
+					logger.NewSafeFields(
+						agentDiagnosticPromptPartField(overlay.ID),
+						agentDiagnosticPromptLayerField(string(overlay.Layer)),
+						agentDiagnosticPromptSlotField(string(overlay.Slot)),
+						agentDiagnosticPromptSourceField(string(overlay.Source.ID)),
+						agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+					),
+				)
 				continue
 			}
 			stringParts = append(stringParts, overlay.Content)
@@ -1000,22 +1026,52 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 	isCached := cb.cachedSystemPrompt != ""
 	cb.systemPromptMutex.RUnlock()
 
-	logger.DebugCF("agent", "System prompt built",
-		map[string]any{
-			"static_chars":  len(staticPrompt),
-			"dynamic_chars": dynamicChars,
-			"total_chars":   len(fullSystemPrompt),
-			"has_summary":   req.Summary != "",
-			"overlays":      len(req.Overlays),
-			"cached":        isCached,
-		})
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentSystemPromptBuilt,
+		logger.NewSafeFields(
+			logger.SafeInt64(logger.FieldStaticBytes, int64(len(staticPrompt))),
+			logger.SafeInt64(logger.FieldDynamicBytes, int64(dynamicChars)),
+			logger.SafeInt64(logger.FieldTotalBytes, int64(len(fullSystemPrompt))),
+			logger.SafeInt(logger.FieldPromptPartCount, len(contentBlocks)),
+			logger.SafeInt(logger.FieldOverlayCount, len(req.Overlays)),
+			logger.SafeBool(logger.FieldCached, isCached),
+			logger.SafeBool(logger.FieldHasSummary, req.Summary != ""),
+			logger.SafeObservation(
+				logger.ObservationPrefixPrompt,
+				logger.ObserveText(logger.ObservationDomainPrompt, fullSystemPrompt),
+			),
+		),
+	)
 
-	// Log preview of system prompt (avoid logging huge content)
-	preview := utils.Truncate(fullSystemPrompt, 500)
-	logger.DebugCF("agent", "System prompt preview",
-		map[string]any{
-			"preview": preview,
-		})
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentSystemPromptPreview,
+		logger.NewSafeFields(
+			logger.SafeInt64(logger.FieldTotalBytes, int64(len(fullSystemPrompt))),
+			logger.SafeObservation(
+				logger.ObservationPrefixPrompt,
+				logger.ObserveText(logger.ObservationDomainPrompt, fullSystemPrompt),
+			),
+		),
+	)
+	logger.DebugSensitiveCF(
+		logger.DiagnosticPolicy{},
+		logger.ComponentAgent,
+		logger.DiagnosticMessageSystemPrompt,
+		logger.NewSafeFields(
+			logger.SafeInt64(logger.FieldStaticBytes, int64(len(staticPrompt))),
+			logger.SafeInt64(logger.FieldDynamicBytes, int64(dynamicChars)),
+			logger.SafeInt64(logger.FieldTotalBytes, int64(len(fullSystemPrompt))),
+			logger.SafeInt(logger.FieldPromptPartCount, len(contentBlocks)),
+			logger.SafeInt(logger.FieldOverlayCount, len(req.Overlays)),
+			logger.SafeBool(logger.FieldCached, isCached),
+			logger.SafeBool(logger.FieldHasSummary, req.Summary != ""),
+		),
+		logger.SensitivityPrompt,
+		logger.ObservationDomainPrompt,
+		fullSystemPrompt,
+	)
 
 	history := sanitizeHistoryForProvider(req.History)
 
@@ -1059,12 +1115,24 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 			// constructs its own single system message (static + dynamic +
 			// summary); extra system messages would break providers that
 			// only accept one (Anthropic, Codex).
-			logger.DebugCF("agent", "Dropping system message from history", map[string]any{})
+			logger.DebugSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentDroppingSystemMessageFromHistory,
+				logger.NewSafeFields(
+					logger.SafeEnum(logger.FieldRole, logger.SafeEnumSystem),
+				),
+			)
 			continue
 
 		case "tool":
 			if len(sanitized) == 0 {
-				logger.DebugCF("agent", "Dropping orphaned leading tool message", map[string]any{})
+				logger.DebugSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentDroppingOrphanedLeadingToolMessage,
+					logger.NewSafeFields(
+						logger.SafeEnum(logger.FieldRole, logger.SafeEnumTool),
+					),
+				)
 				continue
 			}
 			// Walk backwards to find the nearest assistant message,
@@ -1080,7 +1148,13 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 				break
 			}
 			if !foundAssistant {
-				logger.DebugCF("agent", "Dropping orphaned tool message", map[string]any{})
+				logger.DebugSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentDroppingOrphanedToolMessage,
+					logger.NewSafeFields(
+						logger.SafeEnum(logger.FieldRole, logger.SafeEnumTool),
+					),
+				)
 				continue
 			}
 			sanitized = append(sanitized, msg)
@@ -1088,19 +1162,28 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 		case "assistant":
 			if len(msg.ToolCalls) > 0 {
 				if len(sanitized) == 0 {
-					logger.DebugCF(
-						"agent",
-						"Dropping assistant tool-call turn at history start",
-						map[string]any{},
+					logger.DebugSafeCF(
+						logger.ComponentAgent,
+						logger.DiagnosticMessageAgentDroppingAssistantToolCallTurnAtHistoryStart,
+						logger.NewSafeFields(
+							logger.SafeEnum(logger.FieldRole, logger.SafeEnumAssistant),
+							logger.SafeInt(logger.FieldToolCallCount, len(msg.ToolCalls)),
+						),
 					)
 					continue
 				}
 				prev := sanitized[len(sanitized)-1]
 				if prev.Role != "user" && prev.Role != "tool" {
-					logger.DebugCF(
-						"agent",
-						"Dropping assistant tool-call turn with invalid predecessor",
-						map[string]any{"prev_role": prev.Role},
+					logger.DebugSafeCF(
+						logger.ComponentAgent,
+						logger.DiagnosticMessageAgentDroppingAssistantToolCallTurnWithInvalidPredecessor,
+						logger.NewSafeFields(
+							logger.SafeEnum(
+								logger.FieldRole,
+								agentDiagnosticRoleEnum(prev.Role),
+							),
+							logger.SafeInt(logger.FieldToolCallCount, len(msg.ToolCalls)),
+						),
 					)
 					continue
 				}
@@ -1146,26 +1229,32 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 					break
 				}
 				if next.ToolCallID == "" {
-					logger.DebugCF(
-						"agent",
-						"Dropping tool result without tool_call_id",
-						map[string]any{},
+					logger.DebugSafeCF(
+						logger.ComponentAgent,
+						logger.DiagnosticMessageAgentDroppingToolResultWithoutToolCallID,
+						logger.NewSafeFields(
+							logger.SafeEnum(logger.FieldRole, logger.SafeEnumTool),
+						),
 					)
 					continue
 				}
 				if _, ok := expected[next.ToolCallID]; !ok {
-					logger.DebugCF("agent", "Dropping unexpected tool result", map[string]any{
-						"tool_call_id": next.ToolCallID,
-					})
+					logger.DebugSafeCF(
+						logger.ComponentAgent,
+						logger.DiagnosticMessageAgentDroppingUnexpectedToolResult,
+						logger.NewSafeFields(
+							agentDiagnosticToolCallField(next.ToolCallID),
+						),
+					)
 					continue
 				}
 				if seenInBlock[next.ToolCallID] {
-					logger.DebugCF(
-						"agent",
-						"Dropping duplicate tool result in tool block",
-						map[string]any{
-							"tool_call_id": next.ToolCallID,
-						},
+					logger.DebugSafeCF(
+						logger.ComponentAgent,
+						logger.DiagnosticMessageAgentDroppingDuplicateToolResultInToolBlock,
+						logger.NewSafeFields(
+							agentDiagnosticToolCallField(next.ToolCallID),
+						),
 					)
 					continue
 				}
@@ -1176,23 +1265,25 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 
 			allFound := !invalidToolCallID
 			if invalidToolCallID {
-				logger.DebugCF(
-					"agent",
-					"Dropping assistant message with empty tool_call_id",
-					map[string]any{},
+				logger.DebugSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentDroppingAssistantMessageWithEmptyToolCallID,
+					logger.NewSafeFields(
+						logger.SafeInt(logger.FieldToolCallCount, len(msg.ToolCalls)),
+					),
 				)
 			}
 			for toolCallID, found := range expected {
 				if !found {
 					allFound = false
-					logger.DebugCF(
-						"agent",
-						"Dropping assistant message with incomplete tool results",
-						map[string]any{
-							"missing_tool_call_id": toolCallID,
-							"expected_count":       len(expected),
-							"found_count":          len(block),
-						},
+					logger.DebugSafeCF(
+						logger.ComponentAgent,
+						logger.DiagnosticMessageAgentDroppingAssistantMessageWithIncompleteToolResults,
+						logger.NewSafeFields(
+							agentDiagnosticToolCallField(toolCallID),
+							logger.SafeInt(logger.FieldExpectedCount, len(expected)),
+							logger.SafeInt(logger.FieldFoundCount, len(block)),
+						),
 					)
 					break
 				}
@@ -1210,12 +1301,12 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 		}
 
 		if msg.Role == "tool" {
-			logger.DebugCF(
-				"agent",
-				"Dropping orphaned tool message after validation",
-				map[string]any{
-					"tool_call_id": msg.ToolCallID,
-				},
+			logger.DebugSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentDroppingOrphanedToolMessageAfterValidation,
+				logger.NewSafeFields(
+					agentDiagnosticToolCallField(msg.ToolCallID),
+				),
 			)
 			continue
 		}

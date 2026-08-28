@@ -116,10 +116,14 @@ func (m *legacyContextManager) maybeSummarize(sessionKey string) {
 				defer m.summarizing.Delete(summarizeKey)
 				defer func() {
 					if r := recover(); r != nil {
-						logger.WarnCF("agent", "Summarization panic recovered", map[string]any{
-							"session_key": sessionKey,
-							"panic":       r,
-						})
+						logger.WarnSafeCF(
+							logger.ComponentAgent,
+							logger.DiagnosticMessageAgentSummarizationPanicRecovered,
+							logger.NewSafeFields(
+								agentDiagnosticSessionField(sessionKey),
+								agentDiagnosticPanicField(r),
+							),
+						)
 					}
 				}()
 				_, releaseRuntime, err := m.al.AcquireRuntimeGeneration(
@@ -138,7 +142,13 @@ func (m *legacyContextManager) maybeSummarize(sessionKey string) {
 				if !ok || currentAgent == nil {
 					return
 				}
-				logger.Debug("Memory threshold reached. Optimizing conversation history...")
+				logger.DebugSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentMemoryThresholdReachedOptimizingConversationHistory,
+					logger.NewSafeFields(
+						agentDiagnosticSessionField(sessionKey),
+					),
+				)
 				m.summarizeSession(currentAgent, sessionKey)
 			}(agent.ID, generation, registry)
 		}
@@ -199,11 +209,15 @@ func (m *legacyContextManager) forceCompression(sessionKey string) (compressionR
 	agent.Sessions.SetHistory(sessionKey, keptHistory)
 	agent.Sessions.Save(sessionKey)
 
-	logger.WarnCF("agent", "Forced compression executed", map[string]any{
-		"session_key":  sessionKey,
-		"dropped_msgs": droppedCount,
-		"new_count":    len(keptHistory),
-	})
+	logger.WarnSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentForcedCompressionExecuted,
+		logger.NewSafeFields(
+			agentDiagnosticSessionField(sessionKey),
+			logger.SafeInt(logger.FieldDroppedCount, droppedCount),
+			logger.SafeInt(logger.FieldRemainingCount, len(keptHistory)),
+		),
+	)
 
 	return compressionResult{
 		AgentID:           agent.ID,

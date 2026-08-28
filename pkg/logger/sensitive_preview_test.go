@@ -409,7 +409,7 @@ func TestSensitivePairAllowlistIsExplicitAndHookNeverPreviews(t *testing.T) {
 		if _, ok := sensitivePairPrefix(class, ObservationDomainHookMessage); ok {
 			t.Fatalf("class %d previewed hook message", class)
 		}
-		for domain := ObservationDomainIdentityChannel; domain <= ObservationDomainIdentityRuntimeEventKind; domain++ {
+		for domain := ObservationDomainIdentityChannel; domain <= ObservationDomainIdentityToolSurface; domain++ {
 			if _, ok := sensitivePairPrefix(class, domain); ok {
 				t.Fatalf("class %d previewed identity domain %d", class, domain)
 			}
