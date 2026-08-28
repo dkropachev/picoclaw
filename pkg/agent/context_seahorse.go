@@ -222,8 +222,15 @@ func (m *seahorseContextManager) Assemble(ctx context.Context, req *AssembleRequ
 	if effectiveBudget <= 0 {
 		// MaxTokens >= budget is a configuration problem
 		// Use 50% as minimum to avoid guaranteed overflow
-		logger.WarnCF("agent", "MaxTokens >= budget, using 50% fallback",
-			map[string]any{"budget": budget, "max_tokens": req.MaxTokens})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMaxTokensGreaterThanOrEqualToBudgetUsing50PercentFallback,
+			logger.NewSafeFields(
+				logger.SafeInt(logger.FieldContextWindow, budget),
+				logger.SafeInt(logger.FieldMaxTokens, req.MaxTokens),
+				logger.SafeBool(logger.FieldFallback, true),
+			),
+		)
 		effectiveBudget = budget / 2
 	}
 
@@ -339,10 +346,14 @@ func (m *seahorseContextManager) bootstrapAgentSession(
 			if contextErr := ctx.Err(); contextErr != nil {
 				return contextErr
 			}
-			logger.WarnCF("seahorse", "bootstrap snapshot", map[string]any{
-				"session": sessionKey,
-				"error":   err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentSeahorse,
+				logger.DiagnosticMessageSeahorseBootstrapSnapshot,
+				logger.NewSafeFields(
+					agentDiagnosticSessionField(sessionKey),
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 			return nil
 		}
 		if !found || strings.TrimSpace(snapshot.Key) == "" {

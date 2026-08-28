@@ -267,6 +267,24 @@ func agentDiagnosticToolSurfaceField(value string) logger.SafeField {
 	)
 }
 
+func agentDiagnosticMCPServerField(value string) logger.SafeField {
+	return logger.SafeObservation(
+		logger.ObservationPrefixIdentityMCPServer,
+		logger.ObserveIdentity(logger.ObservationDomainIdentityMCPServer, value),
+	)
+}
+
+func agentDiagnosticMediaRefField(value string) logger.SafeField {
+	return logger.SafeObservation(logger.ObservationPrefixURL, logger.ObserveURL(value))
+}
+
+func agentDiagnosticRegexField(value string) logger.SafeField {
+	return logger.SafeObservation(
+		logger.ObservationPrefixRegex,
+		logger.ObserveText(logger.ObservationDomainRegex, value),
+	)
+}
+
 func agentDiagnosticRoleEnum(value string) logger.SafeEnumValue {
 	switch value {
 	case "system":

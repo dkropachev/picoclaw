@@ -23,12 +23,13 @@ type mcpRuntime struct {
 	// sync.Once is safe for concurrent Do calls, but assigning a fresh Once
 	// while another Do is running is not. reset and takeManager therefore join
 	// the same protocol as do.
-	initMu    sync.Mutex
-	initOnce  sync.Once
-	mu        sync.RWMutex
-	manager   *mcp.Manager
-	initErr   error
-	installer mcpFactoryBackedInstaller
+	initMu        sync.Mutex
+	initOnce      sync.Once
+	mu            sync.RWMutex
+	manager       *mcp.Manager
+	initErr       error
+	installer     mcpFactoryBackedInstaller
+	beforePublish func(*mcp.Manager)
 }
 
 func (r *mcpRuntime) do(initialize func()) error {
@@ -78,6 +79,13 @@ func (r *mcpRuntime) setManager(manager *mcp.Manager) {
 	r.manager = manager
 	r.initErr = nil
 	r.mu.Unlock()
+}
+
+func (r *mcpRuntime) publishManager(manager *mcp.Manager) {
+	if r.beforePublish != nil {
+		r.beforePublish(manager)
+	}
+	r.setManager(manager)
 }
 
 func (r *mcpRuntime) setInitErr(err error) {
@@ -203,16 +211,20 @@ func (al *AgentLoop) ensureMCPInitializedForGeneration(
 	}
 
 	if cfg.Tools.MCP.Servers == nil || len(cfg.Tools.MCP.Servers) == 0 {
-		logger.WarnCF("agent", "MCP is enabled but no servers are configured, skipping MCP initialization", nil)
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMCPIsEnabledButNoServersAreConfiguredSkippingMCPInitialization,
+			logger.NewSafeFields(),
+		)
 		return nil
 	}
 
 	mcpCfg := filterMCPConfigServers(cfg.Tools.MCP, registry.allowedMCPServers())
 	if mcpCfg.Servers == nil || len(mcpCfg.Servers) == 0 {
-		logger.InfoCF(
-			"agent",
-			"No MCP servers selected after applying per-agent mcpServers allowlists",
-			nil,
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentNoMCPServersSelectedAfterApplyingPerAgentMCPServerAllowlists,
+			logger.NewSafeFields(),
 		)
 		return nil
 	}
@@ -224,17 +236,23 @@ func (al *AgentLoop) ensureMCPInitializedForGeneration(
 		}
 	}
 	if !findValidServer {
-		logger.WarnCF("agent", "MCP is enabled but no valid servers are configured, skipping MCP initialization", nil)
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMCPIsEnabledButNoValidServersAreConfiguredSkippingMCPInitialization,
+			logger.NewSafeFields(),
+		)
 		return nil
 	}
 
 	return al.mcp.do(func() {
 		if err := al.initializeMCPGeneration(ctx, cfg, registry, mcpCfg); err != nil {
 			al.mcp.setInitErr(err)
-			logger.WarnCF(
-				"agent",
-				"Failed to initialize MCP generation",
-				map[string]any{"error": err.Error()},
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToInitializeMCPGeneration,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
 			)
 		}
 	})
@@ -295,10 +313,10 @@ func (al *AgentLoop) initializeMCPGeneration(
 			ownership = mcpManagerRuntimePublished
 		}
 		if recovered != nil {
-			logger.ErrorCF(
-				"agent",
-				"MCP post-commit publication panicked; retained committed manager",
-				map[string]any{"panic": fmt.Sprint(recovered)},
+			logger.ErrorSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentMCPPostCommitPublicationPanickedRetainedCommittedManager,
+				logger.NewSafeFields(agentDiagnosticPanicField(recovered)),
 			)
 			returnErr = nil
 		}
@@ -350,41 +368,51 @@ func (al *AgentLoop) initializeMCPGeneration(
 	// No fallible operation may run between transaction success and this
 	// transfer. The deferred guard repeats the transfer if an unexpected panic
 	// occurs in this tiny boundary.
-	al.mcp.setManager(manager)
+	al.mcp.publishManager(manager)
 	ownership = mcpManagerRuntimePublished
 
 	summary, err := aggregateMCPAdmissions(stage, admissions)
 	if err != nil {
-		logger.ErrorCF(
-			"agent",
-			"MCP admission projection failed after catalog commit",
-			map[string]any{"error": err.Error()},
+		logger.ErrorSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMCPAdmissionProjectionFailedAfterCatalogCommit,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
 		)
 		return nil
 	}
 	prompts, err := prepareMCPAdmissionPrompts(registry, summary)
 	if err != nil {
-		logger.ErrorCF(
-			"agent",
-			"MCP prompt preparation failed after catalog commit",
-			map[string]any{"error": err.Error()},
+		logger.ErrorSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMCPPromptPreparationFailedAfterCatalogCommit,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
 		)
 		return nil
 	}
 	if err := applyMCPAdmissionPrompts(prompts); err != nil {
-		logger.WarnCF(
-			"agent",
-			"MCP prompt publication was incomplete",
-			map[string]any{"error": err.Error()},
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMCPPromptPublicationWasIncomplete,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
 		)
 	}
 
-	logger.InfoCF("agent", "MCP factory catalog installed successfully", map[string]any{
-		"server_count":        len(servers),
-		"unique_tools":        stage.UniqueTools,
-		"total_registrations": summary.TotalRegistrations,
-		"agent_count":         stage.AgentCount,
-	})
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentMCPFactoryCatalogInstalledSuccessfully,
+		logger.NewSafeFields(
+			logger.SafeInt(logger.FieldServerCount, len(servers)),
+			logger.SafeInt(logger.FieldToolCount, stage.UniqueTools),
+			logger.SafeInt(logger.FieldCount, summary.TotalRegistrations),
+			logger.SafeInt(logger.FieldAgentCount, stage.AgentCount),
+		),
+	)
 	return nil
 }
 

@@ -189,10 +189,14 @@ func parseAgentPromptDefinition(path, content string) AgentPromptDefinition {
 func parseAgentFrontmatter(path, frontmatter string) (AgentFrontmatter, error) {
 	parsed, err := decodeAgentFrontmatter(frontmatter)
 	if err != nil {
-		logger.WarnCF("agent", "Failed to parse AGENT.md frontmatter", map[string]any{
-			"path":  path,
-			"error": err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToParseAgentMDFrontmatter,
+			logger.NewSafeFields(
+				agentDiagnosticPathField(path),
+				agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+			),
+		)
 	}
 	return parsed, err
 }

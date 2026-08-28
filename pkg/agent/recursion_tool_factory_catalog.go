@@ -501,10 +501,12 @@ func installRecursionCatalog(
 		return fmt.Errorf("install recursion factory catalog: %w", err)
 	}
 	if err := verifyRecursionAdmissions(stage, admissions); err != nil {
-		logger.ErrorCF(
-			"agent",
-			"Recursion admission projection failed after catalog commit",
-			map[string]any{"error": err.Error()},
+		logger.ErrorSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentRecursionAdmissionProjectionFailedAfterCatalogCommit,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
 		)
 	}
 	return nil

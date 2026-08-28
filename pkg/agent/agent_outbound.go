@@ -89,10 +89,14 @@ func (al *AgentLoop) publishResponseIfNeeded(
 			)
 			dismissCancel()
 		}
-		logger.DebugCF(
-			"agent",
-			"Skipped outbound (message tool already sent to same chat)",
-			map[string]any{"channel": channel, "chat_id": chatID},
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentSkippedOutboundMessageToolAlreadySentToSameChat,
+			logger.NewSafeFields(
+				agentDiagnosticChannelField(channel),
+				agentDiagnosticChatField(chatID),
+				logger.SafeEnum(logger.FieldReason, logger.SafeEnumSkipped),
+			),
 		)
 		return true
 	}
@@ -116,12 +120,18 @@ func (al *AgentLoop) publishResponseIfNeeded(
 	}
 	markFinalOutbound(&msg)
 	err := al.bus.PublishOutbound(ctx, msg)
-	logger.InfoCF("agent", "Published outbound response",
-		map[string]any{
-			"channel":     channel,
-			"chat_id":     chatID,
-			"content_len": len(response),
-		})
+	// Preserve the legacy diagnostic ordering: this fixed record is emitted for
+	// both successful and failed publication, while the return value reports the
+	// actual result.
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentPublishedOutboundResponse,
+		logger.NewSafeFields(
+			agentDiagnosticChannelField(channel),
+			agentDiagnosticChatField(chatID),
+			logger.SafeInt64(logger.FieldContentBytes, int64(len(response))),
+		),
+	)
 	return err == nil
 }
 
@@ -192,15 +202,27 @@ func (al *AgentLoop) publishPicoReasoning(
 	}); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
 			errors.Is(err, bus.ErrBusClosed) {
-			logger.DebugCF("agent", "Pico reasoning publish skipped (timeout/cancel)", map[string]any{
-				"channel": "pico",
-				"error":   err.Error(),
-			})
+			errorClass := logger.ErrorClassCanceled
+			if errors.Is(err, context.DeadlineExceeded) {
+				errorClass = logger.ErrorClassDeadline
+			}
+			logger.DebugSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentPicoReasoningPublishSkippedTimeoutCancel,
+				logger.NewSafeFields(
+					agentDiagnosticChannelField("pico"),
+					agentDiagnosticErrorField(errorClass, err),
+				),
+			)
 		} else {
-			logger.WarnCF("agent", "Failed to publish pico reasoning (best-effort)", map[string]any{
-				"channel": "pico",
-				"error":   err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToPublishPicoReasoningBestEffort,
+				logger.NewSafeFields(
+					agentDiagnosticChannelField("pico"),
+					agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+				),
+			)
 		}
 	}
 }
@@ -234,11 +256,15 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) &&
 			!errors.Is(err, context.Canceled) &&
 			!errors.Is(err, bus.ErrBusClosed) {
-			logger.WarnCF("agent", "Failed to publish pico reasoning", map[string]any{
-				"channel": ts.channel,
-				"chat_id": ts.chatID,
-				"error":   err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToPublishPicoReasoning,
+				logger.NewSafeFields(
+					agentDiagnosticChannelField(ts.channel),
+					agentDiagnosticChatField(ts.chatID),
+					agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+				),
+			)
 		}
 	}
 
@@ -265,11 +291,15 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) &&
 			!errors.Is(err, context.Canceled) &&
 			!errors.Is(err, bus.ErrBusClosed) {
-			logger.WarnCF("agent", "Failed to publish pico interim assistant content", map[string]any{
-				"channel": ts.channel,
-				"chat_id": ts.chatID,
-				"error":   err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToPublishPicoInterimAssistantContent,
+				logger.NewSafeFields(
+					agentDiagnosticChannelField(ts.channel),
+					agentDiagnosticChatField(ts.chatID),
+					agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+				),
+			)
 		}
 	}
 
@@ -279,11 +309,15 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 
 	rawToolCalls, err := json.Marshal(visibleToolCalls)
 	if err != nil {
-		logger.WarnCF("agent", "Failed to serialize pico tool calls", map[string]any{
-			"channel": ts.channel,
-			"chat_id": ts.chatID,
-			"error":   err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToSerializePicoToolCalls,
+			logger.NewSafeFields(
+				agentDiagnosticChannelField(ts.channel),
+				agentDiagnosticChatField(ts.chatID),
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 		return
 	}
 
@@ -301,11 +335,15 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) &&
 		!errors.Is(err, context.Canceled) &&
 		!errors.Is(err, bus.ErrBusClosed) {
-		logger.WarnCF("agent", "Failed to publish pico tool calls", map[string]any{
-			"channel": ts.channel,
-			"chat_id": ts.chatID,
-			"error":   err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToPublishPicoToolCalls,
+			logger.NewSafeFields(
+				agentDiagnosticChannelField(ts.channel),
+				agentDiagnosticChatField(ts.chatID),
+				agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+			),
+		)
 	}
 }
 
@@ -341,15 +379,27 @@ func (al *AgentLoop) handleReasoning(
 		// shutdown when the bus is closed before all goroutines finish.
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
 			errors.Is(err, bus.ErrBusClosed) {
-			logger.DebugCF("agent", "Reasoning publish skipped (timeout/cancel)", map[string]any{
-				"channel": channelName,
-				"error":   err.Error(),
-			})
+			errorClass := logger.ErrorClassCanceled
+			if errors.Is(err, context.DeadlineExceeded) {
+				errorClass = logger.ErrorClassDeadline
+			}
+			logger.DebugSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentReasoningPublishSkippedTimeoutCancel,
+				logger.NewSafeFields(
+					agentDiagnosticChannelField(channelName),
+					agentDiagnosticErrorField(errorClass, err),
+				),
+			)
 		} else {
-			logger.WarnCF("agent", "Failed to publish reasoning (best-effort)", map[string]any{
-				"channel": channelName,
-				"error":   err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToPublishReasoningBestEffort,
+				logger.NewSafeFields(
+					agentDiagnosticChannelField(channelName),
+					agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+				),
+			)
 		}
 	}
 }

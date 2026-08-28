@@ -114,9 +114,13 @@ func newAgentLoop(
 
 	bridge, err := newEvolutionBridge(registry, cfg, provider)
 	if err != nil {
-		logger.WarnCF("agent", "Failed to initialize evolution bridge", map[string]any{
-			"error": err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToInitializeEvolutionBridge,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 	}
 
 	// Determine worker pool size from config (default: 1 = sequential)
@@ -132,23 +136,35 @@ func newAgentLoop(
 	if bridge != nil {
 		bridge.setCurrentCheck(al.isCurrentEvolutionBridge)
 		if err := bridge.subscribeRuntimeEvents(al.runtimeEvents.Channel()); err != nil {
-			logger.WarnCF("agent", "Failed to subscribe evolution bridge to runtime events", map[string]any{
-				"error": err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToSubscribeEvolutionBridgeToRuntimeEvents,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
 		}
 		if !al.deferEvolutionActivation {
 			if err := al.ActivateEvolution(); err != nil {
-				logger.WarnCF("agent", "Failed to activate evolution bridge", map[string]any{
-					"error": err.Error(),
-				})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentFailedToActivateEvolutionBridge,
+					logger.NewSafeFields(
+						agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
+				)
 			}
 		}
 	}
 	al.activeReqCond = sync.NewCond(&al.activeReqMu)
 	if err := al.initAgentActivityRecorder(); err != nil {
-		logger.WarnCF("agent", "Failed to initialize agent activity recorder", map[string]any{
-			"error": err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToInitializeAgentActivityRecorder,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 	}
 	al.refreshRuntimeEventLogger(cfg)
 	al.policyProviderFactory = providers.CreateProviderFromConfigWithExecutionPolicy
@@ -159,10 +175,12 @@ func newAgentLoop(
 	// Register shared tools to all agents (now that al is created)
 	if err := registerSharedTools(al, cfg, msgBus, registry, provider); err != nil {
 		markRecursionCatalogConfigurationError(registry, err)
-		logger.ErrorCF(
-			"agent",
-			"Failed to install shared recursion tool catalog",
-			map[string]any{"error": err.Error()},
+		logger.ErrorSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToInstallSharedRecursionToolCatalog,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
 		)
 	}
 
@@ -182,7 +200,11 @@ func registerSharedTools(
 	if cfg.Tools.IsToolEnabled("send_tts") {
 		ttsProvider = tts.DetectTTS(cfg)
 		if ttsProvider == nil {
-			logger.WarnCF("voice-tts", "send_tts enabled but no TTS provider configured", nil)
+			logger.WarnSafeCF(
+				logger.ComponentVoiceTTS,
+				logger.DiagnosticMessageVoiceTTSSendTTSEnabledButNoTTSProviderConfigured,
+				logger.NewSafeFields(),
+			)
 		}
 	}
 	messageCallback := func(
@@ -268,7 +290,13 @@ func registerSharedTools(
 			options := cloneWebSearchToolOptions(tools.WebSearchToolOptionsFromConfig(cfg))
 			searchTool, err := tools.NewWebSearchTool(cloneWebSearchToolOptions(options))
 			if err != nil {
-				logger.ErrorCF("agent", "Failed to create web search tool", map[string]any{"error": err.Error()})
+				logger.ErrorSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentFailedToCreateWebSearchTool,
+					logger.NewSafeFields(
+						agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+					),
+				)
 			} else if searchTool != nil {
 				factory := mustToolFactoryFromPrototype(
 					searchTool,
@@ -299,7 +327,13 @@ func registerSharedTools(
 			}
 			fetchTool, err := buildWebFetch()
 			if err != nil {
-				logger.ErrorCF("agent", "Failed to create web fetch tool", map[string]any{"error": err.Error()})
+				logger.ErrorSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentFailedToCreateWebFetchTool,
+					logger.NewSafeFields(
+						agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+					),
+				)
 			} else {
 				factory := mustToolFactoryFromPrototype(
 					fetchTool,
@@ -508,7 +542,11 @@ func registerSharedTools(
 		spawnEnabled := cfg.Tools.IsToolEnabled("spawn")
 		spawnStatusEnabled := cfg.Tools.IsToolEnabled("spawn_status")
 		if (spawnEnabled || spawnStatusEnabled) && !cfg.Tools.IsToolEnabled("subagent") {
-			logger.WarnCF("agent", "spawn/spawn_status tools require subagent to be enabled", nil)
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentSpawnSpawnStatusToolsRequireSubagentToBeEnabled,
+				logger.NewSafeFields(),
+			)
 		}
 		var installLock *sync.Mutex
 		if install_skills_enable && skills_enabled {

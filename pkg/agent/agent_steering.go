@@ -81,11 +81,14 @@ func (al *AgentLoop) runTurnWithSteering(
 	// Build continuation target
 	target, targetErr := al.buildContinuationTarget(initialMsg)
 	if targetErr != nil {
-		logger.WarnCF("agent", "Failed to build steering continuation target",
-			map[string]any{
-				"channel": initialMsg.Channel,
-				"error":   targetErr.Error(),
-			})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToBuildSteeringContinuationTarget,
+			logger.NewSafeFields(
+				agentDiagnosticChannelField(initialMsg.Channel),
+				agentDiagnosticErrorField(logger.ErrorClassValidation, targetErr),
+			),
+		)
 		return outboundEnqueued
 	}
 	if target == nil {
@@ -95,12 +98,15 @@ func (al *AgentLoop) runTurnWithSteering(
 
 	continued, continueErr := al.drainQueuedSteeringContinuations(ctx, target)
 	if continueErr != nil {
-		logger.WarnCF("agent", "Failed to continue queued steering",
-			map[string]any{
-				"channel": target.Channel,
-				"chat_id": target.ChatID,
-				"error":   continueErr.Error(),
-			})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToContinueQueuedSteering,
+			logger.NewSafeFields(
+				agentDiagnosticChannelField(target.Channel),
+				agentDiagnosticChatField(target.ChatID),
+				agentDiagnosticErrorField(logger.ErrorClassInternal, continueErr),
+			),
+		)
 	} else if continued != "" {
 		finalResponse = continued
 	}
@@ -136,13 +142,16 @@ func (al *AgentLoop) drainQueuedSteeringContinuations(
 			return finalResponse, err
 		}
 
-		logger.InfoCF("agent", "Continuing queued steering after turn end",
-			map[string]any{
-				"channel":     target.Channel,
-				"chat_id":     target.ChatID,
-				"session_key": target.SessionKey,
-				"queue_depth": al.pendingSteeringCountForScope(target.SessionKey),
-			})
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentContinuingQueuedSteeringAfterTurnEnd,
+			logger.NewSafeFields(
+				agentDiagnosticChannelField(target.Channel),
+				agentDiagnosticChatField(target.ChatID),
+				agentDiagnosticSessionField(target.SessionKey),
+				logger.SafeInt(logger.FieldQueueDepth, al.pendingSteeringCountForScope(target.SessionKey)),
+			),
+		)
 
 		continued, continueErr := al.continueWithInboundContext(
 			ctx,

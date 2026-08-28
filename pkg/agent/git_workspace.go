@@ -58,9 +58,13 @@ func newGitWorkspaceManagerFromConfig(cfg *config.Config) gitWorkspaceManager {
 		DropDelay:           cfg.GitWorkspaces.EffectiveDropDelay(),
 	})
 	if err != nil {
-		logger.WarnCF("git-workspace", "Failed to initialize git workspace manager", map[string]any{
-			"error": err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentGitWorkspace,
+			logger.DiagnosticMessageGitWorkspaceFailedToInitializeGitWorkspaceManager,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 		return nil
 	}
 	return manager
@@ -75,21 +79,29 @@ func (al *AgentLoop) releaseGitWorkspacesForTurn(ctx context.Context, ts *turnSt
 		AgentID:    ts.agentID,
 	})
 	if err != nil {
-		logger.WarnCF("git-workspace", "Failed to release git workspace locks", map[string]any{
-			"session_key": ts.sessionKey,
-			"agent_id":    ts.agentID,
-			"error":       err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentGitWorkspace,
+			logger.DiagnosticMessageGitWorkspaceFailedToReleaseGitWorkspaceLocks,
+			logger.NewSafeFields(
+				agentDiagnosticSessionField(ts.sessionKey),
+				agentDiagnosticAgentField(ts.agentID),
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 		return
 	}
 	if len(released) == 0 {
 		return
 	}
 	if _, err := al.gitWorkspaces.Reconcile(ctx); err != nil {
-		logger.WarnCF("git-workspace", "Failed to reconcile git workspace retention", map[string]any{
-			"session_key": ts.sessionKey,
-			"agent_id":    ts.agentID,
-			"error":       err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentGitWorkspace,
+			logger.DiagnosticMessageGitWorkspaceFailedToReconcileGitWorkspaceRetention,
+			logger.NewSafeFields(
+				agentDiagnosticSessionField(ts.sessionKey),
+				agentDiagnosticAgentField(ts.agentID),
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 	}
 }

@@ -241,14 +241,17 @@ func (r *workflowToolRunner) deliverHandledMedia(
 	}
 	if r.loop.channelManager != nil && delivery.Channel != "" && !constants.IsInternalChannel(delivery.Channel) {
 		if err := r.loop.channelManager.SendMedia(ctx, outboundMedia); err != nil {
-			logger.WarnCF("workflow", "Failed to deliver handled workflow media",
-				map[string]any{
-					"agent_id": r.agentID,
-					"tool":     req.Name,
-					"channel":  delivery.Channel,
-					"chat_id":  delivery.ChatID,
-					"error":    err.Error(),
-				})
+			logger.WarnSafeCF(
+				logger.ComponentWorkflow,
+				logger.DiagnosticMessageWorkflowFailedToDeliverHandledWorkflowMedia,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(r.agentID),
+					agentDiagnosticToolField(req.Name),
+					agentDiagnosticChannelField(delivery.Channel),
+					agentDiagnosticChatField(delivery.ChatID),
+					agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+				),
+			)
 			return fmt.Errorf("failed to deliver workflow attachment: %w", err)
 		}
 		return nil

@@ -274,6 +274,81 @@ func TestAgentDiagnosticIdentityHelpersAreSealedAndDistinct(t *testing.T) {
 	assertP015CanariesAbsent(t, raw, canary)
 }
 
+func TestAgentDiagnosticP015B2BHelpersUseExactDomainsWithoutRawValues(t *testing.T) {
+	const (
+		mcpServerCanary = "P015B2B_MCP_SERVER_64cb20a1"
+		mediaRefCanary  = "https://P015B2B_MEDIA_REF_848de9b3.invalid/private"
+		regexCanary     = "(?i)P015B2B_REGEX_25e9c784"
+	)
+
+	records, raw := captureP015HookRecords(t, func() {
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageEvent,
+			logger.NewSafeFields(
+				agentDiagnosticMCPServerField(mcpServerCanary),
+				agentDiagnosticMediaRefField(mediaRefCanary),
+				agentDiagnosticRegexField(regexCanary),
+			),
+		)
+	})
+	if len(records) != 1 {
+		t.Fatalf("P015b2b helper records = %d, want 1: %#v", len(records), records)
+	}
+	record := records[0]
+	if _, invalid := record["safe_fields_state"]; invalid {
+		t.Fatalf("P015b2b helpers emitted invalid fields: %#v", record)
+	}
+
+	mcpServer := logger.ObserveIdentity(
+		logger.ObservationDomainIdentityMCPServer,
+		mcpServerCanary,
+	)
+	mediaRef := logger.ObserveURL(mediaRefCanary)
+	regex := logger.ObserveText(logger.ObservationDomainRegex, regexCanary)
+	expected := []struct {
+		key         string
+		classKey    string
+		wantDigest  string
+		wantClass   string
+		wrongDigest string
+	}{
+		{
+			key:         "identity_mcp_server_digest",
+			classKey:    "identity_mcp_server_class",
+			wantDigest:  mcpServer.Digest,
+			wantClass:   "present",
+			wrongDigest: logger.ObserveIdentity(logger.ObservationDomainIdentityTool, mcpServerCanary).Digest,
+		},
+		{
+			key:         "url_digest",
+			classKey:    "url_class",
+			wantDigest:  mediaRef.Digest,
+			wantClass:   "https",
+			wrongDigest: logger.ObserveText(logger.ObservationDomainURL, mediaRefCanary).Digest,
+		},
+		{
+			key:         "regex_digest",
+			classKey:    "regex_class",
+			wantDigest:  regex.Digest,
+			wantClass:   "text",
+			wrongDigest: logger.ObserveText(logger.ObservationDomainQuery, regexCanary).Digest,
+		},
+	}
+	for _, contract := range expected {
+		if got := record[contract.key]; got != contract.wantDigest || contract.wantDigest == "" {
+			t.Errorf("%s = %#v, want exact nonempty digest %q", contract.key, got, contract.wantDigest)
+		}
+		if got := record[contract.classKey]; got != contract.wantClass {
+			t.Errorf("%s = %#v, want %q", contract.classKey, got, contract.wantClass)
+		}
+		if contract.wantDigest == contract.wrongDigest {
+			t.Errorf("%s is not domain-separated from alternate observation", contract.key)
+		}
+	}
+	assertP015CanariesAbsent(t, raw, mcpServerCanary, mediaRefCanary, regexCanary)
+}
+
 func TestAgentDiagnosticErrorPanicAndPathHelpersInvokeNoMethods(t *testing.T) {
 	const pathCanary = "/P015B2/private/path/canary"
 	var calls atomic.Int64

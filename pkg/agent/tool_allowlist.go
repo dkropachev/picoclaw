@@ -39,12 +39,15 @@ func warnOnUnknownAgentToolDeclarations(
 	}
 
 	if unknownTools := unknownAgentToolNames(registry, definition); len(unknownTools) > 0 {
-		logger.WarnCF("agent", "AGENT.md declares unregistered tool names",
-			map[string]any{
-				"agent_id":  agentID,
-				"workspace": workspace,
-				"tools":     unknownTools,
-			})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMDDeclaresUnregisteredToolNames,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(agentID),
+				agentDiagnosticWorkspaceField(workspace),
+				logger.SafeInt(logger.FieldToolCount, len(unknownTools)),
+			),
+		)
 	}
 }
 
@@ -58,12 +61,15 @@ func warnOnUnknownAgentMCPServerDeclarations(
 	}
 
 	if unknownServers := unknownAgentMCPServerNames(cfg, definition); len(unknownServers) > 0 {
-		logger.WarnCF("agent", "AGENT.md declares unknown MCP server names",
-			map[string]any{
-				"agent_id":    agentID,
-				"workspace":   workspace,
-				"mcp_servers": unknownServers,
-			})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentMDDeclaresUnknownMCPServerNames,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(agentID),
+				agentDiagnosticWorkspaceField(workspace),
+				logger.SafeInt(logger.FieldServerCount, len(unknownServers)),
+			),
+		)
 	}
 }
 

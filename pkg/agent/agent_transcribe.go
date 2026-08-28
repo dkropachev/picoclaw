@@ -22,7 +22,14 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 	for _, ref := range msg.Media {
 		path, meta, err := al.mediaStore.ResolveWithMeta(ref)
 		if err != nil {
-			logger.WarnCF("voice", "Failed to resolve media ref", map[string]any{"ref": ref, "error": err})
+			logger.WarnSafeCF(
+				logger.ComponentVoice,
+				logger.DiagnosticMessageFailedToResolveMediaRef,
+				logger.NewSafeFields(
+					agentDiagnosticMediaRefField(ref),
+					agentDiagnosticErrorField(logger.ErrorClassNotFound, err),
+				),
+			)
 			keptMedia = append(keptMedia, ref)
 			continue
 		}
@@ -32,7 +39,14 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 		}
 		result, err := al.transcriber.Transcribe(ctx, path)
 		if err != nil {
-			logger.WarnCF("voice", "Transcription failed", map[string]any{"ref": ref, "error": err})
+			logger.WarnSafeCF(
+				logger.ComponentVoice,
+				logger.DiagnosticMessageVoiceTranscriptionFailed,
+				logger.NewSafeFields(
+					agentDiagnosticMediaRefField(ref),
+					agentDiagnosticErrorField(logger.ErrorClassProvider, err),
+				),
+			)
 			transcriptions = append(transcriptions, "")
 			keptMedia = append(keptMedia, ref)
 			continue
@@ -104,6 +118,12 @@ func (al *AgentLoop) sendTranscriptionFeedback(
 		ReplyToMessageID: messageID,
 	})
 	if err != nil {
-		logger.WarnCF("voice", "Failed to send transcription feedback", map[string]any{"error": err.Error()})
+		logger.WarnSafeCF(
+			logger.ComponentVoice,
+			logger.DiagnosticMessageVoiceFailedToSendTranscriptionFeedback,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+			),
+		)
 	}
 }

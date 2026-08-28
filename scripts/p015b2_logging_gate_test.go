@@ -19,6 +19,7 @@ import (
 const (
 	p015LoggingLedgerPath   = "scripts/testdata/p015b2_logging_inventory.tsv"
 	p015TombstoneGoldenPath = "scripts/testdata/p015b2_logging_tombstones.tsv"
+	p015B2BSignaturePath    = "scripts/testdata/p015b2b_safe_signatures.tsv"
 	p015ModulePath          = "github.com/sipeed/picoclaw"
 )
 
@@ -115,7 +116,7 @@ var p015ActiveCohortSizes = map[string]int{
 var p015ExpectedStageCounts = map[string]int{
 	"A|b2a_safe|pico_safe":              112,
 	"A|b2a_retired|retired":             4,
-	"B|b2b_deferred|pico_legacy":        132,
+	"B|b2b_safe|pico_safe":              132,
 	"H|b1_certified_safe|pico_safe":     24,
 	"G|b2c_logger_deferred|pico_legacy": 54,
 	"C|b2c_console_deferred|console":    23,
@@ -147,6 +148,95 @@ var p015B2AApplicationFiles = map[string]struct{}{
 	"pkg/agent/context_legacy.go":   {},
 	"pkg/agent/pipeline_execute.go": {},
 	"pkg/agent/pipeline_llm.go":     {},
+}
+
+type p015B2BFileExpectation struct {
+	count  int
+	canary string
+}
+
+var p015B2BFiles = map[string]p015B2BFileExpectation{
+	"pkg/agent/account_alias_resolution.go": {
+		count: 2, canary: "pkg/agent/p015b2b_catalog_logging_test.go#TestP015B2BCatalogLoggingASTManifest",
+	},
+	"pkg/agent/agent_command.go": {
+		count: 2, canary: "pkg/agent/p015b2b_catalog_logging_test.go#TestP015B2BCatalogLoggingASTManifest",
+	},
+	"pkg/agent/agent_init.go": {
+		count: 9, canary: "pkg/agent/p015b2b_catalog_logging_test.go#TestP015B2BCatalogLoggingASTManifest",
+	},
+	"pkg/agent/agent_mcp.go": {
+		count: 9, canary: "pkg/agent/p015b2b_catalog_logging_test.go#TestP015B2BCatalogLoggingASTManifest",
+	},
+	"pkg/agent/definition.go": {
+		count: 1, canary: "pkg/agent/p015b2b_catalog_logging_test.go#TestP015B2BCatalogLoggingASTManifest",
+	},
+	"pkg/agent/instance.go": {
+		count: 8, canary: "pkg/agent/p015b2b_catalog_logging_test.go#TestP015B2BCatalogLoggingASTManifest",
+	},
+	"pkg/agent/prompt.go": {
+		count: 2, canary: "pkg/agent/p015b2b_catalog_logging_test.go#TestP015B2BCatalogLoggingASTManifest",
+	},
+	"pkg/agent/recursion_tool_factory_catalog.go": {
+		count: 1, canary: "pkg/agent/p015b2b_catalog_logging_test.go#TestP015B2BCatalogLoggingASTManifest",
+	},
+	"pkg/agent/registry.go": {
+		count: 3, canary: "pkg/agent/p015b2b_catalog_logging_test.go#TestP015B2BCatalogLoggingASTManifest",
+	},
+	"pkg/agent/thinking.go": {
+		count: 1, canary: "pkg/agent/p015b2b_catalog_logging_test.go#TestP015B2BCatalogLoggingASTManifest",
+	},
+	"pkg/agent/tool_allowlist.go": {
+		count: 2, canary: "pkg/agent/p015b2b_catalog_logging_test.go#TestP015B2BCatalogLoggingASTManifest",
+	},
+	"pkg/agent/agent_media.go": {
+		count: 7, canary: "pkg/agent/p015b2b_transport_logging_test.go#TestP015B2BTransportLoggingASTManifest",
+	},
+	"pkg/agent/agent_outbound.go": {
+		count: 10, canary: "pkg/agent/p015b2b_transport_logging_test.go#TestP015B2BTransportLoggingASTManifest",
+	},
+	"pkg/agent/agent_steering.go": {
+		count: 3, canary: "pkg/agent/p015b2b_transport_logging_test.go#TestP015B2BTransportLoggingASTManifest",
+	},
+	"pkg/agent/agent_transcribe.go": {
+		count: 3, canary: "pkg/agent/p015b2b_transport_logging_test.go#TestP015B2BTransportLoggingASTManifest",
+	},
+	"pkg/agent/llm_media.go": {
+		count: 1, canary: "pkg/agent/p015b2b_transport_logging_test.go#TestP015B2BTransportLoggingASTManifest",
+	},
+	"pkg/agent/pipeline_setup.go": {
+		count: 4, canary: "pkg/agent/p015b2b_transport_logging_test.go#TestP015B2BTransportLoggingASTManifest",
+	},
+	"pkg/agent/pipeline_streaming.go": {
+		count: 18, canary: "pkg/agent/p015b2b_transport_logging_test.go#TestP015B2BTransportLoggingASTManifest",
+	},
+	"pkg/agent/steering.go": {
+		count: 3, canary: "pkg/agent/p015b2b_transport_logging_test.go#TestP015B2BTransportLoggingASTManifest",
+	},
+	"pkg/agent/turn_coord.go": {
+		count: 9, canary: "pkg/agent/p015b2b_transport_logging_test.go#TestP015B2BTransportLoggingASTManifest",
+	},
+	"pkg/agent/context_seahorse.go": {
+		count: 2, canary: "pkg/agent/p015b2b_lifecycle_logging_test.go#TestP015B2BLifecycleLoggingASTManifest",
+	},
+	"pkg/agent/evolution_bridge.go": {
+		count: 4, canary: "pkg/agent/p015b2b_lifecycle_logging_test.go#TestP015B2BLifecycleLoggingASTManifest",
+	},
+	"pkg/agent/git_workspace.go": {
+		count: 3, canary: "pkg/agent/p015b2b_lifecycle_logging_test.go#TestP015B2BLifecycleLoggingASTManifest",
+	},
+	"pkg/agent/legacy_events.go": {
+		count: 1, canary: "pkg/agent/p015b2b_lifecycle_logging_test.go#TestP015B2BLifecycleLoggingASTManifest",
+	},
+	"pkg/agent/workflow_automations.go": {
+		count: 17, canary: "pkg/agent/p015b2b_workflow_logging_test.go#TestP015B2BWorkflowLoggingASTManifest",
+	},
+	"pkg/agent/workflow_runtime.go": {
+		count: 1, canary: "pkg/agent/p015b2b_workflow_logging_test.go#TestP015B2BWorkflowLoggingASTManifest",
+	},
+	"pkg/agent/workflow_triggers.go": {
+		count: 6, canary: "pkg/agent/p015b2b_workflow_logging_test.go#TestP015B2BWorkflowLoggingASTManifest",
+	},
 }
 
 func TestP015B2LoggingInventoryClosed(t *testing.T) {
@@ -527,17 +617,200 @@ func TestP015B2PrintFrozenTombstoneGolden(t *testing.T) {
 func TestP015B2LoggingInventoryMonotonicHistory(t *testing.T) {
 	repoRoot := p015FindRepoRoot(t)
 	currentPath := filepath.Join(repoRoot, filepath.FromSlash(p015LoggingLedgerPath))
-	current := p015ReadLoggingLedger(t, currentPath)
-	previousData, found := p015PreviousLedger(repoRoot, currentPath)
-	if !found {
-		t.Skip("no earlier tracked logging ledger revision")
-	}
-	previous, err := p015ParseLoggingLedger(previousData)
+	revisions, err := p015LoggingLedgerRevisions(repoRoot, currentPath)
 	if err != nil {
-		t.Fatalf("parse previous logging ledger: %v", err)
+		t.Fatal(err)
 	}
-	for _, issue := range p015LedgerHistoryIssues(previous, current) {
+	if len(revisions) == 0 {
+		t.Fatal("logging ledger history has no tracked or working-tree revision")
+	}
+	for _, issue := range p015LedgerRevisionHistoryIssues(revisions) {
 		t.Error(issue)
+	}
+}
+
+func TestP015B2PendingCohortMigrationMappingClosed(t *testing.T) {
+	repoRoot := p015FindRepoRoot(t)
+	ledgerPath := filepath.Join(repoRoot, filepath.FromSlash(p015LoggingLedgerPath))
+	ledger := p015ReadLoggingLedger(t, ledgerPath)
+	scan, err := p015ScanLogging(p015LoggingScanOptions{
+		RepoRoot:   repoRoot,
+		ModulePath: p015ModulePath,
+		Roots:      []string{"pkg/agent", "pkg/gateway"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := p015MigrateB2BRows(ledger, scan.Sites)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, row := range ledger {
+		if p015SiteCohort(row.ID) != "B" {
+			continue
+		}
+		got := migrated[index]
+		if got.ID != row.ID || got.File != row.File || got.Owner != row.Owner ||
+			got.Ordinal != row.Ordinal {
+			t.Errorf("%s migration did not preserve ID/file/owner/ordinal", row.ID)
+		}
+		if got.Disposition != "b2b_safe" || got.Kind != "pico_safe" ||
+			!strings.HasSuffix(got.Callee, "SafeCF") || got.Callee == "pico.DebugSensitiveCF" {
+			t.Errorf("%s migration target is not direct safe-only: %#v", row.ID, got)
+		}
+	}
+}
+
+// TestP015B2BReviewedSafeSignatures is deliberately independent of the
+// migration ledger rewrite path. The ledger preserves stable source identity;
+// this reviewed golden freezes the exact safe call selected for every B ID so
+// regenerating the ledger cannot bless a swapped message, helper, field, or
+// error class during the first pending-to-safe transition.
+func TestP015B2BReviewedSafeSignatures(t *testing.T) {
+	repoRoot := p015FindRepoRoot(t)
+	ledger := p015ReadLoggingLedger(
+		t,
+		filepath.Join(repoRoot, filepath.FromSlash(p015LoggingLedgerPath)),
+	)
+	signatures := p015ReadB2BReviewedSignatures(
+		t,
+		filepath.Join(repoRoot, filepath.FromSlash(p015B2BSignaturePath)),
+	)
+	scan, err := p015ScanLogging(p015LoggingScanOptions{
+		RepoRoot:   repoRoot,
+		ModulePath: p015ModulePath,
+		Roots:      []string{"pkg/agent", "pkg/gateway"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := make(map[string]struct{}, len(scan.Sites))
+	for _, site := range scan.Sites {
+		current[site.sourceKey()] = struct{}{}
+	}
+
+	seen := make(map[string]struct{}, len(signatures))
+	for _, row := range ledger {
+		if p015SiteCohort(row.ID) != "B" {
+			continue
+		}
+		signature, ok := signatures[row.ID]
+		if !ok {
+			t.Errorf("reviewed B signature is missing %s", row.ID)
+			continue
+		}
+		seen[row.ID] = struct{}{}
+		if row.Callee != signature.Callee || row.Call != signature.Call {
+			t.Errorf(
+				"%s safe call differs from the reviewed signature\ncallee: %s\nwant:   %s\ncall:\n%s\nwant:\n%s",
+				row.ID,
+				row.Callee,
+				signature.Callee,
+				row.Call,
+				signature.Call,
+			)
+		}
+		if _, exists := current[row.sourceKey()]; !exists {
+			t.Errorf("%s reviewed safe signature is absent from current source", row.ID)
+		}
+	}
+	for index := 1; index <= p015CohortSizes["B"]; index++ {
+		id := fmt.Sprintf("B%03d", index)
+		if _, ok := signatures[id]; !ok {
+			t.Errorf("reviewed signature golden is missing %s", id)
+		}
+		if _, ok := seen[id]; !ok {
+			t.Errorf("current B ledger did not consume reviewed signature %s", id)
+		}
+	}
+	if got, want := len(signatures), p015CohortSizes["B"]; got != want {
+		t.Errorf("reviewed signature count = %d, want %d", got, want)
+	}
+}
+
+type p015B2BReviewedSignature struct {
+	Callee string
+	Call   string
+}
+
+func p015ReadB2BReviewedSignatures(
+	t *testing.T,
+	path string,
+) map[string]p015B2BReviewedSignature {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signatures := make(map[string]p015B2BReviewedSignature)
+	previousID := ""
+	for index, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(rawLine, "\t")
+		if len(fields) != 3 {
+			t.Fatalf("reviewed signature line %d has %d fields, want 3", index+1, len(fields))
+		}
+		id := fields[0]
+		if id <= previousID {
+			t.Fatalf("reviewed signature IDs are not strictly sorted: %s then %s", previousID, id)
+		}
+		previousID = id
+		if _, duplicate := signatures[id]; duplicate {
+			t.Fatalf("duplicate reviewed signature %s", id)
+		}
+		call, decodeErr := base64.RawURLEncoding.DecodeString(fields[2])
+		if decodeErr != nil {
+			t.Fatalf("reviewed signature line %d has invalid call encoding: %v", index+1, decodeErr)
+		}
+		signatures[id] = p015B2BReviewedSignature{Callee: fields[1], Call: string(call)}
+	}
+	return signatures
+}
+
+func TestP015B2RewriteB2BLoggingInventory(t *testing.T) {
+	if os.Getenv("P015B2_REWRITE_B2B_INVENTORY") != "1" {
+		t.Skip("set P015B2_REWRITE_B2B_INVENTORY=1 to apply the closed B migration")
+	}
+	repoRoot := p015FindRepoRoot(t)
+	ledgerPath := filepath.Join(repoRoot, filepath.FromSlash(p015LoggingLedgerPath))
+	data, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := p015ParseLoggingLedger(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan, err := p015ScanLogging(p015LoggingScanOptions{
+		RepoRoot:   repoRoot,
+		ModulePath: p015ModulePath,
+		Roots:      []string{"pkg/agent", "pkg/gateway"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := p015MigrateB2BRows(ledger, scan.Sites)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var output strings.Builder
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "#") {
+			break
+		}
+		output.WriteString(line)
+		output.WriteByte('\n')
+	}
+	for _, row := range migrated {
+		output.WriteString(p015FormatLedgerRow(row))
+		output.WriteByte('\n')
+	}
+	if err := os.WriteFile(ledgerPath, []byte(output.String()), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -603,7 +876,81 @@ func TestP015B2CollapsedPendingRowsPreserveHistory(t *testing.T) {
 			); len(issues) != 0 {
 				t.Fatalf("pending-to-safe source migration rejected: %v", issues)
 			}
+
+			for name, mutate := range map[string]func(*p015LoggingSite){
+				"file":    func(row *p015LoggingSite) { row.File = "pkg/other.go" },
+				"owner":   func(row *p015LoggingSite) { row.Owner += ".other" },
+				"ordinal": func(row *p015LoggingSite) { row.Ordinal++ },
+			} {
+				t.Run("safe_rejects_"+name, func(t *testing.T) {
+					mutated := safe
+					mutate(&mutated)
+					if issues := p015LedgerHistoryIssues(
+						[]p015LoggingSite{old},
+						[]p015LoggingSite{mutated},
+					); len(issues) == 0 {
+						t.Fatalf("pending-to-safe %s mutation was accepted", name)
+					}
+				})
+			}
+
+			for name, mutate := range map[string]func(*p015LoggingSite){
+				"file":    func(row *p015LoggingSite) { row.File = "pkg/other.go" },
+				"owner":   func(row *p015LoggingSite) { row.Owner += ".other" },
+				"ordinal": func(row *p015LoggingSite) { row.Ordinal++ },
+				"callee":  func(row *p015LoggingSite) { row.Callee = "pico.ErrorCF" },
+				"call":    func(row *p015LoggingSite) { row.Call += " /* mutation */" },
+			} {
+				t.Run("retired_rejects_"+name, func(t *testing.T) {
+					mutated := retired
+					mutate(&mutated)
+					if issues := p015LedgerHistoryIssues(
+						[]p015LoggingSite{old},
+						[]p015LoggingSite{mutated},
+					); len(issues) == 0 {
+						t.Fatalf("pending-to-retired %s mutation was accepted", name)
+					}
+				})
+			}
 		})
+	}
+}
+
+func TestP015B2LedgerHistoryReplaysEveryAdjacentRevision(t *testing.T) {
+	old := p015LoggingSite{
+		ID:          "B001",
+		Disposition: "b2b_deferred",
+		File:        "pkg/agent/old.go",
+		Owner:       p015ModulePath + "/pkg/agent.old",
+		Ordinal:     1,
+		Kind:        "pico_legacy",
+		Callee:      "pico.WarnCF",
+		Call:        `logger.WarnCF("agent", "old", nil)`,
+	}
+	badFirstTransition := old
+	badFirstTransition.Disposition = "b2b_safe"
+	badFirstTransition.Kind = "pico_safe"
+	badFirstTransition.Callee = "pico.WarnSafeCF"
+	badFirstTransition.Call = "logger.WarnSafeCF(component, message, fields)"
+	badFirstTransition.File = "pkg/agent/moved.go"
+	unchangedLater := badFirstTransition
+
+	revisions := []p015LoggingLedgerRevision{
+		{label: "revision-1", rows: []p015LoggingSite{old}},
+		{label: "revision-2", rows: []p015LoggingSite{badFirstTransition}},
+		{label: "revision-3", rows: []p015LoggingSite{unchangedLater}},
+	}
+	issues := p015LedgerRevisionHistoryIssues(revisions)
+	if len(issues) == 0 || !strings.Contains(strings.Join(issues, "\n"), "revision-1 -> revision-2") {
+		t.Fatalf("bad first transition hidden by later revision: %v", issues)
+	}
+
+	goodFirstTransition := badFirstTransition
+	goodFirstTransition.File = old.File
+	revisions[1].rows = []p015LoggingSite{goodFirstTransition}
+	revisions[2].rows = []p015LoggingSite{goodFirstTransition}
+	if issues := p015LedgerRevisionHistoryIssues(revisions); len(issues) != 0 {
+		t.Fatalf("valid adjacent transition history rejected: %v", issues)
 	}
 }
 
@@ -939,6 +1286,7 @@ func p015ValidateLedger(t *testing.T, repoRoot string, rows []p015LoggingSite) {
 	activeCounts := make(map[string]int)
 	retiredCounts := make(map[string]int)
 	stageCounts := make(map[string]int)
+	b2bFileCounts := make(map[string]int)
 	seenIDs := make(map[string]struct{}, len(rows))
 	previousID := ""
 	for _, row := range rows {
@@ -961,6 +1309,10 @@ func p015ValidateLedger(t *testing.T, repoRoot string, rows []p015LoggingSite) {
 		p015ValidateDisposition(t, row, cohort)
 		if cohort == "A" {
 			p015ValidateAOwnerCanary(t, row)
+		}
+		if cohort == "B" {
+			b2bFileCounts[row.File]++
+			p015ValidateB2BOwnerCanary(t, row)
 		}
 		if cohort == "F" && row.Disposition == "functional_retired" {
 			p015ValidateFunctionalTombstone(t, row)
@@ -995,6 +1347,19 @@ func p015ValidateLedger(t *testing.T, repoRoot string, rows []p015LoggingSite) {
 			t.Errorf("ledger has unexpected stage %s with %d rows", stage, got)
 		}
 	}
+	if len(p015B2BFiles) != 27 {
+		t.Errorf("closed P015b2b file map has %d files, want exact 27", len(p015B2BFiles))
+	}
+	for file, expectation := range p015B2BFiles {
+		if got := b2bFileCounts[file]; got != expectation.count {
+			t.Errorf("P015b2b file %s has %d stable rows, want exact %d", file, got, expectation.count)
+		}
+	}
+	for file, got := range b2bFileCounts {
+		if _, expected := p015B2BFiles[file]; !expected {
+			t.Errorf("P015b2b has unexpected file %s with %d stable rows", file, got)
+		}
+	}
 	if len(rows) != 379 {
 		t.Errorf("ledger has %d stable rows, want exact 379", len(rows))
 	}
@@ -1007,8 +1372,36 @@ func p015ValidateLedger(t *testing.T, repoRoot string, rows []p015LoggingSite) {
 	if got := retiredCounts["A"]; got != 4 {
 		t.Errorf("P015b2a has %d retired rows, want four collapsed recovery tombstones", got)
 	}
+	if got := retiredCounts["B"]; got != 0 {
+		t.Errorf("P015b2b has %d retired rows, want exact zero", got)
+	}
 	if got := retiredCounts["F"]; got != 8 {
 		t.Errorf("functional census has %d retired rows, want eight formatter tombstones", got)
+	}
+	const originalAIdentities = 109
+	if got := originalAIdentities + counts["B"] + counts["H"]; got != 265 {
+		t.Errorf("original Agent census has %d identities, want exact 265", got)
+	}
+	if got := counts["A"] - originalAIdentities; got != 7 {
+		t.Errorf("current source has %d A projection extensions, want exact seven", got)
+	}
+	if got := counts["A"] + counts["B"] + counts["H"]; got != 272 {
+		t.Errorf("stable Agent ledger has %d rows, want exact 272", got)
+	}
+	if got := activeCounts["A"] + activeCounts["B"] + activeCounts["H"]; got != 268 {
+		t.Errorf("active Agent safe census has %d rows, want exact 268", got)
+	}
+	agentLegacy := 0
+	for _, row := range rows {
+		if strings.HasPrefix(row.File, "pkg/agent/") && row.Kind == "pico_legacy" {
+			agentLegacy++
+			if p015SiteCohort(row.ID) != "R" {
+				t.Errorf("Agent legacy row %s remains outside the reserved R cohort", row.ID)
+			}
+		}
+	}
+	if agentLegacy != 7 {
+		t.Errorf("Agent legacy census has %d rows, want only the seven reserved R rows", agentLegacy)
 	}
 	activeTotal := 0
 	for _, count := range activeCounts {
@@ -1119,6 +1512,24 @@ func p015ValidateAOwnerCanary(t *testing.T, row p015LoggingSite) {
 	if (row.ID == "A024" || row.ID == "A110") &&
 		!p015CanaryIncludes(row.Canary, finalResponse) {
 		t.Errorf("%s lacks final-response runtime canary %q", row.ID, finalResponse)
+	}
+}
+
+func p015ValidateB2BOwnerCanary(t *testing.T, row p015LoggingSite) {
+	t.Helper()
+	expectation, exists := p015B2BFiles[row.File]
+	if !exists {
+		t.Errorf("%s is outside the closed P015b2b file map", row.ID)
+		return
+	}
+	if row.Disposition == "b2b_deferred" {
+		if row.Canary != "-" {
+			t.Errorf("%s deferred row unexpectedly owns canary %q", row.ID, row.Canary)
+		}
+		return
+	}
+	if !p015CanaryIncludes(row.Canary, expectation.canary) {
+		t.Errorf("%s lacks exact owning P015b2b source canary %q", row.ID, expectation.canary)
 	}
 }
 
@@ -1249,10 +1660,6 @@ func p015PendingDisposition(disposition string) bool {
 		disposition == "b2c_console_deferred"
 }
 
-func p015HistoryMayChangeSource(oldDisposition, newDisposition string) bool {
-	return p015PendingDisposition(oldDisposition) && p015SafeDisposition(newDisposition)
-}
-
 func p015LedgerHistoryIssues(
 	previous []p015LoggingSite,
 	current []p015LoggingSite,
@@ -1296,8 +1703,19 @@ func p015LedgerHistoryIssues(
 				),
 			)
 		}
-		if !p015HistoryMayChangeSource(old.Disposition, row.Disposition) &&
-			old.immutableSourceKey() != row.immutableSourceKey() {
+		pendingToSafe := p015PendingDisposition(old.Disposition) &&
+			p015SafeDisposition(row.Disposition)
+		if pendingToSafe &&
+			(old.File != row.File || old.Owner != row.Owner || old.Ordinal != row.Ordinal) {
+			issues = append(
+				issues,
+				fmt.Sprintf(
+					"ledger row %s pending-to-safe migration changed file/owner/ordinal",
+					old.ID,
+				),
+			)
+		}
+		if !pendingToSafe && old.immutableSourceKey() != row.immutableSourceKey() {
 			issues = append(
 				issues,
 				fmt.Sprintf("ledger row %s changed its immutable source tuple", old.ID),
@@ -1307,35 +1725,160 @@ func p015LedgerHistoryIssues(
 	return issues
 }
 
-func p015PreviousLedger(repoRoot, currentPath string) ([]byte, bool) {
+type p015LoggingLedgerRevision struct {
+	label string
+	rows  []p015LoggingSite
+}
+
+func p015LedgerRevisionHistoryIssues(revisions []p015LoggingLedgerRevision) []string {
+	var issues []string
+	for index := 1; index < len(revisions); index++ {
+		previous, current := revisions[index-1], revisions[index]
+		for _, issue := range p015LedgerHistoryIssues(previous.rows, current.rows) {
+			issues = append(
+				issues,
+				fmt.Sprintf("ledger history %s -> %s: %s", previous.label, current.label, issue),
+			)
+		}
+	}
+	return issues
+}
+
+func p015MigrateB2BRows(
+	ledger []p015LoggingSite,
+	sites []p015LoggingSite,
+) ([]p015LoggingSite, error) {
+	currentByIdentity := make(map[string]p015LoggingSite, len(p015B2BFiles))
+	for _, site := range sites {
+		if _, owned := p015B2BFiles[site.File]; !owned {
+			continue
+		}
+		if site.Kind == "functional_fmt" || site.Kind == "functional_io" {
+			continue
+		}
+		if site.Kind != "pico_safe" || !strings.HasSuffix(site.Callee, "SafeCF") ||
+			site.Callee == "pico.DebugSensitiveCF" {
+			return nil, fmt.Errorf(
+				"P015b2b current source is not safe-only: %s",
+				p015DescribeSite(site),
+			)
+		}
+		key := p015MigrationIdentityKey(site)
+		if previous, duplicate := currentByIdentity[key]; duplicate {
+			return nil, fmt.Errorf(
+				"P015b2b current source has duplicate migration identity: %s and %s",
+				p015DescribeSite(previous),
+				p015DescribeSite(site),
+			)
+		}
+		currentByIdentity[key] = site
+	}
+	if len(currentByIdentity) != 132 {
+		return nil, fmt.Errorf(
+			"P015b2b current safe source has %d identities, want exact 132",
+			len(currentByIdentity),
+		)
+	}
+
+	migrated := append([]p015LoggingSite(nil), ledger...)
+	matched := make(map[string]struct{}, len(currentByIdentity))
+	bRows := 0
+	for index, old := range migrated {
+		if p015SiteCohort(old.ID) != "B" {
+			continue
+		}
+		bRows++
+		expectation, owned := p015B2BFiles[old.File]
+		if !owned {
+			return nil, fmt.Errorf("%s is outside the closed P015b2b file map", old.ID)
+		}
+		key := p015MigrationIdentityKey(old)
+		current, exists := currentByIdentity[key]
+		if !exists {
+			return nil, fmt.Errorf(
+				"%s has no current source with the same file/owner/ordinal",
+				old.ID,
+			)
+		}
+		if _, duplicate := matched[key]; duplicate {
+			return nil, fmt.Errorf("current P015b2b source matched more than once: %s", old.ID)
+		}
+		matched[key] = struct{}{}
+		migrated[index].Disposition = "b2b_safe"
+		migrated[index].Kind = current.Kind
+		migrated[index].Callee = current.Callee
+		migrated[index].Call = current.Call
+		migrated[index].Canary = expectation.canary
+	}
+	if bRows != 132 || len(matched) != len(currentByIdentity) {
+		return nil, fmt.Errorf(
+			"P015b2b migration matched %d of %d current identities from %d stable rows",
+			len(matched),
+			len(currentByIdentity),
+			bRows,
+		)
+	}
+	return migrated, nil
+}
+
+func p015MigrationIdentityKey(site p015LoggingSite) string {
+	return strings.Join(
+		[]string{site.File, site.Owner, strconv.Itoa(site.Ordinal)},
+		"\x00",
+	)
+}
+
+func p015LoggingLedgerRevisions(
+	repoRoot string,
+	currentPath string,
+) ([]p015LoggingLedgerRevision, error) {
 	relative, err := filepath.Rel(repoRoot, currentPath)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	relative = filepath.ToSlash(relative)
 	logCommand := exec.Command("git", "log", "--format=%H", "--", relative)
 	logCommand.Dir = repoRoot
 	output, err := logCommand.Output()
 	if err != nil {
-		return nil, false
+		return nil, fmt.Errorf("read logging ledger git history: %w", err)
 	}
 	commits := strings.Fields(string(output))
-	if len(commits) == 0 {
-		return nil, false
+	var revisions []p015LoggingLedgerRevision
+	for index := len(commits) - 1; index >= 0; index-- {
+		data, found := p015GitFile(repoRoot, commits[index], relative)
+		if !found {
+			return nil, fmt.Errorf("read logging ledger at revision %s", commits[index])
+		}
+		rows, parseErr := p015ParseLoggingLedger(data)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse logging ledger at revision %s: %w", commits[index], parseErr)
+		}
+		revisions = append(revisions, p015LoggingLedgerRevision{
+			label: commits[index],
+			rows:  rows,
+		})
 	}
-	current, err := os.ReadFile(currentPath)
+
+	workingData, err := os.ReadFile(currentPath)
 	if err != nil {
-		return nil, false
+		return nil, fmt.Errorf("read working logging ledger: %w", err)
 	}
-	index := 0
-	headData, headFound := p015GitFile(repoRoot, "HEAD", relative)
-	if headFound && string(headData) == string(current) {
-		index = 1
+	workingRows, err := p015ParseLoggingLedger(workingData)
+	if err != nil {
+		return nil, fmt.Errorf("parse working logging ledger: %w", err)
 	}
-	if index >= len(commits) {
-		return nil, false
+	latestData := []byte(nil)
+	if len(commits) != 0 {
+		latestData, _ = p015GitFile(repoRoot, commits[0], relative)
 	}
-	return p015GitFile(repoRoot, commits[index], relative)
+	if len(revisions) == 0 || string(latestData) != string(workingData) {
+		revisions = append(revisions, p015LoggingLedgerRevision{
+			label: "working-tree",
+			rows:  workingRows,
+		})
+	}
+	return revisions, nil
 }
 
 func p015GitFile(repoRoot, revision, relative string) ([]byte, bool) {

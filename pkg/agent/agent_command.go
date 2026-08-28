@@ -148,10 +148,13 @@ func (al *AgentLoop) buildCommandsRuntime(
 			}
 
 			if err := al.ensureMCPInitialized(ctx); err != nil {
-				logger.WarnCF("agent", "Failed to refresh MCP status for command",
-					map[string]any{
-						"error": err.Error(),
-					})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentFailedToRefreshMCPStatusForCommand,
+					logger.NewSafeFields(
+						agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
+				)
 			}
 
 			connected := make(map[string]int)
@@ -209,11 +212,14 @@ func (al *AgentLoop) buildCommandsRuntime(
 			}
 
 			if err := al.ensureMCPInitialized(ctx); err != nil {
-				logger.WarnCF("agent", "Failed to initialize MCP runtime for command",
-					map[string]any{
-						"server": resolvedName,
-						"error":  err.Error(),
-					})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentFailedToInitializeMCPRuntimeForCommand,
+					logger.NewSafeFields(
+						agentDiagnosticMCPServerField(resolvedName),
+						agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
+				)
 			}
 
 			manager := al.mcp.getManager()
