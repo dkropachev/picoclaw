@@ -23,6 +23,11 @@ export interface CollectionQuerySchema {
   fields: CollectionQueryField[]
 }
 
+export interface CollectionDefaultOrderField {
+  field: string
+  direction: "ASC" | "DESC"
+}
+
 export interface CollectionPageMetadata {
   total: number
   next_cursor?: string
@@ -162,6 +167,169 @@ export async function collectionAPIErrorFromResponse(
       message || `API error: ${response.status} ${response.statusText}`,
     ),
     { ...(code ? { code } : {}), ...(position != null ? { position } : {}) },
+  )
+}
+
+const maximumCollectionSchemaFields = 128
+const maximumCollectionFieldNameBytes = 64
+const maximumCollectionSuggestedValues = 100
+const maximumCollectionSuggestedValueBytes = 256
+const maximumCollectionDefaultOrderFields = 3
+const collectionFieldTypes = new Set<CollectionQueryFieldType>([
+  "string",
+  "enum",
+  "boolean",
+  "number",
+  "timestamp",
+])
+const meaningfulCollectionOperators: Record<
+  CollectionQueryFieldType,
+  ReadonlySet<string>
+> = {
+  string: new Set(["=", "!=", "~", "!~", "IN", "NOT IN"]),
+  enum: new Set(["=", "!=", "IN", "NOT IN"]),
+  boolean: new Set(["=", "!=", "IN", "NOT IN"]),
+  number: new Set(["=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN"]),
+  timestamp: new Set(["=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN"]),
+}
+
+export function projectCollectionQuerySchema(
+  value: unknown,
+  expectedDefaultOrder: readonly CollectionDefaultOrderField[],
+): CollectionQuerySchema {
+  if (
+    !collectionRecord(value) ||
+    !Array.isArray(value.fields) ||
+    value.fields.length === 0 ||
+    value.fields.length > maximumCollectionSchemaFields ||
+    !Array.isArray(value.default_order) ||
+    value.default_order.length === 0 ||
+    value.default_order.length > maximumCollectionDefaultOrderFields
+  ) {
+    malformedCollectionSchema()
+  }
+  const fields = value.fields.map(projectCollectionQueryField)
+  rejectCollectionSchemaDuplicates(fields.map((field) => field.name))
+  const fieldsByName = new Map(fields.map((field) => [field.name, field]))
+  const defaultOrder = value.default_order.map((entry) => {
+    if (
+      !collectionRecord(entry) ||
+      typeof entry.field !== "string" ||
+      (entry.direction !== "ASC" && entry.direction !== "DESC") ||
+      !fieldsByName.get(entry.field)?.sortable
+    ) {
+      malformedCollectionSchema()
+    }
+    return { field: entry.field, direction: entry.direction }
+  })
+  rejectCollectionSchemaDuplicates(defaultOrder.map((entry) => entry.field))
+  if (
+    defaultOrder.length !== expectedDefaultOrder.length ||
+    defaultOrder.some(
+      (entry, index) =>
+        entry.field !== expectedDefaultOrder[index]?.field ||
+        entry.direction !== expectedDefaultOrder[index]?.direction,
+    )
+  ) {
+    malformedCollectionSchema()
+  }
+  return { fields }
+}
+
+function projectCollectionQueryField(value: unknown): CollectionQueryField {
+  if (
+    !collectionRecord(value) ||
+    typeof value.name !== "string" ||
+    value.name === "all" ||
+    value.name === "not" ||
+    !/^[a-z][a-z0-9_.-]*$/u.test(value.name) ||
+    collectionQueryByteLength(value.name) > maximumCollectionFieldNameBytes ||
+    collectionHasUnpairedSurrogate(value.name) ||
+    typeof value.type !== "string" ||
+    !collectionFieldTypes.has(value.type as CollectionQueryFieldType) ||
+    !Array.isArray(value.operators) ||
+    value.operators.length === 0 ||
+    value.operators.length > 10 ||
+    typeof value.sortable !== "boolean"
+  ) {
+    malformedCollectionSchema()
+  }
+  const type = value.type as CollectionQueryFieldType
+  const meaningfulOperators = meaningfulCollectionOperators[type]
+  const operators = value.operators.map((operator) => {
+    if (typeof operator !== "string" || !meaningfulOperators.has(operator)) {
+      malformedCollectionSchema()
+    }
+    return operator
+  })
+  rejectCollectionSchemaDuplicates(operators)
+  const rawSuggestions = value.suggested_values ?? []
+  if (
+    !Array.isArray(rawSuggestions) ||
+    rawSuggestions.length > maximumCollectionSuggestedValues
+  ) {
+    malformedCollectionSchema()
+  }
+  const suggestedValues = rawSuggestions.map((suggestion) => {
+    if (
+      typeof suggestion !== "string" ||
+      suggestion === "" ||
+      suggestion.trim() !== suggestion ||
+      collectionQueryByteLength(suggestion) >
+        maximumCollectionSuggestedValueBytes ||
+      collectionHasUnpairedSurrogate(suggestion) ||
+      /\p{Cc}/u.test(suggestion) ||
+      (type === "enum" && suggestion.toLowerCase() !== suggestion)
+    ) {
+      malformedCollectionSchema()
+    }
+    return suggestion
+  })
+  if (
+    new Set(suggestedValues.map((suggestion) => suggestion.toLowerCase()))
+      .size !== suggestedValues.length ||
+    (type === "enum" && suggestedValues.length === 0)
+  ) {
+    malformedCollectionSchema()
+  }
+  return {
+    name: value.name,
+    type,
+    operators,
+    sortable: value.sortable,
+    ...(suggestedValues.length > 0
+      ? { suggested_values: suggestedValues }
+      : {}),
+  }
+}
+
+function collectionRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function collectionHasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (next < 0xdc00 || next > 0xdfff) return true
+      index += 1
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true
+    }
+  }
+  return false
+}
+
+function rejectCollectionSchemaDuplicates(values: string[]) {
+  if (new Set(values).size !== values.length) malformedCollectionSchema()
+}
+
+function malformedCollectionSchema(): never {
+  throw new CollectionAPIError(
+    502,
+    "The server returned an invalid collection query schema.",
+    { code: "malformed_response" },
   )
 }
 

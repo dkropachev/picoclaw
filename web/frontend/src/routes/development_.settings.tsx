@@ -16,7 +16,6 @@ function DevelopmentSettingsRoutePage() {
   const navigate = Route.useNavigate()
   return (
     <PRLifecycleWorkflowConfigurationsPage
-      page="settings"
       settingsTab={search.tab}
       onBack={() => void navigate({ to: "/development" })}
       onSettingsTabChange={(tab) =>

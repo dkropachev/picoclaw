@@ -50,6 +50,11 @@ const smokeGitWorkspaceIDs = {
   locked: "gw-555555555555",
 } as const
 
+const smokeDevelopmentAdminIDs = {
+  repositoryAssignment: "Rjljc2epaibQOt_BhFLZFLSNQFrkJGFxU2BnbKKqal8",
+  workflowConfiguration: "editable",
+} as const
+
 const smokeWorkflowDefinitionIDs: Record<string, string> = {
   "workflows/code-review.yml": "W41H3aj_ymqpg1aP8Vs6TJXUddSpYgjW7VRRcTHj_-I",
   "workflows/github-issue-triage.yml":
@@ -78,6 +83,15 @@ const smokeRoutes = [
   "/event-sources/settings",
   "/development",
   "/development/new",
+  "/development/repositories",
+  "/development/repositories/new",
+  `/development/repositories/${smokeDevelopmentAdminIDs.repositoryAssignment}`,
+  `/development/repositories/${smokeDevelopmentAdminIDs.repositoryAssignment}/edit`,
+  "/development/workflow-configurations",
+  "/development/workflow-configurations/new",
+  `/development/workflow-configurations/${smokeDevelopmentAdminIDs.workflowConfiguration}`,
+  `/development/workflow-configurations/${smokeDevelopmentAdminIDs.workflowConfiguration}/edit`,
+  "/development/settings",
   "/notifications",
   "/repository-reviews",
   "/repository-reviews/repositories",
@@ -378,6 +392,18 @@ const mockCollectionSchemas = {
     ],
     ["repositories", "number"],
     ["poll_notifications", "boolean", ["true", "false"]],
+  ]),
+  developmentRepositoryAssignments: collectionSchema([
+    ["repository", "string"],
+    ["configuration", "string", ["default", "editable"]],
+    ["default_branch", "string", ["main"]],
+  ]),
+  developmentWorkflowConfigurations: collectionSchema([
+    ["id", "string", ["default", "editable"]],
+    ["name", "string"],
+    ["is_default", "boolean", ["true", "false"]],
+    ["bindings", "number"],
+    ["deferred_issues", "enum", ["off", "ask", "automatic"]],
   ]),
   aliases: collectionSchema([
     ["name", "string"],
@@ -2436,6 +2462,129 @@ const prLifecycleRepositoryAssignments = {
     "gateway-effect": "applied",
     "deferred-policy-effect": "applied",
   },
+}
+
+const smokeDevelopmentRepositoryAssignmentID =
+  "Rjljc2epaibQOt_BhFLZFLSNQFrkJGFxU2BnbKKqal8"
+
+const prLifecycleRepositoryAssignmentCollection = {
+  repository_assignments: [
+    {
+      id: smokeDevelopmentRepositoryAssignmentID,
+      repository: "octo/repo",
+      configuration: "default",
+      default_branch: "main",
+    },
+  ],
+  total: 1,
+  next_cursor: "",
+  canonical_query: "ORDER BY repository ASC",
+  query_schema: {
+    ...mockCollectionSchemas.developmentRepositoryAssignments,
+    default_order: [{ field: "repository", direction: "ASC" }],
+  },
+  config_revision: "sha256:config",
+  effects: {
+    gateway_effect: "applied",
+    deferred_policy_effect: "applied",
+  },
+}
+
+const prLifecycleWorkflowConfigurationCollection = {
+  workflow_configurations: [
+    {
+      id: "default",
+      name: "Default",
+      is_default: true,
+      bindings: 0,
+      deferred_issues: "ask",
+    },
+    {
+      id: "editable",
+      name: "Editable",
+      is_default: false,
+      bindings: 0,
+      deferred_issues: "ask",
+    },
+  ],
+  total: 2,
+  next_cursor: "",
+  canonical_query: "ORDER BY name ASC",
+  query_schema: {
+    ...mockCollectionSchemas.developmentWorkflowConfigurations,
+    default_order: [{ field: "name", direction: "ASC" }],
+  },
+  config_revision: "sha256:config",
+  effects: {
+    gateway_effect: "applied",
+    deferred_policy_effect: "applied",
+  },
+}
+
+const prLifecycleCollectionConfigurationChoices = {
+  default: { name: "Default", deferred_issues: { mode: "ask" } },
+  editable: { name: "Editable", deferred_issues: { mode: "ask" } },
+}
+
+const prLifecycleRepositoryAssignmentDetail = {
+  repository_assignment: {
+    ...prLifecycleRepositoryAssignmentCollection.repository_assignments[0],
+    provider_origin: "https://github.com",
+    repository_id: "100",
+  },
+  workflow_configurations: prLifecycleCollectionConfigurationChoices,
+  config_revision: "sha256:config",
+  effects: prLifecycleRepositoryAssignmentCollection.effects,
+}
+
+function prLifecycleWorkflowConfigurationDetail(id: "default" | "editable") {
+  const source =
+    prLifecycleWorkflowConfigurations["workflow-configurations"][id]
+  const snakeGateCatalog = Object.fromEntries(
+    Object.entries(prLifecycleWorkflowConfigurations["gate-catalog"]).map(
+      ([decisionPoint, entry]) => [
+        decisionPoint,
+        {
+          workflow_ref: entry["workflow-ref"],
+          gate_ref: entry["gate-ref"],
+          source_ai_supported: entry["source-ai-supported"],
+          prompt: entry.prompt,
+          fields: entry.fields.map((field) => ({
+            id: field.id,
+            type: field.type,
+            label: field.label,
+            required: false,
+            min_selections: field["min-selections"],
+            max_selections: field["max-selections"],
+            options: field.options,
+          })),
+          workflow_revision: entry["workflow-revision"],
+          default_action: entry["default-action"],
+          effective_action: entry["effective-action"],
+          action_source: entry["action-source"],
+        },
+      ],
+    ),
+  )
+  return {
+    workflow_configuration: {
+      id,
+      name: source.name,
+      is_default: id === "default",
+      bindings: source.bindings,
+      deferred_issues: source["deferred-issues"],
+      scope_disposition: {
+        default: source["scope-disposition"].default,
+        by_type: source["scope-disposition"]["by-type"],
+      },
+    },
+    gate_catalog: snakeGateCatalog,
+    flow: prLifecycleWorkflowConfigurations.flow,
+    flow_revision: prLifecycleWorkflowConfigurations["flow-revision"],
+    catalog_revision: prLifecycleWorkflowConfigurations["catalog-revision"],
+    config_revision: prLifecycleWorkflowConfigurations["config-revision"],
+    effects: prLifecycleWorkflowConfigurationCollection.effects,
+  }
 }
 
 interface MockLauncherApiOptions {
@@ -5110,8 +5259,26 @@ async function mockLauncherApis(
           return json(route, { revision: 0, messages: [] })
         case "/api/development/workflow-configurations":
           return json(route, prLifecycleWorkflowConfigurations)
+        case "/api/development/workflow-configurations/items":
+          return json(route, {
+            ...prLifecycleWorkflowConfigurationCollection,
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY name ASC",
+          })
+        case "/api/development/workflow-configurations/items/default":
+          return json(route, prLifecycleWorkflowConfigurationDetail("default"))
+        case "/api/development/workflow-configurations/items/editable":
+          return json(route, prLifecycleWorkflowConfigurationDetail("editable"))
         case "/api/development/repositories":
           return json(route, prLifecycleRepositoryAssignments)
+        case "/api/development/repository-assignments":
+          return json(route, {
+            ...prLifecycleRepositoryAssignmentCollection,
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY repository ASC",
+          })
+        case `/api/development/repository-assignments/${smokeDevelopmentAdminIDs.repositoryAssignment}`:
+          return json(route, prLifecycleRepositoryAssignmentDetail)
         case "/api/notifications":
           return json(route, {
             notifications: [developmentNotification],
@@ -6922,24 +7089,35 @@ test.skip("legacy combined model review workspace is not compatibility-rendered"
   expect(errors).toEqual([])
 })
 
-test("Workflow configurations use canonical pages, tabs, and modal URLs", async ({
+test("Workflow configurations use canonical collections and routed editor URLs", async ({
   page,
 }) => {
   test.setTimeout(60_000)
-  await gotoMockedRoute(page, "/development/workflow-configurations")
-
-  await expect(page).toHaveURL(
-    /\/development\/workflow-configurations\?flow=review$/,
+  const expectEditorURL = async (id: string, gate?: string) => {
+    await expect
+      .poll(() => new URL(page.url()).pathname)
+      .toBe(`/development/workflow-configurations/${id}/edit`)
+    expect(new URL(page.url()).searchParams.get("flow")).toBe("review")
+    expect(new URL(page.url()).searchParams.get("gate")).toBe(gate ?? null)
+  }
+  await gotoMockedRoute(
+    page,
+    "/development/workflow-configurations?config=editable&view=grid",
   )
+
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe("ORDER BY name ASC")
+  expect(new URL(page.url()).searchParams.get("config")).toBeNull()
+  expect(new URL(page.url()).searchParams.get("view")).toBe("grid")
   await expect(
     page.getByRole("heading", { name: "Workflow configurations" }),
   ).toBeVisible()
-  await page
-    .getByRole("button", { name: "Edit Default Workflow configuration" })
-    .click()
-  await expect(page).toHaveURL(
-    /\/development\/workflow-configurations\?config=default&flow=review$/,
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  await page.goto(
+    "/development/workflow-configurations/default/edit?flow=review",
   )
+  await expectEditorURL("default")
   await expect(
     page.getByRole("textbox", { name: "Configuration name" }),
   ).toHaveValue("Default")
@@ -6957,9 +7135,7 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
   )
 
   await page.getByRole("button", { name: "Approve purpose and scope" }).click()
-  await expect(page).toHaveURL(
-    /\/development\/workflow-configurations\?config=default&flow=review&gate=pr\.charter\.confirm$/,
-  )
+  await expectEditorURL("default", "pr.charter.confirm")
   const lockedDialog = page.getByRole("dialog", {
     name: "Approve purpose and scope",
   })
@@ -6970,23 +7146,12 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
     "Create a custom configuration to override Gate actions",
   )
   await lockedDialog.getByRole("button", { name: "Done editing" }).click()
-  await page
-    .getByRole("button", { name: "Back to Workflow configurations" })
-    .click()
-  await expect(page).toHaveURL(
-    /\/development\/workflow-configurations\?flow=review$/,
+  await page.goto(
+    "/development/workflow-configurations/editable/edit?flow=review",
   )
-
-  await page
-    .getByRole("button", { name: "Edit Editable Workflow configuration" })
-    .click()
-  await expect(page).toHaveURL(
-    /\/development\/workflow-configurations\?config=editable&flow=review$/,
-  )
+  await expectEditorURL("editable")
   await page.getByRole("button", { name: "Approve purpose and scope" }).click()
-  await expect(page).toHaveURL(
-    /\/development\/workflow-configurations\?config=editable&flow=review&gate=pr\.charter\.confirm$/,
-  )
+  await expectEditorURL("editable", "pr.charter.confirm")
   const dialog = page.getByRole("dialog", {
     name: "Approve purpose and scope",
   })
@@ -7011,16 +7176,12 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
   ).toHaveCount(0)
   await page.keyboard.press("Escape")
   await dialog.getByRole("button", { name: "Done editing" }).click()
-  await expect(page).toHaveURL(
-    /\/development\/workflow-configurations\?config=editable&flow=review$/,
-  )
+  await expectEditorURL("editable")
 
   await page
     .getByRole("button", { name: "Decide ambiguous finding scope" })
     .click()
-  await expect(page).toHaveURL(
-    /\/development\/workflow-configurations\?config=editable&flow=review&gate=pr\.finding\.classify$/,
-  )
+  await expectEditorURL("editable", "pr.finding.classify")
   const sourceDialog = page.getByRole("dialog", {
     name: "Decide ambiguous finding scope",
   })
@@ -7076,64 +7237,66 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
   await expect(sourceDialog.getByText("action", { exact: true })).toBeVisible()
   await expect(sourceDialog.getByText("approve", { exact: true })).toBeVisible()
   await sourceDialog.getByRole("button", { name: "Done editing" }).click()
-  await expect(page).toHaveURL(
-    /\/development\/workflow-configurations\?config=editable&flow=review$/,
-  )
+  await expectEditorURL("editable")
   await expectNoSeriousA11yViolations(page)
   await expect(
     page.getByRole("combobox", { name: "Deferred issue mode" }),
   ).toHaveText("Ask")
-
-  if ((page.viewportSize()?.width ?? 1280) < 640) {
-    await page.getByRole("button", { name: "Toggle Sidebar" }).click()
-  }
-  await page.getByRole("link", { name: "Settings" }).click()
-  await expect(page).toHaveURL(/\/development\/settings\?tab=nudging$/)
-  await page.getByRole("tab", { name: "Scope grades" }).click()
-  await expect(page).toHaveURL(/\/development\/settings\?tab=scope$/)
-  await expect(page.getByRole("tab", { name: "Deferred issues" })).toHaveCount(
-    0,
-  )
+  await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
 })
 
 test("Repository assignments have a separate canonical UI and URL", async ({
   page,
 }) => {
-  await gotoMockedRoute(page, "/development/repositories")
+  await gotoMockedRoute(
+    page,
+    "/development/repositories?config=editable&view=table",
+  )
 
-  await expect(page).toHaveURL(/\/development\/repositories$/)
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe("ORDER BY repository ASC")
+  expect(new URL(page.url()).searchParams.get("config")).toBeNull()
+  expect(new URL(page.url()).searchParams.get("view")).toBe("table")
   await expect(
     page.getByRole("heading", { name: "Repository assignments" }),
   ).toBeVisible()
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
   await expect(
-    page.getByRole("heading", { name: "Repository routing" }),
+    page.locator(
+      `[data-item-id="${smokeDevelopmentAdminIDs.repositoryAssignment}"]:visible`,
+    ),
   ).toBeVisible()
-  await expect(
-    page.getByRole("button", { name: "Save assignments" }),
-  ).toBeDisabled()
-  await expect(
-    page.getByRole("textbox", { name: "Configuration name" }),
-  ).toHaveCount(0)
-  await expect(
-    page.getByRole("button", { name: /edit .*workflow configuration/i }),
-  ).toHaveCount(0)
 
-  await page
-    .getByRole("textbox", { name: "Repository URL" })
-    .fill("https://github.com/other/repo")
-  await page.getByRole("combobox", { name: "Workflow configuration" }).click()
-  await page.getByRole("option", { name: "Editable" }).click()
-  await page.getByRole("button", { name: "Add assignment" }).click()
-  await expect(page.getByText("other/repo")).toBeVisible()
+  await page.goto(
+    `/development/repositories/${smokeDevelopmentAdminIDs.repositoryAssignment}`,
+  )
   await expect(
-    page.getByRole("combobox", {
-      name: "Workflow configuration for https://github.com|200",
-    }),
-  ).toHaveText("Editable")
+    page.locator('[data-slot="collection-detail-shell"]'),
+  ).toBeVisible()
+  await expect(page.getByText("https://github.com|100")).toBeVisible()
+
+  await page.goto("/development/repositories/new")
   await expect(
-    page.getByRole("button", { name: "Save assignments" }),
-  ).toBeEnabled()
+    page.getByRole("textbox", { name: "Repository", exact: true }),
+  ).toBeEditable()
+  await expect(
+    page.getByText("Repository routing", { exact: true }),
+  ).toBeVisible()
+
+  await page.goto(
+    `/development/repositories/${smokeDevelopmentAdminIDs.repositoryAssignment}/edit`,
+  )
+  const repository = page.getByRole("textbox", {
+    name: "Repository",
+    exact: true,
+  })
+  await expect(repository).toHaveValue("octo/repo")
+  await expect(repository).toHaveAttribute("readonly")
+  await expect(
+    page.getByRole("button", { name: "Save assignment" }),
+  ).toBeDisabled()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
 })

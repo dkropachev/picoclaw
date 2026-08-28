@@ -5,7 +5,8 @@
 PicoClaw administrative collections use one shared presentation and interaction
 system. Standard surfaces include Accounts, Account Routers, Model Aliases,
 Model Routers, MCP Servers, Agents, Model Evaluations, Skills, Tools, Event
-Sources, Workflow Definitions, and Git Workspaces. New collection surfaces,
+Sources, Workflow Definitions, Git Workspaces, Development Repository
+Assignments, and Development Workflow Configurations. New collection surfaces,
 and legacy collection surfaces when materially changed, must adopt this
 contract.
 
@@ -146,13 +147,18 @@ Canonical pilot routes:
 | Workflow Runs         | `/agent/workflows/runs`         | None                     | `/agent/workflows/runs/:id` | Operational exemption; shared List/Table only                        |
 | Git Workspaces        | `/agent/git-workspaces`         | None                     | `/agent/git-workspaces/:id` | History at `/history`; global limits at `/settings`                  |
 | Git Workspace History | `/agent/git-workspaces/history` | None                     | None                        | Operational exemption; shared List/Table only                        |
+| Repository Assignments | `/development/repositories` | `/development/repositories/new` | `/development/repositories/:id` | `/:id/edit` |
+| Workflow Configurations | `/development/workflow-configurations` | `/development/workflow-configurations/new` | `/development/workflow-configurations/:id` | `/:id/edit` |
 
 Legacy `/models`, `/agent/mcp`, `?agent=`, `?probe=`, and Tools `?tab=` UI forms
 are not redirected or compatibility-rendered. Workflow `mode`, `workflow`, and
 `run` search URLs are likewise a hard cutover: definitions, authoring, runs,
 run detail, and settings use their dedicated routes. The existing evaluation
 report route remains canonical. Skill import and item detail are routed pages
-rather than dialog-only navigation.
+rather than dialog-only navigation. Development Workflow configuration
+`?config=` URLs are also removed: configuration identity is a path segment on
+the dedicated detail and edit routes, while optional `flow` and `gate` editor
+context remains query state on `/:id/edit`.
 
 ## Backend List And Mutation Contract
 
@@ -203,6 +209,18 @@ configured/effective generic storage limits through one same-origin,
 revision-fenced save. Cleanup and drop remain confirmed item actions; locked
 workspaces and every controller-private workspace stay ineligible and
 structurally absent from all three browser projections.
+
+Development repository assignments use
+`/api/development/repository-assignments` for typed query/cursor list reads,
+opaque-ID detail and revision-fenced CRUD. Their summaries expose repository,
+selected configuration, and default branch; bulk deletion uses one exact
+config revision and preserves failed selections. Development Workflow
+configurations use `/api/development/workflow-configurations/items` for the
+paged collection and ID-addressed item reads and writes while the existing
+aggregate endpoint remains the authority for shared lifecycle settings. Their
+summaries expose stable ID, name, default state, binding count, and deferred
+issue mode. Both collections default to compact List and support List, Table,
+and Grid.
 
 ## Governance And Evidence
 

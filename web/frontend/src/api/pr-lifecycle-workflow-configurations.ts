@@ -1,4 +1,12 @@
 import {
+  CollectionAPIError,
+  type CollectionBulkDeleteFailure,
+  type CollectionQuerySchema,
+  collectionListURL,
+  collectionRequest,
+  projectCollectionQuerySchema,
+} from "@/api/collection"
+import {
   DevelopmentWorkspaceAPIError as PRWorkspaceAPIError,
   requestDevelopmentJSON as requestPRWorkspaceJSON,
 } from "@/api/development-workspaces"
@@ -135,9 +143,62 @@ export interface PRLifecycleWorkflowConfigurationIssue {
   message: string
 }
 
+export interface PRLifecycleWorkflowConfigurationSummary {
+  id: string
+  name: string
+  is_default: boolean
+  bindings: number
+  deferred_issues: PRLifecycleDeferredIssueModeV3
+}
+
+export interface PRLifecycleWorkflowConfigurationsCollectionResponse {
+  workflow_configurations: PRLifecycleWorkflowConfigurationSummary[]
+  total: number
+  next_cursor?: string
+  canonical_query: string
+  query_schema: CollectionQuerySchema
+  config_revision: string
+  effects: PRLifecycleWorkflowConfigurationEffects
+}
+
+export interface PRLifecycleWorkflowConfigurationItem extends PRLifecycleWorkflowConfiguration {
+  id: string
+  isDefault: boolean
+}
+
+export interface PRLifecycleWorkflowConfigurationDetailResponse {
+  workflow_configuration: PRLifecycleWorkflowConfigurationItem
+  gate_catalog: Record<string, PRLifecycleGateCatalogEntry>
+  flow: PRLifecycleFlowCatalog
+  flow_revision: string
+  catalog_revision: string
+  config_revision: string
+  effects: PRLifecycleWorkflowConfigurationEffects
+}
+
+export interface PRLifecycleWorkflowConfigurationEffects {
+  gateway_effect: "applied" | "restart_required"
+  deferred_policy_effect: "applied" | "restart_required"
+}
+
+export interface PRLifecycleWorkflowConfigurationInput {
+  id: string
+  name: string
+  bindings: PRLifecycleGateBinding[]
+  deferredIssues: { mode: PRLifecycleDeferredIssueModeV3 }
+  scopeDisposition?: PRLifecycleScopeDispositionConfig
+}
+
+export interface PRLifecycleWorkflowConfigurationDeleteResponse {
+  deleted_ids: string[]
+  failures: CollectionBulkDeleteFailure[]
+  config_revision: string
+  effects: PRLifecycleWorkflowConfigurationEffects
+}
+
 export const prLifecycleWorkflowConfigurationIDPattern =
   /^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
-const gateRefPattern = /^gates\.[a-z][a-z0-9-]{0,63}$/
+const gateRefPattern = /^gates\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 
 export function isPRLifecycleWorkflowConfigurationID(value: string): boolean {
   return prLifecycleWorkflowConfigurationIDPattern.test(value)
@@ -221,7 +282,10 @@ export function validatePRLifecycleWorkflowConfigurations(
             "Workflow reference must be an exact workflows/*.yml or *.yaml path.",
         })
       }
-      if (!gateRefPattern.test(binding.gateRef)) {
+      if (
+        !gateRefPattern.test(binding.gateRef) ||
+        new TextEncoder().encode(binding.gateRef).byteLength > 128
+      ) {
         issues.push({
           path: `${bindingPath}.gate-ref`,
           message: "Gate reference must be gates.<kebab-case-id>.",
@@ -318,11 +382,24 @@ function validateAction(
         path: `${path}.agent-id`,
         message: "AI actions require an agent ID.",
       })
+    } else if (
+      !sourceSession &&
+      !/^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(action.agentID ?? "")
+    ) {
+      issues.push({
+        path: `${path}.agent-id`,
+        message: "AI action agent ID must use kebab-case.",
+      })
     }
     if (!action.prompt?.trim()) {
       issues.push({
         path: `${path}.prompt`,
         message: "AI actions require a prompt.",
+      })
+    } else if (new TextEncoder().encode(action.prompt).byteLength > 32 << 10) {
+      issues.push({
+        path: `${path}.prompt`,
+        message: "AI action prompts cannot exceed 32768 bytes.",
       })
     }
     const ephemeral = action.session === "ephemeral"
@@ -372,7 +449,8 @@ function validateAction(
   if (
     action.type === "workflow" &&
     action.workflowRef !== undefined &&
-    !isCanonicalWorkflowRef(action.workflowRef)
+    (!isCanonicalWorkflowRef(action.workflowRef) ||
+      new TextEncoder().encode(action.workflowRef).byteLength > 512)
   ) {
     issues.push({
       path: `${path}.workflow-ref`,
@@ -410,9 +488,13 @@ function validateAction(
 function isCanonicalWorkflowRef(value: string): boolean {
   if (
     value !== value.trim() ||
+    new TextEncoder().encode(value).byteLength > 1024 ||
     !value.startsWith("workflows/") ||
     (!value.endsWith(".yml") && !value.endsWith(".yaml")) ||
-    value.includes("\\")
+    value.includes("\\") ||
+    value.includes("${{") ||
+    value.startsWith("draft:") ||
+    /[\0\r\n]/u.test(value)
   )
     return false
   return value
@@ -429,6 +511,702 @@ export async function getPRLifecycleWorkflowConfigurations(
       undefined,
       signal,
     ),
+  )
+}
+
+const workflowConfigurationItemsPath =
+  "/api/development/workflow-configurations/items"
+
+export async function listPRLifecycleWorkflowConfigurations(
+  options: { query?: string; cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<PRLifecycleWorkflowConfigurationsCollectionResponse> {
+  return projectWorkflowConfigurationCollection(
+    await collectionRequest<unknown>(
+      collectionListURL(workflowConfigurationItemsPath, options),
+      undefined,
+      signal,
+    ),
+  )
+}
+
+export async function getPRLifecycleWorkflowConfiguration(
+  id: string,
+  signal?: AbortSignal,
+): Promise<PRLifecycleWorkflowConfigurationDetailResponse> {
+  if (!isPRLifecycleWorkflowConfigurationID(id)) collectionMalformed()
+  const response = projectWorkflowConfigurationDetail(
+    await collectionRequest<unknown>(
+      `${workflowConfigurationItemsPath}/${encodeURIComponent(id)}`,
+      undefined,
+      signal,
+    ),
+  )
+  if (response.workflow_configuration.id !== id) collectionMalformed()
+  return response
+}
+
+export async function createPRLifecycleWorkflowConfiguration(
+  configuration: PRLifecycleWorkflowConfigurationInput,
+  expectedConfigRevision: string,
+): Promise<PRLifecycleWorkflowConfigurationDetailResponse> {
+  if (!isPRLifecycleWorkflowConfigurationID(configuration.id)) {
+    collectionMalformed()
+  }
+  const response = projectWorkflowConfigurationDetail(
+    await collectionRequest<unknown>(workflowConfigurationItemsPath, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expected_config_revision: expectedConfigRevision,
+        workflow_configuration: serializeCollectionConfig(configuration),
+      }),
+    }),
+  )
+  if (response.workflow_configuration.id !== configuration.id) {
+    collectionMalformed()
+  }
+  return response
+}
+
+export async function updatePRLifecycleWorkflowConfiguration(
+  id: string,
+  configuration: PRLifecycleWorkflowConfigurationInput,
+  expectedConfigRevision: string,
+): Promise<PRLifecycleWorkflowConfigurationDetailResponse> {
+  if (!isPRLifecycleWorkflowConfigurationID(id) || configuration.id !== id) {
+    collectionMalformed()
+  }
+  const response = projectWorkflowConfigurationDetail(
+    await collectionRequest<unknown>(
+      `${workflowConfigurationItemsPath}/${encodeURIComponent(id)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_config_revision: expectedConfigRevision,
+          workflow_configuration: serializeCollectionConfig(configuration),
+        }),
+      },
+    ),
+  )
+  if (response.workflow_configuration.id !== id) collectionMalformed()
+  return response
+}
+
+export async function makePRLifecycleWorkflowConfigurationDefault(
+  id: string,
+  expectedConfigRevision: string,
+): Promise<PRLifecycleWorkflowConfigurationDetailResponse> {
+  if (!isPRLifecycleWorkflowConfigurationID(id)) collectionMalformed()
+  const response = projectWorkflowConfigurationDetail(
+    await collectionRequest<unknown>(
+      `${workflowConfigurationItemsPath}/${encodeURIComponent(id)}/default`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_config_revision: expectedConfigRevision,
+        }),
+      },
+    ),
+  )
+  if (
+    response.workflow_configuration.id !== id ||
+    !response.workflow_configuration.isDefault
+  ) {
+    collectionMalformed()
+  }
+  return response
+}
+
+export async function deletePRLifecycleWorkflowConfiguration(
+  id: string,
+  expectedConfigRevision: string,
+): Promise<PRLifecycleWorkflowConfigurationDeleteResponse> {
+  if (!isPRLifecycleWorkflowConfigurationID(id)) collectionMalformed()
+  const response = projectWorkflowConfigurationDeleteResponse(
+    await collectionRequest<unknown>(
+      `${workflowConfigurationItemsPath}/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_config_revision: expectedConfigRevision,
+        }),
+      },
+    ),
+  )
+  if (
+    response.deleted_ids.length !== 1 ||
+    response.deleted_ids[0] !== id ||
+    response.failures.length !== 0
+  ) {
+    collectionMalformed()
+  }
+  return response
+}
+
+function serializeCollectionConfig(
+  configuration: PRLifecycleWorkflowConfigurationInput,
+) {
+  return {
+    id: configuration.id,
+    name: configuration.name,
+    bindings: configuration.bindings.map((binding) => ({
+      workflow_ref: binding.workflowRef,
+      gate_ref: binding.gateRef,
+      ...(binding.action
+        ? { action: serializeCollectionAction(binding.action) }
+        : {}),
+    })),
+    deferred_issues: configuration.deferredIssues,
+    scope_disposition: {
+      default: (configuration.scopeDisposition ?? defaultScopeDisposition())
+        .default,
+      by_type: (configuration.scopeDisposition ?? defaultScopeDisposition())
+        .byType,
+    },
+  }
+}
+
+function serializeCollectionAction(action: PRLifecycleGateAction) {
+  return {
+    type: action.type,
+    ...(action.agentID === undefined ? {} : { agent_id: action.agentID }),
+    ...(action.prompt === undefined ? {} : { prompt: action.prompt }),
+    ...(action.session === undefined ? {} : { session: action.session }),
+    ...(action.history === undefined ? {} : { history: action.history }),
+    ...(action.cache === undefined ? {} : { cache: action.cache }),
+    ...(action.tools === undefined ? {} : { tools: action.tools }),
+    ...(action.fields === undefined ? {} : { fields: action.fields }),
+    ...(action.workflowRef === undefined
+      ? {}
+      : { workflow_ref: action.workflowRef }),
+  }
+}
+
+function projectWorkflowConfigurationCollection(
+  value: unknown,
+): PRLifecycleWorkflowConfigurationsCollectionResponse {
+  const root = collectionRecord(value)
+  if (!Array.isArray(root.workflow_configurations)) collectionMalformed()
+  const configurations = root.workflow_configurations.map(
+    projectWorkflowConfigurationSummary,
+  )
+  rejectCollectionDuplicateIDs(
+    configurations.map((configuration) => configuration.id),
+  )
+  return {
+    workflow_configurations: configurations,
+    ...projectCollectionMetadata(root),
+    config_revision: collectionString(root.config_revision),
+    effects: projectWorkflowCollectionEffects(root.effects),
+  }
+}
+
+function projectWorkflowConfigurationSummary(
+  value: unknown,
+): PRLifecycleWorkflowConfigurationSummary {
+  const source = collectionRecord(value)
+  const id = collectionString(source.id)
+  if (!isPRLifecycleWorkflowConfigurationID(id)) collectionMalformed()
+  return {
+    id,
+    name: collectionTrimmedUTF8String(source.name, 128),
+    is_default: collectionBoolean(source.is_default),
+    bindings: collectionInteger(source.bindings),
+    deferred_issues: collectionDeferredIssueMode(source.deferred_issues),
+  }
+}
+
+function projectWorkflowConfigurationDetail(
+  value: unknown,
+): PRLifecycleWorkflowConfigurationDetailResponse {
+  const root = collectionRecord(value)
+  const gateCatalog = collectionMap(
+    root.gate_catalog,
+    projectCollectionCatalogEntry,
+  )
+  const workflowConfiguration = projectWorkflowConfigurationItem(
+    root.workflow_configuration,
+  )
+  const issues = validatePRLifecycleWorkflowConfigurations({
+    workflowConfigurations: {
+      [workflowConfiguration.id]: workflowConfiguration,
+    },
+    defaultWorkflowConfiguration: workflowConfiguration.id,
+    nudge: {
+      reviewMinimumAdditional: 0,
+      reviewMaximumAdditional: 0,
+      completionMinimumAdditional: 0,
+      completionMaximumAdditional: 0,
+    },
+    scope: {
+      xs: { files: 0, semanticLines: 0, modules: 0 },
+      s: { files: 0, semanticLines: 0, modules: 0 },
+      m: { files: 0, semanticLines: 0, modules: 0 },
+    },
+    gateCatalog,
+  })
+  if (issues.length > 0) collectionMalformed()
+  return {
+    workflow_configuration: workflowConfiguration,
+    gate_catalog: gateCatalog,
+    flow: projectPRLifecycleFlowCatalog(root.flow),
+    flow_revision: collectionString(root.flow_revision),
+    catalog_revision: collectionString(root.catalog_revision),
+    config_revision: collectionString(root.config_revision),
+    effects: projectWorkflowCollectionEffects(root.effects),
+  }
+}
+
+function projectWorkflowConfigurationItem(
+  value: unknown,
+): PRLifecycleWorkflowConfigurationItem {
+  const source = collectionRecord(value)
+  const id = collectionString(source.id)
+  if (!isPRLifecycleWorkflowConfigurationID(id)) collectionMalformed()
+  if (!Array.isArray(source.bindings) || source.bindings.length > 8192) {
+    collectionMalformed()
+  }
+  return {
+    id,
+    isDefault: collectionBoolean(source.is_default),
+    name: collectionTrimmedUTF8String(source.name, 128),
+    bindings: source.bindings.map(projectCollectionBinding),
+    deferredIssues: {
+      mode: collectionDeferredIssueMode(source.deferred_issues),
+    },
+    scopeDisposition: projectCollectionScopeDisposition(
+      source.scope_disposition,
+    ),
+  }
+}
+
+function projectCollectionBinding(value: unknown): PRLifecycleGateBinding {
+  const source = collectionRecord(value)
+  const workflowRef = collectionBoundedUTF8String(source.workflow_ref, 1024)
+  const gateRef = collectionBoundedUTF8String(source.gate_ref, 128)
+  if (!isCanonicalWorkflowRef(workflowRef) || !gateRefPattern.test(gateRef)) {
+    collectionMalformed()
+  }
+  return {
+    workflowRef,
+    gateRef,
+    ...(source.action === undefined
+      ? {}
+      : { action: projectCollectionAction(source.action) }),
+  }
+}
+
+function projectCollectionAction(value: unknown): PRLifecycleGateAction {
+  const source = collectionRecord(value)
+  const type = collectionString(source.type)
+  if (
+    type !== "human" &&
+    type !== "ai" &&
+    type !== "deterministic" &&
+    type !== "workflow"
+  ) {
+    collectionMalformed()
+  }
+  const action: PRLifecycleGateAction = {
+    type,
+    ...collectionOptionalBoundedString(source.agent_id, "agentID", 64),
+    ...collectionOptionalBoundedString(source.prompt, "prompt", 32 << 10),
+    ...collectionOptionalEnum(source.session, "session", [
+      "ephemeral",
+      "private",
+      "source",
+    ] as const),
+    ...collectionOptionalEnum(source.history, "history", [
+      "none",
+      "read_only",
+      "read_write",
+    ] as const),
+    ...collectionOptionalEnum(source.cache, "cache", [
+      "none",
+      "session",
+      "agent",
+    ] as const),
+    ...collectionOptionalEnum(source.tools, "tools", [
+      "none",
+      "inherit",
+    ] as const),
+    ...(source.fields === undefined
+      ? {}
+      : { fields: collectionRecord(source.fields) }),
+    ...collectionOptionalBoundedString(source.workflow_ref, "workflowRef", 512),
+  }
+  const issues: PRLifecycleWorkflowConfigurationIssue[] = []
+  validateAction(action, "action", issues)
+  if (issues.length > 0) collectionMalformed()
+  return action
+}
+
+function projectCollectionScopeDisposition(
+  value: unknown,
+): PRLifecycleScopeDispositionConfig {
+  if (value === undefined) return defaultScopeDisposition()
+  const source = collectionRecord(value)
+  const byType = collectionRecord(source.by_type)
+  const supported = new Set([
+    "fix",
+    "feature",
+    "refactor",
+    "documentation",
+    "test",
+  ])
+  if (Object.keys(byType).some((key) => !supported.has(key))) {
+    collectionMalformed()
+  }
+  return {
+    default: projectCollectionScopeRule(source.default),
+    byType: Object.fromEntries(
+      Object.entries(byType).map(([key, rule]) => [
+        key,
+        projectCollectionScopeRule(rule),
+      ]),
+    ) as PRLifecycleScopeDispositionConfig["byType"],
+  }
+}
+
+function projectCollectionScopeRule(
+  value: unknown,
+): PRLifecycleScopeDispositionRule {
+  const source = collectionRecord(value)
+  const mode = collectionString(source.mode)
+  if (mode !== "strict" && mode !== "relaxed") collectionMalformed()
+  return {
+    mode,
+    prompt: collectionScopePrompt(source.prompt),
+  }
+}
+
+function projectCollectionCatalogEntry(
+  value: unknown,
+): PRLifecycleGateCatalogEntry {
+  const source = collectionRecord(value)
+  const workflowRef = collectionBoundedUTF8String(source.workflow_ref, 1024)
+  const gateRef = collectionBoundedUTF8String(source.gate_ref, 128)
+  const prompt = collectionNonblankUTF8String(source.prompt, 16 << 10)
+  if (!isCanonicalWorkflowRef(workflowRef) || !gateRefPattern.test(gateRef)) {
+    collectionMalformed()
+  }
+  const actionSource = source.action_source
+  if (
+    actionSource !== undefined &&
+    actionSource !== "workflow-default" &&
+    actionSource !== "config-override"
+  ) {
+    collectionMalformed()
+  }
+  return {
+    workflowRef,
+    gateRef,
+    sourceAISupported: collectionBoolean(source.source_ai_supported),
+    prompt,
+    ...(source.fields === undefined
+      ? {}
+      : { fields: projectCollectionCatalogFields(source.fields) }),
+    ...(source.workflow_revision === undefined
+      ? {}
+      : { workflowRevision: collectionString(source.workflow_revision) }),
+    ...(source.default_action === undefined
+      ? {}
+      : { defaultAction: projectCollectionAction(source.default_action) }),
+    ...(source.effective_action === undefined
+      ? {}
+      : { effectiveAction: projectCollectionAction(source.effective_action) }),
+    ...(actionSource === undefined ? {} : { actionSource }),
+  }
+}
+
+function projectCollectionCatalogFields(
+  value: unknown,
+): PRLifecycleGateCatalogField[] {
+  if (!Array.isArray(value) || value.length > 64) collectionMalformed()
+  const ids = new Set<string>()
+  return value.map((field) => {
+    const source = collectionRecord(field)
+    const id = collectionGateID(source.id)
+    if (ids.has(id)) collectionMalformed()
+    ids.add(id)
+    const type = collectionString(source.type)
+    const label = collectionNonblankUTF8String(source.label, 4 << 10)
+    const required = collectionBoolean(source.required)
+    if (type === "short-text" || type === "long-text" || type === "boolean") {
+      return { id, type, label, required }
+    }
+    if (type !== "select" || !Array.isArray(source.options)) {
+      collectionMalformed()
+    }
+    const minSelections = collectionOptionalInteger(source.min_selections)
+    const maxSelections = collectionInteger(source.max_selections)
+    const options = source.options.map((option) => {
+      const entry = collectionRecord(option)
+      return {
+        id: collectionGateID(entry.id),
+        label: collectionNonblankUTF8String(entry.label, 4 << 10),
+      }
+    })
+    rejectCollectionDuplicateIDs(options.map((option) => option.id))
+    if (
+      options.length === 0 ||
+      options.length > 128 ||
+      maxSelections < 1 ||
+      maxSelections > options.length ||
+      minSelections > maxSelections
+    ) {
+      collectionMalformed()
+    }
+    return {
+      id,
+      type,
+      label,
+      required: required || minSelections > 0,
+      minSelections,
+      maxSelections,
+      options,
+    }
+  })
+}
+
+function projectWorkflowCollectionEffects(
+  value: unknown,
+): PRLifecycleWorkflowConfigurationEffects {
+  const source = collectionRecord(value)
+  return {
+    gateway_effect: collectionEffect(source.gateway_effect),
+    deferred_policy_effect: collectionEffect(source.deferred_policy_effect),
+  }
+}
+
+function projectWorkflowConfigurationDeleteResponse(
+  value: unknown,
+): PRLifecycleWorkflowConfigurationDeleteResponse {
+  const root = collectionRecord(value)
+  if (!Array.isArray(root.deleted_ids) || !Array.isArray(root.failures)) {
+    collectionMalformed()
+  }
+  const deletedIDs = root.deleted_ids.map((id) => collectionConfigurationID(id))
+  const failures = root.failures.map((failure): CollectionBulkDeleteFailure => {
+    const source = collectionRecord(failure)
+    const blockers = source.blockers
+    if (blockers !== undefined && !Array.isArray(blockers)) {
+      collectionMalformed()
+    }
+    return {
+      id: collectionConfigurationID(source.id),
+      code: collectionCode(source.code),
+      ...(Array.isArray(blockers)
+        ? { blockers: blockers.map((blocker) => collectionString(blocker)) }
+        : {}),
+    }
+  })
+  rejectCollectionDuplicateIDs(deletedIDs)
+  rejectCollectionDuplicateIDs(failures.map((failure) => failure.id))
+  if (failures.some((failure) => deletedIDs.includes(failure.id))) {
+    collectionMalformed()
+  }
+  return {
+    deleted_ids: deletedIDs,
+    failures,
+    config_revision: collectionString(root.config_revision),
+    effects: projectWorkflowCollectionEffects(root.effects),
+  }
+}
+
+function collectionDeferredIssueMode(
+  value: unknown,
+): PRLifecycleDeferredIssueModeV3 {
+  const candidate =
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? collectionRecord(value).mode
+      : value
+  if (candidate !== "off" && candidate !== "ask" && candidate !== "automatic") {
+    collectionMalformed()
+  }
+  return candidate
+}
+
+function projectCollectionMetadata(root: Record<string, unknown>) {
+  const schema = projectCollectionQuerySchema(root.query_schema, [
+    { field: "name", direction: "ASC" },
+  ])
+  return {
+    total: collectionInteger(root.total),
+    canonical_query: collectionCanonicalQuery(root.canonical_query),
+    query_schema: schema,
+    ...(root.next_cursor === undefined || root.next_cursor === ""
+      ? {}
+      : { next_cursor: collectionString(root.next_cursor) }),
+  }
+}
+
+function collectionMap<T>(
+  value: unknown,
+  project: (value: unknown) => T,
+): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(collectionRecord(value)).map(([key, entry]) => [
+      key,
+      project(entry),
+    ]),
+  )
+}
+
+function collectionRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    collectionMalformed()
+  }
+  return value as Record<string, unknown>
+}
+
+function collectionString(value: unknown): string {
+  return collectionBoundedUTF8String(value, 4096)
+}
+
+function collectionBoundedUTF8String(
+  value: unknown,
+  maximumBytes: number,
+  allowEmpty = false,
+): string {
+  if (
+    typeof value !== "string" ||
+    (!allowEmpty && value.length === 0) ||
+    hasUnpairedSurrogate(value) ||
+    new TextEncoder().encode(value).byteLength > maximumBytes
+  ) {
+    collectionMalformed()
+  }
+  return value
+}
+
+function collectionTrimmedUTF8String(
+  value: unknown,
+  maximumBytes: number,
+): string {
+  const result = collectionBoundedUTF8String(value, maximumBytes)
+  if (result !== result.trim()) collectionMalformed()
+  return result
+}
+
+function collectionNonblankUTF8String(
+  value: unknown,
+  maximumBytes: number,
+): string {
+  const result = collectionBoundedUTF8String(value, maximumBytes)
+  if (result.trim() === "") collectionMalformed()
+  return result
+}
+
+function collectionScopePrompt(value: unknown): string {
+  if (value === undefined) return ""
+  const result = collectionBoundedUTF8String(value, 8 << 10, true)
+  if (result !== result.trim()) collectionMalformed()
+  return result
+}
+
+function collectionGateID(value: unknown): string {
+  const result = collectionBoundedUTF8String(value, 128)
+  if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(result)) {
+    collectionMalformed()
+  }
+  return result
+}
+
+function collectionCanonicalQuery(value: unknown): string {
+  const query = collectionBoundedUTF8String(value, 4096)
+  if (/\p{Cc}/u.test(query)) collectionMalformed()
+  return query
+}
+
+function collectionConfigurationID(value: unknown): string {
+  const id = collectionString(value)
+  if (!isPRLifecycleWorkflowConfigurationID(id)) collectionMalformed()
+  return id
+}
+
+function collectionCode(value: unknown): string {
+  const code = collectionString(value)
+  if (!/^[a-z0-9_.-]{1,64}$/u.test(code)) collectionMalformed()
+  return code
+}
+
+function collectionInteger(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    collectionMalformed()
+  }
+  return value as number
+}
+
+function collectionOptionalInteger(value: unknown): number {
+  return value === undefined ? 0 : collectionInteger(value)
+}
+
+function collectionBoolean(value: unknown): boolean {
+  if (typeof value !== "boolean") collectionMalformed()
+  return value
+}
+
+function collectionEffect(
+  value: unknown,
+): PRLifecycleWorkflowConfigurationEffects["gateway_effect"] {
+  if (value !== "applied" && value !== "restart_required") {
+    collectionMalformed()
+  }
+  return value
+}
+
+function collectionOptionalBoundedString<K extends string>(
+  value: unknown,
+  key: K,
+  maximumBytes: number,
+): Partial<Record<K, string>> {
+  return value === undefined
+    ? {}
+    : ({
+        [key]: collectionBoundedUTF8String(value, maximumBytes, true),
+      } as Partial<Record<K, string>>)
+}
+
+function collectionOptionalEnum<
+  K extends string,
+  const Values extends readonly string[],
+>(value: unknown, key: K, values: Values): Partial<Record<K, Values[number]>> {
+  if (value === undefined) return {}
+  const candidate = collectionString(value)
+  if (!(values as readonly string[]).includes(candidate)) collectionMalformed()
+  return { [key]: candidate } as Partial<Record<K, Values[number]>>
+}
+
+function rejectCollectionDuplicateIDs(ids: string[]) {
+  if (new Set(ids).size !== ids.length) collectionMalformed()
+}
+
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (next < 0xdc00 || next > 0xdfff) return true
+      index += 1
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true
+    }
+  }
+  return false
+}
+
+function collectionMalformed(): never {
+  throw new CollectionAPIError(
+    502,
+    "The server returned an invalid response.",
+    {
+      code: "malformed_response",
+    },
   )
 }
 

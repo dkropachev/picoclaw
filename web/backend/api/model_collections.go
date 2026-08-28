@@ -167,6 +167,15 @@ func writeCollectionError(w http.ResponseWriter, status int, code, message strin
 }
 
 func decodeCollectionJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	return decodeCollectionJSONWithLimit(w, r, target, collectionMutationMaxBytes)
+}
+
+func decodeCollectionJSONWithLimit(
+	w http.ResponseWriter,
+	r *http.Request,
+	target any,
+	maximumBytes int64,
+) bool {
 	if r == nil || r.Body == nil {
 		writeCollectionError(
 			w,
@@ -216,7 +225,7 @@ func decodeCollectionJSON(w http.ResponseWriter, r *http.Request, target any) bo
 		}
 	}
 	defer r.Body.Close()
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, collectionMutationMaxBytes))
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maximumBytes))
 	if err != nil {
 		var maximum *http.MaxBytesError
 		if errors.As(err, &maximum) {

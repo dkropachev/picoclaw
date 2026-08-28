@@ -64,7 +64,8 @@ notification devices against the new runtime.
   implement an issue or brief, or pick up one existing PR.
 - Verify repositories at `/development/repositories` before using brief intake.
 - Review strict/relaxed per-type scope policy at
-  `/development/workflow-configurations`.
+  `/development/workflow-configurations`. Old `?config=` editor links are not
+  redirected; open the configuration's `/:id/edit` route.
 - Open `/notifications`, recreate any desired saved views, and explicitly
   enable each mobile Web Push device.
 - Verify issue read, PR read, repository verification, branch push, and draft-PR

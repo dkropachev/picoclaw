@@ -3,15 +3,12 @@ import {
   IconArrowLeft,
   IconDeviceFloppy,
   IconInfoCircle,
-  IconPencil,
-  IconPlus,
   IconRefresh,
   IconSettingsAutomation,
 } from "@tabler/icons-react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useBlocker } from "@tanstack/react-router"
 import {
-  type FormEvent,
   type KeyboardEvent,
   useCallback,
   useEffect,
@@ -21,7 +18,6 @@ import {
 } from "react"
 
 import { createDevelopmentRequestID } from "@/api/development-workspaces"
-import { type PRLifecycleDecisionPoint } from "@/api/pr-lifecycle-flow"
 import {
   type PRLifecycleGateAction,
   type PRLifecycleGateActionType,
@@ -32,12 +28,10 @@ import {
   type PRLifecycleWorkflowConfigurationSnapshot,
   defaultScopeDisposition,
   getPRLifecycleWorkflowConfigurations,
-  isPRLifecycleWorkflowConfigurationID,
   putPRLifecycleWorkflowConfigurations,
   validatePRLifecycleWorkflowConfigurations,
 } from "@/api/pr-lifecycle-workflow-configurations"
 import { PageHeader } from "@/components/page-header"
-import { PRLifecycleGateMap } from "@/components/pr-workspaces/pr-lifecycle-gate-map"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -85,87 +79,26 @@ import {
 import { cn } from "@/lib/utils"
 
 const configQueryKey = ["pr-lifecycle", "workflow-configurations"] as const
-const configDraftQueryKey = [
-  "pr-lifecycle",
-  "workflow-configurations",
-  "draft",
-] as const
 
-export type PRLifecycleConfigurationPage = "configs" | "config" | "settings"
 export type PRLifecycleSettingsTab = "nudging" | "scope"
-
-interface CachedWorkflowConfigurationDraft {
-  baseline: string
-  draft: PRLifecycleWorkflowConfigurationSnapshot
-}
 
 interface WorkflowConfigurationPageProps {
   onBack: () => void
-  page?: PRLifecycleConfigurationPage
   settingsTab?: PRLifecycleSettingsTab
-  initialConfigID?: string
-  initialDecisionPoint?: PRLifecycleDecisionPoint
-  activeFlowID?: "review" | "implementation"
-  discardOpen?: boolean
-  onConfigChange?: (configID?: string) => void
-  onDecisionPointChange?: (decisionPoint?: PRLifecycleDecisionPoint) => void
-  onFlowChange?: (flowID: "review" | "implementation") => void
-  onDiscardOpenChange?: (open: boolean) => void | Promise<void>
   onSettingsTabChange?: (tab: PRLifecycleSettingsTab) => void
 }
 
 export function PRLifecycleWorkflowConfigurationsPage({
   onBack,
-  page,
   settingsTab = "nudging",
-  initialConfigID,
-  initialDecisionPoint,
-  activeFlowID,
-  discardOpen,
-  onConfigChange,
-  onDecisionPointChange,
-  onFlowChange,
-  onDiscardOpenChange,
   onSettingsTabChange,
 }: WorkflowConfigurationPageProps) {
   const queryClient = useQueryClient()
-  const cachedDraft =
-    queryClient.getQueryData<CachedWorkflowConfigurationDraft>(
-      configDraftQueryKey,
-    )
-  const cachedDirty =
-    cachedDraft != null &&
-    JSON.stringify(cachedDraft.draft) !== cachedDraft.baseline
   const [draft, setDraft] =
-    useState<PRLifecycleWorkflowConfigurationSnapshot | null>(() =>
-      cachedDirty ? structuredClone(cachedDraft.draft) : null,
-    )
-  const [baseline, setBaseline] = useState(() =>
-    cachedDirty ? cachedDraft.baseline : "",
-  )
-  const [newConfigID, setNewConfigID] = useState("")
-  const [newConfigName, setNewConfigName] = useState("")
-  const [localConfigID, setLocalConfigID] = useState(initialConfigID ?? "")
-  const [localDecisionPoint, setLocalDecisionPoint] =
-    useState<PRLifecycleDecisionPoint | null>(initialDecisionPoint ?? null)
+    useState<PRLifecycleWorkflowConfigurationSnapshot | null>(null)
+  const [baseline, setBaseline] = useState("")
   const [localDiscardOpen, setLocalDiscardOpen] = useState(false)
   const [error, setError] = useState("")
-
-  const resolvedPage =
-    page ?? (initialConfigID || initialDecisionPoint ? "config" : "configs")
-  const selectedConfigID =
-    resolvedPage === "config"
-      ? onConfigChange
-        ? (initialConfigID ?? "")
-        : localConfigID
-      : ""
-  const selectedDecisionPoint =
-    resolvedPage === "config"
-      ? onDecisionPointChange
-        ? (initialDecisionPoint ?? null)
-        : localDecisionPoint
-      : null
-  const resolvedDiscardOpen = Boolean(discardOpen || localDiscardOpen)
   const dirty = draft != null && JSON.stringify(draft) !== baseline
 
   const query = useQuery({
@@ -176,34 +109,11 @@ export function PRLifecycleWorkflowConfigurationsPage({
 
   useEffect(() => {
     if (!query.data || dirty) return
-    const next = structuredClone(query.data)
-    const serialized = JSON.stringify(next)
-    setDraft(next)
+    const serialized = JSON.stringify(query.data)
+    if (serialized === baseline) return
+    setDraft(structuredClone(query.data))
     setBaseline(serialized)
-  }, [dirty, query.data])
-
-  useEffect(() => {
-    if (!draft || !baseline) return
-    queryClient.setQueryData<CachedWorkflowConfigurationDraft>(
-      configDraftQueryKey,
-      {
-        baseline,
-        draft,
-      },
-    )
-  }, [baseline, draft, queryClient])
-
-  useEffect(() => {
-    if (
-      !draft ||
-      !selectedConfigID ||
-      draft.workflowConfigurations[selectedConfigID]
-    )
-      return
-    setLocalConfigID("")
-    setLocalDecisionPoint(null)
-    onConfigChange?.()
-  }, [draft, onConfigChange, selectedConfigID])
+  }, [baseline, dirty, query.data])
 
   const shouldBlockNavigation = useCallback(
     ({
@@ -213,13 +123,10 @@ export function PRLifecycleWorkflowConfigurationsPage({
       current: { pathname: string }
       next: { pathname: string }
     }) => {
-      const isConfigurationPath = (pathname: string) =>
-        pathname === "/development/workflow-configurations" ||
-        pathname === "/development/settings"
       return (
         dirty &&
-        isConfigurationPath(current.pathname) &&
-        !isConfigurationPath(next.pathname)
+        current.pathname === "/development/settings" &&
+        next.pathname !== "/development/settings"
       )
     },
     [dirty],
@@ -232,10 +139,9 @@ export function PRLifecycleWorkflowConfigurationsPage({
   })
 
   useEffect(() => {
-    if (blocker.status !== "blocked" || resolvedDiscardOpen) return
+    if (blocker.status !== "blocked" || localDiscardOpen) return
     setLocalDiscardOpen(true)
-    void onDiscardOpenChange?.(true)
-  }, [blocker.status, onDiscardOpenChange, resolvedDiscardOpen])
+  }, [blocker.status, localDiscardOpen])
 
   const issues = useMemo(
     () => (draft ? validatePRLifecycleWorkflowConfigurations(draft) : []),
@@ -272,13 +178,6 @@ export function PRLifecycleWorkflowConfigurationsPage({
       setBaseline(nextBaseline)
       setError("")
       queryClient.setQueryData(configQueryKey, next)
-      queryClient.setQueryData<CachedWorkflowConfigurationDraft>(
-        configDraftQueryKey,
-        {
-          baseline: nextBaseline,
-          draft: saved,
-        },
-      )
       void queryClient.invalidateQueries({
         queryKey: ["pr-lifecycle", "repository-assignments"],
       })
@@ -308,21 +207,6 @@ export function PRLifecycleWorkflowConfigurationsPage({
       <WorkflowConfigurationsState text="Loading Workflow configurations…" />
     )
 
-  const selectedConfig = draft.workflowConfigurations[selectedConfigID]
-  const selectedGateNode = selectedDecisionPoint
-    ? draft.flow.flows
-        .flatMap((flow) => flow.nodes)
-        .find(
-          (node) =>
-            node.kind === "gate" &&
-            node.editable &&
-            node.decision_point === selectedDecisionPoint,
-        )
-    : undefined
-  const selectedCatalogEntry = selectedDecisionPoint
-    ? draft.gateCatalog[selectedDecisionPoint]
-    : undefined
-
   const updateDraft = (
     update: (next: PRLifecycleWorkflowConfigurationSnapshot) => void,
   ) => {
@@ -333,59 +217,9 @@ export function PRLifecycleWorkflowConfigurationsPage({
       return next
     })
   }
-  const updateSelectedConfig = (
-    update: (config: PRLifecycleWorkflowConfiguration) => void,
-  ) =>
-    updateDraft((next) => {
-      const config = next.workflowConfigurations[selectedConfigID]
-      if (config) update(config)
-    })
-
-  const selectConfig = (configID?: string) => {
-    setLocalConfigID(configID ?? "")
-    setLocalDecisionPoint(null)
-    onConfigChange?.(configID)
-  }
-  const selectDecisionPoint = (decisionPoint: PRLifecycleDecisionPoint) => {
-    setLocalDecisionPoint(decisionPoint)
-    onDecisionPointChange?.(decisionPoint)
-  }
-  const closeDecisionPoint = () => {
-    setLocalDecisionPoint(null)
-    onDecisionPointChange?.()
-  }
-
-  const addConfig = (event: FormEvent) => {
-    event.preventDefault()
-    const id = newConfigID.trim()
-    const name = newConfigName.trim()
-    if (
-      !isPRLifecycleWorkflowConfigurationID(id) ||
-      !name ||
-      draft.workflowConfigurations[id]
-    )
-      return
-    updateDraft((next) => {
-      next.workflowConfigurations[id] = {
-        name,
-        bindings: [],
-        deferredIssues: { mode: "ask" },
-        scopeDisposition: defaultScopeDisposition(),
-      }
-    })
-    setNewConfigID("")
-    setNewConfigName("")
-    selectConfig(id)
-  }
-
   const requestBack = () => {
-    if (selectedConfig) {
-      selectConfig()
-      return
-    }
     if (dirty) {
       setLocalDiscardOpen(true)
-      void onDiscardOpenChange?.(true)
       return
     }
     onBack()
@@ -394,24 +228,15 @@ export function PRLifecycleWorkflowConfigurationsPage({
   const closeDiscard = (open: boolean) => {
     setLocalDiscardOpen(open)
     if (!open && blocker.status === "blocked") blocker.reset()
-    void onDiscardOpenChange?.(open)
   }
-  const discardChanges = async () => {
+  const discardChanges = () => {
     const saved = query.data ? structuredClone(query.data) : null
     if (saved) {
       const nextBaseline = JSON.stringify(saved)
       setDraft(saved)
       setBaseline(nextBaseline)
-      queryClient.setQueryData<CachedWorkflowConfigurationDraft>(
-        configDraftQueryKey,
-        {
-          baseline: nextBaseline,
-          draft: saved,
-        },
-      )
     }
     setLocalDiscardOpen(false)
-    await onDiscardOpenChange?.(false)
     if (blocker.status === "blocked") blocker.proceed()
     else onBack()
   }
@@ -420,27 +245,19 @@ export function PRLifecycleWorkflowConfigurationsPage({
     <div
       className="bg-background flex h-full min-h-0 flex-col"
       data-testid="pr-workflow-configurations"
-      data-config-view={resolvedPage}
+      data-config-view="settings"
       aria-busy={saveMutation.isPending}
     >
       <PageHeader
-        title={
-          selectedConfig
-            ? `Edit ${selectedConfig.name} Workflow configuration`
-            : resolvedPage === "settings"
-              ? "Development settings"
-              : "Workflow configurations"
-        }
+        title="Development settings"
         titleExtra={<Badge variant="outline">v3</Badge>}
       >
         <Button
           type="button"
           variant="ghost"
           size="icon"
-          aria-label={
-            selectedConfig ? "Back to Workflow configurations" : "Back"
-          }
-          title={selectedConfig ? "Back to Workflow configurations" : "Back"}
+          aria-label="Back"
+          title="Back"
           onClick={requestBack}
         >
           <IconArrowLeft />
@@ -461,142 +278,39 @@ export function PRLifecycleWorkflowConfigurationsPage({
           onClick={() => saveMutation.mutate(draft)}
         >
           <IconDeviceFloppy />
-          Save configuration
+          Save settings
         </Button>
       </PageHeader>
 
       <div className="min-h-0 flex-1 overflow-auto px-4 pb-8 md:px-6">
         <div className="mx-auto w-full max-w-[96rem] min-w-0 space-y-4">
           {(error || issues.length > 0) && (
-            <WorkflowConfigurationIssues error={error} issues={issues} />
+            <PRLifecycleWorkflowConfigurationIssues
+              error={error}
+              issues={issues}
+            />
           )}
           {draft.effects.gatewayEffect === "restart-required" && (
-            <RestartNotice />
+            <PRLifecycleRestartNotice />
           )}
 
-          {selectedConfig && (
-            <PRLifecycleGateMap
-              activeFlowID={activeFlowID}
-              flow={draft.flow}
-              flowRevision={draft.flowRevision}
-              selectedDecisionPoint={selectedDecisionPoint ?? undefined}
-              gateCatalog={draft.gateCatalog}
-              bindings={selectedConfig.bindings}
-              configName={selectedConfig.name}
-              configID={selectedConfigID}
-              onFlowChange={onFlowChange}
-              onSelect={selectDecisionPoint}
-            />
-          )}
-
-          {resolvedPage === "configs" && !selectedConfig && (
-            <ConfigList
-              draft={draft}
-              newConfigID={newConfigID}
-              newConfigName={newConfigName}
-              onConfigIDChange={setNewConfigID}
-              onConfigNameChange={setNewConfigName}
-              onAdd={addConfig}
-              onEdit={selectConfig}
-              onMakeDefault={(configID) =>
-                updateDraft((next) => {
-                  next.defaultWorkflowConfiguration = configID
-                })
-              }
-            />
-          )}
-
-          {selectedConfig && (
-            <ConfigSettings
-              config={selectedConfig}
-              configID={selectedConfigID}
-              defaultConfigID={draft.defaultWorkflowConfiguration}
-              onChange={updateSelectedConfig}
-              onDeferredIssueModeChange={(mode) =>
-                updateSelectedConfig(
-                  (config) => void (config.deferredIssues.mode = mode),
-                )
-              }
-              onMakeDefault={() =>
-                updateDraft((next) => {
-                  next.defaultWorkflowConfiguration = selectedConfigID
-                })
-              }
-            />
-          )}
-
-          {resolvedPage === "settings" && (
-            <LifecycleSettings
-              config={draft}
-              tab={settingsTab}
-              onTabChange={onSettingsTabChange}
-              onChange={updateDraft}
-            />
-          )}
+          <LifecycleSettings
+            config={draft}
+            tab={settingsTab}
+            onTabChange={onSettingsTabChange}
+            onChange={updateDraft}
+          />
         </div>
       </div>
 
-      <GateActionDialog
-        open={
-          !resolvedDiscardOpen &&
-          Boolean(selectedConfig && selectedGateNode && selectedDecisionPoint)
-        }
-        nodeTitle={selectedGateNode?.title ?? selectedDecisionPoint ?? "Gate"}
-        nodeDescription={selectedGateNode?.description}
-        catalogEntry={selectedCatalogEntry}
-        readOnly={
-          selectedConfigID === "default" ||
-          selectedDecisionPoint === "pr.implementation.publish"
-        }
-        binding={
-          selectedCatalogEntry
-            ? selectedConfig?.bindings.find(
-                (binding) =>
-                  binding.workflowRef === selectedCatalogEntry.workflowRef &&
-                  binding.gateRef === selectedCatalogEntry.gateRef,
-              )
-            : undefined
-        }
-        onOpenChange={(open) => {
-          if (!open) closeDecisionPoint()
-        }}
-        onActionChange={(action) => {
-          if (
-            !selectedCatalogEntry ||
-            selectedConfigID === "default" ||
-            selectedDecisionPoint === "pr.implementation.publish"
-          )
-            return
-          updateSelectedConfig((config) => {
-            const index = config.bindings.findIndex(
-              (binding) =>
-                binding.workflowRef === selectedCatalogEntry.workflowRef &&
-                binding.gateRef === selectedCatalogEntry.gateRef,
-            )
-            if (!action) {
-              if (index >= 0) config.bindings.splice(index, 1)
-              return
-            }
-            const binding = {
-              workflowRef: selectedCatalogEntry.workflowRef,
-              gateRef: selectedCatalogEntry.gateRef,
-              action,
-            }
-            if (index >= 0) config.bindings[index] = binding
-            else config.bindings.push(binding)
-          })
-        }}
-      />
-
-      <AlertDialog open={resolvedDiscardOpen} onOpenChange={closeDiscard}>
+      <AlertDialog open={localDiscardOpen} onOpenChange={closeDiscard}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Discard Workflow configuration changes?
+              Discard development setting changes?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              Your unsaved Workflow configuration and lifecycle setting changes
-              will be lost.
+              Your unsaved lifecycle setting changes will be lost.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -611,126 +325,7 @@ export function PRLifecycleWorkflowConfigurationsPage({
   )
 }
 
-function ConfigList({
-  draft,
-  newConfigID,
-  newConfigName,
-  onConfigIDChange,
-  onConfigNameChange,
-  onAdd,
-  onEdit,
-  onMakeDefault,
-}: {
-  draft: PRLifecycleWorkflowConfigurationSnapshot
-  newConfigID: string
-  newConfigName: string
-  onConfigIDChange: (value: string) => void
-  onConfigNameChange: (value: string) => void
-  onAdd: (event: FormEvent) => void
-  onEdit: (configID: string) => void
-  onMakeDefault: (configID: string) => void
-}) {
-  return (
-    <Card size="sm">
-      <CardHeader>
-        <CardTitle>Workflow configurations</CardTitle>
-        <CardDescription>
-          Select how each published workflow Gate is executed. Workflows provide
-          the defaults; configurations only store overrides.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div
-          className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"
-          aria-label="Workflow configurations"
-        >
-          {Object.entries(draft.workflowConfigurations).map(([id, config]) => {
-            return (
-              <div
-                className="border-border bg-muted/15 flex min-w-0 flex-col gap-3 rounded-lg border p-3"
-                data-config-id={id}
-                key={id}
-              >
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <strong className="truncate text-sm">{config.name}</strong>
-                    {id === draft.defaultWorkflowConfiguration && (
-                      <Badge variant="secondary">Default</Badge>
-                    )}
-                  </div>
-                  <p className="text-muted-foreground mt-1 truncate font-mono text-xs">
-                    {id}
-                  </p>
-                </div>
-                <p className="text-muted-foreground text-xs">
-                  {config.bindings.length}{" "}
-                  {config.bindings.length === 1 ? "override" : "overrides"}
-                </p>
-                <p className="text-muted-foreground text-xs">
-                  Deferred issues ·{" "}
-                  {deferredIssueModeLabel(config.deferredIssues.mode)}
-                </p>
-                <div className="mt-auto flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    onClick={() => onEdit(id)}
-                    aria-label={`Edit ${config.name} Workflow configuration`}
-                  >
-                    <IconPencil /> Edit
-                  </Button>
-                  {id !== draft.defaultWorkflowConfiguration && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => onMakeDefault(id)}
-                    >
-                      Make default
-                    </Button>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-        <form
-          className="border-border grid gap-2 border-t pt-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
-          onSubmit={onAdd}
-        >
-          <Input
-            aria-label="Configuration ID"
-            onChange={(event) => onConfigIDChange(event.target.value)}
-            pattern="[a-z][a-z0-9-]{0,63}"
-            placeholder="configuration-id"
-            value={newConfigID}
-          />
-          <Input
-            aria-label="Configuration name"
-            onChange={(event) => onConfigNameChange(event.target.value)}
-            placeholder="Configuration name"
-            value={newConfigName}
-          />
-          <Button
-            type="submit"
-            size="sm"
-            variant="outline"
-            disabled={
-              !isPRLifecycleWorkflowConfigurationID(newConfigID) ||
-              !newConfigName.trim() ||
-              Boolean(draft.workflowConfigurations[newConfigID])
-            }
-          >
-            <IconPlus /> Add configuration
-          </Button>
-          <p className="text-muted-foreground text-xs sm:col-span-3">
-            IDs use kebab-case and are stable API identifiers.
-          </p>
-        </form>
-      </CardContent>
-    </Card>
-  )
-}
-
-function ConfigSettings({
+export function PRLifecycleWorkflowConfigurationSettings({
   config,
   configID,
   defaultConfigID,
@@ -896,7 +491,7 @@ function ConfigSettings({
   )
 }
 
-function GateActionDialog({
+export function PRLifecycleGateActionDialog({
   open,
   nodeTitle,
   nodeDescription,
@@ -1393,13 +988,6 @@ function aiActionForSession(
   }
 }
 
-function deferredIssueModeLabel(
-  mode: PRLifecycleWorkflowConfiguration["deferredIssues"]["mode"],
-): string {
-  if (mode === "automatic") return "Automatic"
-  return mode === "off" ? "Off" : "Ask"
-}
-
 function LockedField({
   className,
   description,
@@ -1693,7 +1281,7 @@ function GateField({
   )
 }
 
-function WorkflowConfigurationIssues({
+export function PRLifecycleWorkflowConfigurationIssues({
   error,
   issues,
 }: {
@@ -1718,7 +1306,7 @@ function WorkflowConfigurationIssues({
   )
 }
 
-function RestartNotice() {
+export function PRLifecycleRestartNotice() {
   return (
     <div
       className="border-border bg-muted/40 flex items-start gap-2 rounded-lg border p-3 text-sm"

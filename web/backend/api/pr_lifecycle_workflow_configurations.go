@@ -20,9 +20,11 @@ import (
 )
 
 const (
-	prLifecycleWorkflowConfigurationsPath = "/api/development/workflow-configurations"
-	prLifecycleRepositoryAssignmentsPath  = "/api/development/repositories"
-	prLifecycleRequestMaxBytes            = config.MaxPRLifecycleConfigBytes + (64 << 10)
+	prLifecycleWorkflowConfigurationsPath         = "/api/development/workflow-configurations"
+	prLifecycleRepositoryAssignmentsPath          = "/api/development/repositories"
+	prLifecycleRepositoryAssignmentCollectionPath = "/api/development/repository-assignments"
+	prLifecycleWorkflowConfigurationItemsPath     = "/api/development/workflow-configurations/items"
+	prLifecycleRequestMaxBytes                    = config.MaxPRLifecycleConfigBytes + (64 << 10)
 )
 
 type prLifecycleGateCatalogEntry struct {
@@ -98,6 +100,7 @@ func (h *Handler) registerPRLifecycleWorkflowConfigurationRoutes(mux *http.Serve
 		w.Header().Set("Allow", "GET, PUT")
 		writePRWorkspaceAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 	})
+	h.registerPRLifecycleCollectionRoutes(mux)
 }
 
 func (h *Handler) handleGetPRLifecycleWorkflowConfigurations(w http.ResponseWriter, r *http.Request) {

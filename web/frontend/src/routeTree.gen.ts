@@ -72,6 +72,10 @@ import { Route as ModelEvaluationsIdEditRouteImport } from './routes/model-evalu
 import { Route as ModelEvaluationsIdCorpusRouteImport } from './routes/model-evaluations_.$id_.corpus'
 import { Route as ModelEvaluationsEvaluationIDReportRouteImport } from './routes/model-evaluations_.$evaluationID.report'
 import { Route as EventSourcesIdEditRouteImport } from './routes/event-sources_.$id_.edit'
+import { Route as DevelopmentWorkflowConfigurationsNewRouteImport } from './routes/development_.workflow-configurations_.new'
+import { Route as DevelopmentWorkflowConfigurationsIdRouteImport } from './routes/development_.workflow-configurations_.$id'
+import { Route as DevelopmentRepositoriesNewRouteImport } from './routes/development_.repositories_.new'
+import { Route as DevelopmentRepositoriesIdRouteImport } from './routes/development_.repositories_.$id'
 import { Route as AgentWorkflowsSettingsRouteImport } from './routes/agent/workflows_.settings'
 import { Route as AgentWorkflowsRunsRouteImport } from './routes/agent/workflows_.runs'
 import { Route as AgentWorkflowsNewRouteImport } from './routes/agent/workflows_.new'
@@ -96,6 +100,8 @@ import { Route as RepositoryReviewsIdIssuesDraftIdRouteImport } from './routes/r
 import { Route as RepositoryReviewsIdFindingsFindingIdRouteImport } from './routes/repository-reviews_.$id_.findings_.$findingId'
 import { Route as ModelsRoutersNameEditRouteImport } from './routes/models_.routers_.$name_.edit'
 import { Route as ModelsAliasesNameEditRouteImport } from './routes/models_.aliases_.$name_.edit'
+import { Route as DevelopmentWorkflowConfigurationsIdEditRouteImport } from './routes/development_.workflow-configurations_.$id_.edit'
+import { Route as DevelopmentRepositoriesIdEditRouteImport } from './routes/development_.repositories_.$id_.edit'
 import { Route as AgentWorkflowsRunsIdRouteImport } from './routes/agent/workflows_.runs_.$id'
 import { Route as AgentWorkflowsIdEditRouteImport } from './routes/agent/workflows_.$id_.edit'
 import { Route as AgentToolsSettingsAdaptationRouteImport } from './routes/agent/tools_.settings_.adaptation'
@@ -441,6 +447,30 @@ const EventSourcesIdEditRoute = EventSourcesIdEditRouteImport.update({
   path: '/event-sources/$id/edit',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DevelopmentWorkflowConfigurationsNewRoute =
+  DevelopmentWorkflowConfigurationsNewRouteImport.update({
+    id: '/development_/workflow-configurations_/new',
+    path: '/development/workflow-configurations/new',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const DevelopmentWorkflowConfigurationsIdRoute =
+  DevelopmentWorkflowConfigurationsIdRouteImport.update({
+    id: '/development_/workflow-configurations_/$id',
+    path: '/development/workflow-configurations/$id',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const DevelopmentRepositoriesNewRoute =
+  DevelopmentRepositoriesNewRouteImport.update({
+    id: '/development_/repositories_/new',
+    path: '/development/repositories/new',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const DevelopmentRepositoriesIdRoute =
+  DevelopmentRepositoriesIdRouteImport.update({
+    id: '/development_/repositories_/$id',
+    path: '/development/repositories/$id',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const AgentWorkflowsSettingsRoute = AgentWorkflowsSettingsRouteImport.update({
   id: '/workflows_/settings',
   path: '/workflows/settings',
@@ -568,6 +598,18 @@ const ModelsAliasesNameEditRoute = ModelsAliasesNameEditRouteImport.update({
   path: '/models/aliases/$name/edit',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DevelopmentWorkflowConfigurationsIdEditRoute =
+  DevelopmentWorkflowConfigurationsIdEditRouteImport.update({
+    id: '/development_/workflow-configurations_/$id_/edit',
+    path: '/development/workflow-configurations/$id/edit',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const DevelopmentRepositoriesIdEditRoute =
+  DevelopmentRepositoriesIdEditRouteImport.update({
+    id: '/development_/repositories_/$id_/edit',
+    path: '/development/repositories/$id/edit',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const AgentWorkflowsRunsIdRoute = AgentWorkflowsRunsIdRouteImport.update({
   id: '/workflows_/runs_/$id',
   path: '/workflows/runs/$id',
@@ -708,6 +750,10 @@ export interface FileRoutesByFullPath {
   '/agent/workflows/new': typeof AgentWorkflowsNewRoute
   '/agent/workflows/runs': typeof AgentWorkflowsRunsRoute
   '/agent/workflows/settings': typeof AgentWorkflowsSettingsRoute
+  '/development/repositories/$id': typeof DevelopmentRepositoriesIdRoute
+  '/development/repositories/new': typeof DevelopmentRepositoriesNewRoute
+  '/development/workflow-configurations/$id': typeof DevelopmentWorkflowConfigurationsIdRoute
+  '/development/workflow-configurations/new': typeof DevelopmentWorkflowConfigurationsNewRoute
   '/event-sources/$id/edit': typeof EventSourcesIdEditRoute
   '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/model-evaluations/$id/corpus': typeof ModelEvaluationsIdCorpusRoute
@@ -735,6 +781,8 @@ export interface FileRoutesByFullPath {
   '/agent/tools/settings/adaptation': typeof AgentToolsSettingsAdaptationRoute
   '/agent/workflows/$id/edit': typeof AgentWorkflowsIdEditRoute
   '/agent/workflows/runs/$id': typeof AgentWorkflowsRunsIdRoute
+  '/development/repositories/$id/edit': typeof DevelopmentRepositoriesIdEditRoute
+  '/development/workflow-configurations/$id/edit': typeof DevelopmentWorkflowConfigurationsIdEditRoute
   '/models/aliases/$name/edit': typeof ModelsAliasesNameEditRoute
   '/models/routers/$name/edit': typeof ModelsRoutersNameEditRoute
   '/repository-reviews/$id/findings/$findingId': typeof RepositoryReviewsIdFindingsFindingIdRoute
@@ -811,6 +859,10 @@ export interface FileRoutesByTo {
   '/agent/workflows/new': typeof AgentWorkflowsNewRoute
   '/agent/workflows/runs': typeof AgentWorkflowsRunsRoute
   '/agent/workflows/settings': typeof AgentWorkflowsSettingsRoute
+  '/development/repositories/$id': typeof DevelopmentRepositoriesIdRoute
+  '/development/repositories/new': typeof DevelopmentRepositoriesNewRoute
+  '/development/workflow-configurations/$id': typeof DevelopmentWorkflowConfigurationsIdRoute
+  '/development/workflow-configurations/new': typeof DevelopmentWorkflowConfigurationsNewRoute
   '/event-sources/$id/edit': typeof EventSourcesIdEditRoute
   '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/model-evaluations/$id/corpus': typeof ModelEvaluationsIdCorpusRoute
@@ -838,6 +890,8 @@ export interface FileRoutesByTo {
   '/agent/tools/settings/adaptation': typeof AgentToolsSettingsAdaptationRoute
   '/agent/workflows/$id/edit': typeof AgentWorkflowsIdEditRoute
   '/agent/workflows/runs/$id': typeof AgentWorkflowsRunsIdRoute
+  '/development/repositories/$id/edit': typeof DevelopmentRepositoriesIdEditRoute
+  '/development/workflow-configurations/$id/edit': typeof DevelopmentWorkflowConfigurationsIdEditRoute
   '/models/aliases/$name/edit': typeof ModelsAliasesNameEditRoute
   '/models/routers/$name/edit': typeof ModelsRoutersNameEditRoute
   '/repository-reviews/$id/findings/$findingId': typeof RepositoryReviewsIdFindingsFindingIdRoute
@@ -915,6 +969,10 @@ export interface FileRoutesById {
   '/agent/workflows_/new': typeof AgentWorkflowsNewRoute
   '/agent/workflows_/runs': typeof AgentWorkflowsRunsRoute
   '/agent/workflows_/settings': typeof AgentWorkflowsSettingsRoute
+  '/development_/repositories_/$id': typeof DevelopmentRepositoriesIdRoute
+  '/development_/repositories_/new': typeof DevelopmentRepositoriesNewRoute
+  '/development_/workflow-configurations_/$id': typeof DevelopmentWorkflowConfigurationsIdRoute
+  '/development_/workflow-configurations_/new': typeof DevelopmentWorkflowConfigurationsNewRoute
   '/event-sources_/$id_/edit': typeof EventSourcesIdEditRoute
   '/model-evaluations_/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/model-evaluations_/$id_/corpus': typeof ModelEvaluationsIdCorpusRoute
@@ -942,6 +1000,8 @@ export interface FileRoutesById {
   '/agent/tools_/settings_/adaptation': typeof AgentToolsSettingsAdaptationRoute
   '/agent/workflows_/$id_/edit': typeof AgentWorkflowsIdEditRoute
   '/agent/workflows_/runs_/$id': typeof AgentWorkflowsRunsIdRoute
+  '/development_/repositories_/$id_/edit': typeof DevelopmentRepositoriesIdEditRoute
+  '/development_/workflow-configurations_/$id_/edit': typeof DevelopmentWorkflowConfigurationsIdEditRoute
   '/models_/aliases_/$name_/edit': typeof ModelsAliasesNameEditRoute
   '/models_/routers_/$name_/edit': typeof ModelsRoutersNameEditRoute
   '/repository-reviews_/$id_/findings_/$findingId': typeof RepositoryReviewsIdFindingsFindingIdRoute
@@ -1020,6 +1080,10 @@ export interface FileRouteTypes {
     | '/agent/workflows/new'
     | '/agent/workflows/runs'
     | '/agent/workflows/settings'
+    | '/development/repositories/$id'
+    | '/development/repositories/new'
+    | '/development/workflow-configurations/$id'
+    | '/development/workflow-configurations/new'
     | '/event-sources/$id/edit'
     | '/model-evaluations/$evaluationID/report'
     | '/model-evaluations/$id/corpus'
@@ -1047,6 +1111,8 @@ export interface FileRouteTypes {
     | '/agent/tools/settings/adaptation'
     | '/agent/workflows/$id/edit'
     | '/agent/workflows/runs/$id'
+    | '/development/repositories/$id/edit'
+    | '/development/workflow-configurations/$id/edit'
     | '/models/aliases/$name/edit'
     | '/models/routers/$name/edit'
     | '/repository-reviews/$id/findings/$findingId'
@@ -1123,6 +1189,10 @@ export interface FileRouteTypes {
     | '/agent/workflows/new'
     | '/agent/workflows/runs'
     | '/agent/workflows/settings'
+    | '/development/repositories/$id'
+    | '/development/repositories/new'
+    | '/development/workflow-configurations/$id'
+    | '/development/workflow-configurations/new'
     | '/event-sources/$id/edit'
     | '/model-evaluations/$evaluationID/report'
     | '/model-evaluations/$id/corpus'
@@ -1150,6 +1220,8 @@ export interface FileRouteTypes {
     | '/agent/tools/settings/adaptation'
     | '/agent/workflows/$id/edit'
     | '/agent/workflows/runs/$id'
+    | '/development/repositories/$id/edit'
+    | '/development/workflow-configurations/$id/edit'
     | '/models/aliases/$name/edit'
     | '/models/routers/$name/edit'
     | '/repository-reviews/$id/findings/$findingId'
@@ -1226,6 +1298,10 @@ export interface FileRouteTypes {
     | '/agent/workflows_/new'
     | '/agent/workflows_/runs'
     | '/agent/workflows_/settings'
+    | '/development_/repositories_/$id'
+    | '/development_/repositories_/new'
+    | '/development_/workflow-configurations_/$id'
+    | '/development_/workflow-configurations_/new'
     | '/event-sources_/$id_/edit'
     | '/model-evaluations_/$evaluationID/report'
     | '/model-evaluations_/$id_/corpus'
@@ -1253,6 +1329,8 @@ export interface FileRouteTypes {
     | '/agent/tools_/settings_/adaptation'
     | '/agent/workflows_/$id_/edit'
     | '/agent/workflows_/runs_/$id'
+    | '/development_/repositories_/$id_/edit'
+    | '/development_/workflow-configurations_/$id_/edit'
     | '/models_/aliases_/$name_/edit'
     | '/models_/routers_/$name_/edit'
     | '/repository-reviews_/$id_/findings_/$findingId'
@@ -1305,6 +1383,10 @@ export interface RootRouteChildren {
   AccountsIdEditRoute: typeof AccountsIdEditRoute
   AccountsRoutersIdRoute: typeof AccountsRoutersIdRoute
   AccountsRoutersNewRoute: typeof AccountsRoutersNewRoute
+  DevelopmentRepositoriesIdRoute: typeof DevelopmentRepositoriesIdRoute
+  DevelopmentRepositoriesNewRoute: typeof DevelopmentRepositoriesNewRoute
+  DevelopmentWorkflowConfigurationsIdRoute: typeof DevelopmentWorkflowConfigurationsIdRoute
+  DevelopmentWorkflowConfigurationsNewRoute: typeof DevelopmentWorkflowConfigurationsNewRoute
   EventSourcesIdEditRoute: typeof EventSourcesIdEditRoute
   ModelEvaluationsEvaluationIDReportRoute: typeof ModelEvaluationsEvaluationIDReportRoute
   ModelEvaluationsIdCorpusRoute: typeof ModelEvaluationsIdCorpusRoute
@@ -1322,6 +1404,8 @@ export interface RootRouteChildren {
   RepositoryReviewsRepositoriesIdRoute: typeof RepositoryReviewsRepositoriesIdRoute
   RepositoryReviewsRepositoriesNewRoute: typeof RepositoryReviewsRepositoriesNewRoute
   AccountsRoutersIdEditRoute: typeof AccountsRoutersIdEditRoute
+  DevelopmentRepositoriesIdEditRoute: typeof DevelopmentRepositoriesIdEditRoute
+  DevelopmentWorkflowConfigurationsIdEditRoute: typeof DevelopmentWorkflowConfigurationsIdEditRoute
   ModelsAliasesNameEditRoute: typeof ModelsAliasesNameEditRoute
   ModelsRoutersNameEditRoute: typeof ModelsRoutersNameEditRoute
   RepositoryReviewsIdFindingsFindingIdRoute: typeof RepositoryReviewsIdFindingsFindingIdRoute
@@ -1777,6 +1861,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof EventSourcesIdEditRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/development_/workflow-configurations_/new': {
+      id: '/development_/workflow-configurations_/new'
+      path: '/development/workflow-configurations/new'
+      fullPath: '/development/workflow-configurations/new'
+      preLoaderRoute: typeof DevelopmentWorkflowConfigurationsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/development_/workflow-configurations_/$id': {
+      id: '/development_/workflow-configurations_/$id'
+      path: '/development/workflow-configurations/$id'
+      fullPath: '/development/workflow-configurations/$id'
+      preLoaderRoute: typeof DevelopmentWorkflowConfigurationsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/development_/repositories_/new': {
+      id: '/development_/repositories_/new'
+      path: '/development/repositories/new'
+      fullPath: '/development/repositories/new'
+      preLoaderRoute: typeof DevelopmentRepositoriesNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/development_/repositories_/$id': {
+      id: '/development_/repositories_/$id'
+      path: '/development/repositories/$id'
+      fullPath: '/development/repositories/$id'
+      preLoaderRoute: typeof DevelopmentRepositoriesIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/agent/workflows_/settings': {
       id: '/agent/workflows_/settings'
       path: '/workflows/settings'
@@ -1943,6 +2055,20 @@ declare module '@tanstack/react-router' {
       path: '/models/aliases/$name/edit'
       fullPath: '/models/aliases/$name/edit'
       preLoaderRoute: typeof ModelsAliasesNameEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/development_/workflow-configurations_/$id_/edit': {
+      id: '/development_/workflow-configurations_/$id_/edit'
+      path: '/development/workflow-configurations/$id/edit'
+      fullPath: '/development/workflow-configurations/$id/edit'
+      preLoaderRoute: typeof DevelopmentWorkflowConfigurationsIdEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/development_/repositories_/$id_/edit': {
+      id: '/development_/repositories_/$id_/edit'
+      path: '/development/repositories/$id/edit'
+      fullPath: '/development/repositories/$id/edit'
+      preLoaderRoute: typeof DevelopmentRepositoriesIdEditRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/agent/workflows_/runs_/$id': {
@@ -2204,6 +2330,12 @@ const rootRouteChildren: RootRouteChildren = {
   AccountsIdEditRoute: AccountsIdEditRoute,
   AccountsRoutersIdRoute: AccountsRoutersIdRoute,
   AccountsRoutersNewRoute: AccountsRoutersNewRoute,
+  DevelopmentRepositoriesIdRoute: DevelopmentRepositoriesIdRoute,
+  DevelopmentRepositoriesNewRoute: DevelopmentRepositoriesNewRoute,
+  DevelopmentWorkflowConfigurationsIdRoute:
+    DevelopmentWorkflowConfigurationsIdRoute,
+  DevelopmentWorkflowConfigurationsNewRoute:
+    DevelopmentWorkflowConfigurationsNewRoute,
   EventSourcesIdEditRoute: EventSourcesIdEditRoute,
   ModelEvaluationsEvaluationIDReportRoute:
     ModelEvaluationsEvaluationIDReportRoute,
@@ -2223,6 +2355,9 @@ const rootRouteChildren: RootRouteChildren = {
   RepositoryReviewsRepositoriesIdRoute: RepositoryReviewsRepositoriesIdRoute,
   RepositoryReviewsRepositoriesNewRoute: RepositoryReviewsRepositoriesNewRoute,
   AccountsRoutersIdEditRoute: AccountsRoutersIdEditRoute,
+  DevelopmentRepositoriesIdEditRoute: DevelopmentRepositoriesIdEditRoute,
+  DevelopmentWorkflowConfigurationsIdEditRoute:
+    DevelopmentWorkflowConfigurationsIdEditRoute,
   ModelsAliasesNameEditRoute: ModelsAliasesNameEditRoute,
   ModelsRoutersNameEditRoute: ModelsRoutersNameEditRoute,
   RepositoryReviewsIdFindingsFindingIdRoute:

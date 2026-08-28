@@ -29,6 +29,16 @@ Brief intake lists only repositories verified for implementation. Manage them
 at `/development/repositories`. Repository identity is provider-backed; a
 display name is not authority to clone, push, or create a PR.
 
+The repository page is a server-paged List/Table/Grid collection. Use its query
+field to filter `repository`, `configuration`, or `default_branch`; compact List
+is the default. Add an assignment at `/development/repositories/new`, open its
+backend-issued direct link at `/:id`, and edit it at `/:id/edit`. Explicitly
+selected assignments may be deleted together after confirmation. Removing an
+assignment preserves its repository descriptor and only restores the default
+Workflow configuration for future work. An assignment that disappears during a
+bulk request remains selected with a safe `not_found` result, while a stale
+config revision rejects the whole request so you can refresh before retrying.
+
 ## Lifecycle
 
 Initial work advances automatically until it needs a decision or reaches a
@@ -87,6 +97,18 @@ policy has a strict default plus optional overrides for `fix`, `feature`,
 
 Scope policy is configured under `/development/workflow-configurations` and is
 separate from follow-up issue publication policy.
+
+Workflow configurations are also a server-paged List/Table/Grid collection.
+They default to `ORDER BY name ASC` and summarize default status, binding count,
+and deferred-issue mode. Create one at
+`/development/workflow-configurations/new`, inspect `/:id`, and use `/:id/edit`
+for gate bindings and scope/deferred policy. The lifecycle diagram opens a gate
+on that routed editor with optional `flow` and `gate` context. The former
+`?config=<id>` URL is a hard cutover and is not redirected; use the item route
+instead. The built-in configuration, the current default, and configurations
+referenced by repository assignments cannot be deleted; referenced failures
+name only bounded repository labels. Shared nudging and size thresholds remain
+lifecycle settings, not collection rows.
 
 ## Required Actions And Notifications
 
