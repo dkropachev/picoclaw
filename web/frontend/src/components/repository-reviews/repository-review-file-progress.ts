@@ -53,7 +53,11 @@ export function repositoryReviewInspectedFilesLabel(
 ): number | string {
   const inspected = count(review.progress.inspected_files)
   if (review.progress.coverage_available !== true) {
-    return review.run_ids.length === 0 && !review.started_at ? 0 : "Unknown"
+    const neverStarted =
+      review.status === "idle" &&
+      review.run_ids.length === 0 &&
+      !review.started_at
+    return neverStarted ? 0 : "Unknown"
   }
   if (review.progress.coverage_exact !== true) return `At least ${inspected}`
   return inspected

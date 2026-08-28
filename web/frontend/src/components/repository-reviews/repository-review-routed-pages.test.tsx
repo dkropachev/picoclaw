@@ -551,6 +551,7 @@ describe("routed repository review pages", () => {
     expect(screen.getByText("4 of 8 files (50%)")).toBeVisible()
     expect(screen.getByText("Fully reviewed files")).toBeVisible()
     expect(screen.getByText("Finding occurrences")).toBeVisible()
+    expect(screen.getByText("Unassociated occurrences")).toBeVisible()
     expect(screen.getByText("Unknown")).toBeVisible()
     expect(
       screen.getByText(/every required reviewer acknowledges the file/i),

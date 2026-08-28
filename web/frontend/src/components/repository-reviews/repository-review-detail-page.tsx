@@ -260,7 +260,7 @@ export function RepositoryReviewDetailPage({
                 value={review.progress.finding_aggregates}
               />
               <Metric
-                label="Awaiting aggregation"
+                label="Unassociated occurrences"
                 value={review.progress.unaggregated_findings}
               />
             </div>

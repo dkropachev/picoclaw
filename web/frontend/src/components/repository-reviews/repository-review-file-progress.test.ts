@@ -60,6 +60,13 @@ describe("repositoryReviewFileProgress", () => {
     expect(
       repositoryReviewInspectedFilesLabel({
         ...review,
+        run_ids: [],
+        started_at: undefined,
+      }),
+    ).toBe("Unknown")
+    expect(
+      repositoryReviewInspectedFilesLabel({
+        ...review,
         progress: {
           ...review.progress,
           coverage_available: true,

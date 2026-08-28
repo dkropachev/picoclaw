@@ -1755,7 +1755,6 @@ function normalizeIssueDraftResult(
 function normalizeRepositoryReviewState(
   value: RepositoryReviewState,
 ): RepositoryReviewState {
-  value = stripRepositoryReviewCampaignAuthority(value)
   return {
     ...normalizeRepositoryReviewSummary(value),
     files: value.files ?? {},
@@ -1863,7 +1862,6 @@ function normalizeIssueSummary(
 function normalizeFinding(
   finding: RepositoryReviewFinding,
 ): RepositoryReviewFinding {
-  finding = stripRepositoryReviewCampaignAuthority(finding)
   return {
     ...finding,
     context_ids: finding.context_ids ?? [],
@@ -1913,7 +1911,6 @@ function normalizeRunFindingStatus(
 function normalizeFindingContext(
   context: RepositoryReviewFindingContext,
 ): RepositoryReviewFindingContext {
-  context = stripRepositoryReviewCampaignAuthority(context)
   return { ...context, files: context.files ?? [] }
 }
 
@@ -2167,7 +2164,6 @@ function normalizeProfile(
 function normalizeAutomation(
   automation: RepositoryReviewAutomation,
 ): RepositoryReviewAutomation {
-  automation = stripRepositoryReviewCampaignAuthority(automation)
   return {
     ...automation,
     name: automation.name ?? automation.repository ?? "Repository review",
@@ -2238,30 +2234,6 @@ function normalizeAutomation(
     started_at: normalizeOptionalTimestamp(automation.started_at),
     completed_at: normalizeOptionalTimestamp(automation.completed_at),
   }
-}
-
-function stripRepositoryReviewCampaignAuthority<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) =>
-      stripRepositoryReviewCampaignAuthority(item),
-    ) as T
-  }
-  if (typeof value !== "object" || value === null) return value
-  const projected: Record<string, unknown> = {}
-  for (const [key, item] of Object.entries(value)) {
-    if (
-      key === "campaign_id" ||
-      key === "campaignId" ||
-      key === "campaign_recovery_pending" ||
-      key === "campaignRecoveryPending" ||
-      key === "current_campaign" ||
-      key === "campaign_history"
-    ) {
-      continue
-    }
-    projected[key] = stripRepositoryReviewCampaignAuthority(item)
-  }
-  return projected as T
 }
 
 function normalizePauseReason(
