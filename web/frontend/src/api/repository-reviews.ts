@@ -2,7 +2,7 @@ import type {
   CollectionListRequest,
   CollectionPageMetadata,
 } from "@/api/collection"
-import { collectionListURL } from "@/api/collection"
+import { collectionListURL, collectionRequest } from "@/api/collection"
 import { launcherFetch } from "@/api/http"
 
 export type RepositoryReviewFindingStatus = "open" | "dismissed" | "posted"
@@ -406,6 +406,87 @@ export interface RepositoryReviewFindingsPage {
   next_repository_finding_offset?: number
   capabilities?: RepositoryReviewCapabilities
 }
+
+export interface RepositoryReviewRunFindingSummary {
+  id: string
+  repository: string
+  path: string
+  line?: number
+  severity: string
+  title: string
+  symbol?: string
+  status: RepositoryReviewFindingStatus
+  run_finding_status: RepositoryReviewRunFindingStatusState
+  association: "unassociated" | "new" | "existing" | "needs_review"
+  repository_finding_id?: string
+  contributors: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface RepositoryReviewRepositoryFindingIssueSummary {
+  url?: string
+  state: RepositoryFindingIssueState
+  snapshot_at?: string
+  conflict?: boolean
+}
+
+export interface RepositoryReviewRepositoryFindingSummary {
+  id: string
+  repository: string
+  canonical_title: string
+  canonical_severity: string
+  path?: string
+  symbol?: string
+  match_state: RepositoryReviewMatchState
+  lifecycle: RepositoryFindingLifecycle
+  issue: RepositoryReviewRepositoryFindingIssueSummary
+  validation_state: RepositoryFindingValidationState
+  occurrence_count: number
+  found_commit_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface RepositoryReviewIssueSummary {
+  id: string
+  repository: string
+  finding_count: number
+  origin: RepositoryReviewIssueDraftOrigin
+  generation_id?: string
+  canonical: boolean
+  publishable: boolean
+  title: string
+  state: RepositoryReviewIssueDraftState
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export interface RepositoryReviewRunFindingsCollectionPage extends CollectionPageMetadata {
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  findings: RepositoryReviewRunFindingSummary[]
+  capabilities?: RepositoryReviewCapabilities
+}
+
+export interface RepositoryReviewRepositoryFindingsCollectionPage extends CollectionPageMetadata {
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  repository_findings: RepositoryReviewRepositoryFindingSummary[]
+  capabilities?: RepositoryReviewCapabilities
+}
+
+export interface RepositoryReviewIssuesCollectionPage extends CollectionPageMetadata {
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  issues: RepositoryReviewIssueSummary[]
+  generation_id?: string
+  capabilities?: RepositoryReviewCapabilities
+}
+
+export type RepositoryReviewRepositoryFindingDetail =
+  RepositoryReviewFindingDetail
 
 /** @deprecated Use RepositoryReviewFindingsPage. */
 export type RepositoryReviewReportPage = RepositoryReviewFindingsPage
@@ -1056,6 +1137,91 @@ export async function getRepositoryReviewAutomationFindings(
   }
 }
 
+export async function listRepositoryReviewAutomationFindingsPage(
+  automationID: string,
+  input: CollectionListRequest = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewRunFindingsCollectionPage> {
+  const collectionInput = {
+    ...input,
+    query: input.query?.trim() || "ALL ORDER BY severity DESC, updated DESC",
+  }
+  const page = await collectionRequest<
+    Partial<RepositoryReviewRunFindingsCollectionPage>
+  >(
+    collectionListURL(
+      `${automationPath(automationID)}/findings`,
+      collectionInput,
+    ),
+    undefined,
+    signal,
+  )
+  return {
+    automation: normalizeAutomation(page.automation!),
+    repository: page.repository
+      ? normalizeRepositoryReviewSummary(page.repository)
+      : undefined,
+    findings: (page.findings ?? []).map(normalizeRunFindingSummary),
+    total: page.total ?? 0,
+    next_cursor: page.next_cursor ?? "",
+    canonical_query: page.canonical_query ?? "",
+    query_schema: page.query_schema ?? { fields: [] },
+    capabilities: page.capabilities,
+  }
+}
+
+export async function listRepositoryReviewAutomationRepositoryFindingsPage(
+  automationID: string,
+  input: CollectionListRequest = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewRepositoryFindingsCollectionPage> {
+  const collectionInput = {
+    ...input,
+    query: input.query?.trim() || "ALL ORDER BY severity DESC, updated DESC",
+  }
+  const page = await collectionRequest<
+    Partial<RepositoryReviewRepositoryFindingsCollectionPage>
+  >(
+    collectionListURL(
+      `${automationPath(automationID)}/repository-findings`,
+      collectionInput,
+    ),
+    undefined,
+    signal,
+  )
+  return {
+    automation: normalizeAutomation(page.automation!),
+    repository: page.repository
+      ? normalizeRepositoryReviewSummary(page.repository)
+      : undefined,
+    repository_findings: (page.repository_findings ?? []).map(
+      normalizeRepositoryFindingSummary,
+    ),
+    total: page.total ?? 0,
+    next_cursor: page.next_cursor ?? "",
+    canonical_query: page.canonical_query ?? "",
+    query_schema: page.query_schema ?? { fields: [] },
+    capabilities: page.capabilities,
+  }
+}
+
+export async function getRepositoryReviewAutomationRepositoryFinding(
+  automationID: string,
+  repositoryFindingID: string,
+  signal?: AbortSignal,
+): Promise<RepositoryReviewRepositoryFindingDetail> {
+  const value = await requestJSON<
+    Partial<RepositoryReviewFindingDetail> & {
+      draft?: RepositoryReviewIssueDraft
+    }
+  >(
+    `${automationPath(automationID)}/repository-findings/${encodeURIComponent(repositoryFindingID)}`,
+    undefined,
+    signal,
+  )
+  return normalizeFindingDetail(value)
+}
+
 /** @deprecated Use getRepositoryReviewAutomationFindings. */
 export async function getRepositoryReviewAutomationReport(
   automationID: string,
@@ -1239,6 +1405,40 @@ export async function listRepositoryReviewAutomationIssues(
       0,
     next_offset: value.next_offset ?? value.next_issue_offset,
     generation_id: value.generation_id ?? input.generation_id,
+  }
+}
+
+export async function listRepositoryReviewAutomationIssuesPage(
+  automationID: string,
+  input: CollectionListRequest & { generation_id?: string } = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewIssuesCollectionPage> {
+  const collectionInput = {
+    ...input,
+    query: input.query?.trim() || "ALL ORDER BY updated DESC",
+  }
+  let path = collectionListURL(
+    `${automationPath(automationID)}/issues`,
+    collectionInput,
+  )
+  if (input.generation_id) {
+    path += `${path.includes("?") ? "&" : "?"}generation_id=${encodeURIComponent(input.generation_id)}`
+  }
+  const page = await collectionRequest<
+    Partial<RepositoryReviewIssuesCollectionPage>
+  >(path, undefined, signal)
+  return {
+    automation: normalizeAutomation(page.automation!),
+    repository: page.repository
+      ? normalizeRepositoryReviewSummary(page.repository)
+      : undefined,
+    issues: (page.issues ?? []).map(normalizeIssueSummary),
+    total: page.total ?? 0,
+    next_cursor: page.next_cursor ?? "",
+    canonical_query: page.canonical_query ?? "",
+    query_schema: page.query_schema ?? { fields: [] },
+    generation_id: page.generation_id ?? input.generation_id,
+    capabilities: page.capabilities,
   }
 }
 
@@ -1581,6 +1781,76 @@ function normalizeRepositoryReviewSummary(
   value: RepositoryReviewSummary,
 ): RepositoryReviewSummary {
   return { ...value, review_version: value.review_version ?? 0 }
+}
+
+function normalizeRunFindingSummary(
+  finding: RepositoryReviewRunFindingSummary,
+): RepositoryReviewRunFindingSummary {
+  return {
+    id: finding.id,
+    repository: finding.repository,
+    path: finding.path,
+    ...(finding.line == null ? {} : { line: finding.line }),
+    severity: finding.severity,
+    title: finding.title,
+    ...(finding.symbol ? { symbol: finding.symbol } : {}),
+    status: finding.status,
+    run_finding_status: finding.run_finding_status,
+    association: finding.association,
+    ...(finding.repository_finding_id
+      ? { repository_finding_id: finding.repository_finding_id }
+      : {}),
+    contributors: finding.contributors ?? [],
+    created_at: finding.created_at,
+    updated_at: finding.updated_at,
+  }
+}
+
+function normalizeRepositoryFindingSummary(
+  finding: RepositoryReviewRepositoryFindingSummary,
+): RepositoryReviewRepositoryFindingSummary {
+  return {
+    id: finding.id,
+    repository: finding.repository,
+    canonical_title: finding.canonical_title,
+    canonical_severity: finding.canonical_severity,
+    ...(finding.path ? { path: finding.path } : {}),
+    ...(finding.symbol ? { symbol: finding.symbol } : {}),
+    match_state: finding.match_state,
+    lifecycle: finding.lifecycle,
+    issue: {
+      ...(finding.issue?.url ? { url: finding.issue.url } : {}),
+      state: finding.issue?.state ?? "none",
+      ...(finding.issue?.snapshot_at
+        ? { snapshot_at: finding.issue.snapshot_at }
+        : {}),
+      ...(finding.issue?.conflict ? { conflict: true } : {}),
+    },
+    validation_state: finding.validation_state,
+    occurrence_count: finding.occurrence_count ?? 0,
+    found_commit_count: finding.found_commit_count ?? 0,
+    created_at: finding.created_at,
+    updated_at: finding.updated_at,
+  }
+}
+
+function normalizeIssueSummary(
+  issue: RepositoryReviewIssueSummary,
+): RepositoryReviewIssueSummary {
+  return {
+    id: issue.id,
+    repository: issue.repository,
+    finding_count: issue.finding_count ?? 0,
+    origin: issue.origin || "legacy",
+    ...(issue.generation_id ? { generation_id: issue.generation_id } : {}),
+    canonical: issue.canonical ?? false,
+    publishable: issue.publishable ?? false,
+    title: issue.title,
+    state: issue.state,
+    version: issue.version,
+    created_at: issue.created_at,
+    updated_at: issue.updated_at,
+  }
 }
 
 function normalizeFinding(

@@ -1,21 +1,20 @@
-import { IconChecks, IconRefresh, IconSparkles } from "@tabler/icons-react"
-import { useMutation, useQuery } from "@tanstack/react-query"
+import { IconChecks, IconSparkles } from "@tabler/icons-react"
+import { useInfiniteQuery, useMutation } from "@tanstack/react-query"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import {
-  type RepositoryFinding,
-  RepositoryReviewAPIError,
+  type RepositoryReviewRepositoryFindingSummary,
   generateRepositoryReviewIssues,
-  getRepositoryReviewAutomationFinding,
-  getRepositoryReviewAutomationFindings,
+  getRepositoryReviewAutomationRepositoryFinding,
+  listRepositoryReviewAutomationRepositoryFindingsPage,
   reserveRepositoryReviewValidations,
   syncRepositoryReviewFinding,
 } from "@/api/repository-reviews"
 import {
   type CollectionDefinition,
-  CollectionDetailShell,
-  CollectionResults,
+  StandardCollectionPage,
+  type StandardCollectionSelectionState,
 } from "@/components/collection"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -30,16 +29,15 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import {
   type CollectionRouteSearch,
-  useCollectionRouteState,
+  normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
 
 import { createRepositoryReviewGenerationID } from "./repository-review-generation"
 import {
-  type RepositoryReviewRouteSearch,
-  repositoryReviewDefaultQuery,
+  type RepositoryReviewCollectionSearch,
+  repositoryReviewRepositoryFindingsDefaultQuery,
+  repositoryReviewViews,
 } from "./repository-review-route-state"
-
-const pageSize = 50
 
 export function RepositoryReviewRepositoryFindingsPage({
   automationID,
@@ -50,54 +48,55 @@ export function RepositoryReviewRepositoryFindingsPage({
   onGenerated,
 }: {
   automationID: string
-  search: RepositoryReviewRouteSearch
-  onSearchChange: (next: RepositoryReviewRouteSearch, replace?: boolean) => void
+  search: RepositoryReviewCollectionSearch
+  onSearchChange: (next: CollectionRouteSearch, replace?: boolean) => void
   onBack: () => void
   onOpenFinding: (findingID: string) => void
   onGenerated: (generationID: string) => void
 }) {
   const [instructionsOpen, setInstructionsOpen] = useState(false)
   const [customInstructions, setCustomInstructions] = useState("")
-  const state = useCollectionRouteState({
-    collectionKey: `repository-review-repository-findings:${automationID}`,
-    defaultQuery: repositoryReviewDefaultQuery,
-    supportedViews: ["list"],
-    defaultView: "list",
-    search,
-    onSearchChange: (collectionSearch: CollectionRouteSearch, replace) =>
-      onSearchChange(
-        {
-          ...search,
-          q: collectionSearch.q,
-          scope: "all",
-          ...(collectionSearch.view ? { view: collectionSearch.view } : {}),
-        },
-        replace,
-      ),
-  })
-  const query = useQuery({
+  const [generationSelection, setGenerationSelection] = useState<string[]>([])
+  const activeQuery = normalizeCollectionRouteSearch(search, {
+    defaultQuery: repositoryReviewRepositoryFindingsDefaultQuery,
+    supportedViews: repositoryReviewViews,
+  }).q
+  const query = useInfiniteQuery({
     queryKey: [
       "repository-review-repository-findings",
       automationID,
-      search.offset,
+      activeQuery,
     ],
-    queryFn: ({ signal }) =>
-      getRepositoryReviewAutomationFindings(
+    initialPageParam: "",
+    queryFn: ({ signal, pageParam }) =>
+      listRepositoryReviewAutomationRepositoryFindingsPage(
         automationID,
-        { scope: "all", offset: search.offset, limit: pageSize },
+        {
+          query: activeQuery,
+          cursor: pageParam || undefined,
+          limit: 50,
+        },
         signal,
       ),
+    getNextPageParam: (page) => page.next_cursor || undefined,
     retry: false,
     refetchInterval: (current) =>
-      current.state.data &&
-      (isActive(current.state.data.automation) ||
-        current.state.data.repository_findings.some((finding) =>
-          new Set(["pending", "running"]).has(finding.validation_state),
-        ))
+      current.state.data?.pages.some(
+        (page) =>
+          isActive(page.automation) ||
+          page.repository_findings.some((finding) =>
+            new Set(["pending", "running"]).has(finding.validation_state),
+          ),
+      )
         ? 2_000
         : false,
   })
-  const page = query.data
+  const pages = query.data?.pages
+  const firstPage = pages?.[0]
+  const findings = useMemo(
+    () => pages?.flatMap((page) => page.repository_findings) ?? [],
+    [pages],
+  )
   const issueSyncs = useRef(new Map<string, Promise<void>>())
   const synchronizeIssue = useCallback(
     (repositoryFindingID: string) => {
@@ -118,7 +117,7 @@ export function RepositoryReviewRepositoryFindingsPage({
     [automationID],
   )
   useEffect(() => {
-    const stale = (page?.repository_findings ?? []).filter(
+    const stale = findings.filter(
       (finding) =>
         Boolean(finding.issue.url) &&
         !finding.issue.conflict &&
@@ -138,16 +137,16 @@ export function RepositoryReviewRepositoryFindingsPage({
       }
       await query.refetch()
     })().catch(() => undefined)
-  }, [page?.repository_findings, query, synchronizeIssue])
+  }, [findings, query, synchronizeIssue])
   const loadedDraftEligibility = useMemo(
     () =>
       new Map(
-        (page?.repository_findings ?? []).map((finding) => [
+        findings.map((finding) => [
           finding.id,
           repositoryFindingCanBeDrafted(finding),
         ]),
       ),
-    [page?.repository_findings],
+    [findings],
   )
   const [rememberedDraftEligibility, setRememberedDraftEligibility] = useState(
     () => new Map<string, boolean>(),
@@ -162,24 +161,20 @@ export function RepositoryReviewRepositoryFindingsPage({
       return next
     })
   }, [loadedDraftEligibility])
-  const canDraftSelection =
-    state.selectedCount > 0 &&
-    [...state.selectedIDs].every(
-      (findingID) =>
-        (loadedDraftEligibility.get(findingID) ??
-          rememberedDraftEligibility.get(findingID)) === true,
-    )
-  const canValidateSelection =
-    state.selectedCount > 0 && state.selectedCount <= 50
-  const notFound =
-    query.error instanceof RepositoryReviewAPIError &&
-    query.error.status === 404
   const generation = useMutation({
-    mutationFn: async ({ custom }: { custom: boolean }) => {
-      const selectedIDs = [...state.selectedIDs]
+    mutationFn: async ({
+      selectedIDs,
+      custom,
+    }: {
+      selectedIDs: string[]
+      custom: boolean
+    }) => {
       const details = await Promise.all(
         selectedIDs.map((findingID) =>
-          getRepositoryReviewAutomationFinding(automationID, findingID),
+          getRepositoryReviewAutomationRepositoryFinding(
+            automationID,
+            findingID,
+          ),
         ),
       )
       if (
@@ -251,11 +246,18 @@ export function RepositoryReviewRepositoryFindingsPage({
       ),
   })
   const validation = useMutation({
-    mutationFn: async () => {
-      const selectedIDs = [...state.selectedIDs]
+    mutationFn: async ({
+      selectedIDs,
+    }: {
+      selectedIDs: string[]
+      clearSelection: () => void
+    }) => {
       const details = await Promise.all(
         selectedIDs.map((findingID) =>
-          getRepositoryReviewAutomationFinding(automationID, findingID),
+          getRepositoryReviewAutomationRepositoryFinding(
+            automationID,
+            findingID,
+          ),
         ),
       )
       const selected = details.flatMap((detail) =>
@@ -284,8 +286,8 @@ export function RepositoryReviewRepositoryFindingsPage({
       )
       return reserveRepositoryReviewValidations(automationID, selectedIDs)
     },
-    onSuccess: async () => {
-      state.clearSelection()
+    onSuccess: async (_response, variables) => {
+      variables.clearSelection()
       await query.refetch()
       toast.success("Selected resolution validations queued.")
     },
@@ -296,28 +298,83 @@ export function RepositoryReviewRepositoryFindingsPage({
       void query.refetch()
     },
   })
-  const definition = useMemo<CollectionDefinition<RepositoryFinding>>(
+  const definition = useMemo<
+    CollectionDefinition<RepositoryReviewRepositoryFindingSummary>
+  >(
     () => ({
-      key: "repository-findings",
+      key: `repository-review-repository-findings:${automationID}`,
       title: "Repository findings",
-      defaultQuery: "",
-      supportedViews: ["list"],
+      defaultQuery: repositoryReviewRepositoryFindingsDefaultQuery,
+      supportedViews: repositoryReviewViews,
       defaultView: "list",
       getItemID: (finding) => finding.id,
       getItemLabel: (finding) => finding.canonical_title,
       getItemIdentity: (finding) => {
-        const latest = finding.path_symbol_history.at(-1)
-        const foundCommitCount =
-          finding.found_commit_count ?? finding.found_commits.length
+        const latest = latestLocation(finding)
         return {
           title: finding.canonical_title,
-          description: latest
-            ? `${latest.path}${latest.symbol ? ` · ${latest.symbol}` : ""}`
-            : "Cross-commit diagnosis",
-          metadata: `${foundCommitCount} observed commit${foundCommitCount === 1 ? "" : "s"} · ${finding.lifecycle} · issue ${finding.issue.state} · validation ${finding.validation_state}`,
+          description: latest || "Cross-commit diagnosis",
+          metadata: `${finding.found_commit_count} observed commit${finding.found_commit_count === 1 ? "" : "s"} · ${finding.lifecycle} · issue ${finding.issue.state} · validation ${finding.validation_state}`,
         }
       },
-      columns: [],
+      columns: [
+        {
+          id: "repository",
+          header: "Repository",
+          cell: (finding) => finding.repository,
+        },
+        {
+          id: "location",
+          header: "Latest location",
+          cell: (finding) => latestLocation(finding) || "Cross-commit",
+        },
+        {
+          id: "severity",
+          header: "Severity",
+          cell: (finding) => finding.canonical_severity,
+          className: "w-28",
+        },
+        {
+          id: "lifecycle",
+          header: "Lifecycle",
+          cell: (finding) => finding.lifecycle,
+          className: "w-36",
+        },
+        {
+          id: "issue",
+          header: "Issue",
+          cell: (finding) => finding.issue.state,
+          className: "w-28",
+        },
+        {
+          id: "validation",
+          header: "Validation",
+          cell: (finding) => finding.validation_state,
+          className: "w-36",
+        },
+      ],
+      gridFacts: [
+        {
+          id: "repository",
+          label: "Repository",
+          value: (finding) => finding.repository,
+        },
+        {
+          id: "severity",
+          label: "Severity",
+          value: (finding) => finding.canonical_severity,
+        },
+        {
+          id: "issue",
+          label: "Issue",
+          value: (finding) => finding.issue.state,
+        },
+        {
+          id: "validation",
+          label: "Validation",
+          value: (finding) => finding.validation_state,
+        },
+      ],
       badges: [
         {
           id: "severity",
@@ -331,135 +388,110 @@ export function RepositoryReviewRepositoryFindingsPage({
         },
       ],
     }),
-    [],
+    [automationID],
   )
+
+  const selectionActions = (state: StandardCollectionSelectionState) => {
+    const selectedIDs = [...state.selectedIDs]
+    const selectionBusy = generation.isPending || validation.isPending
+    const canDraft =
+      state.selectedCount > 0 &&
+      selectedIDs.every(
+        (findingID) =>
+          (loadedDraftEligibility.get(findingID) ??
+            rememberedDraftEligibility.get(findingID)) === true,
+      )
+    const canValidate = state.selectedCount > 0 && state.selectedCount <= 50
+    return (
+      <>
+        <Button
+          type="button"
+          size="sm"
+          disabled={selectionBusy || !canDraft}
+          title={
+            canDraft
+              ? undefined
+              : "Issue drafting requires open, unassociated repository findings that do not need review."
+          }
+          onClick={() => {
+            setGenerationSelection(selectedIDs)
+            setInstructionsOpen(true)
+          }}
+        >
+          <IconSparkles /> Draft issue previews
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          disabled={selectionBusy || !canValidate}
+          title={
+            canValidate
+              ? undefined
+              : "Validate at most 50 repository findings at once."
+          }
+          onClick={() =>
+            validation.mutate({
+              selectedIDs,
+              clearSelection: state.clearSelection,
+            })
+          }
+        >
+          <IconChecks />
+          {validation.isPending ? "Queueing…" : "Validate resolutions"}
+        </Button>
+      </>
+    )
+  }
 
   return (
     <>
-      <CollectionDetailShell
-        title="Repository findings"
-        identity={
-          page ? (
-            <span className="text-muted-foreground truncate text-xs">
-              {page.automation.repository}
-            </span>
-          ) : undefined
-        }
-        status={
-          page ? (
-            <Badge variant="outline">{page.automation.status}</Badge>
-          ) : undefined
-        }
-        actions={
-          <Button
-            type="button"
-            size="icon-sm"
-            variant="outline"
-            aria-label="Refresh repository findings"
-            disabled={query.isFetching}
-            onClick={() => void query.refetch()}
-          >
-            <IconRefresh />
-          </Button>
-        }
+      <StandardCollectionPage
+        definition={definition}
+        search={search}
+        onSearchChange={onSearchChange}
+        items={findings}
+        total={firstPage?.total}
+        schema={firstPage?.query_schema}
+        canonicalQuery={firstPage?.canonical_query}
         loading={query.isLoading}
-        error={!notFound ? query.error?.message : undefined}
-        notFound={notFound}
-        onBack={onBack}
-        onRetry={() => void query.refetch()}
-        backLabel="Repositories"
-        contentRef={state.setScrollContainerRef}
-        onContentScroll={state.onResultsScroll}
-      >
-        {page && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-end">
-              <span className="text-muted-foreground text-sm">
-                {page.repository_finding_total} finding
-                {page.repository_finding_total === 1 ? "" : "s"}
-              </span>
-            </div>
-
-            {state.selectedCount > 0 && (
-              <div className="border-border bg-muted/20 flex flex-wrap items-center gap-2 rounded-lg border p-3">
-                <strong className="mr-auto text-sm">
-                  {state.selectedCount} selected
-                </strong>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={generation.isPending || !canDraftSelection}
-                  title={
-                    canDraftSelection
-                      ? undefined
-                      : "Issue drafting requires open, unassociated repository findings that do not need review."
-                  }
-                  onClick={() => setInstructionsOpen(true)}
-                >
-                  <IconSparkles /> Draft issue previews
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={validation.isPending || !canValidateSelection}
-                  title={
-                    canValidateSelection
-                      ? undefined
-                      : "Validate at most 50 repository findings at once."
-                  }
-                  onClick={() => validation.mutate()}
-                >
-                  <IconChecks />
-                  {validation.isPending ? "Queueing…" : "Validate resolutions"}
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={state.clearSelection}
-                >
-                  Clear selection
-                </Button>
-              </div>
-            )}
-
-            <CollectionResults
-              definition={definition}
-              items={page.repository_findings}
-              view="list"
-              selection={{
-                selectedIDs: state.selectedIDs,
-                additive: true,
-                maximumSelected: 200,
-                isItemDisabled: (finding) =>
-                  finding.match_state === "provisional" ||
-                  finding.lifecycle === "dismissed" ||
-                  Boolean(finding.issue.conflict),
-                onSelectionChange: state.setSelection,
-              }}
-              onOpenItem={(finding) => onOpenFinding(finding.id)}
-              emptyTitle="No repository findings"
-              emptyDescription="This repository does not have a repository finding yet."
-            />
-
-            <FindingsPagination
-              offset={page.repository_finding_offset ?? 0}
-              total={page.repository_finding_total}
-              nextOffset={page.next_repository_finding_offset}
-              onChange={(offset) =>
-                onSearchChange({ ...search, scope: "all", offset })
-              }
-            />
-          </div>
-        )}
-      </CollectionDetailShell>
+        fetching={query.isFetching}
+        error={query.error}
+        context={{
+          backLabel: "Repositories",
+          onBack,
+          identity: firstPage ? (
+            <span className="text-muted-foreground truncate text-xs">
+              {firstPage.automation.repository}
+            </span>
+          ) : undefined,
+          status: firstPage ? (
+            <Badge variant="outline">{firstPage.automation.status}</Badge>
+          ) : undefined,
+        }}
+        onRefresh={query.refetch}
+        hasNextPage={query.hasNextPage}
+        loadingMore={query.isFetchingNextPage}
+        onLoadMore={query.fetchNextPage}
+        onOpenItem={(finding) => onOpenFinding(finding.id)}
+        selection={{
+          disabled: generation.isPending || validation.isPending,
+          maximumSelected: 200,
+          isItemSelectable: (finding) =>
+            finding.match_state !== "provisional" &&
+            finding.lifecycle !== "dismissed" &&
+            !finding.issue.conflict,
+          renderActions: selectionActions,
+        }}
+        emptyTitle="No repository findings"
+        emptyDescription="This repository does not have a repository finding yet."
+      />
 
       <Dialog open={instructionsOpen} onOpenChange={setInstructionsOpen}>
         <DialogContent className="sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>
-              Draft {state.selectedCount} issue
-              {state.selectedCount === 1 ? "" : "s"}
+              Draft {generationSelection.length} issue
+              {generationSelection.length === 1 ? "" : "s"}
             </DialogTitle>
             <DialogDescription>
               Each selected repository finding gets its own saved AI-written
@@ -492,9 +524,14 @@ export function RepositoryReviewRepositoryFindingsPage({
             </Button>
             <Button
               type="button"
-              disabled={generation.isPending || state.selectedCount === 0}
+              disabled={
+                generation.isPending || generationSelection.length === 0
+              }
               onClick={() =>
-                generation.mutate({ custom: customInstructions.trim() !== "" })
+                generation.mutate({
+                  selectedIDs: generationSelection,
+                  custom: customInstructions.trim() !== "",
+                })
               }
             >
               {generation.isPending ? "Drafting…" : "Draft previews"}
@@ -506,47 +543,12 @@ export function RepositoryReviewRepositoryFindingsPage({
   )
 }
 
-function FindingsPagination({
-  offset,
-  total,
-  nextOffset,
-  onChange,
-}: {
-  offset: number
-  total: number
-  nextOffset?: number
-  onChange: (offset: number) => void
-}) {
-  if (offset === 0 && nextOffset == null && total <= pageSize) return null
-  return (
-    <nav
-      className="flex items-center justify-between gap-3"
-      aria-label="Repository finding pages"
-    >
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        disabled={offset === 0}
-        onClick={() => onChange(Math.max(0, offset - pageSize))}
-      >
-        Previous findings
-      </Button>
-      <span className="text-muted-foreground text-xs">
-        {total === 0 ? 0 : offset + 1}–{Math.min(total, offset + pageSize)} of{" "}
-        {total}
-      </span>
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        disabled={nextOffset == null}
-        onClick={() => nextOffset != null && onChange(nextOffset)}
-      >
-        Next findings
-      </Button>
-    </nav>
-  )
+function latestLocation(
+  finding: RepositoryReviewRepositoryFindingSummary,
+): string {
+  return finding.path
+    ? `${finding.path}${finding.symbol ? ` · ${finding.symbol}` : ""}`
+    : ""
 }
 
 function isActive(review: {
@@ -563,7 +565,9 @@ function isActive(review: {
   )
 }
 
-function repositoryFindingCanBeDrafted(finding: RepositoryFinding): boolean {
+function repositoryFindingCanBeDrafted(
+  finding: RepositoryReviewRepositoryFindingSummary,
+): boolean {
   return (
     finding.match_state !== "provisional" &&
     (finding.lifecycle === "open" || finding.lifecycle === "regressed") &&

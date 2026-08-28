@@ -71,17 +71,22 @@ vi.mock(
   () => ({
     RepositoryReviewFindingsPage: ({
       automationID,
+      onBack,
       onOpenFinding,
       onOpenRepositoryFindings,
       onOpenRepositoryFinding,
     }: {
       automationID: string
+      onBack: () => void
       onOpenFinding: (id: string) => void
       onOpenRepositoryFindings: () => void
       onOpenRepositoryFinding: (id: string) => void
     }) => (
       <div>
         <output>Findings {automationID}</output>
+        <button type="button" onClick={onBack}>
+          Back from run findings
+        </button>
         <button type="button" onClick={() => onOpenFinding("finding_1")}>
           Open finding
         </button>
@@ -181,15 +186,20 @@ vi.mock(
 vi.mock("@/components/repository-reviews/repository-review-issue-page", () => ({
   RepositoryReviewIssuePage: ({
     draftID,
+    onEdit,
     onOpenFinding,
     onManageLink,
   }: {
     draftID: string
+    onEdit: () => void
     onOpenFinding: (findingID: string) => void
     onManageLink: (findingID: string) => void
   }) => (
     <div>
       <output>Issue {draftID}</output>
+      <button type="button" onClick={onEdit}>
+        Edit issue
+      </button>
       <button type="button" onClick={() => onOpenFinding("rfn_1")}>
         Open run finding
       </button>
@@ -199,6 +209,26 @@ vi.mock("@/components/repository-reviews/repository-review-issue-page", () => ({
     </div>
   ),
 }))
+
+vi.mock(
+  "@/components/repository-reviews/repository-review-issue-editor-page",
+  () => ({
+    RepositoryReviewIssueEditorPage: ({
+      draftID,
+      onBack,
+    }: {
+      draftID: string
+      onBack: () => void
+    }) => (
+      <div>
+        <output>Edit issue {draftID}</output>
+        <button type="button" onClick={onBack}>
+          Back from issue editor
+        </button>
+      </div>
+    ),
+  }),
+)
 
 vi.mock(
   "@/components/repository-reviews/repository-review-profiles-page",
@@ -295,7 +325,7 @@ vi.mock(
 vi.mock("@/features/chat/controller", () => ({ initializeChatStore: vi.fn() }))
 
 describe("repository review routes", () => {
-  it("opens detail and findings while preserving collection state", async () => {
+  it("keeps parent and run-finding collection state independent", async () => {
     const router = testRouter(
       "/repository-reviews?q=status%20%3D%20running&view=grid",
     )
@@ -306,11 +336,9 @@ describe("repository review routes", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/repository-reviews/auto_1"),
     )
-    expect(router.state.location.search).toMatchObject({
+    expect(router.state.location.search).toEqual({
       q: "status = running",
       view: "grid",
-      scope: "current",
-      offset: 0,
     })
     await user.click(screen.getByRole("button", { name: "Open findings" }))
     await waitFor(() =>
@@ -318,11 +346,49 @@ describe("repository review routes", () => {
         "/repository-reviews/auto_1/findings",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
+    expect(router.state.location.search).toEqual({
+      q: "ALL ORDER BY severity DESC, updated DESC",
+    })
+    await user.click(
+      screen.getByRole("button", { name: "Back from run findings" }),
+    )
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/repository-reviews/auto_1"),
+    )
+    expect(router.state.location.search).toEqual({
       q: "status = running",
       view: "grid",
     })
   })
+
+  it.each([
+    [
+      "/repository-reviews/auto_1/findings?view=unsupported&unknown=value",
+      { q: "ALL ORDER BY severity DESC, updated DESC" },
+    ],
+    [
+      "/repository-reviews/repositories/auto_1/findings?offset=50&unknown=value",
+      { q: "ALL ORDER BY severity DESC, updated DESC" },
+    ],
+    [
+      "/repository-reviews/auto_1/issues?generation_id=rig_1&scope=current&unknown=value",
+      { q: "ALL ORDER BY updated DESC", generation_id: "rig_1" },
+    ],
+  ])(
+    "canonicalizes the child collection address bar for %s",
+    async (path, expected) => {
+      const router = testRouter(path)
+      render(<RouterProvider router={router} />)
+
+      await waitFor(() =>
+        expect(
+          Object.fromEntries(
+            new URLSearchParams(router.state.location.searchStr),
+          ),
+        ).toEqual(expected),
+      )
+    },
+  )
 
   it("redirects an aggregate report URL to the repositories workspace and preserves safe state", async () => {
     const router = testRouter(
@@ -336,12 +402,9 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1/findings",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
+    expect(router.state.location.search).toEqual({
       q: "severity = high",
       view: "grid",
-      scope: "all",
-      offset: 50,
-      generation_id: "rig_1",
     })
 
     await user.click(
@@ -352,12 +415,9 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1/findings/rrf_1",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
+    expect(router.state.location.search).toEqual({
       q: "severity = high",
       view: "grid",
-      scope: "all",
-      offset: 50,
-      generation_id: "rig_1",
     })
   })
 
@@ -372,11 +432,9 @@ describe("repository review routes", () => {
         "/repository-reviews/auto_1/findings",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
+    expect(router.state.location.search).toEqual({
       q: "severity = high",
       view: "list",
-      scope: "current",
-      offset: 50,
     })
   })
 
@@ -391,11 +449,9 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1/findings",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
+    expect(router.state.location.search).toEqual({
       q: "severity = high",
       view: "grid",
-      scope: "all",
-      offset: 50,
     })
   })
 
@@ -410,11 +466,7 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1/findings/rrf_1",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
-      q: "severity = high",
-      scope: "all",
-      offset: 50,
-    })
+    expect(router.state.location.search).toEqual({ q: "severity = high" })
     expect(await screen.findByText("Repository finding rrf_1")).toBeVisible()
   })
 
@@ -429,11 +481,7 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1/findings/rrf_1/link-issue",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
-      q: "severity = high",
-      scope: "all",
-      offset: 50,
-    })
+    expect(router.state.location.search).toEqual({ q: "severity = high" })
   })
 
   it.each([
@@ -452,7 +500,9 @@ describe("repository review routes", () => {
       render(<RouterProvider router={router} />)
 
       await waitFor(() => expect(router.state.location.pathname).toBe(target))
-      expect(router.state.location.search).toMatchObject({ scope: "all" })
+      expect(router.state.location.search).toEqual({
+        q: "ALL ORDER BY severity DESC, updated DESC",
+      })
     },
   )
 
@@ -467,11 +517,7 @@ describe("repository review routes", () => {
         "/repository-reviews/auto_1/findings/finding_1",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
-      q: "severity = high",
-      scope: "current",
-      offset: 50,
-    })
+    expect(router.state.location.search).toEqual({ q: "severity = high" })
     expect(await screen.findByText("Finding finding_1")).toBeVisible()
   })
 
@@ -481,6 +527,12 @@ describe("repository review routes", () => {
     )
     const user = userEvent.setup()
     render(<RouterProvider router={router} />)
+
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({
+        q: "ALL ORDER BY severity DESC, updated DESC",
+      }),
+    )
 
     await user.click(
       await screen.findByRole("button", {
@@ -492,7 +544,9 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1/findings/rrf_1",
       ),
     )
-    expect(router.state.location.search).toMatchObject({ scope: "all" })
+    expect(router.state.location.search).toEqual({
+      q: "ALL ORDER BY severity DESC, updated DESC",
+    })
   })
 
   it("opens the repository finding collection from run findings", async () => {
@@ -502,6 +556,13 @@ describe("repository review routes", () => {
     const user = userEvent.setup()
     render(<RouterProvider router={router} />)
 
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({
+        q: "severity = high",
+        view: "grid",
+      }),
+    )
+
     await user.click(
       await screen.findByRole("button", { name: "View repository findings" }),
     )
@@ -510,11 +571,17 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1/findings",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
-      q: "severity = high",
-      view: "grid",
-      scope: "all",
-      offset: 50,
+    expect(router.state.location.search).toEqual({
+      q: "ALL ORDER BY severity DESC, updated DESC",
+    })
+    await user.click(screen.getByRole("button", { name: "Back from findings" }))
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repository-reviews/repositories",
+      ),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "ORDER BY repository ASC",
     })
   })
 
@@ -550,9 +617,8 @@ describe("repository review routes", () => {
         "/repository-reviews/auto_1/findings/rfn_1",
       ),
     )
-    expect(runRouter.state.location.search).toMatchObject({
-      scope: "current",
-      offset: 50,
+    expect(runRouter.state.location.search).toEqual({
+      q: "ALL ORDER BY severity DESC, updated DESC",
     })
     runView.unmount()
 
@@ -568,9 +634,42 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1/findings/rrf_1/link-issue",
       ),
     )
-    expect(repositoryRouter.state.location.search).toMatchObject({
-      scope: "all",
-      offset: 50,
+    expect(repositoryRouter.state.location.search).toEqual({
+      q: "ALL ORDER BY severity DESC, updated DESC",
+    })
+  })
+
+  it("opens the dedicated issue editor and preserves issue collection state", async () => {
+    const router = testRouter(
+      "/repository-reviews/auto_1/issues/draft_1?q=state%20%3D%20editing&view=grid&generation_id=rig_1",
+    )
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await user.click(await screen.findByRole("button", { name: "Edit issue" }))
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repository-reviews/auto_1/issues/draft_1/edit",
+      ),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "state = editing",
+      view: "grid",
+      generation_id: "rig_1",
+    })
+
+    await user.click(
+      screen.getByRole("button", { name: "Back from issue editor" }),
+    )
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repository-reviews/auto_1/issues/draft_1",
+      ),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "state = editing",
+      view: "grid",
+      generation_id: "rig_1",
     })
   })
 
@@ -591,7 +690,7 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
+    expect(router.state.location.search).toEqual({
       q: "status = paused",
       view: "grid",
     })
@@ -604,7 +703,7 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1/edit",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
+    expect(router.state.location.search).toEqual({
       q: "status = paused",
       view: "grid",
     })
@@ -617,7 +716,7 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
+    expect(router.state.location.search).toEqual({
       q: "status = paused",
       view: "grid",
     })
@@ -630,9 +729,8 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1/findings",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
-      q: "status = paused",
-      view: "grid",
+    expect(router.state.location.search).toEqual({
+      q: "ALL ORDER BY severity DESC, updated DESC",
     })
 
     await user.click(screen.getByRole("button", { name: "Back from findings" }))
@@ -641,7 +739,7 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories",
       ),
     )
-    expect(router.state.location.search).toMatchObject({
+    expect(router.state.location.search).toEqual({
       q: "status = paused",
       view: "grid",
     })
@@ -684,7 +782,16 @@ describe("repository review routes", () => {
         "/repository-reviews/repositories/auto_1/findings",
       ),
     )
-    expect(findingsRouter.state.location.search).toMatchObject({
+    expect(findingsRouter.state.location.search).toEqual({
+      q: "ALL ORDER BY severity DESC, updated DESC",
+    })
+    await user.click(screen.getByRole("button", { name: "Back from findings" }))
+    await waitFor(() =>
+      expect(findingsRouter.state.location.pathname).toBe(
+        "/repository-reviews/repositories",
+      ),
+    )
+    expect(findingsRouter.state.location.search).toEqual({
       q: "repository ~ picoclaw",
       view: "table",
     })

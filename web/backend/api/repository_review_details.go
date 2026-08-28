@@ -257,6 +257,11 @@ func (h *Handler) handleGetRepositoryReviewAutomation(w http.ResponseWriter, r *
 }
 
 func (h *Handler) handleGetRepositoryReviewAutomationReport(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasSuffix(r.URL.Path, "/report") &&
+		!r.URL.Query().Has("scope") && !r.URL.Query().Has("offset") {
+		h.handleListRepositoryReviewRunFindingsCollection(w, r)
+		return
+	}
 	scope, offset, limit, err := repositoryReviewReportPage(r)
 	if err != nil {
 		writeRepositoryReviewError(w, err)
@@ -432,6 +437,30 @@ func (h *Handler) handleGetRepositoryReviewAutomationFinding(w http.ResponseWrit
 	writeRepositoryReviewAutomationError(w, os.ErrNotExist)
 }
 
+func (h *Handler) handleGetRepositoryReviewAutomationRepositoryFinding(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	ledger, err := h.repositoryReviewAutomationLedger(r.Context(), r.PathValue("automation_id"))
+	if err != nil {
+		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
+	_, found := repositoryReviewRepositoryFindingByID(
+		ledger.State,
+		strings.TrimSpace(r.PathValue("finding_id")),
+	)
+	if !found {
+		writeRepositoryReviewAutomationError(w, os.ErrNotExist)
+		return
+	}
+	// Reuse the compatibility detail projection only after the dedicated route
+	// has proved that the opaque ID belongs to the repository-finding resource.
+	// The second read keeps the returned capabilities and histories current if
+	// the ledger changes between validation and projection.
+	h.handleGetRepositoryReviewAutomationFinding(w, r)
+}
+
 func (h *Handler) handleUpdateRepositoryReviewAutomationFinding(w http.ResponseWriter, r *http.Request) {
 	if err := validateRepositoryReviewMutation(r); err != nil {
 		writeRepositoryReviewError(w, err)
@@ -457,6 +486,10 @@ func (h *Handler) handleUpdateRepositoryReviewAutomationFinding(w http.ResponseW
 }
 
 func (h *Handler) handleListRepositoryReviewAutomationIssues(w http.ResponseWriter, r *http.Request) {
+	if repositoryReviewUsesIssueCollectionRequest(r) {
+		h.handleListRepositoryReviewIssuesCollection(w, r)
+		return
+	}
 	generationID, offset, limit, err := repositoryReviewIssuePage(r)
 	if err != nil {
 		writeRepositoryReviewError(w, err)

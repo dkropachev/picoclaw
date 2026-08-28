@@ -84,6 +84,29 @@ test("the checked-in collection manifest remains valid", () => {
   assert.deepEqual(validateCollectionManifest(checkedInManifest), [])
 })
 
+test("repository-review child collections remain fully standard", () => {
+  const checkedInManifest = JSON.parse(
+    fs.readFileSync(
+      path.resolve(scriptDir, "../collection-surfaces.json"),
+      "utf8",
+    ),
+  )
+  const byKey = new Map(
+    checkedInManifest.surfaces.map((candidate) => [candidate.key, candidate]),
+  )
+  for (const key of [
+    "repository-review-run-findings",
+    "repository-findings",
+    "repository-review-issue-previews",
+  ]) {
+    const candidate = byKey.get(key)
+    assert.equal(candidate?.status, "standard", key)
+    assert.deepEqual(candidate?.views, ["list", "table", "grid"], key)
+    assert.equal(candidate?.capabilities.includes("query"), true, key)
+    assert.equal(candidate?.capabilities.includes("pagination"), true, key)
+  }
+})
+
 test("standard surfaces require complete metadata", () => {
   const incomplete = [
     standardSurface("missing-routes", { routes: undefined }),

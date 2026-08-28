@@ -5,6 +5,10 @@ import {
   repositoryReviewRepositoryDefaultQuery,
   repositoryReviewRepositoryViews,
 } from "@/components/repository-reviews/repository-review-repositories-route-state"
+import {
+  normalizeRepositoryReviewRepositoryFindingsSearch,
+  repositoryReviewParentNavigationState,
+} from "@/components/repository-reviews/repository-review-route-state"
 import { normalizeCollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
 export const Route = createFileRoute("/repository-reviews_/repositories_/$id")({
@@ -37,7 +41,11 @@ function RepositoryReviewRepositoryDetailRoute() {
         void navigate({
           to: "/repository-reviews/repositories/$id/findings",
           params: { id },
-          search: { ...search, scope: "all", offset: 0 },
+          search: normalizeRepositoryReviewRepositoryFindingsSearch({}),
+          state: repositoryReviewParentNavigationState(
+            search,
+            repositoryReviewRepositoryDefaultQuery,
+          ),
         })
       }
       onDeleted={() =>

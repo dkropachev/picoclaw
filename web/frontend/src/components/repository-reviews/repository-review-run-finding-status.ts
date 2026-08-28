@@ -1,10 +1,16 @@
 import type {
-  RepositoryReviewFinding,
+  RepositoryReviewMatchState,
   RepositoryReviewRunFindingStatusState,
 } from "@/api/repository-reviews"
 
+interface RunFindingStatusView {
+  run_finding_status?: RepositoryReviewRunFindingStatusState
+  repository_match_state?: RepositoryReviewMatchState
+  repository_finding_id?: string
+}
+
 export function runFindingStatusState(
-  finding: RepositoryReviewFinding,
+  finding: RunFindingStatusView,
 ): RepositoryReviewRunFindingStatusState {
   if (finding.run_finding_status) return finding.run_finding_status
   if (finding.repository_match_state === "provisional") return "needs_review"
@@ -16,9 +22,7 @@ export function runFindingStatusState(
   return "pending"
 }
 
-export function runFindingStatusLabel(
-  finding: RepositoryReviewFinding,
-): string {
+export function runFindingStatusLabel(finding: RunFindingStatusView): string {
   switch (runFindingStatusState(finding)) {
     case "processing":
       return "Processing"
@@ -36,7 +40,7 @@ export function runFindingStatusLabel(
 }
 
 export function runFindingStatusCompactLabel(
-  finding: RepositoryReviewFinding,
+  finding: RunFindingStatusView,
 ): string {
   switch (runFindingStatusState(finding)) {
     case "associated_new":
@@ -51,7 +55,7 @@ export function runFindingStatusCompactLabel(
 }
 
 export function runFindingStatusDescription(
-  finding: RepositoryReviewFinding,
+  finding: RunFindingStatusView,
 ): string {
   switch (runFindingStatusState(finding)) {
     case "processing":
@@ -70,19 +74,19 @@ export function runFindingStatusDescription(
 }
 
 export function runFindingRepositoryFindingID(
-  finding: RepositoryReviewFinding,
+  finding: RunFindingStatusView,
 ): string | undefined {
   return finding.repository_finding_id
 }
 
 export function runFindingStatusCanRetry(
-  finding: RepositoryReviewFinding,
+  finding: RunFindingStatusView,
 ): boolean {
   return runFindingStatusState(finding) === "failed"
 }
 
 export function runFindingStatusIsInProgress(
-  finding: RepositoryReviewFinding,
+  finding: RunFindingStatusView,
 ): boolean {
   const state = runFindingStatusState(finding)
   return state === "pending" || state === "processing"

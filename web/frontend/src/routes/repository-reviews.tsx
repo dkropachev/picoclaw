@@ -72,11 +72,7 @@ function RepositoryReviewsRoutePage() {
         void navigate({
           to: "/repository-reviews/$id",
           params: { id: review.id },
-          search: {
-            ...search,
-            scope: "current",
-            offset: 0,
-          },
+          search,
         })
       }
     />

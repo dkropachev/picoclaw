@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 export function CollectionSelectionBar({
   selectedCount,
   deleting = false,
+  disabled = false,
   deleteDisabled = false,
   onDelete,
   onClear,
@@ -15,8 +16,9 @@ export function CollectionSelectionBar({
 }: {
   selectedCount: number
   deleting?: boolean
+  disabled?: boolean
   deleteDisabled?: boolean
-  onDelete: () => void
+  onDelete?: () => void
   onClear: () => void
   children?: ReactNode
   message?: ReactNode
@@ -36,27 +38,29 @@ export function CollectionSelectionBar({
             {message}
           </span>
         )}
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
           {children}
-          <Button
-            type="button"
-            size="sm"
-            variant="destructive"
-            disabled={deleting || deleteDisabled}
-            onClick={onDelete}
-          >
-            {deleting ? (
-              <IconLoader2 className="animate-spin" />
-            ) : (
-              <IconTrash />
-            )}
-            Delete
-          </Button>
+          {onDelete && (
+            <Button
+              type="button"
+              size="sm"
+              variant="destructive"
+              disabled={disabled || deleting || deleteDisabled}
+              onClick={onDelete}
+            >
+              {deleting ? (
+                <IconLoader2 className="animate-spin" />
+              ) : (
+                <IconTrash />
+              )}
+              Delete
+            </Button>
+          )}
           <Button
             type="button"
             size="sm"
             variant="ghost"
-            disabled={deleting}
+            disabled={disabled || deleting}
             onClick={onClear}
           >
             <IconX />

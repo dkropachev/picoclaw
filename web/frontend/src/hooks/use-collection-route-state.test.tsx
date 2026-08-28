@@ -115,6 +115,50 @@ describe("collection route state", () => {
     expect(oldQuery.result.current.selectedCount).toBe(0)
   })
 
+  it("isolates and restores state when a mounted collection key changes", async () => {
+    const onSearchChange = vi.fn()
+    const state = renderHook(
+      ({ collectionKey }) =>
+        useCollectionRouteState({
+          collectionKey,
+          defaultQuery: "ORDER BY updated DESC",
+          supportedViews: views,
+          search: { q: "status = ready" },
+          onSearchChange,
+        }),
+      { initialProps: { collectionKey: "generation-one" } },
+    )
+
+    act(() => {
+      state.result.current.setSelection(["one"])
+      state.result.current.setView("grid")
+      state.result.current.rememberSuccessfulQuery("status = first")
+    })
+    state.rerender({ collectionKey: "generation-two" })
+    await waitFor(() => expect(state.result.current.selectedCount).toBe(0))
+    expect(state.result.current.view).toBe("list")
+    expect(state.result.current.recentQueries).toEqual([])
+
+    act(() => {
+      state.result.current.setSelection(["two"])
+      state.result.current.setView("table")
+      state.result.current.rememberSuccessfulQuery("status = second")
+    })
+    state.rerender({ collectionKey: "generation-one" })
+    await waitFor(() =>
+      expect([...state.result.current.selectedIDs]).toEqual(["one"]),
+    )
+    expect(state.result.current.view).toBe("grid")
+    expect(state.result.current.recentQueries[0]).toBe("status = first")
+
+    state.rerender({ collectionKey: "generation-two" })
+    await waitFor(() =>
+      expect([...state.result.current.selectedIDs]).toEqual(["two"]),
+    )
+    expect(state.result.current.view).toBe("table")
+    expect(state.result.current.recentQueries[0]).toBe("status = second")
+  })
+
   it("forgets one invalidated item without discarding cross-page selection", () => {
     const first = renderCollectionState()
     act(() => first.result.current.setLoadedSelection(["merged", "kept"], true))

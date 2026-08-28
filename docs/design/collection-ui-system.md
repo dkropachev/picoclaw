@@ -7,8 +7,10 @@ system. Standard surfaces include Accounts, Account Routers, Model Aliases,
 Model Routers, MCP Servers, Agents, Model Evaluations, Skills, Tools, Event
 Sources, Workflow Definitions, Git Workspaces, Development Workspaces,
 Development Repository Assignments, and Development Workflow Configurations.
-New collection surfaces, and legacy collection surfaces when materially
-changed, must adopt this contract.
+Repository Review Run Findings, Repository Findings, and Repository Review
+Issue Previews are also standard collections even though they are nested below
+an owning review or repository. New collection surfaces, and legacy collection
+surfaces when materially changed, must adopt this contract.
 
 This standard does not apply to intrinsically unique experiences such as chat,
 logs, code viewers, diagrams, result reports, marketplace search, or a single
@@ -58,6 +60,13 @@ state, next-page state, refresh, and applicable mutations to
 `StandardCollectionPage`. Route components stay thin and provide search-state
 adapters, resource metadata, navigation, and specialized detail/editor content;
 they do not recreate collection infrastructure.
+
+Nested collections use the same production controller. They may add the shared
+context bar for Back navigation and parent identity, leading status/filter
+content, and metadata-driven selection actions, but they do not replace the
+shared shell, query toolbar, view switch, results, paging, or route-state
+controller. Selection actions such as retry, validate, discuss, generate, or
+publish use the same explicit selected-ID state as bulk deletion.
 
 ## Views And Responsive Layout
 
@@ -133,23 +142,26 @@ maximum page size 200.
 
 Canonical pilot routes:
 
-| Collection            | List                            | New                      | Detail                      | Edit / related                                                       |
-| --------------------- | ------------------------------- | ------------------------ | --------------------------- | -------------------------------------------------------------------- |
-| Model Aliases         | `/models/aliases`               | `/models/aliases/new`    | `/models/aliases/:name`     | `/:name/edit`                                                        |
-| Model Routers         | `/models/routers`               | `/models/routers/new`    | `/models/routers/:name`     | `/:name/edit`                                                        |
-| MCP Servers           | `/agent/mcp/servers`            | `/agent/mcp/servers/new` | `/agent/mcp/servers/:name`  | `/:name/edit`; settings live at `/agent/mcp/settings`                |
-| Agents                | `/agent/agents`                 | `/agent/agents/new`      | `/agent/agents/:id`         | `/:id/edit`, `/:id/capabilities`, `/:id/activity`                    |
-| Model Evaluations     | `/model-evaluations`            | `/model-evaluations/new` | `/model-evaluations/:id`    | `/:id/edit`, `/:id/languages`, `/:id/corpus`, `/:id/report`          |
-| Event Sources         | `/event-sources`                | `/event-sources/new`     | `/event-sources/:id`        | `/:id/edit`; ingress and storage policy at `/event-sources/settings` |
-| Skills                | `/agent/skills`                 | `/agent/skills/new`      | `/agent/skills/:id`         | None; marketplace choices remain at `/agent/hub`                     |
-| Tools                 | `/agent/tools`                  | None                     | `/agent/tools/:id`          | `/:id/edit`; global adaptation at `/agent/tools/settings/adaptation` |
-| Workflow Definitions  | `/agent/workflows`              | `/agent/workflows/new`   | `/agent/workflows/:id`      | `/:id/edit`; global workflow policy at `/agent/workflows/settings`   |
-| Workflow Runs         | `/agent/workflows/runs`         | None                     | `/agent/workflows/runs/:id` | Operational exemption; shared List/Table only                        |
-| Git Workspaces        | `/agent/git-workspaces`         | None                     | `/agent/git-workspaces/:id` | History at `/history`; global limits at `/settings`                  |
-| Git Workspace History | `/agent/git-workspaces/history` | None                     | None                        | Operational exemption; shared List/Table only                        |
-| Development Workspaces | `/development` | `/development/new` | `/development/:id` | Workspace-owned Overview, Changes, Files, and Activity views |
-| Repository Assignments | `/development/repositories` | `/development/repositories/new` | `/development/repositories/:id` | `/:id/edit` |
-| Workflow Configurations | `/development/workflow-configurations` | `/development/workflow-configurations/new` | `/development/workflow-configurations/:id` | `/:id/edit` |
+| Collection              | List                                            | New                                        | Detail                                                     | Edit / related                                                       |
+| ----------------------- | ----------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------- |
+| Model Aliases           | `/models/aliases`                               | `/models/aliases/new`                      | `/models/aliases/:name`                                    | `/:name/edit`                                                        |
+| Model Routers           | `/models/routers`                               | `/models/routers/new`                      | `/models/routers/:name`                                    | `/:name/edit`                                                        |
+| MCP Servers             | `/agent/mcp/servers`                            | `/agent/mcp/servers/new`                   | `/agent/mcp/servers/:name`                                 | `/:name/edit`; settings live at `/agent/mcp/settings`                |
+| Agents                  | `/agent/agents`                                 | `/agent/agents/new`                        | `/agent/agents/:id`                                        | `/:id/edit`, `/:id/capabilities`, `/:id/activity`                    |
+| Model Evaluations       | `/model-evaluations`                            | `/model-evaluations/new`                   | `/model-evaluations/:id`                                   | `/:id/edit`, `/:id/languages`, `/:id/corpus`, `/:id/report`          |
+| Event Sources           | `/event-sources`                                | `/event-sources/new`                       | `/event-sources/:id`                                       | `/:id/edit`; ingress and storage policy at `/event-sources/settings` |
+| Skills                  | `/agent/skills`                                 | `/agent/skills/new`                        | `/agent/skills/:id`                                        | None; marketplace choices remain at `/agent/hub`                     |
+| Tools                   | `/agent/tools`                                  | None                                       | `/agent/tools/:id`                                         | `/:id/edit`; global adaptation at `/agent/tools/settings/adaptation` |
+| Workflow Definitions    | `/agent/workflows`                              | `/agent/workflows/new`                     | `/agent/workflows/:id`                                     | `/:id/edit`; global workflow policy at `/agent/workflows/settings`   |
+| Workflow Runs           | `/agent/workflows/runs`                         | None                                       | `/agent/workflows/runs/:id`                                | Operational exemption; shared List/Table only                        |
+| Git Workspaces          | `/agent/git-workspaces`                         | None                                       | `/agent/git-workspaces/:id`                                | History at `/history`; global limits at `/settings`                  |
+| Git Workspace History   | `/agent/git-workspaces/history`                 | None                                       | None                                                       | Operational exemption; shared List/Table only                        |
+| Development Workspaces  | `/development`                                  | `/development/new`                         | `/development/:id`                                         | Workspace-owned Overview, Changes, Files, and Activity views         |
+| Repository Assignments  | `/development/repositories`                     | `/development/repositories/new`            | `/development/repositories/:id`                            | `/:id/edit`                                                          |
+| Workflow Configurations | `/development/workflow-configurations`          | `/development/workflow-configurations/new` | `/development/workflow-configurations/:id`                 | `/:id/edit`                                                          |
+| Review Run Findings     | `/repository-reviews/:id/findings`              | None                                       | `/repository-reviews/:id/findings/:findingId`              | None                                                                 |
+| Repository Findings     | `/repository-reviews/repositories/:id/findings` | None                                       | `/repository-reviews/repositories/:id/findings/:findingId` | Issue linking at `/:findingId/link-issue`                            |
+| Review Issue Previews   | `/repository-reviews/:id/issues`                | None                                       | `/repository-reviews/:id/issues/:draftId`                  | `/:draftId/edit`                                                     |
 
 Legacy `/models`, `/agent/mcp`, `?agent=`, `?probe=`, and Tools `?tab=` UI forms
 are not redirected or compatibility-rendered. Workflow `mode`, `workflow`, and
@@ -230,6 +242,18 @@ execution state, created time, and updated time and default to
 `ORDER BY updated DESC`. The list supports List, Table, and Grid without
 selection or deletion; intake remains the dedicated New route, and the routed
 workspace retains its specialized lifecycle, chat, code, and activity views.
+
+Repository review run findings, canonical repository findings, and issue
+previews expose automation-scoped typed query/cursor envelopes. Run findings
+remain immutable occurrence evidence; repository findings retain lifecycle and
+issue-generation actions; issue previews retain version-fenced publication
+state. Their list responses contain only compact summaries plus parent context,
+capabilities, `total`, `next_cursor`, `canonical_query`, and `query_schema`.
+Finding messages, commit/blob payloads, model observations, occurrence and
+resolution histories, preview bodies, labels, external issue details, and
+generation instructions remain on ID-addressed detail endpoints. Generation ID
+is a caller-visible, server-enforced issue-preview collection scope and is bound
+into its cursors.
 
 ## Governance And Evidence
 

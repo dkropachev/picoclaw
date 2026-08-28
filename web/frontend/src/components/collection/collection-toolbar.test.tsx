@@ -68,4 +68,23 @@ describe("CollectionSelectionBar", () => {
     expect(onDelete).toHaveBeenCalledOnce()
     expect(onClear).toHaveBeenCalledOnce()
   })
+
+  it("supports feature actions without a delete action", async () => {
+    const user = userEvent.setup()
+    const onClear = vi.fn()
+    const onRun = vi.fn()
+    render(
+      <CollectionSelectionBar selectedCount={1} onClear={onClear}>
+        <button type="button" onClick={onRun}>
+          Run action
+        </button>
+      </CollectionSelectionBar>,
+    )
+
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull()
+    await user.click(screen.getByRole("button", { name: "Run action" }))
+    await user.click(screen.getByRole("button", { name: "Clear selection" }))
+    expect(onRun).toHaveBeenCalledOnce()
+    expect(onClear).toHaveBeenCalledOnce()
+  })
 })

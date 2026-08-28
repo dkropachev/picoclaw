@@ -19,6 +19,7 @@ import {
   type RepositoryReviewFixEffortEstimate,
   generateRepositoryReviewIssues,
   getRepositoryReviewAutomationFinding,
+  getRepositoryReviewAutomationRepositoryFinding,
   postRepositoryReviewFinding,
   reserveRepositoryReviewValidations,
   resolveRepositoryReviewPossibleDuplicate,
@@ -85,7 +86,13 @@ export function RepositoryReviewFindingPage({
   const query = useQuery({
     queryKey: ["repository-review-finding", automationID, findingID],
     queryFn: ({ signal }) =>
-      getRepositoryReviewAutomationFinding(automationID, findingID, signal),
+      resourceKind === "repository"
+        ? getRepositoryReviewAutomationRepositoryFinding(
+            automationID,
+            findingID,
+            signal,
+          )
+        : getRepositoryReviewAutomationFinding(automationID, findingID, signal),
     retry: false,
     refetchInterval: (current) => {
       const currentDetail = current.state.data

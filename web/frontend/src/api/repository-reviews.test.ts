@@ -16,9 +16,13 @@ import {
   getRepositoryReviewAutomationFindings,
   getRepositoryReviewAutomationIssue,
   getRepositoryReviewAutomationOptions,
+  getRepositoryReviewAutomationRepositoryFinding,
   getRepositoryReviewCommitOptions,
   getRepositoryReviewProfile,
+  listRepositoryReviewAutomationFindingsPage,
   listRepositoryReviewAutomationIssues,
+  listRepositoryReviewAutomationIssuesPage,
+  listRepositoryReviewAutomationRepositoryFindingsPage,
   listRepositoryReviewAutomations,
   listRepositoryReviewAutomationsPage,
   listRepositoryReviewProfiles,
@@ -872,6 +876,184 @@ describe("repository review API", () => {
       "/api/repository-reviews/automations/auto%2Fslash/findings/finding%2Fslash",
       { signal: undefined },
     )
+  })
+
+  it("uses cursor collection contracts for findings, repository findings, and issues", async () => {
+    const automation = { id: "auto/slash", repository: "owner/repo" }
+    const finding = {
+      id: "finding/slash",
+      repository: "owner/repo",
+      path: "pkg/service.go",
+      severity: "high",
+      title: "Lost update",
+      status: "open",
+      run_finding_status: "failed",
+      association: "unassociated",
+      contributors: ["reviewer"],
+      created_at: "2026-08-28T11:00:00Z",
+      updated_at: "2026-08-28T12:00:00Z",
+    }
+    const repositoryFinding = {
+      id: "rrf/slash",
+      repository: "owner/repo",
+      canonical_title: "Lost update",
+      canonical_severity: "high",
+      path: "pkg/service.go",
+      symbol: "Save",
+      match_state: "known",
+      lifecycle: "open",
+      issue: { state: "none" },
+      validation_state: "not_requested",
+      occurrence_count: 1,
+      found_commit_count: 1,
+      created_at: "2026-08-28T11:00:00Z",
+      updated_at: "2026-08-28T12:00:00Z",
+    }
+    const issue = {
+      id: "issue/slash",
+      repository: "owner/repo",
+      finding_count: 1,
+      title: "Lost update",
+      state: "editing",
+      origin: "ai_generated",
+      canonical: true,
+      publishable: true,
+      version: 3,
+      created_at: "2026-08-28T11:00:00Z",
+      updated_at: "2026-08-28T12:00:00Z",
+    }
+    const metadata = {
+      total: 1,
+      next_cursor: "next-page",
+      canonical_query: "ALL ORDER BY updated DESC",
+      query_schema: { fields: [{ name: "updated", type: "timestamp" }] },
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({ ...metadata, automation, findings: [finding] }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...metadata,
+          automation,
+          repository_findings: [repositoryFinding],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          finding,
+          repository_finding: repositoryFinding,
+          contexts: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...metadata,
+          automation,
+          issues: [issue],
+          generation_id: "generation/slash",
+        }),
+      )
+
+    const runPage = await listRepositoryReviewAutomationFindingsPage(
+      "auto/slash",
+      {
+        query: "severity = high ORDER BY updated DESC",
+        cursor: "run-cursor",
+        limit: 25,
+      },
+    )
+    expect(runPage).toMatchObject({
+      findings: [{ id: "finding/slash", contributors: ["reviewer"] }],
+      next_cursor: "next-page",
+    })
+    expect(runPage.findings[0]).not.toHaveProperty("models")
+    expect(runPage.findings[0]).not.toHaveProperty("evidence")
+
+    const repositoryPage =
+      await listRepositoryReviewAutomationRepositoryFindingsPage("auto/slash", {
+        limit: 25,
+      })
+    expect(repositoryPage).toMatchObject({
+      repository_findings: [
+        {
+          id: "rrf/slash",
+          path: "pkg/service.go",
+          occurrence_count: 1,
+          found_commit_count: 1,
+        },
+      ],
+    })
+    expect(repositoryPage.repository_findings[0]).not.toHaveProperty(
+      "review_finding_ids",
+    )
+    expect(repositoryPage.repository_findings[0]).not.toHaveProperty(
+      "path_symbol_history",
+    )
+    await expect(
+      getRepositoryReviewAutomationRepositoryFinding("auto/slash", "rrf/slash"),
+    ).resolves.toMatchObject({ repository_finding: { id: "rrf/slash" } })
+    const issuePage = await listRepositoryReviewAutomationIssuesPage(
+      "auto/slash",
+      {
+        query: "   ",
+        cursor: "issue-cursor",
+        limit: 10,
+        generation_id: "generation/slash",
+      },
+    )
+    expect(issuePage).toMatchObject({
+      issues: [{ id: "issue/slash", finding_count: 1, version: 3 }],
+      generation_id: "generation/slash",
+    })
+    expect(issuePage.issues[0]).not.toHaveProperty("finding_ids")
+    expect(issuePage.issues[0]).not.toHaveProperty("body")
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/repository-reviews/automations/auto%2Fslash/findings?query=severity+%3D+high+ORDER+BY+updated+DESC&cursor=run-cursor&limit=25",
+      undefined,
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/repository-reviews/automations/auto%2Fslash/repository-findings?query=ALL+ORDER+BY+severity+DESC%2C+updated+DESC&limit=25",
+      undefined,
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      3,
+      "/api/repository-reviews/automations/auto%2Fslash/repository-findings/rrf%2Fslash",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      4,
+      "/api/repository-reviews/automations/auto%2Fslash/issues?query=ALL+ORDER+BY+updated+DESC&cursor=issue-cursor&limit=10&generation_id=generation%2Fslash",
+      undefined,
+    )
+  })
+
+  it("preserves structured collection query error positions", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          code: "invalid_query",
+          message: "Expected a predicate after AND",
+          position: 18,
+        },
+        400,
+      ),
+    )
+
+    await expect(
+      listRepositoryReviewAutomationFindingsPage("auto", {
+        query: 'title = "é" AND',
+      }),
+    ).rejects.toMatchObject({
+      name: "CollectionAPIError",
+      status: 400,
+      code: "invalid_query",
+      position: 18,
+    })
   })
 
   it("normalizes public run finding status and retries explicit findings", async () => {
