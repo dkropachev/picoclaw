@@ -323,6 +323,124 @@ func TestRepositoryReviewCampaignReconcileBackfillAndExactPromotion(t *testing.T
 	}
 }
 
+func TestRepositoryReviewCampaignReconcilePreservesMultiProfileLegacyProvenance(t *testing.T) {
+	store, state := repositoryReviewCoverageStore(t, "owner/legacy-union")
+	first := repositoryAuditTestFile("first.go", "1", 1)
+	second := repositoryAuditTestFile("second.go", "2", 1)
+	makePlan := func(profile string, files []FileRef) Plan {
+		plan := Plan{
+			Repository: state.Repository, CommitSHA: repositoryReviewCampaignTestCommit,
+			InventoryHash: repositoryReviewCampaignTestInventory, ProfileHash: profile,
+			Authoritative: true, PendingFiles: files, UnchangedFiles: []FileRef{},
+			CreatedAt: repositoryAuditTestNow,
+		}
+		plan.ID = planDigest(plan)
+		return plan
+	}
+	firstPlan := makePlan("sha256:legacy-first", []FileRef{first})
+	secondPlan := makePlan("sha256:legacy-second", []FileRef{first, second})
+	state.Runs = []ReviewRun{
+		{
+			ID: "run-first", PlanID: firstPlan.ID, CommitSHA: firstPlan.CommitSHA,
+			InventoryHash: firstPlan.InventoryHash, FindingIDs: []string{"finding"}, UnreviewedFiles: 1,
+		},
+		{
+			ID: "run-second", PlanID: secondPlan.ID, CommitSHA: secondPlan.CommitSHA,
+			InventoryHash: secondPlan.InventoryHash, FindingIDs: []string{"finding"}, UnreviewedFiles: 2,
+		},
+	}
+	state.Contexts = []FindingContext{
+		{
+			ID: "context-first", Repository: state.Repository, CommitSHA: firstPlan.CommitSHA,
+			InventoryHash: firstPlan.InventoryHash, ProfileHash: firstPlan.ProfileHash,
+			RunID: "run-first", Files: []FileRef{first},
+		},
+		{
+			ID: "context-second", Repository: state.Repository, CommitSHA: secondPlan.CommitSHA,
+			InventoryHash: secondPlan.InventoryHash, ProfileHash: secondPlan.ProfileHash,
+			RunID: "run-second", Files: []FileRef{first, second},
+		},
+	}
+	state.Findings = []Finding{{
+		ID: "finding", Repository: state.Repository, CommitSHA: firstPlan.CommitSHA,
+		File: first, ContextIDs: []string{"context-first", "context-second"},
+	}}
+	if err := store.save(&state); err != nil {
+		t.Fatal(err)
+	}
+	campaignID, begun := beginRepositoryReviewCampaignForTest(t, store, state.Repository, false)
+	coverage := RepositoryReviewCampaignCoverage{
+		ID: campaignID, CommitSHA: firstPlan.CommitSHA,
+		InventoryHash: firstPlan.InventoryHash, ProfileHash: "sha256:canonical-union",
+		ScopeDigest:         repositoryReviewCampaignTestScopeDigest(t, first, second),
+		RequiredAssignments: 4, SelectedFiles: 2, Exact: true,
+		Paths: map[string]RepositoryReviewCampaignPathCoverage{first.Path: {Inspected: true}},
+	}
+	reconciled, err := store.ReconcileCampaign(context.Background(), ReconcileCampaignRequest{
+		Repository: state.Repository, ExpectedReviewVersion: begun.ReviewVersion,
+		Coverage: coverage, SelectedScope: []FileRef{first, second},
+		Runs: []RepositoryReviewCampaignRunRecovery{
+			{ID: "run-first", Plan: firstPlan, InspectedFiles: 1, LegacyRecovered: true},
+			{ID: "run-second", Plan: secondPlan, InspectedFiles: 1, LegacyRecovered: true},
+		},
+		ContextIDs: []string{"context-first", "context-second"}, FindingIDs: []string{"finding"},
+	})
+	if err != nil || !reconciled.CurrentCampaign.Exact ||
+		!reconciled.Runs[0].LegacyRecovered || !reconciled.Runs[1].LegacyRecovered ||
+		reconciled.Runs[0].ProfileHash != firstPlan.ProfileHash ||
+		reconciled.Runs[1].ProfileHash != secondPlan.ProfileHash ||
+		reconciled.Runs[0].ScopeDigest == reconciled.Runs[1].ScopeDigest ||
+		reconciled.Findings[0].CampaignID != campaignID {
+		t.Fatalf("multi-profile reconcile = %#v err=%v", reconciled, err)
+	}
+}
+
+func TestRepositoryReviewCampaignLegacyPlanDigestCompatibilityIsNarrow(t *testing.T) {
+	file := repositoryAuditTestFile("legacy.go", "f", 10)
+	plan := Plan{
+		Repository: "owner/legacy-digest", CommitSHA: repositoryReviewCampaignTestCommit,
+		InventoryHash: repositoryReviewCampaignTestInventory,
+		ProfileHash:   repositoryReviewCampaignTestProfile, Authoritative: true,
+		PendingFiles: []FileRef{file}, UnchangedFiles: []FileRef{}, CreatedAt: repositoryAuditTestNow,
+	}
+	plan.ID = legacyRepositoryReviewPlanDigest(plan)
+	valid := RepositoryReviewCampaignRunRecovery{
+		ID: "legacy-run", Plan: plan, LegacyRecovered: true,
+	}
+	if err := ValidateRepositoryReviewCampaignRunRecovery(valid); err != nil {
+		t.Fatalf("historical legacy plan rejected: %v", err)
+	}
+	withoutMarker := valid
+	withoutMarker.LegacyRecovered = false
+	if err := ValidateRepositoryReviewCampaignRunRecovery(withoutMarker); err == nil {
+		t.Fatal("historical plan digest was accepted without the recovery marker")
+	}
+	for name, mutate := range map[string]func(*RepositoryReviewCampaignRunRecovery){
+		"branch": func(value *RepositoryReviewCampaignRunRecovery) { value.Plan.TargetBranch = "main" },
+		"default branch": func(value *RepositoryReviewCampaignRunRecovery) {
+			value.Plan.TargetIsDefault = true
+		},
+		"assignment": func(value *RepositoryReviewCampaignRunRecovery) {
+			value.Plan.RequiredAssignments = 4
+		},
+		"tamper": func(value *RepositoryReviewCampaignRunRecovery) { value.Plan.ProfileHash += "x" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if err := ValidateRepositoryReviewCampaignRunRecovery(candidate); err == nil {
+				t.Fatal("mutated historical plan was accepted")
+			}
+		})
+	}
+	store, _ := repositoryReviewCoverageStore(t, plan.Repository)
+	if _, err := store.Record(context.Background(), RecordRequest{
+		Plan: plan, RunID: "normal-record", Observations: []Observation{},
+	}); !errors.Is(err, ErrInvalidPlan) {
+		t.Fatalf("normal Record historical digest error = %v", err)
+	}
+}
+
 func TestRepositoryReviewCampaignReconcileRejectsMissingRunAtFullRetention(t *testing.T) {
 	store, state := repositoryReviewCoverageStore(t, "owner/campaign-pruned-run")
 	state.Runs = make([]ReviewRun, maxAutomationRunIDs)
@@ -1473,4 +1591,47 @@ func cloneRepositoryReviewCampaignCoverageForTest(
 		clone.Paths[pathValue] = pathCoverage
 	}
 	return &clone
+}
+
+func TestLegacyFindingIdentityAcceptsOnlyExactHistoricalOrRunBoundID(t *testing.T) {
+	file := FileRef{
+		Path: "pkg/legacy.go", BlobSHA: strings.Repeat("a", 40),
+		SizeBytes: 10, Category: "code", Mode: "100644",
+	}
+	candidate := FindingCandidate{
+		Severity: "high", Title: "Legacy identity", Symbol: "Save", File: file.Path,
+		Message: "State is lost.", Evidence: "The branch drops the write.",
+		Impact:     "The caller observes stale state.",
+		Validation: Validation{Status: "confirmed", Summary: "Traced the write path."},
+	}
+	origin := FindingContext{
+		Repository: "owner/repo", CommitSHA: strings.Repeat("b", 40),
+		RunID: "wr_origin", Files: []FileRef{file},
+	}
+	fingerprint := findingFingerprint(file, candidate)
+	finding := Finding{
+		Repository: origin.Repository, CommitSHA: origin.CommitSHA,
+		Fingerprint: fingerprint, File: file, Line: candidate.Line,
+		Severity: candidate.Severity, Title: candidate.Title, Symbol: candidate.Symbol,
+		Message: candidate.Message, Evidence: candidate.Evidence, Impact: candidate.Impact,
+		Validation: candidate.Validation, MatchHints: candidate.MatchHints, FixEffort: candidate.FixEffort,
+	}
+	for name, id := range map[string]string{
+		"run bound": stableID(
+			"rfn_", finding.Repository, finding.CommitSHA, origin.RunID, fingerprint,
+		),
+		"historical": stableID("rfn_", finding.Repository, fingerprint),
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidateFinding := finding
+			candidateFinding.ID = id
+			if !ValidateRepositoryReviewLegacyFindingIdentity(candidateFinding, origin, candidate) {
+				t.Fatalf("valid %s identity was rejected", name)
+			}
+		})
+	}
+	finding.ID = stableID("rfn_", finding.Repository, origin.RunID, fingerprint)
+	if ValidateRepositoryReviewLegacyFindingIdentity(finding, origin, candidate) {
+		t.Fatal("noncanonical legacy identity was accepted")
+	}
 }

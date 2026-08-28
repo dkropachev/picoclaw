@@ -70,9 +70,10 @@ type ReconcileCampaignRequest struct {
 // RepositoryReviewCampaignRunRecovery tags one retained legacy run and
 // installs its exact successful-child inspection count during backfill.
 type RepositoryReviewCampaignRunRecovery struct {
-	ID             string `json:"id"`
-	Plan           Plan   `json:"plan"`
-	InspectedFiles int    `json:"inspected_files"`
+	ID              string `json:"id"`
+	Plan            Plan   `json:"plan"`
+	InspectedFiles  int    `json:"inspected_files"`
+	LegacyRecovered bool   `json:"legacy_recovered,omitempty"`
 }
 
 // BeginCampaign installs controller-owned campaign authority without accepting
@@ -195,6 +196,27 @@ func (s Store) ReconcileCampaign(
 	if err != nil {
 		return RepositoryState{}, err
 	}
+	for _, recoveredRun := range request.Runs {
+		if !recoveredRun.LegacyRecovered {
+			continue
+		}
+		if recoveredRun.Plan.CampaignID != "" || recoveredRun.Plan.RequiredAssignments != 0 ||
+			recoveredRun.Plan.Repository != request.Repository ||
+			recoveredRun.Plan.CommitSHA != request.Coverage.CommitSHA ||
+			recoveredRun.Plan.InventoryHash != request.Coverage.InventoryHash ||
+			!recoveredRun.Plan.Authoritative {
+			return RepositoryState{}, ErrInvalidPlan
+		}
+		manifest, manifestErr := repositoryReviewCampaignFilesForPlan(recoveredRun.Plan)
+		if manifestErr != nil {
+			return RepositoryState{}, ErrInvalidPlan
+		}
+		for _, file := range manifest {
+			if selectedScope[file.Path] != file {
+				return RepositoryState{}, ErrInvalidPlan
+			}
+		}
+	}
 	request.ContextIDs, err = normalizeRepositoryReviewCampaignRecordIDs(
 		request.ContextIDs, 1_000_000, 256,
 	)
@@ -288,16 +310,24 @@ func (s Store) ReconcileCampaign(
 		if wasTagged && run.CampaignID != request.Coverage.ID {
 			return RepositoryState{}, ErrConflict
 		}
-		if wasTagged && (run.ProfileHash != request.Coverage.ProfileHash ||
-			run.ScopeDigest != request.Coverage.ScopeDigest ||
+		expectedProfileHash := request.Coverage.ProfileHash
+		expectedScopeDigest := request.Coverage.ScopeDigest
+		if recoveredRun.LegacyRecovered {
+			expectedProfileHash = recoveredRun.Plan.ProfileHash
+			expectedScopeDigest, _ = repositoryReviewCampaignScopeDigestForPlan(recoveredRun.Plan)
+		}
+		if wasTagged && (run.ProfileHash != expectedProfileHash ||
+			run.ScopeDigest != expectedScopeDigest ||
+			run.LegacyRecovered != recoveredRun.LegacyRecovered ||
 			run.InspectedFiles != recoveredRun.InspectedFiles) {
 			return RepositoryState{}, ErrConflict
 		}
 		if !wasTagged {
 			run.CampaignID = request.Coverage.ID
-			run.ProfileHash = request.Coverage.ProfileHash
-			run.ScopeDigest = request.Coverage.ScopeDigest
+			run.ProfileHash = expectedProfileHash
+			run.ScopeDigest = expectedScopeDigest
 			run.InspectedFiles = recoveredRun.InspectedFiles
+			run.LegacyRecovered = recoveredRun.LegacyRecovered
 			changed = true
 		}
 	}
@@ -329,6 +359,9 @@ func (s Store) ReconcileCampaign(
 		if !repositoryReviewCampaignFindingMatchesCoverage(
 			state, *finding, request.Coverage, selectedScope, indexes, recoveredRuns,
 		) {
+			return RepositoryState{}, ErrConflict
+		}
+		if finding.CampaignID != "" && finding.CampaignID != request.Coverage.ID {
 			return RepositoryState{}, ErrConflict
 		}
 		if finding.CampaignID == "" {
@@ -711,7 +744,10 @@ func normalizeRepositoryReviewCampaignRuns(
 		envelopeBytes += len(encodedPlan) + len(id) + 32
 		if id != run.ID || !validBoundedText(id, 1024) ||
 			envelopeBytes > maxRepositoryReviewCampaignRecoveryBytes ||
-			run.Plan.ID == "" || run.Plan.ID != planDigest(run.Plan) ||
+			run.Plan.ID == "" || run.Plan.ID != planDigest(run.Plan) &&
+			(!run.LegacyRecovered || run.Plan.ID != legacyRepositoryReviewPlanDigest(run.Plan)) ||
+			(run.LegacyRecovered && (run.Plan.CampaignID != "" || !run.Plan.Authoritative ||
+				run.Plan.RequiredAssignments != 0)) ||
 			run.InspectedFiles < 0 ||
 			run.InspectedFiles > maxReviewFiles {
 			return nil, ErrInvalidPlan
@@ -724,6 +760,46 @@ func normalizeRepositoryReviewCampaignRuns(
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+func legacyRepositoryReviewPlanDigest(plan Plan) string {
+	if plan.TargetBranch != "" || plan.AdvertisedDefaultBranch != "" || plan.TargetIsDefault {
+		return ""
+	}
+	legacy, _ := json.Marshal(struct {
+		ID                 string            `json:"id"`
+		Repository         string            `json:"repository"`
+		CommitSHA          string            `json:"commit_sha"`
+		InventoryHash      string            `json:"inventory_hash"`
+		ProfileHash        string            `json:"profile_hash"`
+		ForceCampaignID    string            `json:"force_campaign_id,omitempty"`
+		Authoritative      bool              `json:"authoritative,omitempty"`
+		StateVersion       int64             `json:"state_version"`
+		PendingFiles       []FileRef         `json:"pending_files"`
+		DeferredFiles      []FileRef         `json:"deferred_files,omitempty"`
+		UnchangedFiles     []FileRef         `json:"unchanged_files"`
+		UnsupportedFiles   []UnsupportedFile `json:"unsupported_files,omitempty"`
+		PreviouslyReviewed int               `json:"previously_reviewed"`
+		CreatedAt          time.Time         `json:"created_at"`
+	}{
+		Repository: plan.Repository, CommitSHA: plan.CommitSHA,
+		InventoryHash: plan.InventoryHash, ProfileHash: plan.ProfileHash,
+		ForceCampaignID: plan.ForceCampaignID, Authoritative: plan.Authoritative,
+		StateVersion: plan.StateVersion, PendingFiles: plan.PendingFiles,
+		DeferredFiles: plan.DeferredFiles, UnchangedFiles: plan.UnchangedFiles,
+		UnsupportedFiles: plan.UnsupportedFiles, PreviouslyReviewed: plan.PreviouslyReviewed,
+		CreatedAt: plan.CreatedAt,
+	})
+	return stableID("rpl_", string(legacy))
+}
+
+// ValidateRepositoryReviewCampaignRunRecovery verifies one retained legacy
+// run and its digest-bound plan without mutating repository state.
+func ValidateRepositoryReviewCampaignRunRecovery(
+	run RepositoryReviewCampaignRunRecovery,
+) error {
+	_, err := normalizeRepositoryReviewCampaignRuns([]RepositoryReviewCampaignRunRecovery{run})
+	return err
 }
 
 func repositoryReviewCampaignRecoveryDigest(request ReconcileCampaignRequest) (string, error) {
@@ -745,11 +821,20 @@ func repositoryReviewCampaignRunMatchesCoverage(
 	if err != nil {
 		return false
 	}
-	return run.ID == recovered.ID && run.PlanID == recovered.Plan.ID &&
+	baseMatches := run.ID == recovered.ID && run.PlanID == recovered.Plan.ID &&
 		run.CommitSHA == coverage.CommitSHA && run.InventoryHash == coverage.InventoryHash &&
 		recovered.Plan.Repository != "" && recovered.Plan.CommitSHA == coverage.CommitSHA &&
-		recovered.Plan.InventoryHash == coverage.InventoryHash &&
-		recovered.Plan.ProfileHash == coverage.ProfileHash && scopeDigest == coverage.ScopeDigest &&
+		recovered.Plan.InventoryHash == coverage.InventoryHash
+	if !baseMatches {
+		return false
+	}
+	if recovered.LegacyRecovered {
+		return recovered.Plan.CampaignID == "" &&
+			recovered.Plan.Authoritative && recovered.Plan.RequiredAssignments == 0 &&
+			validBoundedText(recovered.Plan.ProfileHash, 256) &&
+			validRepositoryReviewCampaignScopeDigest(scopeDigest)
+	}
+	return recovered.Plan.ProfileHash == coverage.ProfileHash && scopeDigest == coverage.ScopeDigest &&
 		(recovered.Plan.CampaignID == "" || recovered.Plan.CampaignID == coverage.ID)
 }
 
@@ -806,8 +891,7 @@ func repositoryReviewCampaignContextMatchesCoverage(
 	recoveredRuns map[string]RepositoryReviewCampaignRunRecovery,
 ) bool {
 	if contextRecord.Repository != state.Repository || contextRecord.CommitSHA != coverage.CommitSHA ||
-		contextRecord.InventoryHash != coverage.InventoryHash ||
-		contextRecord.ProfileHash != coverage.ProfileHash {
+		contextRecord.InventoryHash != coverage.InventoryHash {
 		return false
 	}
 	if len(contextRecord.Files) == 0 {
@@ -825,6 +909,14 @@ func repositoryReviewCampaignContextMatchesCoverage(
 	run := state.Runs[runIndex]
 	if run.CommitSHA != coverage.CommitSHA || run.InventoryHash != coverage.InventoryHash ||
 		(run.CampaignID != "" && run.CampaignID != coverage.ID) {
+		return false
+	}
+	recovered, recoveredExists := recoveredRuns[run.ID]
+	expectedProfileHash := coverage.ProfileHash
+	if recoveredExists && recovered.LegacyRecovered {
+		expectedProfileHash = recovered.Plan.ProfileHash
+	}
+	if contextRecord.ProfileHash != expectedProfileHash {
 		return false
 	}
 	if run.CampaignID == "" {

@@ -713,8 +713,10 @@ func TestRepositoryReviewModelOutcomeUsesRequestedReviewerAndAcknowledgedZeroFin
 	}
 	updated.ScopeSelection = &repoaudit.RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
 	updated.CampaignID = repoaudit.NewRepositoryReviewCampaignID()
+	updated.CampaignRecoveryPending = true
 	if projected := projectRepositoryReviewAutomation(updated); projected.ModelCoverageSketches != nil ||
 		projected.ScopeSelection != nil || projected.CampaignID != "" ||
+		projected.CampaignRecoveryPending ||
 		!projected.Progress.ScopeFrozen {
 		t.Fatalf(
 			"API projection state: sketches=%#v selection=%#v frozen=%v",
