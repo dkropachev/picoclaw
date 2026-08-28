@@ -128,6 +128,8 @@ func TestRepositoryReviewAutomationCollectionQueryAndPaging(t *testing.T) {
 	firstInput.Status = repoaudit.RepositoryReviewAutomationPaused
 	firstInput.PauseReason = repoaudit.RepositoryReviewPauseManual
 	firstInput.PauseDetail = "paused"
+	firstInput.Progress.ReviewedFiles = 2
+	firstInput.Progress.RemainingFiles = 8
 	first, err := store.CreateAutomation(t.Context(), firstInput)
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +141,8 @@ func TestRepositoryReviewAutomationCollectionQueryAndPaging(t *testing.T) {
 	secondInput.Status = repoaudit.RepositoryReviewAutomationPaused
 	secondInput.PauseReason = repoaudit.RepositoryReviewPauseManual
 	secondInput.PauseDetail = "paused"
+	secondInput.Progress.ReviewedFiles = 8
+	secondInput.Progress.RemainingFiles = 2
 	second, err := store.CreateAutomation(t.Context(), secondInput)
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +172,23 @@ func TestRepositoryReviewAutomationCollectionQueryAndPaging(t *testing.T) {
 		page.NextCursor == "" || page.Canonical != `status = "paused" ORDER BY name ASC` ||
 		!json.Valid(page.QuerySchema) {
 		t.Fatalf("collection page=%#v first=%s second=%s", page, first.ID, second.ID)
+	}
+
+	progressQuery := url.QueryEscape("progress >= 50 ORDER BY progress DESC")
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations?query="+progressQuery,
+		nil,
+	))
+	if response.Code != http.StatusOK {
+		t.Fatalf("progress collection status=%d body=%s", response.Code, response.Body.String())
+	}
+	if decodeErr := json.Unmarshal(response.Body.Bytes(), &page); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if page.Total != 1 || len(page.Automations) != 1 || page.Automations[0].ID != second.ID {
+		t.Fatalf("file-progress collection page=%#v", page)
 	}
 
 	response = httptest.NewRecorder()
@@ -209,7 +230,13 @@ func TestRepositoryReviewAutomationCollectionFields(t *testing.T) {
 	automation.Progress.CompletedBatches = 1
 	automation.Progress.TotalBatches = 4
 	automation.Progress.ReviewedFiles = 7
+	automation.Progress.RemainingFiles = 21
 	automation.Progress.Findings = 2
+	// A scope plan written by an older launcher is not authoritative without
+	// the durable internal selection that freezes it.
+	automation.ScopePlan = repoaudit.RepositoryReviewScopePlan{
+		Counts: repoaudit.RepositoryReviewScopePlanCounts{SelectedFiles: 100},
+	}
 	automation.UpdatedAt = time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 	for _, field := range []collectionquery.Field{
 		"id", "name", "repository", "branch", "status", "progress", "reviewed", "findings", "updated",
@@ -221,7 +248,7 @@ func TestRepositoryReviewAutomationCollectionFields(t *testing.T) {
 	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok || value.Number != 25 {
 		t.Fatalf("progress field=%#v ok=%v", value, ok)
 	}
-	automation.Progress.TotalBatches = 0
+	automation.Progress = repoaudit.RepositoryReviewProgress{}
 	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok || value.Number != 0 {
 		t.Fatalf("zero progress field=%#v ok=%v", value, ok)
 	}
@@ -687,11 +714,18 @@ func TestRepositoryReviewModelOutcomeUsesRequestedReviewerAndAcknowledgedZeroFin
 	updated.ScopeSelection = &repoaudit.RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
 	updated.CampaignID = repoaudit.NewRepositoryReviewCampaignID()
 	if projected := projectRepositoryReviewAutomation(updated); projected.ModelCoverageSketches != nil ||
-		projected.ScopeSelection != nil || projected.CampaignID != "" {
+		projected.ScopeSelection != nil || projected.CampaignID != "" ||
+		!projected.Progress.ScopeFrozen {
 		t.Fatalf(
-			"API projection exposed internal review state: sketches=%#v selection=%#v",
+			"API projection state: sketches=%#v selection=%#v frozen=%v",
 			projected.ModelCoverageSketches, projected.ScopeSelection,
+			projected.Progress.ScopeFrozen,
 		)
+	}
+	updated.ScopeSelection = nil
+	updated.Progress.ScopeFrozen = true
+	if projected := projectRepositoryReviewAutomation(updated); projected.Progress.ScopeFrozen {
+		t.Fatal("API projection trusted a non-durable scope_frozen marker")
 	}
 }
 
@@ -785,6 +819,88 @@ func TestRepositoryReviewAutomationStartAutoContinuesBoundedBatches(t *testing.T
 		math.Abs(completed.EstimatedCostUSD-0.00055) > 0.0000001 ||
 		price.InputPricePer1M != 9 || price.OutputPricePer1M != 13 {
 		t.Fatalf("completed=%#v stats=%#v calls=%d", completed, stats, calls.Load())
+	}
+}
+
+func TestRepositoryReviewAutomationNoProgressStopsAutoContinuationAfterOneBatch(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	controller.probe = func(context.Context) (codexAccountLimitsResponse, error) {
+		return codexAccountLimitsResponse{}, nil
+	}
+	var calls atomic.Int32
+	controller.runBatch = func(
+		_ context.Context,
+		_ repoaudit.RepositoryReviewAutomation,
+		runID string,
+		_ workflows.AgentUsageObserver,
+	) (*workflows.RunResult, error) {
+		call := calls.Add(1)
+		remaining := 2
+		reviewed := 0
+		if call == 2 {
+			remaining = 0
+			reviewed = 1
+		}
+		return &workflows.RunResult{
+			RunID: runID, Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{
+				"remainingFiles": remaining, "reviewedFiles": reviewed,
+			},
+		}, nil
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation, err := store.CreateAutomation(t.Context(), testRepositoryReviewAutomation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/start",
+		map[string]any{"expected_version": automation.Version},
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("start status=%d body=%s", response.Code, response.Body.String())
+	}
+	paused := waitForRepositoryReviewAutomationStatus(
+		t,
+		store,
+		automation.ID,
+		repoaudit.RepositoryReviewAutomationPaused,
+	)
+	if calls.Load() != 1 || len(paused.RunIDs) != 1 ||
+		paused.PauseReason != repoaudit.RepositoryReviewPauseNoProgress ||
+		paused.Progress.CompletedBatches != 1 || paused.Progress.RemainingFiles != 2 {
+		t.Fatalf("no-progress automation=%#v calls=%d", paused, calls.Load())
+	}
+	time.Sleep(50 * time.Millisecond)
+	if calls.Load() != 1 {
+		t.Fatalf("no-progress auto-continuation launched %d batches", calls.Load())
+	}
+	response = repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/resume",
+		map[string]any{"expected_version": paused.Version},
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("resume status=%d body=%s", response.Code, response.Body.String())
+	}
+	completed := waitForRepositoryReviewAutomationStatus(
+		t,
+		store,
+		automation.ID,
+		repoaudit.RepositoryReviewAutomationCompleted,
+	)
+	if calls.Load() != 2 || completed.Progress.CompletedBatches != 2 {
+		t.Fatalf("resumed no-progress automation=%#v calls=%d", completed, calls.Load())
 	}
 }
 
@@ -913,7 +1029,9 @@ func TestRepositoryReviewAutomationAutoContinueReusesResolvedCommit(t *testing.T
 		}
 		return &workflows.RunResult{
 			RunID: runID, Status: workflows.RunStatusSucceeded,
-			Outputs: map[string]any{"commit": rememberedCommit, "remainingFiles": remaining},
+			Outputs: map[string]any{
+				"commit": rememberedCommit, "remainingFiles": remaining, "reviewedFiles": 1,
+			},
 		}, nil
 	}
 	store, err := handler.repositoryReviewStore()
@@ -1424,11 +1542,13 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 	expectedRunIDs := append(append([]string(nil), previousRunIDs...), newRunID)
 	expectedQueuedProgress := progress
 	expectedQueuedProgress.Stage = "queued"
+	expectedProjectedProgress := expectedQueuedProgress
+	expectedProjectedProgress.ScopeFrozen = true
 	if resumed.Automation.Status != repoaudit.RepositoryReviewAutomationRunning || newRunID == "" ||
 		!reflect.DeepEqual(resumed.Automation.RunIDs, expectedRunIDs) ||
 		resumed.Automation.Usage != usage ||
 		math.Abs(resumed.Automation.EstimatedCostUSD-input.EstimatedCostUSD) > 0.0000001 ||
-		resumed.Automation.Progress != expectedQueuedProgress ||
+		resumed.Automation.Progress != expectedProjectedProgress ||
 		!resumed.Automation.StartedAt.Equal(startedAt) {
 		t.Fatalf("resumed failed campaign=%#v", resumed.Automation)
 	}

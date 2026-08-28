@@ -620,3 +620,117 @@ func automationTestIndex(index int) string {
 	}
 	return value
 }
+
+func TestRepositoryReviewAutomationFileProgress(t *testing.T) {
+	tests := []struct {
+		name       string
+		automation RepositoryReviewAutomation
+		resolved   int
+		total      int
+		percent    float64
+	}{
+		{
+			name: "frozen scope before first checkpoint",
+			automation: RepositoryReviewAutomation{
+				Status: RepositoryReviewAutomationRunning,
+				ScopeSelection: &RepositoryReviewScopeSelection{
+					IncludePrefixes: []string{"pkg"},
+				},
+				ScopePlan: RepositoryReviewScopePlan{Counts: RepositoryReviewScopePlanCounts{
+					SelectedFiles: 10,
+				}},
+				Progress: RepositoryReviewProgress{
+					CompletedBatches: 16, TotalBatches: 32, Findings: 74,
+				},
+			},
+			total: 10,
+		},
+		{
+			name: "frozen scope resolved from remaining",
+			automation: RepositoryReviewAutomation{
+				Status: RepositoryReviewAutomationRunning,
+				ScopeSelection: &RepositoryReviewScopeSelection{
+					IncludePrefixes: []string{"pkg"},
+				},
+				ScopePlan: RepositoryReviewScopePlan{Counts: RepositoryReviewScopePlanCounts{
+					SelectedFiles: 10,
+				}},
+				Progress: RepositoryReviewProgress{
+					CompletedBatches: 1, TotalBatches: 3, RemainingFiles: 6,
+				},
+			},
+			resolved: 4, total: 10, percent: 40,
+		},
+		{
+			name: "frozen scope rounds one third like the UI",
+			automation: RepositoryReviewAutomation{
+				Status:         RepositoryReviewAutomationRunning,
+				ScopeSelection: &RepositoryReviewScopeSelection{},
+				ScopePlan: RepositoryReviewScopePlan{Counts: RepositoryReviewScopePlanCounts{
+					SelectedFiles: 3,
+				}},
+				Progress: RepositoryReviewProgress{RemainingFiles: 2},
+			},
+			resolved: 1, total: 3, percent: 33,
+		},
+		{
+			name: "legacy transient scope plan uses durable counters",
+			automation: RepositoryReviewAutomation{
+				Status: RepositoryReviewAutomationPaused,
+				ScopePlan: RepositoryReviewScopePlan{Counts: RepositoryReviewScopePlanCounts{
+					SelectedFiles: 100,
+				}},
+				Progress: RepositoryReviewProgress{
+					ReviewedFiles: 3, UnsupportedFiles: 1, RemainingFiles: 6,
+				},
+			},
+			resolved: 4, total: 10, percent: 40,
+		},
+		{
+			name: "legacy counters",
+			automation: RepositoryReviewAutomation{
+				Status: RepositoryReviewAutomationPaused,
+				Progress: RepositoryReviewProgress{
+					ReviewedFiles: 3, UnsupportedFiles: 1, RemainingFiles: 6,
+				},
+			},
+			resolved: 4, total: 10, percent: 40,
+		},
+		{
+			name: "completed all prechecked",
+			automation: RepositoryReviewAutomation{
+				Status: RepositoryReviewAutomationCompleted,
+			},
+			percent: 100,
+		},
+		{
+			name: "completed frozen scope ignores stale remaining projection",
+			automation: RepositoryReviewAutomation{
+				Status: RepositoryReviewAutomationCompleted,
+				ScopeSelection: &RepositoryReviewScopeSelection{
+					CandidateIDs: []string{}, HotpathCandidateIDs: []string{},
+				},
+				ScopePlan: RepositoryReviewScopePlan{Counts: RepositoryReviewScopePlanCounts{
+					SelectedFiles: 10,
+				}},
+				Progress: RepositoryReviewProgress{RemainingFiles: 6},
+			},
+			resolved: 10, total: 10, percent: 100,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			progress := RepositoryReviewAutomationFileProgress(test.automation)
+			if progress.ResolvedFiles != test.resolved || progress.TotalFiles != test.total ||
+				progress.Percent != test.percent {
+				t.Fatalf(
+					"file progress=%#v, want resolved=%d total=%d percent=%v",
+					progress,
+					test.resolved,
+					test.total,
+					test.percent,
+				)
+			}
+		})
+	}
+}

@@ -39,6 +39,8 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 
+import { repositoryReviewFileProgressLabel } from "./repository-review-file-progress"
+
 const fullCommitSHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu
 
 type ReviewAction = "start" | "pause" | "resume" | "restart"
@@ -180,7 +182,7 @@ export function RepositoryReviewDetailPage({
               <RelatedButton
                 icon={<IconFileDescription />}
                 label="Findings"
-                detail={`${review.progress.findings} review finding${review.progress.findings === 1 ? "" : "s"}`}
+                detail={`${review.progress.findings} finding occurrence${review.progress.findings === 1 ? "" : "s"}`}
                 onClick={onFindings}
               />
               <RelatedButton
@@ -208,7 +210,7 @@ export function RepositoryReviewDetailPage({
                 ],
                 ["Target is default", review.target_is_default ? "Yes" : "No"],
                 ["Stage", review.progress.stage || "waiting"],
-                ["Progress", progressLabel(review)],
+                ["Progress", repositoryReviewFileProgressLabel(review)],
                 [
                   "Reviewer",
                   review.reviewer_models.join(", ") || "Unavailable",
@@ -231,7 +233,7 @@ export function RepositoryReviewDetailPage({
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <Metric
-                label="Reviewed files"
+                label="Fully reviewed files"
                 value={review.progress.reviewed_files}
               />
               <Metric
@@ -239,11 +241,20 @@ export function RepositoryReviewDetailPage({
                 value={review.progress.remaining_files}
               />
               <Metric
-                label="Unsupported"
+                label="Unsupported files"
                 value={review.progress.unsupported_files}
               />
-              <Metric label="Findings" value={review.progress.findings} />
+              <Metric
+                label="Finding occurrences"
+                value={review.progress.findings}
+              />
             </div>
+
+            <p className="text-muted-foreground text-sm">
+              Fully reviewed files count only after every required reviewer
+              acknowledges the file. Finding occurrences may be retained from
+              partial inspection before a file is fully reviewed.
+            </p>
 
             <section aria-labelledby="review-usage" className="space-y-3">
               <h2 id="review-usage" className="font-semibold">
@@ -298,7 +309,7 @@ export function RepositoryReviewDetailPage({
               </p>
             )}
 
-            {review.scope_plan && (
+            {review.scope_plan && review.progress.scope_frozen === true && (
               <section className="border-border space-y-3 rounded-lg border p-4">
                 <h2 className="font-semibold">Pinned scope</h2>
                 <p className="text-muted-foreground text-sm">
@@ -690,11 +701,6 @@ function selectedCommitSHA(state: ContinueDialogState): string {
   if (state.choice === "remembered") return state.options.remembered.sha.trim()
   if (state.choice === "latest") return state.options.latest.sha.trim()
   return state.customSHA.trim()
-}
-
-function progressLabel(review: RepositoryReviewAutomation): string {
-  if (!review.progress.total_batches) return "Not started"
-  return `${Math.round((review.progress.completed_batches / review.progress.total_batches) * 100)}%`
 }
 
 function resolvedCommit(

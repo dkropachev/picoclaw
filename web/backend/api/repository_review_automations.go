@@ -351,12 +351,8 @@ func repositoryReviewAutomationCollectionField(
 	case "status":
 		return collectionquery.EnumValue(string(automation.Status)), true
 	case "progress":
-		percent := 0.0
-		if automation.Progress.TotalBatches > 0 {
-			percent = float64(automation.Progress.CompletedBatches) /
-				float64(automation.Progress.TotalBatches) * 100
-		}
-		return collectionquery.NumberValue(percent), true
+		progress := repoaudit.RepositoryReviewAutomationFileProgress(automation)
+		return collectionquery.NumberValue(progress.Percent), true
 	case "reviewed":
 		return collectionquery.NumberValue(float64(automation.Progress.ReviewedFiles)), true
 	case "findings":
@@ -645,6 +641,7 @@ func projectRepositoryReviewAutomation(
 ) repoaudit.RepositoryReviewAutomation {
 	automation.CampaignID = ""
 	automation.ModelCoverageSketches = nil
+	automation.Progress.ScopeFrozen = automation.ScopeSelection != nil
 	automation.ScopeSelection = nil
 	return automation
 }

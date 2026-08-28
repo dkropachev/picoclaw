@@ -273,6 +273,7 @@ describe("repository review API", () => {
           automations: [
             {
               id: "auto_1",
+              pause_reason: "no_progress",
               reviewer_models: null,
               run_ids: null,
               model_prices: null,
@@ -343,6 +344,7 @@ describe("repository review API", () => {
       automations: [
         {
           id: "auto_1",
+          pause_reason: "no_progress",
           account_ref: "",
           reviewer_models: [],
           max_parallel_children: 8,
@@ -365,7 +367,7 @@ describe("repository review API", () => {
           },
           usage: { total_tokens: 0 },
           budget: { guard_expression: "" },
-          progress: { stage: "waiting" },
+          progress: { stage: "waiting", scope_frozen: false },
           model_stats: [{ model: "fast", total_tokens: 100, latency_ms: 250 }],
           account_limits: [
             {

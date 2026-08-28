@@ -2253,6 +2253,29 @@ func repositoryReviewDurableRecordRemainingFiles(run *workflows.Run) (int, bool)
 	return repositoryReviewOutputNonnegativeInt(recordedRun, "remaining_files")
 }
 
+func repositoryReviewDurableRecordFileCounts(run *workflows.Run) (int, int, bool) {
+	record := repositoryReviewRunStep(run, "record")
+	if record.Status != workflows.RunStatusSucceeded || strings.TrimSpace(record.Error) != "" {
+		return 0, 0, false
+	}
+	recordedRun, ok := record.Outputs["run"].(map[string]any)
+	if !ok {
+		return 0, 0, false
+	}
+	reviewed, reviewedFound := repositoryReviewOutputNonnegativeInt(
+		recordedRun,
+		"reviewed_files",
+	)
+	unsupported, unsupportedFound := repositoryReviewOutputNonnegativeInt(
+		recordedRun,
+		"unsupported_files",
+	)
+	if !reviewedFound || !unsupportedFound {
+		return 0, 0, false
+	}
+	return reviewed, unsupported, true
+}
+
 func repositoryReviewDurableResultRemainingFiles(run *workflows.Run) (int, bool) {
 	result := repositoryReviewRunStep(run, "result")
 	if result.Status != workflows.RunStatusSucceeded || strings.TrimSpace(result.Error) != "" {
@@ -2422,6 +2445,8 @@ func (c *repositoryReviewController) finishAutomationRun(
 			if candidate.ActiveRunID != runID {
 				return nil
 			}
+			previousProgress := candidate.Progress
+			fileProgress := false
 			candidate.ActiveRunID = ""
 			candidate.RequestedPauseReason = ""
 			candidate.RequestedPauseDetail = ""
@@ -2434,6 +2459,13 @@ func (c *repositoryReviewController) finishAutomationRun(
 				)
 				applyRepositoryReviewRunProgress(candidate, result, persistedRun)
 				applyRepositoryReviewOutcome(candidate, outcome)
+				fileProgress = repositoryReviewFileProgressMade(
+					previousProgress,
+					candidate.Progress,
+					persistedRun,
+					outcome,
+					c.runBatch != nil && persistedRun == nil,
+				)
 			}
 			if runErr == nil && result != nil && result.Status == workflows.RunStatusSucceeded && !checkpointed {
 				candidate.Status = repoaudit.RepositoryReviewAutomationFailed
@@ -2475,6 +2507,15 @@ func (c *repositoryReviewController) finishAutomationRun(
 				candidate.CompletedAt = c.clock()
 				return nil
 			}
+			if checkpointed && !fileProgress {
+				candidate.Status = repoaudit.RepositoryReviewAutomationPaused
+				candidate.PauseReason = repoaudit.RepositoryReviewPauseNoProgress
+				candidate.PauseDetail = repositoryReviewBoundedDetail(
+					"Automatic continuation stopped after a verified batch resolved zero files. Resume to retry the remaining files.",
+				)
+				candidate.Progress.Stage = "paused"
+				return nil
+			}
 			if candidate.AutoContinue {
 				candidate.Status = repoaudit.RepositoryReviewAutomationIdle
 				candidate.PauseReason = ""
@@ -2504,6 +2545,31 @@ func (c *repositoryReviewController) finishAutomationRun(
 			})
 		}
 	}
+}
+
+func repositoryReviewFileProgressMade(
+	before repoaudit.RepositoryReviewProgress,
+	after repoaudit.RepositoryReviewProgress,
+	persistedRun *workflows.Run,
+	outcome repositoryReviewOutcome,
+	allowProjectedCounts bool,
+) bool {
+	if before.RemainingFiles > 0 && after.RemainingFiles < before.RemainingFiles {
+		return true
+	}
+	reviewed, unsupported, durableCountsFound := repositoryReviewDurableRecordFileCounts(persistedRun)
+	if durableCountsFound && (reviewed > 0 || unsupported > 0) {
+		return true
+	}
+	if outcome.found && (outcome.reviewedFiles > before.ReviewedFiles ||
+		outcome.unsupportedFiles > before.UnsupportedFiles) {
+		return true
+	}
+	// runBatch is a controller test seam with no persisted workflow run. Keep
+	// its projected counters useful without letting production workflow outputs
+	// qualify as durable file progress.
+	return allowProjectedCounts && (after.ReviewedFiles > before.ReviewedFiles ||
+		after.UnsupportedFiles > before.UnsupportedFiles)
 }
 
 func repositoryReviewFinalPause(
@@ -2567,9 +2633,14 @@ func applyRepositoryReviewRunProgress(
 	if remaining, ok := repositoryReviewRemainingFiles(result, persistedRun); ok {
 		automation.Progress.RemainingFiles = remaining
 	}
-	reviewed := repositoryReviewInt(result.Outputs["reviewedFiles"])
-	if reviewed == 0 {
-		reviewed = repositoryReviewInt(result.Outputs["reviewed_files"])
+	reviewed := 0
+	if persistedRun == nil {
+		reviewed = repositoryReviewInt(result.Outputs["reviewedFiles"])
+		if reviewed == 0 {
+			reviewed = repositoryReviewInt(result.Outputs["reviewed_files"])
+		}
+	} else if durableReviewed, _, ok := repositoryReviewDurableRecordFileCounts(persistedRun); ok {
+		reviewed = durableReviewed
 	}
 	if reviewed > 0 {
 		automation.Progress.ReviewedFiles += reviewed
