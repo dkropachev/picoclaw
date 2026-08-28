@@ -235,6 +235,7 @@ type RepositoryReviewAutomation struct {
 	RequestedPauseReason    RepositoryReviewPauseReason            `json:"requested_pause_reason,omitempty"`
 	RequestedPauseDetail    string                                 `json:"requested_pause_detail,omitempty"`
 	CampaignID              string                                 `json:"campaign_id,omitempty"`
+	CampaignRecoveryPending bool                                   `json:"campaign_recovery_pending,omitempty"`
 	ActiveRunID             string                                 `json:"active_run_id,omitempty"`
 	RunIDs                  []string                               `json:"run_ids"`
 	Usage                   RepositoryReviewTokenUsage             `json:"usage"`
@@ -801,6 +802,16 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		!validOptionalAutomationText(automation.PauseDetail, 4096) ||
 		!validOptionalAutomationText(automation.RequestedPauseDetail, 4096) ||
 		(automation.CampaignID != "" && !ValidRepositoryReviewCampaignID(automation.CampaignID)) ||
+		(automation.CampaignRecoveryPending && (automation.CampaignID == "" ||
+			automation.ScopeSelection == nil || repositoryReviewScopePlanEmpty(automation.ScopePlan) ||
+			automation.ResolvedCommitSHA == "" ||
+			automation.ScopePlan.CommitSHA != automation.ResolvedCommitSHA ||
+			len(automation.RunIDs) == 0 || automation.StartedAt.IsZero() ||
+			!automation.CompletedAt.IsZero() || automation.ActiveRunID != "" ||
+			(automation.Status != RepositoryReviewAutomationPaused &&
+				automation.Status != RepositoryReviewAutomationFailed &&
+				(automation.Status != RepositoryReviewAutomationIdle ||
+					automation.Progress.Stage != "next batch queued")))) ||
 		!validOptionalAutomationText(automation.ActiveRunID, 1024) ||
 		len(automation.RunIDs) > maxAutomationRunIDs ||
 		!finiteNonnegative(automation.EstimatedCostUSD, maxAutomationEstimatedCost) ||

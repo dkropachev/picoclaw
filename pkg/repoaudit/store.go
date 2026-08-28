@@ -1891,6 +1891,14 @@ func validateRepositoryReviewCampaignPlan(plan Plan) (int, error) {
 }
 
 func repositoryReviewCampaignScopeDigestForPlan(plan Plan) (string, error) {
+	files, err := repositoryReviewCampaignFilesForPlan(plan)
+	if err != nil {
+		return "", err
+	}
+	return repositoryReviewCampaignScopeDigestForFiles(files)
+}
+
+func repositoryReviewCampaignFilesForPlan(plan Plan) ([]FileRef, error) {
 	files := make([]FileRef, 0,
 		len(plan.PendingFiles)+len(plan.DeferredFiles)+len(plan.UnchangedFiles)+len(plan.UnsupportedFiles),
 	)
@@ -1900,7 +1908,7 @@ func repositoryReviewCampaignScopeDigestForPlan(plan Plan) (string, error) {
 	for _, unsupported := range plan.UnsupportedFiles {
 		files = append(files, unsupported.FileRef)
 	}
-	return repositoryReviewCampaignScopeDigestForFiles(files)
+	return canonicalRepositoryReviewCampaignFiles(files)
 }
 
 func repositoryReviewCampaignScopeDigestForFiles(files []FileRef) (string, error) {
@@ -1910,6 +1918,19 @@ func repositoryReviewCampaignScopeDigestForFiles(files []FileRef) (string, error
 	}
 	data, _ := json.Marshal(canonical)
 	return stableID("sha256:", string(data)), nil
+}
+
+// CanonicalRepositoryReviewCampaignScope validates and sorts an exact campaign
+// manifest. It is exposed for trusted controller recovery code; callers still
+// need ReconcileCampaign's CAS boundary before the manifest becomes durable.
+func CanonicalRepositoryReviewCampaignScope(files []FileRef) ([]FileRef, error) {
+	return canonicalRepositoryReviewCampaignFiles(files)
+}
+
+// RepositoryReviewCampaignScopeDigest returns the digest ReconcileCampaign
+// binds to a canonical exact-file manifest.
+func RepositoryReviewCampaignScopeDigest(files []FileRef) (string, error) {
+	return repositoryReviewCampaignScopeDigestForFiles(files)
 }
 
 func canonicalRepositoryReviewCampaignFiles(files []FileRef) ([]FileRef, error) {
@@ -2010,6 +2031,51 @@ func normalizeCandidate(candidate FindingCandidate) FindingCandidate {
 	candidate.FixEffort.Quality.Class = strings.ToLower(strings.TrimSpace(candidate.FixEffort.Quality.Class))
 	candidate.FixEffort.Quality.Rationale = strings.TrimSpace(candidate.FixEffort.Quality.Rationale)
 	return candidate
+}
+
+// NormalizeRepositoryReviewFindingCandidate returns the detached canonical
+// form persisted by Record. Recovery uses it before exact evidence comparison.
+func NormalizeRepositoryReviewFindingCandidate(candidate FindingCandidate) FindingCandidate {
+	return normalizeCandidate(candidate)
+}
+
+// ValidateRepositoryReviewLegacyContextIdentity verifies the stable identity
+// originally assigned to an untagged legacy finding context.
+func ValidateRepositoryReviewLegacyContextIdentity(contextRecord FindingContext) bool {
+	contextRecord.CampaignID = ""
+	return contextRecord.ID != "" && contextRecord.ID == stableID(
+		"rctx_", contextBindingDigest(contextRecord),
+	)
+}
+
+// ValidateRepositoryReviewLegacyFindingIdentity verifies immutable finding
+// identity and first-observation fields with the exact Record algorithms.
+func ValidateRepositoryReviewLegacyFindingIdentity(
+	finding Finding,
+	origin FindingContext,
+	candidate FindingCandidate,
+) bool {
+	candidate = normalizeCandidate(candidate)
+	primary, inScope := fileInScope(candidate.File, origin.Files)
+	if !inScope {
+		return false
+	}
+	fingerprint := findingFingerprint(primary, candidate)
+	currentID := stableID(
+		"rfn_", finding.Repository, finding.CommitSHA, origin.RunID, fingerprint,
+	)
+	// Before immutable run occurrences were introduced, repository review
+	// findings coalesced across runs and their stable ID omitted commit/run
+	// identity. Recovery accepts only that exact predecessor formula.
+	legacyID := stableID("rfn_", finding.Repository, fingerprint)
+	return finding.Fingerprint == fingerprint &&
+		(finding.ID == currentID || finding.ID == legacyID) &&
+		finding.File == primary && reflect.DeepEqual(finding.Line, candidate.Line) &&
+		finding.Title == candidate.Title && finding.Symbol == candidate.Symbol &&
+		finding.Message == candidate.Message && finding.Evidence == candidate.Evidence &&
+		finding.Impact == candidate.Impact && reflect.DeepEqual(finding.Validation, candidate.Validation) &&
+		reflect.DeepEqual(finding.MatchHints, candidate.MatchHints) &&
+		reflect.DeepEqual(finding.FixEffort, candidate.FixEffort)
 }
 
 func normalizeFindingIdentityHints(values []string) []string {
@@ -2459,6 +2525,7 @@ func validateState(state RepositoryState) error {
 	}
 	for _, run := range state.Runs {
 		if run.InspectedFiles < 0 || run.InspectedFiles > maxReviewFiles ||
+			run.LegacyRecovered && run.CampaignID == "" ||
 			(run.CampaignID != "" && (!ValidRepositoryReviewCampaignID(run.CampaignID) ||
 				state.CampaignHistory[run.CampaignID] != run.CommitSHA ||
 				!validBoundedText(run.ProfileHash, 256) ||

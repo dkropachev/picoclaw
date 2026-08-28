@@ -503,6 +503,7 @@ func projectRepositoryReviewGatewayAutomation(
 	automation repoaudit.RepositoryReviewAutomation,
 ) repoaudit.RepositoryReviewAutomation {
 	automation.CampaignID = ""
+	automation.CampaignRecoveryPending = false
 	automation.ModelCoverageSketches = nil
 	automation.Progress.ScopeFrozen = automation.ScopeSelection != nil
 	automation.ScopeSelection = nil

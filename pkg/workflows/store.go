@@ -939,6 +939,49 @@ func (s *FileRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
 	return run, nil
 }
 
+// GetRunBounded rejects an oversized persisted run before decoding it. It is
+// intended for bounded background recovery scans, not ordinary run display.
+func (s *FileRunStore) GetRunBounded(
+	ctx context.Context,
+	runID string,
+	maximumBytes int64,
+) (*Run, error) {
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" || maximumBytes < 1 {
+		return nil, os.ErrInvalid
+	}
+	unlock, err := s.lockRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
+	}
+	runPath := filepath.Join(s.root, safeID(runID), "run.json")
+	info, err := os.Lstat(runPath)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maximumBytes {
+		return nil, fmt.Errorf("workflow run exceeds its recovery read limit")
+	}
+	run, err := readRunFile(runPath)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil || run.ID != runID {
+		if run != nil && !IsPrivateWorkflowRun(run) {
+			return nil, os.ErrNotExist
+		}
+		return nil, ErrPrivateWorkflowContext
+	}
+	return run, nil
+}
+
 func (s *FileRunStore) ListRuns(ctx context.Context) ([]Run, error) {
 	_ = ctx
 	unlock, err := s.lockRoot()

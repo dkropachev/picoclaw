@@ -433,6 +433,7 @@ type ReviewRun struct {
 	ProfileHash             string    `json:"profile_hash,omitempty"`
 	ScopeDigest             string    `json:"scope_digest,omitempty"`
 	InspectedFiles          int       `json:"inspected_files,omitempty"`
+	LegacyRecovered         bool      `json:"legacy_recovered,omitempty"`
 	ReviewedFiles           int       `json:"reviewed_files"`
 	UnreviewedFiles         int       `json:"unreviewed_files"`
 	UnsupportedCount        int       `json:"unsupported_files"`

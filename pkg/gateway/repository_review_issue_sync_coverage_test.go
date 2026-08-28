@@ -21,14 +21,16 @@ import (
 
 func TestRepositoryReviewGatewayAutomationProjectionHidesInternalScopeState(t *testing.T) {
 	projected := projectRepositoryReviewGatewayAutomation(repoaudit.RepositoryReviewAutomation{
-		CampaignID:            repoaudit.NewRepositoryReviewCampaignID(),
-		ModelCoverageSketches: map[string]string{"review": "internal"},
+		CampaignID:              repoaudit.NewRepositoryReviewCampaignID(),
+		CampaignRecoveryPending: true,
+		ModelCoverageSketches:   map[string]string{"review": "internal"},
 		ScopeSelection: &repoaudit.RepositoryReviewScopeSelection{
 			IncludePrefixes: []string{"pkg"},
 		},
 	})
 	if projected.ModelCoverageSketches != nil || projected.ScopeSelection != nil ||
-		projected.CampaignID != "" || !projected.Progress.ScopeFrozen {
+		projected.CampaignID != "" || projected.CampaignRecoveryPending ||
+		!projected.Progress.ScopeFrozen {
 		t.Fatalf("gateway projection exposed internal state: %#v", projected)
 	}
 	projected = projectRepositoryReviewGatewayAutomation(repoaudit.RepositoryReviewAutomation{

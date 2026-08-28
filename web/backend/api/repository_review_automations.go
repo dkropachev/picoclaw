@@ -457,6 +457,8 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 			executionChanged := repositoryReviewExecutionConfigurationChanged(previous, *candidate)
 			if executionChanged {
 				candidate.Status = repoaudit.RepositoryReviewAutomationIdle
+				candidate.CampaignID = ""
+				candidate.CampaignRecoveryPending = false
 				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
 				candidate.ScopeSelection = nil
 				candidate.ResolvedCommitSHA = ""
@@ -640,6 +642,7 @@ func projectRepositoryReviewAutomation(
 	automation repoaudit.RepositoryReviewAutomation,
 ) repoaudit.RepositoryReviewAutomation {
 	automation.CampaignID = ""
+	automation.CampaignRecoveryPending = false
 	automation.ModelCoverageSketches = nil
 	automation.Progress.ScopeFrozen = automation.ScopeSelection != nil
 	automation.ScopeSelection = nil

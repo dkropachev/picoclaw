@@ -716,6 +716,8 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 				candidate.Usage = repoaudit.RepositoryReviewTokenUsage{}
 				candidate.EstimatedCostUSD = 0
 				if restart {
+					candidate.CampaignID = ""
+					candidate.CampaignRecoveryPending = false
 					candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
 					candidate.ScopeSelection = nil
 					candidate.Progress = repoaudit.RepositoryReviewProgress{}
@@ -758,6 +760,8 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 		expectedVersion,
 		func(candidate *repoaudit.RepositoryReviewAutomation) error {
 			if candidate.ResolvedCommitSHA != resolvedCommit {
+				candidate.CampaignID = ""
+				candidate.CampaignRecoveryPending = false
 				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
 				candidate.ScopeSelection = nil
 			}
@@ -1003,6 +1007,8 @@ func resetRepositoryReviewExecutionCampaign(automation *repoaudit.RepositoryRevi
 	}
 	automation.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
 	automation.ScopeSelection = nil
+	automation.CampaignID = ""
+	automation.CampaignRecoveryPending = false
 	automation.ResolvedCommitSHA = ""
 	automation.ResolvedTargetBranch = ""
 	automation.AdvertisedDefaultBranch = ""

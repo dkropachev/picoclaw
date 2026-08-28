@@ -40,6 +40,53 @@ func TestAutomationStorePersistsCanonicalResolvedCommit(t *testing.T) {
 	}
 }
 
+func TestRepositoryReviewCampaignRecoveryPendingInvariant(t *testing.T) {
+	store := newAutomationTestStore(t)
+	base := createAutomationForTest(t, store, "rra_recovery_pending", "Recovery pending")
+	base.CampaignID = NewRepositoryReviewCampaignID()
+	base.CampaignRecoveryPending = true
+	selection := RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
+	base.ScopeSelection = &selection
+	base.ScopePlan = repositoryReviewScopeSelectionPlan()
+	base.ResolvedCommitSHA = base.ScopePlan.CommitSHA
+	base.RunIDs = []string{"run"}
+	base.StartedAt = automationTestNow
+	base.Status = RepositoryReviewAutomationPaused
+	base.PauseReason = RepositoryReviewPauseManual
+	base.PauseDetail = "Recovering exact legacy evidence."
+	if err := validateAutomation(base); err != nil {
+		t.Fatalf("valid pending recovery error = %v", err)
+	}
+	for name, mutate := range map[string]func(*RepositoryReviewAutomation){
+		"missing campaign": func(value *RepositoryReviewAutomation) { value.CampaignID = "" },
+		"missing scope":    func(value *RepositoryReviewAutomation) { value.ScopeSelection = nil },
+		"missing commit":   func(value *RepositoryReviewAutomation) { value.ResolvedCommitSHA = "" },
+		"commit mismatch": func(value *RepositoryReviewAutomation) {
+			value.ResolvedCommitSHA = strings.Repeat("d", 40)
+		},
+		"missing runs":  func(value *RepositoryReviewAutomation) { value.RunIDs = nil },
+		"missing start": func(value *RepositoryReviewAutomation) { value.StartedAt = time.Time{} },
+		"completed":     func(value *RepositoryReviewAutomation) { value.CompletedAt = automationTestNow },
+		"active":        func(value *RepositoryReviewAutomation) { value.ActiveRunID = "run" },
+		"running":       func(value *RepositoryReviewAutomation) { value.Status = RepositoryReviewAutomationRunning },
+		"stopping":      func(value *RepositoryReviewAutomation) { value.Status = RepositoryReviewAutomationStopping },
+		"idle wrong stage": func(value *RepositoryReviewAutomation) {
+			value.Status = RepositoryReviewAutomationIdle
+			value.PauseReason = ""
+			value.PauseDetail = ""
+			value.Progress.Stage = "idle"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := base
+			mutate(&candidate)
+			if err := validateAutomation(candidate); !errors.Is(err, ErrInvalidAutomation) {
+				t.Fatalf("invalid pending recovery error = %v", err)
+			}
+		})
+	}
+}
+
 func TestAutomationLoadRemovesLegacyPriceResolutionMetadata(t *testing.T) {
 	store := NewStore(t.TempDir())
 	store.now = func() time.Time { return automationTestNow }
