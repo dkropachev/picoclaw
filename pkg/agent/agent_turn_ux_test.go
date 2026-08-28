@@ -1411,6 +1411,14 @@ func TestAgentTurnUXRescueMarkerHandsLateAbandonmentToSuccessor(t *testing.T) {
 			t.Fatalf("rescued outbound %d was not published", index)
 		}
 	}
+	for _, turnUXID := range []string{firstTurnUX, secondTurnUX} {
+		select {
+		case call := <-manager.typingCalled:
+			assertAgentTurnUXCall(t, call, channel, chatID, turnUXID)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("rescued response for %q did not release typing ownership", turnUXID)
+		}
+	}
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {

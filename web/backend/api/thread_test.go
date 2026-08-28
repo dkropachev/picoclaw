@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -289,4 +290,37 @@ func TestHandleThreads_MarksWorkingThreads(t *testing.T) {
 func strconvQuote(value string) string {
 	raw, _ := json.Marshal(value)
 	return string(raw)
+}
+
+func TestParseThreadContextAndBooleanQueries(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want map[string]string
+	}{
+		{name: "empty", raw: "   ", want: nil},
+		{name: "invalid", raw: "missing-separator, :blank, empty: ", want: nil},
+		{
+			name: "normalized values",
+			raw:  " Branch : main , repo: owner/project, branch:release , ignored ",
+			want: map[string]string{"branch": "release", "repo": "owner/project"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := parseThreadContextQuery(test.raw); !maps.Equal(got, test.want) {
+				t.Fatalf("parseThreadContextQuery(%q) = %#v, want %#v", test.raw, got, test.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"1", " TRUE ", "yes", "On"} {
+		if !parseThreadBoolQuery(value) {
+			t.Fatalf("parseThreadBoolQuery(%q) = false, want true", value)
+		}
+	}
+	for _, value := range []string{"", "0", "false", "sometimes"} {
+		if parseThreadBoolQuery(value) {
+			t.Fatalf("parseThreadBoolQuery(%q) = true, want false", value)
+		}
+	}
 }

@@ -72,12 +72,10 @@ func builtAPITestCoreBinary(t *testing.T) string {
 			"./cmd/picoclaw",
 		)
 		command.Dir = repositoryRoot
-		command.Env = replaceAPITestEnvironment(os.Environ(), map[string]string{
-			"CGO_ENABLED": "0",
-			"GOCACHE":     filepath.Join(repositoryRoot, ".cache", "go-build"),
-			"GOMODCACHE":  filepath.Join(repositoryRoot, ".cache", "go-mod"),
-			"GOTOOLCHAIN": "auto",
-		})
+		command.Env = replaceAPITestEnvironment(
+			os.Environ(),
+			apiTestBuildEnvironment(repositoryRoot),
+		)
 		output, buildErr := command.CombinedOutput()
 		apiTestCoreBinary.output = string(output)
 		if buildErr != nil {
@@ -88,6 +86,23 @@ func builtAPITestCoreBinary(t *testing.T) string {
 		t.Fatalf("%v\n%s", apiTestCoreBinary.err, apiTestCoreBinary.output)
 	}
 	return apiTestCoreBinary.path
+}
+
+func apiTestBuildEnvironment(repositoryRoot string) map[string]string {
+	goCache := os.Getenv("GOCACHE")
+	if strings.TrimSpace(goCache) == "" {
+		goCache = filepath.Join(repositoryRoot, ".cache", "go-build")
+	}
+	goModCache := os.Getenv("GOMODCACHE")
+	if strings.TrimSpace(goModCache) == "" {
+		goModCache = filepath.Join(repositoryRoot, ".cache", "go-mod")
+	}
+	return map[string]string{
+		"CGO_ENABLED": "0",
+		"GOCACHE":     goCache,
+		"GOMODCACHE":  goModCache,
+		"GOTOOLCHAIN": "auto",
+	}
 }
 
 func findAPITestRepositoryRoot() (string, error) {
@@ -188,6 +203,32 @@ func reserveAPITestLoopbackPort(t *testing.T) int {
 		t.Fatalf("reserve gateway test port: %v", err)
 	}
 	return port
+}
+
+func TestAPITestBuildEnvironmentPreservesExplicitGoCaches(t *testing.T) {
+	const repositoryRoot = "/test/repository"
+	t.Run("inherited", func(t *testing.T) {
+		t.Setenv("GOCACHE", "/external/go-build")
+		t.Setenv("GOMODCACHE", "/external/go-mod")
+		environment := apiTestBuildEnvironment(repositoryRoot)
+		if environment["GOCACHE"] != "/external/go-build" {
+			t.Fatalf("GOCACHE = %q, want inherited value", environment["GOCACHE"])
+		}
+		if environment["GOMODCACHE"] != "/external/go-mod" {
+			t.Fatalf("GOMODCACHE = %q, want inherited value", environment["GOMODCACHE"])
+		}
+	})
+	t.Run("fallback", func(t *testing.T) {
+		t.Setenv("GOCACHE", "")
+		t.Setenv("GOMODCACHE", "   ")
+		environment := apiTestBuildEnvironment(repositoryRoot)
+		if environment["GOCACHE"] != filepath.Join(repositoryRoot, ".cache", "go-build") {
+			t.Fatalf("GOCACHE = %q, want repository fallback", environment["GOCACHE"])
+		}
+		if environment["GOMODCACHE"] != filepath.Join(repositoryRoot, ".cache", "go-mod") {
+			t.Fatalf("GOMODCACHE = %q, want repository fallback", environment["GOMODCACHE"])
+		}
+	})
 }
 
 func TestGatewayDirectBinaryUsesOnlyTestRuntime(t *testing.T) {
