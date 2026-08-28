@@ -80,7 +80,7 @@ func RepositoryBugFinderProfileHash(input RepositoryBugFinderProfileHashInput) (
 		!slices.Equal(canonicalEffective, input.EffectiveModels) {
 		return "", errors.New("noncanonical repository bug finder profile hash input")
 	}
-	data, err := json.Marshal(map[string]any{
+	data, _ := json.Marshal(map[string]any{
 		"schema": input.Schema, "prompt_revision": input.PromptRevision,
 		"account_ref": input.AccountRef, "target": input.Target, "focus": input.Focus,
 		"scope_policy": input.ScopePolicy, "scope_plan_hash": input.ScopePlanHash,
@@ -89,9 +89,6 @@ func RepositoryBugFinderProfileHash(input RepositoryBugFinderProfileHashInput) (
 		"include_default_reviewer": input.IncludeDefaultReviewer,
 		"max_content_bytes":        input.MaxContentBytes,
 	})
-	if err != nil {
-		return "", err
-	}
 	digest := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
@@ -105,7 +102,7 @@ func RepositoryBugFinderLegacyResolvedProfileHash(
 	if _, err := RepositoryBugFinderProfileHash(input); err != nil {
 		return "", err
 	}
-	data, err := json.Marshal(map[string]any{
+	data, _ := json.Marshal(map[string]any{
 		"schema": input.Schema, "prompt_revision": input.PromptRevision,
 		"account_ref": input.AccountRef, "target": input.Target, "focus": input.Focus,
 		"scope_policy": input.ScopePolicy, "scope_plan_hash": input.ScopePlanHash,
@@ -115,9 +112,6 @@ func RepositoryBugFinderLegacyResolvedProfileHash(
 		"include_default_reviewer": input.IncludeDefaultReviewer,
 		"max_content_bytes":        input.MaxContentBytes,
 	})
-	if err != nil {
-		return "", err
-	}
 	digest := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }

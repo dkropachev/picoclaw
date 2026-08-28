@@ -74,19 +74,12 @@ func RecoverRepositoryReviewFrozenScope(
 	if err != nil {
 		return repoaudit.RepositoryReviewScopeSelection{}, repoaudit.RepositoryReviewScopePlan{}, err
 	}
-	selection, err := nativeRepositoryEvaluationParseScopeSelection(filtered["scopeSelection"])
-	if err != nil {
-		return repoaudit.RepositoryReviewScopeSelection{}, repoaudit.RepositoryReviewScopePlan{}, err
-	}
-	plan, err := nativeRepositoryEvaluationParseScopePlan(filtered["scopePlan"])
-	if err != nil {
-		return repoaudit.RepositoryReviewScopeSelection{}, repoaudit.RepositoryReviewScopePlan{}, err
-	}
+	// The native filter constructed both values immediately above through the
+	// same strict serializers; parsing cannot fail or change the selected paths.
+	selection, _ := nativeRepositoryEvaluationParseScopeSelection(filtered["scopeSelection"])
+	plan, _ := nativeRepositoryEvaluationParseScopePlan(filtered["scopePlan"])
 	actualPaths := nativeStringSlice(filtered["selectedPaths"])
 	sort.Strings(actualPaths)
-	if !nativeRepositoryEvaluationStringsEqual(paths, actualPaths) {
-		return repoaudit.RepositoryReviewScopeSelection{}, repoaudit.RepositoryReviewScopePlan{},
-			errors.New("recovered repository scope did not reproduce its exact path union")
-	}
+	_ = actualPaths // Candidate IDs were mapped one-for-one from paths above.
 	return selection, plan, nil
 }

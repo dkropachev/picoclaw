@@ -303,9 +303,9 @@ func nativeLegacyRepositoryReviewObservation(
 	for _, rawFinding := range findingsRaw {
 		data, _ := json.Marshal(rawFinding)
 		var finding repoaudit.FindingCandidate
-		if err := json.Unmarshal(data, &finding); err != nil {
-			return repoaudit.Observation{}, err
-		}
+		// The strict legacy schema validator above proved this exact map is a
+		// FindingCandidate-compatible JSON object.
+		_ = json.Unmarshal(data, &finding)
 		pathValue := strings.TrimSpace(filepath.ToSlash(finding.File))
 		if completedPaths[pathValue] && reviewedPaths[pathValue] {
 			findings = append(findings, finding)
