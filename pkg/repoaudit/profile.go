@@ -356,9 +356,8 @@ func (s Store) loadProfile(id string) (RepositoryReviewProfile, bool, error) {
 		return RepositoryReviewProfile{}, false, err
 	}
 	var legacy map[string]json.RawMessage
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		return RepositoryReviewProfile{}, false, err
-	}
+	// unmarshalRepositoryReviewGuardState already decoded this exact JSON.
+	_ = json.Unmarshal(data, &legacy)
 	if profile.ID != id {
 		return RepositoryReviewProfile{}, false, errors.New("repository review profile identity mismatch")
 	}

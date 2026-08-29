@@ -1622,10 +1622,8 @@ func (s Store) save(state *RepositoryState) error {
 	if writeErr := fileutil.WriteFileAtomic(statePath, data, 0o600); writeErr != nil {
 		return writeErr
 	}
-	summaryData, err := json.Marshal(Summarize(*state))
-	if err != nil {
-		return err
-	}
+	// RepositorySummary contains only JSON-native scalar and time fields.
+	summaryData, _ := json.Marshal(Summarize(*state))
 	// The sidecar is a rebuildable list projection. The authoritative state is
 	// already committed, so a projection write failure must not turn a successful
 	// versioned mutation into an ambiguous failure.

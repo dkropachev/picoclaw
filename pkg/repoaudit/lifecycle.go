@@ -2359,7 +2359,6 @@ func validateRepositoryLifecycleState(state RepositoryState) error {
 		}
 	}
 	mappingIDs := make(map[string]struct{}, len(state.MappingJobs))
-	mappingFindings := make(map[string]struct{}, len(state.MappingJobs))
 	for _, job := range state.MappingJobs {
 		if job.ID != mappingJobID(job.ReviewFindingID) || !validMappingJobState(job.State) ||
 			job.Attempts < 0 || job.CreatedAt.IsZero() || job.UpdatedAt.IsZero() ||
@@ -2371,11 +2370,10 @@ func validateRepositoryLifecycleState(state RepositoryState) error {
 		if _, exists := reviewFindings[job.ReviewFindingID]; !exists {
 			return errors.New("repository mapping job occurrence is missing")
 		}
+		// ID is derived solely from ReviewFindingID, so this also rejects a
+		// second mapping job for the same occurrence.
 		if _, duplicate := mappingIDs[job.ID]; duplicate {
 			return errors.New("duplicate repository mapping job ID")
-		}
-		if _, duplicate := mappingFindings[job.ReviewFindingID]; duplicate {
-			return errors.New("duplicate mapping job for review finding")
 		}
 		if (job.State == RepositoryMappingRunning) == job.ReservedAt.IsZero() ||
 			(job.State != RepositoryMappingCompleted && job.RepositoryFindingID != "") {
@@ -2400,7 +2398,6 @@ func validateRepositoryLifecycleState(state RepositoryState) error {
 			}
 		}
 		mappingIDs[job.ID] = struct{}{}
-		mappingFindings[job.ReviewFindingID] = struct{}{}
 	}
 	validationIDs := make(map[string]struct{}, len(state.ValidationJobs))
 	for _, job := range state.ValidationJobs {

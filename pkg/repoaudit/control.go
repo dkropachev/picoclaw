@@ -577,10 +577,8 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 	if err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
-	legacy, err := decodeLegacyAutomationPriceMetadata(data)
-	if err != nil {
-		return RepositoryReviewAutomation{}, false, err
-	}
+	// unmarshalRepositoryReviewGuardState already decoded this exact JSON.
+	legacy, _ := decodeLegacyAutomationPriceMetadata(data)
 	hasLegacyPriceMetadata := false
 	for _, price := range legacy.ModelPrices {
 		if _, exists := price["subscription"]; exists {
