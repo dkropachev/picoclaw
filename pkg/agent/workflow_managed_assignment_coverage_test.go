@@ -534,3 +534,13 @@ func TestWorkflowManagedExactPlanStringCoverage(t *testing.T) {
 		t.Fatal("bounded assignment text classification mismatch")
 	}
 }
+
+func TestWorkflowStructuredAgentOutputsIncludesSchemaError(t *testing.T) {
+	outputs := workflowStructuredAgentOutputs(
+		"raw", workflows.StructuredOutputResult{Error: "schema mismatch"}, 0,
+		"main", "", "none", "none", "", "message", "none",
+	)
+	if outputs["structured_error"] != "schema mismatch" {
+		t.Fatalf("structured error output = %#v", outputs)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -580,6 +581,27 @@ func TestRepositoryReviewAssignmentInstalledRecoveryRejectsActiveRun(t *testing.
 		t.Context(), fixture.store, prepared,
 	); !errors.Is(err, repoaudit.ErrConflict) {
 		t.Fatalf("active installed recovery error = %v", err)
+	}
+}
+
+func TestRepositoryReviewAssignmentRecoveryRejectsOversizedCatalog(t *testing.T) {
+	fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
+		inspected: []int{0}, occurrences: 0,
+	})
+	models := make([]string, 33)
+	for index := range models {
+		models[index] = fmt.Sprintf("review-%02d", index)
+	}
+	resolved := workflows.RepositoryReviewModelProfile{
+		Revision: "assignment-oversized-catalog", AccountRef: fixture.automation.EffectiveAccountRef,
+		ReviewerModels: models, MaxContentBytes: int(fixture.automation.MaxContentBytes),
+	}
+	prepared, err := prepareRepositoryReviewLegacyCampaignBackfill(
+		t.Context(), fixture.automation, fixture.state,
+		repoaudit.NewRepositoryReviewCampaignID(), fixture.runStore, resolved,
+	)
+	if err == nil || prepared.Exact {
+		t.Fatalf("oversized recovery catalog = %#v err=%v", prepared, err)
 	}
 }
 
