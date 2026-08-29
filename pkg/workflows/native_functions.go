@@ -267,6 +267,18 @@ func nativeRepositoryReview(
 				return nil, err
 			}
 		}
+		var assignmentCatalog []repoaudit.RepositoryReviewAssignment
+		if campaignID != "" {
+			assignmentCatalog, err = RepositoryBugFinderAssignmentCatalog(
+				repositoryReviewModelNames(args["resolved_reviewer_models"]),
+				nativeBoolAny(args, "include_default_reviewer"),
+				RepositoryBugFinderPromptRevision,
+				profileHash,
+			)
+			if err != nil {
+				return nil, err
+			}
+		}
 		repository, err := nativeRepositoryReviewIdentity(ctx, args, exec)
 		if err != nil {
 			return nil, err
@@ -284,25 +296,19 @@ func nativeRepositoryReview(
 		if reviewerCount < 1 {
 			reviewerCount = 1
 		}
-		maximumPending = nativeRepositoryReviewPendingLimit(maximumPending, reviewerCount)
 		inventoryHash := nativeStringAny(args, "inventory_hash", "inventoryHash")
 		authoritative := nativeBoolAny(args, "authoritative")
 		var plan repoaudit.Plan
 		if campaignID == "" {
+			maximumPending = nativeRepositoryReviewPendingLimit(maximumPending, reviewerCount)
 			plan, err = store.PlanWithProfileLimitAuthoritative(
 				ctx, repository, commit, inventoryHash, profileHash, files,
 				nativeBoolAny(args, "force"), maximumPending, authoritative,
 			)
 		} else {
-			requiredAssignments, assignmentErr := RepositoryBugFinderRequiredAssignments(
-				resolvedReviewers, includeDefaultReviewer,
-			)
-			if assignmentErr != nil {
-				return nil, assignmentErr
-			}
-			plan, err = store.PlanWithProfileLimitAuthoritativeForCampaign(
+			plan, err = store.PlanAssignmentsForCampaign(
 				ctx, repository, commit, inventoryHash, profileHash,
-				campaignID, requiredAssignments, files,
+				campaignID, assignmentCatalog, files,
 				nativeBoolAny(args, "force"), maximumPending, authoritative,
 			)
 		}
@@ -323,6 +329,12 @@ func nativeRepositoryReview(
 		)
 		if err != nil {
 			return nil, err
+		}
+		if campaignID != "" && len(plan.AssignmentPlans) > 0 {
+			plan, err = BindRepositoryBugFinderAssignmentTasks(plan)
+			if err != nil {
+				return nil, err
+			}
 		}
 		output, err := nativeRepositoryReviewPlanOutput(
 			plan, args["files"], nativeBoolAny(args, "compact_output", "compactOutput"),
@@ -350,6 +362,32 @@ func nativeRepositoryReview(
 		output["maxContentBytes"] = int(nativeInt64Any(args, "resolved_max_content_bytes"))
 		output["maxFiles"] = maximumPending
 		return output, nil
+	case "begin":
+		plan, err := nativeRepositoryReviewPlan(args["plan"])
+		if err != nil {
+			return nil, err
+		}
+		if len(plan.AssignmentCatalog) == 0 {
+			return map[string]any{"stateVersion": plan.StateVersion}, nil
+		}
+		reviewable, err := nativeRepositoryReviewFiles(args["files"])
+		if err != nil {
+			return nil, fmt.Errorf("reviewable repository files: %w", err)
+		}
+		state, err := store.BeginRepositoryReviewRun(
+			ctx,
+			repoaudit.BeginRepositoryReviewRunRequest{
+				Plan: plan,
+				RunID: strings.TrimSpace(firstNonEmpty(
+					nativeStringAny(args, "run_id", "runId"), exec.RunID,
+				)),
+				ReviewableFiles: reviewable,
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"stateVersion": state.Version}, nil
 	case "freeze":
 		hydrationArgs := args
 		if maximumFileBytes := int(nativeInt64Any(
@@ -408,30 +446,42 @@ func nativeRepositoryReview(
 		if err != nil {
 			return nil, err
 		}
-		evidence, err := nativeRepositoryReviewRecordEvidence(args, plan)
-		if err != nil {
-			return nil, err
-		}
 		unsupportedFiles := nativeRepositoryReviewUnsupportedFiles(args["managed_children"])
 		unsupportedFiles = mergeNativeRepositoryUnsupportedFiles(
 			unsupportedFiles,
 			nativeRepositoryReviewUnsupportedScopeFiles(args["unsupported_files"]),
 		)
-		result, err := store.Record(ctx, repoaudit.RecordRequest{
-			Plan: plan,
-			RunID: strings.TrimSpace(
-				firstNonEmpty(nativeStringAny(args, "run_id", "runId"), exec.RunID),
-			),
-			Observations:            evidence.Observations,
-			ReviewEvidence:          evidence.ReviewEvidence,
-			InspectedFiles:          evidence.InspectedFiles,
-			CompletedFiles:          evidence.CompletedFiles,
-			UnsupportedFiles:        unsupportedFiles,
-			ExcludedFiles:           int(nativeInt64Any(args, "excluded_count", "excludedCount")),
-			TargetBranch:            plan.TargetBranch,
-			AdvertisedDefaultBranch: plan.AdvertisedDefaultBranch,
-			TargetIsDefault:         plan.TargetIsDefault,
-		})
+		runID := strings.TrimSpace(
+			firstNonEmpty(nativeStringAny(args, "run_id", "runId"), exec.RunID),
+		)
+		var result repoaudit.RecordResult
+		if len(plan.AssignmentCatalog) > 0 {
+			result, err = store.FinalizeRepositoryReviewRun(
+				ctx,
+				repoaudit.FinalizeRepositoryReviewRunRequest{
+					Plan: plan, RunID: runID,
+					UnsupportedFiles: unsupportedFiles,
+					ExcludedFiles:    int(nativeInt64Any(args, "excluded_count", "excludedCount")),
+				},
+			)
+		} else {
+			var evidence nativeRepositoryReviewRecordEvidenceResult
+			evidence, err = nativeRepositoryReviewRecordEvidence(args, plan)
+			if err == nil {
+				result, err = store.Record(ctx, repoaudit.RecordRequest{
+					Plan: plan, RunID: runID,
+					Observations:            evidence.Observations,
+					ReviewEvidence:          evidence.ReviewEvidence,
+					InspectedFiles:          evidence.InspectedFiles,
+					CompletedFiles:          evidence.CompletedFiles,
+					UnsupportedFiles:        unsupportedFiles,
+					ExcludedFiles:           int(nativeInt64Any(args, "excluded_count", "excludedCount")),
+					TargetBranch:            plan.TargetBranch,
+					AdvertisedDefaultBranch: plan.AdvertisedDefaultBranch,
+					TargetIsDefault:         plan.TargetIsDefault,
+				})
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1048,6 +1098,9 @@ func nativeRepositoryReviewPlanOutput(
 		"unchangedCount":     len(plan.UnchangedFiles),
 		"stateVersion":       plan.StateVersion,
 		"previouslyReviewed": plan.PreviouslyReviewed,
+	}
+	if len(plan.AssignmentPlans) > 0 {
+		output["assignmentPlans"] = value["assignment_plans"]
 	}
 	if !compact {
 		output["deferredFiles"] = nativeRepositoryReviewBoundFileMaps(plan.DeferredFiles, originals)

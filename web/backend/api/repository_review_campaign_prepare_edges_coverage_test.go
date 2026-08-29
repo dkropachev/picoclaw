@@ -1063,6 +1063,7 @@ func TestRepositoryReviewLegacyPrepareManagedUnsupportedCoverage(t *testing.T) {
 	for index := range 4 {
 		child := map[string]any{
 			"label": "unsupported", "required": true, "valid": false,
+			"tasks": []string{workflows.RepositoryBugFinderFocuses()[index].Task},
 			"scope": scope, "run_error": "unsupported",
 			"model": map[string]any{"selected": "review-a"},
 		}
@@ -1198,7 +1199,7 @@ func TestFinalizeRepositoryReviewLegacyBackfillByteBoundariesCoverage(t *testing
 		return finalizeRepositoryReviewLegacyCampaignBackfill(
 			result, state, repoaudit.NewRepositoryReviewCampaignID(), strings.Repeat("d", 40),
 			"inventory", "profile", "sha256:"+strings.Repeat("e", 64), 4,
-			files, coverage, runs, maximum,
+			nil, files, coverage, runs, maximum,
 		)
 	}
 	valid, err := call(base, recovered, 1<<20)

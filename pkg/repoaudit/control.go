@@ -20,7 +20,11 @@ import (
 )
 
 const (
-	RepositoryReviewAutomationSchemaVersion = 1
+	RepositoryReviewAutomationSchemaVersion = 2
+
+	DefaultRepositoryReviewAssignmentTimeoutSeconds = 3_600
+	MinRepositoryReviewAssignmentTimeoutSeconds     = 60
+	MaxRepositoryReviewAssignmentTimeoutSeconds     = 86_400
 
 	defaultAutomationMaxFilesPerRun              = 24
 	defaultAutomationMaxContentBytes             = 512 << 10
@@ -95,20 +99,50 @@ type RepositoryReviewTokenUsage struct {
 	TotalTokens      int64 `json:"total_tokens"`
 }
 
+// RepositoryReviewAssignmentFocusProgress is the public coverage projection
+// for one stable repository-review focus. Counts are file-assignment pairs,
+// not files or provider calls.
+type RepositoryReviewAssignmentFocusProgress struct {
+	Total     int `json:"total"`
+	Completed int `json:"completed"`
+	Pending   int `json:"pending"`
+	Active    int `json:"active"`
+}
+
+// RepositoryReviewAssignmentFocusesProgress keeps the public per-focus shape
+// fixed to the four stable focus IDs used by every campaign catalog.
+type RepositoryReviewAssignmentFocusesProgress struct {
+	CorrectnessState      RepositoryReviewAssignmentFocusProgress `json:"correctness_state"`
+	SecurityTrust         RepositoryReviewAssignmentFocusProgress `json:"security_trust"`
+	ConcurrencyRecovery   RepositoryReviewAssignmentFocusProgress `json:"concurrency_recovery"`
+	IntegrationValidation RepositoryReviewAssignmentFocusProgress `json:"integration_validation"`
+}
+
+// RepositoryReviewAssignmentProgress reports durable assignment coverage for
+// the current campaign.
+type RepositoryReviewAssignmentProgress struct {
+	Total     int                                       `json:"total"`
+	Completed int                                       `json:"completed"`
+	Pending   int                                       `json:"pending"`
+	Active    int                                       `json:"active"`
+	ByFocus   RepositoryReviewAssignmentFocusesProgress `json:"by_focus"`
+}
+
 type RepositoryReviewProgress struct {
-	Stage                  string `json:"stage,omitempty"`
-	CompletedBatches       int    `json:"completed_batches"`
-	TotalBatches           int    `json:"total_batches"`
-	CoverageAvailable      bool   `json:"coverage_available"`
-	CoverageExact          bool   `json:"coverage_exact"`
-	SelectedFiles          int    `json:"selected_files"`
-	InspectedFiles         int    `json:"inspected_files"`
-	ReviewedFiles          int    `json:"reviewed_files"`
-	RemainingFiles         int    `json:"remaining_files"`
-	UnsupportedFiles       int    `json:"unsupported_files"`
-	Findings               int    `json:"findings"`
-	FindingAggregates      int    `json:"finding_aggregates"`
-	PendingFindingMappings int    `json:"unaggregated_findings"`
+	Stage                  string                             `json:"stage,omitempty"`
+	CompletedBatches       int                                `json:"completed_batches"`
+	TotalBatches           int                                `json:"total_batches"`
+	CoverageAvailable      bool                               `json:"coverage_available"`
+	CoverageExact          bool                               `json:"coverage_exact"`
+	SelectedFiles          int                                `json:"selected_files"`
+	InspectedFiles         int                                `json:"inspected_files"`
+	ReviewedFiles          int                                `json:"reviewed_files"`
+	RemainingFiles         int                                `json:"remaining_files"`
+	UnsupportedFiles       int                                `json:"unsupported_files"`
+	Findings               int                                `json:"findings"`
+	FindingAggregates      int                                `json:"finding_aggregates"`
+	PendingFindingMappings int                                `json:"unaggregated_findings"`
+	AssignmentProgress     RepositoryReviewAssignmentProgress `json:"assignment_progress"`
 	// ScopeFrozen is a public projection marker derived from the internal
 	// durable scope selection. Stores never treat this caller-visible value as
 	// campaign authority.
@@ -216,55 +250,56 @@ type RepositoryReviewAccountLimitSnapshot struct {
 // is internal durable controller state, not user configuration, and must be
 // cleared together with ScopePlan.
 type RepositoryReviewAutomation struct {
-	SchemaVersion           int                                    `json:"schema_version"`
-	ID                      string                                 `json:"id"`
-	Version                 int64                                  `json:"version"`
-	ProfileID               string                                 `json:"profile_id,omitempty"`
-	ProfileVersion          int64                                  `json:"profile_version,omitempty"`
-	AccountRef              string                                 `json:"account_ref,omitempty"`
-	EffectiveAccountRef     string                                 `json:"effective_account_ref,omitempty"`
-	Name                    string                                 `json:"name"`
-	Repository              string                                 `json:"repository"`
-	Ref                     string                                 `json:"ref,omitempty"`
-	ResolvedCommitSHA       string                                 `json:"resolved_commit_sha,omitempty"`
-	ResolvedTargetBranch    string                                 `json:"resolved_target_branch,omitempty"`
-	AdvertisedDefaultBranch string                                 `json:"advertised_default_branch,omitempty"`
-	TargetIsDefault         bool                                   `json:"target_is_default"`
-	Target                  string                                 `json:"target"`
-	ReviewFocus             string                                 `json:"review_focus"`
-	ScopePolicy             RepositoryReviewScopePolicy            `json:"scope_policy"`
-	ScopePlan               RepositoryReviewScopePlan              `json:"scope_plan"`
-	ScopeSelection          *RepositoryReviewScopeSelection        `json:"scope_selection,omitempty"`
-	ReviewerModels          []string                               `json:"reviewer_models"`
-	IssueWriterModel        string                                 `json:"issue_writer_model"`
-	CompareModels           bool                                   `json:"compare_models"`
-	ModelPrices             map[string]RepositoryReviewModelPrice  `json:"model_prices,omitempty"`
-	Force                   bool                                   `json:"force"`
-	AutoContinue            bool                                   `json:"auto_continue"`
-	MaxFilesPerRun          int                                    `json:"max_files_per_run"`
-	MaxContentBytes         int64                                  `json:"max_content_bytes"`
-	MaxParallelChildren     int                                    `json:"max_parallel_children"`
-	EstimatedOutputTokens   int                                    `json:"-"`
-	BudgetPolicy            RepositoryReviewBudgetPolicy           `json:"budget"`
-	Status                  RepositoryReviewAutomationStatus       `json:"status"`
-	PauseReason             RepositoryReviewPauseReason            `json:"pause_reason,omitempty"`
-	PauseDetail             string                                 `json:"pause_detail,omitempty"`
-	RequestedPauseReason    RepositoryReviewPauseReason            `json:"requested_pause_reason,omitempty"`
-	RequestedPauseDetail    string                                 `json:"requested_pause_detail,omitempty"`
-	CampaignID              string                                 `json:"campaign_id,omitempty"`
-	CampaignRecoveryPending bool                                   `json:"campaign_recovery_pending,omitempty"`
-	ActiveRunID             string                                 `json:"active_run_id,omitempty"`
-	RunIDs                  []string                               `json:"run_ids"`
-	Usage                   RepositoryReviewTokenUsage             `json:"usage"`
-	EstimatedCostUSD        float64                                `json:"estimated_cost_usd"`
-	Progress                RepositoryReviewProgress               `json:"progress"`
-	ModelStats              map[string]RepositoryReviewModelStats  `json:"model_stats"`
-	ModelCoverageSketches   map[string]string                      `json:"model_coverage_sketches,omitempty"`
-	AccountLimitSnapshots   []RepositoryReviewAccountLimitSnapshot `json:"account_limits"`
-	StartedAt               time.Time                              `json:"started_at,omitempty"`
-	CompletedAt             time.Time                              `json:"completed_at,omitempty"`
-	CreatedAt               time.Time                              `json:"created_at"`
-	UpdatedAt               time.Time                              `json:"updated_at"`
+	SchemaVersion            int                                    `json:"schema_version"`
+	ID                       string                                 `json:"id"`
+	Version                  int64                                  `json:"version"`
+	ProfileID                string                                 `json:"profile_id,omitempty"`
+	ProfileVersion           int64                                  `json:"profile_version,omitempty"`
+	AccountRef               string                                 `json:"account_ref,omitempty"`
+	EffectiveAccountRef      string                                 `json:"effective_account_ref,omitempty"`
+	Name                     string                                 `json:"name"`
+	Repository               string                                 `json:"repository"`
+	Ref                      string                                 `json:"ref,omitempty"`
+	ResolvedCommitSHA        string                                 `json:"resolved_commit_sha,omitempty"`
+	ResolvedTargetBranch     string                                 `json:"resolved_target_branch,omitempty"`
+	AdvertisedDefaultBranch  string                                 `json:"advertised_default_branch,omitempty"`
+	TargetIsDefault          bool                                   `json:"target_is_default"`
+	Target                   string                                 `json:"target"`
+	ReviewFocus              string                                 `json:"review_focus"`
+	ScopePolicy              RepositoryReviewScopePolicy            `json:"scope_policy"`
+	ScopePlan                RepositoryReviewScopePlan              `json:"scope_plan"`
+	ScopeSelection           *RepositoryReviewScopeSelection        `json:"scope_selection,omitempty"`
+	ReviewerModels           []string                               `json:"reviewer_models"`
+	IssueWriterModel         string                                 `json:"issue_writer_model"`
+	CompareModels            bool                                   `json:"compare_models"`
+	ModelPrices              map[string]RepositoryReviewModelPrice  `json:"model_prices,omitempty"`
+	Force                    bool                                   `json:"force"`
+	AutoContinue             bool                                   `json:"auto_continue"`
+	MaxFilesPerRun           int                                    `json:"max_files_per_run"`
+	MaxContentBytes          int64                                  `json:"max_content_bytes"`
+	MaxParallelChildren      int                                    `json:"max_parallel_children"`
+	AssignmentTimeoutSeconds int                                    `json:"assignment_timeout_seconds"`
+	EstimatedOutputTokens    int                                    `json:"-"`
+	BudgetPolicy             RepositoryReviewBudgetPolicy           `json:"budget"`
+	Status                   RepositoryReviewAutomationStatus       `json:"status"`
+	PauseReason              RepositoryReviewPauseReason            `json:"pause_reason,omitempty"`
+	PauseDetail              string                                 `json:"pause_detail,omitempty"`
+	RequestedPauseReason     RepositoryReviewPauseReason            `json:"requested_pause_reason,omitempty"`
+	RequestedPauseDetail     string                                 `json:"requested_pause_detail,omitempty"`
+	CampaignID               string                                 `json:"campaign_id,omitempty"`
+	CampaignRecoveryPending  bool                                   `json:"campaign_recovery_pending,omitempty"`
+	ActiveRunID              string                                 `json:"active_run_id,omitempty"`
+	RunIDs                   []string                               `json:"run_ids"`
+	Usage                    RepositoryReviewTokenUsage             `json:"usage"`
+	EstimatedCostUSD         float64                                `json:"estimated_cost_usd"`
+	Progress                 RepositoryReviewProgress               `json:"progress"`
+	ModelStats               map[string]RepositoryReviewModelStats  `json:"model_stats"`
+	ModelCoverageSketches    map[string]string                      `json:"model_coverage_sketches,omitempty"`
+	AccountLimitSnapshots    []RepositoryReviewAccountLimitSnapshot `json:"account_limits"`
+	StartedAt                time.Time                              `json:"started_at,omitempty"`
+	CompletedAt              time.Time                              `json:"completed_at,omitempty"`
+	CreatedAt                time.Time                              `json:"created_at"`
+	UpdatedAt                time.Time                              `json:"updated_at"`
 }
 
 func (s Store) ListAutomations(ctx context.Context) ([]RepositoryReviewAutomation, error) {
@@ -556,13 +591,20 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 		}
 	}
 	hadLegacyIssueWriter := strings.TrimSpace(automation.IssueWriterModel) == ""
+	hadLegacyAssignmentTimeout := automation.AssignmentTimeoutSeconds == 0
 	if automation.ID != id {
 		return RepositoryReviewAutomation{}, false, errors.New("repository review automation identity mismatch")
+	}
+	hadLegacySchema := false
+	if automation.SchemaVersion == 1 {
+		automation.SchemaVersion = RepositoryReviewAutomationSchemaVersion
+		hadLegacySchema = true
 	}
 	if err := normalizeAutomation(&automation); err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
-	if hasLegacyPriceMetadata || hadLegacyGuard || hadLegacyIssueWriter {
+	if hasLegacyPriceMetadata || hadLegacyGuard || hadLegacyIssueWriter ||
+		hadLegacyAssignmentTimeout || hadLegacySchema {
 		if err := s.saveAutomation(automation); err != nil {
 			return RepositoryReviewAutomation{}, false, err
 		}
@@ -717,6 +759,9 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	if automation.MaxParallelChildren == 0 {
 		automation.MaxParallelChildren = defaultAutomationMaxParallelChildren
 	}
+	if automation.AssignmentTimeoutSeconds == 0 {
+		automation.AssignmentTimeoutSeconds = DefaultRepositoryReviewAssignmentTimeoutSeconds
+	}
 	if automation.EstimatedOutputTokens == 0 {
 		automation.EstimatedOutputTokens = defaultAutomationEstimatedOutputTokens
 	}
@@ -815,6 +860,9 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		automation.MaxFilesPerRun < 1 || automation.MaxFilesPerRun > maxReviewFiles ||
 		automation.MaxContentBytes < 1 || automation.MaxContentBytes > defaultAutomationMaxContentBytes ||
 		automation.MaxParallelChildren < 1 || automation.MaxParallelChildren > 64 ||
+		automation.AssignmentTimeoutSeconds < MinRepositoryReviewAssignmentTimeoutSeconds ||
+		automation.AssignmentTimeoutSeconds > MaxRepositoryReviewAssignmentTimeoutSeconds ||
+		automation.AssignmentTimeoutSeconds%60 != 0 ||
 		automation.EstimatedOutputTokens < 1 || automation.EstimatedOutputTokens > 65_536 ||
 		!validOptionalAutomationText(automation.PauseDetail, 4096) ||
 		!validOptionalAutomationText(automation.RequestedPauseDetail, 4096) ||
@@ -945,6 +993,7 @@ func (s Store) validateAutomationProfileSnapshotUnlocked(
 		automation.MaxFilesPerRun != materialized.MaxFilesPerRun ||
 		automation.MaxContentBytes != materialized.MaxContentBytes ||
 		automation.MaxParallelChildren != materialized.MaxParallelChildren ||
+		automation.AssignmentTimeoutSeconds != materialized.AssignmentTimeoutSeconds ||
 		automation.EstimatedOutputTokens != materialized.EstimatedOutputTokens ||
 		!reflect.DeepEqual(automation.BudgetPolicy, materialized.BudgetPolicy) ||
 		automation.Target != materialized.Target {
@@ -970,6 +1019,7 @@ func repositoryReviewAutomationProfilePolicyEqual(
 		left.MaxFilesPerRun == right.MaxFilesPerRun &&
 		left.MaxContentBytes == right.MaxContentBytes &&
 		left.MaxParallelChildren == right.MaxParallelChildren &&
+		left.AssignmentTimeoutSeconds == right.AssignmentTimeoutSeconds &&
 		left.EstimatedOutputTokens == right.EstimatedOutputTokens &&
 		reflect.DeepEqual(left.BudgetPolicy, right.BudgetPolicy) &&
 		left.Target == right.Target
@@ -1047,10 +1097,35 @@ func validateProgress(progress RepositoryReviewProgress) error {
 		(progress.CoverageAvailable && (progress.InspectedFiles > progress.SelectedFiles ||
 			progress.ReviewedFiles+progress.UnsupportedFiles > progress.SelectedFiles ||
 			progress.CoverageExact && progress.RemainingFiles !=
-				progress.SelectedFiles-progress.ReviewedFiles-progress.UnsupportedFiles)) {
+				progress.SelectedFiles-progress.ReviewedFiles-progress.UnsupportedFiles)) ||
+		!validRepositoryReviewAssignmentProgress(progress.AssignmentProgress) {
 		return fmt.Errorf("%w: invalid progress", ErrInvalidAutomation)
 	}
 	return nil
+}
+
+func validRepositoryReviewAssignmentProgress(progress RepositoryReviewAssignmentProgress) bool {
+	maximum := maxReviewFiles * maxRepositoryReviewRequiredAssignments
+	validCounts := func(total, completed, pending, active int) bool {
+		return total >= 0 && total <= maximum &&
+			completed >= 0 && completed <= total &&
+			pending >= 0 && pending <= total &&
+			active >= 0 && active <= total
+	}
+	if !validCounts(progress.Total, progress.Completed, progress.Pending, progress.Active) {
+		return false
+	}
+	for _, counts := range []RepositoryReviewAssignmentFocusProgress{
+		progress.ByFocus.CorrectnessState,
+		progress.ByFocus.SecurityTrust,
+		progress.ByFocus.ConcurrencyRecovery,
+		progress.ByFocus.IntegrationValidation,
+	} {
+		if !validCounts(counts.Total, counts.Completed, counts.Pending, counts.Active) {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeModelPrices(automation *RepositoryReviewAutomation) error {

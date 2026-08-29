@@ -675,6 +675,26 @@ export interface RepositoryReviewTokenUsage {
   cached_tokens: number
 }
 
+export type RepositoryReviewFocusID =
+  | "correctness_state"
+  | "security_trust"
+  | "concurrency_recovery"
+  | "integration_validation"
+
+export interface RepositoryReviewAssignmentFocusProgress {
+  total: number
+  completed: number
+  pending: number
+  active: number
+}
+
+export interface RepositoryReviewAssignmentProgress extends RepositoryReviewAssignmentFocusProgress {
+  by_focus: Record<
+    RepositoryReviewFocusID,
+    RepositoryReviewAssignmentFocusProgress
+  >
+}
+
 export interface RepositoryReviewAutomationProgress {
   stage: string
   completed_batches: number
@@ -687,6 +707,7 @@ export interface RepositoryReviewAutomationProgress {
   remaining_files: number
   unsupported_files: number
   findings: number
+  assignment_progress: RepositoryReviewAssignmentProgress
   scope_frozen?: boolean
   finding_aggregates: number
   unaggregated_findings: number
@@ -754,6 +775,7 @@ export interface RepositoryReviewAutomationConfig {
   max_files_per_run: number
   max_content_bytes: number
   max_parallel_children: number
+  assignment_timeout_seconds: number
   auto_continue: boolean
   model_prices: Record<string, ReviewModelPrice>
   budget: RepositoryReviewAutomationBudget
@@ -772,6 +794,7 @@ export interface RepositoryReviewProfileConfig {
   max_files_per_run: number
   max_content_bytes: number
   max_parallel_children: number
+  assignment_timeout_seconds: number
   budget: RepositoryReviewAutomationBudget
 }
 
@@ -2148,6 +2171,7 @@ function normalizeProfile(
     max_files_per_run: profile.max_files_per_run ?? 24,
     max_content_bytes: profile.max_content_bytes ?? 524_288,
     max_parallel_children: profile.max_parallel_children ?? 8,
+    assignment_timeout_seconds: profile.assignment_timeout_seconds ?? 3_600,
     scope_policy: {
       code_types:
         profile.scope_policy?.code_types?.length > 0
@@ -2194,6 +2218,7 @@ function normalizeAutomation(
     max_files_per_run: automation.max_files_per_run ?? 24,
     max_content_bytes: automation.max_content_bytes ?? 524_288,
     max_parallel_children: automation.max_parallel_children ?? 8,
+    assignment_timeout_seconds: automation.assignment_timeout_seconds ?? 3_600,
     auto_continue: automation.auto_continue ?? true,
     run_ids: automation.run_ids ?? [],
     model_prices: automation.model_prices ?? {},
@@ -2212,6 +2237,9 @@ function normalizeAutomation(
       remaining_files: automation.progress?.remaining_files ?? 0,
       unsupported_files: automation.progress?.unsupported_files ?? 0,
       findings: automation.progress?.findings ?? 0,
+      assignment_progress: normalizeAssignmentProgress(
+        automation.progress?.assignment_progress,
+      ),
       scope_frozen: automation.progress?.scope_frozen ?? false,
       finding_aggregates: automation.progress?.finding_aggregates ?? 0,
       unaggregated_findings: automation.progress?.unaggregated_findings ?? 0,
@@ -2233,6 +2261,29 @@ function normalizeAutomation(
       : undefined,
     started_at: normalizeOptionalTimestamp(automation.started_at),
     completed_at: normalizeOptionalTimestamp(automation.completed_at),
+  }
+}
+
+function normalizeAssignmentProgress(
+  progress: RepositoryReviewAssignmentProgress | undefined,
+): RepositoryReviewAssignmentProgress {
+  const counts = (value: RepositoryReviewAssignmentFocusProgress | undefined) =>
+    ({
+      total: value?.total ?? 0,
+      completed: value?.completed ?? 0,
+      pending: value?.pending ?? 0,
+      active: value?.active ?? 0,
+    }) satisfies RepositoryReviewAssignmentFocusProgress
+  return {
+    ...counts(progress),
+    by_focus: {
+      correctness_state: counts(progress?.by_focus?.correctness_state),
+      security_trust: counts(progress?.by_focus?.security_trust),
+      concurrency_recovery: counts(progress?.by_focus?.concurrency_recovery),
+      integration_validation: counts(
+        progress?.by_focus?.integration_validation,
+      ),
+    },
   }
 }
 
@@ -2440,6 +2491,7 @@ function repositoryReviewProfileConfigPayload(
     max_files_per_run: input.max_files_per_run,
     max_content_bytes: input.max_content_bytes,
     max_parallel_children: input.max_parallel_children,
+    assignment_timeout_seconds: input.assignment_timeout_seconds,
     budget: input.budget,
   }
 }

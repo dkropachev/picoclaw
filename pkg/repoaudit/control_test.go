@@ -170,7 +170,7 @@ func TestAutomationStoreCreatesConfigurationBeforeRepositoryReviewState(t *testi
 	if !strings.HasPrefix(automation.ID, "rra_") || !validAutomationID(automation.ID) {
 		t.Fatalf("generated ID = %q", automation.ID)
 	}
-	if automation.SchemaVersion != 1 || automation.Version != 1 ||
+	if automation.SchemaVersion != RepositoryReviewAutomationSchemaVersion || automation.Version != 1 ||
 		automation.Name != "Nightly correctness review" || automation.Repository != "owner/repo" ||
 		automation.Ref != "main" || automation.Target != "all" ||
 		automation.ReviewFocus != "Find concrete concurrency bugs." ||
@@ -178,11 +178,13 @@ func TestAutomationStoreCreatesConfigurationBeforeRepositoryReviewState(t *testi
 		t.Fatalf("normalized automation = %#v", automation)
 	}
 	if automation.Status != RepositoryReviewAutomationIdle || automation.ActiveRunID != "" ||
-		len(automation.RunIDs) != 0 || automation.Progress != (RepositoryReviewProgress{}) {
+		len(automation.RunIDs) != 0 || !reflect.DeepEqual(automation.Progress, RepositoryReviewProgress{}) {
 		t.Fatalf("new automation runtime = %#v", automation)
 	}
 	if automation.MaxFilesPerRun != 24 || automation.MaxContentBytes != 512<<10 ||
-		automation.MaxParallelChildren != 8 || automation.EstimatedOutputTokens != 1_800 {
+		automation.MaxParallelChildren != 8 ||
+		automation.AssignmentTimeoutSeconds != DefaultRepositoryReviewAssignmentTimeoutSeconds ||
+		automation.EstimatedOutputTokens != 1_800 {
 		t.Fatalf("new automation defaults = %#v", automation)
 	}
 	if automation.BudgetPolicy.GuardExpression != "spent.tokens.total < 200000 and spend.total.usd < 8.5" ||
@@ -524,6 +526,11 @@ func TestAutomationStoreRejectsInvalidPolicyRuntimeAndPricing(t *testing.T) {
 		}},
 		{name: "progress", mutate: func(value *RepositoryReviewAutomation) {
 			value.Progress = RepositoryReviewProgress{CompletedBatches: 2, TotalBatches: 1}
+		}},
+		{name: "assignment progress", mutate: func(value *RepositoryReviewAutomation) {
+			value.Progress.AssignmentProgress = RepositoryReviewAssignmentProgress{
+				Total: 1, Completed: 2,
+			}
 		}},
 		{name: "unknown price alias", mutate: func(value *RepositoryReviewAutomation) {
 			value.ModelPrices = map[string]RepositoryReviewModelPrice{"not-selected": {InputPricePer1M: 1}}

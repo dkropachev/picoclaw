@@ -27,24 +27,25 @@ import (
 )
 
 type repositoryReviewAutomationConfigRequest struct {
-	Name                string                                 `json:"name"`
-	Repository          string                                 `json:"repository"`
-	ProfileID           string                                 `json:"profile_id,omitempty"`
-	Branch              string                                 `json:"branch,omitempty"`
-	Ref                 string                                 `json:"ref,omitempty"`
-	Target              string                                 `json:"target"`
-	ReviewFocus         string                                 `json:"review_focus"`
-	AccountRef          string                                 `json:"account_ref,omitempty"`
-	ScopePolicy         repoaudit.RepositoryReviewScopePolicy  `json:"scope_policy"`
-	ReviewerModels      []string                               `json:"reviewer_models"`
-	CompareModels       bool                                   `json:"compare_models"`
-	Force               bool                                   `json:"force"`
-	AutoContinue        *bool                                  `json:"auto_continue,omitempty"`
-	MaxFilesPerRun      int                                    `json:"max_files_per_run"`
-	MaxContentBytes     int64                                  `json:"max_content_bytes"`
-	MaxParallelChildren int                                    `json:"max_parallel_children"`
-	Budget              repoaudit.RepositoryReviewBudgetPolicy `json:"budget"`
-	ExpectedVersion     int64                                  `json:"expected_version,omitempty"`
+	Name                     string                                 `json:"name"`
+	Repository               string                                 `json:"repository"`
+	ProfileID                string                                 `json:"profile_id,omitempty"`
+	Branch                   string                                 `json:"branch,omitempty"`
+	Ref                      string                                 `json:"ref,omitempty"`
+	Target                   string                                 `json:"target"`
+	ReviewFocus              string                                 `json:"review_focus"`
+	AccountRef               string                                 `json:"account_ref,omitempty"`
+	ScopePolicy              repoaudit.RepositoryReviewScopePolicy  `json:"scope_policy"`
+	ReviewerModels           []string                               `json:"reviewer_models"`
+	CompareModels            bool                                   `json:"compare_models"`
+	Force                    bool                                   `json:"force"`
+	AutoContinue             *bool                                  `json:"auto_continue,omitempty"`
+	MaxFilesPerRun           int                                    `json:"max_files_per_run"`
+	MaxContentBytes          int64                                  `json:"max_content_bytes"`
+	MaxParallelChildren      int                                    `json:"max_parallel_children"`
+	AssignmentTimeoutSeconds repositoryReviewOptionalInt            `json:"assignment_timeout_seconds"`
+	Budget                   repoaudit.RepositoryReviewBudgetPolicy `json:"budget"`
+	ExpectedVersion          int64                                  `json:"expected_version,omitempty"`
 }
 
 type repositoryReviewAutomationActionRequest struct {
@@ -272,6 +273,10 @@ func (h *Handler) handleListRepositoryReviewAutomations(w http.ResponseWriter, r
 		}
 		if found {
 			applyRepositoryReviewLiveMetrics(&automations[index], state)
+			automations[index].Progress.AssignmentProgress = repoaudit.CurrentCampaignAssignmentProgress(
+				state,
+				automations[index].CampaignID,
+			)
 		}
 	}
 	query, _ := collectionquery.Parse("", repositoryReviewAutomationCollectionSchema)
@@ -378,6 +383,10 @@ func (h *Handler) handleCreateRepositoryReviewAutomation(w http.ResponseWriter, 
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
+	if !validRepositoryReviewAssignmentTimeoutRequest(request.AssignmentTimeoutSeconds) {
+		writeRepositoryReviewAutomationError(w, repoaudit.ErrInvalidAutomation)
+		return
+	}
 	if strings.TrimSpace(request.ProfileID) == "" {
 		writeRepositoryReviewAutomationError(
 			w,
@@ -409,7 +418,7 @@ func (h *Handler) handleCreateRepositoryReviewAutomation(w http.ResponseWriter, 
 	writeRepositoryReviewJSON(
 		w,
 		http.StatusCreated,
-		map[string]any{"automation": projectRepositoryReviewAutomation(created)},
+		map[string]any{"automation": projectRepositoryReviewAutomationWithStore(store, created)},
 	)
 }
 
@@ -421,6 +430,10 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 	var request repositoryReviewAutomationConfigRequest
 	if err := decodeRepositoryReviewRequest(r, &request); err != nil {
 		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
+	if !validRepositoryReviewAssignmentTimeoutRequest(request.AssignmentTimeoutSeconds) {
+		writeRepositoryReviewAutomationError(w, repoaudit.ErrInvalidAutomation)
 		return
 	}
 	store, err := h.repositoryReviewStore()
@@ -498,7 +511,7 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 	writeRepositoryReviewJSON(
 		w,
 		http.StatusOK,
-		map[string]any{"automation": projectRepositoryReviewAutomation(updated)},
+		map[string]any{"automation": projectRepositoryReviewAutomationWithStore(store, updated)},
 	)
 }
 
@@ -584,8 +597,12 @@ func (h *Handler) handleRepositoryReviewAutomationStartAction(
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
+	projected := projectRepositoryReviewAutomation(automation)
+	if store, storeErr := h.repositoryReviewStore(); storeErr == nil {
+		projected = projectRepositoryReviewAutomationWithStore(store, automation)
+	}
 	writeRepositoryReviewJSON(w, http.StatusAccepted, map[string]any{
-		"automation": projectRepositoryReviewAutomation(automation),
+		"automation": projected,
 		"outcome":    "started",
 	})
 }
@@ -637,8 +654,12 @@ func (h *Handler) handlePauseRepositoryReviewAutomation(w http.ResponseWriter, r
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
+	projected := projectRepositoryReviewAutomation(automation)
+	if store, storeErr := h.repositoryReviewStore(); storeErr == nil {
+		projected = projectRepositoryReviewAutomationWithStore(store, automation)
+	}
 	writeRepositoryReviewJSON(w, http.StatusAccepted, map[string]any{
-		"automation": projectRepositoryReviewAutomation(automation),
+		"automation": projected,
 	})
 }
 
@@ -651,6 +672,21 @@ func projectRepositoryReviewAutomation(
 	automation.Progress.ScopeFrozen = automation.ScopeSelection != nil
 	automation.ScopeSelection = nil
 	return automation
+}
+
+func projectRepositoryReviewAutomationWithStore(
+	store repoaudit.Store,
+	automation repoaudit.RepositoryReviewAutomation,
+) repoaudit.RepositoryReviewAutomation {
+	if state, found, err := store.ResolveRepositoryState(
+		automation.Repository, automation.RunIDs,
+	); err == nil && found {
+		automation.Progress.AssignmentProgress = repoaudit.CurrentCampaignAssignmentProgress(
+			state,
+			automation.CampaignID,
+		)
+	}
+	return projectRepositoryReviewAutomation(automation)
 }
 
 func repositoryReviewCommitReferenceForAutomation(
@@ -721,6 +757,9 @@ func repositoryReviewAutomationFromRequest(
 		EstimatedOutputTokens: 1_800,
 		BudgetPolicy:          request.Budget,
 		Status:                repoaudit.RepositoryReviewAutomationIdle,
+	}
+	if request.AssignmentTimeoutSeconds.Present {
+		automation.AssignmentTimeoutSeconds = request.AssignmentTimeoutSeconds.Value
 	}
 	if request.AutoContinue == nil {
 		automation.AutoContinue = true
@@ -978,6 +1017,7 @@ func applyRepositoryReviewMaterializedPolicy(
 	candidate.MaxFilesPerRun = materialized.MaxFilesPerRun
 	candidate.MaxContentBytes = materialized.MaxContentBytes
 	candidate.MaxParallelChildren = materialized.MaxParallelChildren
+	candidate.AssignmentTimeoutSeconds = materialized.AssignmentTimeoutSeconds
 	candidate.EstimatedOutputTokens = materialized.EstimatedOutputTokens
 	candidate.BudgetPolicy = materialized.BudgetPolicy
 }
@@ -1005,6 +1045,9 @@ func applyRepositoryReviewAutomationRequest(
 	automation.MaxFilesPerRun = request.MaxFilesPerRun
 	automation.MaxContentBytes = request.MaxContentBytes
 	automation.MaxParallelChildren = request.MaxParallelChildren
+	if request.AssignmentTimeoutSeconds.Present {
+		automation.AssignmentTimeoutSeconds = request.AssignmentTimeoutSeconds.Value
+	}
 	automation.EstimatedOutputTokens = 1_800
 	automation.BudgetPolicy = request.Budget
 }
@@ -1020,6 +1063,7 @@ func repositoryReviewExecutionConfigurationChanged(
 		previous.IssueWriterModel != next.IssueWriterModel ||
 		previous.CompareModels != next.CompareModels || previous.Force != next.Force ||
 		previous.MaxContentBytes != next.MaxContentBytes || previous.MaxParallelChildren != next.MaxParallelChildren ||
+		previous.AssignmentTimeoutSeconds != next.AssignmentTimeoutSeconds ||
 		!reflect.DeepEqual(previous.BudgetPolicy, next.BudgetPolicy) ||
 		!slicesEqual(previous.ReviewerModels, next.ReviewerModels)
 }

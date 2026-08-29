@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -84,7 +85,7 @@ func TestSchemaOneListMigrationAndExplicitJobReconciliation(t *testing.T) {
 	}
 
 	persisted, err := os.ReadFile(store.path(state.Repository))
-	if err != nil || !strings.Contains(string(persisted), `"schema_version":2`) ||
+	if err != nil || !strings.Contains(string(persisted), fmt.Sprintf(`"schema_version":%d`, SchemaVersion)) ||
 		!strings.Contains(string(persisted), `"mapping_jobs"`) {
 		t.Fatalf("persisted migration = %s, err=%v", persisted, err)
 	}

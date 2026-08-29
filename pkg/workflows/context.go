@@ -11,8 +11,11 @@ import (
 )
 
 var (
-	ErrAgentCallNotAdmitted            = errors.New("workflow agent provider call was not admitted")
-	ErrManagedChildActivityNotRecorded = errors.New("workflow managed child activity was not recorded")
+	ErrAgentCallNotAdmitted                   = errors.New("workflow agent provider call was not admitted")
+	ErrManagedChildActivityNotRecorded        = errors.New("workflow managed child activity was not recorded")
+	ErrManagedAssignmentCheckpointNotRecorded = errors.New(
+		"workflow managed assignment checkpoint was not recorded",
+	)
 )
 
 type Delivery struct {
@@ -199,6 +202,8 @@ type ManagedChildActivity struct {
 	Phase                 ManagedChildActivityPhase `json:"phase"`
 	Index                 int                       `json:"index"`
 	Total                 int                       `json:"total"`
+	AssignmentID          string                    `json:"assignment_id,omitempty"`
+	FocusID               string                    `json:"focus_id,omitempty"`
 	Label                 string                    `json:"label,omitempty"`
 	ModelAlias            string                    `json:"model_alias,omitempty"`
 	ScopeCount            int                       `json:"scope_count"`
@@ -223,6 +228,43 @@ type ManagedChildActivityEvent struct {
 
 // ManagedChildActivityEventObserver receives managed child data with workflow identity.
 type ManagedChildActivityEventObserver func(ManagedChildActivityEvent) error
+
+// ManagedAssignmentDispatchEvent identifies one exact planned assignment at
+// the last admission boundary before a provider request. Scope contains only
+// detached file references; it never contains repository content or a source
+// capability. The same event may be delivered again for a structured-output
+// repair, and observers must therefore be idempotent.
+type ManagedAssignmentDispatchEvent struct {
+	AssignmentID  string `json:"assignment_id"`
+	FocusID       string `json:"focus_id"`
+	Index         int    `json:"index"`
+	Total         int    `json:"total"`
+	Label         string `json:"label,omitempty"`
+	ReviewerModel string `json:"reviewer_model,omitempty"`
+	Model         string `json:"model,omitempty"`
+	Required      bool   `json:"required"`
+	Scope         []any  `json:"scope"`
+}
+
+// ManagedAssignmentDispatchObserver verifies that an exact assignment remains
+// dispatchable immediately before each provider request.
+type ManagedAssignmentDispatchObserver func(ManagedAssignmentDispatchEvent) error
+
+// ManagedAssignmentCheckpointEvent carries one independently validated child
+// result to its durable domain checkpoint. Output is a detached structured JSON
+// value. OutputDigest binds the raw child response without exposing it, while
+// CheckpointDigest binds the assignment, exact scope, model, and output together.
+type ManagedAssignmentCheckpointEvent struct {
+	ManagedAssignmentDispatchEvent
+	Output           any    `json:"output"`
+	OutputDigest     string `json:"output_digest"`
+	CheckpointDigest string `json:"checkpoint_digest"`
+}
+
+// ManagedAssignmentCheckpointObserver durably records one successful
+// assignment. Returning nil is the managed runner's acknowledgement that the
+// result reached its atomic domain checkpoint.
+type ManagedAssignmentCheckpointObserver func(ManagedAssignmentCheckpointEvent) error
 
 type AgentCallAdmissionEvent struct {
 	RunID  string `json:"run_id"`
@@ -318,6 +360,16 @@ type AgentRequest struct {
 	// ManagedChildObserver receives bounded start/completion metadata for each
 	// managed child. It never receives prompts, responses, or scope content.
 	ManagedChildObserver ManagedChildActivityObserver
+	// ManagedAssignmentDispatch is checked immediately before every provider
+	// request made for an explicit managed assignment, including repairs.
+	ManagedAssignmentDispatch ManagedAssignmentDispatchObserver
+	// ManagedAssignmentCheckpoint receives each valid explicit assignment output
+	// synchronously before the child is reported complete.
+	ManagedAssignmentCheckpoint ManagedAssignmentCheckpointObserver
+	// AssignmentTimeoutSeconds is one fixed wall-clock budget shared by an
+	// explicit assignment's initial provider request and all output repairs. Zero
+	// retains the caller's existing context deadline without adding another one.
+	AssignmentTimeoutSeconds int
 	// CallAdmission is checked before every provider request, including queued
 	// managed children, fallbacks, retries, and structured-output repairs.
 	CallAdmission AgentCallAdmission

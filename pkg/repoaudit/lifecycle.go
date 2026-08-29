@@ -124,7 +124,7 @@ func migrateRepositoryState(state *RepositoryState) (bool, error) {
 	}
 	migrated := false
 	switch state.SchemaVersion {
-	case 1:
+	case 1, 2:
 		state.SchemaVersion = SchemaVersion
 		migrated = true
 	case SchemaVersion:

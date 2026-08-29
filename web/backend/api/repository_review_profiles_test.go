@@ -25,7 +25,8 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 	created := createRepositoryReviewProfileForTest(t, mux, "Focused review", "cheap")
 	if created.ID == "" || created.Version != 1 || created.ReviewerModel != "cheap" ||
 		created.IssueWriterModel != "" ||
-		created.IssuePrompt != repoaudit.DefaultRepositoryReviewIssuePrompt || !created.AutoContinue {
+		created.IssuePrompt != repoaudit.DefaultRepositoryReviewIssuePrompt || !created.AutoContinue ||
+		created.AssignmentTimeoutSeconds != 3_600 {
 		t.Fatalf("created profile=%#v", created)
 	}
 	legacyPriceBody := repositoryReviewProfileCreateBody("Legacy price", "cheap")
@@ -38,6 +39,21 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 	)
 	if legacyPrice.Code != http.StatusBadRequest {
 		t.Fatalf("legacy model_price status=%d body=%s", legacyPrice.Code, legacyPrice.Body.String())
+	}
+	invalidTimeoutBody := repositoryReviewProfileCreateBody("Invalid timeout", "cheap")
+	invalidTimeoutBody["assignment_timeout_seconds"] = 0
+	invalidTimeout := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/profiles", invalidTimeoutBody,
+	)
+	if invalidTimeout.Code != http.StatusBadRequest {
+		t.Fatalf("invalid timeout status=%d body=%s", invalidTimeout.Code, invalidTimeout.Body.String())
+	}
+	invalidTimeoutBody["assignment_timeout_seconds"] = nil
+	nullTimeout := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/profiles", invalidTimeoutBody,
+	)
+	if nullTimeout.Code != http.StatusBadRequest {
+		t.Fatalf("null timeout status=%d body=%s", nullTimeout.Code, nullTimeout.Body.String())
 	}
 
 	list := httptest.NewRecorder()
@@ -85,6 +101,7 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 	updateBody["name"] = "Focused review v2"
 	updateBody["issue_writer_model"] = "quality"
 	updateBody["issue_prompt"] = "Use compact evidence and impact sections."
+	updateBody["assignment_timeout_seconds"] = 7_200
 	updateBody["expected_version"] = created.Version
 	updatedResponse := repositoryReviewAutomationMutation(
 		t, mux, http.MethodPatch, "/api/repository-reviews/profiles/"+created.ID, updateBody,
@@ -101,11 +118,13 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 	updated := updatedResult.Profile
 	if updated.Version != 2 || updated.Name != "Focused review v2" ||
 		updated.IssueWriterModel != "quality" ||
-		updated.IssuePrompt != "Use compact evidence and impact sections." {
+		updated.IssuePrompt != "Use compact evidence and impact sections." ||
+		updated.AssignmentTimeoutSeconds != 7_200 {
 		t.Fatalf("updated profile=%#v", updated)
 	}
 	legacyUpdateBody := repositoryReviewProfileBody(updated)
 	delete(legacyUpdateBody, "issue_prompt")
+	delete(legacyUpdateBody, "assignment_timeout_seconds")
 	legacyUpdateBody["name"] = "Focused review v3"
 	legacyUpdateBody["expected_version"] = updated.Version
 	legacyUpdateResponse := repositoryReviewAutomationMutation(
@@ -123,7 +142,8 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 	}
 	updated = updatedResult.Profile
 	if updated.Version != 3 || updated.Name != "Focused review v3" ||
-		updated.IssuePrompt != "Use compact evidence and impact sections." {
+		updated.IssuePrompt != "Use compact evidence and impact sections." ||
+		updated.AssignmentTimeoutSeconds != 7_200 {
 		t.Fatalf("omitted issue prompt was not preserved: %#v", updated)
 	}
 
@@ -148,6 +168,7 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 		assigned.Ref != "" || assigned.Target != "all" ||
 		len(assigned.ReviewerModels) != 1 || assigned.ReviewerModels[0] != "cheap" ||
 		assigned.IssueWriterModel != "quality" ||
+		assigned.AssignmentTimeoutSeconds != 7_200 ||
 		!strings.Contains(assigned.Name, updated.Name) || !strings.Contains(assigned.Name, "profiled") {
 		t.Fatalf("assigned automation=%#v", assigned)
 	}
@@ -1485,8 +1506,9 @@ func repositoryReviewProfileCreateBody(name, model string) map[string]any {
 		"reviewer_model": model,
 		"force":          false, "auto_continue": true,
 		"max_files_per_run": 4, "max_content_bytes": 65536,
-		"max_parallel_children": 8,
-		"budget":                map[string]any{"guard_expression": ""},
+		"max_parallel_children":      8,
+		"assignment_timeout_seconds": 3_600,
+		"budget":                     map[string]any{"guard_expression": ""},
 	}
 }
 
@@ -1499,8 +1521,9 @@ func repositoryReviewProfileBody(profile repoaudit.RepositoryReviewProfile) map[
 		"issue_writer_model": profile.IssueWriterModel,
 		"force":              profile.Force,
 		"auto_continue":      profile.AutoContinue, "max_files_per_run": profile.MaxFilesPerRun,
-		"max_content_bytes":     profile.MaxContentBytes,
-		"max_parallel_children": profile.MaxParallelChildren,
-		"budget":                profile.BudgetPolicy,
+		"max_content_bytes":          profile.MaxContentBytes,
+		"max_parallel_children":      profile.MaxParallelChildren,
+		"assignment_timeout_seconds": profile.AssignmentTimeoutSeconds,
+		"budget":                     profile.BudgetPolicy,
 	}
 }

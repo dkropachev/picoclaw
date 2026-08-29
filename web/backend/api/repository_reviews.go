@@ -229,6 +229,7 @@ func projectRepositoryReviewDetail(
 	state.ActiveForceCommitSHA = ""
 	state.CurrentCampaign = nil
 	state.CampaignHistory = nil
+	state.ActiveReviewRun = nil
 	unsupportedPaths := make([]string, 0, len(state.Unsupported))
 	for pathValue := range state.Unsupported {
 		unsupportedPaths = append(unsupportedPaths, pathValue)
@@ -245,6 +246,10 @@ func projectRepositoryReviewDetail(
 	}
 	for index := range state.Runs {
 		state.Runs[index].CampaignID = ""
+	}
+	for index := range state.Runs {
+		state.Runs[index].CheckpointDigests = nil
+		state.Runs[index].CheckpointScopes = nil
 	}
 	draftTotal := len(state.IssueDrafts)
 	page.DraftOffset = min(page.DraftOffset, draftTotal)

@@ -2,7 +2,7 @@ package repoaudit
 
 import "time"
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 type FileRef struct {
 	Path      string `json:"path"`
@@ -31,25 +31,27 @@ type UnsupportedFile struct {
 }
 
 type Plan struct {
-	ID                      string            `json:"id"`
-	CampaignID              string            `json:"campaign_id,omitempty"`
-	Repository              string            `json:"repository"`
-	CommitSHA               string            `json:"commit_sha"`
-	InventoryHash           string            `json:"inventory_hash"`
-	ProfileHash             string            `json:"profile_hash"`
-	RequiredAssignments     int               `json:"required_assignments,omitempty"`
-	ForceCampaignID         string            `json:"force_campaign_id,omitempty"`
-	Authoritative           bool              `json:"authoritative,omitempty"`
-	TargetBranch            string            `json:"target_branch,omitempty"`
-	AdvertisedDefaultBranch string            `json:"advertised_default_branch,omitempty"`
-	TargetIsDefault         bool              `json:"target_is_default"`
-	StateVersion            int64             `json:"state_version"`
-	PendingFiles            []FileRef         `json:"pending_files"`
-	DeferredFiles           []FileRef         `json:"deferred_files,omitempty"`
-	UnchangedFiles          []FileRef         `json:"unchanged_files"`
-	UnsupportedFiles        []UnsupportedFile `json:"unsupported_files,omitempty"`
-	PreviouslyReviewed      int               `json:"previously_reviewed"`
-	CreatedAt               time.Time         `json:"created_at"`
+	ID                      string                           `json:"id"`
+	CampaignID              string                           `json:"campaign_id,omitempty"`
+	Repository              string                           `json:"repository"`
+	CommitSHA               string                           `json:"commit_sha"`
+	InventoryHash           string                           `json:"inventory_hash"`
+	ProfileHash             string                           `json:"profile_hash"`
+	RequiredAssignments     int                              `json:"required_assignments,omitempty"`
+	AssignmentCatalog       []RepositoryReviewAssignment     `json:"assignment_catalog,omitempty"`
+	AssignmentPlans         []RepositoryReviewAssignmentPlan `json:"assignment_plans,omitempty"`
+	ForceCampaignID         string                           `json:"force_campaign_id,omitempty"`
+	Authoritative           bool                             `json:"authoritative,omitempty"`
+	TargetBranch            string                           `json:"target_branch,omitempty"`
+	AdvertisedDefaultBranch string                           `json:"advertised_default_branch,omitempty"`
+	TargetIsDefault         bool                             `json:"target_is_default"`
+	StateVersion            int64                            `json:"state_version"`
+	PendingFiles            []FileRef                        `json:"pending_files"`
+	DeferredFiles           []FileRef                        `json:"deferred_files,omitempty"`
+	UnchangedFiles          []FileRef                        `json:"unchanged_files"`
+	UnsupportedFiles        []UnsupportedFile                `json:"unsupported_files,omitempty"`
+	PreviouslyReviewed      int                              `json:"previously_reviewed"`
+	CreatedAt               time.Time                        `json:"created_at"`
 }
 
 type Validation struct {
@@ -115,6 +117,8 @@ type Observation struct {
 // exact acknowledged subset; an unsuccessful child carries neither.
 type RepositoryReviewEvidence struct {
 	AssignmentID      string       `json:"assignment_id"`
+	FocusID           string       `json:"focus_id,omitempty"`
+	ReviewerIdentity  string       `json:"reviewer_identity,omitempty"`
 	ScopeFiles        []FileRef    `json:"scope_files"`
 	Required          bool         `json:"required"`
 	Successful        bool         `json:"successful"`
@@ -425,31 +429,34 @@ type RepositoryValidationJob struct {
 }
 
 type ReviewRun struct {
-	ID                      string    `json:"id"`
-	CampaignID              string    `json:"campaign_id,omitempty"`
-	PlanID                  string    `json:"plan_id"`
-	CommitSHA               string    `json:"commit_sha"`
-	InventoryHash           string    `json:"inventory_hash"`
-	ProfileHash             string    `json:"profile_hash,omitempty"`
-	ScopeDigest             string    `json:"scope_digest,omitempty"`
-	InspectedFiles          int       `json:"inspected_files,omitempty"`
-	LegacyRecovered         bool      `json:"legacy_recovered,omitempty"`
-	ReviewedFiles           int       `json:"reviewed_files"`
-	UnreviewedFiles         int       `json:"unreviewed_files"`
-	UnsupportedCount        int       `json:"unsupported_files"`
-	RemainingFiles          int       `json:"remaining_files"`
-	UnreviewedPaths         []string  `json:"unreviewed_paths,omitempty"`
-	UnsupportedPaths        []string  `json:"unsupported_paths,omitempty"`
-	SkippedFiles            int       `json:"skipped_files"`
-	ExcludedFiles           int       `json:"excluded_files"`
-	AcceptedFindings        int       `json:"accepted_findings"`
-	FindingIDs              []string  `json:"finding_ids,omitempty"`
-	RejectedFindings        int       `json:"rejected_findings"`
-	Models                  []string  `json:"models"`
-	TargetBranch            string    `json:"target_branch,omitempty"`
-	AdvertisedDefaultBranch string    `json:"advertised_default_branch,omitempty"`
-	TargetIsDefault         bool      `json:"target_is_default"`
-	CompletedAt             time.Time `json:"completed_at"`
+	ID                      string               `json:"id"`
+	CampaignID              string               `json:"campaign_id,omitempty"`
+	PlanID                  string               `json:"plan_id"`
+	CommitSHA               string               `json:"commit_sha"`
+	InventoryHash           string               `json:"inventory_hash"`
+	ProfileHash             string               `json:"profile_hash,omitempty"`
+	ScopeDigest             string               `json:"scope_digest,omitempty"`
+	InspectedFiles          int                  `json:"inspected_files,omitempty"`
+	LegacyRecovered         bool                 `json:"legacy_recovered,omitempty"`
+	Interrupted             bool                 `json:"interrupted,omitempty"`
+	ReviewedFiles           int                  `json:"reviewed_files"`
+	UnreviewedFiles         int                  `json:"unreviewed_files"`
+	UnsupportedCount        int                  `json:"unsupported_files"`
+	RemainingFiles          int                  `json:"remaining_files"`
+	UnreviewedPaths         []string             `json:"unreviewed_paths,omitempty"`
+	UnsupportedPaths        []string             `json:"unsupported_paths,omitempty"`
+	SkippedFiles            int                  `json:"skipped_files"`
+	ExcludedFiles           int                  `json:"excluded_files"`
+	AcceptedFindings        int                  `json:"accepted_findings"`
+	FindingIDs              []string             `json:"finding_ids,omitempty"`
+	CheckpointDigests       map[string]string    `json:"checkpoint_digests,omitempty"`
+	CheckpointScopes        map[string][]FileRef `json:"checkpoint_scopes,omitempty"`
+	RejectedFindings        int                  `json:"rejected_findings"`
+	Models                  []string             `json:"models"`
+	TargetBranch            string               `json:"target_branch,omitempty"`
+	AdvertisedDefaultBranch string               `json:"advertised_default_branch,omitempty"`
+	TargetIsDefault         bool                 `json:"target_is_default"`
+	CompletedAt             time.Time            `json:"completed_at"`
 }
 
 // RepositoryReviewCampaignPathCoverage is the monotonic durable state of one
@@ -458,9 +465,61 @@ type ReviewRun struct {
 // same-profile checkpoint. Unsupported is terminal and mutually exclusive
 // with both review states.
 type RepositoryReviewCampaignPathCoverage struct {
-	Inspected   bool `json:"inspected,omitempty"`
-	Completed   bool `json:"completed,omitempty"`
-	Unsupported bool `json:"unsupported,omitempty"`
+	AssignmentBits string `json:"assignment_bits,omitempty"`
+	Inspected      bool   `json:"inspected,omitempty"`
+	Completed      bool   `json:"completed,omitempty"`
+	Unsupported    bool   `json:"unsupported,omitempty"`
+}
+
+// RepositoryReviewAssignment is one stable campaign credit. ID is derived
+// from the focus, reviewer identity, prompt revision, and frozen profile hash.
+// Required assignments gate file completion; optional assignments are tracked
+// independently but do not keep a file pending after all required work lands.
+type RepositoryReviewAssignment struct {
+	ID             string `json:"id"`
+	FocusID        string `json:"focus_id"`
+	Reviewer       string `json:"reviewer"`
+	PromptRevision string `json:"prompt_revision"`
+	ProfileHash    string `json:"profile_hash"`
+	Required       bool   `json:"required"`
+}
+
+// RepositoryReviewAssignmentPlan is the exact missing-only scope reserved for
+// one assignment in a review run. Empty scopes are never persisted or sent to
+// a provider.
+type RepositoryReviewAssignmentPlan struct {
+	AssignmentID string    `json:"assignment_id"`
+	FocusID      string    `json:"focus_id"`
+	Label        string    `json:"label,omitempty"`
+	Task         string    `json:"task,omitempty"`
+	Reviewer     string    `json:"reviewer_model,omitempty"`
+	Optional     bool      `json:"optional,omitempty"`
+	Files        []FileRef `json:"files"`
+}
+
+// RepositoryReviewAssignmentReservation freezes the exact file-assignment
+// pairs owned by an active run. CheckpointDigest is set only after the child
+// result has been durably committed.
+type RepositoryReviewAssignmentReservation struct {
+	AssignmentID      string    `json:"assignment_id"`
+	Files             []FileRef `json:"files"`
+	AcknowledgedFiles []FileRef `json:"acknowledged_files,omitempty"`
+	CheckpointDigest  string    `json:"checkpoint_digest,omitempty"`
+}
+
+// RepositoryReviewActiveRun is the durable crash-recovery fence for managed
+// review dispatch. A launcher restart interrupts it, preserving committed bits
+// while releasing only reservations without a durable checkpoint.
+type RepositoryReviewActiveRun struct {
+	ID            string                                           `json:"id"`
+	CampaignID    string                                           `json:"campaign_id"`
+	PlanID        string                                           `json:"plan_id"`
+	CommitSHA     string                                           `json:"commit_sha"`
+	InventoryHash string                                           `json:"inventory_hash"`
+	ProfileHash   string                                           `json:"profile_hash"`
+	Reservations  map[string]RepositoryReviewAssignmentReservation `json:"reservations"`
+	FindingIDs    []string                                         `json:"finding_ids,omitempty"`
+	StartedAt     time.Time                                        `json:"started_at"`
 }
 
 // RepositoryReviewCampaignCoverage is the compact, exact-path ledger for the
@@ -474,6 +533,7 @@ type RepositoryReviewCampaignCoverage struct {
 	ProfileHash         string                                          `json:"profile_hash,omitempty"`
 	ScopeDigest         string                                          `json:"scope_digest,omitempty"`
 	RequiredAssignments int                                             `json:"required_assignments,omitempty"`
+	AssignmentCatalog   []RepositoryReviewAssignment                    `json:"assignment_catalog,omitempty"`
 	SelectedFiles       int                                             `json:"selected_files"`
 	Exact               bool                                            `json:"exact"`
 	RecoveryDigest      string                                          `json:"recovery_digest,omitempty"`
@@ -499,6 +559,7 @@ type RepositoryState struct {
 	MappingJobs             []RepositoryMappingJob            `json:"mapping_jobs"`
 	ValidationJobs          []RepositoryValidationJob         `json:"validation_jobs"`
 	CurrentCampaign         *RepositoryReviewCampaignCoverage `json:"current_campaign,omitempty"`
+	ActiveReviewRun         *RepositoryReviewActiveRun        `json:"active_review_run,omitempty"`
 	CampaignHistory         map[string]string                 `json:"campaign_history,omitempty"`
 	ActiveForceCampaignID   string                            `json:"active_force_campaign_id,omitempty"`
 	ActiveForceProfileHash  string                            `json:"active_force_profile_hash,omitempty"`

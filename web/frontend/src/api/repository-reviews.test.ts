@@ -463,6 +463,7 @@ describe("repository review API", () => {
       max_files_per_run: 24,
       max_content_bytes: 524288,
       max_parallel_children: 8,
+      assignment_timeout_seconds: 3_600,
       budget: {
         guard_expression:
           "account.limits.weekly.remaining_percent >= 10 and spend.total.usd < 25",
@@ -479,7 +480,13 @@ describe("repository review API", () => {
     mockedLauncherFetch
       .mockResolvedValueOnce(
         jsonResponse({
-          profiles: [{ ...profile, max_parallel_children: undefined }],
+          profiles: [
+            {
+              ...profile,
+              max_parallel_children: undefined,
+              assignment_timeout_seconds: undefined,
+            },
+          ],
         }),
       )
       .mockResolvedValueOnce(jsonResponse({ profile }))
@@ -493,6 +500,7 @@ describe("repository review API", () => {
           id: "profile/slash",
           reviewer_model: "review-model",
           max_parallel_children: 8,
+          assignment_timeout_seconds: 3_600,
         },
       ],
     })
@@ -623,7 +631,25 @@ describe("repository review API", () => {
       profile_id: "profile_1",
     }
 
-    await createRepositoryReviewAutomation(config)
+    await expect(
+      createRepositoryReviewAutomation(config),
+    ).resolves.toMatchObject({
+      assignment_timeout_seconds: 3_600,
+      progress: {
+        assignment_progress: {
+          total: 0,
+          completed: 0,
+          pending: 0,
+          active: 0,
+          by_focus: {
+            correctness_state: { total: 0 },
+            security_trust: { total: 0 },
+            concurrency_recovery: { total: 0 },
+            integration_validation: { total: 0 },
+          },
+        },
+      },
+    })
     await updateRepositoryReviewAutomation("auto/slash", {
       ...config,
       expected_version: 4,

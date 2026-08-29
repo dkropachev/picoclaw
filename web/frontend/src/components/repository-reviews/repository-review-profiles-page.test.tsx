@@ -171,6 +171,16 @@ describe("RepositoryReviewProfilesPage", () => {
     const files = screen.getByLabelText("Files per batch")
     await user.clear(files)
     await user.type(files, "12")
+    const assignmentDeadline = screen.getByLabelText(
+      "Assignment deadline (minutes)",
+    )
+    expect(assignmentDeadline).toHaveValue(60)
+    expect(assignmentDeadline).toHaveAttribute(
+      "aria-describedby",
+      "assignment-deadline-help",
+    )
+    await user.clear(assignmentDeadline)
+    await user.type(assignmentDeadline, "90")
     await user.click(screen.getByText(/^Advanced/))
     expect(screen.queryByLabelText("Files per batch")).not.toBeInTheDocument()
     expect(screen.getByLabelText("Include folders")).toHaveValue("pkg/core")
@@ -188,6 +198,7 @@ describe("RepositoryReviewProfilesPage", () => {
       issue_prompt: "Present confirmed diagnosis with evidence and provenance.",
       max_files_per_run: 12,
       max_parallel_children: 6,
+      assignment_timeout_seconds: 5_400,
       scope_policy: { include_folders: ["pkg/core"] },
       budget: { guard_expression: "" },
     })
@@ -894,6 +905,7 @@ function storedProfile(accountRef: string, reviewerModel: string) {
     max_files_per_run: 24,
     max_content_bytes: 524_288,
     max_parallel_children: 8,
+    assignment_timeout_seconds: 3_600,
     scope_policy: {
       code_types: ["code" as const],
       include_folders: [],

@@ -90,6 +90,7 @@ const emptyProfile: RepositoryReviewProfileConfig = {
   max_files_per_run: 24,
   max_content_bytes: 524_288,
   max_parallel_children: 8,
+  assignment_timeout_seconds: 3_600,
   scope_policy: {
     code_types: ["hotpath-code", "code"],
     include_folders: [],
@@ -360,6 +361,10 @@ export function RepositoryReviewProfileDetailPage({
               ["Files per batch", String(profile.max_files_per_run)],
               ["Content bytes", String(profile.max_content_bytes)],
               ["Parallel workers", String(profile.max_parallel_children)],
+              [
+                "Assignment deadline",
+                assignmentDeadlineLabel(profile.assignment_timeout_seconds),
+              ],
               ["Auto continue", profile.auto_continue ? "Yes" : "No"],
               ["Force unchanged files", profile.force ? "Yes" : "No"],
               ["Updated", formatTimestamp(profile.updated_at)],
@@ -602,7 +607,8 @@ function ProfileForm({
     value.scope_policy.code_types.length > 0 &&
     value.max_files_per_run >= 1 &&
     value.max_content_bytes >= 1 &&
-    value.max_parallel_children >= 1
+    value.max_parallel_children >= 1 &&
+    validAssignmentTimeout(value.assignment_timeout_seconds)
 
   return (
     <div className="space-y-5">
@@ -944,6 +950,20 @@ function ProfileForm({
               value={value.max_parallel_children}
               onChange={(next) => setValue("max_parallel_children", next)}
             />
+            <NumberField
+              label="Assignment deadline (minutes)"
+              hint="Required whole-minute wall-clock limit from 1 to 1,440 minutes."
+              describedBy="assignment-deadline-help"
+              min={1}
+              max={1_440}
+              value={value.assignment_timeout_seconds / 60}
+              invalid={
+                !validAssignmentTimeout(value.assignment_timeout_seconds)
+              }
+              onChange={(next) =>
+                setValue("assignment_timeout_seconds", Math.round(next) * 60)
+              }
+            />
           </div>
           <div className="flex flex-wrap gap-5 text-sm">
             <Check
@@ -1142,6 +1162,7 @@ function NumberField({
   min = 0,
   max,
   describedBy,
+  invalid = false,
   onChange,
 }: {
   label: string
@@ -1150,6 +1171,7 @@ function NumberField({
   min?: number
   max?: number
   describedBy?: string
+  invalid?: boolean
   onChange: (value: number) => void
 }) {
   const controlId = `review-profile-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
@@ -1169,6 +1191,7 @@ function NumberField({
         step="1"
         value={value}
         aria-describedby={describedBy}
+        aria-invalid={invalid || undefined}
         onChange={(event) => {
           const parsed = Number(event.target.value)
           if (!event.target.value || !Number.isFinite(parsed)) {
@@ -1266,6 +1289,20 @@ function profileConfig(editor: ProfileEditor): RepositoryReviewProfileConfig {
 
 function profileWriterLabel(profile: RepositoryReviewProfile): string {
   return profile.issue_writer_model || `${profile.reviewer_model} (reviewer)`
+}
+
+function assignmentDeadlineLabel(seconds: number): string {
+  const minutes = seconds / 60
+  return `${minutes.toLocaleString()} minute${minutes === 1 ? "" : "s"}`
+}
+
+function validAssignmentTimeout(seconds: number): boolean {
+  return (
+    Number.isInteger(seconds) &&
+    seconds >= 60 &&
+    seconds <= 86_400 &&
+    seconds % 60 === 0
+  )
 }
 
 function formatTimestamp(value: string): string {

@@ -1245,6 +1245,10 @@ func (h *Handler) repositoryReviewAutomationLedger(
 	}
 	if ledger.Found {
 		applyRepositoryReviewLiveMetrics(&ledger.Automation, ledger.State)
+		ledger.Automation.Progress.AssignmentProgress = repoaudit.CurrentCampaignAssignmentProgress(
+			ledger.State,
+			ledger.Automation.CampaignID,
+		)
 	}
 	return ledger, nil
 }
