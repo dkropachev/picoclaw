@@ -20,6 +20,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/health"
 	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
@@ -285,7 +286,7 @@ func gatewayPolicyEnvironmentCommand(name string) string {
 	return fmt.Sprintf(`printf '%%s' "$%s"`, name)
 }
 
-func TestHandleConfigReloadRollbackRestoresExactExecutionPolicy(t *testing.T) {
+func TestP015B3AGatewayRollbackRetainsExactPolicy(t *testing.T) {
 	const environmentName = "PICOCLAW_GATEWAY_ROLLBACK_POLICY"
 
 	oldCfg := config.DefaultConfig()
@@ -297,13 +298,15 @@ func TestHandleConfigReloadRollbackRestoresExactExecutionPolicy(t *testing.T) {
 
 	t.Setenv(environmentName, "generation-a")
 	oldExecutionPolicy := isolation.NewExecutionPolicy(oldCfg.Isolation)
+	oldDiagnosticPolicy := logger.NewDiagnosticPolicy(true, logger.DEBUG)
 	msgBus := bus.NewMessageBus()
 	oldProvider := &startupBlockedProvider{reason: "not used"}
-	agentLoop := agent.NewAgentLoopWithExecutionPolicy(
+	agentLoop := agent.NewAgentLoopWithRuntimePolicies(
 		oldCfg,
 		msgBus,
 		oldProvider,
 		oldExecutionPolicy,
+		oldDiagnosticPolicy,
 	)
 	healthServer := health.NewServer("127.0.0.1", 1, "")
 	healthServer.SetReady(true)
@@ -326,7 +329,7 @@ func TestHandleConfigReloadRollbackRestoresExactExecutionPolicy(t *testing.T) {
 		) error {
 			restartCalls++
 			currentCfg := currentLoop.GetConfig()
-			currentPolicy, policyErr := currentLoop.ExecutionPolicyForGeneration(currentCfg)
+			currentPolicy, currentDiagnostic, policyErr := currentLoop.RuntimePoliciesForGeneration(currentCfg)
 			if policyErr != nil {
 				return policyErr
 			}
@@ -335,6 +338,9 @@ func TestHandleConfigReloadRollbackRestoresExactExecutionPolicy(t *testing.T) {
 				return fmt.Errorf("%s was not captured", environmentName)
 			}
 			if currentCfg == newCfg {
+				if currentDiagnostic != (logger.DiagnosticPolicy{}) {
+					return fmt.Errorf("candidate diagnostic policy was not dormant zero")
+				}
 				if captured != "generation-b" {
 					return fmt.Errorf("candidate policy = %q, want generation-b", captured)
 				}
@@ -344,6 +350,9 @@ func TestHandleConfigReloadRollbackRestoresExactExecutionPolicy(t *testing.T) {
 			}
 			if currentCfg != oldCfg {
 				return fmt.Errorf("unexpected recovered config identity")
+			}
+			if currentDiagnostic != oldDiagnosticPolicy {
+				return fmt.Errorf("rollback diagnostic policy did not restore exact A")
 			}
 			if captured != "generation-a" {
 				return fmt.Errorf("rollback policy = %q, want generation-a", captured)
@@ -376,12 +385,15 @@ func TestHandleConfigReloadRollbackRestoresExactExecutionPolicy(t *testing.T) {
 	if providerRef != oldProvider {
 		t.Fatal("rollback did not retain provider A")
 	}
-	restoredPolicy, policyErr := agentLoop.ExecutionPolicyForGeneration(oldCfg)
+	restoredPolicy, restoredDiagnostic, policyErr := agentLoop.RuntimePoliciesForGeneration(oldCfg)
 	if policyErr != nil {
 		t.Fatalf("ExecutionPolicyForGeneration(old) error = %v", policyErr)
 	}
 	if captured, ok := restoredPolicy.LookupEnvironment(environmentName); !ok || captured != "generation-a" {
 		t.Fatalf("restored policy value = %q, %v; want generation-a, true", captured, ok)
+	}
+	if restoredDiagnostic != oldDiagnosticPolicy {
+		t.Fatal("restored diagnostic policy is not exact retained A")
 	}
 }
 

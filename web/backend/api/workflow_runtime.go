@@ -11,6 +11,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
@@ -222,11 +223,12 @@ func (r *webWorkflowRuntimeRunner) ensureLoopLocked() error {
 		return fmt.Errorf("failed to create provider: %w", err)
 	}
 	r.msgBus = bus.NewMessageBus()
-	r.loop = agentloop.NewAgentLoopWithExecutionPolicy(
+	r.loop = agentloop.NewAgentLoopWithRuntimePolicies(
 		cfg,
 		r.msgBus,
 		provider,
 		executionPolicy,
+		logger.DiagnosticPolicy{},
 		agentloop.WithConfigPath(r.configPath),
 	)
 	return nil

@@ -595,7 +595,7 @@ func TestTurnProfile_SubTurnCannotRegainGloballyAllowedTool(t *testing.T) {
 		turnID: "parent-turn-profile",
 	})
 
-	_, err := spawnSubTurn(context.Background(), al, parentTS, SubTurnConfig{
+	_, err := spawnSubTurnFromTrustedRuntime(context.Background(), al, parentTS, SubTurnConfig{
 		Model:        "test-model",
 		SystemPrompt: "child task",
 		Timeout:      time.Second,

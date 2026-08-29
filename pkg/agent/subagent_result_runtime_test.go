@@ -13,6 +13,8 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -20,6 +22,7 @@ import (
 
 type trackedSubagentRuntimeCall struct {
 	messages []providers.Message
+	policy   logger.DiagnosticPolicy
 }
 
 type trackedSubagentRuntimeProvider struct {
@@ -49,6 +52,7 @@ func (provider *trackedSubagentRuntimeProvider) Chat(
 	provider.calls.Add(1)
 	provider.called <- trackedSubagentRuntimeCall{
 		messages: session.CloneMessages(messages),
+		policy:   logger.DiagnosticPolicyFromContext(ctx),
 	}
 	if provider.release != nil {
 		select {
@@ -179,6 +183,18 @@ func newTrackedSubagentRuntimeFixture(
 	t *testing.T,
 	providerA *trackedSubagentRuntimeProvider,
 ) *trackedSubagentRuntimeFixture {
+	return newTrackedSubagentRuntimeFixtureWithPolicy(
+		t,
+		providerA,
+		logger.DiagnosticPolicy{},
+	)
+}
+
+func newTrackedSubagentRuntimeFixtureWithPolicy(
+	t *testing.T,
+	providerA *trackedSubagentRuntimeProvider,
+	diagnosticPolicy logger.DiagnosticPolicy,
+) *trackedSubagentRuntimeFixture {
 	t.Helper()
 	root := t.TempDir()
 	mainWorkspace := filepath.Join(root, "main")
@@ -190,7 +206,18 @@ func newTrackedSubagentRuntimeFixture(
 	}
 	cfg := trackedSubagentRuntimeConfig(mainWorkspace, rootWorkspace, true)
 	messageBus := bus.NewMessageBus()
-	loop := newTestAgentLoopWithStrictModels(cfg, messageBus, providerA)
+	hadExplicitAccount := strings.TrimSpace(cfg.Agents.Defaults.AccountRef) != ""
+	ensureStrictTestModelSelection(cfg, providerA)
+	loop := NewAgentLoopWithRuntimePolicies(
+		cfg,
+		messageBus,
+		providerA,
+		isolation.NewExecutionPolicy(cfg.Isolation),
+		diagnosticPolicy,
+	)
+	if !hadExplicitAccount {
+		bindLegacyTestProviderToAliases(loop, cfg, providerA)
+	}
 	t.Cleanup(func() {
 		loop.Close()
 		messageBus.Close()

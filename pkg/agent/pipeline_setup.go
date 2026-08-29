@@ -44,7 +44,10 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	ts.recordSkillContextSnapshot(skillContextTriggerInitialBuild, contextualSkills)
 	initialPromptReq := promptBuildRequestForTurn(ts, history, summary, ts.userMessage, ts.media, cfg)
 	initialPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
-	messages := ts.agent.ContextBuilder.BuildMessagesFromPrompt(initialPromptReq)
+	messages := ts.agent.ContextBuilder.buildMessagesFromPromptWithDiagnosticPolicy(
+		initialPromptReq,
+		ts.diagnosticPolicy,
+	)
 	currentTurnStart := len(messages)
 	if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
 		currentTurnStart = len(messages) - 1
@@ -98,7 +101,10 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 						cfg,
 					)
 					rebuildPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
-					rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(rebuildPromptReq)
+					rebuilt := ts.agent.ContextBuilder.buildMessagesFromPromptWithDiagnosticPolicy(
+						rebuildPromptReq,
+						ts.diagnosticPolicy,
+					)
 					rebuiltCurrentTurnStart := len(rebuilt)
 					if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
 						rebuiltCurrentTurnStart = len(rebuilt) - 1

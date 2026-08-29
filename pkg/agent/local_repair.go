@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -130,6 +131,9 @@ type LocalRepairRunner struct {
 	maxTokens     int
 	temperature   float64
 	providerSlot  chan struct{}
+	runtimeLoop   *AgentLoop
+	generationID  uint64
+	strictRuntime bool
 }
 
 func NewLocalRepairRunner(config LocalRepairRunnerConfig) (*LocalRepairRunner, error) {
@@ -181,6 +185,19 @@ func (runner *LocalRepairRunner) Run(
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if runner.strictRuntime {
+		if runner.runtimeLoop == nil {
+			return LocalRepairResult{}, errors.New("local repair runtime lease is unavailable")
+		}
+		generation, err := runner.runtimeLoop.runtimeGenerationFromLease(ctx)
+		if err != nil || generation.id != runner.generationID {
+			return LocalRepairResult{}, errors.New("local repair runtime lease is unavailable")
+		}
+	} else {
+		var revoke func()
+		ctx, revoke = logger.BindRootDiagnosticPolicy(ctx, logger.DiagnosticPolicy{})
+		defer revoke()
 	}
 	if err := validateLocalRepairPin(request.Pin); err != nil {
 		return LocalRepairResult{}, err
@@ -270,7 +287,10 @@ func (runner *LocalRepairRunner) runPinned(
 		return LocalRepairResult{}, ctx.Err()
 	}
 
-	registry := newLocalRepairToolRegistry(guard)
+	registry := newLocalRepairToolRegistryWithDiagnosticPolicy(
+		guard,
+		logger.DiagnosticPolicyFromContext(ctx),
+	)
 	messages := []providers.Message{
 		{Role: "system", Content: localRepairSystemPrompt},
 		{Role: "user", Content: localRepairUserMessage(instruction, contextText)},
@@ -569,7 +589,17 @@ func localRepairPathHasGitAlias(path string) bool {
 }
 
 func newLocalRepairToolRegistry(guard *localRepairPathGuard) *tools.ToolRegistry {
-	registry := tools.NewToolRegistry()
+	return newLocalRepairToolRegistryWithDiagnosticPolicy(
+		guard,
+		logger.DiagnosticPolicy{},
+	)
+}
+
+func newLocalRepairToolRegistryWithDiagnosticPolicy(
+	guard *localRepairPathGuard,
+	diagnosticPolicy logger.DiagnosticPolicy,
+) *tools.ToolRegistry {
+	registry := tools.NewToolRegistryWithDiagnosticPolicy(diagnosticPolicy)
 	registry.SetAllowlist([]string{"read_file", "list_dir", "edit_file", "apply_patch"})
 	registry.Register(&localRepairGuardedTool{
 		delegate: tools.NewReadFileLinesTool(guard.root, true, tools.MaxReadFileSize),

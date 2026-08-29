@@ -211,26 +211,33 @@ func TestRepositoryReviewProfileRejectsUnavailableRuntimeAgentsAndModels(t *test
 	}
 	if _, err := (&workflowAgentRunner{loop: &AgentLoop{}}).ResolveRepositoryReviewProfile(
 		context.Background(), "main", "", nil,
-	); err == nil || !strings.Contains(err.Error(), "registry not configured") {
+	); err == nil || !strings.Contains(err.Error(), "runtime generation is not configured") {
 		t.Fatalf("missing registry error = %v", err)
 	}
-	missing := &AgentLoop{registry: &AgentRegistry{agents: map[string]*AgentInstance{}}}
+	missing := &AgentLoop{
+		cfg:      config.DefaultConfig(),
+		registry: &AgentRegistry{agents: map[string]*AgentInstance{}},
+	}
 	if _, err := (&workflowAgentRunner{loop: missing}).ResolveRepositoryReviewProfile(
 		context.Background(), "missing", "", nil,
 	); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("missing agent error = %v", err)
 	}
-	withoutModels := &AgentLoop{registry: &AgentRegistry{agents: map[string]*AgentInstance{
-		"main": {ID: "main"},
-	}}}
+	withoutModels := &AgentLoop{
+		cfg: config.DefaultConfig(),
+		registry: &AgentRegistry{agents: map[string]*AgentInstance{
+			"main": {ID: "main"},
+		}},
+	}
 	if _, err := (&workflowAgentRunner{loop: withoutModels}).ResolveRepositoryReviewProfile(
 		context.Background(), "main", "", nil,
 	); err == nil || !strings.Contains(err.Error(), "no configured model aliases") {
 		t.Fatalf("missing model aliases error = %v", err)
 	}
-	if _, err := (&workflowAgentRunner{loop: withoutModels}).ResolveRepositoryReviewProfile(
+	withoutConfig := &AgentLoop{registry: withoutModels.registry}
+	if _, err := (&workflowAgentRunner{loop: withoutConfig}).ResolveRepositoryReviewProfile(
 		context.Background(), "main", "", []string{"review-a"},
-	); err == nil || !strings.Contains(err.Error(), "config is nil") {
+	); err == nil || !strings.Contains(err.Error(), "runtime generation is not configured") {
 		t.Fatalf("missing config error = %v", err)
 	}
 	stopped := &AgentLoop{runtimeGateStopped: true}
@@ -360,6 +367,7 @@ func TestRepositoryReviewModelDependencyAndReviewerNormalization(t *testing.T) {
 
 func TestWorkflowAgentRunnerValidatesRepositoryReviewSystemPromptAuthority(t *testing.T) {
 	runner := &workflowAgentRunner{loop: &AgentLoop{
+		cfg:      config.DefaultConfig(),
 		registry: &AgentRegistry{agents: map[string]*AgentInstance{}},
 	}}
 	for _, test := range []struct {

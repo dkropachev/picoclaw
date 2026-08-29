@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -22,8 +24,24 @@ const (
 	p015B2BSignaturePath        = "scripts/testdata/p015b2b_safe_signatures.tsv"
 	p015B2CLoggerSignaturePath  = "scripts/testdata/p015b2c_logger_safe_signatures.tsv"
 	p015B2CConsoleSignaturePath = "scripts/testdata/p015b2c_console_safe_signatures.tsv"
+	p015B3ATransitionPath       = "scripts/testdata/p015b3a_logging_transitions.tsv"
 	p015ModulePath              = "github.com/sipeed/picoclaw"
 )
+
+//go:embed testdata/p015b3a_logging_transitions.tsv
+var p015B3AReviewedTransitionData []byte
+
+var p015B3AExpectedTransitionIDs = []string{
+	"A032", "A033", "A034", "A035",
+	"A110", "A111", "A112", "A113", "A114", "A115", "A116",
+	"B057", "B058", "B059", "B092", "B093",
+}
+
+type p015ReviewedLoggingTransition struct {
+	ID       string
+	FromHash string
+	ToHash   string
+}
 
 var p015ExpectedFrozenTombstoneIDs = map[string]struct{}{
 	"A004": {}, "A019": {}, "A103": {}, "A106": {},
@@ -822,6 +840,184 @@ func TestP015B2LoggingInventoryMonotonicHistory(t *testing.T) {
 	}
 	for _, issue := range p015LedgerRevisionHistoryIssues(revisions) {
 		t.Error(issue)
+	}
+}
+
+func TestP015B3AReviewedLoggingTransitionsClosed(t *testing.T) {
+	transitions, err := p015ParseReviewedLoggingTransitions(p015B3AReviewedTransitionData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoRoot := p015FindRepoRoot(t)
+	diskData, err := os.ReadFile(
+		filepath.Join(repoRoot, filepath.FromSlash(p015B3ATransitionPath)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(diskData) != string(p015B3AReviewedTransitionData) {
+		t.Fatal("embedded P015b3a transition manifest differs from its repository file")
+	}
+	ledger := p015ReadLoggingLedger(
+		t,
+		filepath.Join(repoRoot, filepath.FromSlash(p015LoggingLedgerPath)),
+	)
+	ledgerByID := make(map[string]p015LoggingSite, len(ledger))
+	for _, row := range ledger {
+		ledgerByID[row.ID] = row
+	}
+	for _, transition := range transitions {
+		row, exists := ledgerByID[transition.ID]
+		if !exists {
+			t.Errorf("reviewed transition target %s is missing from the ledger", transition.ID)
+			continue
+		}
+		if got := p015LoggingTransitionHash(row); got != transition.ToHash {
+			t.Errorf(
+				"reviewed transition target %s hash = %s, want %s",
+				transition.ID,
+				got,
+				transition.ToHash,
+			)
+		}
+	}
+}
+
+func TestP015B3AReviewedLoggingTransitionManifestRejectsMutations(t *testing.T) {
+	lines := strings.Split(strings.TrimSuffix(string(p015B3AReviewedTransitionData), "\n"), "\n")
+	firstDataLine := 3
+	if len(lines) != firstDataLine+len(p015B3AExpectedTransitionIDs) {
+		t.Fatalf("unexpected reviewed transition fixture shape: %d lines", len(lines))
+	}
+	mutations := map[string]func([]string) []string{
+		"missing": func(candidate []string) []string {
+			return candidate[:len(candidate)-1]
+		},
+		"duplicate": func(candidate []string) []string {
+			return append(candidate, candidate[len(candidate)-1])
+		},
+		"unsorted": func(candidate []string) []string {
+			first := candidate[firstDataLine]
+			candidate[firstDataLine] = candidate[firstDataLine+1]
+			candidate[firstDataLine+1] = first
+			return candidate
+		},
+		"unknown_id": func(candidate []string) []string {
+			candidate[firstDataLine] = strings.Replace(
+				candidate[firstDataLine], "A032\t", "A031\t", 1,
+			)
+			return candidate
+		},
+		"uppercase_hash": func(candidate []string) []string {
+			fields := strings.Split(candidate[firstDataLine], "\t")
+			fields[1] = strings.ToUpper(fields[1])
+			candidate[firstDataLine] = strings.Join(fields, "\t")
+			return candidate
+		},
+		"short_hash": func(candidate []string) []string {
+			fields := strings.Split(candidate[firstDataLine], "\t")
+			fields[1] = fields[1][:len(fields[1])-1]
+			candidate[firstDataLine] = strings.Join(fields, "\t")
+			return candidate
+		},
+		"same_hash": func(candidate []string) []string {
+			fields := strings.Split(candidate[firstDataLine], "\t")
+			fields[2] = fields[1]
+			candidate[firstDataLine] = strings.Join(fields, "\t")
+			return candidate
+		},
+		"extra_field": func(candidate []string) []string {
+			candidate[firstDataLine] += "\textra"
+			return candidate
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			candidate := append([]string(nil), lines...)
+			candidate = mutate(candidate)
+			if _, err := p015ParseReviewedLoggingTransitions(
+				[]byte(strings.Join(candidate, "\n") + "\n"),
+			); err == nil {
+				t.Fatal("mutated reviewed transition manifest was accepted")
+			}
+		})
+	}
+}
+
+func TestP015B3AReviewedLoggingTransitionRejectsUnreviewedChanges(t *testing.T) {
+	old := p015LoggingSite{
+		ID:          "A032",
+		Disposition: "b2a_safe",
+		File:        "pkg/agent/context.go",
+		Owner:       p015ModulePath + "/pkg/agent.(*ContextBuilder).BuildMessagesFromPrompt",
+		Ordinal:     1,
+		Kind:        "pico_safe",
+		Callee:      "pico.WarnSafeCF",
+		Call:        `logger.WarnSafeCF(component, message, fields)`,
+		Canary:      "pkg/agent/p015b2a_application_logging_test.go#TestP015B2AApplicationLoggingASTManifest",
+	}
+	target := old
+	target.Owner = p015ModulePath +
+		"/pkg/agent.(*ContextBuilder).buildMessagesFromPromptWithDiagnosticPolicy"
+	transition := p015ReviewedLoggingTransition{
+		ID:       old.ID,
+		FromHash: p015LoggingTransitionHash(old),
+		ToHash:   p015LoggingTransitionHash(target),
+	}
+	transitions := map[string]p015ReviewedLoggingTransition{old.ID: transition}
+	if issues := p015LedgerHistoryIssuesWithTransitions(
+		[]p015LoggingSite{old},
+		[]p015LoggingSite{target},
+		transitions,
+	); len(issues) != 0 {
+		t.Fatalf("exact reviewed transition rejected: %v", issues)
+	}
+
+	mutations := map[string]func(*p015LoggingSite){
+		"id":          func(row *p015LoggingSite) { row.ID = "A033" },
+		"disposition": func(row *p015LoggingSite) { row.Disposition = "b2a_retired" },
+		"file":        func(row *p015LoggingSite) { row.File = "pkg/agent/other.go" },
+		"owner":       func(row *p015LoggingSite) { row.Owner += ".other" },
+		"ordinal":     func(row *p015LoggingSite) { row.Ordinal++ },
+		"kind":        func(row *p015LoggingSite) { row.Kind = "retired" },
+		"callee":      func(row *p015LoggingSite) { row.Callee = "pico.ErrorSafeCF" },
+		"call":        func(row *p015LoggingSite) { row.Call += " /* mutation */" },
+		"canary":      func(row *p015LoggingSite) { row.Canary += ",other_test.go#TestOther" },
+	}
+	for name, mutate := range mutations {
+		t.Run("target_"+name, func(t *testing.T) {
+			candidate := target
+			mutate(&candidate)
+			if issues := p015LedgerHistoryIssuesWithTransitions(
+				[]p015LoggingSite{old},
+				[]p015LoggingSite{candidate},
+				transitions,
+			); len(issues) == 0 {
+				t.Fatal("unreviewed target mutation was accepted")
+			}
+		})
+		t.Run("preimage_"+name, func(t *testing.T) {
+			candidate := old
+			mutate(&candidate)
+			if issues := p015LedgerHistoryIssuesWithTransitions(
+				[]p015LoggingSite{candidate},
+				[]p015LoggingSite{target},
+				transitions,
+			); len(issues) == 0 {
+				t.Fatal("unreviewed preimage mutation was accepted")
+			}
+		})
+		t.Run("after_target_"+name, func(t *testing.T) {
+			candidate := target
+			mutate(&candidate)
+			if issues := p015LedgerHistoryIssuesWithTransitions(
+				[]p015LoggingSite{target},
+				[]p015LoggingSite{candidate},
+				transitions,
+			); len(issues) == 0 {
+				t.Fatal("post-transition mutation was accepted")
+			}
+		})
 	}
 }
 
@@ -1718,6 +1914,85 @@ func p015FormatLedgerRow(row p015LoggingSite) string {
 	}, "\t")
 }
 
+func p015LoggingTransitionHash(row p015LoggingSite) string {
+	sum := sha256.Sum256([]byte(p015FormatLedgerRow(row)))
+	return hex.EncodeToString(sum[:])
+}
+
+func p015ParseReviewedLoggingTransitions(
+	data []byte,
+) ([]p015ReviewedLoggingTransition, error) {
+	var transitions []p015ReviewedLoggingTransition
+	for index, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(rawLine, "\t")
+		if len(fields) != 3 {
+			return nil, fmt.Errorf(
+				"reviewed transition line %d has %d fields, want 3",
+				index+1,
+				len(fields),
+			)
+		}
+		transition := p015ReviewedLoggingTransition{
+			ID:       fields[0],
+			FromHash: fields[1],
+			ToHash:   fields[2],
+		}
+		for label, hash := range map[string]string{
+			"from": transition.FromHash,
+			"to":   transition.ToHash,
+		} {
+			decoded, err := hex.DecodeString(hash)
+			if err != nil || len(decoded) != sha256.Size || strings.ToLower(hash) != hash {
+				return nil, fmt.Errorf(
+					"reviewed transition line %d has invalid lowercase SHA-256 %s hash %q",
+					index+1,
+					label,
+					hash,
+				)
+			}
+		}
+		if transition.FromHash == transition.ToHash {
+			return nil, fmt.Errorf(
+				"reviewed transition line %d has identical from/to hashes",
+				index+1,
+			)
+		}
+		transitions = append(transitions, transition)
+	}
+	if len(transitions) != len(p015B3AExpectedTransitionIDs) {
+		return nil, fmt.Errorf(
+			"reviewed transition count = %d, want exact %d",
+			len(transitions),
+			len(p015B3AExpectedTransitionIDs),
+		)
+	}
+	for index, wantID := range p015B3AExpectedTransitionIDs {
+		if gotID := transitions[index].ID; gotID != wantID {
+			return nil, fmt.Errorf(
+				"reviewed transition ID %d = %q, want exact sorted ID %q",
+				index+1,
+				gotID,
+				wantID,
+			)
+		}
+	}
+	return transitions, nil
+}
+
+func p015ReviewedLoggingTransitionMap(
+	transitions []p015ReviewedLoggingTransition,
+) map[string]p015ReviewedLoggingTransition {
+	result := make(map[string]p015ReviewedLoggingTransition, len(transitions))
+	for _, transition := range transitions {
+		result[transition.ID] = transition
+	}
+	return result
+}
+
 func p015ValidateLedger(t *testing.T, repoRoot string, rows []p015LoggingSite) {
 	t.Helper()
 	golden, err := p015ReadFrozenTombstones(
@@ -2249,6 +2524,22 @@ func p015LedgerHistoryIssues(
 	previous []p015LoggingSite,
 	current []p015LoggingSite,
 ) []string {
+	transitions, err := p015ParseReviewedLoggingTransitions(p015B3AReviewedTransitionData)
+	if err != nil {
+		return []string{"invalid P015b3a reviewed transition manifest: " + err.Error()}
+	}
+	return p015LedgerHistoryIssuesWithTransitions(
+		previous,
+		current,
+		p015ReviewedLoggingTransitionMap(transitions),
+	)
+}
+
+func p015LedgerHistoryIssuesWithTransitions(
+	previous []p015LoggingSite,
+	current []p015LoggingSite,
+	transitions map[string]p015ReviewedLoggingTransition,
+) []string {
 	currentByID := make(map[string]p015LoggingSite, len(current))
 	for _, row := range current {
 		currentByID[row.ID] = row
@@ -2277,6 +2568,24 @@ func p015LedgerHistoryIssues(
 		}
 		if oldCohort == "G" || oldCohort == "C" {
 			issues = append(issues, p015B2CLedgerHistoryIssues(old, row)...)
+			continue
+		}
+		if old == row {
+			continue
+		}
+		if transition, reviewed := transitions[old.ID]; reviewed &&
+			p015LoggingTransitionHash(old) == transition.FromHash {
+			if got := p015LoggingTransitionHash(row); got != transition.ToHash {
+				issues = append(
+					issues,
+					fmt.Sprintf(
+						"ledger row %s did not use its exact reviewed P015b3a transition: got %s, want %s",
+						old.ID,
+						got,
+						transition.ToHash,
+					),
+				)
+			}
 			continue
 		}
 		oldRank, oldKnown := p015DispositionRank(old.Disposition)

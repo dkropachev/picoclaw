@@ -7,17 +7,212 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 type controllerRepairFactoryProvider struct {
 	name string
+}
+
+type controllerRepairPolicyProbeProvider struct {
+	mu       sync.Mutex
+	policies []logger.DiagnosticPolicy
+}
+
+func (provider *controllerRepairPolicyProbeProvider) Chat(
+	ctx context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	provider.mu.Lock()
+	provider.policies = append(
+		provider.policies,
+		logger.DiagnosticPolicyFromContext(ctx),
+	)
+	provider.mu.Unlock()
+	return &providers.LLMResponse{Content: "done"}, nil
+}
+
+func (provider *controllerRepairPolicyProbeProvider) snapshot() []logger.DiagnosticPolicy {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	return append([]logger.DiagnosticPolicy(nil), provider.policies...)
+}
+
+func TestP015B3ALocalRepairControllerLeaseBoundary(t *testing.T) {
+	pin, workspace, _ := newLocalRepairTestWorkspace(t)
+	pin.AgentID = "repairer"
+	workspace.LockedBy.AgentID = pin.AgentID
+	workspaces := &localRepairTestAcquirer{workspace: workspace}
+	provider := &controllerRepairPolicyProbeProvider{}
+	candidate := controllerRepairFactoryCandidate(
+		"account-a",
+		"coding",
+		"openai",
+		"gpt-primary",
+	)
+	agent := &AgentInstance{
+		ID:            "repairer",
+		Model:         "coding",
+		Candidates:    []providers.FallbackCandidate{candidate},
+		Provider:      provider,
+		MaxIterations: 7,
+		MaxTokens:     2048,
+		Temperature:   0.4,
+	}
+	loop := newControllerRepairFactoryLoop(t, &config.Config{}, agent)
+	positive := logger.NewDiagnosticPolicy(true, logger.DEBUG)
+	loop.mu.Lock()
+	loop.diagnosticPolicy = positive
+	loop.mu.Unlock()
+	leaseCtx, release, err := loop.acquireTrustedRuntimeRoot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loop.ControllerLocalRepairReadyWithRuntimeLease(leaseCtx, "repairer") {
+		release()
+		t.Fatal("strict repair readiness rejected a live generation")
+	}
+	runner, err := loop.NewControllerLocalRepairRunnerWithRuntimeLease(
+		leaseCtx,
+		"repairer",
+		"route",
+	)
+	if err != nil {
+		release()
+		t.Fatal(err)
+	}
+	if !runner.strictRuntime || runner.generationID == 0 ||
+		runner.runtimeLoop != loop {
+		release()
+		t.Fatal("strict repair runner did not retain opaque generation identity")
+	}
+	runner.workspaces = workspaces
+	request := localRepairTestRunRequest(pin)
+	result, err := runner.Run(leaseCtx, request)
+	if err != nil || result.Content != "done" {
+		release()
+		t.Fatalf("live strict repair result = %#v, %v", result, err)
+	}
+	seen := provider.snapshot()
+	if len(seen) != 1 || seen[0] != positive {
+		release()
+		t.Fatalf("live strict repair policies = %#v, want exact positive", seen)
+	}
+	baselineWorkspaceCalls := len(workspaces.Calls())
+	baselineProviderCalls := len(seen)
+	assertRejectedBeforeEffects := func(name string, ctx context.Context) {
+		t.Helper()
+		beforeWorkspace := len(workspaces.Calls())
+		beforeProvider := len(provider.snapshot())
+		if _, runErr := runner.Run(ctx, request); runErr == nil ||
+			!strings.Contains(runErr.Error(), "runtime lease is unavailable") {
+			t.Fatalf("%s strict repair Run() error = %v", name, runErr)
+		}
+		if got := len(workspaces.Calls()); got != beforeWorkspace {
+			t.Fatalf("%s strict repair reached workspace: %d -> %d", name, beforeWorkspace, got)
+		}
+		if got := len(provider.snapshot()); got != beforeProvider {
+			t.Fatalf("%s strict repair reached provider: %d -> %d", name, beforeProvider, got)
+		}
+	}
+	release()
+	assertRejectedBeforeEffects("released A", leaseCtx)
+	assertRejectedBeforeEffects("missing", context.Background())
+	if _, err := loop.NewControllerLocalRepairRunnerWithRuntimeLease(
+		context.Background(),
+		"repairer",
+		"route",
+	); err == nil || !strings.Contains(err.Error(), "runtime lease is unavailable") {
+		t.Fatalf("missing-lease strict repair constructor error = %v", err)
+	}
+
+	pauseCtx, resume, pauseErr := loop.PauseRuntimeForReloadWithContext(
+		context.Background(),
+		context.Background(),
+	)
+	if pauseErr != nil {
+		t.Fatal(pauseErr)
+	}
+	assertRejectedBeforeEffects("pause owner", pauseCtx)
+	if _, pauseConstructorErr := loop.NewControllerLocalRepairRunnerWithRuntimeLease(
+		pauseCtx,
+		"repairer",
+		"route",
+	); pauseConstructorErr == nil ||
+		!strings.Contains(pauseConstructorErr.Error(), "runtime lease is unavailable") {
+		resume()
+		t.Fatalf("pause-owner strict repair constructor error = %v", pauseConstructorErr)
+	}
+	resume()
+
+	foreignAgent := &AgentInstance{
+		ID:            "repairer",
+		Model:         "coding",
+		Candidates:    []providers.FallbackCandidate{candidate},
+		Provider:      &controllerRepairFactoryProvider{name: "foreign"},
+		MaxIterations: 7,
+		MaxTokens:     2048,
+		Temperature:   0.4,
+	}
+	foreignLoop := newControllerRepairFactoryLoop(t, &config.Config{}, foreignAgent)
+	foreignCtx, releaseForeign, foreignErr := foreignLoop.acquireTrustedRuntimeRoot(
+		context.Background(),
+	)
+	if foreignErr != nil {
+		t.Fatal(foreignErr)
+	}
+	assertRejectedBeforeEffects("foreign loop", foreignCtx)
+	releaseForeign()
+
+	loop.mu.Lock()
+	loop.runtimeGenerationID++
+	loop.mu.Unlock()
+	leaseB, releaseB, acquireBErr := loop.acquireTrustedRuntimeRoot(context.Background())
+	if acquireBErr != nil {
+		t.Fatal(acquireBErr)
+	}
+	assertRejectedBeforeEffects("generation B", leaseB)
+	releaseB()
+	if len(workspaces.Calls()) != baselineWorkspaceCalls ||
+		len(provider.snapshot()) != baselineProviderCalls {
+		t.Fatal("rejected strict repair changed effect counters")
+	}
+
+	compatibility, compatibilityErr := loop.NewControllerLocalRepairRunner(
+		"repairer",
+		"route",
+	)
+	if compatibilityErr != nil {
+		t.Fatal(compatibilityErr)
+	}
+	compatibility.workspaces = workspaces
+	positiveCtx, revokePositive := logger.BindRootDiagnosticPolicy(
+		context.Background(),
+		positive,
+	)
+	defer revokePositive()
+	if _, compatibilityRunErr := compatibility.Run(
+		positiveCtx,
+		request,
+	); compatibilityRunErr != nil {
+		t.Fatal(compatibilityRunErr)
+	}
+	seen = provider.snapshot()
+	if len(seen) != baselineProviderCalls+1 ||
+		seen[len(seen)-1] != (logger.DiagnosticPolicy{}) {
+		t.Fatalf("compatibility repair policies = %#v, want final zero", seen)
+	}
 }
 
 func (*controllerRepairFactoryProvider) Chat(

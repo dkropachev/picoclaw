@@ -15,7 +15,7 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 	if al == nil {
 		return false
 	}
-	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	leaseCtx, releaseRuntime, err := al.acquireTrustedRuntimeRoot(ctx)
 	if err != nil {
 		logger.WarnSafeCF(
 			logger.ComponentWorkflow,

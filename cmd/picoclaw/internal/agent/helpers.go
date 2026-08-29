@@ -59,11 +59,12 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 
 	msgBus := bus.NewMessageBus()
 	defer msgBus.Close()
-	agentLoop := agent.NewAgentLoopWithExecutionPolicy(
+	agentLoop := agent.NewAgentLoopWithRuntimePolicies(
 		cfg,
 		msgBus,
 		provider,
 		executionPolicy,
+		logger.DiagnosticPolicy{},
 	)
 	defer agentLoop.Close()
 

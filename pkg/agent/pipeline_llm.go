@@ -632,7 +632,10 @@ func (p *Pipeline) CallLLM(
 				fullHistory := append(append([]providers.Message(nil), trimmedHistory...), protectedTurnTail...)
 				rebuildPromptReq := promptBuildRequestForTurn(ts, fullHistory, exec.summary, "", nil, p.Cfg)
 				rebuildPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
-				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(rebuildPromptReq)
+				rebuilt := ts.agent.ContextBuilder.buildMessagesFromPromptWithDiagnosticPolicy(
+					rebuildPromptReq,
+					ts.diagnosticPolicy,
+				)
 				return resolveMediaRefs(
 					rebuilt,
 					p.MediaStore,
@@ -852,7 +855,7 @@ func (p *Pipeline) CallLLM(
 		logger.NewSafeFields(responseSafeFields...),
 	)
 	logger.DebugSensitiveCF(
-		logger.DiagnosticPolicy{},
+		ts.diagnosticPolicy,
 		logger.ComponentAgent,
 		logger.DiagnosticMessageModelResponse,
 		logger.NewSafeFields(
@@ -868,7 +871,7 @@ func (p *Pipeline) CallLLM(
 		exec.response.Content,
 	)
 	logger.DebugSensitiveCF(
-		logger.DiagnosticPolicy{},
+		ts.diagnosticPolicy,
 		logger.ComponentAgent,
 		logger.DiagnosticMessageModelReasoning,
 		logger.NewSafeFields(

@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -678,6 +679,156 @@ func TestP015B2AApplicationToolArgumentRuntimeProjection(t *testing.T) {
 	}
 }
 
+func TestP015B3ASensitiveBoundaryPolicyMatrix(t *testing.T) {
+	const (
+		promptCanary    = "P015B3A_PROMPT_PREVIEW_71e2c4"
+		inboundCanary   = "P015B3A_INBOUND_PREVIEW_2a84d9"
+		responseCanary  = "P015B3A_RESPONSE_PREVIEW_93b8e1"
+		reasoningCanary = "P015B3A_REASONING_PREVIEW_4f6d20"
+		argumentCanary  = "P015B3A_ARGUMENT_PREVIEW_5c17ab"
+		argumentKey     = "P015B3A_ARGUMENT_KEY_9e04df"
+	)
+	enabled := logger.NewDiagnosticPolicy(true, logger.DEBUG)
+
+	promptBuilder := NewContextBuilder(t.TempDir())
+	promptRequest := PromptBuildRequest{
+		Overlays: []PromptPart{{
+			ID:      "instruction.p015b3a_positive",
+			Layer:   PromptLayerInstruction,
+			Slot:    PromptSlotWorkspace,
+			Source:  PromptSource{ID: PromptSourceSubTurnProfile, Name: "p015b3a.positive"},
+			Title:   "P015b3a positive fixture",
+			Content: promptCanary,
+		}},
+		SuppressDefaultSystemPrompt: true,
+		SuppressSkillContext:        true,
+		SuppressToolUseRule:         true,
+	}
+	_, publicRaw := captureP015HookRecords(t, func() {
+		_ = promptBuilder.BuildMessagesFromPrompt(promptRequest)
+	})
+	if bytes.Contains(publicRaw, []byte(promptCanary)) {
+		t.Fatal("public prompt API accepted diagnostic authority")
+	}
+	privateRecords, privateRaw := captureP015HookRecords(t, func() {
+		_ = promptBuilder.buildMessagesFromPromptWithDiagnosticPolicy(
+			promptRequest,
+			enabled,
+		)
+	})
+	if !bytes.Contains(privateRaw, []byte(promptCanary)) {
+		t.Fatal("private prompt path did not emit the admitted bounded preview")
+	}
+	if got := p015B3APreviewCount(privateRecords, promptCanary); got != 1 {
+		t.Fatalf("prompt preview records = %d, want 1", got)
+	}
+
+	cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+		Workspace: t.TempDir(), ModelName: "test-model", MaxTokens: 4096, MaxToolIterations: 2,
+	}}}
+	provider := &p015B2ATextProjectionProvider{response: providers.LLMResponse{
+		Content: responseCanary, ReasoningContent: reasoningCanary, FinishReason: "stop",
+	}}
+	messageBus := bus.NewMessageBus()
+	loop := newTestAgentLoopWithStrictModels(cfg, messageBus, provider)
+	t.Cleanup(func() {
+		loop.Close()
+		messageBus.Close()
+	})
+	loop.mu.Lock()
+	loop.diagnosticPolicy = enabled
+	loop.mu.Unlock()
+	applicationRecords, applicationRaw := captureP015HookRecords(t, func() {
+		response, err := loop.processDirectWithChannel(
+			context.Background(),
+			inboundCanary,
+			"p015b3a:positive",
+			"cli",
+			"p015b3a-positive",
+			false,
+		)
+		if err != nil {
+			t.Fatalf("positive application turn error = %v", err)
+		}
+		if response != responseCanary {
+			t.Fatalf("positive application response = %q", response)
+		}
+	})
+	for _, canary := range []string{inboundCanary, responseCanary, reasoningCanary} {
+		if !bytes.Contains(applicationRaw, []byte(canary)) {
+			t.Errorf("positive application log omitted selected preview %q", canary)
+		}
+	}
+	for canary, want := range map[string]int{
+		inboundCanary: 1, responseCanary: 2, reasoningCanary: 1,
+	} {
+		if got := p015B3APreviewCount(applicationRecords, canary); got != want {
+			t.Errorf("preview records for %q = %d, want %d", canary, got, want)
+		}
+	}
+
+	arguments := map[string]any{
+		"payload": map[string]any{argumentKey: argumentCanary},
+	}
+	for _, test := range []struct {
+		name string
+		hook bool
+	}{
+		{name: "ordinary"},
+		{name: "hook", hook: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &p015B2AToolProjectionProvider{arguments: arguments}
+			toolLoop, agent, _ := newPipelineToolPolicyLoop(
+				t,
+				provider,
+				tools.CompatibilityAllowToolPolicy{},
+				false,
+			)
+			toolLoop.mu.Lock()
+			toolLoop.diagnosticPolicy = enabled
+			toolLoop.mu.Unlock()
+			agent.Tools.Register(&p015B2AProjectionTool{})
+			if test.hook {
+				if err := toolLoop.MountHook(NamedHook(
+					"p015b3a-positive-hook",
+					&p015B2AProjectionHook{},
+				)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			records, raw := captureP015HookRecords(t, func() {
+				if _, err := runPipelineToolPolicyTurn(
+					context.Background(),
+					toolLoop,
+					agent,
+					"p015b3a-positive-"+test.name,
+				); err != nil {
+					t.Fatalf("positive tool turn error = %v", err)
+				}
+			})
+			for _, canary := range []string{argumentKey, argumentCanary} {
+				if !bytes.Contains(raw, []byte(canary)) {
+					t.Errorf("positive %s argument preview omitted %q", test.name, canary)
+				}
+			}
+			if got := p015B3APreviewCount(records, argumentCanary); got != 1 {
+				t.Errorf("positive %s argument preview records = %d, want 1", test.name, got)
+			}
+		})
+	}
+}
+
+func p015B3APreviewCount(records []map[string]any, token string) int {
+	count := 0
+	for _, record := range records {
+		if strings.Contains(fmt.Sprint(record["sensitive_preview"]), token) {
+			count++
+		}
+	}
+	return count
+}
+
 func p015B2ARequireRuntimeRecord(
 	t *testing.T,
 	records []map[string]any,
@@ -739,27 +890,33 @@ func TestP015B2AApplicationLoggingASTManifest(t *testing.T) {
 		"DiagnosticMessageInboundMessage": {
 			file: "agent_message.go", sensitivity: "SensitivityInboundMessage",
 			domain: "ObservationDomainMessageGraph", valuePath: []string{"msg", "Content"},
+			policySource: "context",
 		},
 		"DiagnosticMessageSystemPrompt": {
 			file: "context.go", sensitivity: "SensitivityPrompt",
 			domain: "ObservationDomainPrompt", valuePath: []string{"fullSystemPrompt"},
+			policySource: "diagnosticPolicy",
 		},
 		"DiagnosticMessageModelResponse": {
 			file: "pipeline_llm.go", sensitivity: "SensitivityModelResponse",
-			domain:    "ObservationDomainModelResponse",
-			valuePath: []string{"exec", "response", "Content"},
+			domain:       "ObservationDomainModelResponse",
+			valuePath:    []string{"exec", "response", "Content"},
+			policySource: "ts.diagnosticPolicy",
 		},
 		"DiagnosticMessageModelReasoning": {
 			file: "pipeline_llm.go", sensitivity: "SensitivityReasoning",
 			domain: "ObservationDomainReasoning", valuePath: []string{"reasoningContent"},
+			policySource: "ts.diagnosticPolicy",
 		},
 		"DiagnosticMessageToolArguments": {
 			file: "pipeline_execute.go", sensitivity: "SensitivityToolArguments",
 			domain: "ObservationDomainToolArguments", valuePath: []string{"diagnosticToolArgs"},
+			policySource: "ts.diagnosticPolicy",
 		},
 		"DiagnosticMessageHookToolArguments": {
 			file: "pipeline_execute.go", sensitivity: "SensitivityToolArguments",
 			domain: "ObservationDomainToolArguments", valuePath: []string{"diagnosticToolArgs"},
+			policySource: "ts.diagnosticPolicy",
 		},
 	}
 	gotSensitiveMessages := make(map[string]int)
@@ -851,10 +1008,11 @@ func TestP015B2AApplicationLoggingASTManifest(t *testing.T) {
 }
 
 type p015B2ASensitiveSinkExpectation struct {
-	file        string
-	sensitivity string
-	domain      string
-	valuePath   []string
+	file         string
+	sensitivity  string
+	domain       string
+	valuePath    []string
+	policySource string
 }
 
 func p015B2AValidateSafeSink(t *testing.T, file string, call *ast.CallExpr) {
@@ -874,10 +1032,10 @@ func p015B2AValidateSensitiveSink(
 	want map[string]p015B2ASensitiveSinkExpectation,
 ) string {
 	t.Helper()
-	if len(call.Args) != 7 || !p015B2AEmptyPolicy(call.Args[0]) ||
+	if len(call.Args) != 7 ||
 		!p015B2ASelector(call.Args[1], "logger", "ComponentAgent") ||
 		!p015B2ACall(call.Args[3], "logger", "NewSafeFields") {
-		t.Errorf("%s has non-zero/non-direct sensitive call at byte %d", file, call.Pos())
+		t.Errorf("%s has non-direct sensitive call at byte %d", file, call.Pos())
 		return ""
 	}
 	p015B2ARejectHostileFormatting(t, file, call)
@@ -895,6 +1053,7 @@ func p015B2AValidateSensitiveSink(
 	}
 	valuePath, valueOK := p015B2AExpressionPath(call.Args[6])
 	if file != expected.file ||
+		!p015B2ASensitivePolicySource(call.Args[0], expected.policySource) ||
 		!p015B2ASelector(call.Args[4], "logger", expected.sensitivity) ||
 		!p015B2ASelector(call.Args[5], "logger", expected.domain) ||
 		!valueOK || !reflect.DeepEqual(valuePath, expected.valuePath) {
@@ -913,6 +1072,17 @@ func p015B2AValidateSensitiveSink(
 		)
 	}
 	return message
+}
+
+func p015B2ASensitivePolicySource(expression ast.Expr, want string) bool {
+	if want == "context" {
+		call, ok := expression.(*ast.CallExpr)
+		return ok && !call.Ellipsis.IsValid() && len(call.Args) == 1 &&
+			p015B2ASelector(call.Fun, "logger", "DiagnosticPolicyFromContext") &&
+			p015B2AIdent(call.Args[0], "ctx")
+	}
+	path, ok := p015B2AExpressionPath(expression)
+	return ok && strings.Join(path, ".") == want
 }
 
 func p015B2AValidateToolProjectionPaths(t *testing.T, parsed *ast.File) {
@@ -1063,11 +1233,6 @@ func p015B2ARejectHostileFormatting(t *testing.T, file string, root ast.Node) {
 		}
 		return true
 	})
-}
-
-func p015B2AEmptyPolicy(expression ast.Expr) bool {
-	literal, ok := expression.(*ast.CompositeLit)
-	return ok && len(literal.Elts) == 0 && p015B2ASelector(literal.Type, "logger", "DiagnosticPolicy")
 }
 
 func p015B2ACall(expression ast.Expr, pkg, name string) bool {

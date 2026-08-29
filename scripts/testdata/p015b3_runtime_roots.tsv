@@ -1,0 +1,8 @@
+# p015b3-runtime-roots-v1
+# file	function	callee
+# Every production root passes a literal logger.DiagnosticPolicy{} owner cap.
+cmd/picoclaw/internal/agent/helpers.go	agentCmd	NewAgentLoopWithRuntimePolicies
+cmd/picoclaw/internal/workflow/helpers.go	(*cliWorkflowRuntimeRunner).ensureLoopLocked	NewAgentLoopWithRuntimePolicies
+pkg/gateway/gateway.go	Run	NewAgentLoopWithRuntimePolicies
+web/backend/api/workflow_ai.go	defaultRunWorkflowAuthorAgent	NewAgentLoopWithRuntimePolicies
+web/backend/api/workflow_runtime.go	(*webWorkflowRuntimeRunner).ensureLoopLocked	NewAgentLoopWithRuntimePolicies

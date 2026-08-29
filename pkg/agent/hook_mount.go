@@ -186,7 +186,7 @@ func (al *AgentLoop) ensureHooksInitialized(ctx context.Context) error {
 	// mutex. Configured factories may re-enter runtime-admitted Agent APIs; a
 	// concurrent reload must wait for that work to finish instead of pausing
 	// admission and then deadlocking on this mutex.
-	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	leaseCtx, releaseRuntime, err := al.acquireTrustedRuntimeRoot(ctx)
 	if err != nil {
 		return err
 	}

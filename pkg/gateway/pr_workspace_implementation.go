@@ -110,7 +110,11 @@ func (runtime *prWorkspaceImplementationRuntime) Repair(
 		return prworkspace.RepairResult{}, err
 	}
 	defer release()
-	runner, err := runtime.loop.NewControllerLocalRepairRunner(runtime.agentID, request.Instruction)
+	runner, err := runtime.loop.NewControllerLocalRepairRunnerWithRuntimeLease(
+		leaseCtx,
+		runtime.agentID,
+		request.Instruction,
+	)
 	if err != nil {
 		return prworkspace.RepairResult{}, err
 	}

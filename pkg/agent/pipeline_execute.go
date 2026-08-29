@@ -346,7 +346,7 @@ toolLoop:
 						),
 					)
 					logger.DebugSensitiveCF(
-						logger.DiagnosticPolicy{},
+						ts.diagnosticPolicy,
 						logger.ComponentAgent,
 						logger.DiagnosticMessageHookToolArguments,
 						logger.NewSafeFields(
@@ -705,7 +705,7 @@ toolLoop:
 			),
 		)
 		logger.DebugSensitiveCF(
-			logger.DiagnosticPolicy{},
+			ts.diagnosticPolicy,
 			logger.ComponentAgent,
 			logger.DiagnosticMessageToolArguments,
 			logger.NewSafeFields(

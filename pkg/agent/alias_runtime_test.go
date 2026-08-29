@@ -139,7 +139,12 @@ func TestConfiguredSubagentAliasPolicyOverridesParentAndUsesFallbackAlias(t *tes
 		pendingResults: make(chan *tools.ToolResult, 16),
 		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
 	}
-	ctx := WithAgentLoop(withTurnState(parentCtx, parent), loop)
+	rootCtx, releaseRoot, err := loop.acquireTrustedRuntimeRoot(parentCtx)
+	if err != nil {
+		t.Fatalf("acquire trusted runtime root: %v", err)
+	}
+	defer releaseRoot()
+	ctx := WithAgentLoop(withTurnState(rootCtx, parent), loop)
 	result := subagentTool.Execute(ctx, map[string]any{"task": "check aliases"})
 	if result == nil || result.IsError {
 		t.Fatalf("subagent result = %#v", result)

@@ -259,11 +259,12 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	}
 
 	msgBus := bus.NewMessageBus()
-	agentLoop := agent.NewAgentLoopWithExecutionPolicy(
+	agentLoop := agent.NewAgentLoopWithRuntimePolicies(
 		cfg,
 		msgBus,
 		provider,
 		executionPolicy,
+		logger.DiagnosticPolicy{},
 		agent.WithConfigPath(configPath),
 		agent.WithRuntimeStartupBarrier(),
 		agent.WithDeferredEvolutionActivation(),
@@ -1128,15 +1129,22 @@ func handleConfigReloadWithServiceOps(
 		return fmt.Errorf("reload service lifecycle operations are required")
 	}
 
-	oldCfg := al.GetConfig()
-	oldExecutionPolicy, err := al.ExecutionPolicyForGeneration(oldCfg)
+	expectedGeneration, err := al.SnapshotRuntimeGenerationIdentity()
 	if err != nil {
-		return fmt.Errorf("snapshot active execution policy for reload: %w", err)
+		return fmt.Errorf("snapshot active runtime generation for reload: %w", err)
 	}
-	oldProvider := *providerRef
 	newExecutionPolicy := isolation.NewExecutionPolicy(newCfg.Isolation)
 	if policyErr := newExecutionPolicy.Validate(); policyErr != nil {
 		return fmt.Errorf("invalid replacement subprocess execution policy: %w", policyErr)
+	}
+	reloadTransaction, err := al.BeginRuntimeReloadTransaction(expectedGeneration)
+	if err != nil {
+		return fmt.Errorf("begin exact runtime reload transaction: %w", err)
+	}
+	defer reloadTransaction.Close()
+	oldCfg := reloadTransaction.InitialConfig()
+	if oldCfg == nil {
+		return fmt.Errorf("active runtime generation disappeared before reload")
 	}
 	newModel := newCfg.Agents.Defaults.ModelName
 	hadEventWebhookRoute := runningServices != nil &&
@@ -1264,6 +1272,14 @@ func handleConfigReloadWithServiceOps(
 		)
 	}
 	defer resumeRuntime()
+	restartPausedServices := func() error {
+		return al.WithPausedRuntimeGeneration(
+			runtimeCtx,
+			func(setupCtx context.Context) error {
+				return serviceOps.restart(setupCtx, al, runningServices, msgBus)
+			},
+		)
+	}
 
 	channelDrainCtx, channelDrainCancel := context.WithTimeout(
 		ctx,
@@ -1300,7 +1316,7 @@ func handleConfigReloadWithServiceOps(
 		if recoveryStopErr == nil {
 			recoveryRestartErr = prepareEventChannelAdmission(runningServices, oldCfg)
 			if recoveryRestartErr == nil {
-				recoveryRestartErr = serviceOps.restart(runtimeCtx, al, runningServices, msgBus)
+				recoveryRestartErr = restartPausedServices()
 			}
 			if recoveryRestartErr == nil {
 				recoveryActivateErr = activateEventAdmissions(runningServices)
@@ -1323,11 +1339,12 @@ func handleConfigReloadWithServiceOps(
 	reloadCtx, reloadCancel := context.WithTimeout(context.Background(), providerReloadTimeout)
 	defer reloadCancel()
 
-	previousProvider, err := al.ReloadProviderAndConfigRetainingPreviousWithExecutionPolicy(
+	retainedPrevious, err := reloadTransaction.PublishRetainingPrevious(
 		reloadCtx,
 		newProvider,
 		newCfg,
 		newExecutionPolicy,
+		logger.DiagnosticPolicy{},
 	)
 	if err != nil {
 		logger.ErrorSafeCF(
@@ -1347,7 +1364,7 @@ func handleConfigReloadWithServiceOps(
 		)
 		restartErr := prepareEventChannelAdmission(runningServices, oldCfg)
 		if restartErr == nil {
-			restartErr = serviceOps.restart(runtimeCtx, al, runningServices, msgBus)
+			restartErr = restartPausedServices()
 		}
 		var reactivateErr error
 		if restartErr == nil {
@@ -1372,26 +1389,25 @@ func handleConfigReloadWithServiceOps(
 			reactivateErr,
 		)
 	}
-	if previousProvider == nil {
-		previousProvider = oldProvider
-	}
-
 	logger.InfoSafeCF(
 		logger.ComponentGateway,
 		logger.DiagnosticMessageGatewayPreflightingAndRestartingAllServicesWithNewConfiguration,
 		logger.NewSafeFields(),
 	)
 	candidateServicesStarted := false
-	restartErr := validateEventAutomationRuntime(runtimeCtx, newCfg, al)
-	if restartErr != nil {
-		restartErr = fmt.Errorf("preflight replacement event runtime: %w", restartErr)
-	} else {
-		candidateServicesStarted = true
-		restartErr = serviceOps.restart(runtimeCtx, al, runningServices, msgBus)
-		if restartErr == nil {
-			restartErr = activateEventAdmissions(runningServices)
-		}
-	}
+	restartErr := al.WithPausedRuntimeGeneration(
+		runtimeCtx,
+		func(setupCtx context.Context) error {
+			if preflightErr := validateEventAutomationRuntime(setupCtx, newCfg, al); preflightErr != nil {
+				return fmt.Errorf("preflight replacement event runtime: %w", preflightErr)
+			}
+			candidateServicesStarted = true
+			if restartErr := serviceOps.restart(setupCtx, al, runningServices, msgBus); restartErr != nil {
+				return restartErr
+			}
+			return activateEventAdmissions(runningServices)
+		},
+	)
 	if restartErr != nil {
 		logger.ErrorSafeCF(
 			logger.ComponentGateway,
@@ -1406,10 +1422,14 @@ func handleConfigReloadWithServiceOps(
 		}
 		if cleanupErr != nil {
 			*providerRef = newProvider
-			closeRetainedProviderAfterReload(al, previousProvider)
+			commitErr := reloadTransaction.CommitRetained(
+				context.Background(),
+				retainedPrevious,
+			)
 			return errors.Join(
 				fmt.Errorf("error restarting services: %w", restartErr),
 				fmt.Errorf("stop partially restarted services: %w", cleanupErr),
+				commitErr,
 			)
 		}
 
@@ -1417,27 +1437,26 @@ func handleConfigReloadWithServiceOps(
 			context.Background(),
 			providerReloadTimeout,
 		)
-		failedProvider, rollbackErr := al.ReloadProviderAndConfigRetainingPreviousWithExecutionPolicy(
+		retainedFailed, rollbackErr := reloadTransaction.Rollback(
 			rollbackCtx,
-			previousProvider,
-			oldCfg,
-			oldExecutionPolicy,
+			retainedPrevious,
 		)
 		rollbackCancel()
 		if rollbackErr != nil {
 			*providerRef = newProvider
-			closeRetainedProviderAfterReload(al, previousProvider)
+			commitErr := reloadTransaction.CommitRetained(
+				context.Background(),
+				retainedPrevious,
+			)
 			return errors.Join(
 				fmt.Errorf("error restarting services: %w", restartErr),
 				fmt.Errorf("roll back agent configuration: %w", rollbackErr),
+				commitErr,
 			)
-		}
-		if failedProvider == nil {
-			failedProvider = newProvider
 		}
 		recoveryErr := prepareEventChannelAdmission(runningServices, oldCfg)
 		if recoveryErr == nil {
-			recoveryErr = serviceOps.restart(runtimeCtx, al, runningServices, msgBus)
+			recoveryErr = restartPausedServices()
 		}
 		var recoveryActivateErr error
 		if recoveryErr == nil {
@@ -1449,11 +1468,15 @@ func handleConfigReloadWithServiceOps(
 			runningServices.HealthServer != nil {
 			runningServices.HealthServer.SetReady(true)
 		}
-		closeRetainedProviderAfterReload(al, failedProvider)
+		commitErr := reloadTransaction.CommitRetained(
+			context.Background(),
+			retainedFailed,
+		)
 		return errors.Join(
 			fmt.Errorf("error restarting services: %w", restartErr),
 			recoveryErr,
 			recoveryActivateErr,
+			commitErr,
 		)
 	}
 
@@ -1461,7 +1484,12 @@ func handleConfigReloadWithServiceOps(
 	if runningServices != nil && runningServices.HealthServer != nil {
 		runningServices.HealthServer.SetReady(true)
 	}
-	closeRetainedProviderAfterReload(al, previousProvider)
+	if err := reloadTransaction.CommitRetained(
+		context.Background(),
+		retainedPrevious,
+	); err != nil {
+		return fmt.Errorf("close retained runtime generation: %w", err)
+	}
 
 	logger.InfoSafeCF(
 		logger.ComponentConfig,
@@ -1482,15 +1510,6 @@ func handleConfigReloadWithServiceOps(
 	}
 
 	return nil
-}
-
-func closeRetainedProviderAfterReload(
-	agentLoop *agent.AgentLoop,
-	provider providers.LLMProvider,
-) {
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), providerReloadTimeout)
-	defer closeCancel()
-	agentLoop.CloseRetainedProvider(closeCtx, provider)
 }
 
 func restartServices(

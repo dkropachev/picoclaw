@@ -969,7 +969,10 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 	}
 	promptReq.SuppressToolUseRule = true
 	promptReq.ToolUseFallback = false
-	messages := agent.ContextBuilder.BuildMessagesFromPrompt(promptReq)
+	messages := agent.ContextBuilder.buildMessagesFromPromptWithDiagnosticPolicy(
+		promptReq,
+		logger.DiagnosticPolicyFromContext(ctx),
+	)
 
 	maxMediaSize := al.GetConfig().Agents.Defaults.GetMaxMediaSize()
 	currentTurnStart := len(messages)

@@ -9,6 +9,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
@@ -43,15 +44,27 @@ func (al *AgentLoop) GetConfig() *config.Config {
 func (al *AgentLoop) ExecutionPolicyForGeneration(
 	expected *config.Config,
 ) (isolation.ExecutionPolicy, error) {
+	executionPolicy, _, err := al.RuntimePoliciesForGeneration(expected)
+	return executionPolicy, err
+}
+
+// RuntimePoliciesForGeneration returns the immutable owner policies paired
+// with expected under one lock. It is a control-plane compatibility accessor;
+// request code must use runtimeGenerationFromLease instead.
+func (al *AgentLoop) RuntimePoliciesForGeneration(
+	expected *config.Config,
+) (isolation.ExecutionPolicy, logger.DiagnosticPolicy, error) {
 	if al == nil || expected == nil {
-		return isolation.ExecutionPolicy{}, fmt.Errorf("runtime generation is not configured")
+		return isolation.ExecutionPolicy{}, logger.DiagnosticPolicy{},
+			fmt.Errorf("runtime generation is not configured")
 	}
 	al.mu.RLock()
 	defer al.mu.RUnlock()
 	if al.cfg != expected {
-		return isolation.ExecutionPolicy{}, fmt.Errorf("runtime generation is stale")
+		return isolation.ExecutionPolicy{}, logger.DiagnosticPolicy{},
+			fmt.Errorf("runtime generation is stale")
 	}
-	return al.executionPolicy, nil
+	return al.executionPolicy, al.diagnosticPolicy, nil
 }
 
 // SetMediaStore replaces the generation media store. The caller must hold the

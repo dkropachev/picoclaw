@@ -884,6 +884,20 @@ func (cb *ContextBuilder) BuildMessages(
 }
 
 func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []providers.Message {
+	return cb.buildMessagesFromPromptWithDiagnosticPolicy(
+		req,
+		logger.DiagnosticPolicy{},
+	)
+}
+
+// buildMessagesFromPromptWithDiagnosticPolicy is the private runtime-owned
+// prompt path. The policy stays separate from PromptBuildRequest so prompt
+// contributors, public callers, and cached prompt content cannot retain or
+// replay diagnostic authority.
+func (cb *ContextBuilder) buildMessagesFromPromptWithDiagnosticPolicy(
+	req PromptBuildRequest,
+	diagnosticPolicy logger.DiagnosticPolicy,
+) []providers.Message {
 	messages := []providers.Message{}
 
 	// The default static part (identity, bootstrap, skills, memory) is cached
@@ -1056,7 +1070,7 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 		),
 	)
 	logger.DebugSensitiveCF(
-		logger.DiagnosticPolicy{},
+		diagnosticPolicy,
 		logger.ComponentAgent,
 		logger.DiagnosticMessageSystemPrompt,
 		logger.NewSafeFields(

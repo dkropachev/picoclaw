@@ -199,6 +199,9 @@ type turnState struct {
 	opts    processOptions
 	profile config.EffectiveTurnProfile
 	scope   turnEventScope
+	// diagnosticPolicy is the immutable effective request capability captured
+	// from the admitted runtime context before turn publication.
+	diagnosticPolicy logger.DiagnosticPolicy
 
 	turnID            string
 	agentID           string
@@ -415,26 +418,55 @@ func (al *AgentLoop) lockSessionTurn(sessionKey string) func() {
 }
 
 func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScope) *turnState {
+	return newTurnStateWithDiagnosticPolicy(
+		agent,
+		opts,
+		scope,
+		logger.DiagnosticPolicy{},
+	)
+}
+
+func newTurnStateFromRuntimeContext(
+	ctx context.Context,
+	agent *AgentInstance,
+	opts processOptions,
+	scope turnEventScope,
+) *turnState {
+	return newTurnStateWithDiagnosticPolicy(
+		agent,
+		opts,
+		scope,
+		logger.DiagnosticPolicyFromContext(ctx),
+	)
+}
+
+func newTurnStateWithDiagnosticPolicy(
+	agent *AgentInstance,
+	opts processOptions,
+	scope turnEventScope,
+	diagnosticPolicy logger.DiagnosticPolicy,
+) *turnState {
 	ts := &turnState{
-		agent:        agent,
-		opts:         opts,
-		profile:      opts.TurnProfile,
-		scope:        scope,
-		turnID:       scope.turnID,
-		agentID:      agent.ID,
-		sessionKey:   opts.Dispatch.SessionKey,
-		activeSkills: activeSkillNames(agent, opts),
-		turnCtx:      cloneTurnContext(scope.context),
-		channel:      opts.Dispatch.Channel(),
-		chatID:       opts.Dispatch.ChatID(),
-		turnUXID:     opts.Dispatch.TurnUXID(),
-		workspace:    agent.Workspace,
-		userMessage:  opts.Dispatch.UserMessage,
-		media:        append([]string(nil), opts.Dispatch.Media...),
-		phase:        TurnPhaseSetup,
-		startedAt:    time.Now(),
-		usage:        newWorkflowAgentUsageAccumulator(opts.usageObserver),
-		finishedChan: make(chan struct{}),
+		agent:            agent,
+		opts:             opts,
+		profile:          opts.TurnProfile,
+		scope:            scope,
+		diagnosticPolicy: diagnosticPolicy,
+		turnID:           scope.turnID,
+		agentID:          agent.ID,
+		sessionKey:       opts.Dispatch.SessionKey,
+		activeSkills:     activeSkillNames(agent, opts),
+		turnCtx:          cloneTurnContext(scope.context),
+		channel:          opts.Dispatch.Channel(),
+		chatID:           opts.Dispatch.ChatID(),
+		turnUXID:         opts.Dispatch.TurnUXID(),
+		workspace:        agent.Workspace,
+		userMessage:      opts.Dispatch.UserMessage,
+		media:            append([]string(nil), opts.Dispatch.Media...),
+		phase:            TurnPhaseSetup,
+		startedAt:        time.Now(),
+		usage:            newWorkflowAgentUsageAccumulator(opts.usageObserver),
+		finishedChan:     make(chan struct{}),
 	}
 
 	// Bind the session store. restorePointHistory/restorePointSummary are the
@@ -915,7 +947,7 @@ func (al *AgentLoop) abandonSessionTurnState(
 }
 
 type steeringRescueRequest struct {
-	parentContext    context.Context
+	diagnosticOrigin runtimeDiagnosticOrigin
 	channel          string
 	chatID           string
 	inboundContext   *bus.InboundContext
@@ -956,11 +988,12 @@ func (al *AgentLoop) rescueOrClearOrphanedSteering(
 		return false
 	}
 
+	origin, _ := al.runtimeDiagnosticOriginFromLease(ctx)
 	request := steeringRescueRequest{
-		parentContext:  ctx,
-		channel:        channel,
-		chatID:         chatID,
-		inboundContext: cloneInboundContext(inboundContext),
+		diagnosticOrigin: origin,
+		channel:          channel,
+		chatID:           chatID,
+		inboundContext:   cloneInboundContext(inboundContext),
 		outboundEnqueued: len(bufferedOutbound) > 0 &&
 			bufferedOutbound[0],
 	}
@@ -1022,11 +1055,7 @@ func (al *AgentLoop) runSteeringRescue(
 		)
 	}()
 
-	resumeCtx := context.Background()
-	if request.parentContext != nil {
-		resumeCtx = context.WithoutCancel(request.parentContext)
-	}
-	resumeCtx, cancel := context.WithTimeout(resumeCtx, 30*time.Second)
+	resumeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	trackedResultOwner := &trackedSubagentResultOutputOwner{}
 	resumeCtx = withTrackedSubagentResultOutputOwner(resumeCtx, trackedResultOwner)
@@ -1038,6 +1067,7 @@ func (al *AgentLoop) runSteeringRescue(
 		request.channel,
 		request.chatID,
 		request.inboundContext,
+		&request.diagnosticOrigin,
 	)
 	if errors.Is(err, errSessionTurnAlreadyOwned) {
 		// Another live owner won the session claim and therefore owns the
@@ -1071,6 +1101,7 @@ func (al *AgentLoop) runSteeringRescue(
 	continued, continueErr := al.drainQueuedSteeringContinuations(
 		resumeCtx,
 		target,
+		&request.diagnosticOrigin,
 	)
 	if continued != "" {
 		response = continued

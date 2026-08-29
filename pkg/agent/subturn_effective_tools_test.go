@@ -818,7 +818,7 @@ func TestSpawnSubTurnCentralTargetAuthorizationFailsBeforeConstructionAndProvide
 		pendingResults: make(chan *tools.ToolResult, 1),
 		concurrencySem: make(chan struct{}, 1),
 	}
-	result, err := spawnSubTurn(context.Background(), loop, parent, SubTurnConfig{
+	result, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, parent, SubTurnConfig{
 		TargetAgentID: "beta", SystemPrompt: "unauthorized",
 	})
 	if result != nil || err == nil || !errors.Is(err, ErrInvalidSubTurnConfig) ||
@@ -857,7 +857,7 @@ func TestSpawnSubTurnRuntimeEnforcesParentTargetExplicitProfileIntersection(t *t
 			AllowedTools: []string{"intersection_shared", "intersection_target_only"},
 		},
 	}
-	result, err := spawnSubTurn(context.Background(), loop, parent, SubTurnConfig{
+	result, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, parent, SubTurnConfig{
 		TargetAgentID: "beta", SystemPrompt: "intersect",
 		Tools: []tools.Tool{&subTurnSelectorTestTool{name: "INTERSECTION_SHARED"}},
 	})
@@ -869,7 +869,7 @@ func TestSpawnSubTurnRuntimeEnforcesParentTargetExplicitProfileIntersection(t *t
 	}
 
 	callsBefore := provider.calls.Load()
-	result, err = spawnSubTurn(context.Background(), loop, &turnState{
+	result, err = spawnSubTurnFromTrustedRuntime(context.Background(), loop, &turnState{
 		turnID: "intersection-unavailable-parent", agent: parentAgent,
 		pendingResults: make(chan *tools.ToolResult, 1),
 		concurrencySem: make(chan struct{}, 1),
@@ -907,7 +907,7 @@ func TestSpawnSubTurnRuntimeAppliesNilEmptyAndForeignExactSelectors(t *testing.T
 			concurrencySem: make(chan struct{}, 1),
 		}
 	}
-	if _, err := spawnSubTurn(context.Background(), loop, newParent("nil-parent"), SubTurnConfig{
+	if _, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, newParent("nil-parent"), SubTurnConfig{
 		Model: "test-model", SystemPrompt: "inherit", Tools: nil,
 	}); err != nil {
 		t.Fatal(err)
@@ -915,7 +915,7 @@ func TestSpawnSubTurnRuntimeAppliesNilEmptyAndForeignExactSelectors(t *testing.T
 	if len(provider.tools) == 0 {
 		t.Fatal("nil selector did not inherit constructible tools")
 	}
-	if _, err := spawnSubTurn(context.Background(), loop, newParent("empty-parent"), SubTurnConfig{
+	if _, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, newParent("empty-parent"), SubTurnConfig{
 		Model: "test-model", SystemPrompt: "empty", Tools: []tools.Tool{},
 	}); err != nil {
 		t.Fatal(err)
@@ -923,7 +923,7 @@ func TestSpawnSubTurnRuntimeAppliesNilEmptyAndForeignExactSelectors(t *testing.T
 	if len(provider.tools) != 0 {
 		t.Fatalf("explicit empty provider tools = %#v", provider.tools)
 	}
-	if _, err := spawnSubTurn(context.Background(), loop, newParent("exact-parent"), SubTurnConfig{
+	if _, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, newParent("exact-parent"), SubTurnConfig{
 		Model: "test-model", SystemPrompt: "exact",
 		Tools: []tools.Tool{&subTurnSelectorTestTool{name: "READ_FILE"}},
 	}); err != nil {
@@ -969,7 +969,7 @@ func TestSpawnSubTurnConstructsToolsForExactScopedTurnOwner(t *testing.T) {
 		pendingResults: make(chan *tools.ToolResult, 1),
 		concurrencySem: make(chan struct{}, 1),
 	}
-	result, err := spawnSubTurn(context.Background(), loop, parent, SubTurnConfig{
+	result, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, parent, SubTurnConfig{
 		Model: "test-model", SystemPrompt: "check owner",
 		Tools: []tools.Tool{&subTurnSelectorTestTool{name: "owner_probe"}},
 	})
@@ -1026,7 +1026,7 @@ func TestSpawnSubTurnNestedRuntimeCannotRegainRemovedRoot(t *testing.T) {
 		concurrencySem:     make(chan struct{}, 1),
 		toolAuthorityBound: true,
 	}
-	result, err := spawnSubTurn(context.Background(), loop, parent, SubTurnConfig{
+	result, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, parent, SubTurnConfig{
 		Model: "test-model", SystemPrompt: "nested",
 	})
 	if err != nil || result == nil || result.IsError {
@@ -1055,7 +1055,7 @@ func TestSpawnSubTurnPromptContributorsUseExactEffectiveChildTools(t *testing.T)
 			concurrencySem: make(chan struct{}, 1),
 		}
 	}
-	if _, err := spawnSubTurn(context.Background(), loop, newParent("prompt-inherit"), SubTurnConfig{
+	if _, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, newParent("prompt-inherit"), SubTurnConfig{
 		Model: "model-alpha", SystemPrompt: "inherit prompt", Tools: nil,
 	}); err != nil {
 		t.Fatal(err)
@@ -1063,7 +1063,7 @@ func TestSpawnSubTurnPromptContributorsUseExactEffectiveChildTools(t *testing.T)
 	if prompt := provider.prompt(); !strings.Contains(prompt, "# Agent Discovery") {
 		t.Fatalf("inherited child prompt omitted spawn contributor:\n%s", prompt)
 	}
-	if _, err := spawnSubTurn(context.Background(), loop, newParent("prompt-empty"), SubTurnConfig{
+	if _, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, newParent("prompt-empty"), SubTurnConfig{
 		Model: "model-alpha", SystemPrompt: "empty prompt", Tools: []tools.Tool{},
 	}); err != nil {
 		t.Fatal(err)
@@ -1072,7 +1072,7 @@ func TestSpawnSubTurnPromptContributorsUseExactEffectiveChildTools(t *testing.T)
 		strings.Contains(prompt, toolUseSystemPromptRule()) {
 		t.Fatalf("empty child prompt retained tool contributors:\n%s", prompt)
 	}
-	if _, err := spawnSubTurn(context.Background(), loop, newParent("prompt-read"), SubTurnConfig{
+	if _, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, newParent("prompt-read"), SubTurnConfig{
 		Model: "model-alpha", SystemPrompt: "read prompt",
 		Tools: []tools.Tool{&subTurnSelectorTestTool{name: "read_file"}},
 	}); err != nil {
@@ -1127,7 +1127,7 @@ func TestSpawnSubTurnStrictResourcesCloseAndCloseFailureRelabelsResult(t *testin
 				pendingResults: make(chan *tools.ToolResult, 1),
 				concurrencySem: make(chan struct{}, 1),
 			}
-			result, err := spawnSubTurn(context.Background(), loop, parent, SubTurnConfig{
+			result, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, parent, SubTurnConfig{
 				Model: "test-model", SystemPrompt: "finish",
 			})
 			if test.wantError {
@@ -1186,7 +1186,7 @@ func TestSpawnSubTurnStrictResourcesCloseOnceOnPanicAndHardAbort(t *testing.T) {
 				pendingResults: make(chan *tools.ToolResult, 1),
 				concurrencySem: make(chan struct{}, 1),
 			}
-			result, err := spawnSubTurn(context.Background(), loop, parent, SubTurnConfig{
+			result, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, parent, SubTurnConfig{
 				Model: "test-model", SystemPrompt: test.name,
 			})
 			if err == nil || result == nil || !result.IsError || closeCount.Load() != 1 {
@@ -1251,7 +1251,7 @@ func TestSpawnSubTurnStrictResourcesCloseOnceOnPanicAndHardAbort(t *testing.T) {
 			}
 			done := make(chan spawnOutcome, 1)
 			go func() {
-				result, err := spawnSubTurn(context.Background(), loop, parent, SubTurnConfig{
+				result, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, parent, SubTurnConfig{
 					Model: "test-model", SystemPrompt: "block",
 				})
 				done <- spawnOutcome{result: result, err: err}
@@ -1336,7 +1336,7 @@ func TestSpawnSubTurnFactoryFailureClosesEarlierProductsBeforePublication(t *tes
 		pendingResults: make(chan *tools.ToolResult, 1),
 		concurrencySem: make(chan struct{}, 1),
 	}
-	result, err := spawnSubTurn(context.Background(), loop, parent, SubTurnConfig{
+	result, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, parent, SubTurnConfig{
 		Model: "test-model", SystemPrompt: "must not start",
 	})
 	if result != nil || err == nil || !strings.Contains(err.Error(), "injected child factory failure") {
@@ -1395,7 +1395,7 @@ func TestSpawnSubTurnAttachRejectionClosesConstructedProducts(t *testing.T) {
 	}
 	done := make(chan spawnOutcome, 1)
 	go func() {
-		result, err := spawnSubTurn(context.Background(), loop, parent, SubTurnConfig{
+		result, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, parent, SubTurnConfig{
 			Model: "test-model", SystemPrompt: "reject attach",
 			Tools: []tools.Tool{&subTurnSelectorTestTool{name: "attach_rejection_probe"}},
 		})
@@ -1462,7 +1462,7 @@ func TestSpawnSubTurnStrictRegistryClosesOnlyAfterBlockingToolUseQuiesces(t *tes
 	}
 	done := make(chan spawnOutcome, 1)
 	go func() {
-		result, err := spawnSubTurn(context.Background(), loop, parent, SubTurnConfig{
+		result, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, parent, SubTurnConfig{
 			Model: "test-model", SystemPrompt: "execute blocking tool",
 			Tools: []tools.Tool{&subTurnSelectorTestTool{name: "blocking_owned_tool"}},
 		})
@@ -1758,8 +1758,21 @@ func TestPrepareAsyncSubTurnBoundsQueuedSourceAdmissionsWithoutBlockingAck(t *te
 		concurrencySem: make(chan struct{}, 1),
 	}
 	parent.concurrencySem <- struct{}{}
-	ctx := withTurnState(WithAgentLoop(context.Background(), loop), parent)
 	spawner := NewSubTurnSpawner(loop)
+	detachedCtx := withTurnState(WithAgentLoop(context.Background(), loop), parent)
+	if _, detachedRelease, detachedErr := spawner.PrepareAsyncSubTurn(detachedCtx); detachedErr == nil {
+		detachedRelease()
+		t.Fatal("detached async preparation retained runtime without a live origin")
+	} else if detachedRelease == nil {
+		t.Fatal("detached async preparation returned a nil release function")
+	}
+
+	rootCtx, releaseRoot, err := loop.acquireTrustedRuntimeRoot(context.Background())
+	if err != nil {
+		t.Fatalf("acquire trusted runtime root: %v", err)
+	}
+	defer releaseRoot()
+	ctx := withTurnState(WithAgentLoop(rootCtx, loop), parent)
 	preparedCtx, releasePrepared, err := spawner.PrepareAsyncSubTurn(ctx)
 	if err != nil || preparedCtx == nil {
 		t.Fatalf("first queued async preparation = %#v, %v", preparedCtx, err)
@@ -1873,7 +1886,12 @@ func TestSpawnToolAsyncConstructionLeaseProtectsStrictParentSource(t *testing.T)
 		t.Fatalf("strict spawn type = %T", spawnRaw)
 	}
 	callbackDone := make(chan *tools.ToolResult, 1)
-	parentCtx := withTurnState(WithAgentLoop(context.Background(), loop), parent)
+	rootCtx, releaseRoot, err := loop.acquireTrustedRuntimeRoot(context.Background())
+	if err != nil {
+		t.Fatalf("acquire trusted runtime root: %v", err)
+	}
+	defer releaseRoot()
+	parentCtx := withTurnState(WithAgentLoop(rootCtx, loop), parent)
 	ack := spawn.ExecuteAsync(
 		parentCtx,
 		map[string]any{"task": "block during child construction"},
@@ -2084,7 +2102,7 @@ func TestSubTurnBeforeLLMHookCanNarrowNativeSearch(t *testing.T) {
 				pendingResults: make(chan *tools.ToolResult, 1),
 				concurrencySem: make(chan struct{}, 1),
 			}
-			result, err := spawnSubTurn(context.Background(), loop, parent, SubTurnConfig{
+			result, err := spawnSubTurnFromTrustedRuntime(context.Background(), loop, parent, SubTurnConfig{
 				Model: "test-model", SystemPrompt: "hook narrows native",
 				Tools: []tools.Tool{&subTurnSelectorTestTool{name: "web_search"}},
 			})

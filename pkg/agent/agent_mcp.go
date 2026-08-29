@@ -154,7 +154,7 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 		return al.ensureMCPInitializedForGeneration(ctx, cfg, registry)
 	}
 
-	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	leaseCtx, releaseRuntime, err := al.acquireTrustedRuntimeRoot(ctx)
 	if err != nil {
 		return err
 	}
