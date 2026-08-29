@@ -10,6 +10,7 @@ import (
 	"testing"
 )
 
+//nolint:govet // Boundary assertions intentionally reuse err in short scopes.
 func TestRepositoryReviewAssignmentCampaignBindingAndMergeCoverage(t *testing.T) {
 	profileHash := "sha256:" + strings.Repeat("a", 64)
 	catalog := repositoryReviewAssignmentCatalogForTest(t, profileHash)
@@ -131,6 +132,7 @@ func TestRepositoryReviewAssignmentCampaignBindingAndMergeCoverage(t *testing.T)
 	}
 }
 
+//nolint:govet // Boundary assertions intentionally reuse err in short scopes.
 func TestRepositoryReviewAssignmentPlanningAndStateValidationCoverage(t *testing.T) {
 	if _, err := NewStore(t.TempDir()).PlanAssignmentsForCampaign(
 		context.Background(), "owner/repo", strings.Repeat("a", 40), "inventory", "profile",
@@ -242,6 +244,7 @@ func TestRepositoryReviewAssignmentPlanningAndStateValidationCoverage(t *testing
 	}
 }
 
+//nolint:govet // Boundary assertions intentionally reuse err in short scopes.
 func TestRepositoryReviewAssignmentStoreFailureCoverage(t *testing.T) {
 	fixture := newAssignmentCoverageFixture(t, 1, 1)
 	sentinel := errors.New("injected assignment load failure")

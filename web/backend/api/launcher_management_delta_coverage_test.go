@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
 )
 
+//nolint:govet // Boundary assertions intentionally reuse err in short scopes.
 func TestLauncherManagementRepositoryCampaignRecoveryBranches(t *testing.T) {
 	fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
 		inspected: []int{0}, occurrences: 0,

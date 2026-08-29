@@ -134,7 +134,9 @@ func TestRepositoryReviewAssignmentVerifyCloseoutDefenses(t *testing.T) {
 func TestRepositoryReviewAssignmentCheckpointCloseoutDefenses(t *testing.T) {
 	fixture := newAssignmentCoverageFixture(t, 1, 1)
 	checkpoint := assignmentCoverageCheckpoint(fixture, "run", 0, fixture.files)
-	if _, err := fixture.store.CheckpointRepositoryReviewAssignment(t.Context(), checkpoint); !errors.Is(err, ErrConflict) {
+	if _, err := fixture.store.CheckpointRepositoryReviewAssignment(
+		t.Context(), checkpoint,
+	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("checkpoint without run error = %v", err)
 	}
 	invalid := checkpoint
@@ -255,7 +257,9 @@ func TestRepositoryReviewAssignmentInterruptCloseoutDefenses(t *testing.T) {
 	fixture := newAssignmentCoverageFixture(t, 1, 1)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := fixture.store.InterruptRepositoryReviewRun(canceled, fixture.repository, "run"); !errors.Is(err, context.Canceled) {
+	if _, err := fixture.store.InterruptRepositoryReviewRun(
+		canceled, fixture.repository, "run",
+	); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled interrupt error = %v", err)
 	}
 	if _, err := fixture.store.InterruptRepositoryReviewRun(t.Context(), "", ""); err == nil {
@@ -266,13 +270,19 @@ func TestRepositoryReviewAssignmentInterruptCloseoutDefenses(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.InterruptRepositoryReviewRun(t.Context(), fixture.repository, "wrong"); !errors.Is(err, ErrConflict) {
+	if _, err := fixture.store.InterruptRepositoryReviewRun(
+		t.Context(), fixture.repository, "wrong",
+	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("wrong interrupt run error = %v", err)
 	}
-	if _, err := fixture.store.InterruptRepositoryReviewRun(t.Context(), fixture.repository, "run"); err != nil {
+	if _, err := fixture.store.InterruptRepositoryReviewRun(
+		t.Context(), fixture.repository, "run",
+	); err != nil {
 		t.Fatal(err)
 	}
-	if _, runID, err := fixture.store.InterruptAbandonedRepositoryReviewRun(t.Context(), fixture.repository); err != nil || runID != "" {
+	if _, runID, err := fixture.store.InterruptAbandonedRepositoryReviewRun(
+		t.Context(), fixture.repository,
+	); err != nil || runID != "" {
 		t.Fatalf("no-active abandoned interrupt run=%q err=%v", runID, err)
 	}
 	if _, _, err := fixture.store.InterruptAbandonedRepositoryReviewRun(t.Context(), ""); err == nil {

@@ -182,7 +182,9 @@ func TestRepositoryReviewAssignmentGovernancePersistenceErrors(t *testing.T) {
 }
 
 func TestRepositoryReviewAssignmentGovernanceCorruptStateErrors(t *testing.T) {
-	if _, err := (Store{}).CheckpointRepositoryReviewAssignment(nil, CheckpointRepositoryReviewAssignmentRequest{}); err == nil {
+	if _, err := (Store{}).CheckpointRepositoryReviewAssignment(
+		nil, CheckpointRepositoryReviewAssignmentRequest{},
+	); err == nil {
 		t.Fatal("empty nil-context checkpoint accepted")
 	}
 
@@ -379,6 +381,7 @@ func TestRepositoryReviewAssignmentGovernanceFinalizeMergeAndTrim(t *testing.T) 
 	})
 }
 
+//nolint:govet // Boundary assertions intentionally reuse err in short scopes.
 func TestRepositoryReviewAssignmentGovernanceCampaignBranches(t *testing.T) {
 	fixture := newAssignmentCoverageFixture(t, 1, 1)
 	state, _, err := fixture.store.Get(fixture.repository)

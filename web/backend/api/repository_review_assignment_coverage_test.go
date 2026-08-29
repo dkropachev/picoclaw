@@ -112,6 +112,7 @@ func TestRepositoryReviewAssignmentControllerCampaignBoundaries(t *testing.T) {
 	}
 }
 
+//nolint:govet // Boundary assertions intentionally reuse err in short scopes.
 func TestRepositoryReviewAssignmentCampaignRecoveryExecutionBranches(t *testing.T) {
 	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
@@ -676,6 +677,7 @@ func TestRepositoryReviewAssignmentReconcileStopsAfterCatalogRead(t *testing.T) 
 	}
 }
 
+//nolint:govet // Boundary assertions intentionally reuse err in short scopes.
 func TestRepositoryReviewAssignmentReconcileRestoresCampaignAfterRestart(t *testing.T) {
 	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
