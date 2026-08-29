@@ -25,6 +25,28 @@ const review = {
     findings: 0,
     finding_aggregates: 0,
     unaggregated_findings: 0,
+    assignment_progress: {
+      total: 0,
+      completed: 0,
+      pending: 0,
+      active: 0,
+      by_focus: {
+        correctness_state: { total: 0, completed: 0, pending: 0, active: 0 },
+        security_trust: { total: 0, completed: 0, pending: 0, active: 0 },
+        concurrency_recovery: {
+          total: 0,
+          completed: 0,
+          pending: 0,
+          active: 0,
+        },
+        integration_validation: {
+          total: 0,
+          completed: 0,
+          pending: 0,
+          active: 0,
+        },
+      },
+    },
     scope_frozen: true,
   },
   scope_plan: {

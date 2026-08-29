@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -18,12 +20,24 @@ import (
 )
 
 type workflowManagedChildPlan struct {
-	index     int
-	label     string
-	scope     []any
-	tasks     []string
-	modelName string
-	optional  bool
+	index        int
+	assignmentID string
+	focusID      string
+	label        string
+	scope        []any
+	tasks        []string
+	modelName    string
+	optional     bool
+}
+
+type workflowManagedExplicitAssignmentPlan struct {
+	assignmentID string
+	focusID      string
+	label        string
+	task         string
+	reviewer     string
+	optional     bool
+	files        []map[string]any
 }
 
 type workflowManagedChildResult struct {
@@ -130,7 +144,15 @@ func (r *workflowAgentRunner) runManagedSplit(
 	promptCacheKey string,
 	strategy string,
 	runOnce workflowAgentTextRunner,
+	contexts ...context.Context,
 ) (outputs map[string]any, runErr error) {
+	managedCtx := context.Background()
+	if len(contexts) > 1 {
+		return nil, errors.New("managed agent split received multiple execution contexts")
+	}
+	if len(contexts) == 1 && contexts[0] != nil {
+		managedCtx = contexts[0]
+	}
 	managedUsage := newWorkflowAgentUsageAccumulator(req.UsageObserver)
 	req.UsageObserver = managedUsage.Observe
 	baseRunOnce := runOnce
@@ -150,9 +172,21 @@ func (r *workflowAgentRunner) runManagedSplit(
 		}
 	}()
 	options := workflowManagedOptions(req.Managed)
+	if options.assignmentPlansDeclared &&
+		(req.AssignmentTimeoutSeconds < 60 || req.AssignmentTimeoutSeconds > 86_400 ||
+			req.AssignmentTimeoutSeconds%60 != 0) {
+		return nil, errors.New("managed assignment timeout is outside its safe bound")
+	}
 	strategy = workflowNormalizeSplitStrategy(strategy)
 	options = agent.workflowManagedResolveChildPromptTarget(req, options, strategy)
-	plans := workflowManagedChildPlans(req, agent, options, strategy)
+	plans, planErr := workflowManagedChildPlansChecked(req, agent, options, strategy)
+	if planErr != nil {
+		return nil, fmt.Errorf("managed assignment plans: %w", planErr)
+	}
+	if (req.ManagedAssignmentDispatch != nil || req.ManagedAssignmentCheckpoint != nil) &&
+		!options.assignmentPlansDeclared {
+		return nil, errors.New("managed assignment callbacks require explicit assignment plans")
+	}
 	if len(plans) > workflowManagedMaximumChildren {
 		return nil, fmt.Errorf(
 			"managed agent split requires more than %d children; reduce scope, tasks, or reviewer models",
@@ -164,7 +198,23 @@ func (r *workflowAgentRunner) runManagedSplit(
 	metadata["split"] = workflowManagedSplitMetadata(req, agent, options, strategy, plans)
 	managedSingle := len(plans) == 1 &&
 		(req.ManagedChildObserver != nil || len(options.reviewerModels) > 0 ||
-			!options.combineStructuredOutputs)
+			!options.combineStructuredOutputs || options.assignmentPlansDeclared)
+	if options.assignmentPlansDeclared && len(plans) == 0 {
+		outputs = workflowAgentBaseOutputs(
+			"",
+			agentID,
+			sessionKey,
+			historyMode,
+			cacheMode,
+			promptCacheKey,
+			req.MessageID,
+			req.Tools,
+		)
+		outputs["managed"] = metadata
+		outputs["managed_children"] = []map[string]any{}
+		outputs["structured_repairs"] = 0
+		return outputs, nil
+	}
 	if len(plans) == 0 || len(plans) == 1 && !managedSingle {
 		fallbackReq := req
 		fallbackReq.Managed = "off"
@@ -193,7 +243,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 		outputs["managed"] = metadata
 		return outputs, err
 	}
-	if options.calibrationEnabled {
+	if options.calibrationEnabled && !options.assignmentPlansDeclared {
 		cacheKey, cacheIdentity := workflowManagedCalibrationCacheKey(req, agent, options, strategy, plans)
 		shouldCalibrate, cacheMeta := agent.workflowManagedCalibrationCacheDecision(
 			cacheKey,
@@ -201,7 +251,9 @@ func (r *workflowAgentRunner) runManagedSplit(
 			options,
 		)
 		if shouldCalibrate {
-			calibration := r.runManagedSplitCalibration(req, agent, options, strategy, runOnce)
+			calibration := r.runManagedSplitCalibration(
+				managedCtx, req, agent, options, strategy, runOnce,
+			)
 			recordMeta := agent.recordWorkflowManagedCalibrationCache(
 				cacheKey,
 				cacheIdentity,
@@ -261,7 +313,9 @@ func (r *workflowAgentRunner) runManagedSplit(
 	if r != nil && r.loop != nil {
 		cfg = r.loop.cfg
 	}
-	results := workflowRunManagedChildren(req, agent, cfg, options, strategy, plans, runOnce)
+	results := workflowRunManagedChildren(
+		req, agent, cfg, options, strategy, plans, runOnce, managedCtx,
+	)
 	partials := make([]any, 0, len(results))
 	childOutputs := make([]map[string]any, 0, len(results))
 	totalRepairs := 0
@@ -367,6 +421,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 }
 
 func (r *workflowAgentRunner) runManagedSplitCalibration(
+	ctx context.Context,
 	req workflows.AgentRequest,
 	agent *AgentInstance,
 	options workflowManagedExecutionOptions,
@@ -438,6 +493,7 @@ func (r *workflowAgentRunner) runManagedSplitCalibration(
 			strategy,
 			plans,
 			runOnce,
+			ctx,
 		)
 		partials := make([]any, 0, len(results))
 		for _, result := range results {
@@ -1471,9 +1527,14 @@ func workflowRunManagedChildren(
 	strategy string,
 	plans []workflowManagedChildPlan,
 	runOnce workflowAgentTextRunner,
+	contexts ...context.Context,
 ) []workflowManagedChildResult {
 	if len(plans) == 0 {
 		return nil
+	}
+	managedCtx := context.Background()
+	if len(contexts) > 0 && contexts[0] != nil {
+		managedCtx = contexts[0]
 	}
 	results := make([]workflowManagedChildResult, len(plans))
 	maxParallel := options.maxParallelChildren
@@ -1524,7 +1585,8 @@ func workflowRunManagedChildren(
 					}
 				}
 				activity := workflows.ManagedChildActivity{
-					Index: plan.index, Total: len(plans), Label: plan.label,
+					Index: plan.index, Total: len(plans), AssignmentID: plan.assignmentID,
+					FocusID: plan.focusID, Label: plan.label,
 					ModelAlias: modelAlias, ScopeCount: len(plan.scope),
 					EstimatedPromptTokens: intFromAny(choice.costMeta["input_tokens"]),
 					EstimatedOutputTokens: intFromAny(choice.costMeta["estimated_output_tokens"]),
@@ -1575,6 +1637,14 @@ func workflowRunManagedChildren(
 				childReq := workflowManagedApplyPlan(req, plan)
 				childReq.Managed = "off"
 				message := workflowManagedPlanMessage(childReq, plan, len(plans))
+				assignmentCtx := managedCtx
+				cancelAssignment := func() {}
+				if req.AssignmentTimeoutSeconds > 0 {
+					assignmentCtx, cancelAssignment = context.WithTimeout(
+						managedCtx,
+						time.Duration(req.AssignmentTimeoutSeconds)*time.Second,
+					)
+				}
 				modelOverride := ""
 				var modelFallbacks []string
 				if changed, _ := choice.modelMeta["changed"].(bool); changed {
@@ -1597,11 +1667,25 @@ func workflowRunManagedChildren(
 						return parentObserver(usage)
 					}
 				}
+				callAdmission := req.CallAdmission
+				if req.ManagedAssignmentDispatch != nil && plan.assignmentID != "" {
+					callAdmission = func() error {
+						if req.CallAdmission != nil {
+							if admissionErr := req.CallAdmission(); admissionErr != nil {
+								return admissionErr
+							}
+						}
+						return req.ManagedAssignmentDispatch(
+							workflowManagedAssignmentDispatchEvent(plan, choice.modelName, len(plans)),
+						)
+					}
+				}
 				text, structured, repairs, usage, err := workflowRunStructuredAgentWithOptions(
 					message,
 					req.Output,
 					runOnce,
 					workflowAgentRunOptions{
+						Context:         assignmentCtx,
 						ModelName:       modelOverride,
 						ModelFallbacks:  modelFallbacks,
 						AccountRef:      req.AccountRef,
@@ -1609,7 +1693,7 @@ func workflowRunManagedChildren(
 						NoTools:         true,
 						ActualModelName: &actualModelName,
 						UsageObserver:   childUsageObserver,
-						CallAdmission:   req.CallAdmission,
+						CallAdmission:   callAdmission,
 					},
 				)
 				for usageIndex := range usage {
@@ -1621,9 +1705,55 @@ func workflowRunManagedChildren(
 					choice.modelMeta["fallback_used"] = true
 					choice.modelName = actualModelName
 				}
+				if err == nil {
+					if deadlineErr := assignmentCtx.Err(); deadlineErr != nil {
+						err = deadlineErr
+						structured.Valid = false
+						structured.Error = deadlineErr.Error()
+					}
+				}
+				if err == nil && structured.Valid && req.ManagedAssignmentCheckpoint != nil &&
+					plan.assignmentID != "" {
+					checkpointOutput, detachErr := workflowManagedDetachedJSON(structured.Structured)
+					if detachErr != nil {
+						err = errors.Join(workflows.ErrManagedAssignmentCheckpointNotRecorded, detachErr)
+					} else {
+						dispatchEvent := workflowManagedAssignmentDispatchEvent(
+							plan, choice.modelName, len(plans),
+						)
+						checkpointDigest, digestErr := workflowManagedAssignmentCheckpointDigest(
+							dispatchEvent, checkpointOutput,
+						)
+						if digestErr != nil {
+							err = errors.Join(
+								workflows.ErrManagedAssignmentCheckpointNotRecorded,
+								digestErr,
+							)
+						}
+						checkpointEvent := workflows.ManagedAssignmentCheckpointEvent{
+							ManagedAssignmentDispatchEvent: dispatchEvent,
+							Output:                         checkpointOutput,
+							OutputDigest:                   "sha256:" + workflowManagedHashString(text),
+							CheckpointDigest:               checkpointDigest,
+						}
+						if err == nil {
+							if checkpointErr := req.ManagedAssignmentCheckpoint(checkpointEvent); checkpointErr != nil {
+								err = errors.Join(
+									workflows.ErrManagedAssignmentCheckpointNotRecorded,
+									checkpointErr,
+								)
+							}
+						}
+					}
+					if err != nil {
+						structured.Valid = false
+						structured.Error = err.Error()
+					}
+				}
 				if observeErr := completeActivity(err == nil && structured.Valid); observeErr != nil {
 					err = errors.Join(err, observeErr)
 				}
+				cancelAssignment()
 				results[i] = workflowManagedChildResult{
 					plan:       plan,
 					choice:     choice,
@@ -1701,6 +1831,12 @@ func workflowManagedChildOutput(result workflowManagedChildResult) map[string]an
 		"scope":          workflowManagedScopeReferences(result.plan.scope),
 		"usage":          cloneWorkflowAgentUsage(result.usage),
 	}
+	if result.plan.assignmentID != "" {
+		out["assignment_id"] = result.plan.assignmentID
+	}
+	if result.plan.focusID != "" {
+		out["focus_id"] = result.plan.focusID
+	}
 	if result.structured.Structured != nil {
 		out["structured"] = result.structured.Structured
 	}
@@ -1711,6 +1847,60 @@ func workflowManagedChildOutput(result workflowManagedChildResult) map[string]an
 		out["run_error"] = result.err.Error()
 	}
 	return out
+}
+
+func workflowManagedAssignmentDispatchEvent(
+	plan workflowManagedChildPlan,
+	model string,
+	total int,
+) workflows.ManagedAssignmentDispatchEvent {
+	return workflows.ManagedAssignmentDispatchEvent{
+		AssignmentID:  plan.assignmentID,
+		FocusID:       plan.focusID,
+		Index:         plan.index,
+		Total:         total,
+		Label:         plan.label,
+		ReviewerModel: plan.modelName,
+		Model:         strings.TrimSpace(model),
+		Required:      !plan.optional,
+		Scope:         workflowManagedScopeReferences(plan.scope),
+	}
+}
+
+func workflowManagedDetachedJSON(value any) (any, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var detached any
+	if err := json.Unmarshal(encoded, &detached); err != nil {
+		return nil, err
+	}
+	return detached, nil
+}
+
+func workflowManagedAssignmentCheckpointDigest(
+	dispatch workflows.ManagedAssignmentDispatchEvent,
+	output any,
+) (string, error) {
+	payload := struct {
+		AssignmentID  string `json:"assignment_id"`
+		FocusID       string `json:"focus_id"`
+		ReviewerModel string `json:"reviewer_model,omitempty"`
+		Model         string `json:"model,omitempty"`
+		Required      bool   `json:"required"`
+		Scope         []any  `json:"scope"`
+		Output        any    `json:"output"`
+	}{
+		AssignmentID: dispatch.AssignmentID, FocusID: dispatch.FocusID,
+		ReviewerModel: dispatch.ReviewerModel, Model: dispatch.Model,
+		Required: dispatch.Required, Scope: dispatch.Scope, Output: output,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return "sha256:" + workflowManagedHashBytes(encoded), nil
 }
 
 func workflowManagedScopeReferences(scope []any) []any {
@@ -1730,7 +1920,7 @@ func workflowManagedScopeReferences(scope []any) []any {
 			"contentBytes", "contentPromptBytes", "category", "mode", "selected", "contentComplete", "contentUnavailable",
 			"reviewGroup",
 		} {
-			if value, exists := mapped[key]; exists {
+			if value, exists := mapped[key]; exists && workflowManagedScopeReferenceScalar(value) {
 				ref[key] = value
 			}
 		}
@@ -1739,10 +1929,161 @@ func workflowManagedScopeReferences(scope []any) []any {
 	return out
 }
 
+func workflowManagedScopeReferenceScalar(value any) bool {
+	switch value.(type) {
+	case nil, bool, string,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64, json.Number:
+		return true
+	default:
+		return false
+	}
+}
+
+func workflowManagedExplicitAssignmentPlans(
+	raw any,
+) ([]workflowManagedExplicitAssignmentPlan, error) {
+	var values []any
+	switch typed := raw.(type) {
+	case nil:
+		return []workflowManagedExplicitAssignmentPlan{}, nil
+	case []any:
+		values = typed
+	case []map[string]any:
+		values = make([]any, len(typed))
+		for index := range typed {
+			values[index] = typed[index]
+		}
+	default:
+		return nil, errors.New("managed assignment plans must be an array")
+	}
+	if len(values) > workflowManagedMaximumChildren {
+		return nil, fmt.Errorf(
+			"managed assignment plans exceed the %d child limit",
+			workflowManagedMaximumChildren,
+		)
+	}
+	plans := make([]workflowManagedExplicitAssignmentPlan, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for index, rawPlan := range values {
+		planMap, ok := rawPlan.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("managed assignment plan %d must be an object", index)
+		}
+		assignmentID, assignmentOK := workflowManagedExactPlanString(
+			planMap, "assignment_id", "assignmentId",
+		)
+		focusID, focusOK := workflowManagedExactPlanString(planMap, "focus_id", "focusId")
+		task, taskOK := workflowManagedExactPlanString(planMap, "task")
+		label, labelOK := workflowManagedExactPlanString(planMap, "label")
+		reviewer, reviewerOK := workflowManagedExactPlanString(
+			planMap, "reviewer_model", "reviewerModel",
+		)
+		if !assignmentOK || !focusOK || !taskOK || !labelOK || !reviewerOK ||
+			!workflowManagedBoundedPlanText(assignmentID, 256) ||
+			!workflowManagedBoundedPlanText(focusID, 256) ||
+			!workflowManagedBoundedPlanText(task, 64<<10) ||
+			(label != "" && !workflowManagedBoundedPlanText(label, 4096)) ||
+			(reviewer != "" && !workflowManagedBoundedPlanText(reviewer, 256)) {
+			return nil, fmt.Errorf("managed assignment plan %d has invalid identity or task", index)
+		}
+		if _, duplicate := seen[assignmentID]; duplicate {
+			return nil, fmt.Errorf("managed assignment plan %d duplicates assignment %q", index, assignmentID)
+		}
+		seen[assignmentID] = struct{}{}
+		optional := false
+		if rawOptional, declared := planMap["optional"]; declared {
+			var optionalOK bool
+			optional, optionalOK = rawOptional.(bool)
+			if !optionalOK {
+				return nil, fmt.Errorf("managed assignment plan %d has invalid optional flag", index)
+			}
+		}
+		rawFiles, filesDeclared := planMap["files"]
+		if !filesDeclared {
+			return nil, fmt.Errorf("managed assignment plan %d has no files", index)
+		}
+		files, err := workflowManagedExplicitAssignmentFiles(rawFiles)
+		if err != nil {
+			return nil, fmt.Errorf("managed assignment plan %d files: %w", index, err)
+		}
+		if label == "" {
+			label = focusID
+		}
+		plans = append(plans, workflowManagedExplicitAssignmentPlan{
+			assignmentID: assignmentID,
+			focusID:      focusID,
+			label:        label,
+			task:         task,
+			reviewer:     reviewer,
+			optional:     optional,
+			files:        files,
+		})
+	}
+	return plans, nil
+}
+
+func workflowManagedExplicitAssignmentFiles(raw any) ([]map[string]any, error) {
+	if raw == nil {
+		return nil, errors.New("must be an array")
+	}
+	var values []any
+	switch typed := raw.(type) {
+	case []any:
+		values = typed
+	case []map[string]any:
+		values = make([]any, len(typed))
+		for index := range typed {
+			values[index] = typed[index]
+		}
+	default:
+		return nil, errors.New("must be an array")
+	}
+	if len(values) > workflowManagedMaximumChildren {
+		return nil, errors.New("scope is too large")
+	}
+	files := make([]map[string]any, 0, len(values))
+	for index, rawFile := range values {
+		file, ok := rawFile.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("file %d must be an object", index)
+		}
+		files = append(files, cloneAnyMap(file))
+	}
+	return files, nil
+}
+
+func workflowManagedExactPlanString(values map[string]any, keys ...string) (string, bool) {
+	for _, key := range keys {
+		raw, exists := values[key]
+		if !exists {
+			continue
+		}
+		if raw == nil {
+			return "", false
+		}
+		value, ok := raw.(string)
+		if !ok || value != strings.TrimSpace(value) {
+			return "", false
+		}
+		return value, !strings.ContainsRune(value, '\x00')
+	}
+	return "", true
+}
+
+func workflowManagedBoundedPlanText(value string, maximum int) bool {
+	return value != "" && value == strings.TrimSpace(value) && len(value) <= maximum &&
+		!strings.ContainsRune(value, '\x00')
+}
+
 func workflowManagedSplitStrategy(req workflows.AgentRequest, agent *AgentInstance) string {
 	options := workflowManagedOptions(req.Managed)
 	if options.mode == "off" || req.Output == nil || !req.Output.Enabled() {
 		return ""
+	}
+	if options.assignmentPlansDeclared {
+		return "assignment_split"
 	}
 	requested := workflowNormalizeSplitStrategy(options.requestedSplitStrategy)
 	if requested == "none" {
@@ -1816,6 +2157,31 @@ func workflowManagedChildPlans(
 	options workflowManagedExecutionOptions,
 	strategy string,
 ) []workflowManagedChildPlan {
+	plans, _ := workflowManagedChildPlansChecked(req, agent, options, strategy)
+	return plans
+}
+
+func workflowManagedChildPlansChecked(
+	req workflows.AgentRequest,
+	agent *AgentInstance,
+	options workflowManagedExecutionOptions,
+	strategy string,
+) ([]workflowManagedChildPlan, error) {
+	if options.assignmentPlansErr != nil {
+		return nil, options.assignmentPlansErr
+	}
+	if options.assignmentPlansDeclared {
+		return workflowManagedExplicitChildPlans(req, options.assignmentPlans)
+	}
+	return workflowManagedCartesianChildPlans(req, agent, options, strategy), nil
+}
+
+func workflowManagedCartesianChildPlans(
+	req workflows.AgentRequest,
+	agent *AgentInstance,
+	options workflowManagedExecutionOptions,
+	strategy string,
+) []workflowManagedChildPlan {
 	strategy = workflowNormalizeSplitStrategy(strategy)
 	scopeChunks := [][]any{workflowScopeItems(req.Scope)}
 	taskChunks := [][]string{nil}
@@ -1878,6 +2244,174 @@ func workflowManagedChildPlans(
 		}
 	}
 	return plans
+}
+
+func workflowManagedExplicitChildPlans(
+	req workflows.AgentRequest,
+	assignments []workflowManagedExplicitAssignmentPlan,
+) ([]workflowManagedChildPlan, error) {
+	type scopeEntry struct {
+		identity string
+		value    any
+	}
+	scopeByPath := make(map[string]scopeEntry)
+	for index, item := range workflowScopeItems(req.Scope) {
+		mapped, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("explicit managed scope item %d must be a file object", index)
+		}
+		pathValue, identity, valid := workflowManagedExactFileReference(mapped)
+		if !valid {
+			return nil, fmt.Errorf("explicit managed scope item %d is not an exact file reference", index)
+		}
+		if _, duplicate := scopeByPath[pathValue]; duplicate {
+			return nil, fmt.Errorf("explicit managed scope duplicates file %q", pathValue)
+		}
+		scopeByPath[pathValue] = scopeEntry{identity: identity, value: item}
+	}
+	plans := make([]workflowManagedChildPlan, 0, len(assignments))
+	for assignmentIndex, assignment := range assignments {
+		scope := make([]any, 0, len(assignment.files))
+		seenFiles := make(map[string]struct{}, len(assignment.files))
+		for fileIndex, file := range assignment.files {
+			pathValue, identity, valid := workflowManagedExactFileReference(file)
+			if !valid {
+				return nil, fmt.Errorf(
+					"managed assignment plan %d file %d is not an exact file reference",
+					assignmentIndex,
+					fileIndex,
+				)
+			}
+			if _, duplicate := seenFiles[pathValue]; duplicate {
+				return nil, fmt.Errorf(
+					"managed assignment %q duplicates file %q",
+					assignment.assignmentID,
+					pathValue,
+				)
+			}
+			seenFiles[pathValue] = struct{}{}
+			entry, available := scopeByPath[pathValue]
+			if !available {
+				// Immutable hydration can classify a planned file as unavailable.
+				// Such a file produces no provider call and remains unacknowledged.
+				continue
+			}
+			if entry.identity != identity {
+				return nil, fmt.Errorf(
+					"managed assignment %q file %q does not match the frozen scope",
+					assignment.assignmentID,
+					pathValue,
+				)
+			}
+			scope = append(scope, entry.value)
+		}
+		if len(scope) == 0 {
+			continue
+		}
+		plans = append(plans, workflowManagedChildPlan{
+			index:        len(plans) + 1,
+			assignmentID: assignment.assignmentID,
+			focusID:      assignment.focusID,
+			label:        assignment.label,
+			scope:        scope,
+			tasks:        []string{assignment.task},
+			modelName:    assignment.reviewer,
+			optional:     assignment.optional,
+		})
+	}
+	return plans, nil
+}
+
+func workflowManagedExactFileReference(file map[string]any) (string, string, bool) {
+	pathValue, ok := workflowManagedExactStringField(file, "path")
+	if !ok || pathValue == "" {
+		return "", "", false
+	}
+	hash, ok := workflowManagedExactStringField(file, "fileHash", "blob_sha")
+	if !ok || hash == "" {
+		return "", "", false
+	}
+	rawSize, sizeDeclared := file["sizeBytes"]
+	if !sizeDeclared {
+		rawSize, sizeDeclared = file["size_bytes"]
+	}
+	size, sizeOK := workflowManagedExactNonnegativeInt64(rawSize)
+	if !sizeDeclared || !sizeOK {
+		return "", "", false
+	}
+	category, categoryOK := workflowManagedOptionalExactStringField(file, "category")
+	mode, modeOK := workflowManagedOptionalExactStringField(file, "mode")
+	if !categoryOK || !modeOK {
+		return "", "", false
+	}
+	identity := strings.Join([]string{
+		pathValue,
+		hash,
+		fmt.Sprint(size),
+		category,
+		mode,
+	}, "\x00")
+	return pathValue, identity, true
+}
+
+func workflowManagedExactStringField(file map[string]any, keys ...string) (string, bool) {
+	for _, key := range keys {
+		raw, declared := file[key]
+		if !declared {
+			continue
+		}
+		value, ok := raw.(string)
+		return value, ok && value == strings.TrimSpace(value) && !strings.ContainsRune(value, '\x00')
+	}
+	return "", false
+}
+
+func workflowManagedOptionalExactStringField(file map[string]any, key string) (string, bool) {
+	raw, declared := file[key]
+	if !declared {
+		return "", true
+	}
+	value, ok := raw.(string)
+	return value, ok && value == strings.TrimSpace(value) && !strings.ContainsRune(value, '\x00')
+}
+
+func workflowManagedExactNonnegativeInt64(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed), typed >= 0
+	case int8:
+		return int64(typed), typed >= 0
+	case int16:
+		return int64(typed), typed >= 0
+	case int32:
+		return int64(typed), typed >= 0
+	case int64:
+		return typed, typed >= 0
+	case uint:
+		if uint64(typed) > ^uint64(0)>>1 {
+			return 0, false
+		}
+		return int64(typed), true
+	case uint8:
+		return int64(typed), true
+	case uint16:
+		return int64(typed), true
+	case uint32:
+		return int64(typed), true
+	case uint64:
+		if typed > ^uint64(0)>>1 {
+			return 0, false
+		}
+		return int64(typed), true
+	case float64:
+		converted := int64(typed)
+		return converted, typed >= 0 && float64(converted) == typed
+	case json.Number:
+		converted, err := typed.Int64()
+		return converted, err == nil && converted >= 0
+	default:
+		return 0, false
+	}
 }
 
 func workflowManagedSplitMetadata(
@@ -2802,9 +3336,17 @@ func (r *workflowAgentRunner) ensureWorkflowManagedProviders(
 		return nil
 	}
 	options := workflowManagedOptions(raw)
+	if options.assignmentPlansErr != nil {
+		return options.assignmentPlansErr
+	}
 	candidates := append([]workflowManagedModelCandidate(nil), options.modelCandidates...)
 	for _, name := range options.reviewerModels {
 		candidates = append(candidates, workflowManagedModelCandidate{name: name})
+	}
+	for _, assignment := range options.assignmentPlans {
+		if assignment.reviewer != "" && len(assignment.files) > 0 {
+			candidates = append(candidates, workflowManagedModelCandidate{name: assignment.reviewer})
+		}
 	}
 	if len(candidates) == 0 {
 		return nil

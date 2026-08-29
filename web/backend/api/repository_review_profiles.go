@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,20 +35,36 @@ var repositoryReviewProfileCollectionSchema = mustCollectionQuerySchema(
 )
 
 type repositoryReviewProfileConfigRequest struct {
-	Name                string                                 `json:"name"`
-	ReviewFocus         string                                 `json:"review_focus"`
-	ScopePolicy         repoaudit.RepositoryReviewScopePolicy  `json:"scope_policy"`
-	ReviewerModel       string                                 `json:"reviewer_model"`
-	IssueWriterModel    string                                 `json:"issue_writer_model,omitempty"`
-	IssuePrompt         *string                                `json:"issue_prompt,omitempty"`
-	AccountRef          string                                 `json:"account_ref,omitempty"`
-	Force               bool                                   `json:"force"`
-	AutoContinue        *bool                                  `json:"auto_continue,omitempty"`
-	MaxFilesPerRun      int                                    `json:"max_files_per_run"`
-	MaxContentBytes     int64                                  `json:"max_content_bytes"`
-	MaxParallelChildren int                                    `json:"max_parallel_children"`
-	Budget              repoaudit.RepositoryReviewBudgetPolicy `json:"budget"`
-	ExpectedVersion     int64                                  `json:"expected_version,omitempty"`
+	Name                     string                                 `json:"name"`
+	ReviewFocus              string                                 `json:"review_focus"`
+	ScopePolicy              repoaudit.RepositoryReviewScopePolicy  `json:"scope_policy"`
+	ReviewerModel            string                                 `json:"reviewer_model"`
+	IssueWriterModel         string                                 `json:"issue_writer_model,omitempty"`
+	IssuePrompt              *string                                `json:"issue_prompt,omitempty"`
+	AccountRef               string                                 `json:"account_ref,omitempty"`
+	Force                    bool                                   `json:"force"`
+	AutoContinue             *bool                                  `json:"auto_continue,omitempty"`
+	MaxFilesPerRun           int                                    `json:"max_files_per_run"`
+	MaxContentBytes          int64                                  `json:"max_content_bytes"`
+	MaxParallelChildren      int                                    `json:"max_parallel_children"`
+	AssignmentTimeoutSeconds repositoryReviewOptionalInt            `json:"assignment_timeout_seconds"`
+	Budget                   repoaudit.RepositoryReviewBudgetPolicy `json:"budget"`
+	ExpectedVersion          int64                                  `json:"expected_version,omitempty"`
+}
+
+type repositoryReviewOptionalInt struct {
+	Value   int
+	Present bool
+	Null    bool
+}
+
+func (value *repositoryReviewOptionalInt) UnmarshalJSON(data []byte) error {
+	value.Present = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		value.Null = true
+		return nil
+	}
+	return json.Unmarshal(data, &value.Value)
 }
 
 func (h *Handler) registerRepositoryReviewProfileRoutes(mux *http.ServeMux) {
@@ -210,6 +227,10 @@ func (h *Handler) handleCreateRepositoryReviewProfile(w http.ResponseWriter, r *
 		writeRepositoryReviewProfileError(w, err)
 		return
 	}
+	if !validRepositoryReviewAssignmentTimeoutRequest(request.AssignmentTimeoutSeconds) {
+		writeRepositoryReviewProfileError(w, repoaudit.ErrInvalidProfile)
+		return
+	}
 	store, err := h.repositoryReviewStore()
 	if err != nil {
 		writeRepositoryReviewProfileError(w, err)
@@ -237,6 +258,10 @@ func (h *Handler) handleUpdateRepositoryReviewProfile(w http.ResponseWriter, r *
 	var request repositoryReviewProfileConfigRequest
 	if err := decodeRepositoryReviewRequest(r, &request); err != nil {
 		writeRepositoryReviewProfileError(w, err)
+		return
+	}
+	if !validRepositoryReviewAssignmentTimeoutRequest(request.AssignmentTimeoutSeconds) {
+		writeRepositoryReviewProfileError(w, repoaudit.ErrInvalidProfile)
 		return
 	}
 	store, err := h.repositoryReviewStore()
@@ -434,7 +459,16 @@ func applyRepositoryReviewProfileRequest(
 	profile.MaxFilesPerRun = request.MaxFilesPerRun
 	profile.MaxContentBytes = request.MaxContentBytes
 	profile.MaxParallelChildren = request.MaxParallelChildren
+	if request.AssignmentTimeoutSeconds.Present {
+		profile.AssignmentTimeoutSeconds = request.AssignmentTimeoutSeconds.Value
+	}
 	profile.BudgetPolicy = request.Budget
+}
+
+func validRepositoryReviewAssignmentTimeoutRequest(value repositoryReviewOptionalInt) bool {
+	return !value.Present || !value.Null &&
+		value.Value >= repoaudit.MinRepositoryReviewAssignmentTimeoutSeconds &&
+		value.Value <= repoaudit.MaxRepositoryReviewAssignmentTimeoutSeconds && value.Value%60 == 0
 }
 
 func ensureRepositoryReviewProfileInactive(

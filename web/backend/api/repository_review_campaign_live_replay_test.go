@@ -112,9 +112,11 @@ func TestRepositoryReviewCampaignLiveCopyReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	metrics := repoaudit.CurrentCampaignMetrics(applied, campaignID, nil, automation.StartedAt)
+	assignmentProgress := repoaudit.CurrentCampaignAssignmentProgress(applied, campaignID)
 	if !metrics.CoverageExact || metrics.SelectedFiles != 367 || metrics.InspectedFiles != 27 ||
-		metrics.CompletedFiles != 0 || metrics.FindingOccurrences != 87 {
-		t.Fatalf("live-copy metrics = %#v", metrics)
+		metrics.CompletedFiles != 0 || metrics.FindingOccurrences != 87 ||
+		assignmentProgress.Completed != 53 {
+		t.Fatalf("live-copy metrics = %#v assignments=%#v", metrics, assignmentProgress)
 	}
 	rescanned, err := prepareRepositoryReviewLegacyCampaignBackfill(
 		t.Context(), func() repoaudit.RepositoryReviewAutomation {

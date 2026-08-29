@@ -62,16 +62,21 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 		t.Fatalf("first agent calls=%d, want scope planner plus visible managed review", agentRunner.calls)
 	}
 	state, found, err := repoaudit.NewStore(workspace).Get(repo)
-	if err != nil || !found || len(state.Files) != 1 || len(state.Findings) != 1 {
+	if err != nil || !found || len(state.Files) != 1 || len(state.Findings) != 2 {
 		t.Fatalf("first durable state found=%v err=%v state=%#v", found, err, state)
 	}
-	if state.Findings[0].File.BlobSHA == "" || state.Findings[0].CommitSHA == "" ||
-		len(state.Findings[0].ContextIDs) != 2 || len(state.Findings[0].Models) != 2 || len(state.Contexts) != 2 {
-		t.Fatalf("first finding provenance=%#v contexts=%d", state.Findings[0], len(state.Contexts))
+	for _, finding := range state.Findings {
+		if finding.File.BlobSHA == "" || finding.CommitSHA == "" ||
+			len(finding.ContextIDs) != 1 || len(finding.Models) != 1 {
+			t.Fatalf("assignment finding provenance=%#v contexts=%d", finding, len(state.Contexts))
+		}
+	}
+	if len(state.Contexts) != 2 {
+		t.Fatalf("assignment finding contexts=%d, want 2", len(state.Contexts))
 	}
 	metrics := repoaudit.CurrentCampaignMetrics(state, campaignID, nil, time.Time{})
 	if !metrics.CoverageExact || metrics.InspectedFiles != 1 || metrics.CompletedFiles != 1 ||
-		metrics.RemainingFiles != 0 || metrics.FindingOccurrences != 1 {
+		metrics.RemainingFiles != 0 || metrics.FindingOccurrences != 2 {
 		t.Fatalf("campaign metrics=%#v", metrics)
 	}
 
@@ -94,7 +99,7 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 		t.Fatalf("unchanged explicit outputs=%#v", second.Outputs)
 	}
 	after, _, err := repoaudit.NewStore(workspace).Get(repo)
-	if err != nil || len(after.Runs) != 1 || len(after.Findings) != 1 {
+	if err != nil || len(after.Runs) != 1 || len(after.Findings) != 2 {
 		t.Fatalf("unchanged second run mutated review ledger: %#v err=%v", after, err)
 	}
 	if len(toolRunner.sessions) != 8 || toolRunner.sessions[0] != toolRunner.sessions[1] ||
@@ -223,7 +228,15 @@ func (runner *repositoryBugFinderTestAgent) RunAgent(
 		"mode": files[0]["mode"],
 	}}
 	children := make([]map[string]any, 0, 8)
-	for index := 0; index < 8; index++ {
+	assignmentPlans, err := nativeOptionalMapSlice(managed["assignment_plans"])
+	if err != nil || len(assignmentPlans) != 8 {
+		runner.t.Fatalf("assignment plans=%#v err=%v", managed["assignment_plans"], err)
+	}
+	scopeValues := make([]any, len(scope))
+	for index := range scope {
+		scopeValues[index] = scope[index]
+	}
+	for index, assignmentPlan := range assignmentPlans {
 		model := "review-a"
 		if index%2 == 1 {
 			model = "review-b"
@@ -235,9 +248,32 @@ func (runner *repositoryBugFinderTestAgent) RunAgent(
 		if index < 2 {
 			childStructured = structured
 		}
+		assignmentID := nativeAnyString(assignmentPlan["assignment_id"])
+		focusID := nativeAnyString(assignmentPlan["focus_id"])
+		dispatch := ManagedAssignmentDispatchEvent{
+			AssignmentID: assignmentID, FocusID: focusID,
+			Index: index + 1, Total: len(assignmentPlans), Label: focusID,
+			ReviewerModel: model, Model: model, Required: true, Scope: scopeValues,
+		}
+		if request.ManagedAssignmentDispatch == nil || request.ManagedAssignmentCheckpoint == nil {
+			runner.t.Fatal("durable assignment callbacks are missing")
+		}
+		if err := request.ManagedAssignmentDispatch(dispatch); err != nil {
+			runner.t.Fatalf("dispatch assignment %d: %v", index+1, err)
+		}
+		digest := fmt.Sprintf("sha256:%064x", index+1)
+		if err := request.ManagedAssignmentCheckpoint(ManagedAssignmentCheckpointEvent{
+			ManagedAssignmentDispatchEvent: dispatch,
+			Output:                         childStructured,
+			OutputDigest:                   digest,
+			CheckpointDigest:               digest,
+		}); err != nil {
+			runner.t.Fatalf("checkpoint assignment %d: %v", index+1, err)
+		}
 		children = append(children, map[string]any{
 			"index": index + 1, "required": true,
-			"label": fmt.Sprintf("challenge %d", index+1), "valid": true,
+			"assignment_id": assignmentID, "focus_id": focusID,
+			"label": focusID, "valid": true,
 			"scope": scope, "model": map[string]any{"selected": model},
 			"structured": childStructured, "text": fmt.Sprintf("validated challenge %d", index+1),
 		})

@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	RepositoryReviewProfileSchemaVersion       = 2
+	RepositoryReviewProfileSchemaVersion       = 3
 	maxProfileFileBytes                  int64 = 1 << 20
 	maxProfileCount                            = 10_000
 	maxRepositoryReviewIssuePromptBytes        = 16 << 10
@@ -33,24 +33,25 @@ var (
 // RepositoryReviewProfile is reusable review policy. Repository identity,
 // branch selection, and controller runtime state remain on the automation.
 type RepositoryReviewProfile struct {
-	SchemaVersion       int                          `json:"schema_version"`
-	ID                  string                       `json:"id"`
-	Version             int64                        `json:"version"`
-	Name                string                       `json:"name"`
-	ReviewFocus         string                       `json:"review_focus"`
-	ScopePolicy         RepositoryReviewScopePolicy  `json:"scope_policy"`
-	ReviewerModel       string                       `json:"reviewer_model"`
-	IssueWriterModel    string                       `json:"issue_writer_model,omitempty"`
-	IssuePrompt         string                       `json:"issue_prompt"`
-	AccountRef          string                       `json:"account_ref,omitempty"`
-	Force               bool                         `json:"force"`
-	AutoContinue        bool                         `json:"auto_continue"`
-	MaxFilesPerRun      int                          `json:"max_files_per_run"`
-	MaxContentBytes     int64                        `json:"max_content_bytes"`
-	MaxParallelChildren int                          `json:"max_parallel_children"`
-	BudgetPolicy        RepositoryReviewBudgetPolicy `json:"budget"`
-	CreatedAt           time.Time                    `json:"created_at"`
-	UpdatedAt           time.Time                    `json:"updated_at"`
+	SchemaVersion            int                          `json:"schema_version"`
+	ID                       string                       `json:"id"`
+	Version                  int64                        `json:"version"`
+	Name                     string                       `json:"name"`
+	ReviewFocus              string                       `json:"review_focus"`
+	ScopePolicy              RepositoryReviewScopePolicy  `json:"scope_policy"`
+	ReviewerModel            string                       `json:"reviewer_model"`
+	IssueWriterModel         string                       `json:"issue_writer_model,omitempty"`
+	IssuePrompt              string                       `json:"issue_prompt"`
+	AccountRef               string                       `json:"account_ref,omitempty"`
+	Force                    bool                         `json:"force"`
+	AutoContinue             bool                         `json:"auto_continue"`
+	MaxFilesPerRun           int                          `json:"max_files_per_run"`
+	MaxContentBytes          int64                        `json:"max_content_bytes"`
+	MaxParallelChildren      int                          `json:"max_parallel_children"`
+	AssignmentTimeoutSeconds int                          `json:"assignment_timeout_seconds"`
+	BudgetPolicy             RepositoryReviewBudgetPolicy `json:"budget"`
+	CreatedAt                time.Time                    `json:"created_at"`
+	UpdatedAt                time.Time                    `json:"updated_at"`
 }
 
 func (s Store) ListProfiles(ctx context.Context) ([]RepositoryReviewProfile, error) {
@@ -277,6 +278,7 @@ func MaterializeRepositoryReviewAutomation(
 	automation.MaxFilesPerRun = profile.MaxFilesPerRun
 	automation.MaxContentBytes = profile.MaxContentBytes
 	automation.MaxParallelChildren = profile.MaxParallelChildren
+	automation.AssignmentTimeoutSeconds = profile.AssignmentTimeoutSeconds
 	automation.EstimatedOutputTokens = defaultAutomationEstimatedOutputTokens
 	automation.BudgetPolicy = profile.BudgetPolicy
 	automation.Target = "all"
@@ -354,25 +356,29 @@ func (s Store) loadProfile(id string) (RepositoryReviewProfile, bool, error) {
 		return RepositoryReviewProfile{}, false, err
 	}
 	var legacy map[string]json.RawMessage
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		return RepositoryReviewProfile{}, false, err
-	}
+	// unmarshalRepositoryReviewGuardState already decoded this exact JSON.
+	_ = json.Unmarshal(data, &legacy)
 	if profile.ID != id {
 		return RepositoryReviewProfile{}, false, errors.New("repository review profile identity mismatch")
 	}
 	hadLegacySchema := false
-	if profile.SchemaVersion == 1 {
+	switch profile.SchemaVersion {
+	case 1:
 		profile.SchemaVersion = RepositoryReviewProfileSchemaVersion
 		if strings.TrimSpace(profile.IssuePrompt) == "" {
 			profile.IssuePrompt = DefaultRepositoryReviewIssuePrompt
 		}
 		hadLegacySchema = true
+	case 2:
+		profile.SchemaVersion = RepositoryReviewProfileSchemaVersion
+		hadLegacySchema = true
 	}
+	hadLegacyAssignmentTimeout := profile.AssignmentTimeoutSeconds == 0
 	if err := normalizeProfile(&profile); err != nil {
 		return RepositoryReviewProfile{}, false, err
 	}
 	_, hadLegacyPrice := legacy["model_price"]
-	if hadLegacyPrice || hadLegacyGuard || hadLegacySchema {
+	if hadLegacyPrice || hadLegacyGuard || hadLegacySchema || hadLegacyAssignmentTimeout {
 		if err := s.saveProfile(profile); err != nil {
 			return RepositoryReviewProfile{}, false, err
 		}
@@ -429,6 +435,9 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 	if profile.MaxParallelChildren == 0 {
 		profile.MaxParallelChildren = defaultAutomationMaxParallelChildren
 	}
+	if profile.AssignmentTimeoutSeconds == 0 {
+		profile.AssignmentTimeoutSeconds = DefaultRepositoryReviewAssignmentTimeoutSeconds
+	}
 	if err := normalizeRepositoryReviewScopePolicy(&profile.ScopePolicy); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidProfile, err)
 	}
@@ -444,6 +453,9 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 		profile.MaxFilesPerRun < 1 || profile.MaxFilesPerRun > maxReviewFiles ||
 		profile.MaxContentBytes < 1 || profile.MaxContentBytes > defaultAutomationMaxContentBytes ||
 		profile.MaxParallelChildren < 1 || profile.MaxParallelChildren > 64 ||
+		profile.AssignmentTimeoutSeconds < MinRepositoryReviewAssignmentTimeoutSeconds ||
+		profile.AssignmentTimeoutSeconds > MaxRepositoryReviewAssignmentTimeoutSeconds ||
+		profile.AssignmentTimeoutSeconds%60 != 0 ||
 		profile.CreatedAt.IsZero() || profile.UpdatedAt.IsZero() || profile.UpdatedAt.Before(profile.CreatedAt) {
 		return ErrInvalidProfile
 	}

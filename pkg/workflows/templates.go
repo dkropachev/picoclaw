@@ -154,6 +154,9 @@ on:
       max_parallel_children:
         type: number
         default: 8
+      assignment_timeout_seconds:
+        type: number
+        default: 3600
       estimated_output_tokens:
         type: number
         default: 1800
@@ -366,6 +369,14 @@ jobs:
           max_file_content_bytes: 524288
           max_group_files: ${{ inputs.max_files_per_run }}
           max_group_content_bytes: ${{ steps.plan.outputs.maxContentBytes }}
+      - id: begin_assignments
+        name: Reserve exact review assignments
+        if: ${{ steps.plan.outputs.pendingCount > 0 }}
+        uses: function/review.repository
+        with:
+          action: begin
+          plan: ${{ steps.plan.outputs.plan }}
+          files: ${{ steps.freeze.outputs.files }}
       - id: release
         name: Release repository workspace after immutable freeze
         uses: tool/git_workspace
@@ -381,6 +392,9 @@ jobs:
           tools: none
           scope_content: frozen_git
           scope_snapshot: ${{ steps.freeze.outputs.token }}
+          review_profile: repository-bug-finder-v1
+          review_plan: ${{ steps.plan.outputs.plan }}
+          assignment_timeout_seconds: ${{ inputs.assignment_timeout_seconds }}
           managed:
             mode: auto
             strategy: auto
@@ -391,6 +405,7 @@ jobs:
             continue_on_child_error: true
             reviewer_models: ${{ steps.plan.outputs.reviewerModels }}
             include_default_reviewer: ${{ steps.plan.outputs.includeDefaultReviewer }}
+            assignment_plans: ${{ steps.plan.outputs.assignmentPlans }}
             estimated_output_tokens: ${{ inputs.estimated_output_tokens }}
             calibration:
               enabled: false

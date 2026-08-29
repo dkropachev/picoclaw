@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"reflect"
 	"slices"
@@ -45,7 +46,7 @@ func repositoryReviewLoadLegacyWorkflowRun(
 
 // repositoryReviewLegacyCampaignBackfill is a prepared, evidence-only CAS
 // request. Exact means the entire retained campaign history and provenance are
-// recoverable; incomplete recovery is unavailable and never mutates authority.
+// recoverable; individual ambiguous children contribute no assignment credit.
 type repositoryReviewLegacyCampaignBackfill struct {
 	Available             bool
 	Exact                 bool
@@ -415,6 +416,16 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 		return result, err
 	}
 	scopeDigest, _ := repoaudit.RepositoryReviewCampaignScopeDigest(selectedScope)
+	assignmentCatalog, err := workflows.RepositoryBugFinderAssignmentCatalog(
+		resolvedProfile.ReviewerModels,
+		resolvedProfile.IncludeDefaultReviewer,
+		workflows.RepositoryBugFinderPromptRevision,
+		profileHash,
+	)
+	if err != nil {
+		result.Exact = false
+		return result, err
+	}
 	result.ScopeSelection = scopeSelection
 	result.ScopePlan = scopePlan
 	coveragePaths := make(map[string]repoaudit.RepositoryReviewCampaignPathCoverage)
@@ -425,6 +436,7 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 	}
 
 	for _, record := range evidenceRecords {
+		coverageBeforeRun := maps.Clone(coveragePaths)
 		ledgerRun, plan, evidence := record.ledgerRun, record.plan, record.evidence
 		historicalProfileHash, _ := repositoryReviewHistoricalProfileHash(
 			automation, record.scopePlanHash, resolvedProfile,
@@ -439,26 +451,44 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 					result.Exact = false
 					continue
 				}
-				repositoryReviewMergeLegacyCoverage(
-					coveragePaths, selectedByPath, file,
-					repoaudit.RepositoryReviewCampaignPathCoverage{Completed: true}, &result.Exact,
+				current := coveragePaths[file.Path]
+				credited, creditErr := repoaudit.CreditAllRequiredRepositoryReviewAssignments(
+					current, assignmentCatalog,
 				)
+				if creditErr != nil {
+					result.Exact = false
+					continue
+				}
+				coveragePaths[file.Path] = credited
 			}
 		}
 
-		for _, file := range evidence.InspectedFiles {
-			repositoryReviewMergeLegacyCoverage(
-				coveragePaths, selectedByPath, file,
-				repoaudit.RepositoryReviewCampaignPathCoverage{Inspected: true}, &result.Exact,
-			)
-		}
 		if profileCompatible {
-			for _, file := range evidence.CompletedFiles {
-				repositoryReviewMergeLegacyCoverage(
-					coveragePaths, selectedByPath, file,
-					repoaudit.RepositoryReviewCampaignPathCoverage{Inspected: true, Completed: true},
-					&result.Exact,
-				)
+			for childIndex, child := range evidence.Children {
+				if !child.Successful || len(child.AcknowledgedFiles) == 0 {
+					continue
+				}
+				assignment := assignmentCatalog[childIndex%len(assignmentCatalog)]
+				if child.Required != assignment.Required || child.FocusID != assignment.FocusID ||
+					!repositoryReviewLegacyReviewerIdentityMatches(
+						assignment.Reviewer, child.ReviewerIdentity,
+					) {
+					continue
+				}
+				for _, file := range child.AcknowledgedFiles {
+					if selectedByPath[file.Path] != file {
+						result.Exact = false
+						continue
+					}
+					credited, creditErr := repoaudit.CreditRepositoryReviewAssignment(
+						coveragePaths[file.Path], assignmentCatalog, assignment.ID,
+					)
+					if creditErr != nil {
+						result.Exact = false
+						continue
+					}
+					coveragePaths[file.Path] = credited
+				}
 			}
 		}
 		ledgerUnsupported := make(map[string]repoaudit.FileRef, len(ledgerRun.UnsupportedPaths))
@@ -483,6 +513,7 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 			}
 		}
 		if !unsupportedEvidenceValid {
+			coveragePaths = coverageBeforeRun
 			result.Exact = false
 			continue
 		}
@@ -532,6 +563,7 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 			slices.Equal(ledgerRun.UnreviewedPaths, expectedUnreviewedPaths) &&
 			slices.Equal(ledgerRun.Models, expectedModels) && ledgerRun.RejectedFindings == 0
 		if !runValid {
+			coveragePaths = coverageBeforeRun
 			result.Exact = false
 			continue
 		}
@@ -567,20 +599,30 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 	result.RecoveredContexts = len(contextIDs)
 	result.RecoveredFindings = len(findingIDs)
 	result.UnrecoveredFindingIDs = unrecoveredFindingIDs
+	if len(recoveredRuns) == 0 {
+		result.Exact = false
+		return result, nil
+	}
 
 	if len(selectedScope) >= repositoryReviewLegacyBackfillMaxPaths ||
 		len(coveragePaths) >= repositoryReviewLegacyBackfillMaxPaths ||
 		len(recoveredRuns) != len(currentRuns) {
 		result.Exact = false
 	}
-	if !result.Exact {
-		return result, nil
-	}
 	return finalizeRepositoryReviewLegacyCampaignBackfill(
 		result, state, campaignID, commitSHA, inventoryHash, profileHash, scopeDigest,
-		requiredAssignments, selectedScope, coveragePaths, recoveredRuns,
+		requiredAssignments, assignmentCatalog, selectedScope, coveragePaths, recoveredRuns,
 		repositoryReviewLegacyBackfillMaxBytes,
 	)
+}
+
+func repositoryReviewLegacyReviewerIdentityMatches(expected, observed string) bool {
+	expected = strings.TrimSpace(expected)
+	observed = strings.TrimSpace(observed)
+	if expected == "default" {
+		return observed == "default"
+	}
+	return expected != "" && expected == observed
 }
 
 func finalizeRepositoryReviewLegacyCampaignBackfill(
@@ -592,6 +634,7 @@ func finalizeRepositoryReviewLegacyCampaignBackfill(
 	profileHash string,
 	scopeDigest string,
 	requiredAssignments int,
+	assignmentCatalog []repoaudit.RepositoryReviewAssignment,
 	selectedScope []repoaudit.FileRef,
 	coveragePaths map[string]repoaudit.RepositoryReviewCampaignPathCoverage,
 	recoveredRuns []repositoryReviewLegacyRecoveredRun,
@@ -602,8 +645,9 @@ func finalizeRepositoryReviewLegacyCampaignBackfill(
 		Coverage: repoaudit.RepositoryReviewCampaignCoverage{
 			ID: campaignID, CommitSHA: commitSHA, InventoryHash: inventoryHash,
 			ProfileHash: profileHash, ScopeDigest: scopeDigest,
-			RequiredAssignments: requiredAssignments, SelectedFiles: len(selectedScope),
-			Exact: result.Exact, Paths: coveragePaths,
+			RequiredAssignments: requiredAssignments, AssignmentCatalog: assignmentCatalog,
+			SelectedFiles: len(selectedScope),
+			Exact:         result.Exact, Paths: coveragePaths,
 		},
 		SelectedScope: selectedScope,
 	}
@@ -638,10 +682,7 @@ func finalizeRepositoryReviewLegacyCampaignBackfill(
 	}
 	sort.Strings(request.ContextIDs)
 	sort.Strings(request.FindingIDs)
-	if !result.Exact {
-		return result, nil
-	}
-	result.Available = true
+	result.Available = result.Exact
 	result.Request = request
 	for _, pathCoverage := range coveragePaths {
 		if pathCoverage.Inspected {
@@ -966,16 +1007,17 @@ func repositoryReviewMergeLegacyCoverage(
 		return
 	}
 	current := coverage[file.Path]
-	if current.Unsupported && (update.Inspected || update.Completed) ||
-		update.Unsupported && (current.Inspected || current.Completed) {
+	if current.Unsupported && (update.Inspected || update.Completed || update.AssignmentBits != "") ||
+		update.Unsupported && (current.Inspected || current.Completed || current.AssignmentBits != "") {
 		delete(coverage, file.Path)
 		*exact = false
 		return
 	}
 	coverage[file.Path] = repoaudit.RepositoryReviewCampaignPathCoverage{
-		Inspected:   current.Inspected || update.Inspected,
-		Completed:   current.Completed || update.Completed,
-		Unsupported: current.Unsupported || update.Unsupported,
+		AssignmentBits: current.AssignmentBits,
+		Inspected:      current.Inspected || update.Inspected,
+		Completed:      current.Completed || update.Completed,
+		Unsupported:    current.Unsupported || update.Unsupported,
 	}
 }
 
@@ -1300,6 +1342,22 @@ func installRepositoryReviewLegacyCampaignAuthority(
 			current.Version != prepared.AutomationVersion+1 {
 			return repoaudit.RepositoryReviewAutomation{}, prepared, repoaudit.ErrConflict
 		}
+		if !current.CampaignRecoveryPending {
+			current, err = store.UpdateAutomation(
+				ctx, current.ID, current.Version,
+				func(candidate *repoaudit.RepositoryReviewAutomation) error {
+					if candidate.CampaignID != prepared.Request.Coverage.ID ||
+						candidate.ActiveRunID != "" {
+						return repoaudit.ErrConflict
+					}
+					candidate.CampaignRecoveryPending = true
+					return nil
+				},
+			)
+			if err != nil {
+				return repoaudit.RepositoryReviewAutomation{}, prepared, err
+			}
+		}
 	} else {
 		if current.Version != prepared.AutomationVersion || current.CampaignID != "" ||
 			current.Status != prepared.AutomationStatus || current.ActiveRunID != "" ||
@@ -1343,7 +1401,7 @@ func stageRepositoryReviewLegacyCampaign(
 }
 
 // applyRepositoryReviewLegacyCampaignBackfill reconciles controller-installed
-// authority and exact recovered coverage under review-version CAS. A retry
+// authority and conservative recovered coverage under review-version CAS. A retry
 // with the same campaign ID and request is idempotent after a lost response.
 func applyRepositoryReviewLegacyCampaignBackfill(
 	ctx context.Context,
@@ -1418,7 +1476,8 @@ func (c *repositoryReviewController) recoverLegacyRepositoryReviewCampaign(
 	if automation.CampaignID != "" && !automation.CampaignRecoveryPending {
 		if state.CurrentCampaign != nil && state.CurrentCampaign.ID == automation.CampaignID &&
 			state.CurrentCampaign.Exact && state.CurrentCampaign.CommitSHA == resolvedCommit &&
-			automation.ResolvedCommitSHA == resolvedCommit {
+			automation.ResolvedCommitSHA == resolvedCommit &&
+			len(state.CurrentCampaign.AssignmentCatalog) > 0 {
 			return automation, nil
 		}
 		return repoaudit.RepositoryReviewAutomation{}, repoaudit.ErrConflict

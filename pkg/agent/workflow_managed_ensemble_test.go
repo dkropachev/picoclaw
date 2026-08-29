@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -188,6 +190,423 @@ func TestWorkflowManagedEnsembleAssignsEveryScopeChunkToEveryModel(t *testing.T)
 				expected.model,
 			)
 		}
+	}
+}
+
+func TestWorkflowManagedExplicitAssignmentsOverrideCartesianPlansAndCheckpoint(t *testing.T) {
+	fileA := workflowManagedAssignmentTestFile("a.go", "aaaaaaaa", 11)
+	fileB := workflowManagedAssignmentTestFile("b.go", "bbbbbbbb", 22)
+	scopeA := cloneAnyMap(fileA)
+	scopeA["content"] = "private a"
+	scopeA["contentComplete"] = true
+	scopeB := cloneAnyMap(fileB)
+	scopeB["content"] = "private b"
+	scopeB["contentComplete"] = true
+
+	request := workflows.AgentRequest{
+		Prompt: "Review the explicit assignment.",
+		Context: strings.Join([]string{
+			"Repository context.",
+			"",
+			"Assigned textual agent tasks:",
+			"- old broad task",
+		}, "\n"),
+		Managed: map[string]any{
+			"strategy":                   "hybrid_split",
+			"reviewer_models":            []any{"cartesian-a", "cartesian-b"},
+			"max_parallel_children":      1,
+			"combine_structured_outputs": false,
+			"calibration":                map[string]any{"enabled": true},
+			"assignment_plans": []any{
+				map[string]any{
+					"assignment_id": "assignment-a", "focus_id": "correctness_state",
+					"label": "correctness", "task": "Trace exact state transitions.",
+					"reviewer_model": "review-a", "optional": false,
+					"files": []any{fileA},
+				},
+				map[string]any{
+					"assignment_id": "assignment-empty", "focus_id": "security_trust",
+					"label": "security", "task": "Trace trust boundaries.",
+					"reviewer_model": "review-a", "optional": false,
+					"files": []any{},
+				},
+				map[string]any{
+					"assignment_id": "assignment-b", "focus_id": "integration_validation",
+					"label": "integration", "task": "Trace integration validation.",
+					"reviewer_model": "review-b", "optional": true,
+					"files": []any{fileB},
+				},
+			},
+		},
+		Scope:                    []any{scopeA, scopeB},
+		Output:                   workflowManagedTestOutputContract(),
+		AssignmentTimeoutSeconds: 60,
+	}
+
+	var mu sync.Mutex
+	var order []string
+	var dispatches []workflows.ManagedAssignmentDispatchEvent
+	var checkpoints []workflows.ManagedAssignmentCheckpointEvent
+	request.ManagedChildObserver = func(activity workflows.ManagedChildActivity) error {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, string(activity.Phase)+":"+activity.AssignmentID)
+		return nil
+	}
+	request.ManagedAssignmentDispatch = func(event workflows.ManagedAssignmentDispatchEvent) error {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, "dispatch:"+event.AssignmentID)
+		dispatches = append(dispatches, event)
+		return nil
+	}
+	request.ManagedAssignmentCheckpoint = func(event workflows.ManagedAssignmentCheckpointEvent) error {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, "checkpoint:"+event.AssignmentID)
+		checkpoints = append(checkpoints, event)
+		// The callback receives a detached output and cannot mutate the child output.
+		event.Output.(map[string]any)["summary"] = "callback mutation"
+		return nil
+	}
+	if strategy := workflowManagedSplitStrategy(request, &AgentInstance{}); strategy != "assignment_split" {
+		t.Fatalf("explicit assignment split strategy = %q", strategy)
+	}
+
+	var messages []string
+	outputs, err := (&workflowAgentRunner{}).runManagedSplit(
+		request,
+		&AgentInstance{ID: "main", Model: "default"},
+		"main", "", "none", "none", "", "hybrid_split",
+		func(message string, _ bool, options workflowAgentRunOptions) (string, error) {
+			if options.CallAdmission == nil {
+				return "", errors.New("assignment dispatch admission is missing")
+			}
+			if admissionErr := options.CallAdmission(); admissionErr != nil {
+				return "", errors.Join(workflows.ErrAgentCallNotAdmitted, admissionErr)
+			}
+			mu.Lock()
+			messages = append(messages, message)
+			mu.Unlock()
+			return `{"summary":"reviewed","findings":[]}`, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	children, ok := outputs["managed_children"].([]map[string]any)
+	if !ok || len(children) != 2 {
+		t.Fatalf("explicit managed children = %#v", outputs["managed_children"])
+	}
+	if len(dispatches) != 2 || len(checkpoints) != 2 || len(messages) != 2 {
+		t.Fatalf(
+			"explicit callbacks dispatch=%#v checkpoint=%#v messages=%d",
+			dispatches,
+			checkpoints,
+			len(messages),
+		)
+	}
+	wantAssignments := []string{"assignment-a", "assignment-b"}
+	wantFocuses := []string{"correctness_state", "integration_validation"}
+	for index := range children {
+		if children[index]["assignment_id"] != wantAssignments[index] ||
+			children[index]["focus_id"] != wantFocuses[index] ||
+			children[index]["scope_count"] != 1 {
+			t.Fatalf("explicit child %d = %#v", index, children[index])
+		}
+		structured := children[index]["structured"].(map[string]any)
+		if structured["summary"] != "reviewed" {
+			t.Fatalf("callback mutated child output: %#v", structured)
+		}
+		if strings.Contains(messages[index], "old broad task") {
+			t.Fatalf("explicit child retained broad task:\n%s", messages[index])
+		}
+	}
+	if dispatches[0].Required != true || dispatches[1].Required != false ||
+		dispatches[0].ReviewerModel != "review-a" || dispatches[1].ReviewerModel != "review-b" ||
+		len(dispatches[0].Scope) != 1 || dispatches[0].Scope[0].(map[string]any)["content"] != nil {
+		t.Fatalf("explicit dispatch projections = %#v", dispatches)
+	}
+	for _, checkpoint := range checkpoints {
+		if !strings.HasPrefix(checkpoint.OutputDigest, "sha256:") || len(checkpoint.OutputDigest) != 71 {
+			t.Fatalf("checkpoint digest = %q", checkpoint.OutputDigest)
+		}
+		if !strings.HasPrefix(checkpoint.CheckpointDigest, "sha256:") ||
+			len(checkpoint.CheckpointDigest) != 71 ||
+			checkpoint.CheckpointDigest == checkpoint.OutputDigest {
+			t.Fatalf("bound checkpoint digest = %q", checkpoint.CheckpointDigest)
+		}
+	}
+	wantOrder := []string{
+		"started:assignment-a", "dispatch:assignment-a", "checkpoint:assignment-a", "completed:assignment-a",
+		"started:assignment-b", "dispatch:assignment-b", "checkpoint:assignment-b", "completed:assignment-b",
+	}
+	if !reflect.DeepEqual(order, wantOrder) {
+		t.Fatalf("explicit assignment order = %#v, want %#v", order, wantOrder)
+	}
+}
+
+func TestWorkflowManagedExplicitAssignmentDeadlineIsFixedAcrossRepair(t *testing.T) {
+	file := workflowManagedAssignmentTestFile("repair.go", "cccccccc", 33)
+	request := workflows.AgentRequest{
+		Prompt: "Review the explicit assignment.",
+		Managed: map[string]any{
+			"combine_structured_outputs": false,
+			"calibration":                map[string]any{"enabled": false},
+			"assignment_plans": []any{map[string]any{
+				"assignment_id": "assignment-repair", "focus_id": "concurrency_recovery",
+				"task": "Trace retries and recovery.", "reviewer_model": "review-a",
+				"optional": false, "files": []any{file},
+			}},
+		},
+		Scope:                    []any{file},
+		Output:                   workflowManagedTestOutputContract(),
+		AssignmentTimeoutSeconds: 60,
+	}
+	var deadlines []time.Time
+	outputs, err := (&workflowAgentRunner{}).runManagedSplit(
+		request,
+		&AgentInstance{ID: "main", Model: "default"},
+		"main", "", "none", "none", "", "assignment_split",
+		func(_ string, _ bool, options workflowAgentRunOptions) (string, error) {
+			if options.Context == nil {
+				return "", errors.New("assignment context is missing")
+			}
+			deadline, bounded := options.Context.Deadline()
+			if !bounded {
+				return "", errors.New("assignment deadline is missing")
+			}
+			deadlines = append(deadlines, deadline)
+			if len(deadlines) == 1 {
+				return `{}`, nil
+			}
+			return `{"summary":"repaired","findings":[]}`, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deadlines) != 2 || !deadlines[0].Equal(deadlines[1]) {
+		t.Fatalf("assignment repair deadlines = %#v", deadlines)
+	}
+	children := outputs["managed_children"].([]map[string]any)
+	if len(children) != 1 || children[0]["valid"] != true || children[0]["repairs"] != 1 {
+		t.Fatalf("repaired assignment output = %#v", children)
+	}
+}
+
+func TestWorkflowManagedExplicitAssignmentRejectsResultAfterDeadlineContext(t *testing.T) {
+	file := workflowManagedAssignmentTestFile("late.go", "cdcdcdcd", 34)
+	managedCtx, cancel := context.WithCancel(context.Background())
+	checkpoints := 0
+	request := workflows.AgentRequest{
+		Managed: map[string]any{
+			"combine_structured_outputs": false,
+			"calibration":                map[string]any{"enabled": false},
+			"assignment_plans": []any{map[string]any{
+				"assignment_id": "assignment-late", "focus_id": "concurrency_recovery",
+				"task": "Trace recovery.", "reviewer_model": "review-a", "optional": false,
+				"files": []any{file},
+			}},
+		},
+		Scope:                    []any{file},
+		Output:                   workflowManagedTestOutputContract(),
+		AssignmentTimeoutSeconds: 60,
+		ManagedAssignmentCheckpoint: func(workflows.ManagedAssignmentCheckpointEvent) error {
+			checkpoints++
+			return nil
+		},
+	}
+	outputs, err := (&workflowAgentRunner{}).runManagedSplit(
+		request,
+		&AgentInstance{ID: "main", Model: "default"},
+		"main", "", "none", "none", "", "assignment_split",
+		func(_ string, _ bool, _ workflowAgentRunOptions) (string, error) {
+			cancel()
+			return `{"summary":"late","findings":[]}`, nil
+		},
+		managedCtx,
+	)
+	if !errors.Is(err, context.Canceled) || checkpoints != 0 {
+		t.Fatalf("late assignment outputs=%#v checkpoints=%d err=%v", outputs, checkpoints, err)
+	}
+	children := outputs["managed_children"].([]map[string]any)
+	if len(children) != 1 || children[0]["valid"] != false {
+		t.Fatalf("late assignment child = %#v", children)
+	}
+}
+
+func TestWorkflowManagedExplicitAssignmentCheckpointFailureIsNotSuccess(t *testing.T) {
+	file := workflowManagedAssignmentTestFile("checkpoint.go", "dddddddd", 44)
+	checkpointErr := errors.New("durable checkpoint failed")
+	var completion workflows.ManagedChildActivity
+	request := workflows.AgentRequest{
+		Managed: map[string]any{
+			"combine_structured_outputs": false,
+			"calibration":                map[string]any{"enabled": false},
+			"assignment_plans": []any{map[string]any{
+				"assignment_id": "assignment-checkpoint", "focus_id": "correctness_state",
+				"task": "Trace state.", "reviewer_model": "review-a", "optional": false,
+				"files": []any{file},
+			}},
+		},
+		Scope:                    []any{file},
+		Output:                   workflowManagedTestOutputContract(),
+		AssignmentTimeoutSeconds: 60,
+		ManagedAssignmentCheckpoint: func(workflows.ManagedAssignmentCheckpointEvent) error {
+			return checkpointErr
+		},
+		ManagedChildObserver: func(activity workflows.ManagedChildActivity) error {
+			if activity.Phase == workflows.ManagedChildCompleted {
+				completion = activity
+			}
+			return nil
+		},
+	}
+	outputs, err := (&workflowAgentRunner{}).runManagedSplit(
+		request,
+		&AgentInstance{ID: "main", Model: "default"},
+		"main", "", "none", "none", "", "assignment_split",
+		func(_ string, _ bool, _ workflowAgentRunOptions) (string, error) {
+			return `{"summary":"reviewed","findings":[]}`, nil
+		},
+	)
+	if !errors.Is(err, workflows.ErrManagedAssignmentCheckpointNotRecorded) ||
+		!errors.Is(err, checkpointErr) {
+		t.Fatalf("checkpoint failure outputs=%#v err=%v", outputs, err)
+	}
+	children := outputs["managed_children"].([]map[string]any)
+	if len(children) != 1 || children[0]["valid"] != false || children[0]["run_error"] == nil ||
+		completion.Success {
+		t.Fatalf("checkpoint failure child=%#v completion=%#v", children, completion)
+	}
+}
+
+func TestWorkflowManagedExplicitAssignmentDispatchFailureFencesProvider(t *testing.T) {
+	file := workflowManagedAssignmentTestFile("dispatch.go", "abababab", 45)
+	dispatchErr := errors.New("reservation is no longer active")
+	providerWork := 0
+	checkpoints := 0
+	request := workflows.AgentRequest{
+		Managed: map[string]any{
+			"combine_structured_outputs": false,
+			"calibration":                map[string]any{"enabled": false},
+			"assignment_plans": []any{map[string]any{
+				"assignment_id": "assignment-dispatch", "focus_id": "security_trust",
+				"task": "Trace trust.", "reviewer_model": "review-a", "optional": false,
+				"files": []any{file},
+			}},
+		},
+		Scope:                    []any{file},
+		Output:                   workflowManagedTestOutputContract(),
+		AssignmentTimeoutSeconds: 60,
+		ManagedAssignmentDispatch: func(workflows.ManagedAssignmentDispatchEvent) error {
+			return dispatchErr
+		},
+		ManagedAssignmentCheckpoint: func(workflows.ManagedAssignmentCheckpointEvent) error {
+			checkpoints++
+			return nil
+		},
+	}
+	outputs, err := (&workflowAgentRunner{}).runManagedSplit(
+		request,
+		&AgentInstance{ID: "main", Model: "default"},
+		"main", "", "none", "none", "", "assignment_split",
+		func(_ string, _ bool, options workflowAgentRunOptions) (string, error) {
+			if admissionErr := options.CallAdmission(); admissionErr != nil {
+				return "", errors.Join(workflows.ErrAgentCallNotAdmitted, admissionErr)
+			}
+			providerWork++
+			return `{"summary":"reviewed","findings":[]}`, nil
+		},
+	)
+	if !errors.Is(err, workflows.ErrAgentCallNotAdmitted) || !errors.Is(err, dispatchErr) ||
+		providerWork != 0 || checkpoints != 0 {
+		t.Fatalf(
+			"dispatch fence outputs=%#v provider=%d checkpoints=%d err=%v",
+			outputs,
+			providerWork,
+			checkpoints,
+			err,
+		)
+	}
+	children := outputs["managed_children"].([]map[string]any)
+	if len(children) != 1 || children[0]["admitted"] != false {
+		t.Fatalf("dispatch-fenced child = %#v", children)
+	}
+}
+
+func TestWorkflowManagedExplicitAssignmentsSkipEmptyAndRejectScopeDrift(t *testing.T) {
+	if options := workflowManagedOptions(map[string]any{"assignment_plans": nil}); options.assignmentPlansDeclared {
+		t.Fatal("nil legacy assignment interpolation enabled explicit planning")
+	}
+	if options := workflowManagedOptions(
+		map[string]any{"assignment_plans": []any{}},
+	); !options.assignmentPlansDeclared ||
+		len(options.assignmentPlans) != 0 {
+		t.Fatalf("explicit empty assignment plans = %#v", options)
+	}
+	file := workflowManagedAssignmentTestFile("drift.go", "eeeeeeee", 55)
+	emptyRequest := workflows.AgentRequest{
+		Managed: map[string]any{"assignment_plans": []any{map[string]any{
+			"assignment_id": "assignment-empty", "focus_id": "security_trust",
+			"task": "Trace trust.", "reviewer_model": "review-a", "optional": false,
+			"files": []any{},
+		}}},
+		Scope: []any{file}, Output: workflowManagedTestOutputContract(),
+		AssignmentTimeoutSeconds: 60,
+	}
+	for _, timeout := range []int{0, 59, 61, 86_460} {
+		invalidTimeout := emptyRequest
+		invalidTimeout.AssignmentTimeoutSeconds = timeout
+		if _, err := (&workflowAgentRunner{}).runManagedSplit(
+			invalidTimeout, &AgentInstance{ID: "main", Model: "default"},
+			"main", "", "none", "none", "", "assignment_split",
+			func(_ string, _ bool, _ workflowAgentRunOptions) (string, error) {
+				return "", errors.New("provider must not run")
+			},
+		); err == nil || !strings.Contains(err.Error(), "timeout") {
+			t.Fatalf("invalid assignment timeout %d error = %v", timeout, err)
+		}
+	}
+	calls := 0
+	outputs, err := (&workflowAgentRunner{}).runManagedSplit(
+		emptyRequest, &AgentInstance{ID: "main", Model: "default"},
+		"main", "", "none", "none", "", "assignment_split",
+		func(_ string, _ bool, _ workflowAgentRunOptions) (string, error) {
+			calls++
+			return "", nil
+		},
+	)
+	if err != nil || calls != 0 || len(outputs["managed_children"].([]map[string]any)) != 0 {
+		t.Fatalf("empty assignment outputs=%#v calls=%d err=%v", outputs, calls, err)
+	}
+
+	drifted := cloneAnyMap(file)
+	drifted["fileHash"] = "ffffffff"
+	driftRequest := emptyRequest
+	driftRequest.Managed = map[string]any{"assignment_plans": []any{map[string]any{
+		"assignment_id": "assignment-drift", "focus_id": "security_trust",
+		"task": "Trace trust.", "reviewer_model": "review-a", "optional": false,
+		"files": []any{drifted},
+	}}}
+	_, err = (&workflowAgentRunner{}).runManagedSplit(
+		driftRequest, &AgentInstance{ID: "main", Model: "default"},
+		"main", "", "none", "none", "", "assignment_split",
+		func(_ string, _ bool, _ workflowAgentRunOptions) (string, error) {
+			calls++
+			return "", nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match the frozen scope") || calls != 0 {
+		t.Fatalf("drift assignment calls=%d err=%v", calls, err)
+	}
+}
+
+func workflowManagedAssignmentTestFile(pathValue string, hash string, size int64) map[string]any {
+	return map[string]any{
+		"path": pathValue, "fileHash": hash, "sizeBytes": size,
+		"category": "code", "mode": "100644",
 	}
 }
 

@@ -200,6 +200,7 @@ func newRepositoryReviewBackfillFixture(
 			}
 			managedChildren = append(managedChildren, map[string]any{
 				"label": "correctness", "required": true, "valid": true,
+				"tasks": []string{workflows.RepositoryBugFinderFocuses()[0].Task},
 				"scope": scope, "structured": structured, "text": "validated",
 				"model": map[string]any{"selected": "review-a"},
 			})
@@ -207,6 +208,7 @@ func newRepositoryReviewBackfillFixture(
 				if spec.complete {
 					managedChildren = append(managedChildren, map[string]any{
 						"label":    fmt.Sprintf("challenge-%d", childIndex),
+						"tasks":    []string{workflows.RepositoryBugFinderFocuses()[childIndex%4].Task},
 						"required": true, "valid": true, "scope": scope,
 						"structured": structured, "text": "validated",
 						"model": map[string]any{"selected": "review-a"},
@@ -215,6 +217,7 @@ func newRepositoryReviewBackfillFixture(
 				}
 				managedChildren = append(managedChildren, map[string]any{
 					"label":    fmt.Sprintf("challenge-%d", childIndex),
+					"tasks":    []string{workflows.RepositoryBugFinderFocuses()[childIndex%4].Task},
 					"required": true, "valid": false, "scope": scope,
 					"run_error": "deadline exceeded",
 					"model":     map[string]any{"selected": "review-b"},
@@ -387,6 +390,93 @@ func TestRepositoryReviewLegacyCampaignBackfillRecoversLiveLikeExactEvidence(t *
 	}
 }
 
+func TestRepositoryReviewLegacyCampaignBackfillRestoresFiftyThreeAssignmentCredits(t *testing.T) {
+	fixture := newRepositoryReviewBackfillFixture(t, 27, repositoryReviewBackfillRunSpec{
+		inspected: func() []int {
+			values := make([]int, 27)
+			for index := range values {
+				values[index] = index
+			}
+			return values
+		}(),
+	})
+	runID := fixture.automation.RunIDs[0]
+	run := fixture.runs[runID]
+	review := run.Steps["find_bugs/review"]
+	children := review.Outputs["managed_children"].([]map[string]any)
+	firstScope := children[0]["scope"].([]map[string]any)
+	secondScope := append([]map[string]any(nil), firstScope...)
+	secondPaths := make([]string, 0, 26)
+	for _, file := range secondScope[:26] {
+		secondPaths = append(secondPaths, file["path"].(string))
+	}
+	children[1] = map[string]any{
+		"label": "security", "required": true, "valid": true,
+		"tasks": []string{workflows.RepositoryBugFinderFocuses()[1].Task},
+		"scope": secondScope,
+		"structured": map[string]any{
+			"summary": "second retained focus", "reviewedFiles": secondPaths,
+			"findings": []map[string]any{}, "residualRisks": []string{},
+		},
+		"text": "validated", "model": map[string]any{"selected": "review-a"},
+	}
+	review.Outputs["managed_children"] = children
+	run.Steps["find_bugs/review"] = review
+
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	prepared, err := prepareRepositoryReviewLegacyCampaignBackfill(
+		t.Context(), fixture.automation, fixture.state, campaignID,
+		repositoryReviewBackfillLoader{runs: fixture.runs, err: map[string]error{}},
+	)
+	if err != nil || !prepared.Available || !prepared.Exact || prepared.InspectedFiles != 27 ||
+		prepared.CompletedFiles != 0 {
+		t.Fatalf("prepared 53-credit recovery = %#v err=%v", prepared, err)
+	}
+	progress := repoaudit.CurrentCampaignAssignmentProgress(repoaudit.RepositoryState{
+		CurrentCampaign: &prepared.Request.Coverage,
+	}, campaignID)
+	if progress.Completed != 53 || progress.Total != 108 {
+		t.Fatalf("recovered assignment progress = %#v", progress)
+	}
+	_, prepared, err = installRepositoryReviewLegacyCampaignAuthority(
+		t.Context(), fixture.store, prepared,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := applyRepositoryReviewLegacyCampaignBackfill(
+		t.Context(), fixture.store, prepared,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := fixture.store.PlanAssignmentsForCampaign(
+		t.Context(), fixture.automation.Repository,
+		prepared.Request.Coverage.CommitSHA,
+		prepared.Request.Coverage.InventoryHash,
+		prepared.Request.Coverage.ProfileHash,
+		campaignID,
+		prepared.Request.Coverage.AssignmentCatalog,
+		prepared.Request.SelectedScope,
+		false,
+		27,
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingPairs := 0
+	for _, assignmentPlan := range plan.AssignmentPlans {
+		missingPairs += len(assignmentPlan.Files)
+	}
+	if missingPairs != 55 {
+		t.Fatalf("missing assignment pairs = %d, want 55; plans=%#v", missingPairs, plan.AssignmentPlans)
+	}
+	if got := repoaudit.CurrentCampaignAssignmentProgress(applied, campaignID).Completed; got != 53 {
+		t.Fatalf("applied assignment credits = %d, want 53", got)
+	}
+}
+
 func TestRepositoryReviewLegacyCampaignBackfillRecoversMultiProfileLiveShape(t *testing.T) {
 	const fileCount = 444
 	specs := make([]repositoryReviewBackfillRunSpec, 19)
@@ -549,7 +639,7 @@ func TestRepositoryReviewLegacyCampaignBackfillUsesResolvedProfileClamp(t *testi
 			runs: fixture.runs, err: map[string]error{},
 		}, resolved,
 	)
-	if err != nil || !prepared.Available {
+	if err != nil {
 		t.Fatalf("resolved recovery = %#v err=%v", prepared, err)
 	}
 	scopePolicy, _ := json.Marshal(fixture.automation.ScopePolicy)
@@ -590,7 +680,7 @@ func TestRepositoryReviewLegacyCampaignBackfillGatesCompletionOnResolvedRevision
 			MaxContentBytes: int(fixture.automation.MaxContentBytes),
 		},
 	)
-	if err != nil || !drifted.Available || !drifted.Exact || drifted.InspectedFiles != 2 ||
+	if err != nil || !drifted.Available || !drifted.Exact || drifted.InspectedFiles != 0 ||
 		drifted.CompletedFiles != 0 {
 		t.Fatalf("revision-drift completion = %#v err=%v", drifted, err)
 	}

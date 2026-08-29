@@ -12,9 +12,11 @@ import { toast } from "sonner"
 
 import {
   RepositoryReviewAPIError,
+  type RepositoryReviewAssignmentProgress,
   type RepositoryReviewAutomation,
   type RepositoryReviewCommitOption,
   type RepositoryReviewCommitOptions,
+  type RepositoryReviewFocusID,
   getRepositoryReviewAutomation,
   getRepositoryReviewCommitOptions,
   pauseRepositoryReviewAutomation,
@@ -45,6 +47,15 @@ import {
 } from "./repository-review-file-progress"
 
 const fullCommitSHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu
+const assignmentFocuses: Array<{
+  id: RepositoryReviewFocusID
+  label: string
+}> = [
+  { id: "correctness_state", label: "Correctness and state" },
+  { id: "security_trust", label: "Security and trust" },
+  { id: "concurrency_recovery", label: "Concurrency and recovery" },
+  { id: "integration_validation", label: "Integration and validation" },
+]
 
 type ReviewAction = "start" | "pause" | "resume" | "restart"
 type CommitChoice = "remembered" | "latest" | "custom"
@@ -230,6 +241,10 @@ export function RepositoryReviewDetailPage({
                     review.account_ref ||
                     "Default account",
                 ],
+                [
+                  "Assignment deadline",
+                  assignmentDeadlineLabel(review.assignment_timeout_seconds),
+                ],
                 ["Updated", formatTimestamp(review.updated_at)],
               ]}
             />
@@ -277,6 +292,10 @@ export function RepositoryReviewDetailPage({
                 their durable evidence is recovered.
               </p>
             )}
+
+            <AssignmentCoverage
+              progress={review.progress.assignment_progress}
+            />
 
             <section aria-labelledby="review-usage" className="space-y-3">
               <h2 id="review-usage" className="font-semibold">
@@ -719,6 +738,54 @@ function Metric({ label, value }: { label: string; value: number | string }) {
       </p>
     </div>
   )
+}
+
+function AssignmentCoverage({
+  progress,
+}: {
+  progress: RepositoryReviewAssignmentProgress
+}) {
+  return (
+    <section aria-labelledby="review-assignment-coverage" className="space-y-3">
+      <div>
+        <h2 id="review-assignment-coverage" className="font-semibold">
+          Review assignment coverage
+        </h2>
+        <p className="text-muted-foreground mt-1 text-sm">
+          Durable file-focus checkpoints are counted independently from fully
+          reviewed files.
+        </p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Metric label="Total assignments" value={progress.total} />
+        <Metric label="Completed assignments" value={progress.completed} />
+        <Metric label="Pending assignments" value={progress.pending} />
+        <Metric label="Active assignments" value={progress.active} />
+      </div>
+      <dl className="border-border divide-border divide-y rounded-lg border">
+        {assignmentFocuses.map(({ id, label }) => {
+          const focus = progress.by_focus[id]
+          return (
+            <div
+              key={id}
+              className="grid gap-1 px-3 py-3 text-sm sm:grid-cols-[12rem_minmax(0,1fr)]"
+            >
+              <dt className="text-muted-foreground">{label}</dt>
+              <dd className="tabular-nums">
+                {focus.completed} of {focus.total} completed · {focus.pending}{" "}
+                pending · {focus.active} active
+              </dd>
+            </div>
+          )
+        })}
+      </dl>
+    </section>
+  )
+}
+
+function assignmentDeadlineLabel(seconds: number): string {
+  const minutes = seconds / 60
+  return `${minutes.toLocaleString()} minute${minutes === 1 ? "" : "s"}`
 }
 
 function selectedCommitSHA(state: ContinueDialogState): string {

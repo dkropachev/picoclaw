@@ -147,6 +147,7 @@ const automation: RepositoryReviewAutomation = {
   max_files_per_run: 24,
   max_content_bytes: 524288,
   max_parallel_children: 4,
+  assignment_timeout_seconds: 3_600,
   auto_continue: true,
   model_prices: {},
   budget: { guard_expression: "" },
@@ -173,6 +174,28 @@ const automation: RepositoryReviewAutomation = {
     findings: 1,
     finding_aggregates: 1,
     unaggregated_findings: 0,
+    assignment_progress: {
+      total: 32,
+      completed: 18,
+      pending: 12,
+      active: 2,
+      by_focus: {
+        correctness_state: { total: 8, completed: 4, pending: 3, active: 1 },
+        security_trust: { total: 8, completed: 5, pending: 3, active: 0 },
+        concurrency_recovery: {
+          total: 8,
+          completed: 5,
+          pending: 2,
+          active: 1,
+        },
+        integration_validation: {
+          total: 8,
+          completed: 4,
+          pending: 4,
+          active: 0,
+        },
+      },
+    },
   },
   model_stats: [],
   account_limits: [],
@@ -553,6 +576,17 @@ describe("routed repository review pages", () => {
     expect(screen.getByText("Finding occurrences")).toBeVisible()
     expect(screen.getByText("Unassociated occurrences")).toBeVisible()
     expect(screen.getByText("Unknown")).toBeVisible()
+    expect(screen.getByText("Review assignment coverage")).toBeVisible()
+    expect(screen.getByText("Total assignments")).toBeVisible()
+    expect(screen.getByText("Completed assignments")).toBeVisible()
+    expect(screen.getByText("Pending assignments")).toBeVisible()
+    expect(screen.getByText("Active assignments")).toBeVisible()
+    expect(screen.getByText("Correctness and state")).toBeVisible()
+    expect(
+      screen.getByText("4 of 8 completed · 3 pending · 1 active"),
+    ).toBeVisible()
+    expect(screen.getByText("Assignment deadline")).toBeVisible()
+    expect(screen.getByText("60 minutes")).toBeVisible()
     expect(
       screen.getByText(/every required reviewer acknowledges the file/i),
     ).toBeVisible()

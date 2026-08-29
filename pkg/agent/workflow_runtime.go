@@ -546,6 +546,7 @@ func removeRepositoryReviewModelDependency(models []string, model string) []stri
 }
 
 type workflowAgentRunOptions struct {
+	Context         context.Context
 	ModelName       string
 	ModelFallbacks  []string
 	AccountRef      string
@@ -948,9 +949,13 @@ func (r *workflowAgentRunner) RunAgent(
 		if callAdmission == nil {
 			callAdmission = req.CallAdmission
 		}
+		runCtx := ctx
+		if runOptions.Context != nil {
+			runCtx = runOptions.Context
+		}
 		if ephemeralDecision {
 			return r.loop.askSideQuestionWithOptions(
-				ctx,
+				runCtx,
 				agent,
 				&processOptions{
 					Dispatch: DispatchRequest{
@@ -988,7 +993,7 @@ func (r *workflowAgentRunner) RunAgent(
 				scope = session.CloneScope(readOnlySnapshot.Scope)
 			}
 			return r.loop.askSideQuestionWithOptions(
-				ctx,
+				runCtx,
 				agent,
 				&processOptions{
 					Dispatch: DispatchRequest{
@@ -1025,7 +1030,7 @@ func (r *workflowAgentRunner) RunAgent(
 				},
 			)
 		}
-		return r.loop.runAgentLoop(ctx, agent, processOptions{
+		return r.loop.runAgentLoop(runCtx, agent, processOptions{
 			Dispatch: DispatchRequest{
 				SessionKey:     sessionKey,
 				InboundContext: inbound,
@@ -1093,6 +1098,7 @@ func (r *workflowAgentRunner) RunAgent(
 			publicPromptCacheKey,
 			strategy,
 			runOnce,
+			ctx,
 		)
 		if readOnlySnapshot != nil && splitOutputs != nil {
 			splitOutputs["history_revision"] = historyRevision
@@ -2105,6 +2111,9 @@ type workflowManagedExecutionOptions struct {
 	combineStructuredOutputs       bool
 	requestedSplitStrategy         string
 	estimatedOutputTokens          int
+	assignmentPlansDeclared        bool
+	assignmentPlans                []workflowManagedExplicitAssignmentPlan
+	assignmentPlansErr             error
 }
 
 func workflowManagedOptions(raw any) workflowManagedExecutionOptions {
@@ -2130,6 +2139,13 @@ func workflowManagedOptions(raw any) workflowManagedExecutionOptions {
 	values, ok := raw.(map[string]any)
 	if !ok {
 		return options
+	}
+	if assignments, declared := values["assignment_plans"]; declared && assignments != nil {
+		options.assignmentPlansDeclared = true
+		options.assignmentPlans, options.assignmentPlansErr = workflowManagedExplicitAssignmentPlans(assignments)
+	} else if assignments, declared := values["assignmentPlans"]; declared && assignments != nil {
+		options.assignmentPlansDeclared = true
+		options.assignmentPlans, options.assignmentPlansErr = workflowManagedExplicitAssignmentPlans(assignments)
 	}
 	if n := intFromAny(values["max_items_per_chunk"]); n > 0 {
 		options.maxItemsPerChunk = n

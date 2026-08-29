@@ -70,6 +70,7 @@ const profile = {
   max_files_per_run: 24,
   max_content_bytes: 524288,
   max_parallel_children: 8,
+  assignment_timeout_seconds: 3_600,
   budget: {
     guard_expression: "spend.total.usd < 25",
   },
@@ -96,6 +97,7 @@ const repository = {
   max_files_per_run: 24,
   max_content_bytes: 524288,
   max_parallel_children: 8,
+  assignment_timeout_seconds: profile.assignment_timeout_seconds,
   auto_continue: true,
   model_prices: {
     [profile.reviewer_model]: {
@@ -127,6 +129,28 @@ const repository = {
     findings: 0,
     finding_aggregates: 0,
     unaggregated_findings: 0,
+    assignment_progress: {
+      total: 0,
+      completed: 0,
+      pending: 0,
+      active: 0,
+      by_focus: {
+        correctness_state: { total: 0, completed: 0, pending: 0, active: 0 },
+        security_trust: { total: 0, completed: 0, pending: 0, active: 0 },
+        concurrency_recovery: {
+          total: 0,
+          completed: 0,
+          pending: 0,
+          active: 0,
+        },
+        integration_validation: {
+          total: 0,
+          completed: 0,
+          pending: 0,
+          active: 0,
+        },
+      },
+    },
   },
   model_stats: [],
   account_limits: [],
@@ -209,6 +233,7 @@ describe("RepositoryReviewRepositoriesPage", () => {
       max_files_per_run: 24,
       max_content_bytes: 524288,
       max_parallel_children: 8,
+      assignment_timeout_seconds: profile.assignment_timeout_seconds,
       auto_continue: true,
       model_prices: {
         [profile.reviewer_model]: {
@@ -226,21 +251,7 @@ describe("RepositoryReviewRepositoriesPage", () => {
         cached_tokens: 0,
       },
       estimated_cost_usd: 0,
-      progress: {
-        stage: "waiting",
-        completed_batches: 0,
-        total_batches: 0,
-        coverage_available: false,
-        coverage_exact: false,
-        selected_files: 0,
-        inspected_files: 0,
-        reviewed_files: 0,
-        remaining_files: 0,
-        unsupported_files: 0,
-        findings: 0,
-        finding_aggregates: 0,
-        unaggregated_findings: 0,
-      },
+      progress: repository.progress,
       model_stats: [],
       account_limits: [],
       created_at: "2026-08-23T00:00:00Z",

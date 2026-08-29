@@ -22,6 +22,95 @@ const (
 	RepositoryReviewRequiredAssignmentsPerReviewer = 4
 )
 
+// RepositoryReviewFocus defines the stable ID and trusted task text for one
+// built-in assignment. IDs are persistence identity; task wording may only
+// change together with the prompt revision.
+type RepositoryReviewFocus struct {
+	ID   string
+	Task string
+}
+
+var repositoryBugFinderFocuses = []RepositoryReviewFocus{
+	{ID: repoaudit.RepositoryReviewFocusCorrectnessState, Task: "Trace correctness and state invariants."},
+	{ID: repoaudit.RepositoryReviewFocusSecurityTrust, Task: "Challenge security and trust boundaries."},
+	{
+		ID:   repoaudit.RepositoryReviewFocusConcurrencyRecovery,
+		Task: "Challenge concurrency, cancellation, retries, and recovery.",
+	},
+	{
+		ID:   repoaudit.RepositoryReviewFocusIntegrationValidation,
+		Task: "Challenge integration contracts and validation gaps.",
+	},
+}
+
+var repositoryBugFinderLegacyFocusTasks = map[string]string{
+	"Trace correctness, state transitions, invariants, and data-flow edge cases.":            repoaudit.RepositoryReviewFocusCorrectnessState,
+	"Challenge trust boundaries, authorization, injection, disclosure, and unsafe defaults.": repoaudit.RepositoryReviewFocusSecurityTrust,
+	"Challenge concurrency, cancellation, retries, partial failure, and recovery paths.":     repoaudit.RepositoryReviewFocusConcurrencyRecovery,
+	"Challenge integration contracts and existing validation gaps.":                          repoaudit.RepositoryReviewFocusIntegrationValidation,
+}
+
+func RepositoryBugFinderFocuses() []RepositoryReviewFocus {
+	return append([]RepositoryReviewFocus(nil), repositoryBugFinderFocuses...)
+}
+
+// RepositoryBugFinderAssignmentCatalog freezes focus and reviewer identity for
+// one resolved profile. When the default fallback chain is enabled it is the
+// required reviewer and explicit aliases retain their existing optional role.
+func RepositoryBugFinderAssignmentCatalog(
+	reviewerModels []string,
+	includeDefaultReviewer bool,
+	promptRevision string,
+	profileHash string,
+) ([]repoaudit.RepositoryReviewAssignment, error) {
+	reviewerModels = repositoryReviewModelNames(reviewerModels)
+	promptRevision = strings.TrimSpace(promptRevision)
+	profileHash = strings.TrimSpace(profileHash)
+	type reviewer struct {
+		identity string
+		required bool
+	}
+	reviewers := make([]reviewer, 0, len(reviewerModels)+1)
+	if includeDefaultReviewer || len(reviewerModels) == 0 {
+		reviewers = append(reviewers, reviewer{identity: "default", required: true})
+	}
+	for _, model := range reviewerModels {
+		reviewers = append(reviewers, reviewer{
+			identity: model, required: !includeDefaultReviewer,
+		})
+	}
+	if len(reviewers) == 0 || len(reviewers)*len(repositoryBugFinderFocuses) > maxRepositoryReviewManagedAssignments {
+		return nil, errors.New("invalid repository review assignment reviewer cohort")
+	}
+	catalog := make([]repoaudit.RepositoryReviewAssignment, 0,
+		len(reviewers)*len(repositoryBugFinderFocuses),
+	)
+	for _, focus := range repositoryBugFinderFocuses {
+		for _, reviewer := range reviewers {
+			assignment, err := repoaudit.NewRepositoryReviewAssignment(
+				focus.ID, reviewer.identity, promptRevision, profileHash, reviewer.required,
+			)
+			if err != nil {
+				return nil, err
+			}
+			catalog = append(catalog, assignment)
+		}
+	}
+	return repoaudit.NormalizeRepositoryReviewAssignmentCatalog(catalog)
+}
+
+// BindRepositoryBugFinderAssignmentTasks fills the trusted task text on a
+// store-produced missing-only plan without changing assignment identity.
+func BindRepositoryBugFinderAssignmentTasks(
+	plan repoaudit.Plan,
+) (repoaudit.Plan, error) {
+	tasks := make(map[string]string, len(repositoryBugFinderFocuses))
+	for _, focus := range repositoryBugFinderFocuses {
+		tasks[focus.ID] = focus.Task
+	}
+	return repoaudit.BindRepositoryReviewAssignmentTasks(plan, tasks)
+}
+
 // RepositoryReviewRequiredAssignments returns the fixed required-child
 // denominator for a resolved built-in reviewer ensemble.
 func RepositoryReviewRequiredAssignments(reviewerCount int) (int, error) {
@@ -166,6 +255,7 @@ func DecodeRepositoryReviewManagedEvidence(
 			ScopeFiles:   append([]repoaudit.FileRef(nil), scopeFiles...),
 			Required:     required,
 		}
+		evidence.FocusID = repositoryReviewManagedEvidenceFocusID(child)
 		for _, file := range scopeFiles {
 			if required {
 				requiredCoverage[file.Path]++
@@ -190,11 +280,18 @@ func DecodeRepositoryReviewManagedEvidence(
 			continue
 		}
 		modelMeta := nativeMapValue(child["model"])
+		reviewerIdentity := strings.TrimSpace(nativeAnyString(modelMeta["requested"]))
+		if reviewerIdentity == "" {
+			reviewerIdentity = strings.TrimSpace(nativeAnyString(modelMeta["selected"]))
+		}
 		model := strings.TrimSpace(nativeAnyString(modelMeta["selected"]))
 		if model == "" {
 			model = strings.TrimSpace(nativeAnyString(modelMeta["default"]))
 		}
 		reviewer := strings.TrimSpace(nativeAnyString(child["label"]))
+		if strings.Contains(strings.ToLower(reviewer), "default fallback chain") {
+			reviewerIdentity = "default"
+		}
 		raw := strings.TrimSpace(nativeAnyString(child["text"]))
 		observation, parseErr := nativeRepositoryReviewObservation(
 			structured, child["scope"], model, reviewer, raw,
@@ -223,6 +320,7 @@ func DecodeRepositoryReviewManagedEvidence(
 		}
 		sort.Slice(acknowledged, func(i, j int) bool { return acknowledged[i].Path < acknowledged[j].Path })
 		evidence.Successful = true
+		evidence.ReviewerIdentity = reviewerIdentity
 		evidence.AcknowledgedFiles = acknowledged
 		evidence.Observation = &observation
 		result.Children = append(result.Children, evidence)
@@ -280,6 +378,20 @@ func DecodeRepositoryReviewManagedEvidence(
 		return result.CompletedFiles[i].Path < result.CompletedFiles[j].Path
 	})
 	return result, nil
+}
+
+func repositoryReviewManagedEvidenceFocusID(child map[string]any) string {
+	tasks := nativeStringSlice(child["tasks"])
+	if len(tasks) != 1 {
+		return ""
+	}
+	task := strings.TrimSpace(tasks[0])
+	for _, focus := range repositoryBugFinderFocuses {
+		if task == focus.Task {
+			return focus.ID
+		}
+	}
+	return repositoryBugFinderLegacyFocusTasks[task]
 }
 
 func nativeLegacyRepositoryReviewObservation(

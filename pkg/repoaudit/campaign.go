@@ -264,16 +264,30 @@ func (s Store) ReconcileCampaign(
 	}
 	nextCoverage := cloneRepositoryReviewCampaignCoverage(*current)
 	temporary := RepositoryState{CurrentCampaign: &nextCoverage}
-	bound, err := bindRepositoryReviewCampaignScope(
-		&temporary,
-		request.Coverage.ID,
-		request.Coverage.CommitSHA,
-		request.Coverage.InventoryHash,
-		request.Coverage.ProfileHash,
-		request.Coverage.ScopeDigest,
-		request.Coverage.RequiredAssignments,
-		request.Coverage.SelectedFiles,
-	)
+	var bound bool
+	if len(request.Coverage.AssignmentCatalog) > 0 {
+		bound, err = bindRepositoryReviewCampaignAssignmentCatalog(
+			&temporary,
+			request.Coverage.ID,
+			request.Coverage.CommitSHA,
+			request.Coverage.InventoryHash,
+			request.Coverage.ProfileHash,
+			request.Coverage.ScopeDigest,
+			request.Coverage.AssignmentCatalog,
+			request.Coverage.SelectedFiles,
+		)
+	} else {
+		bound, err = bindRepositoryReviewCampaignScope(
+			&temporary,
+			request.Coverage.ID,
+			request.Coverage.CommitSHA,
+			request.Coverage.InventoryHash,
+			request.Coverage.ProfileHash,
+			request.Coverage.ScopeDigest,
+			request.Coverage.RequiredAssignments,
+			request.Coverage.SelectedFiles,
+		)
+	}
 	if err != nil {
 		return RepositoryState{}, err
 	}
@@ -520,6 +534,65 @@ func bindRepositoryReviewCampaignScope(
 	return true, nil
 }
 
+func bindRepositoryReviewCampaignAssignmentCatalog(
+	state *RepositoryState,
+	campaignID string,
+	commitSHA string,
+	inventoryHash string,
+	profileHash string,
+	scopeDigest string,
+	catalog []RepositoryReviewAssignment,
+	selectedFiles int,
+) (bool, error) {
+	normalized, err := NormalizeRepositoryReviewAssignmentCatalog(catalog)
+	if err != nil || normalized[0].ProfileHash != profileHash {
+		return false, ErrInvalidPlan
+	}
+	requiredAssignments := repositoryReviewRequiredAssignmentCount(normalized)
+	changed, err := bindRepositoryReviewCampaignScope(
+		state,
+		campaignID,
+		commitSHA,
+		inventoryHash,
+		profileHash,
+		scopeDigest,
+		requiredAssignments,
+		selectedFiles,
+	)
+	if err != nil {
+		return false, err
+	}
+	coverage := state.CurrentCampaign
+	if len(coverage.AssignmentCatalog) > 0 {
+		if !repositoryReviewAssignmentCatalogEqual(coverage.AssignmentCatalog, normalized) {
+			return false, ErrConflict
+		}
+		return changed, nil
+	}
+	coverage.AssignmentCatalog = normalized
+	for pathValue, pathCoverage := range coverage.Paths {
+		// A historical full-file checkpoint is strong enough to seed every
+		// required credit. Inspection-only legacy evidence is deliberately not
+		// guessed into an assignment bit.
+		if pathCoverage.Completed && !pathCoverage.Unsupported {
+			pathCoverage, _, err = setAllRequiredRepositoryReviewAssignments(pathCoverage, normalized)
+		} else {
+			pathCoverage.Inspected = false
+			pathCoverage.Completed = false
+		}
+		if err != nil {
+			return false, err
+		}
+		if !pathCoverage.Inspected && !pathCoverage.Completed &&
+			!pathCoverage.Unsupported && pathCoverage.AssignmentBits == "" {
+			delete(coverage.Paths, pathValue)
+		} else {
+			coverage.Paths[pathValue] = pathCoverage
+		}
+	}
+	return true, nil
+}
+
 func mergeRepositoryReviewCampaignPath(
 	coverage *RepositoryReviewCampaignCoverage,
 	pathValue string,
@@ -527,7 +600,7 @@ func mergeRepositoryReviewCampaignPath(
 ) (bool, error) {
 	if coverage == nil || !repositoryReviewCampaignScopeBound(coverage) ||
 		!validRepositoryReviewPath(pathValue) ||
-		(!update.Inspected && !update.Completed && !update.Unsupported) ||
+		(!update.Inspected && !update.Completed && !update.Unsupported && update.AssignmentBits == "") ||
 		(update.Unsupported && (update.Inspected || update.Completed)) {
 		return false, ErrInvalidPlan
 	}
@@ -535,6 +608,56 @@ func mergeRepositoryReviewCampaignPath(
 		coverage.Paths = make(map[string]RepositoryReviewCampaignPathCoverage)
 	}
 	current := coverage.Paths[pathValue]
+	if len(coverage.AssignmentCatalog) > 0 {
+		if update.Unsupported {
+			if current.AssignmentBits != "" {
+				return false, ErrConflict
+			}
+			next := RepositoryReviewCampaignPathCoverage{Unsupported: true}
+			if current == next {
+				return false, nil
+			}
+			coverage.Paths[pathValue] = next
+			return true, nil
+		}
+		currentBits, err := decodeRepositoryReviewAssignmentBits(
+			current.AssignmentBits, coverage.AssignmentCatalog,
+		)
+		if err != nil {
+			return false, err
+		}
+		updateBits, err := decodeRepositoryReviewAssignmentBits(
+			update.AssignmentBits, coverage.AssignmentCatalog,
+		)
+		if err != nil {
+			return false, err
+		}
+		if update.Completed && update.AssignmentBits == "" {
+			for index, assignment := range coverage.AssignmentCatalog {
+				if assignment.Required {
+					setRepositoryReviewAssignmentBit(updateBits, index)
+				}
+			}
+		}
+		changed := false
+		for index := range currentBits {
+			next := currentBits[index] | updateBits[index]
+			changed = changed || next != currentBits[index]
+			currentBits[index] = next
+		}
+		current.AssignmentBits = encodeRepositoryReviewAssignmentBits(currentBits)
+		projected, err := projectRepositoryReviewAssignmentCoverage(
+			current, coverage.AssignmentCatalog,
+		)
+		if err != nil {
+			return false, err
+		}
+		if !changed && projected == coverage.Paths[pathValue] {
+			return false, nil
+		}
+		coverage.Paths[pathValue] = projected
+		return true, nil
+	}
 	if current.Unsupported && (update.Inspected || update.Completed) ||
 		update.Unsupported && (current.Inspected || current.Completed) {
 		return false, ErrConflict
@@ -565,6 +688,15 @@ func validateRepositoryReviewCampaignCoverage(
 		return errors.New("invalid repository review campaign coverage")
 	}
 	bound := repositoryReviewCampaignScopeBound(coverage)
+	assignmentCatalog := coverage.AssignmentCatalog
+	if len(assignmentCatalog) > 0 {
+		normalized, err := NormalizeRepositoryReviewAssignmentCatalog(assignmentCatalog)
+		if err != nil || !repositoryReviewAssignmentCatalogEqual(normalized, assignmentCatalog) ||
+			assignmentCatalog[0].ProfileHash != coverage.ProfileHash ||
+			repositoryReviewRequiredAssignmentCount(assignmentCatalog) != coverage.RequiredAssignments {
+			return errors.New("invalid repository review assignment catalog")
+		}
+	}
 	if (coverage.InventoryHash == "") != (coverage.ProfileHash == "") ||
 		(bound && (!validBoundedText(coverage.InventoryHash, 256) ||
 			!validBoundedText(coverage.ProfileHash, 256) ||
@@ -574,7 +706,7 @@ func validateRepositoryReviewCampaignCoverage(
 			coverage.InventoryHash != strings.TrimSpace(coverage.InventoryHash) ||
 			coverage.ProfileHash != strings.TrimSpace(coverage.ProfileHash))) ||
 		(!bound && (coverage.ScopeDigest != "" || coverage.RequiredAssignments != 0 ||
-			coverage.SelectedFiles != 0 || len(coverage.Paths) != 0)) {
+			coverage.SelectedFiles != 0 || len(coverage.Paths) != 0 || len(assignmentCatalog) != 0)) {
 		return errors.New("invalid repository review campaign scope binding")
 	}
 	metadataBytes := 0
@@ -585,6 +717,12 @@ func validateRepositoryReviewCampaignCoverage(
 			(!pathCoverage.Inspected && !pathCoverage.Completed && !pathCoverage.Unsupported) ||
 			(pathCoverage.Unsupported && (pathCoverage.Inspected || pathCoverage.Completed)) {
 			return errors.New("invalid repository review campaign path coverage")
+		}
+		if len(assignmentCatalog) > 0 {
+			projected, err := projectRepositoryReviewAssignmentCoverage(pathCoverage, assignmentCatalog)
+			if err != nil || projected != pathCoverage {
+				return errors.New("invalid repository review campaign assignment projection")
+			}
 		}
 		if pathCoverage.Completed || pathCoverage.Unsupported {
 			terminal++
@@ -683,6 +821,9 @@ func validRepositoryReviewCampaignScopeDigest(value string) bool {
 func cloneRepositoryReviewCampaignCoverage(
 	coverage RepositoryReviewCampaignCoverage,
 ) RepositoryReviewCampaignCoverage {
+	coverage.AssignmentCatalog = append(
+		[]RepositoryReviewAssignment(nil), coverage.AssignmentCatalog...,
+	)
 	if coverage.Paths == nil {
 		return coverage
 	}

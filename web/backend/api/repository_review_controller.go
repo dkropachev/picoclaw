@@ -44,9 +44,9 @@ const (
 	repositoryReviewControllerInterval = 5 * time.Second
 	repositoryReviewQuotaProbeTimeout  = 30 * time.Second
 	repositoryReviewMaximumFiles       = 100_000
-	// Repository reviews run a planning call before managed review children and
-	// reserve the end of the workflow deadline for durable checkpoint cleanup.
-	repositoryReviewWorkflowMinTimeout = 15 * time.Minute
+	// Repository reviews reserve five minutes beyond the fixed assignment
+	// deadline for planning, durable checkpoints, and reservation cleanup.
+	repositoryReviewWorkflowCleanupReserve = 5 * time.Minute
 )
 
 type repositoryReviewActiveRun struct {
@@ -733,6 +733,11 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 		}
 		expectedVersion = automation.Version
 	}
+	if _, _, interruptErr := store.InterruptAbandonedRepositoryReviewRun(
+		ctx, repoaudit.CanonicalRepositoryIdentity(automation.Repository),
+	); interruptErr != nil {
+		return repoaudit.RepositoryReviewAutomation{}, interruptErr
+	}
 	commitChanged := repositoryReviewRememberedCommit(automation) != "" &&
 		repositoryReviewRememberedCommit(automation) != resolvedCommit
 	legacyContinuation := automation.CampaignID == "" &&
@@ -1129,8 +1134,162 @@ func repositoryReviewProfileSnapshotMatches(
 		automation.MaxFilesPerRun == materialized.MaxFilesPerRun &&
 		automation.MaxContentBytes == materialized.MaxContentBytes &&
 		automation.MaxParallelChildren == materialized.MaxParallelChildren &&
+		automation.AssignmentTimeoutSeconds == materialized.AssignmentTimeoutSeconds &&
 		automation.EstimatedOutputTokens == materialized.EstimatedOutputTokens &&
 		reflect.DeepEqual(automation.BudgetPolicy, materialized.BudgetPolicy)
+}
+
+func (c *repositoryReviewController) ensureRepositoryReviewCampaign(
+	ctx context.Context,
+	store repoaudit.Store,
+	cfg *config.Config,
+	automation repoaudit.RepositoryReviewAutomation,
+	resolvedCommit string,
+	action string,
+) (repoaudit.RepositoryReviewAutomation, error) {
+	resolvedCommit = strings.ToLower(strings.TrimSpace(resolvedCommit))
+	if !repositoryReviewValidCommitSHA(resolvedCommit) {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.ErrInvalidAutomation
+	}
+	// Complete or retry the legacy adapter before admitting any new assignment.
+	// Ambiguous historical evidence intentionally falls through to a fresh empty
+	// catalog on the same campaign continuation; it is never guessed into bits.
+	stateSnapshot, stateFound, stateErr := store.ResolveRepositoryState(
+		automation.Repository, automation.RunIDs,
+	)
+	if stateErr != nil {
+		return repoaudit.RepositoryReviewAutomation{}, stateErr
+	}
+	retainedCampaignRun := false
+	configuredRunIDs := make(map[string]struct{}, len(automation.RunIDs))
+	for _, runID := range automation.RunIDs {
+		configuredRunIDs[runID] = struct{}{}
+	}
+	for _, run := range stateSnapshot.Runs {
+		if _, configured := configuredRunIDs[run.ID]; configured &&
+			(run.CampaignID == "" || run.CampaignID == automation.CampaignID) {
+			retainedCampaignRun = true
+			break
+		}
+	}
+	legacyCatalogMissing := automation.CampaignID != "" && stateFound && retainedCampaignRun &&
+		stateSnapshot.CurrentCampaign != nil &&
+		stateSnapshot.CurrentCampaign.ID == automation.CampaignID &&
+		len(stateSnapshot.CurrentCampaign.AssignmentCatalog) == 0
+	shouldRecover := automation.CampaignRecoveryPending || legacyCatalogMissing ||
+		action == "resume" && automation.CampaignID == "" && len(automation.RunIDs) > 0
+	if shouldRecover {
+		if !stateFound {
+			if automation.CampaignRecoveryPending {
+				return repoaudit.RepositoryReviewAutomation{}, repoaudit.ErrConflict
+			}
+			shouldRecover = false
+		}
+	}
+	if shouldRecover {
+		resolvedProfile, err := c.resolveRepositoryReviewCampaignProfile(ctx, cfg, automation)
+		if err != nil {
+			return repoaudit.RepositoryReviewAutomation{}, err
+		}
+		if c.recoverCampaign == nil {
+			return repoaudit.RepositoryReviewAutomation{}, errors.New(
+				"legacy repository review campaign recovery is unavailable",
+			)
+		}
+		legacy := automation
+		legacy.ResolvedCommitSHA = resolvedCommit
+		recovered, recoverErr := c.recoverCampaign(
+			ctx, store, cfg.WorkspacePath(), legacy, resolvedCommit, resolvedProfile,
+		)
+		if recoverErr == nil {
+			return recovered, nil
+		}
+		if automation.CampaignRecoveryPending ||
+			(!errors.Is(recoverErr, repoaudit.ErrConflict) &&
+				!errors.Is(recoverErr, os.ErrNotExist)) {
+			return repoaudit.RepositoryReviewAutomation{}, recoverErr
+		}
+	}
+	ledgerRepository := repoaudit.CanonicalRepositoryIdentity(automation.Repository)
+	state, _, err := store.Get(ledgerRepository)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	if automation.CampaignID != "" && automation.ResolvedCommitSHA == resolvedCommit {
+		if state.CurrentCampaign == nil || state.CurrentCampaign.ID != automation.CampaignID ||
+			state.CurrentCampaign.CommitSHA != resolvedCommit {
+			return repoaudit.RepositoryReviewAutomation{}, repoaudit.ErrConflict
+		}
+		return automation, nil
+	}
+	expectedCampaignID := ""
+	if state.CurrentCampaign != nil {
+		expectedCampaignID = state.CurrentCampaign.ID
+	}
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	if _, err = store.BeginCampaign(ctx, repoaudit.BeginCampaignRequest{
+		Repository: ledgerRepository, CampaignID: campaignID,
+		ExpectedCampaignID: expectedCampaignID, CommitSHA: resolvedCommit,
+		ExpectedReviewVersion: state.ReviewVersion, Exact: false,
+	}); err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	return store.UpdateAutomation(
+		ctx,
+		automation.ID,
+		automation.Version,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			newCampaign := candidate.CampaignID != campaignID
+			if candidate.ResolvedCommitSHA != resolvedCommit {
+				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
+				candidate.ScopeSelection = nil
+			}
+			if newCampaign {
+				candidate.Progress = repoaudit.RepositoryReviewProgress{}
+				candidate.StartedAt = c.clock()
+				candidate.CompletedAt = time.Time{}
+				candidate.ModelCoverageSketches = make(map[string]string)
+				for alias, stats := range candidate.ModelStats {
+					stats.Findings = 0
+					stats.ReviewedFiles = 0
+					candidate.ModelStats[alias] = stats
+				}
+			}
+			candidate.ResolvedCommitSHA = resolvedCommit
+			candidate.CampaignID = campaignID
+			candidate.CampaignRecoveryPending = false
+			return nil
+		},
+	)
+}
+
+func (c *repositoryReviewController) resolveRepositoryReviewCampaignProfile(
+	ctx context.Context,
+	cfg *config.Config,
+	automation repoaudit.RepositoryReviewAutomation,
+) (workflows.RepositoryReviewModelProfile, error) {
+	if c == nil || c.handler == nil || cfg == nil {
+		return workflows.RepositoryReviewModelProfile{}, errors.New(
+			"repository review model profile resolver is unavailable",
+		)
+	}
+	_, _, executor, err := c.handler.workflowRuntimeFromConfigWithoutPrune(ctx, cfg)
+	if err != nil {
+		return workflows.RepositoryReviewModelProfile{}, err
+	}
+	defer closeWorkflowRuntime(executor)
+	resolver, ok := executor.Agents.(workflows.RepositoryReviewProfileResolver)
+	if !ok || resolver == nil {
+		return workflows.RepositoryReviewModelProfile{}, errors.New(
+			"repository review model profile resolver is unavailable",
+		)
+	}
+	return resolver.ResolveRepositoryReviewProfile(
+		ctx,
+		"main",
+		repositoryReviewEffectiveAccountRef(cfg, automation.EffectiveAccountRef),
+		automation.ReviewerModels,
+	)
 }
 
 func resetRepositoryReviewExecutionCampaign(automation *repoaudit.RepositoryReviewAutomation) {
@@ -1396,7 +1555,9 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		c.finishAutomationRun(id, runID, nil, err, false, nil)
 		return
 	}
-	executor.DefaultTimeout = repositoryReviewEffectiveWorkflowTimeout(executor.DefaultTimeout)
+	executor.DefaultTimeout = repositoryReviewEffectiveWorkflowTimeoutForAssignment(
+		executor.DefaultTimeout, automation.AssignmentTimeoutSeconds,
+	)
 	priceIndex = repositoryReviewAccountingIndex(cfg, automation)
 	executor.AgentUsageObserver = repositoryReviewAgentUsageObserver(runID, observeUsage)
 	executor.AgentCallAdmission = repositoryReviewAgentCallAdmissionObserver(
@@ -1418,26 +1579,27 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		Workflow:    workflow,
 		WorkflowRef: workflows.RepositoryBugFinderWorkflowRef,
 		Inputs: map[string]any{
-			"repository":                automation.Repository,
-			"campaign_id":               automation.CampaignID,
-			"account_ref":               repositoryReviewEffectiveAccountRef(cfg, automation.EffectiveAccountRef),
-			"ref":                       repositoryReviewExecutionRef(automation),
-			"target_branch":             automation.ResolvedTargetBranch,
-			"advertised_default_branch": automation.AdvertisedDefaultBranch,
-			"target_is_default":         automation.TargetIsDefault,
-			"target":                    automation.Target,
-			"review_focus":              automation.ReviewFocus,
-			"review_models":             strings.Join(repositoryReviewExecutionModels(automation), ","),
-			"planner_model":             repositoryReviewPlannerModel(automation),
-			"scope_policy":              string(scopePolicyJSON),
-			"scope_planned":             scopePlanned,
-			"scope_selection":           scopeSelectionInput,
-			"scope_plan":                scopePlanInput,
-			"force":                     automation.Force,
-			"max_content_bytes":         automation.MaxContentBytes,
-			"max_files_per_run":         automation.MaxFilesPerRun,
-			"max_parallel_children":     automation.MaxParallelChildren,
-			"estimated_output_tokens":   automation.EstimatedOutputTokens,
+			"repository":                 automation.Repository,
+			"account_ref":                repositoryReviewEffectiveAccountRef(cfg, automation.EffectiveAccountRef),
+			"ref":                        repositoryReviewExecutionRef(automation),
+			"target_branch":              automation.ResolvedTargetBranch,
+			"advertised_default_branch":  automation.AdvertisedDefaultBranch,
+			"target_is_default":          automation.TargetIsDefault,
+			"target":                     automation.Target,
+			"review_focus":               automation.ReviewFocus,
+			"review_models":              strings.Join(repositoryReviewExecutionModels(automation), ","),
+			"planner_model":              repositoryReviewPlannerModel(automation),
+			"scope_policy":               string(scopePolicyJSON),
+			"scope_planned":              scopePlanned,
+			"scope_selection":            scopeSelectionInput,
+			"scope_plan":                 scopePlanInput,
+			"force":                      automation.Force,
+			"max_content_bytes":          automation.MaxContentBytes,
+			"max_files_per_run":          automation.MaxFilesPerRun,
+			"max_parallel_children":      automation.MaxParallelChildren,
+			"assignment_timeout_seconds": automation.AssignmentTimeoutSeconds,
+			"campaign_id":                automation.CampaignID,
+			"estimated_output_tokens":    automation.EstimatedOutputTokens,
 		},
 	})
 	runErr = errors.Join(runErr, repositoryReviewValidateExecutionCommit(automation, result))
@@ -1455,7 +1617,22 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 }
 
 func repositoryReviewEffectiveWorkflowTimeout(configured time.Duration) time.Duration {
-	return max(configured, repositoryReviewWorkflowMinTimeout)
+	return repositoryReviewEffectiveWorkflowTimeoutForAssignment(
+		configured, repoaudit.DefaultRepositoryReviewAssignmentTimeoutSeconds,
+	)
+}
+
+func repositoryReviewEffectiveWorkflowTimeoutForAssignment(
+	configured time.Duration,
+	assignmentTimeoutSeconds int,
+) time.Duration {
+	if assignmentTimeoutSeconds <= 0 {
+		assignmentTimeoutSeconds = repoaudit.DefaultRepositoryReviewAssignmentTimeoutSeconds
+	}
+	return max(
+		configured,
+		time.Duration(assignmentTimeoutSeconds)*time.Second+repositoryReviewWorkflowCleanupReserve,
+	)
 }
 
 func repositoryReviewWorkflowObject(value any) map[string]any {
@@ -2289,6 +2466,7 @@ func repositoryReviewWorkflowStage(run *workflows.Run) string {
 		"scope_files":        "Binding exact target files",
 		"plan":               "Planning changed files",
 		"freeze":             "Freezing immutable evidence",
+		"begin_assignments":  "Reserving review assignments",
 		"release":            "Releasing checkout",
 		"review":             "Reviewing bounded file batch",
 		"record":             "Checkpointing findings",
@@ -2297,7 +2475,7 @@ func repositoryReviewWorkflowStage(run *workflows.Run) string {
 	order := []string{
 		"checkout", "inventory", "scope_catalog", "release_structure", "plan_scope",
 		"scope_checkout", "scope_inventory", "full_scope_catalog", "scope", "scope_files",
-		"plan", "freeze", "release", "review", "record", "result",
+		"plan", "freeze", "begin_assignments", "release", "review", "record", "result",
 	}
 	for index := len(order) - 1; index >= 0; index-- {
 		step := repositoryReviewRunStep(run, order[index])
@@ -2568,6 +2746,12 @@ func (c *repositoryReviewController) finishAutomationRun(
 	current, currentFound, _ := store.GetAutomation(context.Background(), id)
 	outcome := repositoryReviewOutcome{}
 	if currentFound {
+		// Final record normally clears the run. On timeout, cancellation, or a
+		// failed final envelope this releases only unfinished reservations; every
+		// child checkpoint already committed remains durable.
+		_, _ = store.InterruptRepositoryReviewRun(
+			context.Background(), repoaudit.CanonicalRepositoryIdentity(current.Repository), runID,
+		)
 		outcome = loadRepositoryReviewOutcome(store, current)
 		if state, found, resolveErr := store.ResolveRepositoryState(
 			current.Repository, current.RunIDs,
@@ -2853,9 +3037,15 @@ func loadRepositoryReviewOutcome(
 	findingIDs := make(map[string]struct{})
 	unsupportedPaths := make(map[string]struct{})
 	for _, run := range state.Runs {
-		if _, selected := configuredRuns[run.ID]; !selected ||
-			!automation.StartedAt.IsZero() && run.CompletedAt.Before(automation.StartedAt) {
-			continue
+		if automation.CampaignID != "" {
+			if run.CampaignID != automation.CampaignID {
+				continue
+			}
+		} else {
+			if _, selected := configuredRuns[run.ID]; !selected ||
+				!automation.StartedAt.IsZero() && run.CompletedAt.Before(automation.StartedAt) {
+				continue
+			}
 		}
 		campaignRuns[run.ID] = struct{}{}
 		for _, findingID := range run.FindingIDs {
@@ -2865,25 +3055,37 @@ func loadRepositoryReviewOutcome(
 			unsupportedPaths[path] = struct{}{}
 		}
 	}
-	for _, finding := range repoaudit.CurrentCampaignFindings(
-		state,
-		automation.RunIDs,
-		automation.StartedAt,
+	for _, finding := range repoaudit.CurrentCampaignFindingsByID(
+		state, automation.CampaignID, automation.RunIDs, automation.StartedAt,
 	) {
 		findingIDs[finding.ID] = struct{}{}
 	}
-	if len(campaignRuns) == 0 {
+	if len(campaignRuns) == 0 && automation.CampaignID == "" {
 		return repositoryReviewOutcome{}
 	}
 	reviewedPaths := make(map[string]struct{})
-	for path, file := range state.Files {
-		if _, selected := campaignRuns[file.RunID]; selected {
-			reviewedPaths[path] = struct{}{}
+	if automation.CampaignID != "" && state.CurrentCampaign != nil &&
+		state.CurrentCampaign.ID == automation.CampaignID {
+		for pathValue, coverage := range state.CurrentCampaign.Paths {
+			if coverage.Completed {
+				reviewedPaths[pathValue] = struct{}{}
+			}
+			if coverage.Unsupported {
+				unsupportedPaths[pathValue] = struct{}{}
+			}
+		}
+	} else {
+		for path, file := range state.Files {
+			if _, selected := campaignRuns[file.RunID]; selected {
+				reviewedPaths[path] = struct{}{}
+			}
 		}
 	}
 	selectedContexts := make(map[string]repoaudit.FindingContext)
 	for _, findingContext := range state.Contexts {
-		if _, selected := campaignRuns[findingContext.RunID]; selected {
+		_, selectedRun := campaignRuns[findingContext.RunID]
+		if automation.CampaignID != "" && findingContext.CampaignID == automation.CampaignID ||
+			automation.CampaignID == "" && selectedRun {
 			selectedContexts[findingContext.ID] = findingContext
 		}
 	}
@@ -3371,6 +3573,10 @@ func (c *repositoryReviewController) reconcile() {
 		c.mu.Unlock()
 		if (automation.Status == repoaudit.RepositoryReviewAutomationRunning ||
 			automation.Status == repoaudit.RepositoryReviewAutomationStopping) && !active {
+			_, _ = store.InterruptRepositoryReviewRun(
+				context.Background(), repoaudit.CanonicalRepositoryIdentity(automation.Repository),
+				automation.ActiveRunID,
+			)
 			if strings.TrimSpace(cfg.WorkspacePath()) != "" {
 				workflowStore := workflows.NewFileRunStore(cfg.WorkspacePath())
 				_, _ = workflowStore.CancelRun(context.Background(), automation.ActiveRunID, "launcher restarted")
@@ -3381,7 +3587,7 @@ func (c *repositoryReviewController) reconcile() {
 				requestedReason = repoaudit.RepositoryReviewPauseServiceRestart
 				requestedDetail = "The launcher restarted. Resume continues from durable review checkpoints."
 			}
-			_, _ = store.UpdateAutomation(
+			paused, pauseErr := store.UpdateAutomation(
 				context.Background(),
 				automation.ID,
 				automation.Version,
@@ -3396,6 +3602,13 @@ func (c *repositoryReviewController) reconcile() {
 					return nil
 				},
 			)
+			if pauseErr == nil {
+				if commit := repositoryReviewRememberedCommit(paused); commit != "" {
+					_, _ = c.ensureRepositoryReviewCampaign(
+						context.Background(), store, cfg, paused, commit, "resume",
+					)
+				}
+			}
 		}
 	}
 	c.startRepositoryFindingMapping(automations)

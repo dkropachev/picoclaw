@@ -95,7 +95,7 @@ func (s Store) PlanWithProfileLimitAuthoritative(
 	authoritative bool,
 ) (Plan, error) {
 	return s.planWithProfileLimitAuthoritative(
-		ctx, repository, commitSHA, inventoryHash, profileHash, "", 0,
+		ctx, repository, commitSHA, inventoryHash, profileHash, "", 0, nil,
 		files, force, maximumPending, authoritative,
 	)
 }
@@ -117,8 +117,40 @@ func (s Store) PlanWithProfileLimitAuthoritativeForCampaign(
 		return Plan{}, ErrInvalidPlan
 	}
 	return s.planWithProfileLimitAuthoritative(
-		ctx, repository, commitSHA, inventoryHash, profileHash, campaignID, requiredAssignments,
+		ctx, repository, commitSHA, inventoryHash, profileHash, campaignID, requiredAssignments, nil,
 		files, force, maximumPending, authoritative,
+	)
+}
+
+// PlanAssignmentsForCampaign selects distinct incomplete files and freezes one
+// missing-only scope for every assignment in catalog. The catalog is part of
+// campaign identity and cannot drift after its first successful binding.
+func (s Store) PlanAssignmentsForCampaign(
+	ctx context.Context,
+	repository, commitSHA, inventoryHash, profileHash, campaignID string,
+	catalog []RepositoryReviewAssignment,
+	files []FileRef,
+	force bool,
+	maximumPending int,
+	authoritative bool,
+) (Plan, error) {
+	normalized, err := NormalizeRepositoryReviewAssignmentCatalog(catalog)
+	if err != nil {
+		return Plan{}, err
+	}
+	return s.planWithProfileLimitAuthoritative(
+		ctx,
+		repository,
+		commitSHA,
+		inventoryHash,
+		profileHash,
+		campaignID,
+		repositoryReviewRequiredAssignmentCount(normalized),
+		normalized,
+		files,
+		force,
+		maximumPending,
+		authoritative,
 	)
 }
 
@@ -126,6 +158,7 @@ func (s Store) planWithProfileLimitAuthoritative(
 	ctx context.Context,
 	repository, commitSHA, inventoryHash, profileHash, campaignID string,
 	requiredAssignments int,
+	assignmentCatalog []RepositoryReviewAssignment,
 	files []FileRef,
 	force bool,
 	maximumPending int,
@@ -171,10 +204,17 @@ func (s Store) planWithProfileLimitAuthoritative(
 	campaignChanged := false
 	if campaignID != "" {
 		scopeDigest, _ := repositoryReviewCampaignScopeDigestForFiles(files)
-		campaignChanged, err = bindRepositoryReviewCampaignScope(
-			&state, campaignID, commitSHA, inventoryHash, profileHash, scopeDigest,
-			requiredAssignments, len(files),
-		)
+		if len(assignmentCatalog) > 0 {
+			campaignChanged, err = bindRepositoryReviewCampaignAssignmentCatalog(
+				&state, campaignID, commitSHA, inventoryHash, profileHash, scopeDigest,
+				assignmentCatalog, len(files),
+			)
+		} else {
+			campaignChanged, err = bindRepositoryReviewCampaignScope(
+				&state, campaignID, commitSHA, inventoryHash, profileHash, scopeDigest,
+				requiredAssignments, len(files),
+			)
+		}
 		if err != nil {
 			return Plan{}, err
 		}
@@ -197,6 +237,18 @@ func (s Store) planWithProfileLimitAuthoritative(
 	planUnsupported := make([]UnsupportedFile, 0)
 	previouslyReviewed := 0
 	for _, file := range files {
+		if campaignID != "" && len(assignmentCatalog) > 0 &&
+			state.CurrentCampaign.Paths[file.Path].Unsupported {
+			unsupported := state.Unsupported[file.Path]
+			unsupported.FileRef = file
+			unsupported.CommitSHA = commitSHA
+			unsupported.ProfileHash = profileHash
+			if strings.TrimSpace(unsupported.Reason) == "" {
+				unsupported.Reason = "campaign_terminal"
+			}
+			planUnsupported = append(planUnsupported, unsupported)
+			continue
+		}
 		if unsupported, exists := state.Unsupported[file.Path]; exists &&
 			unsupported.BlobSHA == file.BlobSHA && unsupported.SizeBytes == file.SizeBytes &&
 			unsupported.Mode == file.Mode && unsupported.ProfileHash == profileHash &&
@@ -214,7 +266,22 @@ func (s Store) planWithProfileLimitAuthoritative(
 		matchesBase := reviewed && previous.BlobSHA == file.BlobSHA &&
 			previous.SizeBytes == file.SizeBytes && previous.Mode == file.Mode &&
 			previous.ProfileHash == profileHash
-		if matchesBase && (!force || previous.ForceCampaignID == forceCampaignID) {
+		campaignComplete := false
+		if campaignID != "" && len(assignmentCatalog) > 0 {
+			if pathCoverage, exists := state.CurrentCampaign.Paths[file.Path]; exists &&
+				!pathCoverage.Unsupported {
+				projected, projectionErr := projectRepositoryReviewAssignmentCoverage(
+					pathCoverage, assignmentCatalog,
+				)
+				if projectionErr != nil {
+					return Plan{}, projectionErr
+				}
+				campaignComplete = projected.Completed
+			}
+		}
+		if campaignID != "" && len(assignmentCatalog) > 0 && campaignComplete ||
+			(campaignID == "" || len(assignmentCatalog) == 0) &&
+				matchesBase && (!force || previous.ForceCampaignID == forceCampaignID) {
 			unchanged = append(unchanged, file)
 			continue
 		}
@@ -235,12 +302,45 @@ func (s Store) planWithProfileLimitAuthoritative(
 		CampaignID: campaignID,
 		Repository: repository, CommitSHA: commitSHA, InventoryHash: inventoryHash,
 		ProfileHash: profileHash, RequiredAssignments: requiredAssignments,
-		ForceCampaignID: forceCampaignID, Authoritative: authoritative,
+		AssignmentCatalog: append([]RepositoryReviewAssignment(nil), assignmentCatalog...),
+		ForceCampaignID:   forceCampaignID, Authoritative: authoritative,
 		TargetIsDefault: true,
 		StateVersion:    state.ReviewVersion, PendingFiles: pending, DeferredFiles: deferred,
 		UnchangedFiles:     unchanged,
 		UnsupportedFiles:   planUnsupported,
 		PreviouslyReviewed: previouslyReviewed, CreatedAt: now,
+	}
+	if len(assignmentCatalog) > 0 {
+		plan.AssignmentPlans = make([]RepositoryReviewAssignmentPlan, 0, len(assignmentCatalog))
+		for _, assignment := range assignmentCatalog {
+			missing := make([]FileRef, 0, len(pending))
+			for _, file := range pending {
+				complete, assignmentErr := repositoryReviewAssignmentComplete(
+					state.CurrentCampaign.Paths[file.Path], assignmentCatalog, assignment.ID,
+				)
+				if assignmentErr != nil {
+					return Plan{}, assignmentErr
+				}
+				if !complete {
+					missing = append(missing, file)
+				}
+			}
+			if len(missing) == 0 {
+				continue
+			}
+			reviewerModel := assignment.Reviewer
+			if reviewerModel == "default" {
+				reviewerModel = ""
+			}
+			plan.AssignmentPlans = append(plan.AssignmentPlans, RepositoryReviewAssignmentPlan{
+				AssignmentID: assignment.ID,
+				FocusID:      assignment.FocusID,
+				Label:        assignment.FocusID,
+				Reviewer:     reviewerModel,
+				Optional:     !assignment.Required,
+				Files:        missing,
+			})
+		}
 	}
 	if campaignID != "" {
 		for _, file := range unchanged {
@@ -998,7 +1098,7 @@ func (s Store) listSummaries(maximum int) ([]RepositorySummary, error) {
 		if summaryErr != nil {
 			return nil, summaryErr
 		}
-		if summary.SchemaVersion == 1 {
+		if summary.SchemaVersion != SchemaVersion {
 			state, found, migrationErr := s.Get(summary.Repository)
 			if migrationErr != nil {
 				return nil, migrationErr
@@ -1042,7 +1142,8 @@ func repositoryReviewSummaryFromEntry(root string, entry os.DirEntry) (Repositor
 	if decodeErr != nil || closeErr != nil {
 		return RepositorySummary{}, errors.Join(decodeErr, closeErr)
 	}
-	if (summary.SchemaVersion != 1 && summary.SchemaVersion != SchemaVersion) ||
+	if (summary.SchemaVersion != 1 && summary.SchemaVersion != 2 &&
+		summary.SchemaVersion != SchemaVersion) ||
 		summary.ID != RepositoryID(summary.Repository) {
 		return RepositorySummary{}, errors.New("invalid repository review summary")
 	}
@@ -1521,10 +1622,8 @@ func (s Store) save(state *RepositoryState) error {
 	if writeErr := fileutil.WriteFileAtomic(statePath, data, 0o600); writeErr != nil {
 		return writeErr
 	}
-	summaryData, err := json.Marshal(Summarize(*state))
-	if err != nil {
-		return err
-	}
+	// RepositorySummary contains only JSON-native scalar and time fields.
+	summaryData, _ := json.Marshal(Summarize(*state))
 	// The sidecar is a rebuildable list projection. The authoritative state is
 	// already committed, so a projection write failure must not turn a successful
 	// versioned mutation into an ambiguous failure.
@@ -1851,6 +1950,27 @@ func validateRepositoryReviewCampaignPlan(plan Plan) (int, error) {
 				!validBoundedText(plan.ForceCampaignID, 256))) ||
 		plan.RequiredAssignments < 1 || plan.RequiredAssignments > maxRepositoryReviewRequiredAssignments ||
 		plan.StateVersion < 0 || plan.PreviouslyReviewed < 0 || plan.PreviouslyReviewed > maxReviewFiles {
+		return 0, ErrInvalidPlan
+	}
+	if len(plan.AssignmentCatalog) > 0 {
+		catalog, err := NormalizeRepositoryReviewAssignmentCatalog(plan.AssignmentCatalog)
+		if err != nil || !repositoryReviewAssignmentCatalogEqual(catalog, plan.AssignmentCatalog) ||
+			catalog[0].ProfileHash != plan.ProfileHash ||
+			repositoryReviewRequiredAssignmentCount(catalog) != plan.RequiredAssignments {
+			return 0, ErrInvalidPlan
+		}
+		allowed := make(map[string]FileRef, len(plan.PendingFiles))
+		for _, file := range plan.PendingFiles {
+			allowed[file.Path] = file
+		}
+		plans, planErr := normalizeRepositoryReviewAssignmentPlans(
+			plan.AssignmentPlans, catalog, allowed,
+		)
+		if planErr != nil || len(plans) != len(plan.AssignmentPlans) ||
+			len(plans) > 0 && !reflect.DeepEqual(plans, plan.AssignmentPlans) {
+			return 0, ErrInvalidPlan
+		}
+	} else if len(plan.AssignmentPlans) != 0 {
 		return 0, ErrInvalidPlan
 	}
 	selected := make(map[string]struct{})
@@ -2470,6 +2590,9 @@ func validateState(state RepositoryState) error {
 	if err := validateRepositoryReviewCampaignHistory(state.CampaignHistory); err != nil {
 		return err
 	}
+	if err := validateRepositoryReviewActiveRun(state); err != nil {
+		return err
+	}
 	if state.CurrentCampaign != nil &&
 		state.CampaignHistory[state.CurrentCampaign.ID] != state.CurrentCampaign.CommitSHA {
 		return errors.New("current repository review campaign is absent from history")
@@ -2532,6 +2655,25 @@ func validateState(state RepositoryState) error {
 				!validRepositoryReviewCampaignScopeDigest(run.ScopeDigest) ||
 				run.InspectedFiles > run.ReviewedFiles+run.UnreviewedFiles+run.UnsupportedCount)) {
 			return errors.New("invalid repository review run campaign")
+		}
+		if len(run.CheckpointDigests) > maxRepositoryReviewRequiredAssignments {
+			return errors.New("invalid repository review run checkpoint digests")
+		}
+		if len(run.CheckpointScopes) != len(run.CheckpointDigests) {
+			return errors.New("invalid repository review run checkpoint scopes")
+		}
+		for assignmentID, files := range run.CheckpointScopes {
+			canonical, err := canonicalRepositoryReviewCampaignFiles(files)
+			if _, found := run.CheckpointDigests[assignmentID]; !found || err != nil ||
+				len(canonical) == 0 || !reflect.DeepEqual(canonical, files) {
+				return errors.New("invalid repository review run checkpoint scope")
+			}
+		}
+		for assignmentID, digest := range run.CheckpointDigests {
+			if !validBoundedText(assignmentID, 128) ||
+				!validRepositoryReviewCheckpointDigest(digest) {
+				return errors.New("invalid repository review run checkpoint digest")
+			}
 		}
 	}
 	if err := validateRepositoryReviewCampaignRecordBindings(state); err != nil {

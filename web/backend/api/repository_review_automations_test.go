@@ -122,8 +122,8 @@ func TestRepositoryReviewEffectiveWorkflowTimeout(t *testing.T) {
 		configured time.Duration
 		want       time.Duration
 	}{
-		{name: "unset", want: 15 * time.Minute},
-		{name: "default", configured: 5 * time.Minute, want: 15 * time.Minute},
+		{name: "unset", want: 65 * time.Minute},
+		{name: "default", configured: 5 * time.Minute, want: 65 * time.Minute},
 		{name: "longer configured", configured: 6 * time.Hour, want: 6 * time.Hour},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -131,6 +131,38 @@ func TestRepositoryReviewEffectiveWorkflowTimeout(t *testing.T) {
 				t.Fatalf("effective timeout = %s, want %s", got, test.want)
 			}
 		})
+	}
+	if got := repositoryReviewEffectiveWorkflowTimeoutForAssignment(5*time.Minute, 90*60); got != 95*time.Minute {
+		t.Fatalf("custom assignment timeout = %s, want 95m", got)
+	}
+	if got := repositoryReviewEffectiveWorkflowTimeoutForAssignment(2*time.Hour, 90*60); got != 2*time.Hour {
+		t.Fatalf("longer workflow timeout = %s, want 2h", got)
+	}
+}
+
+func TestRepositoryReviewCampaignUsesCanonicalRemoteLedgerIdentity(t *testing.T) {
+	store := repoaudit.NewStore(t.TempDir())
+	automation := testRepositoryReviewAutomation()
+	automation.ID = "rra_remote_ledger"
+	automation.Repository = "https://github.com/Acme/Core.git"
+	created, err := store.CreateAutomation(t.Context(), automation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := strings.Repeat("a", 40)
+	prepared, err := (&repositoryReviewController{}).ensureRepositoryReviewCampaign(
+		t.Context(), store, &config.Config{}, created, commit, "start",
+	)
+	if err != nil || prepared.CampaignID == "" {
+		t.Fatalf("prepared remote campaign = %#v, %v", prepared, err)
+	}
+	canonical, found, err := store.Get("acme/core")
+	if err != nil || !found || canonical.CurrentCampaign == nil ||
+		canonical.CurrentCampaign.ID != prepared.CampaignID {
+		t.Fatalf("canonical ledger = %#v found=%v err=%v", canonical.CurrentCampaign, found, err)
+	}
+	if _, found, err := store.Get(automation.Repository); err != nil || found {
+		t.Fatalf("raw remote ledger unexpectedly exists: found=%v err=%v", found, err)
 	}
 }
 
@@ -3468,9 +3500,10 @@ func testRepositoryReviewAutomation() repoaudit.RepositoryReviewAutomation {
 		Ref: "main", Target: "all", ReviewFocus: "Find correctness bugs.",
 		ReviewerModels: []string{"cheap"}, AutoContinue: true,
 		MaxFilesPerRun: 4, MaxContentBytes: 65536, MaxParallelChildren: 1,
-		EstimatedOutputTokens: 900,
-		BudgetPolicy:          repoaudit.RepositoryReviewBudgetPolicy{},
-		Status:                repoaudit.RepositoryReviewAutomationIdle,
+		AssignmentTimeoutSeconds: 3_600,
+		EstimatedOutputTokens:    900,
+		BudgetPolicy:             repoaudit.RepositoryReviewBudgetPolicy{},
+		Status:                   repoaudit.RepositoryReviewAutomationIdle,
 	}
 }
 
@@ -3502,9 +3535,10 @@ func automationConfigBody(automation repoaudit.RepositoryReviewAutomation) map[s
 		"reviewer_models": automation.ReviewerModels, "compare_models": automation.CompareModels,
 		"force":         automation.Force,
 		"auto_continue": autoContinue, "max_files_per_run": automation.MaxFilesPerRun,
-		"max_content_bytes":     automation.MaxContentBytes,
-		"max_parallel_children": automation.MaxParallelChildren,
-		"budget":                automation.BudgetPolicy,
+		"max_content_bytes":          automation.MaxContentBytes,
+		"max_parallel_children":      automation.MaxParallelChildren,
+		"assignment_timeout_seconds": automation.AssignmentTimeoutSeconds,
+		"budget":                     automation.BudgetPolicy,
 	}
 }
 

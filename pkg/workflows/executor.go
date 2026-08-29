@@ -17,6 +17,7 @@ import (
 
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
+	"github.com/sipeed/picoclaw/pkg/repoaudit"
 )
 
 const defaultMaxCallDepth = 4
@@ -2373,31 +2374,48 @@ func (e *Executor) runStepTarget(
 				})
 			}
 		}
+		var managedAssignmentDispatch ManagedAssignmentDispatchObserver
+		var managedAssignmentCheckpoint ManagedAssignmentCheckpointObserver
+		if strings.TrimSpace(execCtx.WorkflowRef) == RepositoryBugFinderWorkflowRef &&
+			step.ID == "review" && with["review_plan"] != nil {
+			managedAssignmentDispatch, managedAssignmentCheckpoint, err = repositoryReviewManagedAssignmentCallbacks(
+				execCtx,
+				with["review_plan"],
+			)
+			if err != nil {
+				return nil, err
+			}
+		}
 		outputs, runErr := e.Agents.RunAgent(agentCtx, AgentRequest{
-			AgentID:                agentID,
-			AccountRef:             stringFromMap(with, "account"),
-			Model:                  stringFromMap(with, "model"),
-			Message:                stringFromMap(with, "message"),
-			Prompt:                 stringFromMap(with, "prompt"),
-			Context:                stringFromMap(with, "context"),
-			Session:                sessionKey,
-			EphemeralSession:       sessionMode == AgentSessionEphemeral,
-			History:                stringFromMap(with, "history"),
-			Cache:                  stringFromMap(with, "cache"),
-			Tools:                  agentToolsMode(with),
-			Delivery:               stepDelivery(step.Context, execCtx),
-			Inputs:                 with,
-			Output:                 output,
-			Managed:                with["managed"],
-			Scope:                  scope,
-			ScopeContent:           scopeContent,
-			SuppressDefaultContext: suppressDefaultContext,
-			ReviewSystemPrompt:     reviewSystemPrompt,
-			PrivateContext:         execCtx.privateValues != nil || frozenSession != nil,
-			FrozenReadOnlySession:  frozenSession,
-			UsageObserver:          usageObserver,
-			ManagedChildObserver:   managedChildObserver,
-			CallAdmission:          callAdmission,
+			AgentID:                     agentID,
+			AccountRef:                  stringFromMap(with, "account"),
+			Model:                       stringFromMap(with, "model"),
+			Message:                     stringFromMap(with, "message"),
+			Prompt:                      stringFromMap(with, "prompt"),
+			Context:                     stringFromMap(with, "context"),
+			Session:                     sessionKey,
+			EphemeralSession:            sessionMode == AgentSessionEphemeral,
+			History:                     stringFromMap(with, "history"),
+			Cache:                       stringFromMap(with, "cache"),
+			Tools:                       agentToolsMode(with),
+			Delivery:                    stepDelivery(step.Context, execCtx),
+			Inputs:                      with,
+			Output:                      output,
+			Managed:                     with["managed"],
+			Scope:                       scope,
+			ScopeContent:                scopeContent,
+			SuppressDefaultContext:      suppressDefaultContext,
+			ReviewSystemPrompt:          reviewSystemPrompt,
+			PrivateContext:              execCtx.privateValues != nil || frozenSession != nil,
+			FrozenReadOnlySession:       frozenSession,
+			UsageObserver:               usageObserver,
+			ManagedChildObserver:        managedChildObserver,
+			ManagedAssignmentDispatch:   managedAssignmentDispatch,
+			ManagedAssignmentCheckpoint: managedAssignmentCheckpoint,
+			AssignmentTimeoutSeconds: int(nativeInt64Any(
+				with, "assignment_timeout_seconds", "assignmentTimeoutSeconds",
+			)),
+			CallAdmission: callAdmission,
 		})
 		if frozenSession != nil && outputs != nil {
 			outputs["session"] = AgentSessionPrivate
@@ -2447,6 +2465,89 @@ func repositoryReviewAgentContext(ctx context.Context, repositoryReview bool) (c
 		return canceled, func() {}
 	}
 	return context.WithDeadline(ctx, agentDeadline)
+}
+
+func repositoryReviewManagedAssignmentCallbacks(
+	exec ExecutionContext,
+	planValue any,
+) (
+	ManagedAssignmentDispatchObserver,
+	ManagedAssignmentCheckpointObserver,
+	error,
+) {
+	plan, err := nativeRepositoryReviewPlan(planValue)
+	if err != nil || plan.ID == "" {
+		return nil, nil, errors.New("repository review managed assignments require a durable plan")
+	}
+	if len(plan.AssignmentCatalog) == 0 {
+		return nil, nil, nil
+	}
+	store := repoaudit.NewStore(nativeWorkspace(exec))
+	dispatch := func(event ManagedAssignmentDispatchEvent) error {
+		files, err := nativeRepositoryReviewFiles(event.Scope)
+		if err != nil {
+			return err
+		}
+		return store.VerifyRepositoryReviewAssignment(
+			context.Background(),
+			repoaudit.VerifyRepositoryReviewAssignmentRequest{
+				Repository: plan.Repository, RunID: exec.RunID,
+				AssignmentID: event.AssignmentID, Files: files,
+			},
+		)
+	}
+	checkpoint := func(event ManagedAssignmentCheckpointEvent) error {
+		structured := nativeMapValue(event.Output)
+		if structured == nil {
+			return errors.New("repository review assignment output is not an object")
+		}
+		scopeFiles, err := nativeRepositoryReviewFiles(event.Scope)
+		if err != nil {
+			return err
+		}
+		acknowledgedPaths, err := nativeRepositoryReviewAcknowledgedPaths(
+			structured,
+			scopeFiles,
+			nativeRepositoryReviewCompletedScopePaths(event.Scope),
+		)
+		if err != nil {
+			return err
+		}
+		model := strings.TrimSpace(event.Model)
+		if model == "" {
+			model = strings.TrimSpace(event.ReviewerModel)
+		}
+		if model == "" {
+			model = "default"
+		}
+		observation, err := nativeRepositoryReviewObservation(
+			structured,
+			event.Scope,
+			model,
+			strings.TrimSpace(event.FocusID),
+			"",
+		)
+		if err != nil {
+			return err
+		}
+		observation.RawDigest = strings.TrimSpace(event.OutputDigest)
+		acknowledged := make([]repoaudit.FileRef, 0, len(acknowledgedPaths))
+		for _, file := range scopeFiles {
+			if acknowledgedPaths[file.Path] {
+				acknowledged = append(acknowledged, file)
+			}
+		}
+		_, err = store.CheckpointRepositoryReviewAssignment(
+			context.Background(),
+			repoaudit.CheckpointRepositoryReviewAssignmentRequest{
+				Plan: plan, RunID: exec.RunID, AssignmentID: event.AssignmentID,
+				Digest: event.CheckpointDigest, AcknowledgedFiles: acknowledged,
+				Observation: observation,
+			},
+		)
+		return err
+	}
+	return dispatch, checkpoint, nil
 }
 
 func (e *Executor) bindRepositoryReviewModelProfile(
