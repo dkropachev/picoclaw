@@ -1191,9 +1191,14 @@ func (c *repositoryReviewController) ensureRepositoryReviewCampaign(
 		if err != nil {
 			return repoaudit.RepositoryReviewAutomation{}, err
 		}
+		if c.recoverCampaign == nil {
+			return repoaudit.RepositoryReviewAutomation{}, errors.New(
+				"legacy repository review campaign recovery is unavailable",
+			)
+		}
 		legacy := automation
 		legacy.ResolvedCommitSHA = resolvedCommit
-		recovered, recoverErr := c.recoverLegacyRepositoryReviewCampaign(
+		recovered, recoverErr := c.recoverCampaign(
 			ctx, store, cfg.WorkspacePath(), legacy, resolvedCommit, resolvedProfile,
 		)
 		if recoverErr == nil {

@@ -381,3 +381,99 @@ func repositoryReviewAssignmentCheckpointEventForTest(
 func repositoryReviewAssignmentDigestForTest(character string) string {
 	return "sha256:" + strings.Repeat(character, 64)
 }
+
+func TestNativeRepositoryReviewAssignmentCoverageBoundaries(t *testing.T) {
+	workspace, exec, output, plan, scope := repositoryReviewNativeAssignmentPlanForTest(t)
+	profile := map[string]any{
+		"schema": RepositoryBugFinderProfileSchema, "prompt_revision": RepositoryBugFinderPromptRevision,
+		"account_ref": "", "target": "all", "focus": "bugs", "scope_policy": "{}",
+		"scope_plan_hash": "scope-plan", "models": []any{"review-a"},
+		"model_graph_revision": "graph-v1", "effective_models": []any{"review-a"},
+		"include_default_reviewer": false, "max_content_bytes": int64(1024),
+	}
+	basePlanArgs := func() map[string]any {
+		return map[string]any{
+			"action": "plan", "working_directory": ".", "repository": "auto",
+			"commit": plan.CommitSHA, "inventory_hash": plan.InventoryHash, "files": scope,
+			"campaign_id": plan.CampaignID, "authoritative": true, "compact_output": true,
+			"resolved_reviewer_models": []any{"review-a"},
+			"include_default_reviewer": false, "profile": profile,
+		}
+	}
+
+	tooManyReviewers := make([]any, maxRepositoryReviewManagedAssignments/len(repositoryBugFinderFocuses)+1)
+	for index := range tooManyReviewers {
+		tooManyReviewers[index] = fmt.Sprintf("review-%02d", index)
+	}
+	args := basePlanArgs()
+	args["resolved_reviewer_models"] = tooManyReviewers
+	if _, err := nativeRepositoryReview(t.Context(), args, exec); err == nil {
+		t.Fatal("oversized native reviewer cohort was accepted")
+	}
+
+	args = basePlanArgs()
+	args["targetIsDefault"] = false
+	branched, err := nativeRepositoryReview(t.Context(), args, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchedPlan, err := nativeRepositoryReviewPlan(branched["plan"])
+	if err != nil || branchedPlan.TargetIsDefault {
+		t.Fatalf("camel-case branch provenance = %#v err=%v", branchedPlan, err)
+	}
+
+	args = basePlanArgs()
+	args["target_branch"] = strings.Repeat("x", 5000)
+	if _, err := nativeRepositoryReview(t.Context(), args, exec); err == nil {
+		t.Fatal("oversized target branch was accepted")
+	}
+
+	if _, err := nativeRepositoryReview(t.Context(), map[string]any{
+		"action": "begin", "plan": output["plan"], "files": scope,
+	}, exec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nativeRepositoryReview(t.Context(), map[string]any{
+		"action": "begin", "plan": output["plan"], "files": scope, "run_id": "competing-run",
+	}, exec); err == nil {
+		t.Fatal("competing assignment begin was accepted")
+	}
+
+	if _, err := nativeRepositoryReview(t.Context(), map[string]any{
+		"action": "freeze", "files": scope, "working_directory": ".",
+		"max_file_content_bytes": 1024, "max_group_files": 1,
+		"max_group_content_bytes": 1024, "copies": 3,
+	}, exec); err == nil || !strings.Contains(err.Error(), "copies") {
+		t.Fatalf("invalid frozen-scope copies error = %v", err)
+	}
+	if _, err := storeNativeFrozenGitScope(exec, make(chan int)); err == nil {
+		t.Fatal("unencodable frozen scope was accepted")
+	}
+	_ = workspace
+}
+
+func TestRepositoryReviewManagedEvidenceDefaultReviewerIdentity(t *testing.T) {
+	file := repoaudit.FileRef{
+		Path: "service.go", BlobSHA: strings.Repeat("a", 40), SizeBytes: 10,
+		Category: "code", Mode: "100644",
+	}
+	plan := repoaudit.Plan{PendingFiles: []repoaudit.FileRef{file}}
+	scope := []any{map[string]any{
+		"path": file.Path, "fileHash": file.BlobSHA, "sizeBytes": file.SizeBytes,
+		"category": file.Category, "mode": file.Mode, "contentComplete": true,
+	}}
+	result, err := DecodeRepositoryReviewManagedEvidence(
+		[]any{map[string]any{
+			"scope": scope, "required": true, "valid": true,
+			"label": "Default fallback chain", "model": map[string]any{"selected": "review-a"},
+			"structured": map[string]any{
+				"summary": "reviewed", "reviewedFiles": []any{file.Path},
+				"findings": []any{}, "residualRisks": []any{},
+			},
+		}},
+		plan,
+	)
+	if err != nil || len(result.Children) != 1 || result.Children[0].ReviewerIdentity != "default" {
+		t.Fatalf("default reviewer evidence = %#v err=%v", result.Children, err)
+	}
+}
