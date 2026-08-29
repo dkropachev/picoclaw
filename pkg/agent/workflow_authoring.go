@@ -42,7 +42,7 @@ func (al *AgentLoop) workflowAuthoringCapabilities(
 	if al == nil {
 		return workflows.WorkflowAuthoringCapabilities{}, nil, fmt.Errorf("agent loop not configured")
 	}
-	leaseCtx, release, err := al.acquireRuntimeUse(ctx)
+	leaseCtx, release, err := al.acquireTrustedRuntimeRoot(ctx)
 	if err != nil {
 		return workflows.WorkflowAuthoringCapabilities{}, nil, err
 	}

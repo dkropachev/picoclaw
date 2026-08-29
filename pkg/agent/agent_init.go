@@ -36,6 +36,7 @@ func NewAgentLoop(
 		msgBus,
 		provider,
 		isolation.NewExecutionPolicy(cfg.Isolation),
+		logger.DiagnosticPolicy{},
 		opts...,
 	)
 }
@@ -50,25 +51,57 @@ func NewAgentLoopWithExecutionPolicy(
 	policy isolation.ExecutionPolicy,
 	opts ...AgentLoopOption,
 ) *AgentLoop {
-	return newAgentLoop(cfg, msgBus, provider, policy, opts...)
+	return newAgentLoop(
+		cfg,
+		msgBus,
+		provider,
+		policy,
+		logger.DiagnosticPolicy{},
+		opts...,
+	)
+}
+
+// NewAgentLoopWithRuntimePolicies constructs a loop from one complete,
+// caller-owned runtime-generation policy tuple. The diagnostic policy is an
+// immutable owner cap; request contexts must still establish and narrow their
+// own effective diagnostic authority.
+func NewAgentLoopWithRuntimePolicies(
+	cfg *config.Config,
+	msgBus *bus.MessageBus,
+	provider providers.LLMProvider,
+	executionPolicy isolation.ExecutionPolicy,
+	diagnosticPolicy logger.DiagnosticPolicy,
+	opts ...AgentLoopOption,
+) *AgentLoop {
+	return newAgentLoop(
+		cfg,
+		msgBus,
+		provider,
+		executionPolicy,
+		diagnosticPolicy,
+		opts...,
+	)
 }
 
 func newAgentLoop(
 	cfg *config.Config,
 	msgBus *bus.MessageBus,
 	provider providers.LLMProvider,
-	policy isolation.ExecutionPolicy,
+	executionPolicy isolation.ExecutionPolicy,
+	diagnosticPolicy logger.DiagnosticPolicy,
 	opts ...AgentLoopOption,
 ) *AgentLoop {
 	al := &AgentLoop{
-		bus:               msgBus,
-		cfg:               cfg,
-		cmdRegistry:       commands.NewRegistry(commands.BuiltinDefinitions()),
-		steering:          newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
-		gitWorkspaces:     newGitWorkspaceManagerFromConfig(cfg),
-		ownsRuntimeEvents: true,
-		toolPolicy:        tools.CompatibilityAllowToolPolicy{},
-		executionPolicy:   policy,
+		bus:                 msgBus,
+		cfg:                 cfg,
+		cmdRegistry:         commands.NewRegistry(commands.BuiltinDefinitions()),
+		steering:            newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
+		gitWorkspaces:       newGitWorkspaceManagerFromConfig(cfg),
+		ownsRuntimeEvents:   true,
+		toolPolicy:          tools.CompatibilityAllowToolPolicy{},
+		executionPolicy:     executionPolicy,
+		diagnosticPolicy:    diagnosticPolicy,
+		runtimeGenerationID: 1,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -80,10 +113,11 @@ func newAgentLoop(
 		al.ownsRuntimeEvents = true
 	}
 
-	registry := NewAgentRegistryWithExecutionPolicy(
+	registry := NewAgentRegistryWithRuntimePolicies(
 		cfg,
 		provider,
 		al.executionPolicy,
+		al.diagnosticPolicy,
 	)
 	al.registry = registry
 

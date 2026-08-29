@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"strings"
 
@@ -34,6 +35,58 @@ func (al *AgentLoop) NewControllerLocalRepairRunner(
 	registry := al.registry
 	workspaces := al.gitWorkspaces
 	al.mu.RUnlock()
+	return al.newControllerLocalRepairRunner(
+		cfg,
+		registry,
+		workspaces,
+		0,
+		false,
+		agentID,
+		routingText,
+	)
+}
+
+// NewControllerLocalRepairRunnerWithRuntimeLease resolves a repair runner from
+// the exact immutable generation carried by ctx. Run must receive the same
+// still-live generation lease.
+func (al *AgentLoop) NewControllerLocalRepairRunnerWithRuntimeLease(
+	ctx context.Context,
+	agentID string,
+	routingText string,
+) (*LocalRepairRunner, error) {
+	if al == nil {
+		return nil, errors.New("controller local repair agent loop is unavailable")
+	}
+	generation, err := al.runtimeGenerationFromLease(ctx)
+	if err != nil {
+		return nil, errors.New("controller local repair runtime lease is unavailable")
+	}
+	al.mu.RLock()
+	workspaces := al.gitWorkspaces
+	al.mu.RUnlock()
+	return al.newControllerLocalRepairRunner(
+		generation.cfg,
+		generation.registry,
+		workspaces,
+		generation.id,
+		true,
+		agentID,
+		routingText,
+	)
+}
+
+func (al *AgentLoop) newControllerLocalRepairRunner(
+	cfg *config.Config,
+	registry *AgentRegistry,
+	workspaces PinnedWorkspaceAcquirer,
+	generationID uint64,
+	strictRuntime bool,
+	agentID string,
+	routingText string,
+) (*LocalRepairRunner, error) {
+	if agentID != strings.TrimSpace(agentID) || !routing.IsCanonicalAgentID(agentID) {
+		return nil, errors.New("controller local repair agent ID must be exact and canonical")
+	}
 	if cfg == nil {
 		return nil, errors.New("controller local repair configuration is unavailable")
 	}
@@ -89,6 +142,9 @@ func (al *AgentLoop) NewControllerLocalRepairRunner(
 	if err != nil {
 		return nil, errors.New("controller local repair agent configuration is invalid")
 	}
+	runner.runtimeLoop = al
+	runner.generationID = generationID
+	runner.strictRuntime = strictRuntime
 	return runner, nil
 }
 
@@ -108,6 +164,48 @@ func (al *AgentLoop) ControllerLocalRepairReady(agentID string) bool {
 	registry := al.registry
 	workspaces := al.gitWorkspaces
 	al.mu.RUnlock()
+	return controllerLocalRepairReadyForGeneration(
+		cfg,
+		registry,
+		workspaces,
+		agentID,
+	)
+}
+
+// ControllerLocalRepairReadyWithRuntimeLease reports readiness only for the
+// exact live generation carried by ctx.
+func (al *AgentLoop) ControllerLocalRepairReadyWithRuntimeLease(
+	ctx context.Context,
+	agentID string,
+) bool {
+	if al == nil {
+		return false
+	}
+	generation, err := al.runtimeGenerationFromLease(ctx)
+	if err != nil {
+		return false
+	}
+	al.mu.RLock()
+	workspaces := al.gitWorkspaces
+	al.mu.RUnlock()
+	return controllerLocalRepairReadyForGeneration(
+		generation.cfg,
+		generation.registry,
+		workspaces,
+		agentID,
+	)
+}
+
+func controllerLocalRepairReadyForGeneration(
+	cfg *config.Config,
+	registry *AgentRegistry,
+	workspaces PinnedWorkspaceAcquirer,
+	agentID string,
+) bool {
+	if agentID != strings.TrimSpace(agentID) ||
+		!routing.IsCanonicalAgentID(agentID) {
+		return false
+	}
 	if cfg == nil || registry == nil || localRepairNil(workspaces) {
 		return false
 	}

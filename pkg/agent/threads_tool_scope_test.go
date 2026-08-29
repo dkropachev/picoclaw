@@ -99,7 +99,7 @@ func TestSpawnSubTurn_DoesNotInheritThreadsTool(t *testing.T) {
 		agent:          mainAgent,
 	}
 
-	if _, err := spawnSubTurn(context.Background(), al, parent, SubTurnConfig{
+	if _, err := spawnSubTurnFromTrustedRuntime(context.Background(), al, parent, SubTurnConfig{
 		Model:        "test-model",
 		SystemPrompt: "inspect this task",
 	}); err != nil {

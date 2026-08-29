@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -196,14 +197,22 @@ func p015B2AValidateCoreSafeSink(
 
 func p015B2AValidateCoreSensitiveSink(t *testing.T, file string, call *ast.CallExpr) {
 	t.Helper()
+	var (
+		policyPath []string
+		policyOK   bool
+	)
+	if len(call.Args) > 0 {
+		policyPath, policyOK = p015B2AExpressionPath(call.Args[0])
+	}
 	if len(call.Args) != 7 ||
-		!p015B2AEmptyPolicy(call.Args[0]) ||
+		!policyOK ||
+		!reflect.DeepEqual(policyPath, []string{"ts", "diagnosticPolicy"}) ||
 		!p015B2ASelector(call.Args[1], "logger", "ComponentAgent") ||
 		!p015B2ASelector(call.Args[2], "logger", "DiagnosticMessageModelResponse") ||
 		!p015B2ACall(call.Args[3], "logger", "NewSafeFields") ||
 		!p015B2ASelector(call.Args[4], "logger", "SensitivityModelResponse") ||
 		!p015B2ASelector(call.Args[5], "logger", "ObservationDomainModelResponse") {
-		t.Errorf("%s has non-zero/non-direct final-response preview at byte %d", file, call.Pos())
+		t.Errorf("%s has non-turn/non-direct final-response preview at byte %d", file, call.Pos())
 	}
 	p015B2ARejectHostileFormatting(t, file, call)
 }

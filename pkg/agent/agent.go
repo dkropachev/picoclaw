@@ -42,17 +42,19 @@ type AgentLoop struct {
 	state      *state.Manager
 
 	// Runtime event system
-	runtimeEvents      runtimeevents.Bus
-	ownsRuntimeEvents  bool
-	runtimeEventLogMu  sync.RWMutex
-	runtimeEventLogger *runtimeEventLogger
-	runtimeEventLogSub runtimeevents.Subscription
-	agentActivityMu    sync.RWMutex
-	agentActivity      *agentActivityRecorder
-	agentActivitySub   runtimeevents.Subscription
-	hooks              *HookManager
-	toolPolicy         tools.ToolPolicy
-	executionPolicy    isolation.ExecutionPolicy
+	runtimeEvents       runtimeevents.Bus
+	ownsRuntimeEvents   bool
+	runtimeEventLogMu   sync.RWMutex
+	runtimeEventLogger  *runtimeEventLogger
+	runtimeEventLogSub  runtimeevents.Subscription
+	agentActivityMu     sync.RWMutex
+	agentActivity       *agentActivityRecorder
+	agentActivitySub    runtimeevents.Subscription
+	hooks               *HookManager
+	toolPolicy          tools.ToolPolicy
+	executionPolicy     isolation.ExecutionPolicy
+	diagnosticPolicy    logger.DiagnosticPolicy
+	runtimeGenerationID uint64
 
 	// Runtime state
 	running         atomic.Bool
@@ -128,11 +130,17 @@ type AgentLoop struct {
 
 	reloadFunc func() error
 
-	providerFactory       func(*config.ModelConfig) (providers.LLMProvider, string, error) // legacy test seam
-	policyProviderFactory func(*config.ModelConfig, isolation.ExecutionPolicy) (providers.LLMProvider, string, error)
-	registryFactory       func(*config.Config, providers.LLMProvider) *AgentRegistry // legacy test seam
-	policyRegistryFactory func(*config.Config, providers.LLMProvider, isolation.ExecutionPolicy) *AgentRegistry
-	recursionInstaller    recursionCatalogInstaller
+	providerFactory              func(*config.ModelConfig) (providers.LLMProvider, string, error) // legacy test seam
+	policyProviderFactory        func(*config.ModelConfig, isolation.ExecutionPolicy) (providers.LLMProvider, string, error)
+	registryFactory              func(*config.Config, providers.LLMProvider) *AgentRegistry // legacy test seam
+	policyRegistryFactory        func(*config.Config, providers.LLMProvider, isolation.ExecutionPolicy) *AgentRegistry
+	runtimePolicyRegistryFactory func(
+		*config.Config,
+		providers.LLMProvider,
+		isolation.ExecutionPolicy,
+		logger.DiagnosticPolicy,
+	) *AgentRegistry
+	recursionInstaller recursionCatalogInstaller
 }
 
 // processOptions configures how a message is processed
@@ -272,7 +280,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			inboundCtx, releaseInbound, err := al.acquireRuntimeUse(ctx)
+			inboundCtx, releaseInbound, err := al.acquireTrustedRuntimeRoot(ctx)
 			if err != nil {
 				al.cleanupInboundTurnUX(ctx, msg)
 				if ctx.Err() != nil {
@@ -585,7 +593,11 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 						ChatID:         m.ChatID,
 						InboundContext: cloneInboundContext(&m.Context),
 					}
-					continued, continueErr := al.drainQueuedSteeringContinuations(workerCtx, target)
+					continued, continueErr := al.drainQueuedSteeringContinuations(
+						workerCtx,
+						target,
+						nil,
+					)
 					if continueErr != nil {
 						outboundEnqueued = al.maybePublishError(
 							workerCtx,
@@ -807,7 +819,15 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 		isolationCfg = cfg.Isolation
 	}
 	policy := isolation.NewExecutionPolicy(isolationCfg)
-	_, err := al.reloadProviderAndConfig(ctx, provider, cfg, policy, true, false)
+	_, err := al.reloadProviderAndConfigWithLock(
+		ctx,
+		provider,
+		cfg,
+		policy,
+		logger.DiagnosticPolicy{},
+		true,
+		false,
+	)
 	return err
 }
 
@@ -819,7 +839,37 @@ func (al *AgentLoop) ReloadProviderAndConfigWithExecutionPolicy(
 	cfg *config.Config,
 	policy isolation.ExecutionPolicy,
 ) error {
-	_, err := al.reloadProviderAndConfig(ctx, provider, cfg, policy, true, true)
+	_, err := al.reloadProviderAndConfigWithLock(
+		ctx,
+		provider,
+		cfg,
+		policy,
+		logger.DiagnosticPolicy{},
+		true,
+		true,
+	)
+	return err
+}
+
+// ReloadProviderAndConfigWithRuntimePolicies atomically publishes one complete
+// runtime generation. The diagnostic policy is an owner maximum; request
+// contexts still need a live admitted binding before any preview is possible.
+func (al *AgentLoop) ReloadProviderAndConfigWithRuntimePolicies(
+	ctx context.Context,
+	provider providers.LLMProvider,
+	cfg *config.Config,
+	executionPolicy isolation.ExecutionPolicy,
+	diagnosticPolicy logger.DiagnosticPolicy,
+) error {
+	_, err := al.reloadProviderAndConfigWithLock(
+		ctx,
+		provider,
+		cfg,
+		executionPolicy,
+		diagnosticPolicy,
+		true,
+		true,
+	)
 	return err
 }
 
@@ -836,7 +886,15 @@ func (al *AgentLoop) ReloadProviderAndConfigRetainingPrevious(
 		isolationCfg = cfg.Isolation
 	}
 	policy := isolation.NewExecutionPolicy(isolationCfg)
-	return al.reloadProviderAndConfig(ctx, provider, cfg, policy, false, false)
+	return al.reloadProviderAndConfigWithLock(
+		ctx,
+		provider,
+		cfg,
+		policy,
+		logger.DiagnosticPolicy{},
+		false,
+		false,
+	)
 }
 
 // ReloadProviderAndConfigRetainingPreviousWithExecutionPolicy atomically
@@ -848,7 +906,37 @@ func (al *AgentLoop) ReloadProviderAndConfigRetainingPreviousWithExecutionPolicy
 	cfg *config.Config,
 	policy isolation.ExecutionPolicy,
 ) (providers.LLMProvider, error) {
-	return al.reloadProviderAndConfig(ctx, provider, cfg, policy, false, true)
+	return al.reloadProviderAndConfigWithLock(
+		ctx,
+		provider,
+		cfg,
+		policy,
+		logger.DiagnosticPolicy{},
+		false,
+		true,
+	)
+}
+
+// ReloadProviderAndConfigRetainingPreviousWithRuntimePolicies publishes one
+// complete generation while retaining the previous provider for the legacy
+// caller-managed rollback flow. Gateway uses the stronger expected-generation
+// transaction added below rather than reconstructing the old policy.
+func (al *AgentLoop) ReloadProviderAndConfigRetainingPreviousWithRuntimePolicies(
+	ctx context.Context,
+	provider providers.LLMProvider,
+	cfg *config.Config,
+	executionPolicy isolation.ExecutionPolicy,
+	diagnosticPolicy logger.DiagnosticPolicy,
+) (providers.LLMProvider, error) {
+	return al.reloadProviderAndConfigWithLock(
+		ctx,
+		provider,
+		cfg,
+		executionPolicy,
+		diagnosticPolicy,
+		false,
+		true,
+	)
 }
 
 // CloseRetainedProvider drains active requests before closing a stateful
@@ -881,21 +969,54 @@ func (al *AgentLoop) PauseRuntimeForReloadWithContext(
 	return al.pauseRuntimeUsesWithContext(waitCtx, runtimeCtx)
 }
 
+func (al *AgentLoop) reloadProviderAndConfigWithLock(
+	ctx context.Context,
+	provider providers.LLMProvider,
+	cfg *config.Config,
+	executionPolicy isolation.ExecutionPolicy,
+	diagnosticPolicy logger.DiagnosticPolicy,
+	closePrevious bool,
+	requireFreshConfig bool,
+) (providers.LLMProvider, error) {
+	al.reloadMu.Lock()
+	defer al.reloadMu.Unlock()
+	return al.reloadProviderAndConfig(
+		ctx,
+		provider,
+		cfg,
+		executionPolicy,
+		diagnosticPolicy,
+		closePrevious,
+		requireFreshConfig,
+		nil,
+		nil,
+		nil,
+	)
+}
+
+// reloadProviderAndConfig requires reloadMu. RuntimeReloadTransaction
+// holds that lock across Gateway service commit/rollback; compatibility entry
+// points acquire it only for this call.
 func (al *AgentLoop) reloadProviderAndConfig(
 	ctx context.Context,
 	provider providers.LLMProvider,
 	cfg *config.Config,
-	policy isolation.ExecutionPolicy,
+	executionPolicy isolation.ExecutionPolicy,
+	diagnosticPolicy logger.DiagnosticPolicy,
 	closePrevious bool,
 	requireFreshConfig bool,
+	expected *RuntimeGenerationIdentity,
+	retainedOut **RetainedRuntimeGeneration,
+	providerGeneration *agentRegistryProviderGeneration,
 ) (providers.LLMProvider, error) {
 	if runtimeLeaseOwner(ctx) == al {
 		return nil, fmt.Errorf("cannot reload provider from an active agent runtime lease")
 	}
-	al.reloadMu.Lock()
-	defer al.reloadMu.Unlock()
 	if al.closed || al.closing.Load() {
 		return nil, fmt.Errorf("agent loop is closed")
+	}
+	if expected != nil && !al.runtimeGenerationIdentityMatches(*expected) {
+		return nil, fmt.Errorf("expected runtime generation is stale")
 	}
 
 	// Validate inputs
@@ -905,14 +1026,20 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
-	if err := policy.Validate(); err != nil {
+	if err := executionPolicy.Validate(); err != nil {
 		return nil, fmt.Errorf("execution policy is invalid: %w", err)
 	}
 	al.mu.RLock()
 	sameConfigGeneration := al.cfg == cfg
+	currentRegistry := al.registry
 	al.mu.RUnlock()
 	if requireFreshConfig && sameConfigGeneration {
 		return nil, fmt.Errorf("reload config must be a new generation snapshot")
+	}
+	if retainedOut != nil {
+		if _, ok := extractProvider(currentRegistry); !ok {
+			return nil, fmt.Errorf("active runtime provider cannot be retained")
+		}
 	}
 
 	var registry *AgentRegistry
@@ -927,12 +1054,32 @@ func (al *AgentLoop) reloadProviderAndConfig(
 				registry = nil
 			}
 		}()
-		if al.policyRegistryFactory != nil {
-			registry = al.policyRegistryFactory(cfg, provider, policy)
+		if providerGeneration != nil {
+			registry = newAgentRegistryWithRuntimePolicies(
+				cfg,
+				provider,
+				executionPolicy,
+				diagnosticPolicy,
+				providerGeneration,
+			)
+		} else if al.runtimePolicyRegistryFactory != nil {
+			registry = al.runtimePolicyRegistryFactory(
+				cfg,
+				provider,
+				executionPolicy,
+				diagnosticPolicy,
+			)
+		} else if al.policyRegistryFactory != nil {
+			registry = al.policyRegistryFactory(cfg, provider, executionPolicy)
 		} else if al.registryFactory != nil {
 			registry = al.registryFactory(cfg, provider)
 		} else {
-			registry = NewAgentRegistryWithExecutionPolicy(cfg, provider, policy)
+			registry = NewAgentRegistryWithRuntimePolicies(
+				cfg,
+				provider,
+				executionPolicy,
+				diagnosticPolicy,
+			)
 		}
 	}()
 	if registry == nil {
@@ -999,9 +1146,9 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		}
 	}
 
-	runtimeCtx, resumeRuntime, err := al.pauseRuntimeUsesWithContext(ctx, ctx)
-	if err != nil {
-		return nil, fmt.Errorf("drain active agent runtime before reload: %w", err)
+	runtimeCtx, resumeRuntime, pauseErr := al.pauseRuntimeUsesWithContext(ctx, ctx)
+	if pauseErr != nil {
+		return nil, fmt.Errorf("drain active agent runtime before reload: %w", pauseErr)
 	}
 	defer resumeRuntime()
 
@@ -1016,7 +1163,23 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	var oldRegistry *AgentRegistry
 	var oldEvolution *evolutionBridge
 	var oldContextManager ContextManager
-	if err = func() error {
+	var oldGeneration runtimeGeneration
+	var oldProviderGeneration *agentRegistryProviderGeneration
+	var publishedGenerationID uint64
+	newRL := providers.NewRateLimiterRegistry()
+	for _, agentID := range registry.ListAgentIDs() {
+		if candidateAgent, ok := registry.GetAgent(agentID); ok {
+			newRL.RegisterCandidates(candidateAgent.Candidates)
+			newRL.RegisterCandidates(candidateAgent.LightCandidates)
+			if candidateAgent.AccountRouter != nil {
+				for _, account := range candidateAgent.AccountRouter.Accounts {
+					newRL.RegisterCandidates(account.Candidates)
+				}
+			}
+		}
+	}
+	newFallback := providers.NewFallbackChain(providers.NewCooldownTracker(), newRL)
+	if err := func() error {
 		al.mediaStoreMu.Lock()
 		defer al.mediaStoreMu.Unlock()
 
@@ -1032,31 +1195,39 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		// Atomically swap the config and registry under the same lock order used
 		// by SetMediaStore: mediaStoreMu then al.mu.
 		al.mu.Lock()
+		if expected != nil && !al.runtimeGenerationIdentityMatchesLocked(*expected) {
+			al.mu.Unlock()
+			return fmt.Errorf("expected runtime generation changed before publication")
+		}
+		if al.runtimeGenerationID == 0 && al.cfg != nil && al.registry != nil {
+			al.runtimeGenerationID = 1
+		}
+		if al.runtimeGenerationID == ^uint64(0) {
+			al.mu.Unlock()
+			return fmt.Errorf("runtime generation identity exhausted")
+		}
 		oldRegistry = al.registry
 		oldEvolution = al.evolution
 		oldContextManager = al.contextManager
+		oldGeneration = runtimeGeneration{
+			id:               al.runtimeGenerationID,
+			cfg:              al.cfg,
+			registry:         al.registry,
+			executionPolicy:  al.executionPolicy,
+			diagnosticPolicy: al.diagnosticPolicy,
+		}
 
 		al.cfg = cfg
 		al.registry = registry
-		al.executionPolicy = policy
+		al.executionPolicy = executionPolicy
+		al.diagnosticPolicy = diagnosticPolicy
+		al.runtimeGenerationID++
+		publishedGenerationID = al.runtimeGenerationID
 		registryInstalled = true
 		al.evolution = newEvolution
 		evolutionInstalled = true
 
-		// Also update fallback chain with new config; rebuild rate limiter registry.
-		newRL := providers.NewRateLimiterRegistry()
-		for _, agentID := range registry.ListAgentIDs() {
-			if agent, ok := registry.GetAgent(agentID); ok {
-				newRL.RegisterCandidates(agent.Candidates)
-				newRL.RegisterCandidates(agent.LightCandidates)
-				if agent.AccountRouter != nil {
-					for _, account := range agent.AccountRouter.Accounts {
-						newRL.RegisterCandidates(account.Candidates)
-					}
-				}
-			}
-		}
-		al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), newRL)
+		al.fallback = newFallback
 		al.mu.Unlock()
 		return nil
 	}(); err != nil {
@@ -1076,7 +1247,17 @@ func (al *AgentLoop) reloadProviderAndConfig(
 			),
 		)
 	}
-	newContextManager := al.resolveContextManagerWithContext(runtimeCtx)
+	oldProviderGeneration = snapshotAgentRegistryProviderGeneration(oldRegistry)
+	var newContextManager ContextManager
+	if err := al.withPausedRuntimeGeneration(
+		runtimeCtx,
+		func(setupCtx context.Context) error {
+			newContextManager = al.resolveContextManagerWithContext(setupCtx)
+			return nil
+		},
+	); err != nil {
+		return nil, fmt.Errorf("resolve reloaded context manager: %w", err)
+	}
 	al.mu.Lock()
 	al.contextManager = newContextManager
 	al.mu.Unlock()
@@ -1105,11 +1286,21 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	}
 	al.refreshRuntimeEventLogger(cfg)
 
-	oldProvider, hasOldProvider := extractProvider(oldRegistry)
 	oldMCPManager := al.mcp.reset()
 	al.hookRuntime.reset(al)
 	configureHookManagerFromConfig(al.hooks, cfg)
-	if err := al.ensureHooksInitializedForGeneration(runtimeCtx, cfg); err != nil {
+	var hookInitializationErr error
+	if pauseSetupErr := al.withPausedRuntimeGeneration(
+		runtimeCtx,
+		func(setupCtx context.Context) error {
+			hookInitializationErr = al.ensureHooksInitializedForGeneration(setupCtx, cfg)
+			return nil
+		},
+	); pauseSetupErr != nil {
+		return nil, fmt.Errorf("bind reloaded hook runtime generation: %w", pauseSetupErr)
+	}
+	if hookInitializationErr != nil {
+		err := hookInitializationErr
 		logger.WarnSafeCF(
 			logger.ComponentAgent,
 			logger.DiagnosticMessageAgentConfiguredHooksFailedToReinitializeAfterReload,
@@ -1133,7 +1324,22 @@ func (al *AgentLoop) reloadProviderAndConfig(
 			)
 		}
 	}
-	if err := al.ensureMCPInitializedForGeneration(runtimeCtx, cfg, registry); err != nil {
+	var mcpInitializationErr error
+	if pauseSetupErr := al.withPausedRuntimeGeneration(
+		runtimeCtx,
+		func(setupCtx context.Context) error {
+			mcpInitializationErr = al.ensureMCPInitializedForGeneration(
+				setupCtx,
+				cfg,
+				registry,
+			)
+			return nil
+		},
+	); pauseSetupErr != nil {
+		return nil, fmt.Errorf("bind reloaded MCP runtime generation: %w", pauseSetupErr)
+	}
+	if mcpInitializationErr != nil {
+		err := mcpInitializationErr
 		logger.WarnSafeCF(
 			logger.ComponentAgent,
 			logger.DiagnosticMessageAgentMCPFailedToReinitializeAfterReload,
@@ -1144,10 +1350,8 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	}
 	// Close old provider after releasing the lock
 	// This prevents blocking readers while closing
-	if closePrevious && hasOldProvider {
-		if stateful, ok := oldProvider.(providers.StatefulProvider); ok {
-			al.closeReloadedProvider(runtimeCtx, stateful)
-		}
+	if closePrevious {
+		oldProviderGeneration.closeAll()
 	}
 
 	logger.InfoSafeCF(
@@ -1158,8 +1362,20 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		),
 	)
 
-	if !hasOldProvider {
+	oldProvider := oldProviderGeneration.legacyRetainedProvider()
+	if oldProvider == nil {
 		return nil, nil
+	}
+	if !closePrevious && retainedOut == nil {
+		oldProviderGeneration.closeAllExcept(oldProvider)
+	}
+	if retainedOut != nil {
+		*retainedOut = newRetainedRuntimeGeneration(
+			al,
+			oldGeneration,
+			oldProviderGeneration,
+			publishedGenerationID,
+		)
 	}
 	return oldProvider, nil
 }
@@ -1204,7 +1420,7 @@ func (al *AgentLoop) runAgentLoop(
 	agent *AgentInstance,
 	opts processOptions,
 ) (string, error) {
-	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	leaseCtx, releaseRuntime, err := al.acquireTrustedRuntimeRoot(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -1266,7 +1482,7 @@ func (al *AgentLoop) runAgentLoop(
 		opts.Dispatch.SessionKey,
 		newTurnContext(opts.Dispatch.InboundContext, opts.Dispatch.RouteResult, opts.Dispatch.SessionScope),
 	)
-	ts := newTurnState(agent, opts, turnScope)
+	ts := newTurnStateFromRuntimeContext(ctx, agent, opts, turnScope)
 	outputOwner := opts.trackedResultOutputOwner
 	if outputOwner == nil {
 		outputOwner = &trackedSubagentResultOutputOwner{}
@@ -1348,7 +1564,7 @@ func (al *AgentLoop) runAgentLoop(
 			),
 		)
 		logger.DebugSensitiveCF(
-			logger.DiagnosticPolicy{},
+			ts.diagnosticPolicy,
 			logger.ComponentAgent,
 			logger.DiagnosticMessageModelResponse,
 			logger.NewSafeFields(

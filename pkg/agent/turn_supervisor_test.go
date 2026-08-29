@@ -584,7 +584,7 @@ func TestRealRootSubTurnSemaphoreSaturatesAndReleasesOnAbort(t *testing.T) {
 	startSpawn := func(index int) {
 		spawnDone[index] = make(chan spawnOutcome, 1)
 		go func() {
-			result, err := spawnSubTurn(rootCtx, al, root, SubTurnConfig{
+			result, err := spawnSubTurnFromTrustedRuntime(rootCtx, al, root, SubTurnConfig{
 				Model:        agent.Model,
 				SystemPrompt: fmt.Sprintf("semaphore child %d", index),
 				Timeout:      5 * time.Second,

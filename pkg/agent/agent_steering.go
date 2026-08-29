@@ -96,7 +96,7 @@ func (al *AgentLoop) runTurnWithSteering(
 		return outboundEnqueued
 	}
 
-	continued, continueErr := al.drainQueuedSteeringContinuations(ctx, target)
+	continued, continueErr := al.drainQueuedSteeringContinuations(ctx, target, nil)
 	if continueErr != nil {
 		logger.WarnSafeCF(
 			logger.ComponentAgent,
@@ -131,6 +131,7 @@ func (al *AgentLoop) runTurnWithSteering(
 func (al *AgentLoop) drainQueuedSteeringContinuations(
 	ctx context.Context,
 	target *continuationTarget,
+	diagnosticOrigin *runtimeDiagnosticOrigin,
 ) (string, error) {
 	if target == nil {
 		return "", nil
@@ -159,6 +160,7 @@ func (al *AgentLoop) drainQueuedSteeringContinuations(
 			target.Channel,
 			target.ChatID,
 			target.InboundContext,
+			diagnosticOrigin,
 		)
 		if continueErr != nil {
 			return finalResponse, continueErr

@@ -465,15 +465,19 @@ func (al *AgentLoop) Continue(
 	ctx context.Context,
 	sessionKey, channel, chatID string,
 ) (string, error) {
-	return al.continueWithInboundContext(ctx, sessionKey, channel, chatID, nil)
+	return al.continueWithInboundContext(ctx, sessionKey, channel, chatID, nil, nil)
 }
 
 func (al *AgentLoop) continueWithInboundContext(
 	ctx context.Context,
 	sessionKey, channel, chatID string,
 	inboundContext *bus.InboundContext,
+	diagnosticOrigin *runtimeDiagnosticOrigin,
 ) (string, error) {
-	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	leaseCtx, releaseRuntime, err := al.acquireSteeringRuntimeUse(
+		ctx,
+		diagnosticOrigin,
+	)
 	if err != nil {
 		return "", err
 	}

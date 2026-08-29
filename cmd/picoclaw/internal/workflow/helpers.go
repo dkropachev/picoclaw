@@ -13,6 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -203,11 +204,12 @@ func (r *cliWorkflowRuntimeRunner) ensureLoopLocked() error {
 		return err
 	}
 	r.msgBus = bus.NewMessageBus()
-	r.loop = agentloop.NewAgentLoopWithExecutionPolicy(
+	r.loop = agentloop.NewAgentLoopWithRuntimePolicies(
 		r.cfg,
 		r.msgBus,
 		provider,
 		executionPolicy,
+		logger.DiagnosticPolicy{},
 		agentloop.WithConfigPath(r.configPath),
 	)
 	return nil

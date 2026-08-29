@@ -159,7 +159,7 @@ func (al *AgentLoop) runScheduledWorkflowTriggers(ctx context.Context) {
 	schedules := make(map[string]scheduledWorkflowRun)
 	var scheduleGeneration *config.Config
 	refresh := func(now time.Time) {
-		leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+		leaseCtx, releaseRuntime, err := al.acquireTrustedRuntimeRoot(ctx)
 		if err != nil {
 			logger.WarnSafeCF(
 				logger.ComponentWorkflow,

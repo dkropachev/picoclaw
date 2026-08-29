@@ -23,6 +23,23 @@ const (
 	testMaxConcurrentSubTurns = defaultMaxConcurrentSubTurns
 )
 
+// spawnSubTurnFromTrustedRuntime models the production call boundary: direct
+// SubTurn behavior tests start from one live admitted generation, while
+// spawnSubTurn itself must still reject detached inherited/retained work.
+func spawnSubTurnFromTrustedRuntime(
+	ctx context.Context,
+	al *AgentLoop,
+	parent *turnState,
+	cfg SubTurnConfig,
+) (*tools.ToolResult, error) {
+	rootCtx, releaseRoot, err := al.acquireTrustedRuntimeRoot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseRoot()
+	return spawnSubTurn(rootCtx, al, parent, cfg)
+}
+
 // ====================== Test Helper: Event Collector ======================
 type eventCollector struct {
 	mu     sync.Mutex
@@ -148,7 +165,7 @@ func TestSpawnSubTurn(t *testing.T) {
 			defer collectCleanup()
 
 			// Execute spawnSubTurn
-			result, err := spawnSubTurn(context.Background(), al, parent, tt.config)
+			result, err := spawnSubTurnFromTrustedRuntime(context.Background(), al, parent, tt.config)
 
 			// Assert errors
 			if tt.wantErr != nil {
@@ -215,7 +232,7 @@ func TestSpawnSubTurn_EphemeralSessionIsolation(t *testing.T) {
 
 	originalParentLen := len(parentSession.GetHistory(""))
 
-	_, _ = spawnSubTurn(context.Background(), al, parent, cfg)
+	_, _ = spawnSubTurnFromTrustedRuntime(context.Background(), al, parent, cfg)
 
 	// Parent session must be untouched — child used its own store
 	if got := len(parentSession.GetHistory("")); got != originalParentLen {
@@ -254,7 +271,7 @@ func TestSpawnSubTurn_ResultDelivery(t *testing.T) {
 	// Set Async=true to test async result delivery via pendingResults channel
 	cfg := SubTurnConfig{Model: "gpt-4o-mini", Tools: []tools.Tool{}, Async: true}
 
-	_, _ = spawnSubTurn(context.Background(), al, parent, cfg)
+	_, _ = spawnSubTurnFromTrustedRuntime(context.Background(), al, parent, cfg)
 
 	// Check if pendingResults received the result (only for async calls)
 	select {
@@ -285,7 +302,7 @@ func TestSpawnSubTurn_ResultDeliverySync(t *testing.T) {
 	// Sync call (Async=false, the default) - result should be returned directly
 	cfg := SubTurnConfig{Model: "gpt-4o-mini", Tools: []tools.Tool{}, Async: false}
 
-	result, err := spawnSubTurn(context.Background(), al, parent, cfg)
+	result, err := spawnSubTurnFromTrustedRuntime(context.Background(), al, parent, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -364,7 +381,7 @@ func TestSubTurnResultChannelRegistration(t *testing.T) {
 		t.Error("expected no channel before spawnSubTurn")
 	}
 
-	_, _ = spawnSubTurn(context.Background(), al, parent, cfg)
+	_, _ = spawnSubTurnFromTrustedRuntime(context.Background(), al, parent, cfg)
 }
 
 // ====================== Extra Independent Test: Dequeue Pending SubTurn Results ======================
@@ -437,7 +454,7 @@ func TestSubTurnConcurrencySemaphore(t *testing.T) {
 	done := make(chan bool, 3)
 	for i := 0; i < 2; i++ {
 		go func() {
-			_, _ = spawnSubTurn(context.Background(), al, parent, cfg)
+			_, _ = spawnSubTurnFromTrustedRuntime(context.Background(), al, parent, cfg)
 			done <- true
 		}()
 	}
@@ -645,7 +662,7 @@ func TestNestedSubTurnHierarchy(t *testing.T) {
 
 	// Spawn a child (depth 1)
 	childCfg := SubTurnConfig{Model: "gpt-4o-mini"}
-	_, err := spawnSubTurn(context.Background(), al, rootTS, childCfg)
+	_, err := spawnSubTurnFromTrustedRuntime(context.Background(), al, rootTS, childCfg)
 	if err != nil {
 		t.Fatalf("failed to spawn child: %v", err)
 	}
@@ -878,7 +895,7 @@ func TestSpawnSubTurn_PanicRecovery(t *testing.T) {
 
 	// Test async call - result should still be delivered via channel
 	asyncCfg := SubTurnConfig{Model: "gpt-4o-mini", Tools: []tools.Tool{}, Async: true}
-	result, err := spawnSubTurn(context.Background(), al, parent, asyncCfg)
+	result, err := spawnSubTurnFromTrustedRuntime(context.Background(), al, parent, asyncCfg)
 
 	// Should return error from panic recovery
 	if err == nil {
@@ -1405,7 +1422,7 @@ func TestConcurrencySemaphore_Timeout(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, err := spawnSubTurn(testCtx, al, parentTS, subTurnCfg)
+	_, err := spawnSubTurnFromTrustedRuntime(testCtx, al, parentTS, subTurnCfg)
 	elapsed := time.Since(start)
 
 	// Should get a timeout error (either from our timeout context or the internal one)
@@ -1496,7 +1513,7 @@ func TestContextWrapping_SingleLayer(t *testing.T) {
 		Async: false,
 	}
 
-	result, err := spawnSubTurn(ctx, al, parentTS, subTurnCfg)
+	result, err := spawnSubTurnFromTrustedRuntime(ctx, al, parentTS, subTurnCfg)
 	if err != nil {
 		t.Fatalf("spawnSubTurn failed: %v", err)
 	}
@@ -1543,7 +1560,7 @@ func TestSyncSubTurn_NoChannelDelivery(t *testing.T) {
 		Async: false, // Synchronous - should NOT deliver to channel
 	}
 
-	result, err := spawnSubTurn(ctx, al, parentTS, subTurnCfg)
+	result, err := spawnSubTurnFromTrustedRuntime(ctx, al, parentTS, subTurnCfg)
 	if err != nil {
 		t.Fatalf("spawnSubTurn failed: %v", err)
 	}
@@ -1601,7 +1618,7 @@ func TestAsyncSubTurn_ChannelDelivery(t *testing.T) {
 		Async: true, // Asynchronous - SHOULD deliver to channel
 	}
 
-	result, err := spawnSubTurn(ctx, al, parentTS, subTurnCfg)
+	result, err := spawnSubTurnFromTrustedRuntime(ctx, al, parentTS, subTurnCfg)
 	if err != nil {
 		t.Fatalf("spawnSubTurn failed: %v", err)
 	}
@@ -1779,7 +1796,7 @@ func TestSpawnDuringAbort_RaceCondition(t *testing.T) {
 			Model: "gpt-4o-mini",
 			Async: false,
 		}
-		_, err := spawnSubTurn(parentTS.ctx, al, parentTS, subTurnCfg)
+		_, err := spawnSubTurnFromTrustedRuntime(parentTS.ctx, al, parentTS, subTurnCfg)
 		spawnErr = err
 	}()
 
@@ -1894,7 +1911,7 @@ func TestAsyncSubTurn_ParentFinishesEarly(t *testing.T) {
 			Model: "slow-model",
 			Async: true, // Asynchronous SubTurn
 		}
-		subTurnResult, subTurnErr = spawnSubTurn(parentTS.ctx, al, parentTS, subTurnCfg)
+		subTurnResult, subTurnErr = spawnSubTurnFromTrustedRuntime(parentTS.ctx, al, parentTS, subTurnCfg)
 	}()
 
 	// Parent finishes quickly (after 100ms), while SubTurn is still running
@@ -1967,7 +1984,7 @@ func TestAsyncSubTurn_ParentWaitsForChild(t *testing.T) {
 			Model: "slow-model",
 			Async: true,
 		}
-		subTurnResult, subTurnErr = spawnSubTurn(parentTS.ctx, al, parentTS, subTurnCfg)
+		subTurnResult, subTurnErr = spawnSubTurnFromTrustedRuntime(parentTS.ctx, al, parentTS, subTurnCfg)
 	}()
 
 	// Parent WAITS for SubTurn to complete
@@ -2134,7 +2151,7 @@ func TestSubTurn_IndependentContext(t *testing.T) {
 			Async:    true,
 			Critical: true, // Critical SubTurn should continue
 		}
-		_, subTurnErr = spawnSubTurn(parentTS.ctx, al, parentTS, subTurnCfg)
+		_, subTurnErr = spawnSubTurnFromTrustedRuntime(parentTS.ctx, al, parentTS, subTurnCfg)
 	}()
 
 	// Let SubTurn start
@@ -2254,7 +2271,7 @@ func TestSpawnSubTurn_TargetAgentID_UsesTargetAgent(t *testing.T) {
 		agent:          alphaAgent,
 	}
 
-	result, err := spawnSubTurn(context.Background(), al, parent, SubTurnConfig{
+	result, err := spawnSubTurnFromTrustedRuntime(context.Background(), al, parent, SubTurnConfig{
 		TargetAgentID: "beta",
 		SystemPrompt:  "task for beta",
 	})
@@ -2289,7 +2306,7 @@ func TestSpawnSubTurn_TargetAgentID_NotFound(t *testing.T) {
 		agent:          alphaAgent,
 	}
 
-	_, err := spawnSubTurn(context.Background(), al, parent, SubTurnConfig{
+	_, err := spawnSubTurnFromTrustedRuntime(context.Background(), al, parent, SubTurnConfig{
 		TargetAgentID: "nonexistent",
 		SystemPrompt:  "task",
 	})
@@ -2319,7 +2336,7 @@ func TestSpawnSubTurn_TargetAgentID_EmptyModelAccepted(t *testing.T) {
 	}
 
 	// Model is empty but TargetAgentID is set — should NOT fail validation
-	result, err := spawnSubTurn(context.Background(), al, parent, SubTurnConfig{
+	result, err := spawnSubTurnFromTrustedRuntime(context.Background(), al, parent, SubTurnConfig{
 		Model:         "", // intentionally empty
 		TargetAgentID: "beta",
 		SystemPrompt:  "task for beta",

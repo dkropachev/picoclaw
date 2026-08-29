@@ -64,7 +64,7 @@ func (al *AgentLoop) processDirectWithChannel(
 	content, sessionKey, channel, chatID string,
 	publish bool,
 ) (string, error) {
-	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	leaseCtx, releaseRuntime, err := al.acquireTrustedRuntimeRoot(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -102,7 +102,7 @@ func (al *AgentLoop) ProcessHeartbeat(
 	ctx context.Context,
 	content, channel, chatID string,
 ) (string, error) {
-	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	leaseCtx, releaseRuntime, err := al.acquireTrustedRuntimeRoot(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -265,7 +265,7 @@ func (al *AgentLoop) processMessageWithPreparation(
 	msg bus.InboundMessage,
 	prepared bool,
 ) (string, error) {
-	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	leaseCtx, releaseRuntime, err := al.acquireTrustedRuntimeRoot(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -351,7 +351,7 @@ func (al *AgentLoop) processMessageWithPreparation(
 		),
 	)
 	logger.DebugSensitiveCF(
-		logger.DiagnosticPolicy{},
+		logger.DiagnosticPolicyFromContext(ctx),
 		logger.ComponentAgent,
 		logger.DiagnosticMessageInboundMessage,
 		logger.NewSafeFields(

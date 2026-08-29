@@ -1,0 +1,10 @@
+# p015b3-sensitive-policy-sources-v1
+# file	function	ordinal	callee	policy_base64url
+# The first argument of every Agent sensitive sink is an exact reviewed source.
+pkg/agent/agent.go	(*AgentLoop).runAgentLoop	1	DebugSensitiveCF	dHMuZGlhZ25vc3RpY1BvbGljeQ
+pkg/agent/agent_message.go	(*AgentLoop).processMessageWithPreparation	1	DebugSensitiveCF	bG9nZ2VyLkRpYWdub3N0aWNQb2xpY3lGcm9tQ29udGV4dChjdHgp
+pkg/agent/context.go	(*ContextBuilder).buildMessagesFromPromptWithDiagnosticPolicy	1	DebugSensitiveCF	ZGlhZ25vc3RpY1BvbGljeQ
+pkg/agent/pipeline_execute.go	(*Pipeline).ExecuteTools	1	DebugSensitiveCF	dHMuZGlhZ25vc3RpY1BvbGljeQ
+pkg/agent/pipeline_execute.go	(*Pipeline).ExecuteTools	2	DebugSensitiveCF	dHMuZGlhZ25vc3RpY1BvbGljeQ
+pkg/agent/pipeline_llm.go	(*Pipeline).CallLLM	1	DebugSensitiveCF	dHMuZGlhZ25vc3RpY1BvbGljeQ
+pkg/agent/pipeline_llm.go	(*Pipeline).CallLLM	2	DebugSensitiveCF	dHMuZGlhZ25vc3RpY1BvbGljeQ

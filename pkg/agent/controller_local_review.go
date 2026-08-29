@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
@@ -124,9 +125,11 @@ type ControllerLocalReviewResult struct {
 // one immutable agent instance from the caller's leased runtime generation.
 // It retains neither a provider nor any repository capability.
 type ControllerLocalReviewRunner struct {
-	loop    *AgentLoop
-	agent   *AgentInstance
-	agentID string
+	loop         *AgentLoop
+	agent        *AgentInstance
+	agentID      string
+	generationID uint64
+	strict       bool
 }
 
 // ControllerLocalReviewPromptDigest binds durable orchestration to the exact
@@ -165,6 +168,34 @@ func (al *AgentLoop) NewControllerLocalReviewRunner(
 	return &ControllerLocalReviewRunner{loop: al, agent: agent, agentID: agentID}, nil
 }
 
+// NewControllerLocalReviewRunnerWithRuntimeLease resolves a runner from the
+// exact immutable generation carried by ctx. The returned runner revalidates
+// the same live generation at every Run call.
+func (al *AgentLoop) NewControllerLocalReviewRunnerWithRuntimeLease(
+	ctx context.Context,
+	agentID string,
+) (*ControllerLocalReviewRunner, error) {
+	if al == nil || agentID != strings.TrimSpace(agentID) ||
+		!routing.IsCanonicalAgentID(agentID) {
+		return nil, ErrControllerLocalReviewUnavailable
+	}
+	generation, err := al.runtimeGenerationFromLease(ctx)
+	if err != nil {
+		return nil, ErrControllerLocalReviewUnavailable
+	}
+	agent, ok := generation.registry.GetAgent(agentID)
+	if !ok || !controllerLocalReviewAgentReady(al, agent, agentID) {
+		return nil, ErrControllerLocalReviewUnavailable
+	}
+	return &ControllerLocalReviewRunner{
+		loop:         al,
+		agent:        agent,
+		agentID:      agentID,
+		generationID: generation.id,
+		strict:       true,
+	}, nil
+}
+
 // ControllerLocalReviewReady reports whether an exact current agent can make
 // an isolated controller review. It invokes no provider, model, hook, MCP,
 // workflow, session, or repository capability.
@@ -184,6 +215,24 @@ func (al *AgentLoop) ControllerLocalReviewReady(agentID string) bool {
 	return ok && controllerLocalReviewAgentReady(al, agent, agentID)
 }
 
+// ControllerLocalReviewReadyWithRuntimeLease reports readiness only for the
+// exact live generation carried by ctx.
+func (al *AgentLoop) ControllerLocalReviewReadyWithRuntimeLease(
+	ctx context.Context,
+	agentID string,
+) bool {
+	if al == nil || agentID != strings.TrimSpace(agentID) ||
+		!routing.IsCanonicalAgentID(agentID) {
+		return false
+	}
+	generation, err := al.runtimeGenerationFromLease(ctx)
+	if err != nil {
+		return false
+	}
+	agent, ok := generation.registry.GetAgent(agentID)
+	return ok && controllerLocalReviewAgentReady(al, agent, agentID)
+}
+
 // Run makes one fresh private ephemeral request. Any provider, configuration,
 // tool-call, or malformed-output detail is collapsed to a stable safe error.
 func (runner *ControllerLocalReviewRunner) Run(
@@ -197,6 +246,21 @@ func (runner *ControllerLocalReviewRunner) Run(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if runner.strict {
+		generation, err := runner.loop.runtimeGenerationFromLease(ctx)
+		if err != nil || generation.id != runner.generationID ||
+			generation.registry == nil {
+			return ControllerLocalReviewResult{}, ErrControllerLocalReviewUnavailable
+		}
+		current, ok := generation.registry.GetAgent(runner.agentID)
+		if !ok || current != runner.agent {
+			return ControllerLocalReviewResult{}, ErrControllerLocalReviewUnavailable
+		}
+	} else {
+		var revoke func()
+		ctx, revoke = logger.BindRootDiagnosticPolicy(ctx, logger.DiagnosticPolicy{})
+		defer revoke()
+	}
 	contextText := strings.TrimSpace(request.Context)
 	if contextText == "" || contextText != request.Context ||
 		!controllerLocalReviewText(contextText, MaxControllerLocalReviewContextBytes) {
@@ -205,7 +269,7 @@ func (runner *ControllerLocalReviewRunner) Run(
 	if err := ctx.Err(); err != nil {
 		return ControllerLocalReviewResult{}, err
 	}
-	if !runner.isCurrentGenerationAgent() {
+	if !runner.strict && !runner.isCurrentGenerationAgent() {
 		return ControllerLocalReviewResult{}, ErrControllerLocalReviewUnavailable
 	}
 

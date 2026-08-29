@@ -1,0 +1,8 @@
+# p015b3-paused-callbacks-v1
+# file	function	ordinal	callee
+# Generationless pause ownership may enter current-generation setup only here.
+pkg/agent/agent.go	(*AgentLoop).reloadProviderAndConfig	1	withPausedRuntimeGeneration
+pkg/agent/agent.go	(*AgentLoop).reloadProviderAndConfig	2	withPausedRuntimeGeneration
+pkg/agent/agent.go	(*AgentLoop).reloadProviderAndConfig	3	withPausedRuntimeGeneration
+pkg/gateway/gateway.go	handleConfigReloadWithServiceOps	1	WithPausedRuntimeGeneration
+pkg/gateway/gateway.go	handleConfigReloadWithServiceOps	2	WithPausedRuntimeGeneration

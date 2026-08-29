@@ -122,7 +122,7 @@ func (r *workflowToolRunner) RunTool(ctx context.Context, req workflows.ToolRequ
 	}
 	registry := r.registry
 	if r.loop != nil && r.dynamic {
-		leaseCtx, releaseRuntime, err := r.loop.acquireRuntimeUse(ctx)
+		leaseCtx, releaseRuntime, err := r.loop.acquireTrustedRuntimeRoot(ctx)
 		if err != nil {
 			return nil, errors.Join(workflows.ErrToolCallNotDispatched, err)
 		}
@@ -284,7 +284,7 @@ func (r *workflowAgentRunner) ResolveRepositoryReviewProfile(
 	if r == nil || r.loop == nil {
 		return workflows.RepositoryReviewModelProfile{}, errors.New("agent loop not configured")
 	}
-	leaseCtx, releaseRuntime, leaseErr := r.loop.acquireRuntimeUse(ctx)
+	leaseCtx, releaseRuntime, leaseErr := r.loop.acquireTrustedRuntimeRoot(ctx)
 	if leaseErr != nil {
 		return workflows.RepositoryReviewModelProfile{}, leaseErr
 	}
@@ -615,7 +615,7 @@ func (r *workflowAgentRunner) CaptureReadOnlySession(
 	if r == nil || r.loop == nil {
 		return nil, fmt.Errorf("agent loop not configured")
 	}
-	leaseCtx, releaseRuntime, acquireErr := r.loop.acquireRuntimeUse(ctx)
+	leaseCtx, releaseRuntime, acquireErr := r.loop.acquireTrustedRuntimeRoot(ctx)
 	if acquireErr != nil {
 		return nil, acquireErr
 	}
@@ -702,7 +702,7 @@ func (r *workflowAgentRunner) RunAgent(
 			outputs["usage"] = usage
 		}
 	}()
-	leaseCtx, releaseRuntime, acquireErr := r.loop.acquireRuntimeUse(ctx)
+	leaseCtx, releaseRuntime, acquireErr := r.loop.acquireTrustedRuntimeRoot(ctx)
 	if acquireErr != nil {
 		return nil, acquireErr
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
@@ -150,11 +151,12 @@ func defaultRunWorkflowAuthorAgent(
 	}
 	msgBus := bus.NewMessageBus()
 	defer msgBus.Close()
-	agentLoop := agentloop.NewAgentLoopWithExecutionPolicy(
+	agentLoop := agentloop.NewAgentLoopWithRuntimePolicies(
 		cfg,
 		msgBus,
 		provider,
 		executionPolicy,
+		logger.DiagnosticPolicy{},
 		agentloop.WithConfigPath(h.configPath),
 	)
 	defer agentLoop.Close()

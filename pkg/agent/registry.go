@@ -18,7 +18,9 @@ type AgentRegistry struct {
 	agents            map[string]*AgentInstance
 	resolver          *routing.RouteResolver
 	executionPolicy   isolation.ExecutionPolicy
+	diagnosticPolicy  logger.DiagnosticPolicy
 	bootstrapProvider providers.LLMProvider
+	borrowedProviders []providers.LLMProvider
 	mu                sync.RWMutex
 }
 
@@ -44,10 +46,11 @@ func NewAgentRegistry(
 	if cfg != nil {
 		isolationCfg = cfg.Isolation
 	}
-	return NewAgentRegistryWithExecutionPolicy(
+	return NewAgentRegistryWithRuntimePolicies(
 		cfg,
 		provider,
 		isolation.NewExecutionPolicy(isolationCfg),
+		logger.DiagnosticPolicy{},
 	)
 }
 
@@ -58,12 +61,48 @@ func NewAgentRegistryWithExecutionPolicy(
 	provider providers.LLMProvider,
 	policy isolation.ExecutionPolicy,
 ) *AgentRegistry {
+	return NewAgentRegistryWithRuntimePolicies(
+		cfg,
+		provider,
+		policy,
+		logger.DiagnosticPolicy{},
+	)
+}
+
+// NewAgentRegistryWithRuntimePolicies constructs every agent process owner
+// from one complete immutable runtime-generation policy tuple.
+func NewAgentRegistryWithRuntimePolicies(
+	cfg *config.Config,
+	provider providers.LLMProvider,
+	executionPolicy isolation.ExecutionPolicy,
+	diagnosticPolicy logger.DiagnosticPolicy,
+) *AgentRegistry {
+	return newAgentRegistryWithRuntimePolicies(
+		cfg,
+		provider,
+		executionPolicy,
+		diagnosticPolicy,
+		nil,
+	)
+}
+
+func newAgentRegistryWithRuntimePolicies(
+	cfg *config.Config,
+	provider providers.LLMProvider,
+	executionPolicy isolation.ExecutionPolicy,
+	diagnosticPolicy logger.DiagnosticPolicy,
+	providerGeneration *agentRegistryProviderGeneration,
+) *AgentRegistry {
 	registry := &AgentRegistry{
 		cfg:               cfg,
 		agents:            make(map[string]*AgentInstance),
 		resolver:          routing.NewRouteResolver(cfg),
-		executionPolicy:   policy,
+		executionPolicy:   executionPolicy,
+		diagnosticPolicy:  diagnosticPolicy,
 		bootstrapProvider: provider,
+	}
+	if providerGeneration != nil {
+		registry.borrowedProviders = providerGeneration.providerSet()
 	}
 	defer (&agentRegistryConstructionGuard{registry: registry}).cleanupPanic()
 
@@ -73,13 +112,20 @@ func NewAgentRegistryWithExecutionPolicy(
 			ID:      "main",
 			Default: true,
 		}
-		instance := NewAgentInstanceWithExecutionPolicy(
+		instance := newAgentInstanceWithRuntimePolicies(
 			implicitAgent,
 			&cfg.Agents.Defaults,
 			cfg,
 			provider,
-			policy,
+			executionPolicy,
+			diagnosticPolicy,
+			providerGeneration.bindingsForAgent("main"),
 		)
+		if providerGeneration != nil {
+			direct := providerGeneration.directForAgent("main")
+			instance.Provider = direct.primary
+			instance.LightProvider = direct.light
+		}
 		registry.agents["main"] = instance
 		logger.InfoSafeCF(
 			logger.ComponentAgent,
@@ -90,13 +136,20 @@ func NewAgentRegistryWithExecutionPolicy(
 		for i := range agentConfigs {
 			ac := &agentConfigs[i]
 			id := routing.NormalizeAgentID(ac.ID)
-			instance := NewAgentInstanceWithExecutionPolicy(
+			instance := newAgentInstanceWithRuntimePolicies(
 				ac,
 				&cfg.Agents.Defaults,
 				cfg,
 				provider,
-				policy,
+				executionPolicy,
+				diagnosticPolicy,
+				providerGeneration.bindingsForAgent(id),
 			)
+			if providerGeneration != nil {
+				direct := providerGeneration.directForAgent(id)
+				instance.Provider = direct.primary
+				instance.LightProvider = direct.light
+			}
 			registry.agents[id] = instance
 			logger.InfoSafeCF(
 				logger.ComponentAgent,
@@ -126,13 +179,14 @@ func (r *AgentRegistry) CloseCandidate() {
 	if r == nil {
 		return
 	}
-	providersToClose := make(map[providers.LLMProvider]struct{})
+	var providersToClose []providers.LLMProvider
 	r.mu.RLock()
 	agents := make([]*AgentInstance, 0, len(r.agents))
 	for _, agent := range r.agents {
 		agents = append(agents, agent)
 	}
 	bootstrap := r.bootstrapProvider
+	borrowed := r.borrowedProviders
 	r.mu.RUnlock()
 	agentCandidateProvidersMu.RLock()
 	for _, agent := range agents {
@@ -140,14 +194,33 @@ func (r *AgentRegistry) CloseCandidate() {
 			continue
 		}
 		for _, candidateProvider := range agent.CandidateProviders {
-			if candidateProvider != nil && candidateProvider != bootstrap {
-				providersToClose[candidateProvider] = struct{}{}
+			if candidateProvider != nil && !sameLLMProvider(candidateProvider, bootstrap) {
+				retained := false
+				for _, borrowedProvider := range borrowed {
+					if sameLLMProvider(candidateProvider, borrowedProvider) {
+						retained = true
+						break
+					}
+				}
+				if retained {
+					continue
+				}
+				duplicate := false
+				for _, queued := range providersToClose {
+					if sameLLMProvider(queued, candidateProvider) {
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					providersToClose = append(providersToClose, candidateProvider)
+				}
 			}
 		}
 	}
 	agentCandidateProvidersMu.RUnlock()
 	r.Close()
-	for candidateProvider := range providersToClose {
+	for _, candidateProvider := range providersToClose {
 		closeProviderIfStateful(candidateProvider)
 	}
 }

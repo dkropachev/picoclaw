@@ -34,6 +34,7 @@ type trackedSubagentResultScope struct {
 }
 
 type trackedSubagentResultRoute struct {
+	diagnosticOrigin            runtimeDiagnosticOrigin
 	SourceTurnID                string
 	SourceAgentID               string
 	SourceSessionKey            string
@@ -265,6 +266,7 @@ func snapshotTrackedSubagentResultRoute(
 		visited[current] = struct{}{}
 
 		current.mu.RLock()
+		diagnosticPolicy := current.diagnosticPolicy
 		turnID := strings.TrimSpace(current.turnID)
 		agentID := strings.TrimSpace(current.agentID)
 		sessionKey := strings.TrimSpace(current.sessionKey)
@@ -306,6 +308,10 @@ func snapshotTrackedSubagentResultRoute(
 			return trackedSubagentResultRoute{}, fmt.Errorf("partial channel/chat route")
 		}
 		if depth == 0 {
+			sourceSnapshot.diagnosticOrigin = runtimeDiagnosticOrigin{
+				policy: diagnosticPolicy,
+				valid:  true,
+			}
 			sourceSnapshot.SourceTurnID = turnID
 			sourceSnapshot.SourceAgentID = agentID
 			sourceSnapshot.SourceSessionKey = sessionKey
@@ -1303,7 +1309,10 @@ func (al *AgentLoop) runTrackedSubagentResultPump(
 	// pending mailbox data owns no lease and must not turn that pause into loss.
 	// Once one coherent generation admits the worker, bound all continuation
 	// setup/provider/output work in that generation.
-	ctx, releaseRuntime, err := al.acquireRuntimeUse(al.trackedSubagentWorkerContext())
+	ctx, releaseRuntime, err := al.acquireRuntimeUseFromOrigin(
+		al.trackedSubagentWorkerContext(),
+		route.diagnosticOrigin,
+	)
 	if err != nil {
 		al.orphanTrackedSubagentResult(id, "runtime_unavailable")
 		return
@@ -1631,7 +1640,10 @@ func (al *AgentLoop) runTrackedSubagentSteeringRescue(
 		}
 	}()
 
-	ctx, releaseRuntime, err := al.acquireRuntimeUse(al.trackedSubagentWorkerContext())
+	ctx, releaseRuntime, err := al.acquireRuntimeUseFromOrigin(
+		al.trackedSubagentWorkerContext(),
+		route.diagnosticOrigin,
+	)
 	if err != nil {
 		retryMode = "none"
 		return

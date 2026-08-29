@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -780,11 +781,6 @@ func TestAgentTurnUXRuntimeRetainFailurePreservesNewerReservation(t *testing.T) 
 		al.activeTurnStates.CompareAndDelete(sessionKey, newer)
 	})
 
-	al.runtimeGateMu.Lock()
-	al.runtimeGateStopped = true
-	al.signalRuntimeGateChangedLocked()
-	al.runtimeGateMu.Unlock()
-
 	msg := bus.InboundMessage{
 		Context: bus.InboundContext{
 			Channel:  channel,
@@ -802,11 +798,10 @@ func TestAgentTurnUXRuntimeRetainFailurePreservesNewerReservation(t *testing.T) 
 		msg,
 	)
 	release()
-	if !errors.Is(err, errAgentRuntimeStopped) {
+	if err == nil || !strings.Contains(err.Error(), "live runtime origin is required") {
 		t.Fatalf(
-			"retainInboundWorkerRuntime() error = %v, want %v",
+			"retainInboundWorkerRuntime() error = %v, want detached-origin rejection",
 			err,
-			errAgentRuntimeStopped,
 		)
 	}
 
@@ -1519,7 +1514,6 @@ func TestAgentTurnUXRescueTreatsCompetingOwnerAsQueueTransfer(t *testing.T) {
 	// queue handoff, not format and publish it as a processing error.
 	state := &steeringRescueState{}
 	request := steeringRescueRequest{
-		parentContext:  context.Background(),
 		channel:        channel,
 		chatID:         chatID,
 		inboundContext: cloneInboundContext(inboundContext),

@@ -394,7 +394,7 @@ func spawnSubTurn(
 	if cfg.Async || cfg.Critical {
 		ctx, releaseRuntime, err = al.retainRuntimeUse(ctx)
 	} else {
-		ctx, releaseRuntime, err = al.acquireRuntimeUse(ctx)
+		ctx, releaseRuntime, err = al.acquireInheritedRuntimeUse(ctx)
 	}
 	if err != nil {
 		return nil, err
@@ -595,7 +595,7 @@ func spawnSubTurn(
 	}
 
 	// Create child turnState using the new API
-	childTS := newTurnState(&agent, opts, scope)
+	childTS := newTurnStateFromRuntimeContext(ctx, &agent, opts, scope)
 
 	// Set SubTurn-specific fields
 	childTS.cancelFunc = cancel

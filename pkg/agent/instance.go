@@ -236,12 +236,13 @@ func NewAgentInstance(
 	if cfg != nil {
 		isolationCfg = cfg.Isolation
 	}
-	return NewAgentInstanceWithExecutionPolicy(
+	return NewAgentInstanceWithRuntimePolicies(
 		agentCfg,
 		defaults,
 		cfg,
 		provider,
 		isolation.NewExecutionPolicy(isolationCfg),
+		logger.DiagnosticPolicy{},
 	)
 }
 
@@ -253,6 +254,48 @@ func NewAgentInstanceWithExecutionPolicy(
 	cfg *config.Config,
 	provider providers.LLMProvider,
 	policy isolation.ExecutionPolicy,
+) *AgentInstance {
+	return NewAgentInstanceWithRuntimePolicies(
+		agentCfg,
+		defaults,
+		cfg,
+		provider,
+		policy,
+		logger.DiagnosticPolicy{},
+	)
+}
+
+// NewAgentInstanceWithRuntimePolicies constructs every process-capable
+// dependency from one complete immutable runtime-generation policy tuple.
+// The diagnostic policy is installed only as the ToolRegistry owner cap; it is
+// never used directly as request authority.
+func NewAgentInstanceWithRuntimePolicies(
+	agentCfg *config.AgentConfig,
+	defaults *config.AgentDefaults,
+	cfg *config.Config,
+	provider providers.LLMProvider,
+	executionPolicy isolation.ExecutionPolicy,
+	diagnosticPolicy logger.DiagnosticPolicy,
+) *AgentInstance {
+	return newAgentInstanceWithRuntimePolicies(
+		agentCfg,
+		defaults,
+		cfg,
+		provider,
+		executionPolicy,
+		diagnosticPolicy,
+		nil,
+	)
+}
+
+func newAgentInstanceWithRuntimePolicies(
+	agentCfg *config.AgentConfig,
+	defaults *config.AgentDefaults,
+	cfg *config.Config,
+	provider providers.LLMProvider,
+	executionPolicy isolation.ExecutionPolicy,
+	diagnosticPolicy logger.DiagnosticPolicy,
+	initialCandidateProviders map[string]providers.LLMProvider,
 ) *AgentInstance {
 	construction := &agentInstanceConstructionGuard{}
 	defer construction.cleanupPanic()
@@ -303,7 +346,7 @@ func NewAgentInstanceWithExecutionPolicy(
 	agentToolAllowlist := resolveAgentToolAllowlist(definition)
 	agentMCPServerAllowlist := resolveAgentMCPServerAllowlist(definition)
 
-	toolsRegistry := tools.NewToolRegistry()
+	toolsRegistry := tools.NewToolRegistryWithDiagnosticPolicy(diagnosticPolicy)
 	construction.partial.Tools = toolsRegistry
 	toolsRegistry.SetAllowlist(agentToolAllowlist)
 	readPathPatterns := cloneToolPathPatterns(allowReadPaths)
@@ -461,7 +504,7 @@ func NewAgentInstanceWithExecutionPolicy(
 			workspace,
 			restrict,
 			cfg,
-			policy,
+			executionPolicy,
 			allowReadPaths,
 		)
 		if err != nil {
@@ -560,7 +603,13 @@ func NewAgentInstanceWithExecutionPolicy(
 		summarizeTokenPercent = 75
 	}
 
-	candidateProviders := make(map[string]providers.LLMProvider)
+	candidateProviders := make(
+		map[string]providers.LLMProvider,
+		len(initialCandidateProviders),
+	)
+	for key, candidateProvider := range initialCandidateProviders {
+		candidateProviders[key] = candidateProvider
+	}
 	var configurationErr error
 	if strings.TrimSpace(model) == "" {
 		configurationErr = config.ErrNoModelConfigured
@@ -582,7 +631,7 @@ func NewAgentInstanceWithExecutionPolicy(
 			fallbacks,
 			workspace,
 			candidateProviders,
-			policy,
+			executionPolicy,
 		)
 		if accountRouter != nil {
 			initialSelection := accountRouter.Select("", accountrouter.SelectReasonInitial)
@@ -603,7 +652,7 @@ func NewAgentInstanceWithExecutionPolicy(
 				fallbacks,
 				workspace,
 				candidateProviders,
-				policy,
+				executionPolicy,
 			)
 			if err != nil {
 				configurationErr = err
@@ -631,7 +680,7 @@ func NewAgentInstanceWithExecutionPolicy(
 			defaults.ImageModelFallbacks,
 			workspace,
 			candidateProviders,
-			policy,
+			executionPolicy,
 		)
 		var imageErr error
 		if imageAccountRouter != nil {
@@ -647,7 +696,7 @@ func NewAgentInstanceWithExecutionPolicy(
 				defaults.ImageModelFallbacks,
 				workspace,
 				candidateProviders,
-				policy,
+				executionPolicy,
 			)
 		}
 		if imageErr != nil && configurationErr == nil {
@@ -688,7 +737,7 @@ func NewAgentInstanceWithExecutionPolicy(
 			nil,
 			workspace,
 			candidateProviders,
-			policy,
+			executionPolicy,
 		)
 		if lightAccountRouter != nil {
 			selection := lightAccountRouter.Select("", accountrouter.SelectReasonInitial)
@@ -701,7 +750,7 @@ func NewAgentInstanceWithExecutionPolicy(
 				nil,
 				workspace,
 				candidateProviders,
-				policy,
+				executionPolicy,
 			)
 		}
 		if len(lightCandidates) == 0 {
@@ -761,7 +810,7 @@ func NewAgentInstanceWithExecutionPolicy(
 		LightAccountRouter:        lightAccountRouter,
 		ModelRouter:               modelRouter,
 		ConfigurationError:        configurationErr,
-		executionPolicy:           policy,
+		executionPolicy:           executionPolicy,
 		managedCalibrationCache:   make(map[string]workflowManagedCalibrationCacheEntry),
 	}
 }

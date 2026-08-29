@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 )
@@ -39,6 +42,148 @@ type controllerLocalReviewProviderCall struct {
 	tools    int
 	model    string
 	options  map[string]any
+}
+
+func TestP015B3AControllerLeaseBoundaryMatrix(t *testing.T) {
+	const (
+		contextCanary = "{\"goal\":\"P015B3A_CONTROLLER_CONTEXT_4d21c7\"}"
+		previewToken  = "IMMUTABLE REVIEW CONTEXT"
+	)
+	loop, reviewAgent, canonicalKey, alias := newWorkflowReadOnlyTestLoop(
+		t,
+		&workflowReadOnlyCaptureProvider{},
+	)
+	_ = reviewAgent
+	_ = canonicalKey
+	_ = alias
+	state := &controllerLocalReviewProviderState{response: controllerLocalReviewValidResponse}
+	loop.providerFactory = state.factory
+	positive := logger.NewDiagnosticPolicy(true, logger.DEBUG)
+	loop.mu.Lock()
+	loop.diagnosticPolicy = positive
+	loop.mu.Unlock()
+
+	leaseCtx, release, acquireErr := loop.acquireTrustedRuntimeRoot(context.Background())
+	if acquireErr != nil {
+		t.Fatal(acquireErr)
+	}
+	if !loop.ControllerLocalReviewReadyWithRuntimeLease(leaseCtx, "main") {
+		release()
+		t.Fatal("strict controller review was not ready under a live lease")
+	}
+	strict, constructorErr := loop.NewControllerLocalReviewRunnerWithRuntimeLease(leaseCtx, "main")
+	if constructorErr != nil {
+		release()
+		t.Fatal(constructorErr)
+	}
+	_, strictRaw := captureP015HookRecords(t, func() {
+		if _, runErr := strict.Run(
+			leaseCtx,
+			ControllerLocalReviewRequest{Context: contextCanary},
+		); runErr != nil {
+			t.Fatalf("strict Run() error = %v", runErr)
+		}
+	})
+	if !bytes.Contains(strictRaw, []byte(previewToken)) {
+		release()
+		t.Fatal("strict live controller request did not carry its diagnostic policy")
+	}
+	_, _, callsBeforeRelease := state.snapshot()
+	release()
+	if _, releasedRunErr := strict.Run(
+		leaseCtx,
+		ControllerLocalReviewRequest{Context: contextCanary},
+	); !errors.Is(releasedRunErr, ErrControllerLocalReviewUnavailable) {
+		t.Fatalf("released strict Run() error = %v", releasedRunErr)
+	}
+	_, _, callsAfterRelease := state.snapshot()
+	if len(callsAfterRelease) != len(callsBeforeRelease) {
+		t.Fatal("released strict runner reached the provider")
+	}
+	if _, missingLeaseErr := loop.NewControllerLocalReviewRunnerWithRuntimeLease(
+		context.Background(),
+		"main",
+	); !errors.Is(missingLeaseErr, ErrControllerLocalReviewUnavailable) {
+		t.Fatalf("missing-lease strict constructor error = %v", missingLeaseErr)
+	}
+
+	compat, compatibilityErr := loop.NewControllerLocalReviewRunner("main")
+	if compatibilityErr != nil {
+		t.Fatal(compatibilityErr)
+	}
+	positiveCtx, revoke := logger.BindRootDiagnosticPolicy(context.Background(), positive)
+	defer revoke()
+	_, compatibilityRaw := captureP015HookRecords(t, func() {
+		if _, runErr := compat.Run(
+			positiveCtx,
+			ControllerLocalReviewRequest{Context: contextCanary},
+		); runErr != nil {
+			t.Fatalf("compatibility Run() error = %v", runErr)
+		}
+	})
+	if bytes.Contains(compatibilityRaw, []byte(previewToken)) {
+		t.Fatal("compatibility controller runner accepted positive request authority")
+	}
+
+	pauseCtx, resume, pauseErr := loop.PauseRuntimeForReloadWithContext(
+		context.Background(),
+		context.Background(),
+	)
+	if pauseErr != nil {
+		t.Fatal(pauseErr)
+	}
+	if _, pauseOwnerErr := loop.NewControllerLocalReviewRunnerWithRuntimeLease(
+		pauseCtx,
+		"main",
+	); !errors.Is(pauseOwnerErr, ErrControllerLocalReviewUnavailable) {
+		resume()
+		t.Fatalf("pause-owner strict constructor error = %v", pauseOwnerErr)
+	}
+	resume()
+
+	foreignLoop, foreignAgent, foreignKey, foreignAlias := newWorkflowReadOnlyTestLoop(
+		t,
+		&workflowReadOnlyCaptureProvider{},
+	)
+	_ = foreignAgent
+	_ = foreignKey
+	_ = foreignAlias
+	foreignCtx, releaseForeign, foreignAcquireErr := foreignLoop.acquireTrustedRuntimeRoot(
+		context.Background(),
+	)
+	if foreignAcquireErr != nil {
+		t.Fatal(foreignAcquireErr)
+	}
+	if _, foreignRunErr := strict.Run(
+		foreignCtx,
+		ControllerLocalReviewRequest{Context: contextCanary},
+	); !errors.Is(foreignRunErr, ErrControllerLocalReviewUnavailable) {
+		releaseForeign()
+		t.Fatalf("foreign-loop strict Run() error = %v", foreignRunErr)
+	}
+	releaseForeign()
+
+	cfgB := *loop.GetConfig()
+	if reloadErr := loop.ReloadProviderAndConfigWithRuntimePolicies(
+		context.Background(),
+		&workflowReadOnlyCaptureProvider{},
+		&cfgB,
+		isolation.NewExecutionPolicy(cfgB.Isolation),
+		positive,
+	); reloadErr != nil {
+		t.Fatal(reloadErr)
+	}
+	leaseB, releaseB, acquireBErr := loop.acquireTrustedRuntimeRoot(context.Background())
+	if acquireBErr != nil {
+		t.Fatal(acquireBErr)
+	}
+	defer releaseB()
+	if _, crossGenerationErr := strict.Run(
+		leaseB,
+		ControllerLocalReviewRequest{Context: contextCanary},
+	); !errors.Is(crossGenerationErr, ErrControllerLocalReviewUnavailable) {
+		t.Fatalf("cross-generation strict Run() error = %v", crossGenerationErr)
+	}
 }
 
 type controllerLocalReviewProviderState struct {

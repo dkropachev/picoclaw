@@ -88,7 +88,8 @@ func agentProviderToCompleteFn(al *AgentLoop, agent *AgentInstance) seahorse.Com
 			return "", fmt.Errorf("seahorse completion: agent ID is not configured")
 		}
 
-		leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+		origin, _ := al.runtimeDiagnosticOriginFromLease(ctx)
+		leaseCtx, releaseRuntime, err := al.acquireRuntimeUseFromOrigin(ctx, origin)
 		if err != nil {
 			return "", fmt.Errorf("seahorse completion: acquire current runtime: %w", err)
 		}

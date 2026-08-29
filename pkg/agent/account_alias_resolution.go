@@ -171,6 +171,12 @@ func candidateForAccountAlias(
 	}
 	candidate.DisplayName = strings.TrimSpace(modelAlias)
 	candidate.IdentityKey = accountAliasIdentityKey(accountRef, modelAlias)
+	agentCandidateProvidersMu.RLock()
+	retainedProvider := providersOut[candidate.IdentityKey]
+	agentCandidateProvidersMu.RUnlock()
+	if retainedProvider != nil {
+		return candidate, nil
+	}
 
 	provider, _, err := providers.CreateProviderFromConfigWithExecutionPolicy(
 		modelCfg,

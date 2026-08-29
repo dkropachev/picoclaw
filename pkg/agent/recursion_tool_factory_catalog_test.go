@@ -786,9 +786,6 @@ func TestRecursionCatalogCandidateAndBundleValidationFailures(t *testing.T) {
 
 func TestLegacyRecursionSpawnerPreservesCompatibilityInputs(t *testing.T) {
 	fixture := newRecursionCatalogFixture(t, "alpha", "beta")
-	fixture.loop.runtimeGateMu.Lock()
-	fixture.loop.runtimeGateStopped = true
-	fixture.loop.runtimeGateMu.Unlock()
 	legacyTools := tools.NewToolRegistry()
 	legacyTools.Register(&recursionCatalogLegacyTool{name: "fixture_tool"})
 	spawn := legacyRecursionSpawner(recursionCatalogSpec{
@@ -811,7 +808,8 @@ func TestLegacyRecursionSpawnerPreservesCompatibilityInputs(t *testing.T) {
 		true,
 		true,
 	)
-	if result != nil || !errors.Is(err, errAgentRuntimeStopped) {
+	if result != nil || err == nil ||
+		!strings.Contains(err.Error(), "inherited runtime lease is required") {
 		t.Fatalf("legacy spawn result = %#v, %v", result, err)
 	}
 }
@@ -956,9 +954,6 @@ func TestRecursionCatalogSubTurnCompatibilityBoundaryHelpers(t *testing.T) {
 		!strings.Contains(missingParentErr.Error(), "parent turnState not found") {
 		t.Fatalf("spawner missing parent = %#v, %v", missingParentResult, missingParentErr)
 	}
-	fixture.loop.runtimeGateMu.Lock()
-	fixture.loop.runtimeGateStopped = true
-	fixture.loop.runtimeGateMu.Unlock()
 	parent := fixture.loop.newAdHocRootTurnState(loopContext)
 	parent.agent = fixture.agents["main"]
 	parentContext := withTurnState(loopContext, parent)
@@ -966,8 +961,9 @@ func TestRecursionCatalogSubTurnCompatibilityBoundaryHelpers(t *testing.T) {
 		parentContext,
 		SubTurnConfig{Model: "model-main"},
 	)
-	if result != nil || !errors.Is(err, errAgentRuntimeStopped) {
-		t.Fatalf("stopped runtime SpawnSubTurn = %#v, %v", result, err)
+	if result != nil || err == nil ||
+		!strings.Contains(err.Error(), "inherited runtime lease is required") {
+		t.Fatalf("detached parent SpawnSubTurn = %#v, %v", result, err)
 	}
 }
 
@@ -1418,7 +1414,12 @@ func TestRecursionCatalogTrackedSpawnRecordsHardAbortAsCanceled(t *testing.T) {
 		},
 	}
 	loop.prepareTurnState(parent)
-	ctx := withTurnState(WithAgentLoop(context.Background(), loop), parent)
+	rootCtx, releaseRoot, err := loop.acquireTrustedRuntimeRoot(context.Background())
+	if err != nil {
+		t.Fatalf("acquire trusted runtime root: %v", err)
+	}
+	defer releaseRoot()
+	ctx := withTurnState(WithAgentLoop(rootCtx, loop), parent)
 	callback := make(chan *tools.ToolResult, 1)
 	ack := spawn.ExecuteAsync(
 		ctx,
