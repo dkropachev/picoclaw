@@ -1968,7 +1968,8 @@ func validateRepositoryReviewCampaignPlan(plan Plan) (int, error) {
 		plans, planErr := normalizeRepositoryReviewAssignmentPlans(
 			plan.AssignmentPlans, catalog, allowed,
 		)
-		if planErr != nil || !reflect.DeepEqual(plans, plan.AssignmentPlans) {
+		if planErr != nil || len(plans) != len(plan.AssignmentPlans) ||
+			len(plans) > 0 && !reflect.DeepEqual(plans, plan.AssignmentPlans) {
 			return 0, ErrInvalidPlan
 		}
 	} else if len(plan.AssignmentPlans) != 0 {

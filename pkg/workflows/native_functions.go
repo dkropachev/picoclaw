@@ -269,9 +269,15 @@ func nativeRepositoryReview(
 		}
 		var assignmentCatalog []repoaudit.RepositoryReviewAssignment
 		if campaignID != "" {
+			resolvedReviewers := repositoryReviewModelNames(args["resolved_reviewer_models"])
+			includeDefaultReviewer := nativeBoolAny(args, "include_default_reviewer")
+			if len(resolvedReviewers) == 0 && !includeDefaultReviewer {
+				_, reviewerErr := RepositoryReviewRequiredAssignments(0)
+				return nil, reviewerErr
+			}
 			assignmentCatalog, err = RepositoryBugFinderAssignmentCatalog(
-				repositoryReviewModelNames(args["resolved_reviewer_models"]),
-				nativeBoolAny(args, "include_default_reviewer"),
+				resolvedReviewers,
+				includeDefaultReviewer,
 				RepositoryBugFinderPromptRevision,
 				profileHash,
 			)

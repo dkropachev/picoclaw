@@ -716,7 +716,7 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 	}
 	expectedVersion = automation.Version
 
-	if resetBudget || restart {
+	if resetBudget {
 		automation, err = c.update(
 			ctx,
 			store,
@@ -725,37 +725,124 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 			func(candidate *repoaudit.RepositoryReviewAutomation) error {
 				candidate.Usage = repoaudit.RepositoryReviewTokenUsage{}
 				candidate.EstimatedCostUSD = 0
-				if restart {
-					candidate.CampaignID = ""
-					candidate.CampaignRecoveryPending = false
-					candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
-					candidate.ScopeSelection = nil
-					candidate.Progress = repoaudit.RepositoryReviewProgress{}
-					candidate.ModelStats = make(map[string]repoaudit.RepositoryReviewModelStats)
-					candidate.ModelCoverageSketches = make(map[string]string)
-					candidate.StartedAt = time.Time{}
-					candidate.CompletedAt = time.Time{}
-				}
 				return nil
 			},
 		)
 		if err != nil {
 			return repoaudit.RepositoryReviewAutomation{}, err
 		}
+		expectedVersion = automation.Version
 	}
 	if _, _, interruptErr := store.InterruptAbandonedRepositoryReviewRun(
 		ctx, repoaudit.CanonicalRepositoryIdentity(automation.Repository),
 	); interruptErr != nil {
 		return repoaudit.RepositoryReviewAutomation{}, interruptErr
 	}
-	automation, err = c.ensureRepositoryReviewCampaign(
-		ctx, store, cfg, automation, resolvedCommit, action,
+	commitChanged := repositoryReviewRememberedCommit(automation) != "" &&
+		repositoryReviewRememberedCommit(automation) != resolvedCommit
+	legacyContinuation := automation.CampaignID == "" &&
+		(action == "resume" && !automation.StartedAt.IsZero() ||
+			action == "start" && strings.EqualFold(
+				strings.TrimSpace(automation.Progress.Stage), "next batch queued",
+			))
+	restartPrepared := restart && automation.CampaignID != "" &&
+		automation.ResolvedCommitSHA == resolvedCommit && automation.ActiveRunID == "" &&
+		automation.StartedAt.IsZero() && automation.Progress.CompletedBatches == 0 &&
+		automation.Progress.ReviewedFiles == 0 && automation.Progress.InspectedFiles == 0
+	newCampaign := restart && !restartPrepared || commitChanged ||
+		automation.CampaignID == "" && !legacyContinuation
+	recoverLegacyCampaign := !newCampaign &&
+		repositoryReviewShouldRecoverLegacyCampaign(automation, action)
+	if recoverLegacyCampaign && c.recoverCampaign == nil {
+		return repoaudit.RepositoryReviewAutomation{}, errors.New(
+			"legacy repository review campaign recovery is unavailable",
+		)
+	}
+	campaignID := automation.CampaignID
+	if recoverLegacyCampaign {
+		recoveryProfile, profileErr := resolveRepositoryReviewCampaignProfile(
+			ctx, c.handler.configPath, cfg, automation,
+		)
+		if profileErr != nil {
+			return repoaudit.RepositoryReviewAutomation{}, profileErr
+		}
+		recovered, recoveryErr := c.recoverCampaign(
+			ctx, store, cfg.WorkspacePath(), automation, resolvedCommit, recoveryProfile,
+		)
+		if recoveryErr != nil {
+			return repoaudit.RepositoryReviewAutomation{}, recoveryErr
+		}
+		if recovered.ID != automation.ID || recovered.Version <= automation.Version ||
+			recovered.CampaignID == "" || recovered.CampaignRecoveryPending ||
+			recovered.ActiveRunID != "" || recovered.ScopeSelection == nil ||
+			recovered.ScopePlan.Hash == "" || recovered.ScopePlan.CommitSHA != resolvedCommit {
+			return repoaudit.RepositoryReviewAutomation{}, errors.New(
+				"legacy repository review campaign recovery returned invalid installed authority",
+			)
+		}
+		automation = recovered
+		expectedVersion = automation.Version
+		campaignID = automation.CampaignID
+	}
+	if newCampaign {
+		campaignID = repoaudit.NewRepositoryReviewCampaignID()
+	}
+	automation, err = c.update(
+		ctx,
+		store,
+		id,
+		expectedVersion,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			if newCampaign {
+				resetRepositoryReviewCampaignProgress(candidate)
+			}
+			candidate.CampaignID = campaignID
+			candidate.CampaignRecoveryPending = false
+			candidate.ResolvedCommitSHA = resolvedCommit
+			candidate.ResolvedTargetBranch = resolvedTargetBranch
+			candidate.AdvertisedDefaultBranch = advertisedDefaultBranch
+			candidate.TargetIsDefault = targetIsDefault
+			return nil
+		},
 	)
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
 	expectedVersion = automation.Version
-	campaignID := automation.CampaignID
+	if campaignID != "" {
+		ledgerRepository := repoaudit.CanonicalRepositoryIdentity(automation.Repository)
+		ledgerState, _, ledgerErr := store.Get(ledgerRepository)
+		if ledgerErr != nil {
+			return repoaudit.RepositoryReviewAutomation{}, ledgerErr
+		}
+		expectedCampaignID := ""
+		exact := true
+		if ledgerState.CurrentCampaign != nil {
+			expectedCampaignID = ledgerState.CurrentCampaign.ID
+			if expectedCampaignID == campaignID {
+				exact = ledgerState.CurrentCampaign.Exact
+			}
+		}
+		if _, beginErr := store.BeginCampaign(ctx, repoaudit.BeginCampaignRequest{
+			Repository: ledgerRepository, CampaignID: campaignID,
+			ExpectedCampaignID: expectedCampaignID, CommitSHA: resolvedCommit,
+			ExpectedReviewVersion: ledgerState.ReviewVersion, Exact: exact,
+		}); beginErr != nil {
+			_, _ = c.updateLatest(ctx, store, id, func(candidate *repoaudit.RepositoryReviewAutomation) error {
+				if candidate.CampaignID != campaignID || candidate.ActiveRunID != "" {
+					return nil
+				}
+				candidate.Status = repoaudit.RepositoryReviewAutomationFailed
+				candidate.PauseReason = repoaudit.RepositoryReviewPauseRunFailed
+				candidate.PauseDetail = repositoryReviewBoundedDetail(
+					"Campaign authorization failed before workflow admission: " + beginErr.Error(),
+				)
+				candidate.Progress.Stage = "failed"
+				return nil
+			})
+			return repoaudit.RepositoryReviewAutomation{}, beginErr
+		}
+	}
 	runID := workflows.NewRunID()
 	now := c.clock()
 	c.lifecycleMu.Lock()

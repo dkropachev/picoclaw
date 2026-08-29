@@ -2166,18 +2166,16 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 	}
 	newRunID := resumed.Automation.ActiveRunID
 	expectedRunIDs := append(append([]string(nil), previousRunIDs...), newRunID)
-	expectedQueuedProgress := repoaudit.RepositoryReviewProgress{
-		Stage: "queued", TotalBatches: 1,
-	}
+	expectedQueuedProgress := progress
+	expectedQueuedProgress.Stage = "queued"
 	expectedProjectedProgress := expectedQueuedProgress
 	expectedProjectedProgress.ScopeFrozen = true
-	resumedStartedAt := resumed.Automation.StartedAt
 	if resumed.Automation.Status != repoaudit.RepositoryReviewAutomationRunning || newRunID == "" ||
 		!reflect.DeepEqual(resumed.Automation.RunIDs, expectedRunIDs) ||
 		resumed.Automation.Usage != usage ||
 		math.Abs(resumed.Automation.EstimatedCostUSD-input.EstimatedCostUSD) > 0.0000001 ||
 		resumed.Automation.Progress != expectedProjectedProgress ||
-		resumedStartedAt.IsZero() || !resumedStartedAt.After(startedAt) {
+		!resumed.Automation.StartedAt.Equal(startedAt) {
 		t.Fatalf("resumed failed campaign=%#v", resumed.Automation)
 	}
 	select {
@@ -2185,7 +2183,7 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 		if observed.runID != newRunID || observed.automation.Usage != usage ||
 			observed.automation.CampaignID != input.CampaignID ||
 			observed.automation.Progress != expectedQueuedProgress ||
-			!observed.automation.StartedAt.Equal(resumedStartedAt) ||
+			!observed.automation.StartedAt.Equal(startedAt) ||
 			!reflect.DeepEqual(observed.automation.RunIDs, expectedRunIDs) ||
 			!reflect.DeepEqual(observed.automation.ScopeSelection, automation.ScopeSelection) ||
 			!reflect.DeepEqual(observed.automation.ScopePlan, automation.ScopePlan) {
@@ -2204,12 +2202,12 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 	)
 	if completed.Usage != usage ||
 		math.Abs(completed.EstimatedCostUSD-input.EstimatedCostUSD) > 0.0000001 ||
-		completed.Progress.CompletedBatches != 1 ||
-		completed.Progress.ReviewedFiles != 0 ||
+		completed.Progress.CompletedBatches != progress.CompletedBatches+1 ||
+		completed.Progress.ReviewedFiles != progress.ReviewedFiles ||
 		completed.Progress.RemainingFiles != 0 ||
-		completed.Progress.UnsupportedFiles != 0 ||
-		completed.Progress.Findings != 0 ||
-		!completed.StartedAt.Equal(resumedStartedAt) ||
+		completed.Progress.UnsupportedFiles != progress.UnsupportedFiles ||
+		completed.Progress.Findings != progress.Findings ||
+		!completed.StartedAt.Equal(startedAt) ||
 		!reflect.DeepEqual(completed.RunIDs, expectedRunIDs) ||
 		!reflect.DeepEqual(completed.ScopeSelection, automation.ScopeSelection) ||
 		!reflect.DeepEqual(completed.ScopePlan, automation.ScopePlan) {

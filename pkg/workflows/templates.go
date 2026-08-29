@@ -130,9 +130,6 @@ on:
       account_ref:
         type: string
         default: ""
-      campaign_id:
-        type: string
-        default: ""
       scope_policy:
         type: string
         default: "{}"
@@ -344,7 +341,6 @@ jobs:
           workspace: ${{ steps.scope_checkout.outputs.workspace }}
           commit: ${{ steps.inventory.outputs.commit }}
           inventory_hash: ${{ steps.inventory.outputs.inventoryHash }}
-          campaign_id: ${{ inputs.campaign_id }}
           files: ${{ steps.scope_files.outputs.selectedFiles }}
           force: ${{ inputs.force }}
           max_files: ${{ inputs.max_files_per_run }}
