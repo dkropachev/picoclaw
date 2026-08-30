@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -45,12 +46,13 @@ func ValidRepositoryReviewCampaignID(value string) bool {
 // campaign; an exact replay of the same authorization is idempotent even after
 // later review checkpoints have advanced that version.
 type BeginCampaignRequest struct {
-	Repository            string `json:"repository"`
-	CampaignID            string `json:"campaign_id"`
-	ExpectedCampaignID    string `json:"expected_campaign_id,omitempty"`
-	CommitSHA             string `json:"commit_sha"`
-	ExpectedReviewVersion int64  `json:"expected_review_version"`
-	Exact                 bool   `json:"exact"`
+	Repository            string                                 `json:"repository"`
+	CampaignID            string                                 `json:"campaign_id"`
+	ExpectedCampaignID    string                                 `json:"expected_campaign_id,omitempty"`
+	CommitSHA             string                                 `json:"commit_sha"`
+	ExpectedReviewVersion int64                                  `json:"expected_review_version"`
+	Exact                 bool                                   `json:"exact"`
+	DeduplicationSnapshot *RepositoryReviewDeduplicationSnapshot `json:"deduplication_snapshot,omitempty"`
 }
 
 // ReconcileCampaignRequest is the trusted recovery/backfill mutation for an
@@ -91,12 +93,17 @@ func (s Store) BeginCampaign(
 	request.CampaignID = strings.TrimSpace(request.CampaignID)
 	request.ExpectedCampaignID = strings.TrimSpace(request.ExpectedCampaignID)
 	request.CommitSHA = strings.ToLower(strings.TrimSpace(request.CommitSHA))
+	request.DeduplicationSnapshot = cloneRepositoryReviewDeduplicationSnapshot(
+		request.DeduplicationSnapshot,
+	)
 	if !validBoundedText(request.Repository, maxRepositoryIdentityBytes) ||
 		!ValidRepositoryReviewCampaignID(request.CampaignID) ||
 		(request.ExpectedCampaignID != "" &&
 			!ValidRepositoryReviewCampaignID(request.ExpectedCampaignID)) ||
 		!validRepositoryReviewCommitSHA(request.CommitSHA) ||
-		request.ExpectedReviewVersion < 0 {
+		request.ExpectedReviewVersion < 0 ||
+		request.DeduplicationSnapshot != nil &&
+			validateRepositoryReviewDeduplicationSnapshot(*request.DeduplicationSnapshot) != nil {
 		return RepositoryState{}, ErrInvalidPlan
 	}
 	unlock, err := s.lock(request.Repository)
@@ -114,6 +121,23 @@ func (s Store) BeginCampaign(
 	if current := state.CurrentCampaign; current != nil && current.ID == request.CampaignID {
 		if current.CommitSHA != request.CommitSHA || request.Exact && !current.Exact {
 			return RepositoryState{}, ErrConflict
+		}
+		if request.DeduplicationSnapshot != nil {
+			if current.DeduplicationSnapshot == nil {
+				// A campaign authorized by an older binary has no deduplication
+				// policy. Bind it once before its first gated raw insertion.
+				current.DeduplicationSnapshot = request.DeduplicationSnapshot
+				state.Version++
+				state.ReviewVersion++
+				state.UpdatedAt = s.clock()
+				if err := s.save(&state); err != nil {
+					return RepositoryState{}, err
+				}
+			} else if !reflect.DeepEqual(
+				current.DeduplicationSnapshot, request.DeduplicationSnapshot,
+			) {
+				return RepositoryState{}, ErrConflict
+			}
 		}
 		return state, nil
 	}
@@ -133,6 +157,7 @@ func (s Store) BeginCampaign(
 	state.CurrentCampaign = &RepositoryReviewCampaignCoverage{
 		ID: request.CampaignID, CommitSHA: request.CommitSHA,
 		Exact: request.Exact, Paths: make(map[string]RepositoryReviewCampaignPathCoverage),
+		DeduplicationSnapshot: request.DeduplicationSnapshot,
 	}
 	if state.CampaignHistory == nil {
 		state.CampaignHistory = make(map[string]string)
@@ -247,6 +272,10 @@ func (s Store) ReconcileCampaign(
 	current := state.CurrentCampaign
 	if current == nil || current.ID != request.Coverage.ID ||
 		current.CommitSHA != request.Coverage.CommitSHA {
+		return RepositoryState{}, ErrConflict
+	}
+	if request.Coverage.DeduplicationSnapshot != nil &&
+		!reflect.DeepEqual(current.DeduplicationSnapshot, request.Coverage.DeduplicationSnapshot) {
 		return RepositoryState{}, ErrConflict
 	}
 	// load validates unique retained record identities while holding the same
@@ -468,6 +497,24 @@ func CurrentCampaignMetrics(
 		metrics.RemainingFiles = max(0, coverage.SelectedFiles-terminal)
 	}
 	aggregates := make(map[string]struct{})
+	if len(state.RawFindings) > 0 || len(state.DeduplicationJobs) > 0 ||
+		len(state.DeduplicatedFindings) > 0 {
+		for _, finding := range state.DeduplicatedFindings {
+			if campaignID != "" && !DeduplicatedFindingBelongsToCampaign(
+				state, finding, campaignID,
+			) {
+				continue
+			}
+			metrics.FindingOccurrences++
+			if finding.RepositoryFindingID == "" {
+				metrics.PendingFindingMappings++
+				continue
+			}
+			aggregates[finding.RepositoryFindingID] = struct{}{}
+		}
+		metrics.FindingAggregates = len(aggregates)
+		return metrics
+	}
 	for _, finding := range CurrentCampaignFindingsByID(
 		state, campaignID, legacyRunIDs, legacyStartedAt,
 	) {
@@ -480,6 +527,22 @@ func CurrentCampaignMetrics(
 	}
 	metrics.FindingAggregates = len(aggregates)
 	return metrics
+}
+
+// DeduplicatedFindingBelongsToCampaign also honors a legacy Record projection
+// tagged by campaign recovery without rewriting immutable raw provenance.
+func DeduplicatedFindingBelongsToCampaign(
+	state RepositoryState,
+	finding DeduplicatedReviewFinding,
+	campaignID string,
+) bool {
+	if finding.CampaignID == campaignID {
+		return true
+	}
+	if index := findingIndexByID(state.Findings, finding.ID); index >= 0 {
+		return state.Findings[index].CampaignID == campaignID
+	}
+	return false
 }
 
 func repositoryReviewCampaignScopeBound(coverage *RepositoryReviewCampaignCoverage) bool {
@@ -682,6 +745,8 @@ func validateRepositoryReviewCampaignCoverage(
 	}
 	if !ValidRepositoryReviewCampaignID(coverage.ID) ||
 		!validRepositoryReviewCommitSHA(coverage.CommitSHA) ||
+		(coverage.DeduplicationSnapshot != nil &&
+			validateRepositoryReviewDeduplicationSnapshot(*coverage.DeduplicationSnapshot) != nil) ||
 		(coverage.RecoveryDigest != "" && !validRepositoryReviewCampaignRecoveryDigest(coverage.RecoveryDigest)) ||
 		coverage.Paths == nil || coverage.SelectedFiles < 0 ||
 		coverage.SelectedFiles > maxReviewFiles || len(coverage.Paths) > maxReviewFiles {
@@ -823,6 +888,9 @@ func cloneRepositoryReviewCampaignCoverage(
 ) RepositoryReviewCampaignCoverage {
 	coverage.AssignmentCatalog = append(
 		[]RepositoryReviewAssignment(nil), coverage.AssignmentCatalog...,
+	)
+	coverage.DeduplicationSnapshot = cloneRepositoryReviewDeduplicationSnapshot(
+		coverage.DeduplicationSnapshot,
 	)
 	if coverage.Paths == nil {
 		return coverage
@@ -1125,7 +1193,7 @@ func validateRepositoryReviewCampaignRecordBindings(state RepositoryState) error
 		}
 		contextCampaigns[contextRecord.ID] = contextRecord.CampaignID
 	}
-	findingCampaigns := make(map[string]string, len(state.Findings))
+	findingCampaigns := make(map[string]string, len(state.Findings)+len(state.RawFindings))
 	for _, finding := range state.Findings {
 		if finding.CampaignID != "" && len(finding.ContextIDs) == 0 {
 			return errors.New("repository review campaign finding has no context")
@@ -1143,6 +1211,15 @@ func validateRepositoryReviewCampaignRecordBindings(state RepositoryState) error
 			}
 			findingCampaigns[finding.ID] = finding.CampaignID
 		}
+	}
+	for _, finding := range state.RawFindings {
+		if finding.ID == "" {
+			continue
+		}
+		if _, duplicate := findingCampaigns[finding.ID]; duplicate {
+			return errors.New("duplicate repository review raw finding identity")
+		}
+		findingCampaigns[finding.ID] = finding.CampaignID
 	}
 	for _, run := range state.Runs {
 		if run.CampaignID == "" {

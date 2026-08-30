@@ -98,32 +98,51 @@ func updateRepositoryReviewAutomation(
 	return store.UpdateAutomation(ctx, id, expectedVersion, mutate)
 }
 
+var reconcileRepositoryReviewDeduplicationJobs = func(
+	store repoaudit.Store,
+	ctx context.Context,
+) (int, error) {
+	return store.ReconcileDeduplicationJobs(ctx)
+}
+
+var repositoryReviewCampaignWorkflowRuntime = func(
+	controller *repositoryReviewController,
+	ctx context.Context,
+	cfg *config.Config,
+) (*config.Config, *workflows.FileRunStore, *workflows.Executor, error) {
+	return controller.handler.workflowRuntimeFromConfigWithoutPrune(ctx, cfg)
+}
+
+var applyRepositoryReviewPause = applyRepositoryReviewPauseTransition
+
 type repositoryReviewController struct {
 	handler *Handler
 	ctx     context.Context
 	cancel  context.CancelFunc
 
-	startOnce            sync.Once
-	stopOnce             sync.Once
-	releaseOnce          sync.Once
-	wg                   sync.WaitGroup
-	admissionWG          sync.WaitGroup
-	lifecycleMu          sync.Mutex
-	stopped              bool
-	startErr             error
-	releaseLease         func()
-	leasedStore          repoaudit.Store
-	leasedConfig         *config.Config
-	mu                   sync.Mutex
-	mappingMu            sync.Mutex
-	validationMu         sync.Mutex
-	active               map[string]*repositoryReviewActiveRun
-	now                  func() time.Time
-	probe                func(context.Context) (codexAccountLimitsResponse, error)
-	update               repositoryReviewAutomationUpdater
-	resolveCommit        repositoryReviewCommitResolver
-	resolveDefaultBranch repositoryReviewDefaultBranchResolver
-	recoverCampaign      func(
+	startOnce                 sync.Once
+	stopOnce                  sync.Once
+	releaseOnce               sync.Once
+	wg                        sync.WaitGroup
+	admissionWG               sync.WaitGroup
+	lifecycleMu               sync.Mutex
+	stopped                   bool
+	startErr                  error
+	releaseLease              func()
+	leasedStore               repoaudit.Store
+	leasedConfig              *config.Config
+	mu                        sync.Mutex
+	mappingMu                 sync.Mutex
+	deduplicationMu           sync.Mutex
+	historicalDeduplicationMu sync.Mutex
+	validationMu              sync.Mutex
+	active                    map[string]*repositoryReviewActiveRun
+	now                       func() time.Time
+	probe                     func(context.Context) (codexAccountLimitsResponse, error)
+	update                    repositoryReviewAutomationUpdater
+	resolveCommit             repositoryReviewCommitResolver
+	resolveDefaultBranch      repositoryReviewDefaultBranchResolver
+	recoverCampaign           func(
 		context.Context,
 		repoaudit.Store,
 		string,
@@ -226,10 +245,42 @@ func (c *repositoryReviewController) Start() error {
 			c.cancel()
 			return
 		}
+		if _, err = reconcileRepositoryReviewDeduplicationJobs(store, c.ctx); err != nil {
+			c.startErr = fmt.Errorf("reconcile finding deduplication jobs: %w", err)
+			if c.releaseLease != nil {
+				c.releaseLease()
+				c.releaseLease = nil
+			}
+			c.cancel()
+			return
+		}
 		c.wg.Add(1)
 		go c.monitor()
 	})
 	return c.startErr
+}
+
+func (c *repositoryReviewController) admitBackgroundWorker(workerMu *sync.Mutex) bool {
+	if c == nil || workerMu == nil || !workerMu.TryLock() {
+		return false
+	}
+	if !c.registerBackgroundWorker() {
+		workerMu.Unlock()
+		return false
+	}
+	return true
+}
+
+func (c *repositoryReviewController) registerBackgroundWorker() bool {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.stopped || c.ctx.Err() != nil {
+		return false
+	}
+	// Stop holds lifecycleMu while it closes admission, so every Add either
+	// happens before Stop begins waiting or is rejected after shutdown starts.
+	c.wg.Add(1)
+	return true
 }
 
 func (c *repositoryReviewController) Stop() {
@@ -815,6 +866,19 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 		if ledgerErr != nil {
 			return repoaudit.RepositoryReviewAutomation{}, ledgerErr
 		}
+		var deduplicationSnapshot repoaudit.RepositoryReviewDeduplicationSnapshot
+		if current := ledgerState.CurrentCampaign; current != nil &&
+			current.ID == campaignID && current.DeduplicationSnapshot != nil {
+			// A campaign freezes its provider revision and policy. Configuration
+			// changes between continuation batches apply only to a new campaign.
+			deduplicationSnapshot = *current.DeduplicationSnapshot
+		} else {
+			var snapshotErr error
+			deduplicationSnapshot, snapshotErr = c.repositoryReviewDeduplicationSnapshot(automation)
+			if snapshotErr != nil {
+				return repoaudit.RepositoryReviewAutomation{}, snapshotErr
+			}
+		}
 		expectedCampaignID := ""
 		exact := true
 		if ledgerState.CurrentCampaign != nil {
@@ -827,6 +891,7 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 			Repository: ledgerRepository, CampaignID: campaignID,
 			ExpectedCampaignID: expectedCampaignID, CommitSHA: resolvedCommit,
 			ExpectedReviewVersion: ledgerState.ReviewVersion, Exact: exact,
+			DeduplicationSnapshot: &deduplicationSnapshot,
 		}); beginErr != nil {
 			_, _ = c.updateLatest(ctx, store, id, func(candidate *repoaudit.RepositoryReviewAutomation) error {
 				if candidate.CampaignID != campaignID || candidate.ActiveRunID != "" {
@@ -1127,6 +1192,9 @@ func repositoryReviewProfileSnapshotMatches(
 		automation.ReviewFocus == materialized.ReviewFocus &&
 		reflect.DeepEqual(automation.ScopePolicy, materialized.ScopePolicy) &&
 		reflect.DeepEqual(automation.ReviewerModels, materialized.ReviewerModels) &&
+		automation.DeduplicationModel == materialized.DeduplicationModel &&
+		automation.DeduplicationSimilarityThreshold == materialized.DeduplicationSimilarityThreshold &&
+		automation.DeduplicationCandidateLimit == materialized.DeduplicationCandidateLimit &&
 		automation.IssueWriterModel == materialized.IssueWriterModel &&
 		!automation.CompareModels &&
 		automation.Force == materialized.Force &&
@@ -1227,10 +1295,15 @@ func (c *repositoryReviewController) ensureRepositoryReviewCampaign(
 		expectedCampaignID = state.CurrentCampaign.ID
 	}
 	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	deduplicationSnapshot, err := c.repositoryReviewDeduplicationSnapshot(automation)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
 	if _, err = store.BeginCampaign(ctx, repoaudit.BeginCampaignRequest{
 		Repository: ledgerRepository, CampaignID: campaignID,
 		ExpectedCampaignID: expectedCampaignID, CommitSHA: resolvedCommit,
 		ExpectedReviewVersion: state.ReviewVersion, Exact: false,
+		DeduplicationSnapshot: &deduplicationSnapshot,
 	}); err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
@@ -1263,6 +1336,21 @@ func (c *repositoryReviewController) ensureRepositoryReviewCampaign(
 	)
 }
 
+func (c *repositoryReviewController) repositoryReviewDeduplicationSnapshot(
+	automation repoaudit.RepositoryReviewAutomation,
+) (repoaudit.RepositoryReviewDeduplicationSnapshot, error) {
+	if c != nil && c.handler != nil {
+		revision, err := config.ConfigRevision(c.handler.configPath)
+		if err != nil {
+			return repoaudit.RepositoryReviewDeduplicationSnapshot{}, fmt.Errorf(
+				"capture repository review account/model revision: %w", err,
+			)
+		}
+		automation.AccountModelRevision = revision
+	}
+	return repoaudit.RepositoryReviewDeduplicationSnapshotFromAutomation(automation)
+}
+
 func (c *repositoryReviewController) resolveRepositoryReviewCampaignProfile(
 	ctx context.Context,
 	cfg *config.Config,
@@ -1273,7 +1361,7 @@ func (c *repositoryReviewController) resolveRepositoryReviewCampaignProfile(
 			"repository review model profile resolver is unavailable",
 		)
 	}
-	_, _, executor, err := c.handler.workflowRuntimeFromConfigWithoutPrune(ctx, cfg)
+	_, _, executor, err := repositoryReviewCampaignWorkflowRuntime(c, ctx, cfg)
 	if err != nil {
 		return workflows.RepositoryReviewModelProfile{}, err
 	}
@@ -1414,7 +1502,7 @@ func (c *repositoryReviewController) pauseAutomationForRun(
 	}
 	latchedRunID := current.ActiveRunID
 	updated, err := c.updateLatest(ctx, store, id, func(candidate *repoaudit.RepositoryReviewAutomation) error {
-		return applyRepositoryReviewPauseTransition(candidate, expectedVersion, expectedRunID)
+		return applyRepositoryReviewPause(candidate, expectedVersion, expectedRunID)
 	})
 	if errors.Is(err, errRepositoryReviewPauseSettled) {
 		return loadSettledRepositoryReviewPause(ctx, store, id)
@@ -3611,6 +3699,8 @@ func (c *repositoryReviewController) reconcile() {
 			}
 		}
 	}
+	c.startHistoricalFindingDeduplication(automations)
+	c.startRepositoryFindingDeduplication()
 	c.startRepositoryFindingMapping(automations)
 	c.startRepositoryFindingValidation(automations)
 }

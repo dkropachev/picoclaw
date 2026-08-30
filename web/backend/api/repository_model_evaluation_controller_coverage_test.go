@@ -304,11 +304,16 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 	) {
 		t.Fatalf("terminal run error=%v", branchErr)
 	}
-	if _, branchErr := controller.Cancel(t.Context(), terminal.ID, terminal.Version); !errors.Is(
-		branchErr,
-		repoeval.ErrInvalidTransition,
-	) {
-		t.Fatalf("terminal cancel error=%v", branchErr)
+	replayedCancellation, branchErr := controller.Cancel(t.Context(), terminal.ID, draft.Version)
+	if branchErr != nil || replayedCancellation.Status != repoeval.StatusCanceled ||
+		replayedCancellation.Version != terminal.Version ||
+		!replayedCancellation.UpdatedAt.Equal(terminal.UpdatedAt) {
+		t.Fatalf("idempotent terminal cancel=%#v error=%v", replayedCancellation, branchErr)
+	}
+	if _, branchErr = controller.Cancel(
+		t.Context(), terminal.ID, terminal.Version+1,
+	); !errors.Is(branchErr, repoeval.ErrConflict) {
+		t.Fatalf("future terminal cancel error=%v", branchErr)
 	}
 	terminalToken, _, terminalCancel, actionErr := controller.reserveActive(terminal.ID)
 	if actionErr != nil {

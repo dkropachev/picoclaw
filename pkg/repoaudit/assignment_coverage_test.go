@@ -905,12 +905,17 @@ func TestRepositoryReviewAssignmentCheckpointPersistenceCoverage(t *testing.T) {
 		&state, fixture.plan, "direct-run", fixture.catalog[0].ID,
 		observation, fixture.files, repositoryAuditTestNow,
 	)
-	if err != nil || len(accepted) != 1 || len(state.Findings) != 1 || len(state.Contexts) != 1 {
+	if err != nil || len(accepted) != 2 || len(state.RawFindings) != 2 ||
+		len(state.DeduplicationJobs) != 2 || len(state.Findings) != 1 || len(state.Contexts) != 1 {
 		t.Fatalf("merged direct checkpoint accepted=%#v state=%#v err=%v", accepted, state.Findings, err)
 	}
 	// Retain the context while removing the finding to cover deterministic
 	// context replacement on a reconstructed checkpoint.
 	state.Findings = nil
+	state.RawFindings = nil
+	state.DeduplicationJobs = nil
+	state.NextDeduplicationOrdinal = 0
+	state.FindingsProcessing = FindingsProcessingCounters{}
 	if _, err := persistRepositoryReviewCheckpointObservation(
 		&state, fixture.plan, "direct-run", fixture.catalog[0].ID,
 		observation, fixture.files, repositoryAuditTestNow,

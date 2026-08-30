@@ -250,56 +250,61 @@ type RepositoryReviewAccountLimitSnapshot struct {
 // is internal durable controller state, not user configuration, and must be
 // cleared together with ScopePlan.
 type RepositoryReviewAutomation struct {
-	SchemaVersion            int                                    `json:"schema_version"`
-	ID                       string                                 `json:"id"`
-	Version                  int64                                  `json:"version"`
-	ProfileID                string                                 `json:"profile_id,omitempty"`
-	ProfileVersion           int64                                  `json:"profile_version,omitempty"`
-	AccountRef               string                                 `json:"account_ref,omitempty"`
-	EffectiveAccountRef      string                                 `json:"effective_account_ref,omitempty"`
-	Name                     string                                 `json:"name"`
-	Repository               string                                 `json:"repository"`
-	Ref                      string                                 `json:"ref,omitempty"`
-	ResolvedCommitSHA        string                                 `json:"resolved_commit_sha,omitempty"`
-	ResolvedTargetBranch     string                                 `json:"resolved_target_branch,omitempty"`
-	AdvertisedDefaultBranch  string                                 `json:"advertised_default_branch,omitempty"`
-	TargetIsDefault          bool                                   `json:"target_is_default"`
-	Target                   string                                 `json:"target"`
-	ReviewFocus              string                                 `json:"review_focus"`
-	ScopePolicy              RepositoryReviewScopePolicy            `json:"scope_policy"`
-	ScopePlan                RepositoryReviewScopePlan              `json:"scope_plan"`
-	ScopeSelection           *RepositoryReviewScopeSelection        `json:"scope_selection,omitempty"`
-	ReviewerModels           []string                               `json:"reviewer_models"`
-	IssueWriterModel         string                                 `json:"issue_writer_model"`
-	CompareModels            bool                                   `json:"compare_models"`
-	ModelPrices              map[string]RepositoryReviewModelPrice  `json:"model_prices,omitempty"`
-	Force                    bool                                   `json:"force"`
-	AutoContinue             bool                                   `json:"auto_continue"`
-	MaxFilesPerRun           int                                    `json:"max_files_per_run"`
-	MaxContentBytes          int64                                  `json:"max_content_bytes"`
-	MaxParallelChildren      int                                    `json:"max_parallel_children"`
-	AssignmentTimeoutSeconds int                                    `json:"assignment_timeout_seconds"`
-	EstimatedOutputTokens    int                                    `json:"-"`
-	BudgetPolicy             RepositoryReviewBudgetPolicy           `json:"budget"`
-	Status                   RepositoryReviewAutomationStatus       `json:"status"`
-	PauseReason              RepositoryReviewPauseReason            `json:"pause_reason,omitempty"`
-	PauseDetail              string                                 `json:"pause_detail,omitempty"`
-	RequestedPauseReason     RepositoryReviewPauseReason            `json:"requested_pause_reason,omitempty"`
-	RequestedPauseDetail     string                                 `json:"requested_pause_detail,omitempty"`
-	CampaignID               string                                 `json:"campaign_id,omitempty"`
-	CampaignRecoveryPending  bool                                   `json:"campaign_recovery_pending,omitempty"`
-	ActiveRunID              string                                 `json:"active_run_id,omitempty"`
-	RunIDs                   []string                               `json:"run_ids"`
-	Usage                    RepositoryReviewTokenUsage             `json:"usage"`
-	EstimatedCostUSD         float64                                `json:"estimated_cost_usd"`
-	Progress                 RepositoryReviewProgress               `json:"progress"`
-	ModelStats               map[string]RepositoryReviewModelStats  `json:"model_stats"`
-	ModelCoverageSketches    map[string]string                      `json:"model_coverage_sketches,omitempty"`
-	AccountLimitSnapshots    []RepositoryReviewAccountLimitSnapshot `json:"account_limits"`
-	StartedAt                time.Time                              `json:"started_at,omitempty"`
-	CompletedAt              time.Time                              `json:"completed_at,omitempty"`
-	CreatedAt                time.Time                              `json:"created_at"`
-	UpdatedAt                time.Time                              `json:"updated_at"`
+	SchemaVersion                    int                                    `json:"schema_version"`
+	ID                               string                                 `json:"id"`
+	Version                          int64                                  `json:"version"`
+	ProfileID                        string                                 `json:"profile_id,omitempty"`
+	ProfileVersion                   int64                                  `json:"profile_version,omitempty"`
+	AccountRef                       string                                 `json:"account_ref,omitempty"`
+	EffectiveAccountRef              string                                 `json:"effective_account_ref,omitempty"`
+	Name                             string                                 `json:"name"`
+	Repository                       string                                 `json:"repository"`
+	Ref                              string                                 `json:"ref,omitempty"`
+	ResolvedCommitSHA                string                                 `json:"resolved_commit_sha,omitempty"`
+	ResolvedTargetBranch             string                                 `json:"resolved_target_branch,omitempty"`
+	AdvertisedDefaultBranch          string                                 `json:"advertised_default_branch,omitempty"`
+	TargetIsDefault                  bool                                   `json:"target_is_default"`
+	Target                           string                                 `json:"target"`
+	ReviewFocus                      string                                 `json:"review_focus"`
+	ScopePolicy                      RepositoryReviewScopePolicy            `json:"scope_policy"`
+	ScopePlan                        RepositoryReviewScopePlan              `json:"scope_plan"`
+	ScopeSelection                   *RepositoryReviewScopeSelection        `json:"scope_selection,omitempty"`
+	ReviewerModels                   []string                               `json:"reviewer_models"`
+	DeduplicationModel               string                                 `json:"deduplication_model,omitempty"`
+	DeduplicationSimilarityThreshold int                                    `json:"deduplication_similarity_threshold"`
+	DeduplicationCandidateLimit      int                                    `json:"deduplication_candidate_limit"`
+	DeduplicationSettingsSpecified   bool                                   `json:"-"`
+	AccountModelRevision             string                                 `json:"account_model_revision,omitempty"`
+	IssueWriterModel                 string                                 `json:"issue_writer_model"`
+	CompareModels                    bool                                   `json:"compare_models"`
+	ModelPrices                      map[string]RepositoryReviewModelPrice  `json:"model_prices,omitempty"`
+	Force                            bool                                   `json:"force"`
+	AutoContinue                     bool                                   `json:"auto_continue"`
+	MaxFilesPerRun                   int                                    `json:"max_files_per_run"`
+	MaxContentBytes                  int64                                  `json:"max_content_bytes"`
+	MaxParallelChildren              int                                    `json:"max_parallel_children"`
+	AssignmentTimeoutSeconds         int                                    `json:"assignment_timeout_seconds"`
+	EstimatedOutputTokens            int                                    `json:"-"`
+	BudgetPolicy                     RepositoryReviewBudgetPolicy           `json:"budget"`
+	Status                           RepositoryReviewAutomationStatus       `json:"status"`
+	PauseReason                      RepositoryReviewPauseReason            `json:"pause_reason,omitempty"`
+	PauseDetail                      string                                 `json:"pause_detail,omitempty"`
+	RequestedPauseReason             RepositoryReviewPauseReason            `json:"requested_pause_reason,omitempty"`
+	RequestedPauseDetail             string                                 `json:"requested_pause_detail,omitempty"`
+	CampaignID                       string                                 `json:"campaign_id,omitempty"`
+	CampaignRecoveryPending          bool                                   `json:"campaign_recovery_pending,omitempty"`
+	ActiveRunID                      string                                 `json:"active_run_id,omitempty"`
+	RunIDs                           []string                               `json:"run_ids"`
+	Usage                            RepositoryReviewTokenUsage             `json:"usage"`
+	EstimatedCostUSD                 float64                                `json:"estimated_cost_usd"`
+	Progress                         RepositoryReviewProgress               `json:"progress"`
+	ModelStats                       map[string]RepositoryReviewModelStats  `json:"model_stats"`
+	ModelCoverageSketches            map[string]string                      `json:"model_coverage_sketches,omitempty"`
+	AccountLimitSnapshots            []RepositoryReviewAccountLimitSnapshot `json:"account_limits"`
+	StartedAt                        time.Time                              `json:"started_at,omitempty"`
+	CompletedAt                      time.Time                              `json:"completed_at,omitempty"`
+	CreatedAt                        time.Time                              `json:"created_at"`
+	UpdatedAt                        time.Time                              `json:"updated_at"`
 }
 
 func (s Store) ListAutomations(ctx context.Context) ([]RepositoryReviewAutomation, error) {
@@ -577,6 +582,12 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 	if err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
+	var persistedFields map[string]json.RawMessage
+	_ = json.Unmarshal(data, &persistedFields)
+	_, hadDeduplicationThreshold := persistedFields["deduplication_similarity_threshold"]
+	_, hadDeduplicationCandidateLimit := persistedFields["deduplication_candidate_limit"]
+	automation.DeduplicationSettingsSpecified = hadDeduplicationThreshold ||
+		hadDeduplicationCandidateLimit
 	// unmarshalRepositoryReviewGuardState already decoded this exact JSON.
 	legacy, _ := decodeLegacyAutomationPriceMetadata(data)
 	hasLegacyPriceMetadata := false
@@ -602,7 +613,8 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 		return RepositoryReviewAutomation{}, false, err
 	}
 	if hasLegacyPriceMetadata || hadLegacyGuard || hadLegacyIssueWriter ||
-		hadLegacyAssignmentTimeout || hadLegacySchema {
+		hadLegacyAssignmentTimeout || hadLegacySchema ||
+		!hadDeduplicationThreshold || !hadDeduplicationCandidateLimit {
 		if err := s.saveAutomation(automation); err != nil {
 			return RepositoryReviewAutomation{}, false, err
 		}
@@ -723,6 +735,8 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	automation.AdvertisedDefaultBranch = strings.TrimSpace(automation.AdvertisedDefaultBranch)
 	automation.Target = strings.TrimSpace(automation.Target)
 	automation.ReviewFocus = strings.TrimSpace(automation.ReviewFocus)
+	automation.DeduplicationModel = strings.TrimSpace(automation.DeduplicationModel)
+	automation.AccountModelRevision = strings.TrimSpace(automation.AccountModelRevision)
 	automation.IssueWriterModel = strings.TrimSpace(automation.IssueWriterModel)
 	automation.BudgetPolicy.GuardExpression = strings.TrimSpace(automation.BudgetPolicy.GuardExpression)
 	automation.PauseDetail = strings.TrimSpace(automation.PauseDetail)
@@ -760,6 +774,13 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	if automation.AssignmentTimeoutSeconds == 0 {
 		automation.AssignmentTimeoutSeconds = DefaultRepositoryReviewAssignmentTimeoutSeconds
 	}
+	if !automation.DeduplicationSettingsSpecified &&
+		automation.DeduplicationSimilarityThreshold == 0 &&
+		automation.DeduplicationCandidateLimit == 0 {
+		automation.DeduplicationSimilarityThreshold = DeduplicationDefaultThreshold
+		automation.DeduplicationCandidateLimit = DeduplicationDefaultCandidateLimit
+	}
+	automation.DeduplicationSettingsSpecified = true
 	if automation.EstimatedOutputTokens == 0 {
 		automation.EstimatedOutputTokens = defaultAutomationEstimatedOutputTokens
 	}
@@ -850,6 +871,12 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		!validOptionalAutomationText(automation.AdvertisedDefaultBranch, maxRepositoryReviewBranchBytes) ||
 		!validOptionalAutomationText(automation.AccountRef, 256) ||
 		!validOptionalAutomationText(automation.EffectiveAccountRef, 256) ||
+		!validOptionalAutomationText(automation.DeduplicationModel, 256) ||
+		!validOptionalAutomationText(automation.AccountModelRevision, 256) ||
+		automation.DeduplicationSimilarityThreshold < 0 ||
+		automation.DeduplicationSimilarityThreshold > 100 ||
+		automation.DeduplicationCandidateLimit < 0 ||
+		automation.DeduplicationCandidateLimit > DeduplicationMaximumShortlist ||
 		!validBoundedText(automation.Target, 4096) ||
 		!validBoundedText(automation.ReviewFocus, maxFindingTextBytes) ||
 		!validBoundedText(automation.IssueWriterModel, 256) ||
@@ -983,6 +1010,9 @@ func (s Store) validateAutomationProfileSnapshotUnlocked(
 		automation.AccountRef != materialized.AccountRef ||
 		!reflect.DeepEqual(automation.ScopePolicy, materialized.ScopePolicy) ||
 		!reflect.DeepEqual(automation.ReviewerModels, materialized.ReviewerModels) ||
+		automation.DeduplicationModel != materialized.DeduplicationModel ||
+		automation.DeduplicationSimilarityThreshold != materialized.DeduplicationSimilarityThreshold ||
+		automation.DeduplicationCandidateLimit != materialized.DeduplicationCandidateLimit ||
 		automation.IssueWriterModel != materialized.IssueWriterModel ||
 		automation.CompareModels != materialized.CompareModels ||
 		!reflect.DeepEqual(automation.ModelPrices, materialized.ModelPrices) ||
@@ -1010,6 +1040,9 @@ func repositoryReviewAutomationProfilePolicyEqual(
 		left.AccountRef == right.AccountRef &&
 		reflect.DeepEqual(left.ScopePolicy, right.ScopePolicy) &&
 		reflect.DeepEqual(left.ReviewerModels, right.ReviewerModels) &&
+		left.DeduplicationModel == right.DeduplicationModel &&
+		left.DeduplicationSimilarityThreshold == right.DeduplicationSimilarityThreshold &&
+		left.DeduplicationCandidateLimit == right.DeduplicationCandidateLimit &&
 		left.IssueWriterModel == right.IssueWriterModel &&
 		left.CompareModels == right.CompareModels &&
 		reflect.DeepEqual(left.ModelPrices, right.ModelPrices) &&

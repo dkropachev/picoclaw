@@ -491,7 +491,7 @@ func TestLoadRepositoryReviewOutcomeUsesAssignmentCampaign(t *testing.T) {
 		ReviewerModels: []string{"review-a"},
 	})
 	if !outcome.found || outcome.reviewedFiles != 1 || outcome.unsupportedFiles != 1 ||
-		outcome.findings != 1 || outcome.modelFindings["review-a"] != 1 ||
+		outcome.findings != 0 || outcome.modelFindings["review-a"] != 1 ||
 		len(outcome.modelPaths["review-a"]) != 1 {
 		t.Fatalf("assignment campaign outcome = %#v", outcome)
 	}

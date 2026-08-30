@@ -512,6 +512,7 @@ func (c *repositoryModelEvaluationController) Cancel(
 	if err := c.Start(); err != nil {
 		return repoeval.Evaluation{}, err
 	}
+	token, cancelActive := c.repositoryModelEvaluationCancellation(id)
 	evaluation, found, err := c.store.Get(ctx, id)
 	if err != nil || !found {
 		if err == nil {
@@ -519,45 +520,104 @@ func (c *repositoryModelEvaluationController) Cancel(
 		}
 		return repoeval.Evaluation{}, err
 	}
+	if repositoryModelEvaluationCancellationSatisfied(evaluation, expectedVersion) {
+		if cancelActive != nil {
+			cancelActive()
+		}
+		return evaluation, nil
+	}
 	if evaluation.Version != expectedVersion {
 		return repoeval.Evaluation{}, repoeval.ErrConflict
 	}
-	updated, err := c.store.Update(ctx, id, expectedVersion, func(candidate *repoeval.Evaluation) error {
-		switch candidate.Status {
-		case repoeval.StatusDraft:
-			candidate.Status = repoeval.StatusCanceled
-			candidate.Progress.Stage = repoeval.ProgressCanceled
-			repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
-			candidate.Progress.Message = "Canceled."
-		case repoeval.StatusPreflighting,
-			repoeval.StatusReady,
-			repoeval.StatusRunning,
-			repoeval.StatusJudging,
-			repoeval.StatusAnalyzing:
-			candidate.Status = repoeval.StatusCanceling
-			candidate.Progress.Stage = repoeval.ProgressCanceling
-			repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
-			candidate.Progress.Message = "Canceling at the current durable boundary."
-		case repoeval.StatusCanceling:
-			return nil
-		default:
-			return repoeval.ErrInvalidTransition
+	if token != "" && !c.activeToken(id, token) {
+		return repoeval.Evaluation{}, repoeval.ErrConflict
+	}
+	updated, err := c.store.Update(
+		ctx, id, expectedVersion, repositoryModelEvaluationApplyCancellation,
+	)
+	if errors.Is(err, repoeval.ErrConflict) && token != "" {
+		updated, err = c.updateActiveLatest(
+			ctx,
+			id,
+			token,
+			[]repoeval.Status{
+				repoeval.StatusPreflighting,
+				repoeval.StatusReady,
+				repoeval.StatusRunning,
+				repoeval.StatusJudging,
+				repoeval.StatusAnalyzing,
+				repoeval.StatusCanceling,
+			},
+			repositoryModelEvaluationApplyCancellation,
+		)
+		if errors.Is(err, errRepositoryModelEvaluationRunFenced) {
+			err = repoeval.ErrConflict
 		}
-		return nil
-	})
+	}
 	if err != nil {
+		if errors.Is(err, repoeval.ErrConflict) {
+			current, currentFound, currentErr := c.store.Get(ctx, id)
+			if currentErr == nil && currentFound &&
+				repositoryModelEvaluationCancellationSatisfied(current, expectedVersion) {
+				if cancelActive != nil {
+					cancelActive()
+				}
+				return current, nil
+			}
+		}
 		return repoeval.Evaluation{}, err
 	}
-	c.mu.Lock()
-	active, ok := c.active[id]
-	c.mu.Unlock()
-	if ok {
-		active.cancel()
+	if cancelActive != nil {
+		cancelActive()
 	}
 	if updated.Status == repoeval.StatusCanceling {
 		updated, err = c.finishCanceled(context.Background(), id)
 	}
 	return updated, err
+}
+
+func (c *repositoryModelEvaluationController) repositoryModelEvaluationCancellation(
+	id string,
+) (string, context.CancelFunc) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	active, ok := c.active[id]
+	if !ok {
+		return "", nil
+	}
+	return active.token, active.cancel
+}
+
+func repositoryModelEvaluationCancellationSatisfied(
+	evaluation repoeval.Evaluation,
+	expectedVersion int64,
+) bool {
+	return evaluation.Status == repoeval.StatusCanceled && expectedVersion >= 1 &&
+		expectedVersion <= evaluation.Version
+}
+
+func repositoryModelEvaluationApplyCancellation(candidate *repoeval.Evaluation) error {
+	switch candidate.Status {
+	case repoeval.StatusDraft:
+		candidate.Status = repoeval.StatusCanceled
+		candidate.Progress.Stage = repoeval.ProgressCanceled
+		repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
+		candidate.Progress.Message = "Canceled."
+	case repoeval.StatusPreflighting,
+		repoeval.StatusReady,
+		repoeval.StatusRunning,
+		repoeval.StatusJudging,
+		repoeval.StatusAnalyzing:
+		candidate.Status = repoeval.StatusCanceling
+		candidate.Progress.Stage = repoeval.ProgressCanceling
+		repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
+		candidate.Progress.Message = "Canceling at the current durable boundary."
+	case repoeval.StatusCanceling:
+		return nil
+	default:
+		return repoeval.ErrInvalidTransition
+	}
+	return nil
 }
 
 func (c *repositoryModelEvaluationController) Resume(
@@ -2757,7 +2817,7 @@ func (c *repositoryModelEvaluationController) finishCanceled(
 	ctx context.Context,
 	id string,
 ) (repoeval.Evaluation, error) {
-	return c.updateLatest(ctx, id, func(candidate *repoeval.Evaluation) error {
+	updated, err := c.updateLatest(ctx, id, func(candidate *repoeval.Evaluation) error {
 		if candidate.Status == repoeval.StatusCanceled {
 			return nil
 		}
@@ -2771,6 +2831,21 @@ func (c *repositoryModelEvaluationController) finishCanceled(
 		candidate.Progress.Message = "Canceled at a durable boundary."
 		return nil
 	})
+	if !errors.Is(err, repoeval.ErrConflict) {
+		return updated, err
+	}
+	// Concurrent cancellation finalizers can race after one has already
+	// persisted the terminal state. Treat that durable target state as the
+	// idempotent result even when clone normalization makes the loser's
+	// nominal no-op fail the terminal deep-equality guard.
+	current, found, currentErr := c.store.Get(ctx, id)
+	if currentErr != nil {
+		return repoeval.Evaluation{}, currentErr
+	}
+	if found && current.Status == repoeval.StatusCanceled {
+		return current, nil
+	}
+	return repoeval.Evaluation{}, err
 }
 
 func (c *repositoryModelEvaluationController) handleExecutionCancellation(id string) {

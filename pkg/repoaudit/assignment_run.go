@@ -400,7 +400,11 @@ func (s Store) CheckpointRepositoryReviewAssignment(
 			return CheckpointRepositoryReviewAssignmentResult{}, ErrConflict
 		}
 		return CheckpointRepositoryReviewAssignmentResult{
-			State: state, Idempotent: true,
+			State: state,
+			AcceptedFindingIDs: repositoryReviewCheckpointRawFindingIDs(
+				state.RawFindings, request.Plan.CampaignID, request.RunID, request.AssignmentID,
+			),
+			Idempotent: true,
 		}, nil
 	}
 	completedAt := request.CompletedAt.UTC()
@@ -446,7 +450,6 @@ func (s Store) CheckpointRepositoryReviewAssignment(
 	for _, findingID := range acceptedIDs {
 		active.FindingIDs = appendUnique(active.FindingIDs, findingID)
 	}
-	ensureMappingJobsForFindings(&state, acceptedIDs, completedAt)
 	state.LastCommitSHA = request.Plan.CommitSHA
 	state.Version++
 	state.ReviewVersion++
@@ -457,6 +460,32 @@ func (s Store) CheckpointRepositoryReviewAssignment(
 	return CheckpointRepositoryReviewAssignmentResult{
 		State: state, AcceptedFindingIDs: acceptedIDs,
 	}, nil
+}
+
+func repositoryReviewCheckpointRawFindingIDs(
+	findings []RawReviewFinding,
+	campaignID string,
+	runID string,
+	assignmentID string,
+) []string {
+	selected := make([]RawReviewFinding, 0)
+	for _, finding := range findings {
+		if finding.CampaignID == campaignID && finding.RunID == runID &&
+			finding.AssignmentID == assignmentID {
+			selected = append(selected, finding)
+		}
+	}
+	sort.Slice(selected, func(left, right int) bool {
+		if selected[left].InsertionOrdinal != selected[right].InsertionOrdinal {
+			return selected[left].InsertionOrdinal < selected[right].InsertionOrdinal
+		}
+		return selected[left].ID < selected[right].ID
+	})
+	ids := make([]string, 0, len(selected))
+	for _, finding := range selected {
+		ids = append(ids, finding.ID)
+	}
+	return ids
 }
 
 func persistRepositoryReviewCheckpointObservation(
@@ -483,7 +512,7 @@ func persistRepositoryReviewCheckpointObservation(
 	initialFindingCount := len(state.Findings)
 	acceptedIDs := make([]string, 0, len(observation.Findings))
 	contextUsed := false
-	for _, rawCandidate := range observation.Findings {
+	for candidateIndex, rawCandidate := range observation.Findings {
 		candidate := normalizeCandidate(rawCandidate)
 		if candidate.Validation.Status != "confirmed" {
 			return nil, errors.New("checkpoint finding is not confirmed")
@@ -495,7 +524,24 @@ func persistRepositoryReviewCheckpointObservation(
 		if err := validateCandidate(candidate); err != nil {
 			return nil, fmt.Errorf("checkpoint finding is invalid: %w", err)
 		}
+		admissionBucket, bucketErr := DeduplicationAdmissionBucket(
+			plan.CampaignID, primary, candidate.Symbol,
+		)
+		if bucketErr != nil {
+			return nil, fmt.Errorf("checkpoint finding has an invalid admission bucket: %w", bucketErr)
+		}
 		fingerprint := findingFingerprint(primary, candidate)
+		rawID := stableID(
+			"rrf_", plan.Repository, plan.CampaignID, plan.CommitSHA, runID,
+			assignmentID, fmt.Sprint(candidateIndex), fingerprint,
+		)
+		if err := persistRawRepositoryReviewCheckpointFinding(
+			state, rawID, admissionBucket, plan, runID, assignmentID,
+			contextRecord.ID, observation, primary, candidate, completedAt,
+		); err != nil {
+			return nil, err
+		}
+		acceptedIDs = append(acceptedIDs, rawID)
 		candidateObservation := findingObservationFrom(
 			candidate, contextRecord.ID, observation.Model, observation.Reviewer,
 		)
@@ -523,6 +569,7 @@ func persistRepositoryReviewCheckpointObservation(
 				MatchHints: candidate.MatchHints, FixEffort: candidate.FixEffort,
 				ContextIDs: []string{contextRecord.ID}, Models: []string{observation.Model},
 				ObservationCount: 1, Status: FindingOpen,
+				DeduplicationPending: true, RawFindingIDs: []string{rawID},
 				Observations:            []FindingObservation{candidateObservation},
 				TargetBranch:            plan.TargetBranch,
 				AdvertisedDefaultBranch: plan.AdvertisedDefaultBranch,
@@ -530,8 +577,8 @@ func persistRepositoryReviewCheckpointObservation(
 				Version:                 1, CreatedAt: completedAt, UpdatedAt: completedAt,
 			}
 			state.Findings = append(state.Findings, finding)
+			setRawReviewFindingLegacyProjection(state, rawID, finding.ID)
 			contextUsed = true
-			acceptedIDs = appendUnique(acceptedIDs, finding.ID)
 			continue
 		}
 		finding := &state.Findings[index]
@@ -542,10 +589,11 @@ func persistRepositoryReviewCheckpointObservation(
 		finding.ContextIDs = findingObservationContextIDs(finding.Observations)
 		finding.Models = appendUnique(finding.Models, observation.Model)
 		finding.ObservationCount = len(finding.Observations)
+		finding.RawFindingIDs = appendUnique(finding.RawFindingIDs, rawID)
 		finding.Version++
 		finding.UpdatedAt = completedAt
+		setRawReviewFindingLegacyProjection(state, rawID, finding.ID)
 		contextUsed = true
-		acceptedIDs = appendUnique(acceptedIDs, finding.ID)
 	}
 	if contextUsed {
 		existing := -1
@@ -562,7 +610,105 @@ func persistRepositoryReviewCheckpointObservation(
 		}
 	}
 	pruneUnreferencedFindingContexts(state)
+	reconcileFindingsProcessingCounters(state)
+	state.FindingsProcessing.UpdatedAt = completedAt
 	return acceptedIDs, nil
+}
+
+func setRawReviewFindingLegacyProjection(state *RepositoryState, rawID, findingID string) {
+	if state == nil {
+		return
+	}
+	if index := rawFindingIndexByID(state.RawFindings, rawID); index >= 0 {
+		state.RawFindings[index].LegacyFindingID = findingID
+		state.RawFindings[index].DiagnosisDigest = RawReviewFindingDiagnosisDigest(
+			state.RawFindings[index],
+		)
+	}
+}
+
+func repositoryReviewCheckpointDeduplicationSnapshot(
+	coverage *RepositoryReviewCampaignCoverage,
+	reviewerModel string,
+) RepositoryReviewDeduplicationSnapshot {
+	if coverage != nil && coverage.DeduplicationSnapshot != nil {
+		return *cloneRepositoryReviewDeduplicationSnapshot(coverage.DeduplicationSnapshot)
+	}
+	reviewerModel = strings.TrimSpace(reviewerModel)
+	return RepositoryReviewDeduplicationSnapshot{
+		ReviewerModel: reviewerModel, DeduplicationModel: reviewerModel,
+		SimilarityThreshold: DeduplicationDefaultThreshold,
+		CandidateLimit:      DeduplicationDefaultCandidateLimit,
+	}
+}
+
+func persistRawRepositoryReviewCheckpointFinding(
+	state *RepositoryState,
+	rawID string,
+	admissionBucket string,
+	plan Plan,
+	runID string,
+	assignmentID string,
+	contextID string,
+	observation Observation,
+	primary FileRef,
+	candidate FindingCandidate,
+	completedAt time.Time,
+) error {
+	for _, existing := range state.RawFindings {
+		if existing.ID != rawID {
+			continue
+		}
+		if existing.CampaignID != plan.CampaignID ||
+			existing.AdmissionBucket != admissionBucket || existing.Repository != plan.Repository ||
+			existing.CommitSHA != plan.CommitSHA || existing.File != primary ||
+			existing.ContextID != contextID || existing.RunID != runID ||
+			existing.AssignmentID != assignmentID || existing.Model != observation.Model ||
+			existing.Reviewer != observation.Reviewer ||
+			!reflect.DeepEqual(rawFindingCandidate(existing), candidate) {
+			return ErrConflict
+		}
+		for _, job := range state.DeduplicationJobs {
+			if job.RawFindingID == rawID {
+				return nil
+			}
+		}
+		return errors.New("raw checkpoint finding is missing its deduplication job")
+	}
+	ordinal := state.NextDeduplicationOrdinal
+	if ordinal == 0 {
+		ordinal = 1
+	}
+	state.NextDeduplicationOrdinal = ordinal + 1
+	snapshot := repositoryReviewCheckpointDeduplicationSnapshot(
+		state.CurrentCampaign, observation.Model,
+	)
+	raw := RawReviewFinding{
+		ID: rawID, Version: 1, CampaignID: plan.CampaignID,
+		AdmissionBucket: admissionBucket, InsertionOrdinal: ordinal,
+		Repository: plan.Repository, CommitSHA: plan.CommitSHA, File: primary,
+		Line: candidate.Line, Severity: candidate.Severity, Title: candidate.Title,
+		Symbol: candidate.Symbol, Message: candidate.Message, Evidence: candidate.Evidence,
+		Impact: candidate.Impact, Validation: candidate.Validation,
+		MatchHints: candidate.MatchHints, FixEffort: candidate.FixEffort,
+		ContextID: contextID, RunID: runID, AssignmentID: assignmentID,
+		Model: observation.Model, Reviewer: observation.Reviewer,
+		State: RawFindingDeduplicationPending, Disposition: RawFindingDispositionUndecided,
+		CreatedAt: completedAt, UpdatedAt: completedAt,
+	}
+	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(raw)
+	raw.History = []RawFindingHistoryEntry{{
+		State: raw.State, Disposition: raw.Disposition, At: completedAt,
+	}}
+	state.RawFindings = append(state.RawFindings, raw)
+	state.DeduplicationJobs = append(state.DeduplicationJobs, DeduplicationJob{
+		ID: stableID("rdj_", rawID), RawFindingID: rawID,
+		State: DeduplicationJobPending, AdmissionBucket: admissionBucket,
+		InsertionOrdinal: ordinal, ModelSnapshot: snapshot,
+		History:   []DeduplicationJobHistoryEntry{{State: DeduplicationJobPending, At: completedAt}},
+		CreatedAt: completedAt, UpdatedAt: completedAt,
+	})
+	return nil
 }
 
 func (s Store) FinalizeRepositoryReviewRun(
@@ -982,10 +1128,19 @@ func validateRepositoryReviewActiveRun(
 		}
 	}
 	for _, findingID := range active.FindingIDs {
-		index := findingIndexByID(state.Findings, findingID)
-		if index < 0 || state.Findings[index].CampaignID != active.CampaignID {
+		index := rawFindingIndexByID(state.RawFindings, findingID)
+		if index < 0 || state.RawFindings[index].CampaignID != active.CampaignID {
 			return errors.New("invalid active repository review finding")
 		}
 	}
 	return nil
+}
+
+func rawFindingIndexByID(findings []RawReviewFinding, id string) int {
+	for index := range findings {
+		if findings[index].ID == id {
+			return index
+		}
+	}
+	return -1
 }

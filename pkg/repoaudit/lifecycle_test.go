@@ -23,7 +23,10 @@ func TestRecordPersistsLifecycleProvenanceAndMappingJobAtomically(t *testing.T) 
 	)
 	if finding.MatchHints.Component != "scheduler" || finding.FixEffort.Quick.Class != "small" ||
 		finding.TargetBranch != "main" || finding.AdvertisedDefaultBranch != "main" ||
-		!finding.TargetIsDefault || len(state.MappingJobs) != 1 {
+		!finding.TargetIsDefault || len(state.MappingJobs) != 1 || len(state.RawFindings) != 1 ||
+		len(state.DeduplicatedFindings) != 1 || len(state.DeduplicationJobs) != 1 ||
+		state.MappingJobs[0].ReviewFindingID != state.DeduplicatedFindings[0].ID ||
+		state.RawFindings[0].DeduplicatedFindingID != state.DeduplicatedFindings[0].ID {
 		t.Fatalf("recorded lifecycle state = %#v / %#v", finding, state.MappingJobs)
 	}
 	job := state.MappingJobs[0]
@@ -45,6 +48,11 @@ func TestSchemaOneListMigrationAndExplicitJobReconciliation(t *testing.T) {
 		"", "", false, "legacy defect",
 	)
 	state.SchemaVersion = 1
+	state.RawFindings = nil
+	state.DeduplicatedFindings = nil
+	state.DeduplicationJobs = nil
+	state.NextDeduplicationOrdinal = 0
+	state.FindingsProcessing = FindingsProcessingCounters{}
 	state.RepositoryFindings = nil
 	state.MappingJobs = nil
 	state.ValidationJobs = nil
@@ -76,12 +84,16 @@ func TestSchemaOneListMigrationAndExplicitJobReconciliation(t *testing.T) {
 		t.Fatalf("ordinary migration unexpectedly reconciled jobs: %#v", migrated.MappingJobs)
 	}
 	reconciled, err := store.ReconcileJobs(context.Background())
-	if err != nil || reconciled.MappingJobsCreated != 1 {
+	if err != nil || reconciled.MappingJobsCreated != 0 {
 		t.Fatalf("reconcile = %#v, err=%v", reconciled, err)
 	}
 	after, _, _ := store.Get(state.Repository)
-	if len(after.MappingJobs) != 1 || after.MappingJobs[0].ID != mappingJobID(after.Findings[0].ID) {
-		t.Fatalf("reconciled jobs = %#v", after.MappingJobs)
+	if len(after.MappingJobs) != 0 || !after.HistoricalDeduplication.Required {
+		t.Fatalf(
+			"legacy mappings bypassed replay: jobs=%#v replay=%#v",
+			after.MappingJobs,
+			after.HistoricalDeduplication,
+		)
 	}
 
 	persisted, err := os.ReadFile(store.path(state.Repository))

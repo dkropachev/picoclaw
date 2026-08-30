@@ -68,6 +68,9 @@ func (s Store) SetFindingStatusByVersion(
 	if err != nil {
 		return RepositoryState{}, Finding{}, err
 	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
+		return RepositoryState{}, Finding{}, err
+	}
 	index := findingIndexByID(state.Findings, findingID)
 	if index < 0 {
 		return RepositoryState{}, Finding{}, os.ErrNotExist
@@ -109,6 +112,9 @@ func (s Store) ReserveIssueGeneration(
 	defer unlock()
 	state, err := s.load(request.Repository)
 	if err != nil {
+		return RepositoryState{}, IssueDraft{}, false, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, IssueDraft{}, false, err
 	}
 	findingIndex := findingIndexByID(state.Findings, request.FindingID)
@@ -193,6 +199,9 @@ func (s Store) BeginIssueRegeneration(
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, false, err
 	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
+		return RepositoryState{}, IssueDraft{}, false, err
+	}
 	draftIndex := issueDraftIndexByID(state.IssueDrafts, draftID)
 	if draftIndex < 0 {
 		return RepositoryState{}, IssueDraft{}, false, os.ErrNotExist
@@ -253,6 +262,9 @@ func (s Store) CompleteIssueGeneration(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
+		return RepositoryState{}, IssueDraft{}, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, IssueDraft{}, err
 	}
 	draftIndex := issueDraftIndexByID(state.IssueDrafts, draftID)
@@ -323,6 +335,9 @@ func (s Store) DeleteIssueDraft(
 	if err != nil {
 		return RepositoryState{}, err
 	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
+		return RepositoryState{}, err
+	}
 	draftIndex := issueDraftIndexByID(state.IssueDrafts, draftID)
 	if draftIndex < 0 {
 		return RepositoryState{}, os.ErrNotExist
@@ -380,6 +395,9 @@ func (s Store) LinkExistingIssue(
 	defer unlock()
 	state, err := s.load(request.Repository)
 	if err != nil {
+		return RepositoryState{}, IssueDraft{}, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, IssueDraft{}, err
 	}
 	findingIndex := findingIndexByID(state.Findings, request.FindingID)
@@ -453,6 +471,9 @@ func (s Store) UnlinkExistingIssue(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
+		return RepositoryState{}, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, err
 	}
 	findingIndex := findingIndexByID(state.Findings, findingID)

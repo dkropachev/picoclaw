@@ -123,8 +123,9 @@ func migrateRepositoryState(state *RepositoryState) (bool, error) {
 		return false, errors.New("repository review state is required")
 	}
 	migrated := false
+	legacySchema := state.SchemaVersion > 0 && state.SchemaVersion < SchemaVersion
 	switch state.SchemaVersion {
-	case 1, 2:
+	case 1, 2, 3:
 		state.SchemaVersion = SchemaVersion
 		migrated = true
 	case SchemaVersion:
@@ -149,6 +150,28 @@ func migrateRepositoryState(state *RepositoryState) (bool, error) {
 	}
 	if state.Findings == nil {
 		state.Findings = []Finding{}
+		migrated = true
+	}
+	if state.RawFindings == nil {
+		state.RawFindings = []RawReviewFinding{}
+		migrated = true
+	}
+	if state.DeduplicatedFindings == nil {
+		state.DeduplicatedFindings = []DeduplicatedReviewFinding{}
+		migrated = true
+	}
+	if state.DeduplicationJobs == nil {
+		state.DeduplicationJobs = []DeduplicationJob{}
+		migrated = true
+	}
+	if reconcileFindingsProcessingCounters(state) {
+		migrated = true
+	}
+	if legacySchema && (len(state.Findings) > 0 || len(state.RepositoryFindings) > 0) &&
+		!state.HistoricalDeduplication.Required {
+		state.HistoricalDeduplication.Required = true
+		state.HistoricalDeduplication.Status = HistoricalDeduplicationPending
+		state.HistoricalDeduplication.UpdatedAt = state.UpdatedAt.UTC()
 		migrated = true
 	}
 	if state.Contexts == nil {
@@ -363,11 +386,23 @@ func ensureMappingJobsForFindings(state *RepositoryState, findingIDs []string, n
 	for _, finding := range state.Findings {
 		byID[finding.ID] = finding
 	}
+	// Once the raw/deduplicated ledger is in use, compatibility Finding
+	// projections are not themselves admission authority. Only a decided
+	// DeduplicatedReviewFinding may enter repository mapping.
+	deduplicated := make(map[string]struct{}, len(state.DeduplicatedFindings))
+	for _, finding := range state.DeduplicatedFindings {
+		deduplicated[finding.ID] = struct{}{}
+	}
 	created := 0
 	for _, findingID := range findingIDs {
 		finding, found := byID[strings.TrimSpace(findingID)]
-		if !found || finding.RepositoryFindingID != "" {
+		if !found || finding.DeduplicationPending || finding.RepositoryFindingID != "" {
 			continue
+		}
+		if len(state.RawFindings) > 0 || state.HistoricalDeduplication.Required {
+			if _, admitted := deduplicated[finding.ID]; !admitted {
+				continue
+			}
 		}
 		if _, found := existing[finding.ID]; found {
 			continue
@@ -419,9 +454,30 @@ func (s Store) reconcileRepositoryJobs(repository string) (int, int, int, error)
 		return 0, 0, 0, err
 	}
 	now := s.clock()
+	historicalMergeReleased := false
+	if HistoricalDeduplicationMergeInProgress(state) {
+		// The controller lease proves that no previous replay process remains
+		// live. A crash between narrow-lease acquisition and completion is a
+		// terminal attempt failure; release the fence and require an explicit
+		// retry to take a fresh snapshot.
+		state.HistoricalDeduplication.Status = HistoricalDeduplicationFailed
+		state.HistoricalDeduplication.Error = "Historical deduplication was interrupted."
+		state.HistoricalDeduplication.MergeLease = HistoricalDeduplicationMergeLease{}
+		state.HistoricalDeduplication.UpdatedAt = now
+		historicalMergeReleased = true
+	}
 	ids := make([]string, 0, len(state.Findings))
+	rawProjections := make(map[string]struct{}, len(state.RawFindings))
+	for _, raw := range state.RawFindings {
+		if raw.LegacyFindingID != "" {
+			rawProjections[raw.LegacyFindingID] = struct{}{}
+		}
+	}
 	for _, finding := range state.Findings {
 		if finding.RepositoryFindingID == "" {
+			if _, undecidedRawProjection := rawProjections[finding.ID]; undecidedRawProjection {
+				continue
+			}
 			ids = append(ids, finding.ID)
 		}
 	}
@@ -462,7 +518,7 @@ func (s Store) reconcileRepositoryJobs(repository string) (int, int, int, error)
 		}
 		validationReset++
 	}
-	if created == 0 && mappingReset == 0 && validationReset == 0 {
+	if created == 0 && mappingReset == 0 && validationReset == 0 && !historicalMergeReleased {
 		return 0, 0, 0, nil
 	}
 	state.Version++
@@ -548,11 +604,27 @@ func (s Store) ClaimMappingJob(
 	if err != nil {
 		return RepositoryState{}, RepositoryMappingJob{}, Finding{}, false, err
 	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
+		return RepositoryState{}, RepositoryMappingJob{}, Finding{}, false, err
+	}
 	jobIndex := mappingJobIndexByID(state.MappingJobs, jobID)
 	if jobIndex < 0 {
 		return RepositoryState{}, RepositoryMappingJob{}, Finding{}, false, os.ErrNotExist
 	}
 	job := &state.MappingJobs[jobIndex]
+	if len(state.RawFindings) > 0 || state.HistoricalDeduplication.Required {
+		admitted := false
+		for _, finding := range state.DeduplicatedFindings {
+			if finding.ID == job.ReviewFindingID {
+				admitted = true
+				break
+			}
+		}
+		if !admitted {
+			return RepositoryState{}, RepositoryMappingJob{}, Finding{}, false,
+				errors.New("repository mapping requires a deduplicated finding")
+		}
+	}
 	findingIndex := findingIndexByID(state.Findings, job.ReviewFindingID)
 	if findingIndex < 0 {
 		return RepositoryState{}, RepositoryMappingJob{}, Finding{}, false, errors.New(
@@ -560,6 +632,13 @@ func (s Store) ClaimMappingJob(
 		)
 	}
 	finding := &state.Findings[findingIndex]
+	if state.HistoricalDeduplication.Required &&
+		historicalReplayDeduplicatedFinding(state, job.ReviewFindingID) {
+		// Replay-derived occurrences are mapped only after the historical
+		// identity merge completes. New campaign findings in the same ledger
+		// remain eligible throughout replay.
+		return state, *job, *finding, false, nil
+	}
 	if finding.RepositoryFindingID != "" {
 		if job.State == RepositoryMappingCompleted && job.RepositoryFindingID == finding.RepositoryFindingID {
 			return state, *job, *finding, false, nil
@@ -594,6 +673,24 @@ func (s Store) ClaimMappingJob(
 	return state, *job, *finding, true, nil
 }
 
+func historicalReplayDeduplicatedFinding(state RepositoryState, findingID string) bool {
+	index := deduplicatedFindingIndexByID(state.DeduplicatedFindings, findingID)
+	if index < 0 {
+		return false
+	}
+	rawIDs := make(map[string]struct{}, len(state.DeduplicatedFindings[index].RawSourceIDs))
+	for _, rawID := range state.DeduplicatedFindings[index].RawSourceIDs {
+		rawIDs[rawID] = struct{}{}
+	}
+	for _, raw := range state.RawFindings {
+		if _, selected := rawIDs[raw.ID]; selected && raw.LegacyFindingID != "" &&
+			strings.HasPrefix(raw.ID, "rrw_") {
+			return true
+		}
+	}
+	return false
+}
+
 func (s Store) SaveMappingAdjudication(
 	repository, jobID string,
 	adjudication RepositoryMappingAdjudication,
@@ -621,6 +718,9 @@ func (s Store) SaveMappingAdjudication(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
+		return RepositoryState{}, RepositoryMappingJob{}, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, RepositoryMappingJob{}, err
 	}
 	if candidateUniverse == "" {
@@ -696,6 +796,9 @@ func (s Store) CompleteMappingJob(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
+		return RepositoryState{}, RepositoryFinding{}, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, RepositoryFinding{}, err
 	}
 	jobIndex := mappingJobIndexByID(state.MappingJobs, completion.JobID)
@@ -894,6 +997,9 @@ func (s Store) ResolvePossibleDuplicate(
 	if err != nil {
 		return RepositoryState{}, RepositoryFinding{}, err
 	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
+		return RepositoryState{}, RepositoryFinding{}, err
+	}
 	provisionalIndex := repositoryFindingIndexByID(state.RepositoryFindings, request.ProvisionalID)
 	candidateIndex := repositoryFindingIndexByID(state.RepositoryFindings, request.CandidateID)
 	if provisionalIndex < 0 || candidateIndex < 0 {
@@ -1058,6 +1164,9 @@ func (s Store) ReserveValidationJobs(
 	if err != nil {
 		return RepositoryState{}, nil, err
 	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
+		return RepositoryState{}, nil, err
+	}
 	selected := make([]int, len(ids))
 	for index, id := range ids {
 		findingIndex := repositoryFindingIndexByID(state.RepositoryFindings, id)
@@ -1117,6 +1226,9 @@ func (s Store) ClaimValidationJob(
 	if err != nil {
 		return RepositoryState{}, RepositoryValidationJob{}, RepositoryFinding{}, false, err
 	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
+		return RepositoryState{}, RepositoryValidationJob{}, RepositoryFinding{}, false, err
+	}
 	jobIndex := validationJobIndexByID(state.ValidationJobs, jobID)
 	if jobIndex < 0 {
 		return RepositoryState{}, RepositoryValidationJob{}, RepositoryFinding{}, false, os.ErrNotExist
@@ -1173,6 +1285,9 @@ func (s Store) SetValidationJobCandidates(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
+		return RepositoryState{}, RepositoryValidationJob{}, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, RepositoryValidationJob{}, err
 	}
 	index := validationJobIndexByID(state.ValidationJobs, jobID)
@@ -1238,6 +1353,9 @@ func (s Store) CompleteValidationJob(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
+		return RepositoryState{}, RepositoryFinding{}, RepositoryValidationJob{}, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, RepositoryFinding{}, RepositoryValidationJob{}, err
 	}
 	jobIndex := validationJobIndexByID(state.ValidationJobs, completion.JobID)
@@ -1359,6 +1477,9 @@ func (s Store) UpdateRepositoryFindingIssueSnapshot(
 	if err != nil {
 		return RepositoryState{}, RepositoryFinding{}, err
 	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
+		return RepositoryState{}, RepositoryFinding{}, err
+	}
 	index := repositoryFindingIndexByID(state.RepositoryFindings, update.RepositoryFindingID)
 	if index < 0 {
 		return RepositoryState{}, RepositoryFinding{}, os.ErrNotExist
@@ -1457,6 +1578,9 @@ func (s Store) SetRepositoryFindingLifecycle(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
+		return RepositoryState{}, RepositoryFinding{}, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, RepositoryFinding{}, err
 	}
 	index := repositoryFindingIndexByID(state.RepositoryFindings, repositoryFindingID)
@@ -2133,7 +2257,7 @@ func containsExactString(values []string, target string) bool {
 }
 
 func repositoryFindingAllowsIssueActions(state RepositoryState, finding Finding) bool {
-	if finding.RepositoryMatchState == RepositoryMatchProvisional {
+	if finding.DeduplicationPending || finding.RepositoryMatchState == RepositoryMatchProvisional {
 		return false
 	}
 	if finding.RepositoryFindingID == "" {

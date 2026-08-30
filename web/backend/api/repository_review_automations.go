@@ -133,6 +133,14 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 		h.handleGetRepositoryReviewAutomationReport,
 	)
 	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/run-findings",
+		h.handleListRepositoryReviewRunFindingsCollection,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/run-findings/{finding_id}",
+		h.handleGetRepositoryReviewAutomationFinding,
+	)
+	mux.HandleFunc(
 		"POST /api/repository-reviews/automations/{automation_id}/findings/status",
 		h.handleRetryRepositoryReviewRunFindingStatus,
 	)
@@ -142,7 +150,47 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 	)
 	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/findings/{finding_id}",
-		h.handleGetRepositoryReviewAutomationFinding,
+		h.handleGetRepositoryReviewDeduplicatedFinding,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/findings/{finding_id}/sources",
+		h.handleListRepositoryReviewRawSources,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/findings/{finding_id}/sources/{source_id}",
+		h.handleGetRepositoryReviewRawSource,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/findings-processing",
+		h.handleGetRepositoryReviewFindingsProcessing,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/findings-processing/sources/{source_id}",
+		h.handleGetRepositoryReviewRawSource,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/findings-processing/sources/{source_id}/retry",
+		h.handleRetryRepositoryReviewRawSource,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/campaigns/{campaign_id}/findings-processing",
+		h.handleGetRepositoryReviewFindingsProcessing,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/campaigns/{campaign_id}/findings-processing/sources/{source_id}",
+		h.handleGetRepositoryReviewRawSource,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/campaigns/{campaign_id}/findings-processing/sources/{source_id}/retry",
+		h.handleRetryRepositoryReviewRawSource,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/historical-deduplication",
+		h.handleGetRepositoryReviewHistoricalDeduplication,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/historical-deduplication/retry",
+		h.handleRetryRepositoryReviewHistoricalDeduplication,
 	)
 	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/repository-findings",
@@ -1818,6 +1866,8 @@ func writeRepositoryReviewAutomationError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(err.Error()), "not found"):
 		status, code = http.StatusNotFound, "not_found"
+	case errors.Is(err, repoaudit.ErrHistoricalDeduplicationInProgress):
+		status, code = http.StatusConflict, "historical_deduplication_in_progress"
 	case errors.Is(err, errRepositoryReviewCommitSelection):
 		status, code = http.StatusConflict, "repository_review_commit_selection_required"
 	case errors.Is(err, repoaudit.ErrConflict), errors.Is(err, repoaudit.ErrAutomationActive),

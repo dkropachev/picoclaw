@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	RepositoryReviewProfileSchemaVersion       = 3
+	RepositoryReviewProfileSchemaVersion       = 4
 	maxProfileFileBytes                  int64 = 1 << 20
 	maxProfileCount                            = 10_000
 	maxRepositoryReviewIssuePromptBytes        = 16 << 10
@@ -33,25 +33,32 @@ var (
 // RepositoryReviewProfile is reusable review policy. Repository identity,
 // branch selection, and controller runtime state remain on the automation.
 type RepositoryReviewProfile struct {
-	SchemaVersion            int                          `json:"schema_version"`
-	ID                       string                       `json:"id"`
-	Version                  int64                        `json:"version"`
-	Name                     string                       `json:"name"`
-	ReviewFocus              string                       `json:"review_focus"`
-	ScopePolicy              RepositoryReviewScopePolicy  `json:"scope_policy"`
-	ReviewerModel            string                       `json:"reviewer_model"`
-	IssueWriterModel         string                       `json:"issue_writer_model,omitempty"`
-	IssuePrompt              string                       `json:"issue_prompt"`
-	AccountRef               string                       `json:"account_ref,omitempty"`
-	Force                    bool                         `json:"force"`
-	AutoContinue             bool                         `json:"auto_continue"`
-	MaxFilesPerRun           int                          `json:"max_files_per_run"`
-	MaxContentBytes          int64                        `json:"max_content_bytes"`
-	MaxParallelChildren      int                          `json:"max_parallel_children"`
-	AssignmentTimeoutSeconds int                          `json:"assignment_timeout_seconds"`
-	BudgetPolicy             RepositoryReviewBudgetPolicy `json:"budget"`
-	CreatedAt                time.Time                    `json:"created_at"`
-	UpdatedAt                time.Time                    `json:"updated_at"`
+	SchemaVersion                    int                          `json:"schema_version"`
+	ID                               string                       `json:"id"`
+	Version                          int64                        `json:"version"`
+	Name                             string                       `json:"name"`
+	ReviewFocus                      string                       `json:"review_focus"`
+	ScopePolicy                      RepositoryReviewScopePolicy  `json:"scope_policy"`
+	ReviewerModel                    string                       `json:"reviewer_model"`
+	DeduplicationModel               string                       `json:"deduplication_model,omitempty"`
+	DeduplicationSimilarityThreshold int                          `json:"deduplication_similarity_threshold"`
+	DeduplicationCandidateLimit      int                          `json:"deduplication_candidate_limit"`
+	IssueWriterModel                 string                       `json:"issue_writer_model,omitempty"`
+	IssuePrompt                      string                       `json:"issue_prompt"`
+	AccountRef                       string                       `json:"account_ref,omitempty"`
+	Force                            bool                         `json:"force"`
+	AutoContinue                     bool                         `json:"auto_continue"`
+	MaxFilesPerRun                   int                          `json:"max_files_per_run"`
+	MaxContentBytes                  int64                        `json:"max_content_bytes"`
+	MaxParallelChildren              int                          `json:"max_parallel_children"`
+	AssignmentTimeoutSeconds         int                          `json:"assignment_timeout_seconds"`
+	BudgetPolicy                     RepositoryReviewBudgetPolicy `json:"budget"`
+	CreatedAt                        time.Time                    `json:"created_at"`
+	UpdatedAt                        time.Time                    `json:"updated_at"`
+	// DeduplicationSettingsSpecified distinguishes an explicit zero/zero pair
+	// from legacy Go callers which omit both newly added settings. It is an
+	// in-memory create/update hint and is never persisted.
+	DeduplicationSettingsSpecified bool `json:"-"`
 }
 
 func (s Store) ListProfiles(ctx context.Context) ([]RepositoryReviewProfile, error) {
@@ -117,6 +124,16 @@ func (s Store) CreateProfile(
 		return RepositoryReviewProfile{}, ErrConflict
 	}
 	now := s.clock()
+	// The all-zero pair is the Go zero value used by callers which predate
+	// campaign deduplication. Individually, zero remains a valid explicit
+	// threshold or candidate limit.
+	if !profile.DeduplicationSettingsSpecified &&
+		profile.DeduplicationSimilarityThreshold == 0 &&
+		profile.DeduplicationCandidateLimit == 0 {
+		profile.DeduplicationSimilarityThreshold = DeduplicationDefaultThreshold
+		profile.DeduplicationCandidateLimit = DeduplicationDefaultCandidateLimit
+	}
+	profile.DeduplicationSettingsSpecified = true
 	profile.SchemaVersion = RepositoryReviewProfileSchemaVersion
 	profile.Version = 1
 	profile.CreatedAt = now
@@ -127,6 +144,7 @@ func (s Store) CreateProfile(
 	if err := s.saveProfile(profile); err != nil {
 		return RepositoryReviewProfile{}, err
 	}
+	profile.DeduplicationSettingsSpecified = false
 	return cloneProfile(profile), nil
 }
 
@@ -185,6 +203,7 @@ func (s Store) UpdateProfile(
 	if err := s.saveProfile(candidate); err != nil {
 		return RepositoryReviewProfile{}, err
 	}
+	candidate.DeduplicationSettingsSpecified = false
 	return cloneProfile(candidate), nil
 }
 
@@ -263,6 +282,10 @@ func MaterializeRepositoryReviewAutomation(
 	automation.ReviewFocus = profile.ReviewFocus
 	automation.ScopePolicy = profile.ScopePolicy
 	automation.ReviewerModels = []string{profile.ReviewerModel}
+	automation.DeduplicationModel = profile.DeduplicationModel
+	automation.DeduplicationSimilarityThreshold = profile.DeduplicationSimilarityThreshold
+	automation.DeduplicationCandidateLimit = profile.DeduplicationCandidateLimit
+	automation.DeduplicationSettingsSpecified = true
 	automation.IssueWriterModel = strings.TrimSpace(profile.IssueWriterModel)
 	if automation.IssueWriterModel == "" {
 		automation.IssueWriterModel = profile.ReviewerModel
@@ -369,16 +392,25 @@ func (s Store) loadProfile(id string) (RepositoryReviewProfile, bool, error) {
 			profile.IssuePrompt = DefaultRepositoryReviewIssuePrompt
 		}
 		hadLegacySchema = true
-	case 2:
+	case 2, 3:
 		profile.SchemaVersion = RepositoryReviewProfileSchemaVersion
 		hadLegacySchema = true
+	}
+	_, hadDeduplicationThreshold := legacy["deduplication_similarity_threshold"]
+	_, hadDeduplicationCandidateLimit := legacy["deduplication_candidate_limit"]
+	if !hadDeduplicationThreshold {
+		profile.DeduplicationSimilarityThreshold = DeduplicationDefaultThreshold
+	}
+	if !hadDeduplicationCandidateLimit {
+		profile.DeduplicationCandidateLimit = DeduplicationDefaultCandidateLimit
 	}
 	hadLegacyAssignmentTimeout := profile.AssignmentTimeoutSeconds == 0
 	if err := normalizeProfile(&profile); err != nil {
 		return RepositoryReviewProfile{}, false, err
 	}
 	_, hadLegacyPrice := legacy["model_price"]
-	if hadLegacyPrice || hadLegacyGuard || hadLegacySchema || hadLegacyAssignmentTimeout {
+	if hadLegacyPrice || hadLegacyGuard || hadLegacySchema || hadLegacyAssignmentTimeout ||
+		!hadDeduplicationThreshold || !hadDeduplicationCandidateLimit {
 		if err := s.saveProfile(profile); err != nil {
 			return RepositoryReviewProfile{}, false, err
 		}
@@ -419,6 +451,7 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 	profile.Name = strings.TrimSpace(profile.Name)
 	profile.ReviewFocus = strings.TrimSpace(profile.ReviewFocus)
 	profile.ReviewerModel = strings.TrimSpace(profile.ReviewerModel)
+	profile.DeduplicationModel = strings.TrimSpace(profile.DeduplicationModel)
 	profile.IssueWriterModel = strings.TrimSpace(profile.IssueWriterModel)
 	profile.IssuePrompt = strings.TrimSpace(profile.IssuePrompt)
 	if profile.IssuePrompt == "" {
@@ -447,6 +480,11 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 		profile.Version < 1 || !validBoundedText(profile.Name, 256) ||
 		!validBoundedText(profile.ReviewFocus, maxFindingTextBytes) ||
 		!validBoundedText(profile.ReviewerModel, 256) ||
+		!validOptionalAutomationText(profile.DeduplicationModel, 256) ||
+		profile.DeduplicationSimilarityThreshold < 0 ||
+		profile.DeduplicationSimilarityThreshold > 100 ||
+		profile.DeduplicationCandidateLimit < 0 ||
+		profile.DeduplicationCandidateLimit > DeduplicationMaximumShortlist ||
 		!validOptionalAutomationText(profile.IssueWriterModel, 256) ||
 		!validBoundedText(profile.IssuePrompt, maxRepositoryReviewIssuePromptBytes) ||
 		!validOptionalAutomationText(profile.AccountRef, 256) ||

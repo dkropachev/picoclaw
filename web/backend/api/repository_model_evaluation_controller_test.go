@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1287,20 +1286,14 @@ func TestRepositoryModelEvaluationControllerBatchFailureAndRunningCancellation(t
 			t.Fatalf("start ready status=%d body=%s", start.Code, start.Body.String())
 		}
 		<-batchEntered
-		var cancel *httptest.ResponseRecorder
-		for attempt := 0; attempt < 5; attempt++ {
-			active, _, _ := handler.getRepositoryModelEvaluation(t.Context(), created.ID)
-			cancel = repositoryModelEvaluationMutation(
-				t,
-				mux,
-				http.MethodPost,
-				"/api/model-evaluations/"+created.ID+"/cancel",
-				map[string]any{"expected_version": active.Version},
-			)
-			if cancel.Code != http.StatusConflict {
-				break
-			}
-		}
+		active, _, _ := handler.getRepositoryModelEvaluation(t.Context(), created.ID)
+		cancel := repositoryModelEvaluationCancelMutation(
+			t,
+			handler,
+			mux,
+			created.ID,
+			active.Version,
+		)
 		if cancel.Code != http.StatusAccepted {
 			t.Fatalf("cancel status=%d body=%s", cancel.Code, cancel.Body.String())
 		}

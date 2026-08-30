@@ -43,10 +43,9 @@ Return only the required structured JSON with decision same, related, distinct, 
 func (c *repositoryReviewController) startRepositoryFindingMapping(
 	automations []repoaudit.RepositoryReviewAutomation,
 ) {
-	if c == nil || c.ctx.Err() != nil || !c.mappingMu.TryLock() {
+	if c == nil || !c.admitBackgroundWorker(&c.mappingMu) {
 		return
 	}
-	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
 		defer c.mappingMu.Unlock()
@@ -137,8 +136,10 @@ func repositoryFallbackAutomation(
 	state repoaudit.RepositoryState,
 ) repoaudit.RepositoryReviewAutomation {
 	automation := repoaudit.RepositoryReviewAutomation{
-		ID:         "legacy_" + strings.TrimPrefix(state.ID, "rrp_"),
-		Repository: state.Repository,
+		ID:                               "legacy_" + strings.TrimPrefix(state.ID, "rrp_"),
+		Repository:                       state.Repository,
+		DeduplicationSimilarityThreshold: repoaudit.DeduplicationDefaultThreshold,
+		DeduplicationCandidateLimit:      repoaudit.DeduplicationDefaultCandidateLimit,
 	}
 	if cfg != nil {
 		automation.AccountRef = cfg.Agents.Defaults.AccountRef

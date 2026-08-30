@@ -2,7 +2,7 @@ package repoaudit
 
 import "time"
 
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 type FileRef struct {
 	Path      string `json:"path"`
@@ -210,26 +210,31 @@ type IssueDraft struct {
 }
 
 type Finding struct {
-	ID                      string               `json:"id"`
-	CampaignID              string               `json:"campaign_id,omitempty"`
-	Fingerprint             string               `json:"fingerprint"`
-	Repository              string               `json:"repository"`
-	CommitSHA               string               `json:"commit_sha"`
-	File                    FileRef              `json:"file"`
-	Line                    *int                 `json:"line,omitempty"`
-	Severity                string               `json:"severity"`
-	Title                   string               `json:"title"`
-	Symbol                  string               `json:"symbol,omitempty"`
-	Message                 string               `json:"message,omitempty"`
-	Evidence                string               `json:"evidence"`
-	Impact                  string               `json:"impact"`
-	Validation              Validation           `json:"validation"`
-	MatchHints              MatchHints           `json:"match_hints,omitempty"`
-	FixEffort               FixEffort            `json:"fix_effort,omitempty"`
-	ContextIDs              []string             `json:"context_ids"`
-	Models                  []string             `json:"models"`
-	ObservationCount        int                  `json:"observation_count"`
-	Observations            []FindingObservation `json:"observations,omitempty"`
+	ID               string               `json:"id"`
+	CampaignID       string               `json:"campaign_id,omitempty"`
+	Fingerprint      string               `json:"fingerprint"`
+	Repository       string               `json:"repository"`
+	CommitSHA        string               `json:"commit_sha"`
+	File             FileRef              `json:"file"`
+	Line             *int                 `json:"line,omitempty"`
+	Severity         string               `json:"severity"`
+	Title            string               `json:"title"`
+	Symbol           string               `json:"symbol,omitempty"`
+	Message          string               `json:"message,omitempty"`
+	Evidence         string               `json:"evidence"`
+	Impact           string               `json:"impact"`
+	Validation       Validation           `json:"validation"`
+	MatchHints       MatchHints           `json:"match_hints,omitempty"`
+	FixEffort        FixEffort            `json:"fix_effort,omitempty"`
+	ContextIDs       []string             `json:"context_ids"`
+	Models           []string             `json:"models"`
+	ObservationCount int                  `json:"observation_count"`
+	Observations     []FindingObservation `json:"observations,omitempty"`
+	// DeduplicationPending marks a compatibility projection of one or more raw
+	// findings. It is never eligible for mapping, issue generation, or lifecycle
+	// mutation; only a promoted deduplicated finding clears this gate.
+	DeduplicationPending    bool                 `json:"deduplication_pending,omitempty"`
+	RawFindingIDs           []string             `json:"raw_finding_ids,omitempty"`
 	Status                  FindingStatus        `json:"status"`
 	IssueDraftID            string               `json:"issue_draft_id,omitempty"`
 	RepositoryFindingID     string               `json:"repository_finding_id,omitempty"`
@@ -527,51 +532,58 @@ type RepositoryReviewActiveRun struct {
 // only between trusted BeginCampaign authorization and the first matching
 // Plan or Record. A false Exact value means Paths are only a known lower bound.
 type RepositoryReviewCampaignCoverage struct {
-	ID                  string                                          `json:"id"`
-	CommitSHA           string                                          `json:"commit_sha"`
-	InventoryHash       string                                          `json:"inventory_hash,omitempty"`
-	ProfileHash         string                                          `json:"profile_hash,omitempty"`
-	ScopeDigest         string                                          `json:"scope_digest,omitempty"`
-	RequiredAssignments int                                             `json:"required_assignments,omitempty"`
-	AssignmentCatalog   []RepositoryReviewAssignment                    `json:"assignment_catalog,omitempty"`
-	SelectedFiles       int                                             `json:"selected_files"`
-	Exact               bool                                            `json:"exact"`
-	RecoveryDigest      string                                          `json:"recovery_digest,omitempty"`
-	Paths               map[string]RepositoryReviewCampaignPathCoverage `json:"paths"`
+	ID                    string                                          `json:"id"`
+	CommitSHA             string                                          `json:"commit_sha"`
+	InventoryHash         string                                          `json:"inventory_hash,omitempty"`
+	ProfileHash           string                                          `json:"profile_hash,omitempty"`
+	ScopeDigest           string                                          `json:"scope_digest,omitempty"`
+	RequiredAssignments   int                                             `json:"required_assignments,omitempty"`
+	AssignmentCatalog     []RepositoryReviewAssignment                    `json:"assignment_catalog,omitempty"`
+	SelectedFiles         int                                             `json:"selected_files"`
+	Exact                 bool                                            `json:"exact"`
+	RecoveryDigest        string                                          `json:"recovery_digest,omitempty"`
+	DeduplicationSnapshot *RepositoryReviewDeduplicationSnapshot          `json:"deduplication_snapshot,omitempty"`
+	Paths                 map[string]RepositoryReviewCampaignPathCoverage `json:"paths"`
 }
 
 type RepositoryState struct {
-	SchemaVersion           int                               `json:"schema_version"`
-	ID                      string                            `json:"id"`
-	Repository              string                            `json:"repository"`
-	Version                 int64                             `json:"version"`
-	ReviewVersion           int64                             `json:"review_version"`
-	LastCommitSHA           string                            `json:"last_commit_sha,omitempty"`
-	Files                   map[string]ReviewedFile           `json:"files"`
-	Unsupported             map[string]UnsupportedFile        `json:"unsupported,omitempty"`
-	ReviewAttempts          map[string]int                    `json:"review_attempts,omitempty"`
-	ReviewAttemptIdentities map[string]string                 `json:"review_attempt_identities,omitempty"`
-	Findings                []Finding                         `json:"findings"`
-	Contexts                []FindingContext                  `json:"contexts"`
-	Runs                    []ReviewRun                       `json:"runs"`
-	IssueDrafts             []IssueDraft                      `json:"issue_drafts"`
-	RepositoryFindings      []RepositoryFinding               `json:"repository_findings"`
-	MappingJobs             []RepositoryMappingJob            `json:"mapping_jobs"`
-	ValidationJobs          []RepositoryValidationJob         `json:"validation_jobs"`
-	CurrentCampaign         *RepositoryReviewCampaignCoverage `json:"current_campaign,omitempty"`
-	ActiveReviewRun         *RepositoryReviewActiveRun        `json:"active_review_run,omitempty"`
-	CampaignHistory         map[string]string                 `json:"campaign_history,omitempty"`
-	ActiveForceCampaignID   string                            `json:"active_force_campaign_id,omitempty"`
-	ActiveForceProfileHash  string                            `json:"active_force_profile_hash,omitempty"`
-	ActiveForceCommitSHA    string                            `json:"active_force_commit_sha,omitempty"`
-	UpdatedAt               time.Time                         `json:"updated_at"`
-	FindingCount            int                               `json:"finding_count"`
-	RepositoryFindingCount  int                               `json:"repository_finding_count"`
-	OpenFindingCount        int                               `json:"open_finding_count"`
-	IssueDraftCount         int                               `json:"issue_draft_count"`
-	UnsupportedCount        int                               `json:"unsupported_count"`
-	ReviewedFileCount       int                               `json:"reviewed_file_count"`
-	LastExcludedFiles       int                               `json:"last_excluded_files"`
+	SchemaVersion            int                               `json:"schema_version"`
+	ID                       string                            `json:"id"`
+	Repository               string                            `json:"repository"`
+	Version                  int64                             `json:"version"`
+	ReviewVersion            int64                             `json:"review_version"`
+	LastCommitSHA            string                            `json:"last_commit_sha,omitempty"`
+	Files                    map[string]ReviewedFile           `json:"files"`
+	Unsupported              map[string]UnsupportedFile        `json:"unsupported,omitempty"`
+	ReviewAttempts           map[string]int                    `json:"review_attempts,omitempty"`
+	ReviewAttemptIdentities  map[string]string                 `json:"review_attempt_identities,omitempty"`
+	Findings                 []Finding                         `json:"findings"`
+	RawFindings              []RawReviewFinding                `json:"raw_findings"`
+	DeduplicatedFindings     []DeduplicatedReviewFinding       `json:"deduplicated_findings"`
+	DeduplicationJobs        []DeduplicationJob                `json:"deduplication_jobs"`
+	NextDeduplicationOrdinal uint64                            `json:"next_deduplication_ordinal"`
+	FindingsProcessing       FindingsProcessingCounters        `json:"findings_processing"`
+	Contexts                 []FindingContext                  `json:"contexts"`
+	Runs                     []ReviewRun                       `json:"runs"`
+	IssueDrafts              []IssueDraft                      `json:"issue_drafts"`
+	RepositoryFindings       []RepositoryFinding               `json:"repository_findings"`
+	MappingJobs              []RepositoryMappingJob            `json:"mapping_jobs"`
+	ValidationJobs           []RepositoryValidationJob         `json:"validation_jobs"`
+	CurrentCampaign          *RepositoryReviewCampaignCoverage `json:"current_campaign,omitempty"`
+	ActiveReviewRun          *RepositoryReviewActiveRun        `json:"active_review_run,omitempty"`
+	CampaignHistory          map[string]string                 `json:"campaign_history,omitempty"`
+	ActiveForceCampaignID    string                            `json:"active_force_campaign_id,omitempty"`
+	ActiveForceProfileHash   string                            `json:"active_force_profile_hash,omitempty"`
+	ActiveForceCommitSHA     string                            `json:"active_force_commit_sha,omitempty"`
+	HistoricalDeduplication  HistoricalDeduplicationReplay     `json:"historical_deduplication"`
+	UpdatedAt                time.Time                         `json:"updated_at"`
+	FindingCount             int                               `json:"finding_count"`
+	RepositoryFindingCount   int                               `json:"repository_finding_count"`
+	OpenFindingCount         int                               `json:"open_finding_count"`
+	IssueDraftCount          int                               `json:"issue_draft_count"`
+	UnsupportedCount         int                               `json:"unsupported_count"`
+	ReviewedFileCount        int                               `json:"reviewed_file_count"`
+	LastExcludedFiles        int                               `json:"last_excluded_files"`
 }
 
 type RepositorySummary struct {
@@ -593,15 +605,26 @@ type RepositorySummary struct {
 
 func Summarize(state RepositoryState) RepositorySummary {
 	openFindings := 0
-	for _, finding := range state.Findings {
-		if finding.Status == FindingOpen {
-			openFindings++
+	findingCount := len(state.Findings)
+	if len(state.RawFindings) > 0 || len(state.DeduplicationJobs) > 0 ||
+		len(state.DeduplicatedFindings) > 0 {
+		findingCount = len(state.DeduplicatedFindings)
+		for _, finding := range state.DeduplicatedFindings {
+			if finding.Status == FindingOpen {
+				openFindings++
+			}
+		}
+	} else {
+		for _, finding := range state.Findings {
+			if finding.Status == FindingOpen {
+				openFindings++
+			}
 		}
 	}
 	return RepositorySummary{
 		SchemaVersion: state.SchemaVersion, ID: state.ID, Repository: state.Repository,
 		Version: state.Version, ReviewVersion: state.ReviewVersion,
-		LastCommitSHA: state.LastCommitSHA, FindingCount: len(state.Findings),
+		LastCommitSHA: state.LastCommitSHA, FindingCount: findingCount,
 		RepositoryFindingCount: len(state.RepositoryFindings),
 		OpenFindingCount:       openFindings, IssueDraftCount: len(state.IssueDrafts),
 		UnsupportedCount: len(state.Unsupported), ReviewedFileCount: len(state.Files),

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -153,7 +154,10 @@ func TestRepositoryReviewAssignmentTimeoutSchemaMigrationsPreserveVersions(t *te
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Contains(rewritten, []byte(`"schema_version":3`)) ||
+		if !bytes.Contains(
+			rewritten,
+			[]byte(fmt.Sprintf(`"schema_version":%d`, RepositoryReviewProfileSchemaVersion)),
+		) ||
 			!bytes.Contains(rewritten, []byte(`"assignment_timeout_seconds":3600`)) {
 			t.Fatalf("profile migration was not persisted: %s", rewritten)
 		}
