@@ -25,6 +25,7 @@ import {
   listRepositoryReviewAutomationRepositoryFindingsPage,
   listRepositoryReviewAutomations,
   listRepositoryReviewAutomationsPage,
+  listRepositoryReviewFindingRawSources,
   listRepositoryReviewProfiles,
   listRepositoryReviewProfilesPage,
   listRepositoryReviews,
@@ -813,7 +814,7 @@ describe("repository review API", () => {
     )
   })
 
-  it("uses automation-owned detail and canonical findings endpoints", async () => {
+  it("separates run finding detail from deduplicated finding sources", async () => {
     const automation = {
       id: "auto/slash",
       repository: "owner/repo",
@@ -855,6 +856,14 @@ describe("repository review API", () => {
       .mockResolvedValueOnce(
         jsonResponse({ automation, finding, contexts: [], capabilities: {} }),
       )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          sources: [{ id: "source/slash" }],
+          offset: 25,
+          total: 26,
+        }),
+      )
 
     await expect(
       getRepositoryReviewAutomation("auto/slash"),
@@ -886,6 +895,17 @@ describe("repository review API", () => {
     ).resolves.toMatchObject({
       finding: { id: "finding/slash", context_ids: [] },
     })
+    await expect(
+      listRepositoryReviewFindingRawSources(
+        "auto/slash",
+        "deduplicated/slash",
+        { offset: 25, limit: 25 },
+      ),
+    ).resolves.toMatchObject({
+      sources: [{ id: "source/slash" }],
+      offset: 25,
+      total: 26,
+    })
 
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       1,
@@ -899,7 +919,12 @@ describe("repository review API", () => {
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       3,
-      "/api/repository-reviews/automations/auto%2Fslash/findings/finding%2Fslash",
+      "/api/repository-reviews/automations/auto%2Fslash/run-findings/finding%2Fslash",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      4,
+      "/api/repository-reviews/automations/auto%2Fslash/findings/deduplicated%2Fslash/sources?offset=25&limit=25",
       { signal: undefined },
     )
   })
@@ -1038,7 +1063,7 @@ describe("repository review API", () => {
 
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       1,
-      "/api/repository-reviews/automations/auto%2Fslash/findings?query=severity+%3D+high+ORDER+BY+updated+DESC&cursor=run-cursor&limit=25",
+      "/api/repository-reviews/automations/auto%2Fslash/run-findings?query=severity+%3D+high+ORDER+BY+updated+DESC&cursor=run-cursor&limit=25",
       undefined,
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(

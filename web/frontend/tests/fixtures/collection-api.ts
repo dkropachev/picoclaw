@@ -1859,7 +1859,7 @@ export async function installCollectionVisualMocks(
       if (path === reviewRoot) {
         return json(route, repositoryReviewAutomation)
       }
-      if (path === `${reviewRoot}/findings`) {
+      if (path === `${reviewRoot}/run-findings`) {
         return json(route, {
           automation: repositoryReviewAutomation,
           repository: repositoryReviewSummary,
@@ -1949,7 +1949,7 @@ export async function installCollectionVisualMocks(
           capabilities: repositoryReviewCapabilities,
         })
       }
-      const reviewFindingPrefix = `${reviewRoot}/findings/`
+      const reviewFindingPrefix = `${reviewRoot}/run-findings/`
       if (path.startsWith(reviewFindingPrefix)) {
         const findingID = decodeURIComponent(
           path.slice(reviewFindingPrefix.length),

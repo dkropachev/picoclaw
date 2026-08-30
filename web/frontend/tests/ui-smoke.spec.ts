@@ -6295,7 +6295,7 @@ async function mockRepositoryReviewAutomationRequest(
     })
   }
 
-  if (path === `${automationRoot}/findings` && method === "GET") {
+  if (path === `${automationRoot}/run-findings` && method === "GET") {
     const cursor = Number(url.searchParams.get("cursor") ?? 0)
     const offset = Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0
     const limit = Number(url.searchParams.get("limit") ?? 50)
@@ -6476,6 +6476,16 @@ async function mockRepositoryReviewAutomationRequest(
       finding.version += 1
     }
     return json(route, findingDetail(finding))
+  }
+
+  const runFindingMatch = path.match(
+    new RegExp(`^${automationRoot}/run-findings/([^/]+)$`),
+  )
+  if (runFindingMatch && method === "GET") {
+    const finding = findFinding(decodeURIComponent(runFindingMatch[1]!))
+    return finding
+      ? json(route, findingDetail(finding))
+      : json(route, { code: "not_found" }, 404)
   }
 
   const repositoryFindingMatch = path.match(
@@ -7055,11 +7065,13 @@ test("legacy repository finding scope and offset normalize to cursor collections
   page,
 }) => {
   const collectionRequests: URL[] = []
+  const runFindingsPath = `/api/repository-reviews/automations/${repositoryReviewAutomationID}/run-findings`
+  const deduplicatedFindingsPath = `/api/repository-reviews/automations/${repositoryReviewAutomationID}/findings`
   page.on("request", (request) => {
     const url = new URL(request.url())
     if (
-      url.pathname ===
-        `/api/repository-reviews/automations/${repositoryReviewAutomationID}/findings` ||
+      url.pathname === runFindingsPath ||
+      url.pathname === deduplicatedFindingsPath ||
       url.pathname ===
         `/api/repository-reviews/automations/${repositoryReviewAutomationID}/repository-findings`
     ) {
@@ -7099,8 +7111,14 @@ test("legacy repository finding scope and offset normalize to cursor collections
       offset: null,
     })
   const currentRequest = collectionRequests.findLast((request) =>
-    request.pathname.endsWith("/findings"),
+    request.pathname.endsWith("/run-findings"),
   )
+  expect(currentRequest?.pathname).toBe(runFindingsPath)
+  expect(
+    collectionRequests.some(
+      (request) => request.pathname === deduplicatedFindingsPath,
+    ),
+  ).toBe(false)
   expect(currentRequest?.searchParams.get("query")).toBe(legacyQuery)
   expect(currentRequest?.searchParams.has("cursor")).toBe(false)
   expect(currentRequest?.searchParams.has("offset")).toBe(false)

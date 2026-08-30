@@ -138,6 +138,75 @@ func TestRepositoryReviewCollectionRoutesAndCompactProjections(t *testing.T) {
 	}
 }
 
+func TestRepositoryReviewRunFindingsSurviveFailedHistoricalDeduplication(t *testing.T) {
+	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	state := seedRepositoryReviewAPIState(t, workspace)
+	want := state.Findings[0]
+	state.RawFindings = nil
+	state.DeduplicatedFindings = nil
+	state.DeduplicationJobs = nil
+	state.FindingsProcessing = repoaudit.FindingsProcessingCounters{}
+	state.HistoricalDeduplication = repoaudit.HistoricalDeduplicationReplay{
+		Required:  true,
+		Status:    repoaudit.HistoricalDeduplicationFailed,
+		Attempts:  3,
+		Error:     "Historical deduplication failed.",
+		UpdatedAt: time.Now().UTC(),
+	}
+	persistRepositoryReviewAdditionalCoverageState(t, workspace, state)
+	automation := seedRepositoryReviewDetailAutomation(
+		t, handler, state.Repository, state.Runs[0].ID,
+	)
+
+	query := url.QueryEscape("ALL ORDER BY severity DESC, updated DESC")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations/"+automation.ID+"/run-findings?query="+query,
+		nil,
+	))
+	if response.Code != http.StatusOK {
+		t.Fatalf("run findings status=%d body=%s", response.Code, response.Body.String())
+	}
+	var page struct {
+		Findings       []repositoryReviewRunFindingSummary `json:"findings"`
+		Total          int                                 `json:"total"`
+		CanonicalQuery string                              `json:"canonical_query"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Findings) != 1 || page.Findings[0].ID != want.ID ||
+		page.Findings[0].Title != want.Title || page.Findings[0].Severity != want.Severity ||
+		page.CanonicalQuery != "ALL ORDER BY severity DESC, updated DESC" {
+		t.Fatalf("run findings page=%#v body=%s", page, response.Body.String())
+	}
+
+	detailResponse := httptest.NewRecorder()
+	mux.ServeHTTP(detailResponse, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations/"+automation.ID+"/run-findings/"+want.ID,
+		nil,
+	))
+	if detailResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"run finding detail status=%d body=%s",
+			detailResponse.Code,
+			detailResponse.Body.String(),
+		)
+	}
+	var detail struct {
+		Finding repositoryReviewRunFindingProjection `json:"finding"`
+	}
+	if err := json.Unmarshal(detailResponse.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Finding.ID != want.ID {
+		t.Fatalf("run finding detail=%#v body=%s", detail, detailResponse.Body.String())
+	}
+}
+
 func TestRepositoryReviewIssueCollectionGenerationCursorAndLegacyFirstPage(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
