@@ -311,6 +311,7 @@ Owns: TEST pkg/workflows/event_dispatcher_test.go
 Owns: TEST pkg/gateway/event_*
 Owns: TEST pkg/gateway/pr_workspace_*
 Owns: TEST pkg/gateway/development_*
+Owns: TEST pkg/gateway/gated_code_*
 Owns: TEST pkg/prworkspace/http_collection_test.go
 Owns: TEST web/frontend/src/routes/-development-collection-route.test.tsx
 Owns: TEST cmd/picoclaw/internal/events/*
