@@ -98,6 +98,23 @@ func updateRepositoryReviewAutomation(
 	return store.UpdateAutomation(ctx, id, expectedVersion, mutate)
 }
 
+var reconcileRepositoryReviewDeduplicationJobs = func(
+	store repoaudit.Store,
+	ctx context.Context,
+) (int, error) {
+	return store.ReconcileDeduplicationJobs(ctx)
+}
+
+var repositoryReviewCampaignWorkflowRuntime = func(
+	controller *repositoryReviewController,
+	ctx context.Context,
+	cfg *config.Config,
+) (*config.Config, *workflows.FileRunStore, *workflows.Executor, error) {
+	return controller.handler.workflowRuntimeFromConfigWithoutPrune(ctx, cfg)
+}
+
+var applyRepositoryReviewPause = applyRepositoryReviewPauseTransition
+
 type repositoryReviewController struct {
 	handler *Handler
 	ctx     context.Context
@@ -228,7 +245,7 @@ func (c *repositoryReviewController) Start() error {
 			c.cancel()
 			return
 		}
-		if _, err = store.ReconcileDeduplicationJobs(c.ctx); err != nil {
+		if _, err = reconcileRepositoryReviewDeduplicationJobs(store, c.ctx); err != nil {
 			c.startErr = fmt.Errorf("reconcile finding deduplication jobs: %w", err)
 			if c.releaseLease != nil {
 				c.releaseLease()
@@ -1344,7 +1361,7 @@ func (c *repositoryReviewController) resolveRepositoryReviewCampaignProfile(
 			"repository review model profile resolver is unavailable",
 		)
 	}
-	_, _, executor, err := c.handler.workflowRuntimeFromConfigWithoutPrune(ctx, cfg)
+	_, _, executor, err := repositoryReviewCampaignWorkflowRuntime(c, ctx, cfg)
 	if err != nil {
 		return workflows.RepositoryReviewModelProfile{}, err
 	}
@@ -1485,7 +1502,7 @@ func (c *repositoryReviewController) pauseAutomationForRun(
 	}
 	latchedRunID := current.ActiveRunID
 	updated, err := c.updateLatest(ctx, store, id, func(candidate *repoaudit.RepositoryReviewAutomation) error {
-		return applyRepositoryReviewPauseTransition(candidate, expectedVersion, expectedRunID)
+		return applyRepositoryReviewPause(candidate, expectedVersion, expectedRunID)
 	})
 	if errors.Is(err, errRepositoryReviewPauseSettled) {
 		return loadSettledRepositoryReviewPause(ctx, store, id)

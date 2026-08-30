@@ -11,6 +11,37 @@ import (
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
 )
 
+var admitNextHistoricalDeduplicationBatch = func(
+	store repoaudit.Store,
+	repository string,
+) (repoaudit.RepositoryState, repoaudit.HistoricalDeduplicationAdmission, error) {
+	return store.AdmitNextHistoricalDeduplicationBatch(repository)
+}
+
+var historicalDeduplicationRepositoryMergeGroups = repoaudit.HistoricalDeduplicationRepositoryMergeGroups
+
+var acquireHistoricalDeduplicationMerge = func(
+	store repoaudit.Store,
+	repository, leaseID string,
+	groups []repoaudit.HistoricalDeduplicationMergeGroup,
+) (repoaudit.RepositoryState, repoaudit.HistoricalDeduplicationReplay, bool, error) {
+	return store.AcquireHistoricalDeduplicationMerge(repository, leaseID, groups)
+}
+
+var completeHistoricalDeduplicationMerge = func(
+	store repoaudit.Store,
+	repository, leaseID string,
+) (repoaudit.RepositoryState, repoaudit.HistoricalDeduplicationReplay, error) {
+	return store.CompleteHistoricalDeduplicationMerge(repository, leaseID)
+}
+
+var failHistoricalDeduplicationReplay = func(
+	store repoaudit.Store,
+	repository, leaseID string,
+) (repoaudit.RepositoryState, repoaudit.HistoricalDeduplicationReplay, error) {
+	return store.FailHistoricalDeduplicationReplay(repository, leaseID)
+}
+
 func (h *Handler) handleGetRepositoryReviewHistoricalDeduplication(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -205,7 +236,7 @@ func (c *repositoryReviewController) advanceHistoricalFindingDeduplication(
 	if replay.Status != repoaudit.HistoricalDeduplicationReplaying {
 		return nil
 	}
-	state, admission, err := c.leasedStore.AdmitNextHistoricalDeduplicationBatch(state.Repository)
+	state, admission, err := admitNextHistoricalDeduplicationBatch(c.leasedStore, state.Repository)
 	if err != nil {
 		return err
 	}
@@ -217,7 +248,7 @@ func (c *repositoryReviewController) advanceHistoricalFindingDeduplication(
 		}
 		return nil
 	}
-	groups, groupErr := repoaudit.HistoricalDeduplicationRepositoryMergeGroups(state)
+	groups, groupErr := historicalDeduplicationRepositoryMergeGroups(state)
 	if errors.Is(groupErr, repoaudit.ErrHistoricalDeduplicationNotQuiescent) {
 		return nil
 	}
@@ -228,18 +259,18 @@ func (c *repositoryReviewController) advanceHistoricalFindingDeduplication(
 	leaseID := repoaudit.HistoricalDeduplicationMergeLeaseID(
 		state.Repository, state.Version, string(encoded),
 	)
-	_, acquiredReplay, _, err := c.leasedStore.AcquireHistoricalDeduplicationMerge(
-		state.Repository, leaseID, groups,
+	_, acquiredReplay, _, err := acquireHistoricalDeduplicationMerge(
+		c.leasedStore, state.Repository, leaseID, groups,
 	)
 	if err != nil {
 		return err
 	}
-	_, _, err = c.leasedStore.CompleteHistoricalDeduplicationMerge(
-		state.Repository, acquiredReplay.MergeLease.ID,
+	_, _, err = completeHistoricalDeduplicationMerge(
+		c.leasedStore, state.Repository, acquiredReplay.MergeLease.ID,
 	)
 	if err != nil {
-		_, _, failErr := c.leasedStore.FailHistoricalDeduplicationReplay(
-			state.Repository, acquiredReplay.MergeLease.ID,
+		_, _, failErr := failHistoricalDeduplicationReplay(
+			c.leasedStore, state.Repository, acquiredReplay.MergeLease.ID,
 		)
 		return errors.Join(err, failErr)
 	}
