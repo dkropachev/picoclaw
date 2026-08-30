@@ -14,6 +14,20 @@ type gatedCodeMutationErrorStore struct {
 	Store
 }
 
+type gatedCodeFailGates struct{}
+
+func (gatedCodeFailGates) Start(context.Context, GateRequest) (GateRun, error) {
+	return GateRun{}, errors.New("injected gated-code gate failure")
+}
+
+func (gatedCodeFailGates) Respond(
+	_ context.Context,
+	gate GateRun,
+	_ map[string]any,
+) (GateRun, error) {
+	return gate, nil
+}
+
 func (store gatedCodeMutationErrorStore) Mutate(
 	ctx context.Context,
 	mutation Mutation,
@@ -587,6 +601,150 @@ func TestGatedCodeRemainingFailClosedBranches(t *testing.T) {
 			},
 		); !errors.Is(err, ErrConflict) {
 			t.Fatalf("repeat charter confirmation error = %v", err)
+		}
+	})
+
+	t.Run("missing phase publishers fail before queueing", func(t *testing.T) {
+		service, aggregate := seededDevelopmentAIService(
+			t,
+			PhasePublication,
+			ExecutionWaitingUser,
+			&codeCLIOperationAI{},
+		)
+		handler, err := NewHTTPHandler(HTTPConfig{
+			Service: service, FeatureRuntimeLease: codeCLISafeFeatureRuntimeLease,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		expectedHead := aggregate.ProviderSnapshot.ProviderRevision
+		if expectedHead == "" {
+			expectedHead = aggregate.ProviderSnapshot.HeadSHA
+		}
+		for _, kind := range []string{"review", "implementation"} {
+			response := developmentLifecycleRequest(
+				t,
+				handler,
+				http.MethodPost,
+				"/"+aggregate.Workspace.ID+"/publications/"+kind,
+				map[string]any{
+					"expected_version":       aggregate.Workspace.Version,
+					"expected_head_revision": expectedHead,
+					"request_id":             "request-gated-code-missing-" + kind + "-publisher",
+				},
+			)
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("missing %s publisher status = %d: %s", kind, response.Code, response.Body.String())
+			}
+		}
+	})
+
+	t.Run("automatic charter confirmation surfaces gate failure", func(t *testing.T) {
+		service, err := NewService(ServiceConfig{
+			Store: NewMemoryStore(), Provider: developmentCatalogResolver{}, AI: serviceAI{},
+			Gates: gatedCodeFailGates{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		aggregate, err := service.Create(t.Context(), CreateWorkspaceRequest{
+			RequestID: "request-gated-code-charter-create", Intent: IntentImplementFeature,
+			SourceKind: SourceBrief, RepositoryIdentity: "https://github.com|42",
+			Brief: "Exercise automatic charter confirmation failure",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		drafted, err := service.DraftCharter(t.Context(), DraftCharterRequest{
+			WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+			RequestID: "request-gated-code-charter-draft",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler, err := NewHTTPHandler(HTTPConfig{
+			Service: service, LeasedFeatureGuard: func(context.Context) error { return nil },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = handler.AdvanceDevelopmentWorkspace(
+			t.Context(),
+			drafted,
+			"request-gated-code-charter-advance",
+		); err == nil {
+			t.Fatal("automatic charter confirmation hid gate failure")
+		}
+	})
+
+	t.Run("implementation helper surfaces repair failure", func(t *testing.T) {
+		service, aggregate := seededDevelopmentAIService(
+			t,
+			PhaseImplementation,
+			ExecutionQueued,
+			&codeCLIOperationAI{},
+		)
+		handler, err := NewHTTPHandler(HTTPConfig{
+			Service: service,
+			Implementation: ImplementationConfig{
+				Repair: failedImplementationRepair{}, Validation: implementationValidation{},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = handler.maybeRunImplementation(
+			t.Context(),
+			aggregate,
+			"request-gated-code-failed-repair",
+		); err == nil {
+			t.Fatal("implementation helper hid repair failure")
+		}
+	})
+
+	t.Run("autonomous review surfaces missing evidence", func(t *testing.T) {
+		service, aggregate := seededDevelopmentAIService(
+			t,
+			PhaseReview,
+			ExecutionQueued,
+			&codeCLIOperationAI{},
+		)
+		handler, err := NewHTTPHandler(HTTPConfig{
+			Service: service, LeasedFeatureGuard: func(context.Context) error { return nil },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = handler.AdvanceDevelopmentWorkspace(
+			t.Context(),
+			aggregate,
+			"request-gated-code-review-without-evidence",
+		); err == nil {
+			t.Fatal("autonomous review hid missing evidence")
+		}
+	})
+
+	t.Run("automatic deferred failure is returned", func(t *testing.T) {
+		now := time.Date(2026, time.August, 29, 12, 0, 0, 0, time.UTC)
+		service, aggregate := publicationTestService(
+			t,
+			DeferredIssuesAutomatic,
+			passingGates{},
+			now,
+		)
+		service.store = &failAutomaticMutationStore{Store: service.store, remaining: 1}
+		handler, err := NewHTTPHandler(HTTPConfig{
+			Service: service, IssuePublisher: &countingIssuePublisher{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = handler.AdvanceDevelopmentWorkspace(
+			t.Context(),
+			aggregate,
+			"request-gated-code-deferred-failure",
+		); err == nil {
+			t.Fatal("automatic deferred policy hid store failure")
 		}
 	})
 }
