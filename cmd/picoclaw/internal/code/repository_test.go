@@ -207,6 +207,90 @@ func TestRepositoryResolverBoundsAndSanitizesFailures(t *testing.T) {
 	}
 }
 
+func TestRepositoryResolverNormalizesTimeoutAndRejectsMalformedRoot(t *testing.T) {
+	for _, timeout := range []time.Duration{0, repositoryGitTimeout + time.Second} {
+		calls := 0
+		resolver := repositoryResolver{
+			runGit: func(_ context.Context, _ string, arguments ...string) (string, error) {
+				calls++
+				if arguments[0] == "rev-parse" {
+					return "/workspace/root", nil
+				}
+				return "git@github.com:owner/repo.git", nil
+			},
+			timeout: timeout,
+		}
+		got, err := resolver.resolve(t.Context(), "./checkout")
+		if err != nil || got != "https://github.com/owner/repo" || calls != 2 {
+			t.Fatalf("timeout %v resolve = %q, %v, calls=%d", timeout, got, err, calls)
+		}
+	}
+
+	resolver := repositoryResolver{
+		runGit: func(context.Context, string, ...string) (string, error) {
+			return "relative/root", nil
+		},
+		timeout: repositoryGitTimeout,
+	}
+	if _, err := resolver.resolve(t.Context(), "./checkout"); !errors.Is(err, errLocalRepositoryUnavailable) {
+		t.Fatalf("relative root error = %v", err)
+	}
+}
+
+func TestRepositoryParsingHelperEdgeCases(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		got  bool
+	}{
+		{
+			name: "dot owner",
+			got: func() bool {
+				_, ok := strictGitHubPathIdentity("https://github.com/./repo", "/./repo")
+				return ok
+			}(),
+		},
+		{
+			name: "reference path mismatch",
+			got: func() bool {
+				_, ok := strictGitHubPathIdentity("https://github.com/owner/repo", "/other/repo")
+				return ok
+			}(),
+		},
+		{
+			name: "inferred control",
+			got: func() bool {
+				_, ok := inferredRepositoryIdentity("git@github.com:owner/repo\n")
+				return ok
+			}(),
+		},
+		{
+			name: "scp canonical mismatch",
+			got: func() bool {
+				_, ok := strictSCPGitHubIdentity("git@github.com:owner/repo.git ")
+				return ok
+			}(),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.got {
+				t.Fatal("malformed repository helper input was accepted")
+			}
+		})
+	}
+
+	if looksLikeRemoteReference(`C:\\checkout`) {
+		t.Fatal("Windows path was classified as a remote")
+	}
+	if !looksLikeWindowsPath(`C:\\checkout`) || !looksLikeWindowsPath(`c:/checkout`) {
+		t.Fatal("Windows drive paths were not recognized")
+	}
+	for _, output := range []string{"", "root\x00tail", strings.Repeat("x", repositoryGitMaxBytes+1)} {
+		if value, ok := repositoryCommandLine(output); ok || value != "" {
+			t.Fatalf("repositoryCommandLine accepted malformed output of length %d", len(output))
+		}
+	}
+}
+
 func TestRepositoryResolverAppliesPerCommandDeadline(t *testing.T) {
 	var calls int
 	resolver := repositoryResolver{

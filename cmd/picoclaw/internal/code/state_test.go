@@ -1,6 +1,7 @@
 package code
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -244,6 +245,12 @@ func TestClassifyAggregateUsesLatestRepairAndTerminalStateBeforeHistoricalAttent
 	value.Workspace.ExecutionState = prworkspace.ExecutionUnknown
 	value.Publications[0].State = prworkspace.ExecutionUnknown
 	value.Gates[0].DecisionPoint = "pr.publication.reconcile"
+	value.Gates[0].TargetID = "ppb_other"
+	snapshot, err = classifyAggregate("request", value)
+	require.NoError(t, err)
+	assert.Equal(t, actionFail, snapshot.action)
+	assert.Equal(t, "development_outcome_unknown", snapshot.result.ErrorCode)
+
 	value.Gates[0].TargetID = value.Publications[0].ID
 	snapshot, err = classifyAggregate("request", value)
 	require.NoError(t, err)
@@ -253,6 +260,33 @@ func TestClassifyAggregateUsesLatestRepairAndTerminalStateBeforeHistoricalAttent
 	snapshot, err = classifyAggregate("request", value)
 	require.NoError(t, err)
 	assert.Equal(t, actionReconcile, snapshot.action)
+}
+
+func TestClassifyAggregateSurfacesPublicationFailures(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name       string
+		publicCode string
+		want       string
+	}{
+		{name: "ordinary", want: "publication_failed"},
+		{name: "unsafe provider", publicCode: "unsafe_provider", want: "unsafe_provider"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			value := completedAggregate()
+			value.Workspace.Phase = prworkspace.PhasePublication
+			value.Workspace.ExecutionState = prworkspace.ExecutionRunning
+			value.Publications[0].State = prworkspace.ExecutionFailed
+			value.Publications[0].PublicErrorCode = test.publicCode
+			snapshot, err := classifyAggregate("request", value)
+			require.NoError(t, err)
+			assert.Equal(t, actionFail, snapshot.action)
+			assert.Equal(t, test.want, snapshot.result.ErrorCode)
+		})
+	}
 }
 
 func TestClassifyAggregateDoesNotReconfirmRevisedOrStoppedCharter(t *testing.T) {
@@ -301,6 +335,85 @@ func TestClassifyAggregateSurfacesPersistedImplementationUnavailable(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, actionFail, snapshot.action)
 	assert.Equal(t, "implementation_unavailable", snapshot.result.ErrorCode)
+}
+
+func TestStateValidationHelperEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, validDevelopmentPhase(prworkspace.Phase("future")))
+	assert.False(t, validExecutionState(prworkspace.ExecutionState("future")))
+	assert.False(t, validBranchName(""))
+	assert.False(t, validBranchName(" branch"))
+	assert.False(t, validBranchName("branch\nname"))
+	assert.False(t, validBranchName("branch\u200ename"))
+	assert.False(t, validBranchName(string([]byte{0xff})))
+
+	charter := prworkspace.Charter{ID: "pcr_11111111111111111111111111111111", Confirmed: true}
+	aggregate := completedAggregate()
+	aggregate.Workspace.Phase = prworkspace.PhaseCharter
+	aggregate.Workspace.ActiveCharterID = ""
+	aggregate.Charters = []prworkspace.Charter{charter}
+	_, pending := pendingCharterDecision(aggregate)
+	assert.False(t, pending)
+	_, revisionRequired := charterRevisionRequired(aggregate)
+	assert.False(t, revisionRequired)
+
+	gates := []prworkspace.GateRun{
+		{
+			DecisionPoint: "pr.charter.confirm", TargetID: "different",
+			State: prworkspace.ExecutionSucceeded,
+		},
+		{
+			DecisionPoint: "pr.charter.confirm", TargetID: charter.ID,
+			State: prworkspace.ExecutionRunning,
+		},
+	}
+	_, found := latestCharterGateAction(gates, charter.ID)
+	assert.False(t, found)
+
+	aggregate = completedAggregate()
+	aggregate.Workspace.Phase = prworkspace.PhaseValidation
+	aggregate.Workspace.ExecutionState = prworkspace.ExecutionFailed
+	aggregate.ValidationRuns[0].State = prworkspace.ExecutionFailed
+	aggregate.ValidationRuns[0].Checks[0].Status = "failed"
+	snapshot, err := classifyAggregate("request", aggregate)
+	require.NoError(t, err)
+	assert.Equal(t, "validation_failed", snapshot.result.ErrorCode)
+}
+
+func TestPendingGateProjectionBoundsAndSanitizesAllFields(t *testing.T) {
+	t.Parallel()
+
+	gate := prworkspace.GateRun{
+		ID: "pgr_11111111111111111111111111111111", DecisionPoint: "review",
+		SubjectRevision: strings.Repeat("s", 300),
+		Evidence: prworkspace.GateEvidence{
+			CandidateSHA:    strings.Repeat("c", 300),
+			ChangedFiles:    []string{"safe.go", "bad\npath.go"},
+			ValidationState: prworkspace.ExecutionSucceeded,
+			FindingCount:    2, PublicationKind: prworkspace.PublicationBranchPush,
+			Repository: "octo/repo",
+		},
+	}
+	form := &prworkspace.GateForm{
+		Prompt: "Prompt\x1b[31m",
+		Fields: []gatetypes.GateField{
+			{ID: "ignored", Type: gatetypes.GateFieldType("unsupported")},
+			{
+				ID: "action", Type: gatetypes.GateFieldSelect, Label: "Action", Required: true,
+				Options: []gatetypes.GateFieldOption{{ID: "accept", Label: "Accept"}},
+			},
+		},
+	}
+	projected := projectPendingGate(gate, form)
+	require.NotNil(t, projected)
+	assert.Len(t, projected.Fields, 1)
+	assert.Equal(t, []string{"safe.go", "bad path.go"}, projected.Evidence.ChangedFiles)
+	assert.Len(t, projected.SubjectRevision, 256)
+	assert.Len(t, projected.Evidence.CandidateRevision, 256)
+	assert.NotContains(t, projected.Prompt, "\x1b")
+	assert.False(t, gateFieldTypeSupported(gatetypes.GateFieldType("unsupported")))
+	assert.Equal(t, "é", boundedTerminalText("éé", len("é")))
 }
 
 func completedAggregate() prworkspace.Aggregate {

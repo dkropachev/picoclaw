@@ -504,3 +504,128 @@ func TestNilClientFailsClosed(t *testing.T) {
 		assert.False(t, RequestMayHaveBeenSent(err))
 	}
 }
+
+func TestClientCoversBoundedValidationFailures(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	client := newClientForTest(func(
+		_ context.Context,
+		_ localgateway.Request,
+	) (localgateway.Response, error) {
+		calls.Add(1)
+		return clientAggregateResponse(http.StatusOK, clientTestWorkspaceID), nil
+	})
+
+	_, err := client.ResolveRepository(context.Background(), "")
+	require.ErrorIs(t, err, ErrInvalidRequest)
+	_, err = client.ConfirmCharter(context.Background(), ConfirmCharterRequest{
+		WorkspaceID: clientTestWorkspaceID, ExpectedVersion: 7,
+		ExpectedCharterRevision: 0, RequestID: clientTestRequestID,
+	})
+	require.ErrorIs(t, err, ErrInvalidRequest)
+	_, err = client.RespondGate(context.Background(), RespondGateRequest{
+		WorkspaceID: clientTestWorkspaceID, GateID: clientTestGateID,
+		ExpectedVersion: 7, RequestID: clientTestRequestID,
+	})
+	require.ErrorIs(t, err, ErrInvalidRequest)
+	_, err = client.ReconcilePublication(context.Background(), ReconcilePublicationRequest{
+		WorkspaceID: clientTestWorkspaceID, PublicationID: clientTestPublicationID,
+		ExpectedVersion: 7, RequestID: clientTestRequestID,
+	})
+	require.ErrorIs(t, err, ErrInvalidRequest)
+	assert.Zero(t, calls.Load())
+
+	assert.False(t, validClientOpaqueID("devw_"+strings.Repeat("A", 32), "devw_"))
+	assert.False(t, validClientRequestID("invalid request id"))
+	assert.False(t, validClientTask(""))
+	assert.False(t, validClientBoundedText("too long", 3, true))
+	assert.False(t, validClientBoundedText("", 8, false))
+	assert.False(t, validClientBoundedText("bad\x7f", 8, false))
+	assert.True(t, validClientBoundedText("", 8, true))
+	assert.False(t, validClientAPIErrorCode(""))
+	assert.False(t, validClientAPIErrorCode(strings.Repeat("a", clientMaxAPIErrorCodeBytes+1)))
+}
+
+func TestClientCoversTransportAndEnvelopeEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil API error", func(t *testing.T) {
+		t.Parallel()
+		var failure *APIError
+		assert.Equal(t, "development workspace API request failed", failure.Error())
+		assert.False(t, failure.Is(localgateway.ErrRequestMayHaveBeenSent))
+	})
+
+	t.Run("expected status with transport failure", func(t *testing.T) {
+		t.Parallel()
+		transportErr := errors.New("transport failed")
+		client := newClientForTest(func(
+			_ context.Context,
+			_ localgateway.Request,
+		) (localgateway.Response, error) {
+			return localgateway.Response{StatusCode: http.StatusOK, Body: []byte(`{}`)}, transportErr
+		})
+		_, err := client.Capabilities(context.Background())
+		require.ErrorIs(t, err, transportErr)
+	})
+
+	t.Run("missing status and nil target", func(t *testing.T) {
+		t.Parallel()
+		client := newClientForTest(func(
+			_ context.Context,
+			_ localgateway.Request,
+		) (localgateway.Response, error) {
+			return localgateway.Response{}, nil
+		})
+		err := client.do(context.Background(), http.MethodGet, "/test", nil, http.StatusOK, &struct{}{})
+		require.ErrorIs(t, err, ErrInvalidResponse)
+
+		client = newClientForTest(func(
+			_ context.Context,
+			_ localgateway.Request,
+		) (localgateway.Response, error) {
+			return localgateway.Response{StatusCode: http.StatusOK, Body: []byte(`{}`)}, nil
+		})
+		err = client.do(context.Background(), http.MethodGet, "/test", nil, http.StatusOK, nil)
+		require.ErrorIs(t, err, ErrInvalidResponse)
+	})
+
+	t.Run("oversized request", func(t *testing.T) {
+		t.Parallel()
+		client := newClientForTest(func(
+			_ context.Context,
+			_ localgateway.Request,
+		) (localgateway.Response, error) {
+			t.Fatal("oversized request reached transport")
+			return localgateway.Response{}, nil
+		})
+		err := client.do(
+			context.Background(), http.MethodPost, "/test",
+			strings.Repeat("x", clientMaxRequestBodyBytes+1), http.StatusOK, &struct{}{},
+		)
+		require.ErrorIs(t, err, ErrInvalidRequest)
+	})
+
+	t.Run("empty and oversized API envelopes", func(t *testing.T) {
+		t.Parallel()
+		for _, raw := range [][]byte{nil, make([]byte, clientMaxResponseBodyBytes+1)} {
+			err := decodeAPIError(http.StatusBadGateway, raw, true)
+			var apiErr *APIError
+			require.ErrorAs(t, err, &apiErr)
+			assert.Equal(t, "invalid_response", apiErr.Code)
+			assert.True(t, RequestMayHaveBeenSent(err))
+		}
+	})
+
+	t.Run("dispatch marker helpers", func(t *testing.T) {
+		t.Parallel()
+		assert.NoError(t, markDispatched(nil, true))
+		original := errors.Join(localgateway.ErrRequestMayHaveBeenSent, errors.New("sent"))
+		assert.Same(t, original, markDispatched(original, true))
+		marked := markDispatched(ErrInvalidResponse, true)
+		assert.Equal(t, ErrInvalidResponse.Error(), marked.Error())
+		require.ErrorIs(t, marked, ErrInvalidResponse)
+		assert.True(t, RequestMayHaveBeenSent(marked))
+	})
+}
