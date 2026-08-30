@@ -3,58 +3,53 @@ package events
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/localgateway"
 	ppid "github.com/sipeed/picoclaw/pkg/pid"
 )
 
 const testEventID = "ev_0123456789abcdef0123456789abcdef"
 
-type httpDoerFunc func(*http.Request) (*http.Response, error)
+type jsonGatewayFunc func(context.Context, localgateway.Request) (localgateway.Response, error)
 
-func (function httpDoerFunc) Do(request *http.Request) (*http.Response, error) {
-	return function(request)
+func (function jsonGatewayFunc) DoJSON(
+	ctx context.Context,
+	request localgateway.Request,
+) (localgateway.Response, error) {
+	return function(ctx, request)
 }
 
-func testGatewayClient(doer httpDoer) *gatewayClient {
-	return &gatewayClient{
-		homePath: func() string { return "/test/picoclaw-home" },
-		readPID: func(path string) *ppid.PidFileData {
-			if path != "/test/picoclaw-home" {
-				panic("unexpected home path")
-			}
-			return &ppid.PidFileData{
-				PID:   1234,
-				Token: "test-token",
-				Port:  18790,
-				Host:  "127.0.0.1",
-			}
-		},
-		http:     doer,
-		timeout:  time.Second,
-		maxBytes: 1 << 20,
-	}
+func testGatewayClient(gateway jsonGateway) *gatewayClient {
+	return &gatewayClient{transport: gateway}
 }
 
-func jsonResponse(status int, body string) *http.Response {
-	return &http.Response{
-		StatusCode:    status,
-		Header:        http.Header{"Content-Type": []string{"application/json"}},
-		Body:          io.NopCloser(strings.NewReader(body)),
-		ContentLength: int64(len(body)),
-	}
+func staticGateway(status int, body string, err error) *gatewayClient {
+	return testGatewayClient(jsonGatewayFunc(func(
+		context.Context,
+		localgateway.Request,
+	) (localgateway.Response, error) {
+		return localgateway.Response{StatusCode: status, Body: []byte(body)}, err
+	}))
 }
 
-func TestGatewayClientGetBuildsAuthenticatedCanonicalRequest(t *testing.T) {
+func dispatchedGatewayError(err error) error {
+	return errors.Join(localgateway.ErrRequestMayHaveBeenSent, err)
+}
+
+func TestGatewayClientGetBuildsCanonicalTransportRequest(t *testing.T) {
 	t.Parallel()
 
 	query := url.Values{
@@ -63,22 +58,22 @@ func TestGatewayClientGetBuildsAuthenticatedCanonicalRequest(t *testing.T) {
 		"routing_status": {"pending"},
 		"limit":          {"10"},
 	}
-	client := testGatewayClient(httpDoerFunc(func(request *http.Request) (*http.Response, error) {
+	client := testGatewayClient(jsonGatewayFunc(func(
+		ctx context.Context,
+		request localgateway.Request,
+	) (localgateway.Response, error) {
+		assert.NotNil(t, ctx)
 		assert.Equal(t, http.MethodGet, request.Method)
-		assert.Equal(t, "/runtime/eventing/events", request.URL.Path)
-		assert.Equal(t, query.Encode(), request.URL.RawQuery)
-		assert.Equal(t, "127.0.0.1:18790", request.URL.Host)
-		assert.Equal(t, "Bearer test-token", request.Header.Get("Authorization"))
-		assert.Equal(t, "application/json", request.Header.Get("Accept"))
-		assert.Empty(t, request.Header.Get("Content-Type"))
-		return jsonResponse(http.StatusOK, `{"events":[]}`), nil
+		assert.Equal(t, "/runtime/eventing/events", request.Path)
+		assert.Equal(t, query.Encode(), request.Query.Encode())
+		assert.Nil(t, request.Body)
+		return localgateway.Response{
+			StatusCode: http.StatusOK,
+			Body:       []byte(`{"events":[]}`),
+		}, nil
 	}))
 
-	got, err := client.get(
-		context.Background(),
-		"/runtime/eventing/events",
-		query,
-	)
+	got, err := client.get(context.Background(), "/runtime/eventing/events", query)
 	require.NoError(t, err)
 	assert.Equal(t, "{\n  \"events\": []\n}\n", string(got))
 }
@@ -87,12 +82,18 @@ func TestGatewayClientPayloadPreservesExactBoundedJSONObject(t *testing.T) {
 	t.Parallel()
 
 	const payload = " \n{\n  \"large\": 9007199254740993,\n  \"tiny\": 1e-1000\n}\t"
-	client := testGatewayClient(httpDoerFunc(func(request *http.Request) (*http.Response, error) {
+	client := testGatewayClient(jsonGatewayFunc(func(
+		_ context.Context,
+		request localgateway.Request,
+	) (localgateway.Response, error) {
 		assert.Equal(t, http.MethodGet, request.Method)
-		assert.Equal(t, "/runtime/eventing/events/"+testEventID+"/payload", request.URL.Path)
-		assert.Empty(t, request.URL.RawQuery)
-		assert.Equal(t, "Bearer test-token", request.Header.Get("Authorization"))
-		return jsonResponse(http.StatusOK, payload), nil
+		assert.Equal(t, "/runtime/eventing/events/"+testEventID+"/payload", request.Path)
+		assert.Empty(t, request.Query)
+		assert.Nil(t, request.Body)
+		return localgateway.Response{
+			StatusCode: http.StatusOK,
+			Body:       []byte(payload),
+		}, nil
 	}))
 
 	got, err := client.payload(context.Background(), testEventID)
@@ -103,9 +104,7 @@ func TestGatewayClientPayloadPreservesExactBoundedJSONObject(t *testing.T) {
 func TestGatewayClientPayloadRejectsNonObjectJSON(t *testing.T) {
 	t.Parallel()
 
-	client := testGatewayClient(httpDoerFunc(func(*http.Request) (*http.Response, error) {
-		return jsonResponse(http.StatusOK, `["not","an","object"]`), nil
-	}))
+	client := staticGateway(http.StatusOK, `["not","an","object"]`, nil)
 	_, err := client.payload(context.Background(), testEventID)
 	require.EqualError(t, err, "live gateway event API returned invalid JSON")
 }
@@ -114,17 +113,19 @@ func TestGatewayClientReplaySendsOneExactEmptyObject(t *testing.T) {
 	t.Parallel()
 
 	calls := 0
-	client := testGatewayClient(httpDoerFunc(func(request *http.Request) (*http.Response, error) {
+	client := testGatewayClient(jsonGatewayFunc(func(
+		_ context.Context,
+		request localgateway.Request,
+	) (localgateway.Response, error) {
 		calls++
 		assert.Equal(t, http.MethodPost, request.Method)
-		assert.Equal(t, "/runtime/eventing/events/"+testEventID+"/replay", request.URL.Path)
-		assert.Empty(t, request.URL.RawQuery)
-		assert.Equal(t, "application/json", request.Header.Get("Content-Type"))
-		assert.Equal(t, int64(2), request.ContentLength)
-		body, err := io.ReadAll(request.Body)
-		require.NoError(t, err)
-		assert.Equal(t, []byte("{}"), body)
-		return jsonResponse(http.StatusCreated, `{"event":{"id":"`+testEventID+`"}}`), nil
+		assert.Equal(t, "/runtime/eventing/events/"+testEventID+"/replay", request.Path)
+		assert.Empty(t, request.Query)
+		assert.Equal(t, []byte("{}"), request.Body)
+		return localgateway.Response{
+			StatusCode: http.StatusCreated,
+			Body:       []byte(`{"event":{"id":"` + testEventID + `"}}`),
+		}, nil
 	}))
 
 	_, err := client.replay(context.Background(), testEventID)
@@ -136,43 +137,50 @@ func TestGatewayClientReplayAmbiguousFailuresRequireInspection(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		do   func(*http.Request) (*http.Response, error)
+		name     string
+		response localgateway.Response
+		err      error
 	}{
 		{
-			name: "transport timeout",
-			do: func(*http.Request) (*http.Response, error) {
-				return nil, errors.New("timeout containing test-token")
-			},
+			name: "dispatched transport failure",
+			err: dispatchedGatewayError(
+				errors.New("timeout containing test-token"),
+			),
 		},
 		{
 			name: "internal response",
-			do: func(*http.Request) (*http.Response, error) {
-				return jsonResponse(
-					http.StatusInternalServerError,
-					`{"error":"database secret"}`,
-				), nil
+			response: localgateway.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       []byte(`{"error":"database secret"}`),
 			},
 		},
 		{
-			name: "invalid success content type",
-			do: func(*http.Request) (*http.Response, error) {
-				response := jsonResponse(http.StatusCreated, `{"event":{}}`)
-				response.Header.Set("Content-Type", "text/plain")
-				return response, nil
-			},
+			name:     "invalid success response",
+			response: localgateway.Response{StatusCode: http.StatusCreated},
+			err:      dispatchedGatewayError(localgateway.ErrInvalidResponse),
 		},
 		{
-			name: "invalid success body",
-			do: func(*http.Request) (*http.Response, error) {
-				return jsonResponse(http.StatusCreated, `{"event":`), nil
+			name:     "invalid success body",
+			response: localgateway.Response{StatusCode: http.StatusCreated},
+			err:      dispatchedGatewayError(localgateway.ErrInvalidJSON),
+		},
+		{
+			name: "defensive invalid success body",
+			response: localgateway.Response{
+				StatusCode: http.StatusCreated,
+				Body:       []byte(`[]`),
 			},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			client := testGatewayClient(httpDoerFunc(test.do))
+			client := testGatewayClient(jsonGatewayFunc(func(
+				context.Context,
+				localgateway.Request,
+			) (localgateway.Response, error) {
+				return test.response, test.err
+			}))
 			_, err := client.replay(context.Background(), testEventID)
 			require.EqualError(t, err, replayUnknownOutcomeMessage)
 			assert.NotContains(t, err.Error(), "test-token")
@@ -182,110 +190,136 @@ func TestGatewayClientReplayAmbiguousFailuresRequireInspection(t *testing.T) {
 	}
 }
 
-func TestGatewayClientReplayRetainsSafeRejectedAndPreDispatchFailures(t *testing.T) {
+func TestGatewayClientReplayStatusBeforeBodyFailureParity(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	statuses := []struct {
 		name   string
 		status int
 		want   string
 	}{
 		{
-			name:   "not found",
-			status: http.StatusNotFound,
-			want:   "durable event operations are unavailable",
+			name:   "bad request",
+			status: http.StatusBadRequest,
+			want:   "gateway rejected the event request (400 Bad Request)",
 		},
 		{
-			name:   "gateway unavailable before replay",
+			name:   "unauthorized",
+			status: http.StatusUnauthorized,
+			want:   "live gateway event credentials are unavailable or stale",
+		},
+		{
+			name:   "forbidden",
+			status: http.StatusForbidden,
+			want:   "live gateway event credentials are unavailable or stale",
+		},
+		{
+			name:   "not found",
+			status: http.StatusNotFound,
+			want:   "durable event operations are unavailable on the running gateway",
+		},
+		{
+			name:   "unavailable",
 			status: http.StatusServiceUnavailable,
-			want:   "temporarily unavailable",
+			want:   "durable event operations are temporarily unavailable on the running gateway",
+		},
+	}
+	failures := []struct {
+		name string
+		err  error
+	}{
+		{name: "malformed JSON", err: localgateway.ErrInvalidJSON},
+		{name: "wrong content type", err: localgateway.ErrInvalidResponse},
+		{name: "oversize", err: localgateway.ErrResponseTooLarge},
+		{name: "read failure", err: localgateway.ErrResponseRead},
+	}
+
+	for _, status := range statuses {
+		for _, failure := range failures {
+			t.Run(status.name+"/"+failure.name, func(t *testing.T) {
+				t.Parallel()
+				client := staticGateway(
+					status.status,
+					"",
+					dispatchedGatewayError(failure.err),
+				)
+				_, err := client.replay(context.Background(), testEventID)
+				require.EqualError(t, err, status.want)
+				assert.NotContains(t, err.Error(), replayUnknownOutcomeMessage)
+			})
+		}
+	}
+}
+
+func TestGatewayClientReplayUnsafeStatusAndDispatchedFailuresAreUnknown(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		response localgateway.Response
+		err      error
+	}{
+		{
+			name:     "unsafe status",
+			response: localgateway.Response{StatusCode: http.StatusInternalServerError},
+			err:      dispatchedGatewayError(localgateway.ErrInvalidJSON),
+		},
+		{
+			name: "dispatched cancellation",
+			err:  dispatchedGatewayError(context.Canceled),
+		},
+		{
+			name: "dispatched transport failure",
+			err:  dispatchedGatewayError(localgateway.ErrAPIUnavailable),
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			client := testGatewayClient(httpDoerFunc(func(*http.Request) (*http.Response, error) {
-				return jsonResponse(test.status, `{"error":"not committed"}`), nil
+			client := testGatewayClient(jsonGatewayFunc(func(
+				context.Context,
+				localgateway.Request,
+			) (localgateway.Response, error) {
+				return test.response, test.err
 			}))
 			_, err := client.replay(context.Background(), testEventID)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), test.want)
-			assert.NotContains(t, err.Error(), replayUnknownOutcomeMessage)
+			require.EqualError(t, err, replayUnknownOutcomeMessage)
 		})
 	}
 }
 
-func TestGatewayEndpointRejectsUnavailableOrUnsafePIDMetadata(t *testing.T) {
+func TestGatewayClientReplayPreservesPreDispatchPIDFailures(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
-		data *ppid.PidFileData
+		err  error
 		want string
 	}{
 		{
 			name: "missing",
-			want: "live gateway is unavailable",
+			err:  localgateway.ErrGatewayUnavailable,
+			want: "live gateway is unavailable; start picoclaw gateway and retry",
 		},
 		{
-			name: "invalid pid",
-			data: &ppid.PidFileData{PID: 0, Token: "token", Port: 18790, Host: "127.0.0.1"},
-			want: "PID metadata is invalid",
+			name: "invalid metadata",
+			err:  localgateway.ErrInvalidPIDMetadata,
+			want: "live gateway PID metadata is invalid; restart the gateway",
 		},
 		{
-			name: "invalid port",
-			data: &ppid.PidFileData{PID: 1, Token: "token", Port: 65536, Host: "127.0.0.1"},
-			want: "PID metadata is invalid",
-		},
-		{
-			name: "missing token",
-			data: &ppid.PidFileData{PID: 1, Port: 18790, Host: "127.0.0.1"},
-			want: "no valid bearer token",
-		},
-		{
-			name: "header injection token",
-			data: &ppid.PidFileData{PID: 1, Token: "token\nInjected: yes", Port: 18790, Host: "127.0.0.1"},
-			want: "no valid bearer token",
-		},
-		{
-			name: "invalid host",
-			data: &ppid.PidFileData{PID: 1, Token: "token", Port: 18790, Host: "http://example.invalid"},
-			want: "PID metadata is invalid",
+			name: "invalid token",
+			err:  localgateway.ErrInvalidPIDToken,
+			want: "live gateway PID metadata has no valid bearer token; restart the gateway",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			_, _, err := gatewayEndpoint(
-				test.data,
-				"/runtime/eventing/events",
-				nil,
-			)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), test.want)
-			assert.NotContains(t, err.Error(), "Injected")
+			client := staticGateway(0, "", test.err)
+			_, err := client.replay(context.Background(), testEventID)
+			require.EqualError(t, err, test.want)
+			assert.NotContains(t, err.Error(), replayUnknownOutcomeMessage)
 		})
-	}
-}
-
-func TestGatewayEndpointNormalizesWildcardAndIPv6ProbeHosts(t *testing.T) {
-	t.Parallel()
-
-	for _, host := range []string{"*", "0.0.0.0", "::", "[::1]"} {
-		endpoint, token, err := gatewayEndpoint(
-			&ppid.PidFileData{
-				PID:   1,
-				Token: "token",
-				Port:  18790,
-				Host:  host,
-			},
-			"/runtime/eventing/events",
-			nil,
-		)
-		require.NoError(t, err, host)
-		assert.Equal(t, "token", token)
-		assert.NotContains(t, endpoint.Host, "0.0.0.0", host)
-		assert.NotEqual(t, "[::]:18790", endpoint.Host, host)
 	}
 }
 
@@ -301,7 +335,11 @@ func TestGatewayClientReturnsBoundedGenericErrors(t *testing.T) {
 		{name: "bad request", status: http.StatusBadRequest, want: "400 Bad Request"},
 		{name: "unauthorized", status: http.StatusUnauthorized, want: "credentials"},
 		{name: "not found", status: http.StatusNotFound, want: "unavailable"},
-		{name: "unavailable", status: http.StatusServiceUnavailable, want: "temporarily unavailable"},
+		{
+			name:   "unavailable",
+			status: http.StatusServiceUnavailable,
+			want:   "temporarily unavailable",
+		},
 		{
 			name:       "internal",
 			status:     http.StatusInternalServerError,
@@ -312,14 +350,8 @@ func TestGatewayClientReturnsBoundedGenericErrors(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			client := testGatewayClient(httpDoerFunc(func(*http.Request) (*http.Response, error) {
-				return jsonResponse(test.status, `{"error":"server-secret"}`), nil
-			}))
-			_, err := client.get(
-				context.Background(),
-				"/runtime/eventing/events",
-				nil,
-			)
+			client := staticGateway(test.status, `{"error":"server-secret"}`, nil)
+			_, err := client.get(context.Background(), "/runtime/eventing/events", nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), test.want)
 			assert.NotContains(t, err.Error(), "server-secret")
@@ -328,76 +360,230 @@ func TestGatewayClientReturnsBoundedGenericErrors(t *testing.T) {
 	}
 }
 
-func TestGatewayClientDoesNotExposeTransportErrors(t *testing.T) {
-	t.Parallel()
-
-	client := testGatewayClient(httpDoerFunc(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("dial detail containing secret material")
-	}))
-	_, err := client.get(context.Background(), "/runtime/eventing/events", nil)
-	require.EqualError(t, err, "live gateway event API is unavailable")
-}
-
-func TestGatewayClientBoundsAndValidatesSuccessfulJSON(t *testing.T) {
+func TestGatewayClientGETClassifiesStatusBeforeBodyFailure(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		contentType string
-		body        string
-		contentLen  int64
-		want        string
+		name   string
+		status int
+		want   string
 	}{
 		{
-			name:        "wrong content type",
-			contentType: "text/html",
-			body:        `{"events":[]}`,
-			want:        "invalid response",
+			name:   "safe status",
+			status: http.StatusServiceUnavailable,
+			want:   "durable event operations are temporarily unavailable on the running gateway",
 		},
 		{
-			name:        "invalid json",
-			contentType: "application/json",
-			body:        `{"events":`,
-			want:        "invalid JSON",
-		},
-		{
-			name:        "non object",
-			contentType: "application/json",
-			body:        `[]`,
-			want:        "invalid JSON",
-		},
-		{
-			name:        "content length",
-			contentType: "application/json",
-			body:        `{}`,
-			contentLen:  17,
-			want:        "safe display limit",
-		},
-		{
-			name:        "streamed overflow",
-			contentType: "application/json",
-			body:        strings.Repeat(" ", 17),
-			contentLen:  -1,
-			want:        "safe display limit",
+			name:   "internal status",
+			status: http.StatusInternalServerError,
+			want:   "live gateway event request failed with HTTP status 500",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			client := testGatewayClient(httpDoerFunc(func(*http.Request) (*http.Response, error) {
-				response := jsonResponse(http.StatusOK, test.body)
-				response.Header.Set("Content-Type", test.contentType)
-				if test.contentLen != 0 {
-					response.ContentLength = test.contentLen
-				}
-				return response, nil
-			}))
-			client.maxBytes = 16
+			client := staticGateway(
+				test.status,
+				"",
+				dispatchedGatewayError(localgateway.ErrInvalidJSON),
+			)
 			_, err := client.get(context.Background(), "/runtime/eventing/events", nil)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), test.want)
+			require.EqualError(t, err, test.want)
+			assert.NotContains(t, err.Error(), "invalid JSON")
 		})
 	}
+}
+
+func TestGatewayClientMapsTransportErrorsWithoutSecrets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "transport",
+			err:  localgateway.ErrAPIUnavailable,
+			want: "live gateway event API is unavailable",
+		},
+		{
+			name: "client",
+			err:  localgateway.ErrClientUnavailable,
+			want: "live gateway event client is unavailable",
+		},
+		{
+			name: "path",
+			err:  localgateway.ErrInvalidPath,
+			want: "live gateway event request path is invalid",
+		},
+		{
+			name: "request",
+			err:  localgateway.ErrInvalidRequest,
+			want: "live gateway PID metadata is invalid; restart the gateway",
+		},
+		{
+			name: "gateway",
+			err:  localgateway.ErrGatewayUnavailable,
+			want: localgateway.ErrGatewayUnavailable.Error(),
+		},
+		{
+			name: "PID",
+			err:  localgateway.ErrInvalidPIDMetadata,
+			want: localgateway.ErrInvalidPIDMetadata.Error(),
+		},
+		{
+			name: "token",
+			err:  localgateway.ErrInvalidPIDToken,
+			want: localgateway.ErrInvalidPIDToken.Error(),
+		},
+		{
+			name: "method",
+			err:  localgateway.ErrInvalidMethod,
+			want: localgateway.ErrInvalidMethod.Error(),
+		},
+		{
+			name: "query",
+			err:  localgateway.ErrQueryTooLarge,
+			want: "gateway rejected the event request (400 Bad Request)",
+		},
+		{name: "GET body", err: localgateway.ErrGETBody, want: localgateway.ErrGETBody.Error()},
+		{
+			name: "request size",
+			err:  localgateway.ErrRequestTooLarge,
+			want: localgateway.ErrRequestTooLarge.Error(),
+		},
+		{
+			name: "request body",
+			err:  localgateway.ErrInvalidRequestBody,
+			want: localgateway.ErrInvalidRequestBody.Error(),
+		},
+		{
+			name: "invalid response",
+			err:  localgateway.ErrInvalidResponse,
+			want: "live gateway event API returned an invalid response",
+		},
+		{
+			name: "oversize",
+			err:  localgateway.ErrResponseTooLarge,
+			want: "live gateway event response exceeds the safe display limit",
+		},
+		{
+			name: "read",
+			err:  localgateway.ErrResponseRead,
+			want: "failed to read live gateway event response",
+		},
+		{
+			name: "invalid JSON",
+			err:  localgateway.ErrInvalidJSON,
+			want: "live gateway event API returned invalid JSON",
+		},
+		{
+			name: "unknown secret",
+			err:  errors.New("dial detail containing secret material"),
+			want: "live gateway event API returned an invalid response",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			client := staticGateway(0, "", test.err)
+			_, err := client.get(context.Background(), "/runtime/eventing/events", nil)
+			require.EqualError(t, err, test.want)
+			assert.NotContains(t, err.Error(), "secret material")
+		})
+	}
+}
+
+func TestGatewayClientMapsDeadlineAndStatuslessSuccessDefensively(t *testing.T) {
+	t.Parallel()
+
+	client := staticGateway(0, "", context.DeadlineExceeded)
+	_, err := client.get(context.Background(), "/runtime/eventing/events", nil)
+	require.EqualError(t, err, "live gateway event request failed: context deadline exceeded")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	client = staticGateway(0, `{}`, nil)
+	_, err = client.get(context.Background(), "/runtime/eventing/events", nil)
+	require.EqualError(t, err, "live gateway event API returned an invalid status")
+}
+
+func TestGatewayClientRejectsUnavailableAdapter(t *testing.T) {
+	t.Parallel()
+
+	for _, client := range []*gatewayClient{nil, {}} {
+		_, err := client.get(context.Background(), "/runtime/eventing/events", nil)
+		require.EqualError(t, err, "live gateway event client is unavailable")
+	}
+}
+
+func TestNewGatewayClientHasSharedTransport(t *testing.T) {
+	t.Parallel()
+
+	client := newGatewayClient()
+	require.NotNil(t, client)
+	require.NotNil(t, client.transport)
+}
+
+func TestNewGatewayClientWiresEventsRouteAndPIDAuthentication(t *testing.T) {
+	homePath := t.TempDir()
+	t.Setenv("PICOCLAW_HOME", homePath)
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		assert.Contains(
+			t,
+			[]string{"/runtime/eventing/events", "/runtime/eventing/dispatches"},
+			request.URL.Path,
+		)
+		assert.Equal(t, "Bearer wiring-token", request.Header.Get("Authorization"))
+		writer.Header().Set("Content-Type", "application/json")
+		_, err := writer.Write([]byte(`{"events":[]}`))
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+	endpoint, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(endpoint.Port())
+	require.NoError(t, err)
+	pidData, err := json.Marshal(ppid.PidFileData{
+		PID:   os.Getpid(),
+		Token: "wiring-token",
+		Host:  endpoint.Hostname(),
+		Port:  port,
+	})
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(homePath, ".picoclaw.pid"), pidData, 0o600),
+	)
+
+	client := newGatewayClient()
+	output, err := client.get(
+		context.Background(),
+		"/runtime/eventing/events",
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "{\n  \"events\": []\n}\n", string(output))
+	_, err = client.get(context.Background(), "/runtime/eventing/dispatches", nil)
+	require.NoError(t, err)
+}
+
+func TestGatewayClientHonorsCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	client := testGatewayClient(jsonGatewayFunc(func(
+		ctx context.Context,
+		_ localgateway.Request,
+	) (localgateway.Response, error) {
+		return localgateway.Response{}, ctx.Err()
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := client.get(ctx, "/runtime/eventing/events", nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	require.EqualError(t, err, "live gateway event request failed: context canceled")
 }
 
 func TestPrettyJSONPreservesNumericTokensAndEscapedControlContent(t *testing.T) {
@@ -410,38 +596,6 @@ func TestPrettyJSONPreservesNumericTokensAndEscapedControlContent(t *testing.T) 
 	assert.Contains(t, string(formatted), "1e-400")
 	assert.Contains(t, string(formatted), `\u001b[31m`)
 	assert.NotContains(t, string(formatted), "\x1b")
-}
-
-func TestNewGatewayClientDisablesProxyAndRedirects(t *testing.T) {
-	t.Parallel()
-
-	client := newGatewayClient()
-	httpClient, ok := client.http.(*http.Client)
-	require.True(t, ok)
-	transport, ok := httpClient.Transport.(*http.Transport)
-	require.True(t, ok)
-	assert.Nil(t, transport.Proxy)
-	require.NotNil(t, httpClient.CheckRedirect)
-	err := httpClient.CheckRedirect(
-		&http.Request{},
-		[]*http.Request{{}},
-	)
-	assert.ErrorIs(t, err, http.ErrUseLastResponse)
-	assert.Equal(t, eventRequestTimeout, httpClient.Timeout)
-}
-
-func TestGatewayClientHonorsCanceledContext(t *testing.T) {
-	t.Parallel()
-
-	client := testGatewayClient(httpDoerFunc(func(request *http.Request) (*http.Response, error) {
-		<-request.Context().Done()
-		return nil, request.Context().Err()
-	}))
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := client.get(ctx, "/runtime/eventing/events", nil)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func TestPrettyJSONRejectsTrailingValues(t *testing.T) {
