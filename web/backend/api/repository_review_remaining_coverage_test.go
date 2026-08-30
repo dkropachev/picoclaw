@@ -341,9 +341,17 @@ func TestRepositoryReviewRemainingHistoricalLockCoverage(t *testing.T) {
 	assertError("admit", err)
 	_, _, err = store.FreezeHistoricalDeduplicationReplay("owner/blocked", snapshot)
 	assertError("freeze", err)
-	_, _, _, err = store.AcquireHistoricalDeduplicationMerge(
+	blockedState, blockedReplay, blockedAcquired, err := store.AcquireHistoricalDeduplicationMerge(
 		"owner/blocked", "rhl_lock_coverage", groups,
 	)
+	if blockedState.Repository != "" || blockedReplay.Required || blockedAcquired {
+		t.Fatalf(
+			"blocked acquisition returned state=%#v replay=%#v acquired=%v",
+			blockedState,
+			blockedReplay,
+			blockedAcquired,
+		)
+	}
 	assertError("acquire", err)
 	_, _, err = store.CompleteHistoricalDeduplicationMerge("owner/blocked", "rhl_lock_coverage")
 	assertError("complete", err)
@@ -418,7 +426,10 @@ func TestRepositoryReviewRemainingHistoricalAdvanceCoverage(t *testing.T) {
 		if advanceErr := controller.advanceHistoricalFindingDeduplication(
 			t.Context(), state, nil,
 		); advanceErr == nil || !strings.Contains(advanceErr.Error(), "attempt limit") {
-			t.Fatalf("failed historical advance raw=%#v jobs=%#v err=%v", state.RawFindings, state.DeduplicationJobs, advanceErr)
+			t.Fatalf(
+				"failed historical advance raw=%#v jobs=%#v err=%v",
+				state.RawFindings, state.DeduplicationJobs, advanceErr,
+			)
 		}
 	})
 
@@ -431,7 +442,12 @@ func TestRepositoryReviewRemainingHistoricalAdvanceCoverage(t *testing.T) {
 		if _, processErr := store.ProcessPendingDeduplicationJobs(
 			t.Context(), state.Repository, options,
 		); processErr != nil {
-			t.Fatalf("historical mapping process raw=%#v jobs=%#v err=%v", state.RawFindings, state.DeduplicationJobs, processErr)
+			t.Fatalf(
+				"historical mapping process raw=%#v jobs=%#v err=%v",
+				state.RawFindings,
+				state.DeduplicationJobs,
+				processErr,
+			)
 		}
 		state, found, err := store.Get(state.Repository)
 		if err != nil || !found || len(state.MappingJobs) == 0 {
@@ -681,7 +697,8 @@ func TestRepositoryReviewRemainingLegacyRepositoryPageCoverage(t *testing.T) {
 		"/api/repository-reviews/automations/"+automation.ID+"/report?scope=all&offset=0&limit=1",
 		nil,
 	))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"next_repository_finding_offset":1`) {
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"next_repository_finding_offset":1`) {
 		t.Fatalf("legacy repository page status=%d body=%s", response.Code, response.Body.String())
 	}
 }

@@ -224,7 +224,7 @@ func TestRepositoryReviewHistoricalDedupAdditionalRouteCoverage(t *testing.T) {
 	if err != nil || admission.Admitted == 0 {
 		t.Fatalf("historical admission=%#v err=%v", admission, err)
 	}
-	state, _, err = store.FailHistoricalDeduplicationReplay(state.Repository, "")
+	_, _, err = store.FailHistoricalDeduplicationReplay(state.Repository, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,11 @@ func TestRepositoryReviewDedupAdditionalRouteErrorAndPagingCoverage(t *testing.T
 	missingSourceResponse := httptest.NewRecorder()
 	mux.ServeHTTP(missingSourceResponse, missingSource)
 	if missingSourceResponse.Code != http.StatusNotFound {
-		t.Fatalf("raw retry missing source status=%d body=%s", missingSourceResponse.Code, missingSourceResponse.Body.String())
+		t.Fatalf(
+			"raw retry missing source status=%d body=%s",
+			missingSourceResponse.Code,
+			missingSourceResponse.Body.String(),
+		)
 	}
 
 	wrongFinding := httptest.NewRecorder()
@@ -595,7 +599,7 @@ func TestRepositoryReviewHistoricalDedupAdditionalErrorCoverage(t *testing.T) {
 	if _, _, retryErr := store.RetryHistoricalDeduplicationReplay(state.Repository); retryErr != nil {
 		t.Fatal(retryErr)
 	}
-	mergeState, _, freezeErr := store.FreezeHistoricalDeduplicationReplay(
+	_, _, freezeErr := store.FreezeHistoricalDeduplicationReplay(
 		state.Repository,
 		repoaudit.RepositoryReviewDeduplicationSnapshot{
 			ReviewerModel: "cheap", DeduplicationModel: "cheap", AccountRef: "api",
@@ -684,7 +688,10 @@ func TestRepositoryReviewDedupAdditionalControllerAndModelCoverage(t *testing.T)
 	}
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	if processErr := controller.processRepositoryFindingDeduplications(canceled); !errors.Is(processErr, context.Canceled) {
+	if processErr := controller.processRepositoryFindingDeduplications(canceled); !errors.Is(
+		processErr,
+		context.Canceled,
+	) {
 		t.Fatalf("canceled deduplication processing err=%v", processErr)
 	}
 

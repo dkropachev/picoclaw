@@ -132,12 +132,12 @@ func TestHistoricalReplayAdditionalValidationBranches(t *testing.T) {
 		},
 	}
 	for index, groups := range invalidGroups {
-		if _, err := normalizeHistoricalDeduplicationMergeGroups(groups); err == nil {
+		if _, normalizeErr := normalizeHistoricalDeduplicationMergeGroups(groups); normalizeErr == nil {
 			t.Fatalf("invalid group set %d accepted", index)
 		}
 	}
 	tooMany := make([]HistoricalDeduplicationMergeGroup, maxHistoricalDeduplicationMergeGroups+1)
-	if _, err := normalizeHistoricalDeduplicationMergeGroups(tooMany); err == nil {
+	if _, oversizedErr := normalizeHistoricalDeduplicationMergeGroups(tooMany); oversizedErr == nil {
 		t.Fatal("oversized merge set accepted")
 	}
 	twoGroups, err := normalizeHistoricalDeduplicationMergeGroups([]HistoricalDeduplicationMergeGroup{
@@ -180,14 +180,19 @@ func TestHistoricalReplayAdditionalValidationBranches(t *testing.T) {
 		{Required: true, Status: "unknown", UpdatedAt: now},
 		{Required: false, Status: HistoricalDeduplicationPending, UpdatedAt: now},
 		{Required: true, Status: HistoricalDeduplicationReplaying, UpdatedAt: now},
-		{Required: true, Status: HistoricalDeduplicationPending, UpdatedAt: now, MergeLease: HistoricalDeduplicationMergeLease{ID: "lease"}},
+		{
+			Required: true, Status: HistoricalDeduplicationPending, UpdatedAt: now,
+			MergeLease: HistoricalDeduplicationMergeLease{ID: "lease"},
+		},
 		{Required: true, Status: HistoricalDeduplicationPending, UpdatedAt: now, Error: strings.Repeat("x", 1025)},
 		{Required: true, Status: HistoricalDeduplicationCompleted, UpdatedAt: now},
 		{
 			Required: true, Status: HistoricalDeduplicationMerging, ProfileSnapshot: validSnapshot,
 			UpdatedAt: now, MergeLease: HistoricalDeduplicationMergeLease{
 				ID: "lease", AcquiredAt: now,
-				Groups: []HistoricalDeduplicationMergeGroup{{Members: []HistoricalDeduplicationFindingVersion{{ID: "one", Version: 1}}}},
+				Groups: []HistoricalDeduplicationMergeGroup{{
+					Members: []HistoricalDeduplicationFindingVersion{{ID: "one", Version: 1}},
+				}},
 			},
 		},
 	}
@@ -267,7 +272,10 @@ func TestHistoricalReplayAdditionalMergeHelpers(t *testing.T) {
 	state := RepositoryState{
 		Findings: []Finding{
 			{ID: "occ-a", RepositoryFindingID: "a", RepositoryMatchState: RepositoryMatchKnown, Version: 1},
-			{ID: "occ-b", RepositoryFindingID: "b", RepositoryMatchState: RepositoryMatchNew, PostResolutionFindingID: "b", Version: 1},
+			{
+				ID: "occ-b", RepositoryFindingID: "b", RepositoryMatchState: RepositoryMatchNew,
+				PostResolutionFindingID: "b", Version: 1,
+			},
 		},
 		DeduplicatedFindings: []DeduplicatedReviewFinding{
 			{ID: "dedup-a", RepositoryFindingID: "a", RepositoryMatchState: RepositoryMatchKnown, Version: 1},
@@ -291,8 +299,10 @@ func TestHistoricalReplayAdditionalMergeHelpers(t *testing.T) {
 			{
 				ID: "b", Version: 2, CreatedAt: created.Add(time.Hour), UpdatedAt: created.Add(time.Hour),
 				ReviewFindingIDs: []string{"occ-b"}, FoundCommits: []string{"two"},
-				PathSymbolHistory: []RepositoryFindingPathSymbol{{ReviewFindingID: "occ-b", ObservedAt: created.Add(time.Hour)}},
-				MatchState:        RepositoryMatchNew, Lifecycle: RepositoryFindingRegressed,
+				PathSymbolHistory: []RepositoryFindingPathSymbol{
+					{ReviewFindingID: "occ-b", ObservedAt: created.Add(time.Hour)},
+				},
+				MatchState: RepositoryMatchNew, Lifecycle: RepositoryFindingRegressed,
 				ValidationState: RepositoryValidationConfirmed, FixCommitSHA: strings.Repeat("f", 40),
 			},
 			{
@@ -386,59 +396,87 @@ func TestHistoricalReplayAdditionalStoreStateMachine(t *testing.T) {
 		Required: true, Status: HistoricalDeduplicationPending, UpdatedAt: now,
 	}
 	state.UpdatedAt = now
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
-	if _, _, err := store.FreezeHistoricalDeduplicationReplay(repository,
-		RepositoryReviewDeduplicationSnapshot{}); err == nil {
+	if _, _, invalidFreezeErr := store.FreezeHistoricalDeduplicationReplay(
+		repository,
+		RepositoryReviewDeduplicationSnapshot{},
+	); invalidFreezeErr == nil {
 		t.Fatal("invalid snapshot frozen")
 	}
 	state, replay, err := store.FreezeHistoricalDeduplicationReplay(repository, snapshot)
 	if err != nil || replay.Status != HistoricalDeduplicationReplaying {
 		t.Fatalf("freeze replay=%#v err=%v", replay, err)
 	}
-	if _, same, err := store.FreezeHistoricalDeduplicationReplay(repository, snapshot); err != nil ||
-		!reflect.DeepEqual(same.ProfileSnapshot, snapshot) {
-		t.Fatalf("idempotent freeze=%#v err=%v", same, err)
+	_, same, sameFreezeErr := store.FreezeHistoricalDeduplicationReplay(repository, snapshot)
+	if sameFreezeErr != nil || !reflect.DeepEqual(same.ProfileSnapshot, snapshot) {
+		t.Fatalf("idempotent freeze=%#v err=%v", same, sameFreezeErr)
 	}
 	different := snapshot
 	different.CandidateLimit = 3
-	if _, _, err := store.FreezeHistoricalDeduplicationReplay(repository, different); !errors.Is(err, ErrConflict) {
-		t.Fatalf("different frozen snapshot error=%v", err)
+	if _, _, differentFreezeErr := store.FreezeHistoricalDeduplicationReplay(
+		repository,
+		different,
+	); !errors.Is(differentFreezeErr, ErrConflict) {
+		t.Fatalf("different frozen snapshot error=%v", differentFreezeErr)
 	}
-	if _, _, _, err := store.AcquireHistoricalDeduplicationMerge(repository, "", nil); err == nil {
+	if _, _, _, emptyLeaseErr := store.AcquireHistoricalDeduplicationMerge(
+		repository,
+		"",
+		nil,
+	); emptyLeaseErr == nil {
 		t.Fatal("empty lease accepted")
 	}
-	if _, _, _, err := store.AcquireHistoricalDeduplicationMerge(repository, "lease", []HistoricalDeduplicationMergeGroup{{
-		Members: []HistoricalDeduplicationFindingVersion{{ID: "one", Version: 1}},
-	}}); err == nil {
+	if _, _, _, invalidGroupErr := store.AcquireHistoricalDeduplicationMerge(
+		repository,
+		"lease",
+		[]HistoricalDeduplicationMergeGroup{{
+			Members: []HistoricalDeduplicationFindingVersion{{ID: "one", Version: 1}},
+		}},
+	); invalidGroupErr == nil {
 		t.Fatal("invalid group accepted")
 	}
 	state, replay, acquired, err := store.AcquireHistoricalDeduplicationMerge(repository, "lease", nil)
 	if err != nil || !acquired || replay.Status != HistoricalDeduplicationMerging {
 		t.Fatalf("acquire=%v replay=%#v err=%v", acquired, replay, err)
 	}
-	if _, _, acquired, err := store.AcquireHistoricalDeduplicationMerge(repository, "lease", nil); err != nil || acquired {
-		t.Fatalf("idempotent acquire=%v err=%v", acquired, err)
+	_, _, acquiredAgain, acquireAgainErr := store.AcquireHistoricalDeduplicationMerge(
+		repository,
+		"lease",
+		nil,
+	)
+	if acquireAgainErr != nil || acquiredAgain {
+		t.Fatalf("idempotent acquire=%v err=%v", acquiredAgain, acquireAgainErr)
 	}
-	if _, _, _, err := store.AcquireHistoricalDeduplicationMerge(repository, "other", nil); !errors.Is(err, ErrHistoricalDeduplicationInProgress) {
-		t.Fatalf("competing acquire error=%v", err)
+	if _, _, _, competingAcquireErr := store.AcquireHistoricalDeduplicationMerge(
+		repository,
+		"other",
+		nil,
+	); !errors.Is(competingAcquireErr, ErrHistoricalDeduplicationInProgress) {
+		t.Fatalf("competing acquire error=%v", competingAcquireErr)
 	}
-	if _, _, err := store.CompleteHistoricalDeduplicationMerge(repository, "wrong"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("wrong completion error=%v", err)
+	if _, _, wrongCompleteErr := store.CompleteHistoricalDeduplicationMerge(
+		repository,
+		"wrong",
+	); !errors.Is(wrongCompleteErr, ErrConflict) {
+		t.Fatalf("wrong completion error=%v", wrongCompleteErr)
 	}
 	state, replay, err = store.CompleteHistoricalDeduplicationMerge(repository, "lease")
 	if err != nil || replay.Status != HistoricalDeduplicationCompleted || replay.Required {
 		t.Fatalf("complete replay=%#v err=%v", replay, err)
 	}
-	if _, _, err := store.CompleteHistoricalDeduplicationMerge(repository, "anything"); err != nil {
-		t.Fatalf("completion replay error=%v", err)
+	if _, _, completedReplayErr := store.CompleteHistoricalDeduplicationMerge(
+		repository,
+		"anything",
+	); completedReplayErr != nil {
+		t.Fatalf("completion replay error=%v", completedReplayErr)
 	}
-	if _, _, err := store.FailHistoricalDeduplicationReplay(repository, ""); err != nil {
-		t.Fatalf("completed fail replay error=%v", err)
+	if _, _, completedFailErr := store.FailHistoricalDeduplicationReplay(repository, ""); completedFailErr != nil {
+		t.Fatalf("completed fail replay error=%v", completedFailErr)
 	}
-	if _, _, err := store.RetryHistoricalDeduplicationReplay(repository); err != nil {
-		t.Fatalf("completed retry replay error=%v", err)
+	if _, _, completedRetryErr := store.RetryHistoricalDeduplicationReplay(repository); completedRetryErr != nil {
+		t.Fatalf("completed retry replay error=%v", completedRetryErr)
 	}
 	_ = state
 
@@ -453,18 +491,24 @@ func TestHistoricalReplayAdditionalStoreStateMachine(t *testing.T) {
 		},
 	}
 	secondState.UpdatedAt = now
-	if err := second.save(&secondState); err != nil {
-		t.Fatal(err)
+	if secondSaveErr := second.save(&secondState); secondSaveErr != nil {
+		t.Fatal(secondSaveErr)
 	}
-	if _, _, err := second.FailHistoricalDeduplicationReplay(repository, "wrong"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("wrong failure lease error=%v", err)
+	if _, _, wrongFailErr := second.FailHistoricalDeduplicationReplay(
+		repository,
+		"wrong",
+	); !errors.Is(wrongFailErr, ErrConflict) {
+		t.Fatalf("wrong failure lease error=%v", wrongFailErr)
 	}
 	_, failed, err := second.FailHistoricalDeduplicationReplay(repository, "merge")
 	if err != nil || failed.Status != HistoricalDeduplicationFailed {
 		t.Fatalf("failed replay=%#v err=%v", failed, err)
 	}
-	if _, _, err := second.FreezeHistoricalDeduplicationReplay(repository, snapshot); !errors.Is(err, ErrConflict) {
-		t.Fatalf("freeze failed replay error=%v", err)
+	if _, _, failedFreezeErr := second.FreezeHistoricalDeduplicationReplay(
+		repository,
+		snapshot,
+	); !errors.Is(failedFreezeErr, ErrConflict) {
+		t.Fatalf("freeze failed replay error=%v", failedFreezeErr)
 	}
 	_, pending, err := second.RetryHistoricalDeduplicationReplay(repository)
 	if err != nil || pending.Status != HistoricalDeduplicationPending {
@@ -581,7 +625,10 @@ func TestHistoricalReplayAdditionalResetErrors(t *testing.T) {
 		{ID: replacementID},
 		{ID: "mixed", RawSourceIDs: []string{historicalRaw.ID, liveRaw.ID}},
 	}
-	if err := resetHistoricalDeduplicationModelWork(&duplicateReplacement, snapshot, now); !errors.Is(err, ErrConflict) {
+	if err := resetHistoricalDeduplicationModelWork(&duplicateReplacement, snapshot, now); !errors.Is(
+		err,
+		ErrConflict,
+	) {
 		t.Fatalf("duplicate replacement reset error=%v", err)
 	}
 	removedOccurrence := RepositoryState{
@@ -686,7 +733,9 @@ func TestHistoricalReplayAdditionalAdmissionAndRawBuilderBranches(t *testing.T) 
 	loaderStore.loadForTest = func(string) (RepositoryState, error) {
 		return RepositoryState{}, errors.New("injected load failure")
 	}
-	if _, _, err := loaderStore.AdmitNextHistoricalDeduplicationBatch("owner/repo"); err == nil {
+	if _, _, loadAdmissionErr := loaderStore.AdmitNextHistoricalDeduplicationBatch(
+		"owner/repo",
+	); loadAdmissionErr == nil {
 		t.Fatal("admission load failure hidden")
 	}
 	loaderStore.loadForTest = func(string) (RepositoryState, error) {
@@ -694,7 +743,9 @@ func TestHistoricalReplayAdditionalAdmissionAndRawBuilderBranches(t *testing.T) 
 			Required: true, Status: HistoricalDeduplicationReplaying,
 		}}, nil
 	}
-	if _, _, err := loaderStore.AdmitNextHistoricalDeduplicationBatch("owner/repo"); err == nil {
+	if _, _, snapshotAdmissionErr := loaderStore.AdmitNextHistoricalDeduplicationBatch(
+		"owner/repo",
+	); snapshotAdmissionErr == nil {
 		t.Fatal("invalid replay snapshot admitted")
 	}
 	loaderStore.loadForTest = func(string) (RepositoryState, error) {
@@ -711,8 +762,10 @@ func TestHistoricalReplayAdditionalAdmissionAndRawBuilderBranches(t *testing.T) 
 			Required: true, Status: HistoricalDeduplicationPending, ProfileSnapshot: snapshot,
 		}}, nil
 	}
-	if _, _, err := loaderStore.AdmitNextHistoricalDeduplicationBatch("owner/repo"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("wrong admission state error=%v", err)
+	if _, _, wrongStateAdmissionErr := loaderStore.AdmitNextHistoricalDeduplicationBatch(
+		"owner/repo",
+	); !errors.Is(wrongStateAdmissionErr, ErrConflict) {
+		t.Fatalf("wrong admission state error=%v", wrongStateAdmissionErr)
 	}
 	completedRaw := RawReviewFinding{
 		ID: "rrw_complete", LegacyFindingID: "legacy", State: RawFindingDeduplicationCompleted,
@@ -746,8 +799,10 @@ func TestHistoricalReplayAdditionalAdmissionAndRawBuilderBranches(t *testing.T) 
 	}
 	// The deliberately incomplete loaded fixture reaches synthetic contexts,
 	// ordinal sorting, and the bounded save failure after both raws are built.
-	if _, admission, err := loaderStore.AdmitNextHistoricalDeduplicationBatch("owner/repo"); err == nil || admission.Admitted != 0 {
-		t.Fatalf("synthetic admission=%#v err=%v", admission, err)
+	if _, syntheticAdmission, syntheticAdmissionErr := loaderStore.AdmitNextHistoricalDeduplicationBatch(
+		"owner/repo",
+	); syntheticAdmissionErr == nil || syntheticAdmission.Admitted != 0 {
+		t.Fatalf("synthetic admission=%#v err=%v", syntheticAdmission, syntheticAdmissionErr)
 	}
 	loaderStore.loadForTest = func(string) (RepositoryState, error) {
 		bad := baseFinding
@@ -826,9 +881,24 @@ func TestHistoricalReplayAdditionalMergeGroupErrors(t *testing.T) {
 	componentState := RepositoryState{
 		RawFindings: []RawReviewFinding{
 			{ID: "live", LegacyFindingID: "live"},
-			{ID: "rrw_a", LegacyFindingID: "legacy-a", State: RawFindingDeduplicationCompleted, DeduplicatedFindingID: "d"},
-			{ID: "rrw_b", LegacyFindingID: "legacy-b", State: RawFindingDeduplicationCompleted, DeduplicatedFindingID: "d"},
-			{ID: "rrw_c", LegacyFindingID: "legacy-c", State: RawFindingDeduplicationCompleted, DeduplicatedFindingID: "single"},
+			{
+				ID:                    "rrw_a",
+				LegacyFindingID:       "legacy-a",
+				State:                 RawFindingDeduplicationCompleted,
+				DeduplicatedFindingID: "d",
+			},
+			{
+				ID:                    "rrw_b",
+				LegacyFindingID:       "legacy-b",
+				State:                 RawFindingDeduplicationCompleted,
+				DeduplicatedFindingID: "d",
+			},
+			{
+				ID:                    "rrw_c",
+				LegacyFindingID:       "legacy-c",
+				State:                 RawFindingDeduplicationCompleted,
+				DeduplicatedFindingID: "single",
+			},
 		},
 		Findings: []Finding{
 			{ID: "legacy-a", RepositoryFindingID: "b"},
@@ -1120,11 +1190,11 @@ func TestHistoricalReplayAdditionalAdjacentRepositoryCoverage(t *testing.T) {
 		Severity: "high", Title: "finding", File: file.Path, Evidence: "evidence", Impact: "impact",
 		Validation: Validation{Status: "confirmed", Summary: "confirmed"},
 	}
+	checkpointSnapshot := historicalReplayCoverageSnapshot()
 	checkpointState := RepositoryState{
-		CurrentCampaign: &RepositoryReviewCampaignCoverage{DeduplicationSnapshot: func() *RepositoryReviewDeduplicationSnapshot {
-			snapshot := historicalReplayCoverageSnapshot()
-			return &snapshot
-		}()},
+		CurrentCampaign: &RepositoryReviewCampaignCoverage{
+			DeduplicationSnapshot: &checkpointSnapshot,
+		},
 	}
 	if err := persistRawRepositoryReviewCheckpointFinding(
 		&checkpointState, "raw", "bucket", plan, "run", "assignment", "context",

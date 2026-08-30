@@ -72,6 +72,40 @@ func dedupDeepSaveFailureStore(
 	return store
 }
 
+type dedupDeepCompletionResult struct {
+	state   RepositoryState
+	finding DeduplicatedReviewFinding
+	created bool
+	err     error
+}
+
+func dedupDeepComplete(
+	store Store,
+	repository string,
+	completion DeduplicationCompletion,
+) dedupDeepCompletionResult {
+	state, finding, created, err := store.CompleteDeduplicationJob(repository, completion)
+	return dedupDeepCompletionResult{
+		state: state, finding: finding, created: created, err: err,
+	}
+}
+
+type dedupDeepFailureResult struct {
+	state    RepositoryState
+	raw      RawReviewFinding
+	terminal bool
+	err      error
+}
+
+func dedupDeepFail(
+	store Store,
+	repository, jobID, leaseID string,
+	cause error,
+) dedupDeepFailureResult {
+	state, raw, terminal, err := store.FailDeduplicationJob(repository, jobID, leaseID, cause)
+	return dedupDeepFailureResult{state: state, raw: raw, terminal: terminal, err: err}
+}
+
 func dedupDeepSameBucketFixture(t *testing.T) assignmentCoverageFixture {
 	t.Helper()
 	fixture := newAssignmentCoverageFixture(t, 1, 1)
@@ -189,10 +223,20 @@ func TestDeduplicationDeepEngineErrorCoverage(t *testing.T) {
 	if _, err := DeduplicationCandidateUniverseDigest([]DeduplicationCandidateSnapshot{{ID: "bad"}}); err == nil {
 		t.Fatal("invalid universe accepted")
 	}
-	if requests, ordered, err := PrepareDeduplicationScoringRequests(diagnosis, nil, 0); err != nil || len(requests) != 0 || len(ordered) != 0 {
-		t.Fatalf("empty scoring universe=%#v %#v %v", requests, ordered, err)
+	requests, ordered, emptyScoringErr := PrepareDeduplicationScoringRequests(
+		diagnosis,
+		nil,
+		0,
+	)
+	if emptyScoringErr != nil || len(requests) != 0 || len(ordered) != 0 {
+		t.Fatalf("empty scoring universe=%#v %#v %v", requests, ordered, emptyScoringErr)
 	}
-	if _, _, err := PrepareDeduplicationScoringRequests(diagnosis, []DeduplicationCandidateSnapshot{{ID: "bad"}}, 0); err == nil {
+	_, _, invalidScoringErr := PrepareDeduplicationScoringRequests(
+		diagnosis,
+		[]DeduplicationCandidateSnapshot{{ID: "bad"}},
+		0,
+	)
+	if invalidScoringErr == nil {
 		t.Fatal("invalid scoring candidate accepted")
 	}
 
@@ -207,17 +251,28 @@ func TestDeduplicationDeepEngineErrorCoverage(t *testing.T) {
 	encodedFirst, _ := json.Marshal(firstChunk[0])
 	oversizedSnapshot := snapshot
 	oversizedSnapshot.CandidateLimit = 17
-	if _, err := EvaluateDeduplicationCandidates(t.Context(), oversizedSnapshot, diagnosis, many, len(encodedFirst)+8,
+	if _, err := EvaluateDeduplicationCandidates(
+		t.Context(),
+		oversizedSnapshot,
+		diagnosis,
+		many,
+		len(encodedFirst)+8,
 		func(_ context.Context, _ RepositoryReviewDeduplicationSnapshot, _ string, request DeduplicationScoringRequest) (DeduplicationScoringResponse, error) {
 			response := DeduplicationScoringResponse{}
 			for _, supplied := range request.Candidates {
-				response.Scores = append(response.Scores, DeduplicationCandidateScore{CandidateID: supplied.ID, Score: 100, Explanation: "same"})
+				response.Scores = append(
+					response.Scores,
+					DeduplicationCandidateScore{
+						CandidateID: supplied.ID, Score: 100, Explanation: "same",
+					},
+				)
 			}
 			return response, nil
 		},
 		func(context.Context, RepositoryReviewDeduplicationSnapshot, string, DeduplicationJudgeRequest) (DeduplicationJudgment, error) {
 			return DeduplicationJudgment{Decision: "new"}, nil
-		}); err == nil {
+		},
+	); err == nil {
 		t.Fatal("oversized aggregate judge request accepted")
 	}
 }
@@ -232,10 +287,13 @@ func TestDeduplicationDeepSlotAndSnapshotCoverage(t *testing.T) {
 	unsafeWorkspace := t.TempDir()
 	unsafeStore := NewStore(unsafeWorkspace)
 	lockPath := filepath.Join(unsafeWorkspace, storeDirectory) + ".deduplication-slot-00.lock"
-	if err := os.Symlink(filepath.Join(unsafeWorkspace, "missing"), lockPath); err != nil {
-		t.Fatal(err)
+	symlinkErr := os.Symlink(filepath.Join(unsafeWorkspace, "missing"), lockPath)
+	if symlinkErr != nil {
+		t.Fatal(symlinkErr)
 	}
-	if _, err := unsafeStore.AcquireDeduplicationSlot(t.Context()); err == nil {
+	unsafeRelease, unsafeAcquireErr := unsafeStore.AcquireDeduplicationSlot(t.Context())
+	if unsafeAcquireErr == nil {
+		unsafeRelease()
 		t.Fatal("unsafe slot lock accepted")
 	}
 
@@ -261,12 +319,29 @@ func TestDeduplicationDeepScoringAndDecodeCoverage(t *testing.T) {
 		{ID: "z", Version: 1, CreationOrdinal: 2, OpaqueID: "opaque-z", Diagnosis: diagnosis},
 		{ID: "a", Version: 1, CreationOrdinal: 1, OpaqueID: "opaque-a", Diagnosis: diagnosis},
 	}
-	request := DeduplicationScoringRequest{Finding: diagnosis, Candidates: []DeduplicationScoringCandidate{{ID: "a", Diagnosis: diagnosis}, {ID: "a", Diagnosis: diagnosis}}}
-	if err := ValidateDeduplicationScoringResponse(DeduplicationScoringResponse{Scores: []DeduplicationCandidateScore{{CandidateID: "a", Score: 90, Explanation: "one"}, {CandidateID: "a", Score: 90, Explanation: "two"}}}, request); err == nil {
+	request := DeduplicationScoringRequest{
+		Finding: diagnosis,
+		Candidates: []DeduplicationScoringCandidate{
+			{ID: "a", Diagnosis: diagnosis},
+			{ID: "a", Diagnosis: diagnosis},
+		},
+	}
+	if err := ValidateDeduplicationScoringResponse(
+		DeduplicationScoringResponse{
+			Scores: []DeduplicationCandidateScore{
+				{CandidateID: "a", Score: 90, Explanation: "one"},
+				{CandidateID: "a", Score: 90, Explanation: "two"},
+			},
+		},
+		request,
+	); err == nil {
 		t.Fatal("duplicate request IDs accepted")
 	}
 	request.Candidates[0].ID = ""
-	if err := ValidateDeduplicationScoringResponse(DeduplicationScoringResponse{Scores: make([]DeduplicationCandidateScore, 2)}, request); err == nil {
+	if err := ValidateDeduplicationScoringResponse(
+		DeduplicationScoringResponse{Scores: make([]DeduplicationCandidateScore, 2)},
+		request,
+	); err == nil {
 		t.Fatal("empty request ID accepted")
 	}
 
@@ -284,12 +359,22 @@ func TestDeduplicationDeepScoringAndDecodeCoverage(t *testing.T) {
 	}
 	missingOpaque := append([]DeduplicationCandidateSnapshot(nil), candidates...)
 	missingOpaque[0].OpaqueID = ""
-	if _, err := ShortlistDeduplicationCandidates(missingOpaque, make([]DeduplicationCandidateScore, 2), 90, 2); err == nil {
+	if _, err := ShortlistDeduplicationCandidates(
+		missingOpaque,
+		make([]DeduplicationCandidateScore, 2),
+		90,
+		2,
+	); err == nil {
 		t.Fatal("missing opaque candidate accepted")
 	}
 	duplicateOpaque := append([]DeduplicationCandidateSnapshot(nil), candidates...)
 	duplicateOpaque[0].OpaqueID = duplicateOpaque[1].OpaqueID
-	if _, err := ShortlistDeduplicationCandidates(duplicateOpaque, make([]DeduplicationCandidateScore, 2), 90, 2); err == nil {
+	if _, err := ShortlistDeduplicationCandidates(
+		duplicateOpaque,
+		make([]DeduplicationCandidateScore, 2),
+		90,
+		2,
+	); err == nil {
 		t.Fatal("duplicate opaque candidate accepted")
 	}
 	for _, limits := range [][2]int{{-1, 1}, {101, 1}, {90, -1}, {90, 21}} {
@@ -313,21 +398,35 @@ func TestDeduplicationDeepScoringAndDecodeCoverage(t *testing.T) {
 	if _, err := DecodeDeduplicationJudgment([]byte(`{"decision":"new"} !`)); err == nil {
 		t.Fatal("malformed trailing JSON accepted")
 	}
-	if _, err := DecodeDeduplicationJudgment([]byte(strings.Repeat("x", DeduplicationMaximumInputBytes+1))); err == nil {
+	if _, err := DecodeDeduplicationJudgment(
+		[]byte(strings.Repeat("x", DeduplicationMaximumInputBytes+1)),
+	); err == nil {
 		t.Fatal("oversized model response accepted")
 	}
-	if _, err := normalizeDeduplicationCandidateSnapshots([]DeduplicationCandidateSnapshot{deduplicationModelTestCandidate(1, 1, "x"), deduplicationModelTestCandidate(1, 2, "x")}); err == nil {
+	if _, err := normalizeDeduplicationCandidateSnapshots([]DeduplicationCandidateSnapshot{
+		deduplicationModelTestCandidate(1, 1, "x"),
+		deduplicationModelTestCandidate(1, 2, "x"),
+	}); err == nil {
 		t.Fatal("duplicate canonical candidate accepted")
 	}
-	if _, err := ShortlistDeduplicationCandidates([]DeduplicationCandidateSnapshot{{ID: "bad"}}, nil, 90, 1); err == nil {
+	if _, err := ShortlistDeduplicationCandidates(
+		[]DeduplicationCandidateSnapshot{{ID: "bad"}},
+		nil,
+		90,
+		1,
+	); err == nil {
 		t.Fatal("invalid canonical shortlist candidate accepted")
 	}
 	ordinalCandidates := []DeduplicationCandidateSnapshot{
 		{ID: "a", Version: 1, CreationOrdinal: 2, OpaqueID: "one", Diagnosis: diagnosis},
 		{ID: "z", Version: 1, CreationOrdinal: 1, OpaqueID: "two", Diagnosis: diagnosis},
 	}
-	ordinalScores := []DeduplicationCandidateScore{{CandidateID: "one", Score: 90, Explanation: "same"}, {CandidateID: "two", Score: 90, Explanation: "same"}}
-	if got, err := ShortlistDeduplicationCandidates(ordinalCandidates, ordinalScores, 90, 2); err != nil || got[0].ID != "z" {
+	ordinalScores := []DeduplicationCandidateScore{
+		{CandidateID: "one", Score: 90, Explanation: "same"},
+		{CandidateID: "two", Score: 90, Explanation: "same"},
+	}
+	if got, err := ShortlistDeduplicationCandidates(ordinalCandidates, ordinalScores, 90, 2); err != nil ||
+		got[0].ID != "z" {
 		t.Fatalf("shortlist ordinal ordering=%#v err=%v", got, err)
 	}
 }
@@ -337,7 +436,12 @@ func TestDeduplicationDeepStoreInjectionCoverage(t *testing.T) {
 	loadErr := errors.New("load failed")
 	loadFailure := NewStore(t.TempDir())
 	loadFailure.loadForTest = func(string) (RepositoryState, error) { return RepositoryState{}, loadErr }
-	completion := DeduplicationCompletion{JobID: "job", LeaseID: "lease", CandidateUniverseDigest: "digest", Decision: DeduplicationJudgment{Decision: "new"}}
+	completion := DeduplicationCompletion{
+		JobID:                   "job",
+		LeaseID:                 "lease",
+		CandidateUniverseDigest: "digest",
+		Decision:                DeduplicationJudgment{Decision: "new"},
+	}
 	if _, _, _, err := loadFailure.ClaimDeduplicationJob(repository, "job", time.Minute); !errors.Is(err, loadErr) {
 		t.Fatalf("claim load error=%v", err)
 	}
@@ -353,11 +457,21 @@ func TestDeduplicationDeepStoreInjectionCoverage(t *testing.T) {
 	if _, err := loadFailure.reconcileRepositoryDeduplicationJobs(repository); !errors.Is(err, loadErr) {
 		t.Fatalf("reconcile load error=%v", err)
 	}
-	if _, err := loadFailure.ProcessPendingDeduplicationJobs(t.Context(), repository, DeduplicationProcessOptions{}); !errors.Is(err, loadErr) {
+	if _, err := loadFailure.ProcessPendingDeduplicationJobs(
+		t.Context(),
+		repository,
+		DeduplicationProcessOptions{},
+	); !errors.Is(
+		err,
+		loadErr,
+	) {
 		t.Fatalf("process load error=%v", err)
 	}
 
-	malformed := RepositoryState{Repository: repository, DeduplicationJobs: []DeduplicationJob{{ID: "job", RawFindingID: "missing"}}}
+	malformed := RepositoryState{
+		Repository:        repository,
+		DeduplicationJobs: []DeduplicationJob{{ID: "job", RawFindingID: "missing"}},
+	}
 	broken := NewStore(t.TempDir())
 	broken.loadForTest = func(string) (RepositoryState, error) { return malformed, nil }
 	if _, _, _, err := broken.ClaimDeduplicationJob(repository, "job", time.Minute); err == nil {
@@ -419,7 +533,10 @@ func TestDeduplicationDeepRemainingWorkerCoverage(t *testing.T) {
 	conflictState.RawFindings[0].Disposition = RawFindingDispositionNew
 	conflictStore := NewStore(t.TempDir())
 	conflictStore.loadForTest = func(string) (RepositoryState, error) { return conflictState, nil }
-	if _, _, _, err := conflictStore.ClaimDeduplicationJob(fixture.repository, job.ID, time.Minute); !errors.Is(err, ErrConflict) {
+	if _, _, _, err := conflictStore.ClaimDeduplicationJob(fixture.repository, job.ID, time.Minute); !errors.Is(
+		err,
+		ErrConflict,
+	) {
 		t.Fatalf("invalid raw claim error=%v", err)
 	}
 
@@ -446,53 +563,91 @@ func TestDeduplicationDeepRemainingWorkerCoverage(t *testing.T) {
 	}
 	wrongLease := completion
 	wrongLease.LeaseID = "wrong"
-	if _, _, _, err := fixture.store.CompleteDeduplicationJob(fixture.repository, wrongLease); !errors.Is(err, ErrConflict) {
-		t.Fatalf("wrong completion lease error=%v", err)
+	wrongLeaseResult := dedupDeepComplete(fixture.store, fixture.repository, wrongLease)
+	if !errors.Is(
+		wrongLeaseResult.err,
+		ErrConflict,
+	) {
+		t.Fatalf("wrong completion lease error=%v", wrongLeaseResult.err)
 	}
 	collision := dedupDeepCloneState(t, running)
 	collision.Findings = append(collision.Findings, Finding{ID: stableID("rdf_", collision.RawFindings[0].ID)})
 	collisionStore := NewStore(t.TempDir())
 	collisionStore.now = func() time.Time { return claim.Job.UpdatedAt.Add(time.Second) }
 	collisionStore.loadForTest = func(string) (RepositoryState, error) { return collision, nil }
-	if _, _, _, err := collisionStore.CompleteDeduplicationJob(fixture.repository, completion); !errors.Is(err, ErrConflict) {
-		t.Fatalf("deduplicated collision error=%v", err)
+	collisionResult := dedupDeepComplete(collisionStore, fixture.repository, completion)
+	if !errors.Is(
+		collisionResult.err,
+		ErrConflict,
+	) {
+		t.Fatalf("deduplicated collision error=%v", collisionResult.err)
 	}
 	completeSaveFailure := dedupDeepSaveFailureStore(t, running, claim.Job.UpdatedAt.Add(time.Second))
-	if _, _, _, err := completeSaveFailure.CompleteDeduplicationJob(fixture.repository, completion); err == nil {
+	completionSaveResult := dedupDeepComplete(
+		completeSaveFailure,
+		fixture.repository,
+		completion,
+	)
+	if completionSaveResult.err == nil || completionSaveResult.state.Repository != "" ||
+		completionSaveResult.finding.ID != "" || completionSaveResult.created {
 		t.Fatal("completion save failure ignored")
 	}
 	failSaveFailure := dedupDeepSaveFailureStore(t, running, claim.Job.UpdatedAt.Add(time.Second))
-	if _, _, _, err := failSaveFailure.FailDeduplicationJob(fixture.repository, job.ID, claim.Job.LeaseID, errors.New("x")); err == nil {
-		t.Fatal("failure release save error ignored")
+	failState, failRaw, failTerminal, failErr := failSaveFailure.FailDeduplicationJob(
+		fixture.repository,
+		job.ID,
+		claim.Job.LeaseID,
+		errors.New("x"),
+	)
+	if failState.Repository != "" || failRaw.ID != "" || failTerminal || failErr == nil {
+		t.Fatalf(
+			"failure release save result=%#v raw=%#v terminal=%v err=%v",
+			failState, failRaw, failTerminal, failErr,
+		)
 	}
 
 	completedState, completedFinding, _, err := fixture.store.CompleteDeduplicationJob(fixture.repository, completion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, terminalClaim, claimed, err := fixture.store.ClaimDeduplicationJob(fixture.repository, job.ID, time.Minute); err != nil || claimed || terminalClaim.Job.State != DeduplicationJobCompleted {
-		t.Fatalf("terminal claim=%#v claimed=%v err=%v", terminalClaim, claimed, err)
+	terminalState, terminalClaim, terminalClaimed, terminalErr := fixture.store.ClaimDeduplicationJob(
+		fixture.repository,
+		job.ID,
+		time.Minute,
+	)
+	if terminalErr != nil || terminalState.Repository == "" || terminalClaimed ||
+		terminalClaim.Job.State != DeduplicationJobCompleted {
+		t.Fatalf("terminal claim=%#v claimed=%v err=%v", terminalClaim, terminalClaimed, terminalErr)
 	}
 	missingCompletedTarget := dedupDeepCloneState(t, completedState)
 	missingCompletedTarget.DeduplicatedFindings = nil
 	missingTargetStore := NewStore(t.TempDir())
 	missingTargetStore.loadForTest = func(string) (RepositoryState, error) { return missingCompletedTarget, nil }
-	if _, _, _, err := missingTargetStore.CompleteDeduplicationJob(fixture.repository, completion); !errors.Is(err, ErrConflict) {
-		t.Fatalf("missing completed target error=%v", err)
+	missingTargetResult := dedupDeepComplete(missingTargetStore, fixture.repository, completion)
+	if !errors.Is(
+		missingTargetResult.err,
+		ErrConflict,
+	) {
+		t.Fatalf("missing completed target error=%v", missingTargetResult.err)
 	}
 	_ = completedFinding
 
 	failedFixture := dedupDeepPendingFixture(t, 1)
 	failedPending := dedupDeepState(t, failedFixture)
-	_, failedClaim, claimed, err := failedFixture.store.ClaimDeduplicationJob(failedFixture.repository, failedPending.DeduplicationJobs[0].ID, time.Minute)
+	_, failedClaim, claimed, err := failedFixture.store.ClaimDeduplicationJob(
+		failedFixture.repository,
+		failedPending.DeduplicationJobs[0].ID,
+		time.Minute,
+	)
 	if err != nil || !claimed {
 		t.Fatal(err)
 	}
 	failedRunning := dedupDeepState(t, failedFixture)
 	failedRunning.DeduplicationJobs[0].Attempts = DeduplicationAttemptLimit
 	failedRunning.Version++
-	if err := failedFixture.store.save(&failedRunning); err != nil {
-		t.Fatal(err)
+	failedSaveErr := failedFixture.store.save(&failedRunning)
+	if failedSaveErr != nil {
+		t.Fatal(failedSaveErr)
 	}
 	failedState, _, terminal, err := failedFixture.store.FailDeduplicationJob(
 		failedFixture.repository, failedClaim.Job.ID, failedClaim.Job.LeaseID, errors.New("terminal"),
@@ -505,11 +660,18 @@ func TestDeduplicationDeepRemainingWorkerCoverage(t *testing.T) {
 	retryZeroStore.loadForTest = func(string) (RepositoryState, error) {
 		return dedupDeepCloneState(t, failedState), nil
 	}
-	if retried, _, err := retryZeroStore.RetryDeduplication(failedFixture.repository, failedState.RawFindings[0].ID); err != nil || retried.NextDeduplicationOrdinal != 2 {
-		t.Fatalf("zero-tail retry state=%#v err=%v", retried, err)
+	if retried, _, retryErr := retryZeroStore.RetryDeduplication(
+		failedFixture.repository,
+		failedState.RawFindings[0].ID,
+	); retryErr != nil ||
+		retried.NextDeduplicationOrdinal != 2 {
+		t.Fatalf("zero-tail retry state=%#v err=%v", retried, retryErr)
 	}
 	retrySaveFailure := dedupDeepSaveFailureStore(t, failedState, repositoryAuditTestNow)
-	if _, _, err := retrySaveFailure.RetryDeduplication(failedFixture.repository, failedState.RawFindings[0].ID); err == nil {
+	if _, _, retryErr := retrySaveFailure.RetryDeduplication(
+		failedFixture.repository,
+		failedState.RawFindings[0].ID,
+	); retryErr == nil {
 		t.Fatal("retry save failure ignored")
 	}
 
@@ -519,15 +681,26 @@ func TestDeduplicationDeepRemainingWorkerCoverage(t *testing.T) {
 		t.Fatal("reconcile save failure ignored")
 	}
 	reconcileOuter := fixture.store
-	reconcileOuter.loadForTest = func(string) (RepositoryState, error) { return RepositoryState{}, errors.New("reconcile load failed") }
+	reconcileOuter.loadForTest = func(string) (RepositoryState, error) {
+		return RepositoryState{}, errors.New("reconcile load failed")
+	}
 	if _, err := reconcileOuter.ReconcileDeduplicationJobs(t.Context()); err == nil {
 		t.Fatal("outer reconciliation ignored repository error")
 	}
 
 	if ordered, err := normalizeDurableDeduplicationScores(
-		[]DeduplicationCandidateScore{{CandidateID: "b", Score: 90, Explanation: "same"}, {CandidateID: "a", Score: 90, Explanation: "same"}},
-		&DeduplicationJob{ModelSnapshot: RepositoryReviewDeduplicationSnapshot{SimilarityThreshold: 90, CandidateLimit: 2}},
-		[]DeduplicationCandidateSnapshot{{ID: "a", Version: 1, CreationOrdinal: 1}, {ID: "b", Version: 1, CreationOrdinal: 2}},
+		[]DeduplicationCandidateScore{
+			{CandidateID: "b", Score: 90, Explanation: "same"},
+			{CandidateID: "a", Score: 90, Explanation: "same"},
+		},
+		&DeduplicationJob{ModelSnapshot: RepositoryReviewDeduplicationSnapshot{
+			SimilarityThreshold: 90,
+			CandidateLimit:      2,
+		}},
+		[]DeduplicationCandidateSnapshot{
+			{ID: "a", Version: 1, CreationOrdinal: 1},
+			{ID: "b", Version: 1, CreationOrdinal: 2},
+		},
 	); err != nil || ordered[0].CandidateID != "a" {
 		t.Fatalf("durable ordinal ordering=%#v err=%v", ordered, err)
 	}
@@ -543,13 +716,25 @@ func TestDeduplicationDeepProcessorOrderingCoverage(t *testing.T) {
 	store.loadForTest = func(string) (RepositoryState, error) { return state, nil }
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := store.ProcessPendingDeduplicationJobs(canceled, state.Repository, DeduplicationProcessOptions{}); !errors.Is(err, context.Canceled) {
+	if _, err := store.ProcessPendingDeduplicationJobs(
+		canceled,
+		state.Repository,
+		DeduplicationProcessOptions{},
+	); !errors.Is(
+		err,
+		context.Canceled,
+	) {
 		t.Fatalf("ordered canceled processor error=%v", err)
 	}
 	empty := state
 	empty.DeduplicationJobs = nil
 	store.loadForTest = func(string) (RepositoryState, error) { return empty, nil }
-	if result, err := store.ProcessPendingDeduplicationJobs(nil, state.Repository, DeduplicationProcessOptions{}); err != nil || result != (DeduplicationProcessResult{}) {
+	if result, err := store.ProcessPendingDeduplicationJobs(
+		nil,
+		state.Repository,
+		DeduplicationProcessOptions{},
+	); err != nil ||
+		result != (DeduplicationProcessResult{}) {
 		t.Fatalf("nil-context empty processor=%#v err=%v", result, err)
 	}
 }
@@ -560,42 +745,71 @@ func TestDeduplicationDeepClaimAndCompletionCoverage(t *testing.T) {
 	}
 	fixture := dedupDeepSameBucketFixture(t)
 	state := dedupDeepState(t, fixture)
-	if _, _, _, err := fixture.store.ClaimDeduplicationJob(fixture.repository, "missing", time.Minute); !errors.Is(err, os.ErrNotExist) {
+	if _, _, _, err := fixture.store.ClaimDeduplicationJob(fixture.repository, "missing", time.Minute); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
 		t.Fatalf("missing claim error=%v", err)
 	}
 	firstJob, secondJob := state.DeduplicationJobs[0], state.DeduplicationJobs[1]
-	if _, claim, claimed, err := fixture.store.ClaimDeduplicationJob(fixture.repository, secondJob.ID, time.Minute); err != nil || claimed || claim.Job.State != DeduplicationJobPending {
-		t.Fatalf("FIFO claim=%#v claimed=%v err=%v", claim, claimed, err)
+	secondState, secondClaim, secondClaimed, secondErr := fixture.store.ClaimDeduplicationJob(
+		fixture.repository,
+		secondJob.ID,
+		time.Minute,
+	)
+	if secondErr != nil || secondState.Repository == "" || secondClaimed ||
+		secondClaim.Job.State != DeduplicationJobPending {
+		t.Fatalf("FIFO claim=%#v claimed=%v err=%v", secondClaim, secondClaimed, secondErr)
 	}
-	_, firstClaim, claimed, err := fixture.store.ClaimDeduplicationJob(fixture.repository, firstJob.ID, time.Minute)
-	if err != nil || !claimed {
-		t.Fatalf("first claim=%#v claimed=%v err=%v", firstClaim, claimed, err)
+	firstState, firstClaim, firstClaimed, firstErr := fixture.store.ClaimDeduplicationJob(
+		fixture.repository,
+		firstJob.ID,
+		time.Minute,
+	)
+	if firstErr != nil || firstState.Repository == "" || !firstClaimed {
+		t.Fatalf("first claim=%#v claimed=%v err=%v", firstClaim, firstClaimed, firstErr)
 	}
-	if _, running, claimed, err := fixture.store.ClaimDeduplicationJob(fixture.repository, firstJob.ID, time.Minute); err != nil || claimed || running.Job.State != DeduplicationJobRunning {
-		t.Fatalf("running claim=%#v claimed=%v err=%v", running, claimed, err)
+	runningState, running, runningClaimed, runningErr := fixture.store.ClaimDeduplicationJob(
+		fixture.repository,
+		firstJob.ID,
+		time.Minute,
+	)
+	if runningErr != nil || runningState.Repository == "" || runningClaimed ||
+		running.Job.State != DeduplicationJobRunning {
+		t.Fatalf("running claim=%#v claimed=%v err=%v", running, runningClaimed, runningErr)
 	}
 	fixture.store.now = func() time.Time { return firstClaim.Job.LeaseExpiresAt.Add(time.Second) }
-	_, reclaimed, claimed, err := fixture.store.ClaimDeduplicationJob(fixture.repository, firstJob.ID, time.Minute)
-	if err != nil || !claimed || reclaimed.Job.Attempts != 2 {
-		t.Fatalf("expired reclaim=%#v claimed=%v err=%v", reclaimed, claimed, err)
+	reclaimedState, reclaimed, reclaimedClaimed, reclaimedErr := fixture.store.ClaimDeduplicationJob(
+		fixture.repository,
+		firstJob.ID,
+		time.Minute,
+	)
+	if reclaimedErr != nil || reclaimedState.Repository == "" || !reclaimedClaimed || reclaimed.Job.Attempts != 2 {
+		t.Fatalf("expired reclaim=%#v claimed=%v err=%v", reclaimed, reclaimedClaimed, reclaimedErr)
 	}
 
-	if _, _, _, err := fixture.store.CompleteDeduplicationJob("", DeduplicationCompletion{}); err == nil {
+	invalidResult := dedupDeepComplete(fixture.store, "", DeduplicationCompletion{})
+	if invalidResult.err == nil || invalidResult.state.Repository != "" ||
+		invalidResult.finding.ID != "" || invalidResult.created {
 		t.Fatal("invalid completion accepted")
 	}
-	if _, _, _, err := fixture.store.CompleteDeduplicationJob(fixture.repository, DeduplicationCompletion{
+	missingResult := dedupDeepComplete(fixture.store, fixture.repository, DeduplicationCompletion{
 		JobID: "missing", LeaseID: "lease", CandidateUniverseDigest: "digest",
 		Decision: DeduplicationJudgment{Decision: "new"},
-	}); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("missing completion error=%v", err)
+	})
+	if !errors.Is(missingResult.err, os.ErrNotExist) || missingResult.state.Repository != "" ||
+		missingResult.finding.ID != "" || missingResult.created {
+		t.Fatalf("missing completion error=%v", missingResult.err)
 	}
 	fixture.store.now = func() time.Time { return reclaimed.Job.LeaseExpiresAt.Add(time.Second) }
-	if _, _, _, err := fixture.store.CompleteDeduplicationJob(fixture.repository, DeduplicationCompletion{
+	expiredResult := dedupDeepComplete(fixture.store, fixture.repository, DeduplicationCompletion{
 		JobID: reclaimed.Job.ID, LeaseID: reclaimed.Job.LeaseID,
 		CandidateUniverseDigest: reclaimed.UniverseDigest,
 		Decision:                DeduplicationJudgment{Decision: "new"},
-	}); !errors.Is(err, ErrDeduplicationLeaseExpired) {
-		t.Fatalf("expired completion error=%v", err)
+	})
+	if !errors.Is(expiredResult.err, ErrDeduplicationLeaseExpired) ||
+		expiredResult.state.Repository != "" || expiredResult.finding.ID != "" || expiredResult.created {
+		t.Fatalf("expired completion error=%v", expiredResult.err)
 	}
 
 	// Restore a clock inside the reclaimed lease and complete it as new.
@@ -605,26 +819,40 @@ func TestDeduplicationDeepClaimAndCompletionCoverage(t *testing.T) {
 		CandidateUniverseDigest: reclaimed.UniverseDigest,
 		Decision:                DeduplicationJudgment{Decision: "new"},
 	}
-	completedState, target, created, err := fixture.store.CompleteDeduplicationJob(fixture.repository, completion)
-	if err != nil || !created {
-		t.Fatalf("new completion target=%#v created=%v err=%v", target, created, err)
+	completedResult := dedupDeepComplete(fixture.store, fixture.repository, completion)
+	completedState, target := completedResult.state, completedResult.finding
+	if completedResult.err != nil || !completedResult.created {
+		t.Fatalf("new completion target=%#v created=%v err=%v", target, completedResult.created, completedResult.err)
 	}
-	if _, replayed, replayCreated, err := fixture.store.CompleteDeduplicationJob(fixture.repository, completion); err != nil || !replayCreated || replayed.ID != target.ID {
-		t.Fatalf("idempotent completion=%#v created=%v err=%v", replayed, replayCreated, err)
+	replayResult := dedupDeepComplete(fixture.store, fixture.repository, completion)
+	if replayResult.err != nil || !replayResult.created || replayResult.finding.ID != target.ID {
+		t.Fatalf(
+			"idempotent completion=%#v created=%v err=%v",
+			replayResult.finding, replayResult.created, replayResult.err,
+		)
 	}
 	wrong := completion
 	wrong.Decision = DeduplicationJudgment{Decision: "duplicate", CandidateID: "other"}
-	if _, _, _, err := fixture.store.CompleteDeduplicationJob(fixture.repository, wrong); !errors.Is(err, ErrConflict) {
-		t.Fatalf("changed replay error=%v", err)
+	changedResult := dedupDeepComplete(fixture.store, fixture.repository, wrong)
+	if !errors.Is(changedResult.err, ErrConflict) || changedResult.state.Repository != "" ||
+		changedResult.finding.ID != "" || changedResult.created {
+		t.Fatalf("changed replay error=%v", changedResult.err)
 	}
 	if len(completedState.DeduplicatedFindings) != 1 {
 		t.Fatalf("completed state=%#v", completedState.DeduplicatedFindings)
 	}
 
 	// The second same-bucket raw now snapshots the created candidate.
-	_, duplicateClaim, claimed, err := fixture.store.ClaimDeduplicationJob(fixture.repository, secondJob.ID, time.Minute)
-	if err != nil || !claimed || len(duplicateClaim.Candidates) != 1 {
-		t.Fatalf("duplicate claim=%#v claimed=%v err=%v", duplicateClaim, claimed, err)
+	duplicateState, duplicateClaim, duplicateClaimed, duplicateErr := fixture.store.ClaimDeduplicationJob(
+		fixture.repository,
+		secondJob.ID,
+		time.Minute,
+	)
+	if duplicateErr != nil ||
+		duplicateState.Repository == "" ||
+		!duplicateClaimed ||
+		len(duplicateClaim.Candidates) != 1 {
+		t.Fatalf("duplicate claim=%#v claimed=%v err=%v", duplicateClaim, duplicateClaimed, duplicateErr)
 	}
 	baseDuplicate := DeduplicationCompletion{
 		JobID: duplicateClaim.Job.ID, LeaseID: duplicateClaim.Job.LeaseID,
@@ -635,10 +863,12 @@ func TestDeduplicationDeepClaimAndCompletionCoverage(t *testing.T) {
 	badScore.ShortlistedScores = []DeduplicationCandidateScore{{
 		CandidateID: target.ID, Score: 89, Explanation: "below threshold",
 	}}
-	if _, _, _, err := fixture.store.CompleteDeduplicationJob(fixture.repository, badScore); err == nil {
+	if badScoreResult := dedupDeepComplete(fixture.store, fixture.repository, badScore); badScoreResult.err == nil {
 		t.Fatal("invalid completion shortlist accepted")
 	}
-	if _, _, _, err := fixture.store.CompleteDeduplicationJob(fixture.repository, baseDuplicate); err == nil {
+	if missingScoreResult := dedupDeepComplete(
+		fixture.store, fixture.repository, baseDuplicate,
+	); missingScoreResult.err == nil {
 		t.Fatal("duplicate outside shortlist accepted")
 	}
 	baseDuplicate.ShortlistedScores = []DeduplicationCandidateScore{{
@@ -654,13 +884,16 @@ func TestDeduplicationDeepClaimAndCompletionCoverage(t *testing.T) {
 	duplicateConflictStore.loadForTest = func(string) (RepositoryState, error) {
 		return dedupDeepCloneState(t, duplicateRunning), nil
 	}
-	if _, _, _, err := duplicateConflictStore.CompleteDeduplicationJob(
-		fixture.repository, baseDuplicate,
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("repeated raw source error=%v", err)
+	duplicateConflictResult := dedupDeepComplete(duplicateConflictStore, fixture.repository, baseDuplicate)
+	if !errors.Is(duplicateConflictResult.err, ErrConflict) {
+		t.Fatalf("repeated raw source error=%v", duplicateConflictResult.err)
 	}
-	if _, duplicate, created, err := fixture.store.CompleteDeduplicationJob(fixture.repository, baseDuplicate); err != nil || created || len(duplicate.RawSourceIDs) != 2 {
-		t.Fatalf("duplicate completion=%#v created=%v err=%v", duplicate, created, err)
+	duplicateResult := dedupDeepComplete(fixture.store, fixture.repository, baseDuplicate)
+	if duplicateResult.err != nil || duplicateResult.created || len(duplicateResult.finding.RawSourceIDs) != 2 {
+		t.Fatalf(
+			"duplicate completion=%#v created=%v err=%v",
+			duplicateResult.finding, duplicateResult.created, duplicateResult.err,
+		)
 	}
 }
 
@@ -670,7 +903,9 @@ func TestDeduplicationDeepDurableScoreCoverage(t *testing.T) {
 		{ID: "a", Version: 1, CreationOrdinal: 1},
 		{ID: "c", Version: 1, CreationOrdinal: 1},
 	}
-	job := &DeduplicationJob{ModelSnapshot: RepositoryReviewDeduplicationSnapshot{SimilarityThreshold: 90, CandidateLimit: 3}}
+	job := &DeduplicationJob{
+		ModelSnapshot: RepositoryReviewDeduplicationSnapshot{SimilarityThreshold: 90, CandidateLimit: 3},
+	}
 	valid := []DeduplicationCandidateScore{
 		{CandidateID: "b", Score: 99, Explanation: "same"},
 		{CandidateID: "c", Score: 95, Explanation: "same"},
@@ -701,24 +936,44 @@ func TestDeduplicationDeepDurableScoreCoverage(t *testing.T) {
 }
 
 func TestDeduplicationDeepFailRetryCoverage(t *testing.T) {
-	if _, _, _, err := (Store{}).FailDeduplicationJob("", "", "", errors.New("x")); err == nil {
+	if result := dedupDeepFail(Store{}, "", "", "", errors.New("x")); result.err == nil {
 		t.Fatal("invalid failure release accepted")
 	}
 	fixture := dedupDeepPendingFixture(t, 1)
 	state := dedupDeepState(t, fixture)
-	if _, _, _, err := fixture.store.FailDeduplicationJob(fixture.repository, "missing", "lease", errors.New("x")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("missing failure job error=%v", err)
+	missingResult := dedupDeepFail(fixture.store, fixture.repository, "missing", "lease", errors.New("x"))
+	if !errors.Is(
+		missingResult.err,
+		os.ErrNotExist,
+	) {
+		t.Fatalf("missing failure job error=%v", missingResult.err)
 	}
 	job := state.DeduplicationJobs[0]
-	_, claim, claimed, err := fixture.store.ClaimDeduplicationJob(fixture.repository, job.ID, time.Minute)
-	if err != nil || !claimed {
-		t.Fatal(err)
+	claimState, claim, claimSucceeded, claimErr := fixture.store.ClaimDeduplicationJob(
+		fixture.repository,
+		job.ID,
+		time.Minute,
+	)
+	if claimErr != nil || claimState.Repository == "" || !claimSucceeded {
+		t.Fatal(claimErr)
 	}
-	if _, _, _, err := fixture.store.FailDeduplicationJob(fixture.repository, job.ID, "wrong", errors.New("x")); !errors.Is(err, ErrConflict) {
-		t.Fatalf("wrong lease error=%v", err)
+	wrongLeaseResult := dedupDeepFail(fixture.store, fixture.repository, job.ID, "wrong", errors.New("x"))
+	if !errors.Is(
+		wrongLeaseResult.err,
+		ErrConflict,
+	) {
+		t.Fatalf("wrong lease error=%v", wrongLeaseResult.err)
 	}
-	if _, raw, terminal, err := fixture.store.FailDeduplicationJob(fixture.repository, job.ID, claim.Job.LeaseID, ErrDeduplicationUniverseChanged); err != nil || terminal || raw.State != RawFindingDeduplicationPending || raw.History[len(raw.History)-1].Failure.Code != "candidate_universe_changed" {
-		t.Fatalf("universe failure raw=%#v terminal=%v err=%v", raw, terminal, err)
+	universeResult := dedupDeepFail(
+		fixture.store, fixture.repository, job.ID, claim.Job.LeaseID, ErrDeduplicationUniverseChanged,
+	)
+	if universeResult.err != nil || universeResult.terminal ||
+		universeResult.raw.State != RawFindingDeduplicationPending ||
+		universeResult.raw.History[len(universeResult.raw.History)-1].Failure.Code != "candidate_universe_changed" {
+		t.Fatalf(
+			"universe failure raw=%#v terminal=%v err=%v",
+			universeResult.raw, universeResult.terminal, universeResult.err,
+		)
 	}
 
 	for name, cause := range map[string]error{
@@ -730,44 +985,64 @@ func TestDeduplicationDeepFailRetryCoverage(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			local := dedupDeepPendingFixture(t, 1)
 			localState := dedupDeepState(t, local)
-			_, localClaim, claimed, err := local.store.ClaimDeduplicationJob(local.repository, localState.DeduplicationJobs[0].ID, time.Minute)
-			if err != nil || !claimed {
-				t.Fatal(err)
+			localClaimState, localClaim, localClaimed, localClaimErr := local.store.ClaimDeduplicationJob(
+				local.repository,
+				localState.DeduplicationJobs[0].ID,
+				time.Minute,
+			)
+			if localClaimErr != nil || !localClaimed || localClaimState.Repository == "" {
+				t.Fatal(localClaimErr)
 			}
-			if _, _, terminal, err := local.store.FailDeduplicationJob(local.repository, localClaim.Job.ID, localClaim.Job.LeaseID, cause); err != nil || terminal {
-				t.Fatalf("failure terminal=%v err=%v", terminal, err)
+			failureResult := dedupDeepFail(
+				local.store, local.repository, localClaim.Job.ID, localClaim.Job.LeaseID, cause,
+			)
+			if failureResult.err != nil || failureResult.terminal {
+				t.Fatalf("failure terminal=%v err=%v", failureResult.terminal, failureResult.err)
 			}
 		})
 	}
 
 	terminalFixture := dedupDeepPendingFixture(t, 1)
 	terminalState := dedupDeepState(t, terminalFixture)
-	_, terminalClaim, claimed, err := terminalFixture.store.ClaimDeduplicationJob(terminalFixture.repository, terminalState.DeduplicationJobs[0].ID, time.Minute)
-	if err != nil || !claimed {
-		t.Fatal(err)
+	terminalClaimState, terminalClaim, terminalClaimed, terminalClaimErr := terminalFixture.store.ClaimDeduplicationJob(
+		terminalFixture.repository,
+		terminalState.DeduplicationJobs[0].ID,
+		time.Minute,
+	)
+	if terminalClaimErr != nil || terminalClaimState.Repository == "" || !terminalClaimed {
+		t.Fatal(terminalClaimErr)
 	}
 	terminalState = dedupDeepState(t, terminalFixture)
 	terminalState.DeduplicationJobs[0].Attempts = DeduplicationAttemptLimit
 	terminalState.Version++
-	if err := terminalFixture.store.save(&terminalState); err != nil {
-		t.Fatal(err)
+	terminalSaveErr := terminalFixture.store.save(&terminalState)
+	if terminalSaveErr != nil {
+		t.Fatal(terminalSaveErr)
 	}
-	failedState, failedRaw, terminal, err := terminalFixture.store.FailDeduplicationJob(
+	failureResult := dedupDeepFail(
+		terminalFixture.store,
 		terminalFixture.repository, terminalClaim.Job.ID, terminalClaim.Job.LeaseID, errors.New("final"),
 	)
-	if err != nil || !terminal || failedRaw.State != RawFindingDeduplicationFailed {
-		t.Fatalf("terminal raw=%#v terminal=%v err=%v", failedRaw, terminal, err)
+	failedState, failedRaw := failureResult.state, failureResult.raw
+	if failureResult.err != nil || !failureResult.terminal || failedRaw.State != RawFindingDeduplicationFailed {
+		t.Fatalf("terminal raw=%#v terminal=%v err=%v", failedRaw, failureResult.terminal, failureResult.err)
 	}
 	if _, _, err := terminalFixture.store.RetryDeduplication("", ""); err == nil {
 		t.Fatal("invalid retry accepted")
 	}
-	if _, _, err := terminalFixture.store.RetryDeduplication(terminalFixture.repository, "missing"); !errors.Is(err, os.ErrNotExist) {
+	if _, _, err := terminalFixture.store.RetryDeduplication(terminalFixture.repository, "missing"); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
 		t.Fatalf("missing retry error=%v", err)
 	}
 	if _, _, err := terminalFixture.store.RetryDeduplication(terminalFixture.repository, failedRaw.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := terminalFixture.store.RetryDeduplication(terminalFixture.repository, failedRaw.ID); !errors.Is(err, ErrConflict) {
+	if _, _, err := terminalFixture.store.RetryDeduplication(terminalFixture.repository, failedRaw.ID); !errors.Is(
+		err,
+		ErrConflict,
+	) {
 		t.Fatalf("nonfailed retry error=%v", err)
 	}
 	missingJob := failedState
@@ -780,39 +1055,64 @@ func TestDeduplicationDeepFailRetryCoverage(t *testing.T) {
 	missingRaw := failedState
 	missingRaw.RawFindings = nil
 	broken.loadForTest = func(string) (RepositoryState, error) { return missingRaw, nil }
-	if _, _, _, err := broken.FailDeduplicationJob(terminalFixture.repository, terminalClaim.Job.ID, terminalClaim.Job.LeaseID, errors.New("x")); err == nil {
+	if result := dedupDeepFail(
+		broken,
+		terminalFixture.repository,
+		terminalClaim.Job.ID,
+		terminalClaim.Job.LeaseID,
+		errors.New("x"),
+	); result.err == nil {
 		t.Fatal("failure release without raw accepted")
 	}
 }
 
 func TestDeduplicationDeepProcessorFailureCoverage(t *testing.T) {
 	missing := NewStore(t.TempDir())
-	if _, err := missing.ProcessPendingDeduplicationJobs(t.Context(), "owner/missing", DeduplicationProcessOptions{}); !errors.Is(err, os.ErrNotExist) {
+	if _, err := missing.ProcessPendingDeduplicationJobs(
+		t.Context(),
+		"owner/missing",
+		DeduplicationProcessOptions{},
+	); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
 		t.Fatalf("missing processor error=%v", err)
 	}
 	invalidLease := dedupDeepPendingFixture(t, 1)
-	if _, err := invalidLease.store.ProcessPendingDeduplicationJobs(t.Context(), invalidLease.repository, DeduplicationProcessOptions{LeaseDuration: DeduplicationMaximumLeaseDuration + time.Second}); err == nil {
+	if _, err := invalidLease.store.ProcessPendingDeduplicationJobs(
+		t.Context(),
+		invalidLease.repository,
+		DeduplicationProcessOptions{
+			LeaseDuration: DeduplicationMaximumLeaseDuration + time.Second,
+		},
+	); err == nil {
 		t.Fatal("invalid processor lease accepted")
 	}
 
 	fixture := dedupDeepSameBucketFixture(t)
 	state := dedupDeepState(t, fixture)
-	_, seedClaim, claimed, err := fixture.store.ClaimDeduplicationJob(fixture.repository, state.DeduplicationJobs[0].ID, time.Minute)
+	_, seedClaim, claimed, err := fixture.store.ClaimDeduplicationJob(
+		fixture.repository,
+		state.DeduplicationJobs[0].ID,
+		time.Minute,
+	)
 	if err != nil || !claimed {
 		t.Fatal(err)
 	}
-	if _, _, _, err := fixture.store.CompleteDeduplicationJob(fixture.repository, DeduplicationCompletion{
+	seedResult := dedupDeepComplete(fixture.store, fixture.repository, DeduplicationCompletion{
 		JobID: seedClaim.Job.ID, LeaseID: seedClaim.Job.LeaseID,
 		CandidateUniverseDigest: seedClaim.UniverseDigest,
 		Decision:                DeduplicationJudgment{Decision: "new"},
-	}); err != nil {
-		t.Fatal(err)
+	})
+	if seedResult.err != nil || seedResult.state.Repository == "" || seedResult.finding.ID == "" ||
+		!seedResult.created {
+		t.Fatal(seedResult.err)
 	}
 	releases := make([]func(), 0, DeduplicationConcurrency)
 	for range DeduplicationConcurrency {
-		release, err := fixture.store.AcquireDeduplicationSlot(t.Context())
-		if err != nil {
-			t.Fatal(err)
+		release, slotErr := fixture.store.AcquireDeduplicationSlot(t.Context())
+		if slotErr != nil {
+			t.Fatal(slotErr)
 		}
 		releases = append(releases, release)
 	}
@@ -820,7 +1120,12 @@ func TestDeduplicationDeepProcessorFailureCoverage(t *testing.T) {
 	cancel()
 	state = dedupDeepState(t, fixture)
 	secondJobID := state.DeduplicationJobs[1].ID
-	blockedOutcome := fixture.store.processOneDeduplicationJob(canceled, fixture.repository, secondJobID, DeduplicationProcessOptions{})
+	blockedOutcome := fixture.store.processOneDeduplicationJob(
+		canceled,
+		fixture.repository,
+		secondJobID,
+		DeduplicationProcessOptions{},
+	)
 	for _, release := range releases {
 		release()
 	}
@@ -831,51 +1136,74 @@ func TestDeduplicationDeepProcessorFailureCoverage(t *testing.T) {
 
 	// A model callback changes the candidate universe after claim. Completion
 	// fails and the verified lease is safely returned to pending.
-	processed, err = fixture.store.ProcessPendingDeduplicationJobs(t.Context(), fixture.repository, DeduplicationProcessOptions{
-		Score: func(_ context.Context, _ RepositoryReviewDeduplicationSnapshot, _ string, request DeduplicationScoringRequest) (DeduplicationScoringResponse, error) {
-			current := dedupDeepState(t, fixture)
-			current.DeduplicatedFindings[0].Version++
-			current.Version++
-			if saveErr := fixture.store.save(&current); saveErr != nil {
-				t.Fatal(saveErr)
-			}
-			return DeduplicationScoringResponse{Scores: []DeduplicationCandidateScore{{CandidateID: request.Candidates[0].ID, Score: 100, Explanation: "same"}}}, nil
+	processed, err = fixture.store.ProcessPendingDeduplicationJobs(
+		t.Context(),
+		fixture.repository,
+		DeduplicationProcessOptions{
+			Score: func(_ context.Context, _ RepositoryReviewDeduplicationSnapshot, _ string, request DeduplicationScoringRequest) (DeduplicationScoringResponse, error) {
+				current := dedupDeepState(t, fixture)
+				current.DeduplicatedFindings[0].Version++
+				current.Version++
+				if saveErr := fixture.store.save(&current); saveErr != nil {
+					t.Fatal(saveErr)
+				}
+				return DeduplicationScoringResponse{
+					Scores: []DeduplicationCandidateScore{
+						{CandidateID: request.Candidates[0].ID, Score: 100, Explanation: "same"},
+					},
+				}, nil
+			},
+			Judge: func(_ context.Context, _ RepositoryReviewDeduplicationSnapshot, _ string, request DeduplicationJudgeRequest) (DeduplicationJudgment, error) {
+				return DeduplicationJudgment{Decision: "duplicate", CandidateID: request.Candidates[0].OpaqueID}, nil
+			},
 		},
-		Judge: func(_ context.Context, _ RepositoryReviewDeduplicationSnapshot, _ string, request DeduplicationJudgeRequest) (DeduplicationJudgment, error) {
-			return DeduplicationJudgment{Decision: "duplicate", CandidateID: request.Candidates[0].OpaqueID}, nil
-		},
-	})
+	)
 	if err == nil || processed.Completed != 0 {
 		t.Fatalf("stale processor=%#v err=%v", processed, err)
 	}
 
 	// Third attempt fails terminally through the scorer-error path.
-	providerOptions := DeduplicationProcessOptions{Score: func(context.Context, RepositoryReviewDeduplicationSnapshot, string, DeduplicationScoringRequest) (DeduplicationScoringResponse, error) {
-		return DeduplicationScoringResponse{}, errors.New("provider failed")
-	}}
+	providerOptions := DeduplicationProcessOptions{
+		Score: func(context.Context, RepositoryReviewDeduplicationSnapshot, string, DeduplicationScoringRequest) (DeduplicationScoringResponse, error) {
+			return DeduplicationScoringResponse{}, errors.New("provider failed")
+		},
+	}
 	for attempt := 0; attempt < DeduplicationAttemptLimit && processed.Failed == 0; attempt++ {
 		processed, err = fixture.store.ProcessPendingDeduplicationJobs(t.Context(), fixture.repository, providerOptions)
 	}
 	if err == nil || processed.Failed != 1 {
 		t.Fatalf("terminal processor=%#v err=%v", processed, err)
 	}
-	if empty, err := fixture.store.ProcessPendingDeduplicationJobs(t.Context(), fixture.repository, DeduplicationProcessOptions{}); err != nil || empty != (DeduplicationProcessResult{}) {
+	if empty, err := fixture.store.ProcessPendingDeduplicationJobs(
+		t.Context(), fixture.repository, DeduplicationProcessOptions{},
+	); err != nil ||
+		empty != (DeduplicationProcessResult{}) {
 		t.Fatalf("empty processor=%#v err=%v", empty, err)
 	}
 
 	deferredFixture := dedupDeepSameBucketFixture(t)
 	deferredState := dedupDeepState(t, deferredFixture)
-	if _, _, claimed, err := deferredFixture.store.ClaimDeduplicationJob(deferredFixture.repository, deferredState.DeduplicationJobs[0].ID, time.Minute); err != nil || !claimed {
-		t.Fatal(err)
+	deferredClaimState, _, deferredClaimed, deferredClaimErr := deferredFixture.store.ClaimDeduplicationJob(
+		deferredFixture.repository,
+		deferredState.DeduplicationJobs[0].ID,
+		time.Minute,
+	)
+	if deferredClaimErr != nil || deferredClaimState.Repository == "" || !deferredClaimed {
+		t.Fatal(deferredClaimErr)
 	}
-	if deferred, err := deferredFixture.store.ProcessPendingDeduplicationJobs(t.Context(), deferredFixture.repository, DeduplicationProcessOptions{}); err != nil || deferred.Deferred != 1 {
+	if deferred, err := deferredFixture.store.ProcessPendingDeduplicationJobs(
+		t.Context(), deferredFixture.repository, DeduplicationProcessOptions{},
+	); err != nil ||
+		deferred.Deferred != 1 {
 		t.Fatalf("deferred processor=%#v err=%v", deferred, err)
 	}
 }
 
 func TestDeduplicationDeepStateValidationCoverage(t *testing.T) {
 	fixture := dedupDeepPendingFixture(t, 1)
-	if _, err := fixture.store.ProcessPendingDeduplicationJobs(t.Context(), fixture.repository, DeduplicationProcessOptions{}); err != nil {
+	if _, err := fixture.store.ProcessPendingDeduplicationJobs(
+		t.Context(), fixture.repository, DeduplicationProcessOptions{},
+	); err != nil {
 		t.Fatal(err)
 	}
 	base := dedupDeepState(t, fixture)
@@ -928,31 +1256,54 @@ func TestDeduplicationDeepStateValidationCoverage(t *testing.T) {
 			state.DeduplicatedFindings[0].Title = "rewritten"
 		},
 		"dedup history": func(state *RepositoryState) {
-			state.DeduplicatedFindings[0].History = append(state.DeduplicatedFindings[0].History, DeduplicatedFindingHistoryEntry{At: repositoryAuditTestNow})
+			state.DeduplicatedFindings[0].History = append(
+				state.DeduplicatedFindings[0].History,
+				DeduplicatedFindingHistoryEntry{At: repositoryAuditTestNow},
+			)
 		},
 		"job state": func(state *RepositoryState) {
 			state.DeduplicationJobs[0].State = "bad"
 		},
 		"candidate version": func(state *RepositoryState) {
-			state.DeduplicationJobs[0].CandidateVersions = []DeduplicationCandidateVersion{{CandidateID: "candidate", Version: 0}}
+			state.DeduplicationJobs[0].CandidateVersions = []DeduplicationCandidateVersion{
+				{CandidateID: "candidate", Version: 0},
+			}
 		},
 		"candidate duplicate": func(state *RepositoryState) {
-			state.DeduplicationJobs[0].CandidateVersions = []DeduplicationCandidateVersion{{CandidateID: "candidate", Version: 1}, {CandidateID: "candidate", Version: 1}}
+			state.DeduplicationJobs[0].CandidateVersions = []DeduplicationCandidateVersion{
+				{CandidateID: "candidate", Version: 1},
+				{CandidateID: "candidate", Version: 1},
+			}
 		},
 		"shortlist oversized": func(state *RepositoryState) {
-			state.DeduplicationJobs[0].ShortlistedScores = make([]DeduplicationCandidateScore, DeduplicationMaximumShortlist+1)
+			state.DeduplicationJobs[0].ShortlistedScores = make(
+				[]DeduplicationCandidateScore,
+				DeduplicationMaximumShortlist+1,
+			)
 			for index := range state.DeduplicationJobs[0].ShortlistedScores {
-				state.DeduplicationJobs[0].ShortlistedScores[index] = DeduplicationCandidateScore{CandidateID: "candidate-" + string(rune('a'+index)), Score: 90, Explanation: "same"}
+				state.DeduplicationJobs[0].ShortlistedScores[index] = DeduplicationCandidateScore{
+					CandidateID: "candidate-" + string(rune('a'+index)),
+					Score:       90,
+					Explanation: "same",
+				}
 			}
 		},
 		"shortlist invalid": func(state *RepositoryState) {
-			state.DeduplicationJobs[0].ShortlistedScores = []DeduplicationCandidateScore{{CandidateID: "candidate", Score: 101, Explanation: "same"}}
+			state.DeduplicationJobs[0].ShortlistedScores = []DeduplicationCandidateScore{
+				{CandidateID: "candidate", Score: 101, Explanation: "same"},
+			}
 		},
 		"shortlist duplicate": func(state *RepositoryState) {
-			state.DeduplicationJobs[0].ShortlistedScores = []DeduplicationCandidateScore{{CandidateID: "candidate", Score: 90, Explanation: "same"}, {CandidateID: "candidate", Score: 91, Explanation: "same"}}
+			state.DeduplicationJobs[0].ShortlistedScores = []DeduplicationCandidateScore{
+				{CandidateID: "candidate", Score: 90, Explanation: "same"},
+				{CandidateID: "candidate", Score: 91, Explanation: "same"},
+			}
 		},
 		"job history": func(state *RepositoryState) {
-			state.DeduplicationJobs[0].History = append(state.DeduplicationJobs[0].History, DeduplicationJobHistoryEntry{State: "bad", At: repositoryAuditTestNow})
+			state.DeduplicationJobs[0].History = append(
+				state.DeduplicationJobs[0].History,
+				DeduplicationJobHistoryEntry{State: "bad", At: repositoryAuditTestNow},
+			)
 		},
 		"job count": func(state *RepositoryState) {
 			state.DeduplicationJobs = nil
@@ -999,10 +1350,14 @@ func TestDeduplicationDeepProjectionAndCounterCoverage(t *testing.T) {
 		ID: "dedup", Status: FindingDismissed, RepositoryFindingID: "repository-target",
 		RepositoryMatchState: RepositoryMatchKnown,
 	})
-	if !synchronizeDeduplicatedFindingProjections(&state) || len(state.DeduplicatedFindings[0].History) != 1 || state.DeduplicatedFindings[0].History[0].At != state.UpdatedAt {
+	if !synchronizeDeduplicatedFindingProjections(&state) || len(state.DeduplicatedFindings[0].History) != 1 ||
+		state.DeduplicatedFindings[0].History[0].At != state.UpdatedAt {
 		t.Fatalf("projection synchronization=%#v", state.DeduplicatedFindings[0])
 	}
-	counters := RepositoryState{UpdatedAt: repositoryAuditTestNow, DeduplicatedFindings: []DeduplicatedReviewFinding{{CreationOrdinal: 9}}}
+	counters := RepositoryState{
+		UpdatedAt:            repositoryAuditTestNow,
+		DeduplicatedFindings: []DeduplicatedReviewFinding{{CreationOrdinal: 9}},
+	}
 	if !reconcileFindingsProcessingCounters(&counters) || counters.NextDeduplicationOrdinal != 10 {
 		t.Fatalf("ordinal counters=%#v", counters)
 	}
@@ -1018,7 +1373,18 @@ func TestDeduplicationDeepLegacyRecordCoverage(t *testing.T) {
 	candidate := repositoryReviewCampaignFinding(file, "legacy deep")
 	contextRecord := FindingContext{ID: "context", Repository: repository}
 	observation := Observation{Model: "review", Reviewer: "reviewer"}
-	if _, err := persistLegacyRecordFinding(&RepositoryState{}, plan, "run", 0, 0, contextRecord, observation, FileRef{}, candidate, repositoryAuditTestNow); err == nil {
+	if _, err := persistLegacyRecordFinding(
+		&RepositoryState{},
+		plan,
+		"run",
+		0,
+		0,
+		contextRecord,
+		observation,
+		FileRef{},
+		candidate,
+		repositoryAuditTestNow,
+	); err == nil {
 		t.Fatal("legacy record with invalid primary accepted")
 	}
 	state := RepositoryState{Repository: repository, CurrentCampaign: &RepositoryReviewCampaignCoverage{
@@ -1028,11 +1394,37 @@ func TestDeduplicationDeepLegacyRecordCoverage(t *testing.T) {
 			SimilarityThreshold: 88, CandidateLimit: 7,
 		},
 	}}
-	id, err := persistLegacyRecordFinding(&state, plan, "run", 0, 0, contextRecord, observation, file, candidate, repositoryAuditTestNow)
-	if err != nil || id == "" || state.DeduplicationJobs[0].ModelSnapshot.CandidateLimit != 0 || state.DeduplicationJobs[0].ModelSnapshot.SimilarityThreshold != 88 {
+	id, err := persistLegacyRecordFinding(
+		&state,
+		plan,
+		"run",
+		0,
+		0,
+		contextRecord,
+		observation,
+		file,
+		candidate,
+		repositoryAuditTestNow,
+	)
+	if err != nil || id == "" || state.DeduplicationJobs[0].ModelSnapshot.CandidateLimit != 0 ||
+		state.DeduplicationJobs[0].ModelSnapshot.SimilarityThreshold != 88 {
 		t.Fatalf("legacy record id=%q state=%#v err=%v", id, state, err)
 	}
-	if _, err := persistLegacyRecordFinding(&state, plan, "run", 0, 0, contextRecord, observation, file, candidate, repositoryAuditTestNow); !errors.Is(err, ErrConflict) {
+	if _, err := persistLegacyRecordFinding(
+		&state,
+		plan,
+		"run",
+		0,
+		0,
+		contextRecord,
+		observation,
+		file,
+		candidate,
+		repositoryAuditTestNow,
+	); !errors.Is(
+		err,
+		ErrConflict,
+	) {
 		t.Fatalf("duplicate legacy record error=%v", err)
 	}
 }
@@ -1041,8 +1433,13 @@ func TestDeduplicationDeepReconcileCoverage(t *testing.T) {
 	fixture := dedupDeepPendingFixture(t, 2)
 	state := dedupDeepState(t, fixture)
 	for _, job := range state.DeduplicationJobs {
-		if _, _, claimed, err := fixture.store.ClaimDeduplicationJob(fixture.repository, job.ID, time.Minute); err != nil || !claimed {
-			t.Fatalf("claim %s=%v %v", job.ID, claimed, err)
+		claimState, _, claimSucceeded, claimErr := fixture.store.ClaimDeduplicationJob(
+			fixture.repository,
+			job.ID,
+			time.Minute,
+		)
+		if claimErr != nil || claimState.Repository == "" || !claimSucceeded {
+			t.Fatalf("claim %s=%v %v", job.ID, claimSucceeded, claimErr)
 		}
 	}
 	state = dedupDeepState(t, fixture)
@@ -1058,7 +1455,8 @@ func TestDeduplicationDeepReconcileCoverage(t *testing.T) {
 		t.Fatalf("reconcile reset=%d err=%v", reset, err)
 	}
 	state = dedupDeepState(t, fixture)
-	if state.DeduplicationJobs[0].State != DeduplicationJobPending || state.DeduplicationJobs[1].State != DeduplicationJobFailed {
+	if state.DeduplicationJobs[0].State != DeduplicationJobPending ||
+		state.DeduplicationJobs[1].State != DeduplicationJobFailed {
 		t.Fatalf("reconciled jobs=%#v", state.DeduplicationJobs)
 	}
 	if reset, err = fixture.store.ReconcileDeduplicationJobs(t.Context()); err != nil || reset != 0 {
@@ -1099,13 +1497,19 @@ func TestDeduplicationDeepHistoryAndPredicateCoverage(t *testing.T) {
 	rawHistory := make([]RawFindingHistoryEntry, DeduplicationHistoryLimit)
 	jobHistory := make([]DeduplicationJobHistoryEntry, DeduplicationHistoryLimit)
 	dedupHistory := make([]DeduplicatedFindingHistoryEntry, DeduplicationHistoryLimit)
-	if got := appendRawFindingHistory(rawHistory, RawFindingHistoryEntry{At: now}); len(got) != DeduplicationHistoryLimit {
+	if got := appendRawFindingHistory(rawHistory, RawFindingHistoryEntry{At: now}); len(
+		got,
+	) != DeduplicationHistoryLimit {
 		t.Fatalf("raw history len=%d", len(got))
 	}
-	if got := appendDeduplicationJobHistory(jobHistory, DeduplicationJobHistoryEntry{At: now}); len(got) != DeduplicationHistoryLimit {
+	if got := appendDeduplicationJobHistory(jobHistory, DeduplicationJobHistoryEntry{At: now}); len(
+		got,
+	) != DeduplicationHistoryLimit {
 		t.Fatalf("job history len=%d", len(got))
 	}
-	if got := appendDeduplicatedFindingHistory(dedupHistory, DeduplicatedFindingHistoryEntry{At: now}); len(got) != DeduplicationHistoryLimit {
+	if got := appendDeduplicatedFindingHistory(dedupHistory, DeduplicatedFindingHistoryEntry{At: now}); len(
+		got,
+	) != DeduplicationHistoryLimit {
 		t.Fatalf("dedup history len=%d", len(got))
 	}
 	for _, code := range []string{"candidate_universe_changed", "processing_interrupted", "lease_expired", "attempt_limit", "other"} {
@@ -1131,7 +1535,10 @@ func TestDeduplicationDeepHistoryAndPredicateCoverage(t *testing.T) {
 	) {
 		t.Fatal("candidate-version predicate mismatch")
 	}
-	if !reflect.DeepEqual(cloneRepositoryReviewDeduplicationSnapshot(nil), (*RepositoryReviewDeduplicationSnapshot)(nil)) {
+	if !reflect.DeepEqual(
+		cloneRepositoryReviewDeduplicationSnapshot(nil),
+		(*RepositoryReviewDeduplicationSnapshot)(nil),
+	) {
 		t.Fatal("nil snapshot clone changed")
 	}
 }
@@ -1154,12 +1561,20 @@ func TestDeduplicationDeepHistoricalMutationFences(t *testing.T) {
 	}
 	_, _, err := store.SetFindingStatusByVersion(repository, "finding", FindingDismissed, 1)
 	assertFence("status by version", err)
-	_, _, _, err = store.ReserveIssueGeneration(testIssueGenerationRequest(repository, "finding", "generation"))
-	assertFence("reserve issue", err)
-	_, _, _, err = store.BeginIssueRegeneration(
+	reservedState, reservedDraft, reserved, reserveErr := store.ReserveIssueGeneration(
+		testIssueGenerationRequest(repository, "finding", "generation"),
+	)
+	if reservedState.Repository != "" || reservedDraft.ID != "" || reserved {
+		t.Fatal("fenced issue reservation returned durable values")
+	}
+	assertFence("reserve issue", reserveErr)
+	regenerationState, regenerationDraft, regenerated, regenerationErr := store.BeginIssueRegeneration(
 		repository, "draft", testIssueGenerationRequest(repository, "finding", "generation"),
 	)
-	assertFence("regenerate issue", err)
+	if regenerationState.Repository != "" || regenerationDraft.ID != "" || regenerated {
+		t.Fatal("fenced issue regeneration returned durable values")
+	}
+	assertFence("regenerate issue", regenerationErr)
 	_, _, err = store.CompleteIssueGeneration(repository, "draft", "generation", "title", "body", nil, "")
 	assertFence("complete issue", err)
 	_, err = store.DeleteIssueDraft(repository, "draft", 1)
@@ -1172,8 +1587,16 @@ func TestDeduplicationDeepHistoricalMutationFences(t *testing.T) {
 	_, err = store.UnlinkExistingIssue(repository, "finding", 1, true)
 	assertFence("unlink issue", err)
 
-	_, _, _, _, err = store.ClaimMappingJob(repository, "job", RepositoryMappingModelSnapshot{})
-	assertFence("claim mapping", err)
+	mappingState, mappingJob, mappingFinding, mappingClaimed, mappingErr := store.ClaimMappingJob(
+		repository,
+		"job",
+		RepositoryMappingModelSnapshot{},
+	)
+	if mappingState.Repository != "" || mappingJob.ID != "" || mappingFinding.ID != "" ||
+		mappingClaimed {
+		t.Fatal("fenced mapping claim returned durable values")
+	}
+	assertFence("claim mapping", mappingErr)
 	_, _, err = store.SaveMappingAdjudication(repository, "job", RepositoryMappingAdjudication{
 		Decision: "distinct", Confidence: 1, Explanation: "distinct",
 	})
@@ -1189,14 +1612,37 @@ func TestDeduplicationDeepHistoricalMutationFences(t *testing.T) {
 	assertFence("resolve duplicate", err)
 	_, _, err = store.ReserveValidationJobs(repository, []string{"finding"}, RepositoryMappingModelSnapshot{})
 	assertFence("reserve validation", err)
-	_, _, _, _, err = store.ClaimValidationJob(repository, "job")
-	assertFence("claim validation", err)
+	var (
+		validationState   RepositoryState
+		validationJob     RepositoryValidationJob
+		validationFinding RepositoryFinding
+		validationClaimed bool
+		validationErr     error
+	)
+	validationState, validationJob, validationFinding, validationClaimed,
+		validationErr = store.ClaimValidationJob(repository, "job")
+	if validationState.Repository != "" || validationJob.ID != "" ||
+		validationFinding.ID != "" || validationClaimed {
+		t.Fatal("fenced validation claim returned durable values")
+	}
+	assertFence("claim validation", validationErr)
 	_, _, err = store.SetValidationJobCandidates(repository, "job", nil)
 	assertFence("validation candidates", err)
-	_, _, _, err = store.CompleteValidationJob(repository, RepositoryValidationCompletion{
+	var (
+		completedValidationState   RepositoryState
+		completedValidationFinding RepositoryFinding
+		completedValidationJob     RepositoryValidationJob
+		completedValidationErr     error
+	)
+	completedValidationState, completedValidationFinding, completedValidationJob,
+		completedValidationErr = store.CompleteValidationJob(repository, RepositoryValidationCompletion{
 		JobID: "job", Outcome: RepositoryValidationFailed, Error: "failed",
 	})
-	assertFence("complete validation", err)
+	if completedValidationState.Repository != "" || completedValidationFinding.ID != "" ||
+		completedValidationJob.ID != "" {
+		t.Fatal("fenced validation completion returned durable values")
+	}
+	assertFence("complete validation", completedValidationErr)
 	_, _, err = store.UpdateRepositoryFindingIssueSnapshot(repository, RepositoryIssueSnapshotUpdate{
 		RepositoryFindingID: "finding", State: RepositoryFindingIssueNone,
 	})
@@ -1218,8 +1664,18 @@ func TestDeduplicationDeepHistoricalMutationFences(t *testing.T) {
 		repository, "draft", 1, IssueDraftEditing, "", "",
 	)
 	assertFence("publication", err)
-	_, _, _, err = store.ClaimIssueDraftPublication(repository, "draft", 1)
-	assertFence("claim publication", err)
+	var (
+		publicationState   RepositoryState
+		publicationDraft   IssueDraft
+		publicationClaimed bool
+		publicationErr     error
+	)
+	publicationState, publicationDraft, publicationClaimed,
+		publicationErr = store.ClaimIssueDraftPublication(repository, "draft", 1)
+	if publicationState.Repository != "" || publicationDraft.ID != "" || publicationClaimed {
+		t.Fatal("fenced publication claim returned durable values")
+	}
+	assertFence("claim publication", publicationErr)
 }
 
 func TestDeduplicationDeepLegacyPureBoundaries(t *testing.T) {
@@ -1428,8 +1884,9 @@ func TestDeduplicationDeepLegacyProfileDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	var legacy map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &legacy); err != nil {
-		t.Fatal(err)
+	unmarshalErr := json.Unmarshal(encoded, &legacy)
+	if unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	delete(legacy, "deduplication_similarity_threshold")
 	delete(legacy, "deduplication_candidate_limit")
@@ -1437,11 +1894,13 @@ func TestDeduplicationDeepLegacyProfileDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(store.root, 0o700); err != nil {
-		t.Fatal(err)
+	mkdirErr := os.MkdirAll(store.root, 0o700)
+	if mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
-	if err := os.WriteFile(store.profilePath(profile.ID), encoded, 0o600); err != nil {
-		t.Fatal(err)
+	writeErr := os.WriteFile(store.profilePath(profile.ID), encoded, 0o600)
+	if writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	loaded, found, err := store.loadProfile(profile.ID)
 	if err != nil || !found || loaded.DeduplicationSimilarityThreshold != DeduplicationDefaultThreshold ||
