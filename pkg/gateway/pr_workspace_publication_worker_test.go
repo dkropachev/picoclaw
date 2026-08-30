@@ -30,6 +30,19 @@ type fakePRWorkspacePublicationService struct {
 
 	dispatchErr  error
 	reconcileErr error
+	failErr      error
+	failCalls    int
+	failRequest  string
+}
+
+func (service *fakePRWorkspacePublicationService) FailUnsafeProvider(
+	_ context.Context,
+	aggregate prworkspace.Aggregate,
+	requestID string,
+) (prworkspace.Aggregate, error) {
+	service.failCalls++
+	service.failRequest = requestID
+	return aggregate, service.failErr
 }
 
 func (service *fakePRWorkspacePublicationService) List(

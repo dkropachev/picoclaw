@@ -20,6 +20,11 @@ type developmentWorkspaceService interface {
 }
 
 type developmentWorkspaceAdvancer interface {
+	AdmitAutonomousDevelopmentWorkspace(
+		ctx context.Context,
+		aggregate prworkspace.Aggregate,
+		requestID string,
+	) (prworkspace.Aggregate, bool, error)
 	AdvanceDevelopmentWorkspace(
 		ctx context.Context,
 		aggregate prworkspace.Aggregate,
@@ -102,6 +107,27 @@ func (worker *developmentWorkspaceWorker) ProcessOne(ctx context.Context) (bool,
 	}
 
 	aggregate := selected.aggregate
+	admissionID := fmt.Sprintf(
+		"devauto:admit:%s:%d",
+		aggregate.Workspace.ID,
+		aggregate.Workspace.Version,
+	)
+	admittedAggregate, admitted, admissionErr := worker.handler.AdmitAutonomousDevelopmentWorkspace(
+		ctx,
+		aggregate,
+		admissionID,
+	)
+	if errors.Is(admissionErr, prworkspace.ErrConflict) ||
+		errors.Is(admissionErr, prworkspace.ErrNotFound) {
+		return true, nil
+	}
+	if admissionErr != nil {
+		return false, admissionErr
+	}
+	if !admitted {
+		return true, nil
+	}
+	aggregate = admittedAggregate
 	if !selected.recovery && worker.handler.AutonomousDevelopmentWorkspaceClaimRequired(aggregate) {
 		claimed, err := worker.service.ClaimAutonomousWork(ctx, prworkspace.ClaimAutonomousWorkRequest{
 			WorkspaceID:     aggregate.Workspace.ID,

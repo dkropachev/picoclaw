@@ -120,6 +120,23 @@ func (mismatchedImplementationValidation) Validate(_ context.Context, _ Validati
 	}, nil
 }
 
+type mismatchedRepairAttemptValidation struct{}
+
+func (mismatchedRepairAttemptValidation) Validate(
+	_ context.Context,
+	request ValidationRequest,
+) (ValidationRun, error) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	return ValidationRun{
+		RepairAttemptID: "pra_ffffffffffffffffffffffffffffffff",
+		State:           ExecutionSucceeded,
+		CandidateSHA:    request.CandidateSHA,
+		Checks:          []ValidationCheck{{ID: "test", Name: "tests", Status: "passed"}},
+		StartedAt:       now,
+		FinishedAt:      &now,
+	}, nil
+}
+
 func TestImplementationRejectsValidationEvidenceForAnotherAttemptOrCandidate(t *testing.T) {
 	service, aggregate := readyImplementationService(t)
 	repair := &implementationRepair{}
@@ -139,6 +156,32 @@ func TestImplementationRejectsValidationEvidenceForAnotherAttemptOrCandidate(t *
 	if len(result.ValidationRuns) != 1 || result.ValidationRuns[0].CandidateSHA != "candidate" ||
 		result.ValidationRuns[0].ID == "pvr_ffffffffffffffffffffffffffffffff" {
 		t.Fatalf("persisted validation identity = %#v", result.ValidationRuns)
+	}
+}
+
+func TestImplementationRejectsRunnerValidationForAnotherRepairAttempt(t *testing.T) {
+	service, aggregate := readyImplementationService(t)
+	result, err := service.RunImplementation(context.Background(), ImplementationConfig{
+		Repair: &implementationRepair{}, Validation: mismatchedRepairAttemptValidation{},
+	}, RunImplementationRequest{
+		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+		RequestID: "request-validation-repair-mismatch", FindingIDs: []string{aggregate.Findings[0].ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := result.StageRuns[len(result.StageRuns)-1]
+	if stage.State != ExecutionFailed || stage.PublicError != "validation_evidence_mismatch" {
+		t.Fatalf("mismatched validation stage = %#v", stage)
+	}
+	if len(result.RepairAttempts) != 1 || len(result.ValidationRuns) != 1 ||
+		result.ValidationRuns[0].RepairAttemptID != result.RepairAttempts[0].ID ||
+		result.ValidationRuns[0].RepairAttemptID == "pra_ffffffffffffffffffffffffffffffff" {
+		t.Fatalf(
+			"persisted validation repair identity = repairs %#v validations %#v",
+			result.RepairAttempts,
+			result.ValidationRuns,
+		)
 	}
 }
 

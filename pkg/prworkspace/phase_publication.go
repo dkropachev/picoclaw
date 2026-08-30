@@ -422,6 +422,14 @@ func (service *Service) dispatchPhasePublication(
 	publication.UpdatedAt = finished
 	success := publishErr == nil && !result.ambiguous && strings.TrimSpace(result.externalID) != "" &&
 		validPhasePublicationURL(publication, result.externalURL)
+	if success && publication.Kind == PublicationBranchPush &&
+		claimed.Aggregate.Workspace.Intent == IntentImplementFeature {
+		success = validImplementationBranchPublicationResult(
+			claimed.Aggregate,
+			publication,
+			result,
+		)
+	}
 	switch {
 	case success:
 		publication.State, publication.ExternalID, publication.ExternalURL = ExecutionSucceeded, result.externalID, result.externalURL
@@ -570,8 +578,13 @@ func (service *Service) ReconcilePhasePublication(
 	default:
 		return aggregate, ErrInvalid
 	}
-	if !exists || strings.TrimSpace(result.externalID) == "" || result.ambiguous ||
-		!validPhasePublicationURL(publication, result.externalURL) {
+	validResult := exists && strings.TrimSpace(result.externalID) != "" && !result.ambiguous &&
+		validPhasePublicationURL(publication, result.externalURL)
+	if validResult && publication.Kind == PublicationBranchPush &&
+		aggregate.Workspace.Intent == IntentImplementFeature {
+		validResult = validImplementationBranchPublicationResult(aggregate, publication, result)
+	}
+	if !validResult {
 		if publication.Kind == PublicationBranchPush && publication.State == ExecutionRunning &&
 			service.publicationRecoveryReady(publication) && !exists && !result.ambiguous {
 			publication.State = ExecutionQueued
@@ -617,6 +630,43 @@ func (service *Service) ReconcilePhasePublication(
 		branchPublicationLeaseID: branchPublicationLeaseID(publication),
 	})
 	return mutated.Aggregate, err
+}
+
+func validImplementationBranchPublicationResult(
+	aggregate Aggregate,
+	publication Publication,
+	result phasePublicationResult,
+) bool {
+	provider := result.provider
+	repair, found := findRepairAttempt(aggregate.RepairAttempts, publication.TargetID)
+	if !found || provider == nil || provider.Intent != IntentImplementFeature ||
+		provider.ProviderOrigin != aggregate.ProviderSnapshot.ProviderOrigin ||
+		provider.RepositoryID != aggregate.ProviderSnapshot.RepositoryID ||
+		provider.Repository != aggregate.ProviderSnapshot.Repository ||
+		strings.TrimSpace(provider.PullRequestID) == "" || provider.PullNumber <= 0 ||
+		strings.TrimSpace(provider.HeadRef) == "" || provider.HeadSHA != repair.CandidateSHA ||
+		strings.TrimSpace(result.externalID) != provider.PullRequestID ||
+		!validImplementationPullRequestURL(result.externalURL, *provider) {
+		return false
+	}
+	return publication.Kind == PublicationBranchPush && publication.TargetID == repair.ID &&
+		repair.State == ExecutionSucceeded && repair.CandidateSHA != ""
+}
+
+func validImplementationPullRequestURL(raw string, provider ProviderSnapshot) bool {
+	external, err := url.Parse(raw)
+	if err != nil || external.Scheme != "https" || external.Host == "" || external.User != nil ||
+		external.RawQuery != "" || external.Fragment != "" {
+		return false
+	}
+	origin, err := url.ParseRequestURI(provider.ProviderOrigin)
+	if err != nil || !strings.EqualFold(external.Scheme, origin.Scheme) ||
+		!strings.EqualFold(external.Host, origin.Host) {
+		return false
+	}
+	wantedPath := strings.TrimSuffix(origin.Path, "/") + "/" + provider.Repository +
+		"/pull/" + strconv.FormatInt(provider.PullNumber, 10)
+	return external.Path == wantedPath
 }
 
 func (service *Service) recordUnknownPhasePublication(
@@ -840,7 +890,9 @@ func latestValidationForRepair(values []ValidationRun, repair RepairAttempt) (Va
 		return ValidationRun{}, false
 	}
 	for index := len(values) - 1; index >= 0; index-- {
-		if values[index].StageRunID == repair.StageRunID && values[index].CandidateSHA == validatedCandidate {
+		if values[index].RepairAttemptID == repair.ID &&
+			values[index].StageRunID == repair.StageRunID &&
+			values[index].CandidateSHA == validatedCandidate {
 			return values[index], true
 		}
 	}

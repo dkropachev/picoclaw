@@ -60,6 +60,8 @@ func (service *fakeDevelopmentWorkspaceService) ClaimAutonomousWork(
 }
 
 type fakeDevelopmentWorkspaceAdvancer struct {
+	admit        func(prworkspace.Aggregate) (prworkspace.Aggregate, bool, error)
+	admissions   []prworkspace.Aggregate
 	ready        func(prworkspace.Aggregate) bool
 	claim        func(prworkspace.Aggregate) bool
 	advances     []prworkspace.Aggregate
@@ -67,6 +69,18 @@ type fakeDevelopmentWorkspaceAdvancer struct {
 	contextValue any
 	contextKey   any
 	err          error
+}
+
+func (advancer *fakeDevelopmentWorkspaceAdvancer) AdmitAutonomousDevelopmentWorkspace(
+	_ context.Context,
+	aggregate prworkspace.Aggregate,
+	_ string,
+) (prworkspace.Aggregate, bool, error) {
+	advancer.admissions = append(advancer.admissions, aggregate)
+	if advancer.admit != nil {
+		return advancer.admit(aggregate)
+	}
+	return aggregate, true, nil
 }
 
 func (advancer *fakeDevelopmentWorkspaceAdvancer) AutonomousDevelopmentWorkspaceReady(
@@ -92,6 +106,46 @@ func (advancer *fakeDevelopmentWorkspaceAdvancer) AdvanceDevelopmentWorkspace(
 		advancer.contextValue = ctx.Value(advancer.contextKey)
 	}
 	return aggregate, advancer.err
+}
+
+func TestDevelopmentWorkspaceWorkerAdmissionPrecedesDurableClaim(t *testing.T) {
+	now := time.Date(2026, time.August, 29, 12, 0, 0, 0, time.UTC)
+	workspaceID := "devw_99999999999999999999999999999999"
+	aggregate := developmentWorkerAggregate(
+		workspaceID,
+		prworkspace.PhasePlanning,
+		prworkspace.ExecutionQueued,
+		4,
+		now,
+	)
+	aggregate.Workspace.Intent = prworkspace.IntentImplementFeature
+	aggregate.Workspace.SourceKind = prworkspace.SourceBrief
+	service := &fakeDevelopmentWorkspaceService{
+		pages:      []prworkspace.Page{{Workspaces: []prworkspace.Workspace{{ID: workspaceID}}}},
+		aggregates: map[string]prworkspace.Aggregate{workspaceID: aggregate},
+	}
+	advancer := &fakeDevelopmentWorkspaceAdvancer{
+		admit: func(value prworkspace.Aggregate) (prworkspace.Aggregate, bool, error) {
+			if len(service.claimRequests) != 0 {
+				t.Fatal("workspace was claimed before provider admission")
+			}
+			return value, false, nil
+		},
+	}
+	worker := &developmentWorkspaceWorker{service: service, handler: advancer}
+
+	processed, err := worker.ProcessOne(t.Context())
+	if err != nil || !processed || len(advancer.admissions) != 1 ||
+		len(service.claimRequests) != 0 || len(advancer.advances) != 0 {
+		t.Fatalf(
+			"ProcessOne() = processed=%v err=%v admissions=%d claims=%d advances=%d",
+			processed,
+			err,
+			len(advancer.admissions),
+			len(service.claimRequests),
+			len(advancer.advances),
+		)
+	}
 }
 
 func TestDevelopmentWorkspaceWorkerPagesAndSelectsOldestRunnableWork(t *testing.T) {

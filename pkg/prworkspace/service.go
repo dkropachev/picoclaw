@@ -283,6 +283,7 @@ func (service *Service) Create(ctx context.Context, request CreateWorkspaceReque
 			provider.RepositoryID, request.RequestID,
 		}, "\x00")))
 		provider.SourceID = "sha256:" + hex.EncodeToString(digest[:])
+		provider.Body = request.Brief
 	}
 	if request.Intent == IntentImplementFeature && !provider.CanCreatePullRequest {
 		return Aggregate{}, errors.New("draft pull request creation is unavailable")
@@ -310,6 +311,117 @@ func (service *Service) Create(ctx context.Context, request CreateWorkspaceReque
 		return Aggregate{}, createErr
 	}
 	return result.Aggregate, nil
+}
+
+// FailUnsafeProvider records a stable terminal outcome before any AI,
+// candidate, validation, or publication side effect can begin.
+func (service *Service) FailUnsafeProvider(
+	ctx context.Context,
+	aggregate Aggregate,
+	requestID string,
+) (Aggregate, error) {
+	if service == nil || service.store == nil || aggregate.Workspace.Intent != IntentImplementFeature ||
+		!validMutationEnvelope(aggregate.Workspace.ID, aggregate.Workspace.Version, requestID) {
+		return Aggregate{}, ErrInvalid
+	}
+	if unsafeProviderFailureRecorded(aggregate) {
+		return aggregate, nil
+	}
+	now := service.now().UTC()
+	for _, publication := range aggregate.Publications {
+		if publication.Kind != PublicationBranchPush || publication.State != ExecutionRunning {
+			continue
+		}
+		publication.State = ExecutionFailed
+		publication.PublicErrorCode = "unsafe_provider"
+		publication.UpdatedAt = now
+		closed, err := service.store.Mutate(ctx, Mutation{
+			WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+			RequestID:                stableID("req_", requestID, "unsafe-running-publication", publication.ID),
+			Patch:                    AggregatePatch{ReplacePublications: []Publication{publication}},
+			branchPublicationLeaseID: publication.ID,
+		})
+		if err != nil {
+			return closed.Aggregate, err
+		}
+		aggregate = closed.Aggregate
+		break
+	}
+	state := ExecutionFailed
+	failedPublications := make([]Publication, 0)
+	for _, publication := range aggregate.Publications {
+		if publication.Kind != PublicationBranchPush ||
+			publication.State == ExecutionSucceeded || publication.State == ExecutionFailed ||
+			publication.State == ExecutionCanceled || publication.State == ExecutionStale {
+			continue
+		}
+		publication.State = ExecutionFailed
+		publication.PublicErrorCode = "unsafe_provider"
+		publication.UpdatedAt = now
+		failedPublications = append(failedPublications, publication)
+	}
+	result, err := service.store.Mutate(ctx, Mutation{
+		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+		RequestID: requestID,
+		Patch: AggregatePatch{
+			ExecutionState:      &state,
+			ReplacePublications: failedPublications,
+			Activity: []Activity{{
+				Kind: "development.failed", Actor: "system",
+				Summary:   "Development provider is unsupported",
+				Metadata:  map[string]any{"code": "unsafe_provider"},
+				CreatedAt: now,
+			}},
+		},
+	})
+	return result.Aggregate, err
+}
+
+// FailImplementationUnavailable terminates feature work that a restarted
+// Gateway can no longer execute because repair or validation capability is
+// absent. This prevents a durable queued/running aggregate from polling
+// forever while preserving the no-overall-timeout contract for runnable work.
+func (service *Service) FailImplementationUnavailable(
+	ctx context.Context,
+	aggregate Aggregate,
+	requestID string,
+) (Aggregate, error) {
+	if service == nil || service.store == nil || aggregate.Workspace.Intent != IntentImplementFeature ||
+		!validMutationEnvelope(aggregate.Workspace.ID, aggregate.Workspace.Version, requestID) {
+		return Aggregate{}, ErrInvalid
+	}
+	if developmentFailureRecorded(aggregate, "implementation_unavailable") {
+		return aggregate, nil
+	}
+	state := ExecutionFailed
+	result, err := service.store.Mutate(ctx, Mutation{
+		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+		RequestID: requestID,
+		Patch: AggregatePatch{
+			ExecutionState: &state,
+			Activity: []Activity{{
+				Kind: "development.failed", Actor: "system",
+				Summary:   "Development implementation runtime is unavailable",
+				Metadata:  map[string]any{"code": "implementation_unavailable"},
+				CreatedAt: service.now().UTC(),
+			}},
+		},
+	})
+	return result.Aggregate, err
+}
+
+func unsafeProviderFailureRecorded(aggregate Aggregate) bool {
+	return developmentFailureRecorded(aggregate, "unsafe_provider")
+}
+
+func developmentFailureRecorded(aggregate Aggregate, code string) bool {
+	for index := len(aggregate.Activity) - 1; index >= 0; index-- {
+		activity := aggregate.Activity[index]
+		if activity.Kind == "development.failed" && activity.Metadata["code"] == code {
+			return true
+		}
+	}
+	return false
 }
 
 func (service *Service) Get(ctx context.Context, workspaceID string) (Aggregate, error) {
@@ -611,7 +723,8 @@ func (service *Service) ConfirmCharterAutomatically(
 		return Aggregate{}, err
 	}
 	charter, _, ready := charterConfirmationReady(aggregate, request.CharterID)
-	if !ready || aggregate.Workspace.Version != request.ExpectedVersion {
+	if !ready || aggregate.Workspace.Version != request.ExpectedVersion ||
+		charterConfirmationWasHumanGated(aggregate) {
 		return aggregate, ErrConflict
 	}
 	if charter.ClarificationNeeded {
@@ -770,6 +883,15 @@ func charterConfirmationReady(aggregate Aggregate, charterID string) (Charter, s
 
 func charterConfirmationDecisionPoint(value string) bool {
 	return value == "pr.charter.confirm" || value == "pr.charter.reconfirm"
+}
+
+func charterConfirmationWasHumanGated(aggregate Aggregate) bool {
+	for _, gate := range aggregate.Gates {
+		if charterConfirmationDecisionPoint(gate.DecisionPoint) {
+			return true
+		}
+	}
+	return false
 }
 
 type RunReviewRequest struct {

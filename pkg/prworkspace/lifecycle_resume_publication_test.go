@@ -12,6 +12,32 @@ type captureReviewAI struct {
 	user  string
 }
 
+func TestLatestValidationForRepairRequiresExactRepairAttempt(t *testing.T) {
+	t.Parallel()
+
+	repair := RepairAttempt{
+		ID: "pra_11111111111111111111111111111111", StageRunID: "psr_shared",
+		CandidateSHA: "candidate-tree", State: ExecutionSucceeded,
+	}
+	wrongAttempt := ValidationRun{
+		ID: "pvr_11111111111111111111111111111111", StageRunID: repair.StageRunID,
+		RepairAttemptID: "pra_22222222222222222222222222222222",
+		CandidateSHA:    repair.CandidateSHA,
+		State:           ExecutionSucceeded,
+	}
+	if validation, found := latestValidationForRepair([]ValidationRun{wrongAttempt}, repair); found {
+		t.Fatalf("cross-attempt validation matched: %#v", validation)
+	}
+
+	exact := wrongAttempt
+	exact.ID = "pvr_22222222222222222222222222222222"
+	exact.RepairAttemptID = repair.ID
+	validation, found := latestValidationForRepair([]ValidationRun{wrongAttempt, exact}, repair)
+	if !found || validation.ID != exact.ID {
+		t.Fatalf("exact validation = %#v, found=%v", validation, found)
+	}
+}
+
 func (runner *captureReviewAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[string]any, error) {
 	if request.Operation == "review.initial" {
 		runner.calls++
@@ -227,9 +253,15 @@ func TestReviewAndImplementationPublicationsShareOneAggregate(t *testing.T) {
 		},
 	}
 	validation := ValidationRun{
-		ID: "pvr_44444444444444444444444444444444", StageRunID: implementationStage.ID,
-		State: ExecutionSucceeded, CandidateSHA: repair.CandidateSHA,
-		Checks: []ValidationCheck{{ID: "tests", Name: "tests", Status: "passed"}}, StartedAt: now, FinishedAt: &now,
+		ID:              "pvr_44444444444444444444444444444444",
+		StageRunID:      implementationStage.ID,
+		RepairAttemptID: repair.ID,
+		State:           ExecutionSucceeded,
+		CandidateSHA:    repair.CandidateSHA,
+		Checks: []ValidationCheck{{
+			ID: "tests", Name: "tests", Status: "passed",
+		}},
+		StartedAt: now, FinishedAt: &now,
 	}
 	finding.Disposition, finding.Version, finding.UpdatedAt = FindingFixed, finding.Version+1, now
 	publicationPhase := PhasePublication

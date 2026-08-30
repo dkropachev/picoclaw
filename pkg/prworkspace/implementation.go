@@ -306,9 +306,11 @@ func (service *Service) RunImplementation(
 			CandidateSHA: repair.CandidateSHA, ChangedFiles: repair.ChangedFiles, CandidateDiff: repair.CandidateDiff,
 		})
 		validationIdentityChanged := validation.ID != "" && validation.ID != validationID ||
+			validation.RepairAttemptID != "" && validation.RepairAttemptID != attempt.ID ||
 			validation.CandidateSHA != "" && validation.CandidateSHA != repair.CandidateSHA
 		validation.ID = validationID
 		validation.StageRunID = runID
+		validation.RepairAttemptID = attempt.ID
 		validation.CandidateSHA = repair.CandidateSHA
 		patch.AppendValidations = append(patch.AppendValidations, validation)
 		if validationIdentityChanged {

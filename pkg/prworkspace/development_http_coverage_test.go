@@ -46,7 +46,10 @@ func developmentHTTPHandler(t *testing.T, provider ProviderResolver) (*HTTPHandl
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHTTPHandler(HTTPConfig{Service: service})
+	handler, err := NewHTTPHandler(HTTPConfig{
+		Service: service, FeatureRuntimeLease: codeCLISafeFeatureRuntimeLease,
+		RepositoryResolverReady: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +156,9 @@ func TestDevelopmentHTTPCollectionCatalogAndConversation(t *testing.T) {
 		ExecutionQueued,
 		conversationRunner,
 	)
-	conversationHandler, err := NewHTTPHandler(HTTPConfig{Service: conversationService})
+	conversationHandler, err := NewHTTPHandler(HTTPConfig{
+		Service: conversationService, FeatureRuntimeLease: codeCLISafeFeatureRuntimeLease,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

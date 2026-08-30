@@ -513,12 +513,8 @@ func validateWorkflowAgentAccountRef(cfg *config.Config, accountRef string) erro
 }
 
 func repositoryReviewUnsafeProvider(provider string) bool {
-	switch providers.NormalizeProvider(provider) {
-	case "codex-cli", "claude-cli":
-		return true
-	default:
-		return false
-	}
+	_, unsafe := restrictedProvider(provider)
+	return unsafe
 }
 
 func appendRepositoryReviewModelDependency(models []string, model string) []string {
