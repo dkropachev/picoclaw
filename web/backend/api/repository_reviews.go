@@ -417,6 +417,8 @@ func writeRepositoryReviewError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		status, code = http.StatusNotFound, "not_found"
+	case errors.Is(err, repoaudit.ErrHistoricalDeduplicationInProgress):
+		status, code = http.StatusConflict, "historical_deduplication_in_progress"
 	case errors.Is(err, repoaudit.ErrConflict):
 		status, code = http.StatusConflict, "stale_repository_review"
 	case errors.Is(err, repoaudit.ErrInvalidPlan),

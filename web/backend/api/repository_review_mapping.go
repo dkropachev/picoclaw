@@ -137,8 +137,10 @@ func repositoryFallbackAutomation(
 	state repoaudit.RepositoryState,
 ) repoaudit.RepositoryReviewAutomation {
 	automation := repoaudit.RepositoryReviewAutomation{
-		ID:         "legacy_" + strings.TrimPrefix(state.ID, "rrp_"),
-		Repository: state.Repository,
+		ID:                               "legacy_" + strings.TrimPrefix(state.ID, "rrp_"),
+		Repository:                       state.Repository,
+		DeduplicationSimilarityThreshold: repoaudit.DeduplicationDefaultThreshold,
+		DeduplicationCandidateLimit:      repoaudit.DeduplicationDefaultCandidateLimit,
 	}
 	if cfg != nil {
 		automation.AccountRef = cfg.Agents.Defaults.AccountRef

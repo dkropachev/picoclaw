@@ -62,7 +62,8 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 		t.Fatalf("first agent calls=%d, want scope planner plus visible managed review", agentRunner.calls)
 	}
 	state, found, err := repoaudit.NewStore(workspace).Get(repo)
-	if err != nil || !found || len(state.Files) != 1 || len(state.Findings) != 2 {
+	if err != nil || !found || len(state.Files) != 1 || len(state.Findings) != 2 ||
+		len(state.RawFindings) != 2 || len(state.DeduplicationJobs) != 2 {
 		t.Fatalf("first durable state found=%v err=%v state=%#v", found, err, state)
 	}
 	for _, finding := range state.Findings {
@@ -76,7 +77,8 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 	}
 	metrics := repoaudit.CurrentCampaignMetrics(state, campaignID, nil, time.Time{})
 	if !metrics.CoverageExact || metrics.InspectedFiles != 1 || metrics.CompletedFiles != 1 ||
-		metrics.RemainingFiles != 0 || metrics.FindingOccurrences != 2 {
+		metrics.RemainingFiles != 0 || metrics.FindingOccurrences != 0 ||
+		state.FindingsProcessing.Pending != 2 {
 		t.Fatalf("campaign metrics=%#v", metrics)
 	}
 

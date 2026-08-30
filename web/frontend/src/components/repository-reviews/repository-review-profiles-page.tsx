@@ -82,6 +82,9 @@ const emptyProfile: RepositoryReviewProfileConfig = {
   name: "",
   account_ref: "",
   reviewer_model: "",
+  deduplication_model: "",
+  deduplication_similarity_threshold: 90,
+  deduplication_candidate_limit: 4,
   issue_writer_model: "",
   review_focus: "Find correctness, security, and reliability bugs.",
   issue_prompt: repositoryReviewDefaultIssuePrompt,
@@ -357,6 +360,19 @@ export function RepositoryReviewProfileDetailPage({
                 profileAccountLabel(profile.account_ref, accounts),
               ],
               ["Reviewer", profile.reviewer_model],
+              [
+                "Finding deduplication",
+                profile.deduplication_model ||
+                  `${profile.reviewer_model} (reviewer)`,
+              ],
+              [
+                "Deduplication threshold",
+                String(profile.deduplication_similarity_threshold ?? 90),
+              ],
+              [
+                "Deduplication candidates",
+                String(profile.deduplication_candidate_limit ?? 4),
+              ],
               ["Issue writer", profileWriterLabel(profile)],
               ["Files per batch", String(profile.max_files_per_run)],
               ["Content bytes", String(profile.max_content_bytes)],
@@ -572,6 +588,13 @@ function ProfileForm({
     selectedWriterModel,
     selectedAccount,
   )
+  const selectedDeduplicationModel = value.deduplication_model
+    ? models.find((model) => model.alias === value.deduplication_model)
+    : selectedModel
+  const selectedDeduplicationAvailability = profileModelAvailability(
+    selectedDeduplicationModel,
+    selectedAccount,
+  )
   const accountIssue = selectedAccount
     ? selectedAccount.available
       ? ""
@@ -595,6 +618,9 @@ function ProfileForm({
   const writerIssue = value.issue_writer_model
     ? explicitWriterAvailability.reason
     : selectedModelAvailability.reason
+  const deduplicationIssue = value.deduplication_model
+    ? selectedDeduplicationAvailability.reason
+    : selectedModelAvailability.reason
   const valid =
     value.name.trim() !== "" &&
     value.reviewer_model !== "" &&
@@ -604,6 +630,13 @@ function ProfileForm({
     (value.issue_writer_model
       ? explicitWriterAvailability.available
       : selectedWriterAvailability.available) &&
+    (value.deduplication_model
+      ? selectedDeduplicationAvailability.available
+      : selectedModelAvailability.available) &&
+    (value.deduplication_similarity_threshold ?? 90) >= 0 &&
+    (value.deduplication_similarity_threshold ?? 90) <= 100 &&
+    (value.deduplication_candidate_limit ?? 4) >= 0 &&
+    (value.deduplication_candidate_limit ?? 4) <= 20 &&
     value.scope_policy.code_types.length > 0 &&
     value.max_files_per_run >= 1 &&
     value.max_content_bytes >= 1 &&
@@ -660,6 +693,16 @@ function ProfileForm({
                   ? value.issue_writer_model
                   : ""
                 : ""
+              const deduplicator = value.deduplication_model
+                ? models.find(
+                    (model) => model.alias === value.deduplication_model,
+                  )
+                : undefined
+              const deduplicationModel = value.deduplication_model
+                ? profileModelAvailability(deduplicator, account).available
+                  ? value.deduplication_model
+                  : ""
+                : ""
               onChange({
                 ...editor,
                 value: {
@@ -667,6 +710,7 @@ function ProfileForm({
                   account_ref: accountRef,
                   reviewer_model: reviewerModel,
                   issue_writer_model: issueWriterModel,
+                  deduplication_model: deduplicationModel,
                 },
               })
             }}
@@ -829,6 +873,65 @@ function ProfileForm({
         )}
       </Field>
       <Field
+        label="Finding deduplication model"
+        hint="Blank uses the reviewer model. Deduplication sees diagnosis fields and opaque candidate IDs only."
+        hintId="review-deduplication-model-help"
+        controlId="review-profile-deduplication-model"
+      >
+        <select
+          id="review-profile-deduplication-model"
+          aria-label="Finding deduplication model"
+          aria-describedby={
+            deduplicationIssue
+              ? "review-deduplication-model-help review-deduplication-model-availability"
+              : "review-deduplication-model-help"
+          }
+          aria-invalid={deduplicationIssue ? true : undefined}
+          className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
+          value={value.deduplication_model ?? ""}
+          disabled={
+            !selectedAccount?.available || !selectedModelAvailability.available
+          }
+          onChange={(event) =>
+            setValue("deduplication_model", event.target.value)
+          }
+        >
+          <option value="">
+            Same as reviewer
+            {value.reviewer_model ? ` (${value.reviewer_model})` : ""}
+          </option>
+          {value.deduplication_model && !selectedDeduplicationModel && (
+            <option value={value.deduplication_model} disabled>
+              {value.deduplication_model} (unavailable)
+            </option>
+          )}
+          {models.map((model) => {
+            const availability = profileModelAvailability(
+              model,
+              selectedAccount,
+            )
+            return (
+              <option
+                key={model.alias}
+                value={model.alias}
+                disabled={!availability.available}
+              >
+                {modelOptionLabel(model, availability)}
+              </option>
+            )
+          })}
+        </select>
+        {deduplicationIssue && (
+          <p
+            id="review-deduplication-model-availability"
+            role="alert"
+            className="text-destructive text-xs"
+          >
+            {deduplicationIssue}
+          </p>
+        )}
+      </Field>
+      <Field
         label="Review focus"
         hint="Narrows defect classes only. Findings diagnose validated defects and never include fixes or remediation."
         hintId="review-focus-help"
@@ -923,7 +1026,7 @@ function ProfileForm({
         </Field>
       </section>
 
-      <ReviewAdvancedSection description="sizing and task admission">
+      <ReviewAdvancedSection description="sizing, deduplication, and task admission">
         <section className="space-y-3">
           <h3 className="text-sm font-semibold">Work sizing</h3>
           <div className="grid gap-4 sm:grid-cols-2">
@@ -962,6 +1065,28 @@ function ProfileForm({
               }
               onChange={(next) =>
                 setValue("assignment_timeout_seconds", Math.round(next) * 60)
+              }
+            />
+            <NumberField
+              label="Deduplication similarity threshold"
+              hint="Scores below this 0–100 threshold are excluded before final judgment."
+              describedBy="deduplication-threshold-help"
+              min={0}
+              max={100}
+              value={value.deduplication_similarity_threshold ?? 90}
+              onChange={(next) =>
+                setValue("deduplication_similarity_threshold", next)
+              }
+            />
+            <NumberField
+              label="Deduplication candidate limit"
+              hint="Shortlists 0–20 candidates. Zero disables model deduplication and promotes every raw finding as new."
+              describedBy="deduplication-candidate-limit-help"
+              min={0}
+              max={20}
+              value={value.deduplication_candidate_limit ?? 4}
+              onChange={(next) =>
+                setValue("deduplication_candidate_limit", next)
               }
             />
           </div>

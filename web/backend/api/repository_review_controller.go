@@ -103,27 +103,29 @@ type repositoryReviewController struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 
-	startOnce            sync.Once
-	stopOnce             sync.Once
-	releaseOnce          sync.Once
-	wg                   sync.WaitGroup
-	admissionWG          sync.WaitGroup
-	lifecycleMu          sync.Mutex
-	stopped              bool
-	startErr             error
-	releaseLease         func()
-	leasedStore          repoaudit.Store
-	leasedConfig         *config.Config
-	mu                   sync.Mutex
-	mappingMu            sync.Mutex
-	validationMu         sync.Mutex
-	active               map[string]*repositoryReviewActiveRun
-	now                  func() time.Time
-	probe                func(context.Context) (codexAccountLimitsResponse, error)
-	update               repositoryReviewAutomationUpdater
-	resolveCommit        repositoryReviewCommitResolver
-	resolveDefaultBranch repositoryReviewDefaultBranchResolver
-	recoverCampaign      func(
+	startOnce                 sync.Once
+	stopOnce                  sync.Once
+	releaseOnce               sync.Once
+	wg                        sync.WaitGroup
+	admissionWG               sync.WaitGroup
+	lifecycleMu               sync.Mutex
+	stopped                   bool
+	startErr                  error
+	releaseLease              func()
+	leasedStore               repoaudit.Store
+	leasedConfig              *config.Config
+	mu                        sync.Mutex
+	mappingMu                 sync.Mutex
+	deduplicationMu           sync.Mutex
+	historicalDeduplicationMu sync.Mutex
+	validationMu              sync.Mutex
+	active                    map[string]*repositoryReviewActiveRun
+	now                       func() time.Time
+	probe                     func(context.Context) (codexAccountLimitsResponse, error)
+	update                    repositoryReviewAutomationUpdater
+	resolveCommit             repositoryReviewCommitResolver
+	resolveDefaultBranch      repositoryReviewDefaultBranchResolver
+	recoverCampaign           func(
 		context.Context,
 		repoaudit.Store,
 		string,
@@ -219,6 +221,15 @@ func (c *repositoryReviewController) Start() error {
 		c.leasedConfig = cfg
 		if _, err = store.ReconcileJobs(c.ctx); err != nil {
 			c.startErr = fmt.Errorf("reconcile repository finding jobs: %w", err)
+			if c.releaseLease != nil {
+				c.releaseLease()
+				c.releaseLease = nil
+			}
+			c.cancel()
+			return
+		}
+		if _, err = store.ReconcileDeduplicationJobs(c.ctx); err != nil {
+			c.startErr = fmt.Errorf("reconcile finding deduplication jobs: %w", err)
 			if c.releaseLease != nil {
 				c.releaseLease()
 				c.releaseLease = nil
@@ -815,6 +826,19 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 		if ledgerErr != nil {
 			return repoaudit.RepositoryReviewAutomation{}, ledgerErr
 		}
+		var deduplicationSnapshot repoaudit.RepositoryReviewDeduplicationSnapshot
+		if current := ledgerState.CurrentCampaign; current != nil &&
+			current.ID == campaignID && current.DeduplicationSnapshot != nil {
+			// A campaign freezes its provider revision and policy. Configuration
+			// changes between continuation batches apply only to a new campaign.
+			deduplicationSnapshot = *current.DeduplicationSnapshot
+		} else {
+			var snapshotErr error
+			deduplicationSnapshot, snapshotErr = c.repositoryReviewDeduplicationSnapshot(automation)
+			if snapshotErr != nil {
+				return repoaudit.RepositoryReviewAutomation{}, snapshotErr
+			}
+		}
 		expectedCampaignID := ""
 		exact := true
 		if ledgerState.CurrentCampaign != nil {
@@ -827,6 +851,7 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 			Repository: ledgerRepository, CampaignID: campaignID,
 			ExpectedCampaignID: expectedCampaignID, CommitSHA: resolvedCommit,
 			ExpectedReviewVersion: ledgerState.ReviewVersion, Exact: exact,
+			DeduplicationSnapshot: &deduplicationSnapshot,
 		}); beginErr != nil {
 			_, _ = c.updateLatest(ctx, store, id, func(candidate *repoaudit.RepositoryReviewAutomation) error {
 				if candidate.CampaignID != campaignID || candidate.ActiveRunID != "" {
@@ -1127,6 +1152,9 @@ func repositoryReviewProfileSnapshotMatches(
 		automation.ReviewFocus == materialized.ReviewFocus &&
 		reflect.DeepEqual(automation.ScopePolicy, materialized.ScopePolicy) &&
 		reflect.DeepEqual(automation.ReviewerModels, materialized.ReviewerModels) &&
+		automation.DeduplicationModel == materialized.DeduplicationModel &&
+		automation.DeduplicationSimilarityThreshold == materialized.DeduplicationSimilarityThreshold &&
+		automation.DeduplicationCandidateLimit == materialized.DeduplicationCandidateLimit &&
 		automation.IssueWriterModel == materialized.IssueWriterModel &&
 		!automation.CompareModels &&
 		automation.Force == materialized.Force &&
@@ -1227,10 +1255,15 @@ func (c *repositoryReviewController) ensureRepositoryReviewCampaign(
 		expectedCampaignID = state.CurrentCampaign.ID
 	}
 	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	deduplicationSnapshot, err := c.repositoryReviewDeduplicationSnapshot(automation)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
 	if _, err = store.BeginCampaign(ctx, repoaudit.BeginCampaignRequest{
 		Repository: ledgerRepository, CampaignID: campaignID,
 		ExpectedCampaignID: expectedCampaignID, CommitSHA: resolvedCommit,
 		ExpectedReviewVersion: state.ReviewVersion, Exact: false,
+		DeduplicationSnapshot: &deduplicationSnapshot,
 	}); err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
@@ -1261,6 +1294,21 @@ func (c *repositoryReviewController) ensureRepositoryReviewCampaign(
 			return nil
 		},
 	)
+}
+
+func (c *repositoryReviewController) repositoryReviewDeduplicationSnapshot(
+	automation repoaudit.RepositoryReviewAutomation,
+) (repoaudit.RepositoryReviewDeduplicationSnapshot, error) {
+	if c != nil && c.handler != nil {
+		revision, err := config.ConfigRevision(c.handler.configPath)
+		if err != nil {
+			return repoaudit.RepositoryReviewDeduplicationSnapshot{}, fmt.Errorf(
+				"capture repository review account/model revision: %w", err,
+			)
+		}
+		automation.AccountModelRevision = revision
+	}
+	return repoaudit.RepositoryReviewDeduplicationSnapshotFromAutomation(automation)
 }
 
 func (c *repositoryReviewController) resolveRepositoryReviewCampaignProfile(
@@ -3611,6 +3659,8 @@ func (c *repositoryReviewController) reconcile() {
 			}
 		}
 	}
+	c.startHistoricalFindingDeduplication(automations)
+	c.startRepositoryFindingDeduplication()
 	c.startRepositoryFindingMapping(automations)
 	c.startRepositoryFindingValidation(automations)
 }

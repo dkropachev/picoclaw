@@ -158,17 +158,14 @@ func TestStoreMergesCorroboratingModelParaphrasesInSameBlobContext(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.State.Findings) != 1 {
-		t.Fatalf("findings=%#v, want one corroborated finding", result.State.Findings)
+	if len(result.State.Findings) != 2 || len(result.State.RawFindings) != 2 ||
+		len(result.State.DeduplicatedFindings) != 2 {
+		t.Fatalf("candidate-limit-zero compatibility findings=%#v", result.State.Findings)
 	}
-	finding := result.State.Findings[0]
-	if finding.ObservationCount != 2 || !reflect.DeepEqual(finding.Models, []string{"review-a", "review-b"}) ||
-		len(finding.ContextIDs) != 2 {
-		t.Fatalf("corroboration=%#v", finding)
-	}
-	if len(finding.Observations) != 2 ||
-		finding.Observations[0].Evidence == finding.Observations[1].Evidence {
-		t.Fatalf("corroborating model substance was not retained: %#v", finding.Observations)
+	if result.State.Findings[0].Models[0] != "review-a" ||
+		result.State.Findings[1].Models[0] != "review-b" ||
+		result.State.Findings[0].Evidence == result.State.Findings[1].Evidence {
+		t.Fatalf("independent raw diagnoses were not retained: %#v", result.State.Findings)
 	}
 	if result.State.Contexts[0].ProfileHash != plan.ProfileHash {
 		t.Fatalf("context profile=%q want=%q", result.State.Contexts[0].ProfileHash, plan.ProfileHash)
@@ -194,9 +191,8 @@ func TestStoreDoesNotCountDuplicateCandidateTwiceWithinOneResponse(t *testing.T)
 			Findings: []FindingCandidate{candidate, candidate},
 		}},
 	})
-	if err != nil || len(result.State.Findings) != 1 ||
-		result.State.Findings[0].ObservationCount != 1 ||
-		len(result.State.Findings[0].Observations) != 1 {
+	if err != nil || len(result.State.Findings) != 2 || len(result.State.RawFindings) != 2 ||
+		len(result.State.DeduplicatedFindings) != 2 {
 		t.Fatalf("duplicate response finding=%#v err=%v", result.State.Findings, err)
 	}
 }
@@ -224,10 +220,8 @@ func TestStoreBoundsFindingContextHistoryWithObservationVariants(t *testing.T) {
 	result, err := store.Record(context.Background(), RecordRequest{
 		Plan: plan, RunID: "bounded-context-history", Observations: observations,
 	})
-	if err != nil || len(result.State.Findings) != 1 ||
-		result.State.Findings[0].ObservationCount != 65 ||
-		len(result.State.Findings[0].Observations) != 64 ||
-		len(result.State.Findings[0].ContextIDs) != 64 || len(result.State.Contexts) != 64 {
+	if err != nil || len(result.State.Findings) != 65 || len(result.State.RawFindings) != 65 ||
+		len(result.State.DeduplicatedFindings) != 65 || len(result.State.Contexts) != 65 {
 		t.Fatalf(
 			"bounded context history finding=%#v contexts=%d err=%v",
 			result.State.Findings,
@@ -343,7 +337,8 @@ func TestStoreSemanticCorroborationUsesWorstSeverity(t *testing.T) {
 			{Model: "review-b", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{critical}},
 		},
 	})
-	if err != nil || len(result.State.Findings) != 1 || result.State.Findings[0].Severity != "critical" {
+	if err != nil || len(result.State.Findings) != 2 ||
+		result.State.Findings[0].Severity != "low" || result.State.Findings[1].Severity != "critical" {
 		t.Fatalf("severity corroboration=%#v err=%v", result.State.Findings, err)
 	}
 }

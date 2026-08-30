@@ -566,11 +566,6 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 		unsupportedFiles[unsupported.Path] = unsupported
 	}
 	contexts := make([]FindingContext, 0, len(request.Observations))
-	// Findings present before this atomic Record call are immutable review
-	// occurrences. Corroborating observations may coalesce only with an
-	// occurrence created by this same review checkpoint; cross-run identity is
-	// handled by RepositoryFinding mapping instead.
-	initialFindingCount := len(state.Findings)
 	existingContexts := make(map[string]int, len(state.Contexts))
 	for index, contextRecord := range state.Contexts {
 		existingContexts[contextRecord.ID] = index
@@ -628,61 +623,16 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 				rejected++
 				continue
 			}
-			fingerprint := findingFingerprint(primary, candidate)
-			candidateObservation := findingObservationFrom(
-				candidate, contextRecord.ID, observation.Model, observation.Reviewer,
+			deduplicatedID, persistErr := persistLegacyRecordFinding(
+				&state, request.Plan, request.RunID, observationIndex, findingIndex,
+				contextRecord, observation, primary, candidate, completedAt,
 			)
-			index := findingIndexByFingerprint(state.Findings[initialFindingCount:], fingerprint)
-			if index >= 0 {
-				index += initialFindingCount
+			if persistErr != nil {
+				return RecordResult{}, persistErr
 			}
-			if index < 0 {
-				index = semanticFindingIndex(state.Findings[initialFindingCount:], primary, candidate)
-				if index >= 0 {
-					index += initialFindingCount
-				}
-			}
-			if index < 0 {
-				finding := Finding{
-					ID: stableID(
-						"rfn_", request.Plan.Repository, request.Plan.CommitSHA, request.RunID, fingerprint,
-					), CampaignID: request.Plan.CampaignID, Fingerprint: fingerprint,
-					Repository: request.Plan.Repository, CommitSHA: request.Plan.CommitSHA,
-					File: primary, Line: candidate.Line, Severity: candidate.Severity,
-					Title: candidate.Title, Symbol: candidate.Symbol,
-					Message: candidate.Message, Evidence: candidate.Evidence,
-					Impact:     candidate.Impact,
-					Validation: candidate.Validation, MatchHints: candidate.MatchHints,
-					FixEffort: candidate.FixEffort, ContextIDs: []string{contextRecord.ID},
-					Models: []string{observation.Model}, ObservationCount: 1, Status: FindingOpen,
-					Observations:            []FindingObservation{candidateObservation},
-					TargetBranch:            request.TargetBranch,
-					AdvertisedDefaultBranch: request.AdvertisedDefaultBranch,
-					TargetIsDefault:         request.TargetIsDefault,
-					Version:                 1, CreatedAt: completedAt, UpdatedAt: completedAt,
-				}
-				state.Findings = append(state.Findings, finding)
-				contextUsed = true
-				acceptedIDs = appendUnique(acceptedIDs, finding.ID)
-				continue
-			}
-			finding := &state.Findings[index]
-			if finding.Severity != candidate.Severity {
-				finding.Severity = moreSevere(finding.Severity, candidate.Severity)
-			}
-			var addedObservation bool
-			finding.Observations, addedObservation = upsertFindingObservation(
-				finding.Observations, candidateObservation,
-			)
-			finding.ContextIDs = findingObservationContextIDs(finding.Observations)
-			finding.Models = appendUnique(finding.Models, observation.Model)
-			if addedObservation {
-				finding.ObservationCount++
-			}
-			finding.Version++
-			finding.UpdatedAt = completedAt
+			acceptedIDs = appendUnique(acceptedIDs, deduplicatedID)
 			contextUsed = true
-			acceptedIDs = appendUnique(acceptedIDs, finding.ID)
+			continue
 		}
 		if contextUsed {
 			if existingIndex, exists := existingContexts[contextRecord.ID]; exists {
@@ -712,6 +662,10 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 	}
 	state.Contexts = append(state.Contexts, contexts...)
 	pruneUnreferencedFindingContexts(&state)
+	reconcileFindingsProcessingCounters(&state)
+	if len(state.RawFindings) > 0 {
+		state.FindingsProcessing.UpdatedAt = completedAt
+	}
 	var unreviewedPaths []string
 	for _, file := range files {
 		if _, complete := covered[file.Path]; complete {
@@ -864,6 +818,9 @@ func (s Store) SnapshotMappingJobs(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
+		return RepositoryState{}, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, err
 	}
 	now := s.clock()
@@ -1142,7 +1099,7 @@ func repositoryReviewSummaryFromEntry(root string, entry os.DirEntry) (Repositor
 	if decodeErr != nil || closeErr != nil {
 		return RepositorySummary{}, errors.Join(decodeErr, closeErr)
 	}
-	if (summary.SchemaVersion != 1 && summary.SchemaVersion != 2 &&
+	if (summary.SchemaVersion != 1 && summary.SchemaVersion != 2 && summary.SchemaVersion != 3 &&
 		summary.SchemaVersion != SchemaVersion) ||
 		summary.ID != RepositoryID(summary.Repository) {
 		return RepositorySummary{}, errors.New("invalid repository review summary")
@@ -1168,6 +1125,9 @@ func (s Store) SetFindingStatus(
 	if err != nil {
 		return RepositoryState{}, err
 	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
+		return RepositoryState{}, err
+	}
 	index := -1
 	for candidate := range state.Findings {
 		if state.Findings[candidate].ID == strings.TrimSpace(findingID) {
@@ -1177,6 +1137,9 @@ func (s Store) SetFindingStatus(
 	}
 	if index < 0 {
 		return RepositoryState{}, os.ErrNotExist
+	}
+	if state.Findings[index].DeduplicationPending {
+		return RepositoryState{}, ErrConflict
 	}
 	if state.Findings[index].Status == status {
 		return state, nil
@@ -1213,6 +1176,9 @@ func (s Store) PrepareIssue(request IssueDraftRequest) (RepositoryState, IssueDr
 	defer unlock()
 	state, err := s.load(request.Repository)
 	if err != nil {
+		return RepositoryState{}, IssueDraft{}, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, IssueDraft{}, err
 	}
 	findings, ids, err := selectedFindings(state.Findings, request.FindingIDs)
@@ -1284,6 +1250,9 @@ func (s Store) UpdateIssueDraft(
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, err
 	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
+		return RepositoryState{}, IssueDraft{}, err
+	}
 	index := -1
 	for candidate := range state.IssueDrafts {
 		if state.IssueDrafts[candidate].ID == strings.TrimSpace(draftID) {
@@ -1338,6 +1307,9 @@ func (s Store) SetIssueDraftPublication(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
+		return RepositoryState{}, IssueDraft{}, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, IssueDraft{}, err
 	}
 	index := -1
@@ -1420,6 +1392,9 @@ func (s Store) ClaimIssueDraftPublication(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
+		return RepositoryState{}, IssueDraft{}, false, err
+	}
+	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, IssueDraft{}, false, err
 	}
 	index := -1
@@ -1531,6 +1506,9 @@ func (s Store) load(repository string) (RepositoryState, error) {
 		ReviewAttempts:          make(map[string]int),
 		ReviewAttemptIdentities: make(map[string]string),
 		Findings:                []Finding{},
+		RawFindings:             []RawReviewFinding{},
+		DeduplicatedFindings:    []DeduplicatedReviewFinding{},
+		DeduplicationJobs:       []DeduplicationJob{},
 		Contexts:                []FindingContext{},
 		Runs:                    []ReviewRun{},
 		IssueDrafts:             []IssueDraft{},
@@ -1587,6 +1565,7 @@ func (s Store) save(state *RepositoryState) error {
 	}
 	backfillCanonicalIssueAssociations(state)
 	synchronizeRepositoryFindingIssues(state)
+	synchronizeDeduplicatedFindingProjections(state)
 	summary := Summarize(*state)
 	state.FindingCount = summary.FindingCount
 	state.RepositoryFindingCount = summary.RepositoryFindingCount
@@ -2476,6 +2455,11 @@ func pruneUnreferencedFindingContexts(state *RepositoryState) {
 			referenced[contextID] = struct{}{}
 		}
 	}
+	for _, raw := range state.RawFindings {
+		if raw.ContextID != "" {
+			referenced[raw.ContextID] = struct{}{}
+		}
+	}
 	contexts := state.Contexts[:0]
 	for _, contextRecord := range state.Contexts {
 		if _, keep := referenced[contextRecord.ID]; keep {
@@ -2581,7 +2565,9 @@ func validateState(state RepositoryState) error {
 		len(state.ReviewAttempts) > maxReviewFiles ||
 		len(state.ReviewAttemptIdentities) > maxReviewFiles ||
 		len(state.Contexts) > 1_000_000 ||
-		len(state.Findings) > 100_000 || len(state.Runs) > 100_000 || len(state.IssueDrafts) > 100_000 {
+		len(state.Findings) > 100_000 || len(state.RawFindings) > 100_000 ||
+		len(state.DeduplicatedFindings) > 100_000 || len(state.DeduplicationJobs) > 100_000 ||
+		len(state.Runs) > 100_000 || len(state.IssueDrafts) > 100_000 {
 		return errors.New("invalid repository review state")
 	}
 	if err := validateRepositoryReviewCampaignCoverage(state.CurrentCampaign); err != nil {
@@ -2591,6 +2577,12 @@ func validateState(state RepositoryState) error {
 		return err
 	}
 	if err := validateRepositoryReviewActiveRun(state); err != nil {
+		return err
+	}
+	if err := validateDeduplicationState(state); err != nil {
+		return err
+	}
+	if err := validateHistoricalDeduplicationReplay(state); err != nil {
 		return err
 	}
 	if state.CurrentCampaign != nil &&
@@ -2713,7 +2705,7 @@ func selectedFindings(all []Finding, requested []string) ([]Finding, []string, e
 			return nil, nil, errors.New("duplicate finding ID")
 		}
 		finding, ok := byID[id]
-		if !ok {
+		if !ok || finding.DeduplicationPending {
 			return nil, nil, os.ErrNotExist
 		}
 		seen[id] = struct{}{}

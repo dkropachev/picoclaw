@@ -267,7 +267,8 @@ func TestRepositoryReviewAssignmentGovernanceSemanticMerge(t *testing.T) {
 		},
 		fixture.files, repositoryAuditTestNow,
 	)
-	if err != nil || len(accepted) != 1 || len(state.Findings) != 1 || state.Findings[0].Version != 2 {
+	if err != nil || len(accepted) != 2 || len(state.RawFindings) != 2 ||
+		len(state.DeduplicationJobs) != 2 || len(state.Findings) != 1 || state.Findings[0].Version != 2 {
 		t.Fatalf("semantic merge accepted=%v findings=%#v err=%v", accepted, state.Findings, err)
 	}
 }

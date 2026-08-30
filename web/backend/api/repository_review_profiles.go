@@ -23,6 +23,9 @@ var repositoryReviewProfileCollectionSchema = mustCollectionQuerySchema(
 		{Name: "name", Type: collectionquery.TypeString, Sortable: true},
 		{Name: "account", Type: collectionquery.TypeString, Sortable: true},
 		{Name: "reviewer", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "deduplicator", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "deduplication_threshold", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "deduplication_candidates", Type: collectionquery.TypeNumber, Sortable: true},
 		{Name: "issue_writer", Type: collectionquery.TypeString, Sortable: true},
 		{Name: "force", Type: collectionquery.TypeBoolean, Sortable: true},
 		{Name: "auto_continue", Type: collectionquery.TypeBoolean, Sortable: true},
@@ -39,6 +42,9 @@ type repositoryReviewProfileConfigRequest struct {
 	ReviewFocus              string                                 `json:"review_focus"`
 	ScopePolicy              repoaudit.RepositoryReviewScopePolicy  `json:"scope_policy"`
 	ReviewerModel            string                                 `json:"reviewer_model"`
+	DeduplicationModel       string                                 `json:"deduplication_model,omitempty"`
+	DeduplicationThreshold   repositoryReviewOptionalInt            `json:"deduplication_similarity_threshold"`
+	DeduplicationCandidates  repositoryReviewOptionalInt            `json:"deduplication_candidate_limit"`
 	IssueWriterModel         string                                 `json:"issue_writer_model,omitempty"`
 	IssuePrompt              *string                                `json:"issue_prompt,omitempty"`
 	AccountRef               string                                 `json:"account_ref,omitempty"`
@@ -156,11 +162,17 @@ func (h *Handler) handleListRepositoryReviewProfiles(w http.ResponseWriter, r *h
 	names := make([]string, 0, len(profiles))
 	accounts := make([]string, 0, len(profiles))
 	reviewers := make([]string, 0, len(profiles))
+	deduplicators := make([]string, 0, len(profiles))
 	writers := make([]string, 0, len(profiles))
 	for _, profile := range profiles {
 		names = append(names, profile.Name)
 		accounts = append(accounts, profile.AccountRef)
 		reviewers = append(reviewers, profile.ReviewerModel)
+		deduplicator := profile.DeduplicationModel
+		if deduplicator == "" {
+			deduplicator = profile.ReviewerModel
+		}
+		deduplicators = append(deduplicators, deduplicator)
 		writer := profile.IssueWriterModel
 		if writer == "" {
 			writer = profile.ReviewerModel
@@ -175,7 +187,8 @@ func (h *Handler) handleListRepositoryReviewProfiles(w http.ResponseWriter, r *h
 		"query_schema": collectionSchemaWithSuggestions(
 			repositoryReviewProfileCollectionSchema,
 			map[collectionquery.Field][]string{
-				"name": names, "account": accounts, "reviewer": reviewers, "issue_writer": writers,
+				"name": names, "account": accounts, "reviewer": reviewers,
+				"deduplicator": deduplicators, "issue_writer": writers,
 			},
 		),
 	})
@@ -194,6 +207,16 @@ func repositoryReviewProfileCollectionField(
 		return collectionquery.StringValue(profile.AccountRef), true
 	case "reviewer":
 		return collectionquery.StringValue(profile.ReviewerModel), true
+	case "deduplicator":
+		model := profile.DeduplicationModel
+		if model == "" {
+			model = profile.ReviewerModel
+		}
+		return collectionquery.StringValue(model), true
+	case "deduplication_threshold":
+		return collectionquery.NumberValue(float64(profile.DeduplicationSimilarityThreshold)), true
+	case "deduplication_candidates":
+		return collectionquery.NumberValue(float64(profile.DeduplicationCandidateLimit)), true
 	case "issue_writer":
 		writer := profile.IssueWriterModel
 		if writer == "" {
@@ -231,13 +254,18 @@ func (h *Handler) handleCreateRepositoryReviewProfile(w http.ResponseWriter, r *
 		writeRepositoryReviewProfileError(w, repoaudit.ErrInvalidProfile)
 		return
 	}
+	if !validRepositoryReviewDeduplicationRequest(request) {
+		writeRepositoryReviewProfileError(w, repoaudit.ErrInvalidProfile)
+		return
+	}
 	store, err := h.repositoryReviewStore()
 	if err != nil {
 		writeRepositoryReviewProfileError(w, err)
 		return
 	}
-	if validationErr := h.validateRepositoryReviewProfileSelectionWithIssueWriter(
-		request.AccountRef, request.ReviewerModel, request.IssueWriterModel, request.Budget,
+	if validationErr := h.validateRepositoryReviewProfileSelectionWithModels(
+		request.AccountRef, request.ReviewerModel, request.IssueWriterModel,
+		request.DeduplicationModel, request.Budget,
 	); validationErr != nil {
 		writeRepositoryReviewProfileError(w, validationErr)
 		return
@@ -264,13 +292,18 @@ func (h *Handler) handleUpdateRepositoryReviewProfile(w http.ResponseWriter, r *
 		writeRepositoryReviewProfileError(w, repoaudit.ErrInvalidProfile)
 		return
 	}
+	if !validRepositoryReviewDeduplicationRequest(request) {
+		writeRepositoryReviewProfileError(w, repoaudit.ErrInvalidProfile)
+		return
+	}
 	store, err := h.repositoryReviewStore()
 	if err != nil {
 		writeRepositoryReviewProfileError(w, err)
 		return
 	}
-	if validationErr := h.validateRepositoryReviewProfileSelectionWithIssueWriter(
-		request.AccountRef, request.ReviewerModel, request.IssueWriterModel, request.Budget,
+	if validationErr := h.validateRepositoryReviewProfileSelectionWithModels(
+		request.AccountRef, request.ReviewerModel, request.IssueWriterModel,
+		request.DeduplicationModel, request.Budget,
 	); validationErr != nil {
 		writeRepositoryReviewProfileError(w, validationErr)
 		return
@@ -313,6 +346,18 @@ func (h *Handler) validateRepositoryReviewProfileSelectionWithIssueWriter(
 	issueWriterModel string,
 	budget repoaudit.RepositoryReviewBudgetPolicy,
 ) error {
+	return h.validateRepositoryReviewProfileSelectionWithModels(
+		accountRef, reviewerModel, issueWriterModel, "", budget,
+	)
+}
+
+func (h *Handler) validateRepositoryReviewProfileSelectionWithModels(
+	accountRef string,
+	reviewerModel string,
+	issueWriterModel string,
+	deduplicationModel string,
+	budget repoaudit.RepositoryReviewBudgetPolicy,
+) error {
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
 		return err
@@ -331,6 +376,14 @@ func (h *Handler) validateRepositoryReviewProfileSelectionWithIssueWriter(
 	if issueWriterModel != "" {
 		if err := validateRepositoryReviewIssueWriterAlias(
 			cfg, accountRef, issueWriterModel,
+		); err != nil {
+			return err
+		}
+	}
+	deduplicationModel = strings.TrimSpace(deduplicationModel)
+	if deduplicationModel != "" {
+		if err := validateRepositoryReviewPassiveModelAlias(
+			cfg, accountRef, deduplicationModel, "deduplication_model",
 		); err != nil {
 			return err
 		}
@@ -429,9 +482,17 @@ func repositoryReviewProfileFromRequest(
 	request repositoryReviewProfileConfigRequest,
 ) repoaudit.RepositoryReviewProfile {
 	profile := repoaudit.RepositoryReviewProfile{}
+	profile.DeduplicationSettingsSpecified = request.DeduplicationThreshold.Present ||
+		request.DeduplicationCandidates.Present
 	applyRepositoryReviewProfileRequest(&profile, request)
 	if request.AutoContinue == nil {
 		profile.AutoContinue = true
+	}
+	if !request.DeduplicationThreshold.Present {
+		profile.DeduplicationSimilarityThreshold = repoaudit.DeduplicationDefaultThreshold
+	}
+	if !request.DeduplicationCandidates.Present {
+		profile.DeduplicationCandidateLimit = repoaudit.DeduplicationDefaultCandidateLimit
 	}
 	return profile
 }
@@ -447,6 +508,16 @@ func applyRepositoryReviewProfileRequest(
 	profile.ReviewFocus = request.ReviewFocus
 	profile.ScopePolicy = request.ScopePolicy
 	profile.ReviewerModel = request.ReviewerModel
+	profile.DeduplicationModel = request.DeduplicationModel
+	if request.DeduplicationThreshold.Present || request.DeduplicationCandidates.Present {
+		profile.DeduplicationSettingsSpecified = true
+	}
+	if request.DeduplicationThreshold.Present && !request.DeduplicationThreshold.Null {
+		profile.DeduplicationSimilarityThreshold = request.DeduplicationThreshold.Value
+	}
+	if request.DeduplicationCandidates.Present && !request.DeduplicationCandidates.Null {
+		profile.DeduplicationCandidateLimit = request.DeduplicationCandidates.Value
+	}
 	profile.IssueWriterModel = request.IssueWriterModel
 	if request.IssuePrompt != nil {
 		profile.IssuePrompt = *request.IssuePrompt
@@ -469,6 +540,14 @@ func validRepositoryReviewAssignmentTimeoutRequest(value repositoryReviewOptiona
 	return !value.Present || !value.Null &&
 		value.Value >= repoaudit.MinRepositoryReviewAssignmentTimeoutSeconds &&
 		value.Value <= repoaudit.MaxRepositoryReviewAssignmentTimeoutSeconds && value.Value%60 == 0
+}
+
+func validRepositoryReviewDeduplicationRequest(request repositoryReviewProfileConfigRequest) bool {
+	threshold := request.DeduplicationThreshold
+	candidates := request.DeduplicationCandidates
+	return (!threshold.Present || !threshold.Null && threshold.Value >= 0 && threshold.Value <= 100) &&
+		(!candidates.Present || !candidates.Null && candidates.Value >= 0 &&
+			candidates.Value <= repoaudit.DeduplicationMaximumShortlist)
 }
 
 func ensureRepositoryReviewProfileInactive(

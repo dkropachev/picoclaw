@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -107,7 +108,7 @@ func TestRepositoryReviewProfileV1MigratesDefaultIssuePrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(rewritten, []byte(`"schema_version":3`)) ||
+	if !bytes.Contains(rewritten, []byte(fmt.Sprintf(`"schema_version":%d`, RepositoryReviewProfileSchemaVersion))) ||
 		!bytes.Contains(rewritten, []byte(`"issue_prompt"`)) {
 		t.Fatalf("v1 profile was not durably rewritten: %s", rewritten)
 	}
