@@ -1258,7 +1258,7 @@ export async function listRepositoryReviewAutomationFindingsPage(
     Partial<RepositoryReviewRunFindingsCollectionPage>
   >(
     collectionListURL(
-      `${automationPath(automationID)}/findings`,
+      `${automationPath(automationID)}/run-findings`,
       collectionInput,
     ),
     undefined,
@@ -1352,7 +1352,7 @@ export async function getRepositoryReviewAutomationFinding(
     Partial<RepositoryReviewFindingDetail> & {
       draft?: RepositoryReviewIssueDraft
     }
-  >(automationFindingPath(automationID, findingID), undefined, signal)
+  >(automationRunFindingPath(automationID, findingID), undefined, signal)
   return normalizeFindingDetail(value)
 }
 
@@ -2638,6 +2638,13 @@ function automationFindingPath(
   findingID: string,
 ): string {
   return `${automationPath(automationID)}/findings/${encodeURIComponent(findingID)}`
+}
+
+function automationRunFindingPath(
+  automationID: string,
+  findingID: string,
+): string {
+  return `${automationPath(automationID)}/run-findings/${encodeURIComponent(findingID)}`
 }
 
 function automationIssuePath(automationID: string, draftID: string): string {
