@@ -74,7 +74,8 @@ captured for each structured CLI add/remove operation and edit preflight.
 ## Surface Ownership
 
 Owns: CODE cmd/picoclaw/internal/mcp/**
-Owns: CODE integration/**
+Owns: CODE integration/fixtures/mcp-streamable-server/**
+Owns: CODE integration/suites/mcp-streamable/**
 Owns: CODE pkg/mcp/**
 Owns: CODE pkg/tools/integration/mcp/**
 Owns: CODE web/backend/api/mcp*

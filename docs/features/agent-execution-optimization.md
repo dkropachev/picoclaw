@@ -68,6 +68,12 @@ scope items, and the structured output schema.
   managed-child, and combined output. One
   request-local compiled-pattern cache keeps large arrays bounded; malformed
   pattern declarations fail closed instead of silently disabling the contract.
+- Every concurrently dispatched managed child owns a detached output-contract
+  validation cache while retaining the same immutable normalized schema.
+  Provider-call telemetry counts every dispatch separately from the subset
+  returning valid reported usage, including structured-output repairs, so
+  missing, estimated, malformed, or overflowed observations cannot become a
+  complete aggregate through concurrent combination.
 - Non-obvious constraints: managed splitting is disabled without an enabled
   JSON output contract; hidden children must not write to chat history or
   publish intermediate responses; calibration intentionally disables

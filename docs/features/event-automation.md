@@ -250,6 +250,8 @@ Owns: CODE pkg/prworkspace/http_collection.go
 Owns: CODE pkg/gateway/event_webhook*
 Owns: CODE pkg/gateway/event_channel*
 Owns: CODE pkg/gateway/event_operator*
+Owns: CODE integration/codingagentbenchmark/**
+Owns: CODE integration/fixtures/coding-agent-benchmark/**
 Owns: CODE cmd/picoclaw/internal/events/**
 Owns: CODE cmd/picoclaw/internal/localgateway/**
 Owns: CODE cmd/picoclaw/internal/code/**
@@ -328,6 +330,7 @@ Owns: TEST pkg/gateway/pr_workspace_*
 Owns: TEST pkg/gateway/development_*
 Owns: TEST pkg/gateway/gated_code_*
 Owns: TEST pkg/gateway/coding_agent_benchmark_*
+Owns: TEST integration/codingagentbenchmark/**
 Owns: TEST pkg/prworkspace/http_collection_test.go
 Owns: TEST web/frontend/src/routes/-development-collection-route.test.tsx
 Owns: TEST cmd/picoclaw/internal/events/*

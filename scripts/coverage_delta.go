@@ -56,7 +56,10 @@ type coveragePlan struct {
 	GlobalRelevant    bool
 }
 
-const featureCoverageRegressionToleranceStatements = 10
+const (
+	featureCoverageRegressionToleranceStatements = 10
+	coverageNestedBenchmarkSkipPattern           = `^Test(GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath)$`
+)
 
 type listedPackage struct {
 	ImportPath string
@@ -474,6 +477,12 @@ func runGoCoverage(
 		args = append(args, "-tags", tags)
 	}
 	args = append(args, "-covermode=atomic", "-coverprofile", profilePath)
+	// These tests spawn full external graders with nested normal and race test
+	// processes. Running both inside the repository-wide atomic coverage command
+	// can exhaust a shared runner and produce incomplete grader evidence.
+	// Ordinary and race CI execute both tests directly; coverage retains every
+	// other test in their packages.
+	args = append(args, "-skip", coverageNestedBenchmarkSkipPattern)
 	if len(coverImports) > 0 {
 		args = append(args, "-coverpkg", strings.Join(coverImports, ","))
 	}

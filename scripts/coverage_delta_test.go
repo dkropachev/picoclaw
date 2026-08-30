@@ -8,10 +8,34 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+func TestCoverageNestedBenchmarkSkipPatternIsExact(t *testing.T) {
+	t.Parallel()
+
+	pattern := regexp.MustCompile(coverageNestedBenchmarkSkipPattern)
+	for _, name := range []string{
+		"TestGraderAcceptsReferenceAndReportsMutationEvidence",
+		"TestCodingAgentBenchmarkScriptedGatewayPath",
+	} {
+		if !pattern.MatchString(name) {
+			t.Fatalf("coverage skip pattern omitted %q", name)
+		}
+	}
+	for _, name := range []string{
+		"TestGraderRejectsOutsideOutput",
+		"TestCodingAgentBenchmarkLiveOptIn",
+		"PrefixTestCodingAgentBenchmarkScriptedGatewayPath",
+	} {
+		if pattern.MatchString(name) {
+			t.Fatalf("coverage skip pattern was too broad for %q", name)
+		}
+	}
+}
 
 func TestCoverageRegressionTracksUncoveredStatementDebt(t *testing.T) {
 	tests := []struct {
