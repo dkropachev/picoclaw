@@ -22,6 +22,14 @@ type repositoryModelEvaluationCASBlockStore struct {
 	blockedOnce     sync.Once
 }
 
+type repositoryModelEvaluationCancellationFixture struct {
+	controller *repositoryModelEvaluationController
+	base       repoeval.Store
+	running    repoeval.Evaluation
+	runCtx     context.Context
+	block      *repositoryModelEvaluationCASBlockStore
+}
+
 func TestRepositoryModelEvaluationCancelingCannotTransitionToFailed(t *testing.T) {
 	store := repoeval.NewStore(t.TempDir())
 	draft, err := store.Create(t.Context(), repositoryModelEvaluationCreateRequest("owner/cancel-only"))
@@ -88,6 +96,215 @@ func (s *repositoryModelEvaluationCASBlockStore) Update(
 		<-s.release
 	}
 	return s.base.Update(ctx, id, version, mutate)
+}
+
+func newRepositoryModelEvaluationCancellationFixture(
+	t *testing.T,
+	repository string,
+) repositoryModelEvaluationCancellationFixture {
+	t.Helper()
+	handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
+	controller := newRepositoryModelEvaluationController(handler)
+	handler.repositoryModelEvaluationController = controller
+	t.Cleanup(handler.Shutdown)
+	if err := controller.Start(); err != nil {
+		t.Fatal(err)
+	}
+	base, _, err := handler.repositoryModelEvaluationStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := seedRunningRepositoryModelEvaluation(t, controller, base, repository)
+	_, runCtx, cancel, err := controller.reserveActive(running.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := &repositoryModelEvaluationCASBlockStore{
+		base: base, status: repoeval.StatusRunning, blockOccurrence: 1,
+		blocked: make(chan struct{}), release: make(chan struct{}),
+	}
+	controller.store = block
+	t.Cleanup(func() {
+		select {
+		case <-block.release:
+		default:
+			close(block.release)
+		}
+		cancel()
+		controller.mu.Lock()
+		active, activeFound := controller.active[running.ID]
+		controller.mu.Unlock()
+		if activeFound {
+			active.cancel()
+			controller.releaseActive(running.ID, active.token)
+		}
+	})
+	return repositoryModelEvaluationCancellationFixture{
+		controller: controller, base: base, running: running,
+		runCtx: runCtx, block: block,
+	}
+}
+
+type repositoryModelEvaluationCancellationResult struct {
+	evaluation repoeval.Evaluation
+	err        error
+}
+
+func startRepositoryModelEvaluationCancellation(
+	t *testing.T,
+	fixture repositoryModelEvaluationCancellationFixture,
+) <-chan repositoryModelEvaluationCancellationResult {
+	t.Helper()
+	result := make(chan repositoryModelEvaluationCancellationResult, 1)
+	go func() {
+		evaluation, err := fixture.controller.Cancel(
+			context.Background(), fixture.running.ID, fixture.running.Version,
+		)
+		result <- repositoryModelEvaluationCancellationResult{evaluation: evaluation, err: err}
+	}()
+	select {
+	case <-fixture.block.blocked:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not reach the guarded CAS boundary")
+	}
+	return result
+}
+
+func TestRepositoryModelEvaluationCancelRetriesSameTokenVersionChurn(t *testing.T) {
+	fixture := newRepositoryModelEvaluationCancellationFixture(t, "owner/cancel-version-churn")
+	result := startRepositoryModelEvaluationCancellation(t, fixture)
+	if _, err := fixture.base.Update(
+		t.Context(), fixture.running.ID, fixture.running.Version,
+		func(value *repoeval.Evaluation) error {
+			value.Progress.Message = "Concurrent progress update."
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	close(fixture.block.release)
+	completed := <-result
+	if completed.err != nil || completed.evaluation.Status != repoeval.StatusCanceled {
+		t.Fatalf("same-token cancellation=%#v err=%v", completed.evaluation, completed.err)
+	}
+	select {
+	case <-fixture.runCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("same-token cancellation did not cancel its active context")
+	}
+}
+
+func TestRepositoryModelEvaluationCancelRejectsReplacementToken(t *testing.T) {
+	fixture := newRepositoryModelEvaluationCancellationFixture(t, "owner/cancel-token-replaced")
+	result := startRepositoryModelEvaluationCancellation(t, fixture)
+	if _, err := fixture.base.Update(
+		t.Context(), fixture.running.ID, fixture.running.Version,
+		func(value *repoeval.Evaluation) error {
+			value.Progress.Message = "Concurrent replacement progress."
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	replacementCtx, replacementCancel := context.WithCancel(fixture.controller.ctx)
+	t.Cleanup(replacementCancel)
+	replacementToken := "replacement-token"
+	fixture.controller.mu.Lock()
+	fixture.controller.active[fixture.running.ID] = repositoryModelEvaluationActiveRun{
+		token: replacementToken, cancel: replacementCancel,
+	}
+	fixture.controller.mu.Unlock()
+	close(fixture.block.release)
+	completed := <-result
+	if !errors.Is(completed.err, repoeval.ErrConflict) {
+		t.Fatalf("replacement-token cancellation error=%v", completed.err)
+	}
+	current, found, err := fixture.base.Get(t.Context(), fixture.running.ID)
+	if err != nil || !found || current.Status != repoeval.StatusRunning {
+		t.Fatalf("replacement-token durable state=%#v found=%v err=%v", current, found, err)
+	}
+	select {
+	case <-replacementCtx.Done():
+		t.Fatal("stale cancellation canceled the replacement token")
+	default:
+	}
+	select {
+	case <-fixture.runCtx.Done():
+		t.Fatal("failed stale cancellation canceled the captured context")
+	default:
+	}
+}
+
+func TestRepositoryModelEvaluationCancelAcceptsConcurrentDurableCancellation(t *testing.T) {
+	fixture := newRepositoryModelEvaluationCancellationFixture(t, "owner/cancel-concurrent")
+	result := startRepositoryModelEvaluationCancellation(t, fixture)
+	canceling, err := fixture.base.Update(
+		t.Context(), fixture.running.ID, fixture.running.Version,
+		repositoryModelEvaluationApplyCancellation,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, err := fixture.base.Update(
+		t.Context(), canceling.ID, canceling.Version,
+		func(value *repoeval.Evaluation) error {
+			value.Status = repoeval.StatusCanceled
+			value.Progress.Stage = repoeval.ProgressCanceled
+			repositoryModelEvaluationClearActiveChildren(&value.Progress)
+			value.Progress.Message = "Canceled at a durable boundary."
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(fixture.block.release)
+	completed := <-result
+	if completed.err != nil || completed.evaluation.Status != repoeval.StatusCanceled ||
+		completed.evaluation.Version != canceled.Version ||
+		!completed.evaluation.UpdatedAt.Equal(canceled.UpdatedAt) {
+		t.Fatalf("concurrent durable cancellation=%#v err=%v", completed.evaluation, completed.err)
+	}
+	select {
+	case <-fixture.runCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("concurrent durable cancellation did not cancel the captured context")
+	}
+}
+
+func TestRepositoryModelEvaluationCancelAcceptsConcurrentFinalizer(t *testing.T) {
+	fixture := newRepositoryModelEvaluationCancellationFixture(t, "owner/cancel-finalizer")
+	fixture.block.status = repoeval.StatusCanceling
+	result := startRepositoryModelEvaluationCancellation(t, fixture)
+	canceling, found, err := fixture.base.Get(t.Context(), fixture.running.ID)
+	if err != nil || !found || canceling.Status != repoeval.StatusCanceling {
+		t.Fatalf("canceling state=%#v found=%v err=%v", canceling, found, err)
+	}
+	canceled, err := fixture.base.Update(
+		t.Context(), canceling.ID, canceling.Version,
+		func(value *repoeval.Evaluation) error {
+			value.Status = repoeval.StatusCanceled
+			value.Progress.Stage = repoeval.ProgressCanceled
+			repositoryModelEvaluationClearActiveChildren(&value.Progress)
+			value.Progress.Message = "Canceled at a durable boundary."
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(fixture.block.release)
+	completed := <-result
+	if completed.err != nil || completed.evaluation.Status != repoeval.StatusCanceled ||
+		completed.evaluation.Version != canceled.Version ||
+		!completed.evaluation.UpdatedAt.Equal(canceled.UpdatedAt) {
+		t.Fatalf("concurrent finalizer cancellation=%#v err=%v", completed.evaluation, completed.err)
+	}
+	select {
+	case <-fixture.runCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("concurrent finalizer did not cancel the captured context")
+	}
 }
 
 func TestRepositoryModelEvaluationCancelFencesPreflightProviderResult(t *testing.T) {

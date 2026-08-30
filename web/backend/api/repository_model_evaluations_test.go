@@ -568,12 +568,12 @@ func TestRepositoryModelEvaluationRoutesFullPatchResumeAndBusyDelete(t *testing.
 	if busyDelete.Code != http.StatusConflict {
 		t.Fatalf("busy delete status=%d body=%s", busyDelete.Code, busyDelete.Body.String())
 	}
-	cancel := repositoryModelEvaluationMutation(
+	cancel := repositoryModelEvaluationCancelMutation(
 		t,
+		handler,
 		mux,
-		http.MethodPost,
-		"/api/model-evaluations/"+created.ID+"/cancel",
-		map[string]any{"expected_version": active.Version},
+		created.ID,
+		active.Version,
 	)
 	if cancel.Code != http.StatusAccepted {
 		t.Fatalf("cancel status=%d body=%s", cancel.Code, cancel.Body.String())
@@ -1692,6 +1692,55 @@ func repositoryModelEvaluationMutation(
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
 	return response
+}
+
+func repositoryModelEvaluationCancelMutation(
+	t *testing.T,
+	handler *Handler,
+	mux *http.ServeMux,
+	id string,
+	expectedVersion int64,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		response := repositoryModelEvaluationMutation(
+			t,
+			mux,
+			http.MethodPost,
+			"/api/model-evaluations/"+id+"/cancel",
+			map[string]any{"expected_version": expectedVersion},
+		)
+		if response.Code != http.StatusConflict {
+			return response
+		}
+		current, found, err := handler.getRepositoryModelEvaluation(t.Context(), id)
+		if err != nil || !found {
+			if err == nil {
+				err = os.ErrNotExist
+			}
+			t.Fatalf("reload model evaluation after cancel conflict: %v", err)
+		}
+		switch current.Status {
+		case repoeval.StatusCanceled:
+			// Exercise the production idempotency path instead of synthesizing
+			// success in the test helper.
+			expectedVersion = current.Version
+		case repoeval.StatusPreflighting,
+			repoeval.StatusReady,
+			repoeval.StatusRunning,
+			repoeval.StatusJudging,
+			repoeval.StatusAnalyzing,
+			repoeval.StatusCanceling:
+			expectedVersion = current.Version
+		default:
+			return response
+		}
+		if !time.Now().Before(deadline) {
+			return response
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func waitRepositoryModelEvaluationStatus(
