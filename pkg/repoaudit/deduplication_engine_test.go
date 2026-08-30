@@ -170,8 +170,18 @@ func TestDeduplicationScoringResponseValidationRejectsIncompleteAndDuplicateIDs(
 	tests := []DeduplicationScoringResponse{
 		{Scores: valid.Scores[:1]},
 		{Scores: []DeduplicationCandidateScore{valid.Scores[0], valid.Scores[0]}},
-		{Scores: []DeduplicationCandidateScore{valid.Scores[0], {CandidateID: "other", Score: 90, Explanation: "Other."}}},
-		{Scores: []DeduplicationCandidateScore{valid.Scores[0], {CandidateID: "candidate-000002", Score: 101, Explanation: "Invalid."}}},
+		{
+			Scores: []DeduplicationCandidateScore{
+				valid.Scores[0],
+				{CandidateID: "other", Score: 90, Explanation: "Other."},
+			},
+		},
+		{
+			Scores: []DeduplicationCandidateScore{
+				valid.Scores[0],
+				{CandidateID: "candidate-000002", Score: 101, Explanation: "Invalid."},
+			},
+		},
 		{Scores: []DeduplicationCandidateScore{valid.Scores[0], {CandidateID: "candidate-000002", Score: 90}}},
 	}
 	for _, response := range tests {

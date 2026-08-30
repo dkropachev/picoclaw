@@ -156,14 +156,14 @@ func (c *repositoryReviewController) advanceHistoricalFindingDeduplication(
 		// inspect conflicts. Retry re-snapshots the then-current profile.
 		return nil
 	case repoaudit.HistoricalDeduplicationMerging:
-		_, _, err := c.leasedStore.CompleteHistoricalDeduplicationMerge(
+		_, _, mergeErr := c.leasedStore.CompleteHistoricalDeduplicationMerge(
 			state.Repository, replay.MergeLease.ID,
 		)
-		if err != nil {
+		if mergeErr != nil {
 			_, _, failErr := c.leasedStore.FailHistoricalDeduplicationReplay(
 				state.Repository, replay.MergeLease.ID,
 			)
-			return errors.Join(err, failErr)
+			return errors.Join(mergeErr, failErr)
 		}
 		return nil
 	case repoaudit.HistoricalDeduplicationPending:

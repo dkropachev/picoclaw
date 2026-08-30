@@ -132,8 +132,8 @@ func (s Store) ClaimDeduplicationJob(
 		state.UpdatedAt = now
 		reconcileFindingsProcessingCounters(&state)
 		state.FindingsProcessing.UpdatedAt = now
-		if err := s.save(&state); err != nil {
-			return RepositoryState{}, DeduplicationClaim{}, false, err
+		if saveErr := s.save(&state); saveErr != nil {
+			return RepositoryState{}, DeduplicationClaim{}, false, saveErr
 		}
 		return state, DeduplicationClaim{Job: *job, RawFinding: *raw}, false, nil
 	}
@@ -618,13 +618,13 @@ func (s Store) processOneDeduplicationJob(
 	_, claim, claimed, err := s.ClaimDeduplicationJob(repository, jobID, options.LeaseDuration)
 	if err != nil {
 		result.err = err
-		return
+		return result
 	}
 	if !claimed {
 		result.deferred = claim.Job.State == DeduplicationJobPending ||
 			claim.Job.State == DeduplicationJobRunning
 		result.failed = claim.Job.State == DeduplicationJobFailed
-		return
+		return result
 	}
 	needsModel := claim.Job.ModelSnapshot.CandidateLimit > 0 && len(claim.Candidates) > 0
 	var releaseSlot func()
@@ -636,7 +636,7 @@ func (s Store) processOneDeduplicationJob(
 			)
 			result.failed = terminal
 			result.err = errors.Join(err, releaseErr)
-			return
+			return result
 		}
 	}
 	modelResult, modelErr := EvaluateDeduplicationCandidates(
@@ -652,7 +652,7 @@ func (s Store) processOneDeduplicationJob(
 		)
 		result.failed = terminal
 		result.err = errors.Join(modelErr, releaseErr)
-		return
+		return result
 	}
 	completion := DeduplicationCompletion{
 		JobID: claim.Job.ID, LeaseID: claim.Job.LeaseID,
@@ -683,11 +683,11 @@ func (s Store) processOneDeduplicationJob(
 		)
 		result.failed = terminal
 		result.err = errors.Join(completionErr, releaseErr)
-		return
+		return result
 	}
 	result.created = created
 	result.duplicate = !created
-	return
+	return result
 }
 
 // FailDeduplicationJob releases a verified lease after a provider, validation,

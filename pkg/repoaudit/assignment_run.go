@@ -542,7 +542,6 @@ func persistRepositoryReviewCheckpointObservation(
 			return nil, err
 		}
 		acceptedIDs = append(acceptedIDs, rawID)
-		contextUsed = true
 		candidateObservation := findingObservationFrom(
 			candidate, contextRecord.ID, observation.Model, observation.Reviewer,
 		)

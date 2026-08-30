@@ -41,8 +41,8 @@ func TestDeduplicationWorkerSerializesBucketAndPromotesOnlyDeduplicatedFinding(t
 				request DeduplicationScoringRequest,
 			) (DeduplicationScoringResponse, error) {
 				scoringCalls.Add(1)
-				if _, _, err := fixture.store.Get(fixture.repository); err != nil {
-					return DeduplicationScoringResponse{}, err
+				if _, _, loadErr := fixture.store.Get(fixture.repository); loadErr != nil {
+					return DeduplicationScoringResponse{}, loadErr
 				}
 				scores := make([]DeduplicationCandidateScore, 0, len(request.Candidates))
 				for _, candidate := range request.Candidates {
@@ -186,12 +186,12 @@ func TestDeduplicationWorkerCandidateLimitZeroSkipsModels(t *testing.T) {
 		ReviewerModel: "review-a", DeduplicationModel: "review-a",
 		SimilarityThreshold: 90, CandidateLimit: 0,
 	}
-	if _, err := fixture.store.BeginCampaign(t.Context(), BeginCampaignRequest{
+	if _, beginErr := fixture.store.BeginCampaign(t.Context(), BeginCampaignRequest{
 		Repository: fixture.repository, CampaignID: fixture.campaignID,
 		CommitSHA: fixture.plan.CommitSHA, ExpectedReviewVersion: state.ReviewVersion,
 		DeduplicationSnapshot: &snapshot,
-	}); err != nil {
-		t.Fatal(err)
+	}); beginErr != nil {
+		t.Fatal(beginErr)
 	}
 	// Binding the legacy campaign snapshot advances its review CAS, so produce
 	// a fresh plan before beginning the run.
@@ -203,16 +203,19 @@ func TestDeduplicationWorkerCandidateLimitZeroSkipsModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.BeginRepositoryReviewRun(t.Context(), BeginRepositoryReviewRunRequest{
+	if _, beginErr := fixture.store.BeginRepositoryReviewRun(t.Context(), BeginRepositoryReviewRunRequest{
 		Plan: fixture.plan, RunID: "no-model-run", ReviewableFiles: fixture.files,
-	}); err != nil {
-		t.Fatal(err)
+	}); beginErr != nil {
+		t.Fatal(beginErr)
 	}
 	finding := repositoryReviewCampaignFinding(fixture.files[0], "same diagnosis")
 	checkpoint := assignmentCoverageCheckpoint(fixture, "no-model-run", 0, fixture.files)
 	checkpoint.Observation.Findings = []FindingCandidate{finding, finding}
-	if _, err := fixture.store.CheckpointRepositoryReviewAssignment(t.Context(), checkpoint); err != nil {
-		t.Fatal(err)
+	if _, checkpointErr := fixture.store.CheckpointRepositoryReviewAssignment(
+		t.Context(),
+		checkpoint,
+	); checkpointErr != nil {
+		t.Fatal(checkpointErr)
 	}
 	processed, err := fixture.store.ProcessPendingDeduplicationJobs(
 		t.Context(), fixture.repository, DeduplicationProcessOptions{
@@ -316,10 +319,10 @@ func TestDeduplicationCompletionRejectsStaleUniverse(t *testing.T) {
 	}
 	state.DeduplicatedFindings[0].Version++
 	state.Version++
-	if err := fixture.store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := fixture.store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
-	_, _, _, err = fixture.store.CompleteDeduplicationJob(
+	completedState, completedFinding, created, completionErr := fixture.store.CompleteDeduplicationJob(
 		fixture.repository,
 		DeduplicationCompletion{
 			JobID: claim.Job.ID, LeaseID: claim.Job.LeaseID,
@@ -333,8 +336,16 @@ func TestDeduplicationCompletionRejectsStaleUniverse(t *testing.T) {
 			},
 		},
 	)
-	if !errors.Is(err, ErrDeduplicationUniverseChanged) {
-		t.Fatalf("stale completion error = %v", err)
+	if !errors.Is(completionErr, ErrDeduplicationUniverseChanged) {
+		t.Fatalf("stale completion error = %v", completionErr)
+	}
+	if completedState.Version != 0 || completedFinding.ID != "" || created {
+		t.Fatalf(
+			"stale completion returned state=%#v finding=%#v created=%v",
+			completedState,
+			completedFinding,
+			created,
+		)
 	}
 }
 
@@ -355,8 +366,8 @@ func TestDeduplicationAttemptLimitDoesNotBlockLaterBucketJob(t *testing.T) {
 	state := result.State
 	state.DeduplicationJobs[0].Attempts = DeduplicationAttemptLimit
 	state.Version++
-	if err := fixture.store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := fixture.store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	processed, err := fixture.store.ProcessPendingDeduplicationJobs(
 		t.Context(), fixture.repository, DeduplicationProcessOptions{},

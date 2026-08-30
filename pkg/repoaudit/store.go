@@ -1178,8 +1178,8 @@ func (s Store) PrepareIssue(request IssueDraftRequest) (RepositoryState, IssueDr
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, IssueDraft{}, err
+	if historicalErr := HistoricalDeduplicationMutationAllowed(state); historicalErr != nil {
+		return RepositoryState{}, IssueDraft{}, historicalErr
 	}
 	findings, ids, err := selectedFindings(state.Findings, request.FindingIDs)
 	if err != nil {

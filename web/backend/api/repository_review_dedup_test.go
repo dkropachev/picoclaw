@@ -374,8 +374,8 @@ func seedRepositoryReviewDeduplicationAPIState(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(statePath, data, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	loaded, found, err := repoaudit.NewStore(workspace).Get(state.Repository)
 	if err != nil || !found {

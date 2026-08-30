@@ -87,8 +87,10 @@ func persistLegacyRecordFinding(
 	raw.DeduplicatedFindingID = deduplicated.ID
 	raw.History = []RawFindingHistoryEntry{
 		{State: RawFindingDeduplicationPending, Disposition: RawFindingDispositionUndecided, At: completedAt},
-		{State: RawFindingDeduplicationCompleted, Disposition: RawFindingDispositionNew,
-			DeduplicatedFindingID: deduplicated.ID, At: completedAt},
+		{
+			State: RawFindingDeduplicationCompleted, Disposition: RawFindingDispositionNew,
+			DeduplicatedFindingID: deduplicated.ID, At: completedAt,
+		},
 	}
 	state.RawFindings = append(state.RawFindings, raw)
 	state.DeduplicatedFindings = append(state.DeduplicatedFindings, deduplicated)

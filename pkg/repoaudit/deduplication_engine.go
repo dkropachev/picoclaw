@@ -226,8 +226,8 @@ func EvaluateDeduplicationCandidates(
 	}
 	scores := make([]DeduplicationCandidateScore, 0, len(ordered))
 	for _, request := range requests {
-		if err := ctx.Err(); err != nil {
-			return DeduplicationModelResult{}, err
+		if contextErr := ctx.Err(); contextErr != nil {
+			return DeduplicationModelResult{}, contextErr
 		}
 		response, scoreErr := score(ctx, snapshot, DeduplicationScoringInstructions, request)
 		if scoreErr != nil {

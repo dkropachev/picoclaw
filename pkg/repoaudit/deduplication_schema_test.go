@@ -152,14 +152,14 @@ func TestAssignmentCheckpointAtomicallyAdmitsRawFindingAndJob(t *testing.T) {
 		ReviewerModel: "review-a", DeduplicationModel: "dedup-a",
 		SimilarityThreshold: 89, CandidateLimit: 1,
 	}
-	if err := fixture.store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := fixture.store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	plan := fixture.plan
-	if _, err := fixture.store.BeginRepositoryReviewRun(context.Background(), BeginRepositoryReviewRunRequest{
+	if _, beginErr := fixture.store.BeginRepositoryReviewRun(context.Background(), BeginRepositoryReviewRunRequest{
 		Plan: plan, RunID: "dedup-checkpoint", ReviewableFiles: fixture.files,
-	}); err != nil {
-		t.Fatal(err)
+	}); beginErr != nil {
+		t.Fatal(beginErr)
 	}
 	assignment := plan.AssignmentPlans[0]
 	observation := Observation{
@@ -199,7 +199,7 @@ func TestAssignmentCheckpointAtomicallyAdmitsRawFindingAndJob(t *testing.T) {
 	tampered := result.State
 	tampered.RawFindings = append([]RawReviewFinding(nil), result.State.RawFindings...)
 	tampered.RawFindings[0].Title = "rewritten diagnosis"
-	if err := fixture.store.save(&tampered); err == nil {
+	if saveErr := fixture.store.save(&tampered); saveErr == nil {
 		t.Fatal("raw diagnosis mutation was accepted")
 	}
 

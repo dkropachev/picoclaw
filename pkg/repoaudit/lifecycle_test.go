@@ -89,7 +89,11 @@ func TestSchemaOneListMigrationAndExplicitJobReconciliation(t *testing.T) {
 	}
 	after, _, _ := store.Get(state.Repository)
 	if len(after.MappingJobs) != 0 || !after.HistoricalDeduplication.Required {
-		t.Fatalf("legacy mappings bypassed replay: jobs=%#v replay=%#v", after.MappingJobs, after.HistoricalDeduplication)
+		t.Fatalf(
+			"legacy mappings bypassed replay: jobs=%#v replay=%#v",
+			after.MappingJobs,
+			after.HistoricalDeduplication,
+		)
 	}
 
 	persisted, err := os.ReadFile(store.path(state.Repository))

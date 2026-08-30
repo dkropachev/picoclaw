@@ -108,8 +108,8 @@ func TestHistoricalReplayAdmitsOnlyOldestIncompleteBatch(t *testing.T) {
 	}
 	state.Version++
 	state.UpdatedAt = now
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	state, replay, err := store.FreezeHistoricalDeduplicationReplay(
 		state.Repository,
@@ -210,9 +210,11 @@ func TestHistoricalReplayAssociatesDeduplicatedOccurrenceWithoutAnotherModelCall
 	state := RepositoryState{
 		Findings: []Finding{
 			{ID: "legacy", RepositoryFindingID: "repository", RepositoryMatchState: RepositoryMatchNew},
-			{ID: "dedup", Repository: "owner/repo", CommitSHA: strings.Repeat("a", 40),
+			{
+				ID: "dedup", Repository: "owner/repo", CommitSHA: strings.Repeat("a", 40),
 				File: FileRef{Path: "main.go"}, Title: "defect", Severity: "high",
-				Status: FindingOpen, Version: 1, CreatedAt: now, UpdatedAt: now},
+				Status: FindingOpen, Version: 1, CreatedAt: now, UpdatedAt: now,
+			},
 		},
 		RawFindings: []RawReviewFinding{{
 			ID: "rrw_historical", LegacyFindingID: "legacy",
@@ -334,14 +336,20 @@ func TestHistoricalReplayRetrySeparatesMixedLiveSources(t *testing.T) {
 		}},
 		RepositoryFindings: []RepositoryFinding{
 			{ID: "historical-repository", Version: 1, ReviewFindingIDs: []string{"legacy"}},
-			{ID: "live-repository", Version: 1, ReviewFindingIDs: []string{"mixed"},
-				PathSymbolHistory: []RepositoryFindingPathSymbol{{ReviewFindingID: "mixed"}}},
+			{
+				ID: "live-repository", Version: 1, ReviewFindingIDs: []string{"mixed"},
+				PathSymbolHistory: []RepositoryFindingPathSymbol{{ReviewFindingID: "mixed"}},
+			},
 		},
 		DeduplicationJobs: []DeduplicationJob{
-			{ID: "historical-job", RawFindingID: historical.ID, State: DeduplicationJobCompleted,
-				InsertionOrdinal: 1, Decision: DeduplicationJudgment{Decision: "new"}},
-			{ID: "live-job", RawFindingID: live.ID, State: DeduplicationJobCompleted,
-				InsertionOrdinal: 2, Decision: DeduplicationJudgment{Decision: "duplicate", CandidateID: "mixed"}},
+			{
+				ID: "historical-job", RawFindingID: historical.ID, State: DeduplicationJobCompleted,
+				InsertionOrdinal: 1, Decision: DeduplicationJudgment{Decision: "new"},
+			},
+			{
+				ID: "live-job", RawFindingID: live.ID, State: DeduplicationJobCompleted,
+				InsertionOrdinal: 2, Decision: DeduplicationJudgment{Decision: "duplicate", CandidateID: "mixed"},
+			},
 		},
 		MappingJobs: []RepositoryMappingJob{{
 			ID: mappingJobID("mixed"), ReviewFindingID: "mixed",
@@ -446,8 +454,8 @@ func TestHistoricalDeduplicationNarrowMergeFenceAndRetry(t *testing.T) {
 	}
 	state.Version++
 	state.UpdatedAt = now
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	groups := []HistoricalDeduplicationMergeGroup{{Members: []HistoricalDeduplicationFindingVersion{
 		{ID: secondRepositoryFinding.ID, Version: secondRepositoryFinding.Version},
@@ -489,7 +497,7 @@ func TestHistoricalDeduplicationNarrowMergeFenceAndRetry(t *testing.T) {
 		HistoricalDeduplicationMergeInProgress(failed) {
 		t.Fatalf("failure release=%#v err=%v", failedReplay, err)
 	}
-	failed, refreshed, mutationErr := store.UpdateRepositoryFindingIssueSnapshot(
+	_, refreshed, mutationErr := store.UpdateRepositoryFindingIssueSnapshot(
 		state.Repository, RepositoryIssueSnapshotUpdate{
 			RepositoryFindingID: firstRepositoryFinding.ID,
 			ExpectedVersion:     firstRepositoryFinding.Version,
