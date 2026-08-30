@@ -1,0 +1,36 @@
+version: 2
+id: transfer-idempotency-v1
+language: go
+task: task.md
+visible-tests: go test ./...
+hidden-grader: external
+network: disabled
+dependencies: forbidden
+model-profile:
+  reasoning-effort: low
+local-ci:
+  definition: .picoclaw/ci.yaml
+  steps:
+    - id: format
+      name: Go format
+      kind: lint
+      run: |
+        files="$(gofmt -l .)"
+        test -z "$files"
+      shell: sh
+      timeout-seconds: 30
+    - id: vet
+      name: Go vet
+      kind: lint
+      command: [go, vet, ./...]
+      timeout-seconds: 60
+    - id: test
+      name: Go tests
+      kind: test
+      command: [go, test, -count=1, ./...]
+      timeout-seconds: 60
+    - id: race
+      name: Go race tests
+      kind: test
+      command: [go, test, -race, -count=1, ./...]
+      timeout-seconds: 120

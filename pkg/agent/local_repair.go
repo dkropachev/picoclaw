@@ -55,6 +55,15 @@ Authority and safety rules:
 - You have no shell, process, network, workflow, session, messaging, hook, MCP, Git, CI, commit, push, merge, or provider-write capability. Never claim to have performed those actions.
 - Keep changes focused. When finished, report the files and behavior changed plus any unresolved blocker. Do not claim validation that you could not run.`
 
+const localRepairEfficiencyPrompt = `
+
+Efficient edit rules:
+- Batch independent read_file and list_dir calls in one response when possible.
+- Prefer one coherent apply_patch for related changes instead of repeated small edits.
+- read_file returns a whole-file revision_sha256. For an inclusive line-range edit, pass that value as expected_revision and include literal line endings in new_text.
+- If a line-range edit reports a stale revision, reread only the affected range before retrying.
+- After a failed edit, change strategy or gather the missing evidence; do not repeat the same failing edit.`
+
 var (
 	ErrLocalRepairInvalid = errors.New("invalid local repair request")
 	ErrLocalRepairLimit   = errors.New("local repair iteration limit reached")
@@ -70,7 +79,7 @@ var (
 func ControllerLocalRepairPromptDigest() string {
 	digest := sha256.Sum256(append(
 		[]byte("picoclaw-local-repair-prompt-digest-v1\x00"),
-		[]byte(localRepairSystemPrompt)...,
+		[]byte(localRepairSystemPrompt+localRepairEfficiencyPrompt)...,
 	))
 	return fmt.Sprintf("%x", digest[:])
 }
@@ -95,12 +104,13 @@ type PinnedWorkspaceAcquirer interface {
 // concrete provider target. A trusted controller is responsible for holding
 // any surrounding runtime-generation lease for the lifetime of the runner.
 type LocalRepairRunnerConfig struct {
-	Workspaces    PinnedWorkspaceAcquirer
-	Provider      providers.LLMProvider
-	Model         string
-	MaxIterations int
-	MaxTokens     int
-	Temperature   float64
+	Workspaces      PinnedWorkspaceAcquirer
+	Provider        providers.LLMProvider
+	Model           string
+	MaxIterations   int
+	MaxTokens       int
+	Temperature     float64
+	ReasoningEffort string
 }
 
 // LocalRepairRequest contains no raw workspace path. The exact pin is resolved
@@ -115,25 +125,28 @@ type LocalRepairRequest struct {
 // LocalRepairResult deliberately omits the checkout path and every provider,
 // session, account, or Git capability.
 type LocalRepairResult struct {
-	Content      string
-	Iterations   int
-	WorkspaceID  string
-	PromptDigest string
+	Content       string
+	Iterations    int
+	WorkspaceID   string
+	PromptDigest  string
+	ProfileDigest string
+	Metrics       LocalRepairMetrics
 }
 
 // LocalRepairRunner runs an isolated edit-only model loop over an exact pinned
 // checkout. It owns neither durable conversation state nor publication.
 type LocalRepairRunner struct {
-	workspaces    PinnedWorkspaceAcquirer
-	provider      providers.LLMProvider
-	model         string
-	maxIterations int
-	maxTokens     int
-	temperature   float64
-	providerSlot  chan struct{}
-	runtimeLoop   *AgentLoop
-	generationID  uint64
-	strictRuntime bool
+	workspaces      PinnedWorkspaceAcquirer
+	provider        providers.LLMProvider
+	model           string
+	maxIterations   int
+	maxTokens       int
+	temperature     float64
+	reasoningEffort string
+	providerSlot    chan struct{}
+	runtimeLoop     *AgentLoop
+	generationID    uint64
+	strictRuntime   bool
 }
 
 func NewLocalRepairRunner(config LocalRepairRunnerConfig) (*LocalRepairRunner, error) {
@@ -165,14 +178,19 @@ func NewLocalRepairRunner(config LocalRepairRunnerConfig) (*LocalRepairRunner, e
 		config.Temperature < 0 || config.Temperature > 2 {
 		return nil, errors.New("local repair temperature must be between 0 and 2")
 	}
+	reasoningEffort, err := normalizeLocalRepairReasoningEffort(config.ReasoningEffort)
+	if err != nil {
+		return nil, err
+	}
 	return &LocalRepairRunner{
-		workspaces:    config.Workspaces,
-		provider:      config.Provider,
-		model:         model,
-		maxIterations: maxIterations,
-		maxTokens:     maxTokens,
-		temperature:   config.Temperature,
-		providerSlot:  make(chan struct{}, 1),
+		workspaces:      config.Workspaces,
+		provider:        config.Provider,
+		model:           model,
+		maxIterations:   maxIterations,
+		maxTokens:       maxTokens,
+		temperature:     config.Temperature,
+		reasoningEffort: reasoningEffort,
+		providerSlot:    make(chan struct{}, 1),
 	}, nil
 }
 
@@ -229,6 +247,7 @@ func (runner *LocalRepairRunner) Run(
 				request,
 				instruction,
 				contextText,
+				promptDigest,
 			)
 			result.PromptDigest = promptDigest
 			return returnErr
@@ -243,8 +262,12 @@ func (runner *LocalRepairRunner) Run(
 func (runner *LocalRepairRunner) runPinned(
 	ctx context.Context,
 	request LocalRepairRequest,
-	instruction, contextText string,
+	instruction, contextText, promptDigest string,
 ) (result LocalRepairResult, returnErr error) {
+	metrics := newLocalRepairMetricsCollector()
+	defer func() {
+		result.Metrics = metrics.snapshot()
+	}()
 	before, err := runner.workspaces.AcquirePinned(ctx, request.Pin)
 	if err != nil {
 		return LocalRepairResult{}, fmt.Errorf("%w: acquire: %v", ErrLocalRepairPin, err)
@@ -279,36 +302,53 @@ func (runner *LocalRepairRunner) runPinned(
 		return LocalRepairResult{}, fmt.Errorf("%w: %v", ErrLocalRepairPin, err)
 	}
 	result.WorkspaceID = before.ID
+	profile, err := newLocalRepairProviderProfile(
+		runner.maxTokens,
+		runner.temperature,
+		runner.reasoningEffort,
+		before.ID,
+		promptDigest,
+	)
+	if err != nil {
+		return result, err
+	}
+	result.ProfileDigest, err = profile.digest()
+	if err != nil {
+		return result, err
+	}
 
 	select {
 	case runner.providerSlot <- struct{}{}:
 		defer func() { <-runner.providerSlot }()
 	case <-ctx.Done():
-		return LocalRepairResult{}, ctx.Err()
+		return result, ctx.Err()
 	}
 
 	registry := newLocalRepairToolRegistryWithDiagnosticPolicy(
 		guard,
 		logger.DiagnosticPolicyFromContext(ctx),
+		metrics,
 	)
 	messages := []providers.Message{
-		{Role: "system", Content: localRepairSystemPrompt},
+		{Role: "system", Content: localRepairSystemPrompt + localRepairEfficiencyPrompt},
 		{Role: "user", Content: localRepairUserMessage(instruction, contextText)},
 	}
-	provider := &validatedLocalRepairProvider{provider: runner.provider, model: runner.model}
+	provider := &validatedLocalRepairProvider{
+		provider: runner.provider,
+		model:    runner.model,
+		metrics:  metrics,
+		profile:  profile,
+	}
 	loopResult, err := tools.RunToolLoop(
 		ctx,
 		tools.ToolLoopConfig{
-			Provider:      provider,
-			Model:         runner.model,
-			Tools:         registry,
-			Policy:        tools.CompatibilityAllowToolPolicy{},
-			PolicySubject: tools.ToolPolicySubject{Source: tools.ToolPolicySourceLocalRepair},
-			MaxIterations: runner.maxIterations,
-			LLMOptions: map[string]any{
-				"max_tokens":  runner.maxTokens,
-				"temperature": runner.temperature,
-			},
+			Provider:              provider,
+			Model:                 runner.model,
+			Tools:                 registry,
+			Policy:                tools.CompatibilityAllowToolPolicy{},
+			PolicySubject:         tools.ToolPolicySubject{Source: tools.ToolPolicySourceLocalRepair},
+			MaxIterations:         runner.maxIterations,
+			LLMOptions:            profile.options(),
 			SequentialToolCalls:   true,
 			SuppressToolArguments: true,
 		},
@@ -351,7 +391,7 @@ func localRepairUserMessage(instruction, contextText string) string {
 func localRepairFullPromptDigest(instruction, contextText string) string {
 	digest := sha256.New()
 	_, _ = digest.Write([]byte("picoclaw-local-repair-full-prompt-v1\x00"))
-	_, _ = digest.Write([]byte(localRepairSystemPrompt))
+	_, _ = digest.Write([]byte(localRepairSystemPrompt + localRepairEfficiencyPrompt))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(localRepairUserMessage(instruction, contextText)))
 	return fmt.Sprintf("sha256:%x", digest.Sum(nil))
@@ -598,23 +638,31 @@ func newLocalRepairToolRegistry(guard *localRepairPathGuard) *tools.ToolRegistry
 func newLocalRepairToolRegistryWithDiagnosticPolicy(
 	guard *localRepairPathGuard,
 	diagnosticPolicy logger.DiagnosticPolicy,
+	metricCollectors ...*localRepairMetricsCollector,
 ) *tools.ToolRegistry {
+	var metrics *localRepairMetricsCollector
+	if len(metricCollectors) == 1 {
+		metrics = metricCollectors[0]
+	}
 	registry := tools.NewToolRegistryWithDiagnosticPolicy(diagnosticPolicy)
 	registry.SetAllowlist([]string{"read_file", "list_dir", "edit_file", "apply_patch"})
 	registry.Register(&localRepairGuardedTool{
-		delegate: tools.NewReadFileLinesTool(guard.root, true, tools.MaxReadFileSize),
+		delegate: newLocalRepairRevisionReadTool(guard),
 		guard:    guard,
 		kind:     localRepairToolRead,
+		metrics:  metrics,
 	})
 	registry.Register(&localRepairGuardedTool{
 		delegate: tools.NewListDirTool(guard.root, true),
 		guard:    guard,
 		kind:     localRepairToolList,
+		metrics:  metrics,
 	})
 	registry.Register(&localRepairGuardedTool{
-		delegate: tools.NewEditFileTool(guard.root, true),
+		delegate: newLocalRepairRevisionEditTool(guard),
 		guard:    guard,
 		kind:     localRepairToolEdit,
+		metrics:  metrics,
 	})
 	registry.Register(&localRepairGuardedTool{
 		delegate: tools.NewApplyPatchToolWithPathGuard(
@@ -622,8 +670,9 @@ func newLocalRepairToolRegistryWithDiagnosticPolicy(
 			true,
 			guard.validateMutation,
 		),
-		guard: guard,
-		kind:  localRepairToolPatch,
+		guard:   guard,
+		kind:    localRepairToolPatch,
+		metrics: metrics,
 	})
 	return registry
 }
@@ -641,16 +690,32 @@ type localRepairGuardedTool struct {
 	delegate tools.Tool
 	guard    *localRepairPathGuard
 	kind     localRepairToolKind
+	metrics  *localRepairMetricsCollector
 }
 
-func (tool *localRepairGuardedTool) Name() string               { return tool.delegate.Name() }
-func (tool *localRepairGuardedTool) Description() string        { return tool.delegate.Description() }
-func (tool *localRepairGuardedTool) Parameters() map[string]any { return tool.delegate.Parameters() }
+func (tool *localRepairGuardedTool) Name() string { return tool.delegate.Name() }
+func (tool *localRepairGuardedTool) Description() string {
+	return tool.delegate.Description()
+}
+
+func (tool *localRepairGuardedTool) Parameters() map[string]any {
+	parameters := tool.delegate.Parameters()
+	if tool.kind == localRepairToolList {
+		return localRepairOptionalListParameters(parameters)
+	}
+	return parameters
+}
 
 func (tool *localRepairGuardedTool) Execute(
 	ctx context.Context,
 	args map[string]any,
-) *tools.ToolResult {
+) (result *tools.ToolResult) {
+	startedAt := time.Now()
+	defer func() {
+		if tool != nil {
+			tool.metrics.observeTool(tool.kind, result, time.Since(startedAt))
+		}
+	}()
 	if tool == nil || tool.delegate == nil || tool.guard == nil {
 		return tools.ErrorResult("local repair tool is unavailable")
 	}
@@ -660,6 +725,11 @@ func (tool *localRepairGuardedTool) Execute(
 	switch tool.kind {
 	case localRepairToolRead, localRepairToolList, localRepairToolEdit:
 		path, ok := args["path"].(string)
+		if tool.kind == localRepairToolList && !ok {
+			args = cloneLocalRepairToolArguments(args)
+			args["path"] = "."
+			path, ok = ".", true
+		}
 		if !ok {
 			return tools.ErrorResult("path is required")
 		}
@@ -670,12 +740,16 @@ func (tool *localRepairGuardedTool) Execute(
 			)
 		}
 		if mutation {
-			oldText, oldOK := args["old_text"].(string)
 			newText, newOK := args["new_text"].(string)
-			if !oldOK || !newOK || len(oldText) > maxLocalRepairEditArgument ||
-				len(newText) > maxLocalRepairEditArgument || !utf8.ValidString(oldText) ||
+			if !newOK || len(newText) > maxLocalRepairEditArgument ||
 				!utf8.ValidString(newText) {
 				return tools.ErrorResult("edit content is invalid or too large")
+			}
+			if oldText, present := args["old_text"]; present {
+				value, oldOK := oldText.(string)
+				if !oldOK || len(value) > maxLocalRepairEditArgument || !utf8.ValidString(value) {
+					return tools.ErrorResult("edit content is invalid or too large")
+				}
 			}
 		}
 	case localRepairToolPatch:
@@ -689,7 +763,7 @@ func (tool *localRepairGuardedTool) Execute(
 	if err := ctx.Err(); err != nil {
 		return tools.ErrorResult("local repair was canceled")
 	}
-	result := tool.delegate.Execute(ctx, args)
+	result = tool.delegate.Execute(ctx, args)
 	if err := ctx.Err(); err != nil {
 		return tools.ErrorResult("local repair was canceled")
 	}
@@ -794,6 +868,8 @@ func filterLocalRepairDirectoryOutput(value string) string {
 type validatedLocalRepairProvider struct {
 	provider providers.LLMProvider
 	model    string
+	metrics  *localRepairMetricsCollector
+	profile  localRepairProviderProfile
 }
 
 func (provider *validatedLocalRepairProvider) Chat(
@@ -812,19 +888,16 @@ func (provider *validatedLocalRepairProvider) Chat(
 	if provider == nil || localRepairNil(provider.provider) {
 		return nil, errors.New("local repair provider is unavailable")
 	}
-	if model != provider.model || len(options) != 2 {
+	if model != provider.model {
 		return nil, errors.New("local repair provider profile is invalid")
 	}
-	if _, ok := options["max_tokens"].(int); !ok {
-		return nil, errors.New("local repair provider token profile is invalid")
-	}
-	if _, ok := options["temperature"].(float64); !ok {
-		return nil, errors.New("local repair provider temperature profile is invalid")
+	if err := provider.profile.validateOptions(options); err != nil {
+		return nil, err
 	}
 	if err := validateLocalRepairToolDefinitions(definitions); err != nil {
 		return nil, err
 	}
-	response, err := provider.provider.Chat(
+	response, err := provider.dispatch(
 		ctx,
 		session.CloneMessages(messages),
 		definitions,
@@ -835,6 +908,33 @@ func (provider *validatedLocalRepairProvider) Chat(
 		return nil, err
 	}
 	return cloneAndValidateLocalRepairResponse(response)
+}
+
+func (provider *validatedLocalRepairProvider) dispatch(
+	ctx context.Context,
+	messages []providers.Message,
+	definitions []providers.ToolDefinition,
+	model string,
+	options map[string]any,
+) (response *providers.LLMResponse, returnErr error) {
+	startedAt := time.Now()
+	defer func() {
+		panicValue := recover()
+		metricErr := provider.metrics.observeProviderCall(response, time.Since(startedAt))
+		if panicValue != nil {
+			response = nil
+			returnErr = errors.New("local repair provider panicked")
+		}
+		if metricErr != nil {
+			response = nil
+			if returnErr == nil {
+				returnErr = metricErr
+			} else {
+				returnErr = errors.Join(returnErr, metricErr)
+			}
+		}
+	}()
+	return provider.provider.Chat(ctx, messages, definitions, model, options)
 }
 
 func validateLocalRepairToolDefinitions(definitions []providers.ToolDefinition) error {
@@ -904,11 +1004,10 @@ func cloneAndValidateLocalRepairResponse(
 		FinishReason:     response.FinishReason,
 		ToolCalls:        make([]providers.ToolCall, len(response.ToolCalls)),
 	}
+	if _, _, usageErr := normalizeLocalRepairUsage(response); usageErr != nil {
+		return nil, usageErr
+	}
 	if response.Usage != nil {
-		if response.Usage.PromptTokens < 0 || response.Usage.CompletionTokens < 0 ||
-			response.Usage.TotalTokens < 0 || response.Usage.CachedTokens < 0 {
-			return nil, errors.New("local repair provider usage is invalid")
-		}
 		usage := *response.Usage
 		cloned.Usage = &usage
 	}

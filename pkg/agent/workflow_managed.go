@@ -1636,6 +1636,7 @@ func workflowRunManagedChildren(
 				}
 				childReq := workflowManagedApplyPlan(req, plan)
 				childReq.Managed = "off"
+				childReq, childContract := childReq.DetachStructuredContract()
 				message := workflowManagedPlanMessage(childReq, plan, len(plans))
 				assignmentCtx := managedCtx
 				cancelAssignment := func() {}
@@ -1682,7 +1683,7 @@ func workflowRunManagedChildren(
 				}
 				text, structured, repairs, usage, err := workflowRunStructuredAgentWithOptions(
 					message,
-					req.Output,
+					childContract,
 					runOnce,
 					workflowAgentRunOptions{
 						Context:         assignmentCtx,

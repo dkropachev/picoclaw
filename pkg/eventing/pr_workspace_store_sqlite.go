@@ -1838,8 +1838,11 @@ func validatePRWorkspaceRecordTransition(existing []byte, next any) error {
 				StageRunID, Instruction, RepairWorkspaceID    string
 				Attempt                                       int
 				Goal, Base, Agent, Model, Prompt, ScopePrompt string
+				Profile                                       string
+				Usage                                         PRTokenUsage
+				UsageComplete                                 bool
 				PublicationFence                              *PRImplementationPublicationFence
-			}{v.StageRunID, v.Instruction, v.RepairWorkspaceID, v.Attempt, v.GoalDigest, v.BaseCommit, v.AgentID, v.Model, v.PromptDigest, v.ScopePromptDigest, v.PublicationFence}
+			}{v.StageRunID, v.Instruction, v.RepairWorkspaceID, v.Attempt, v.GoalDigest, v.BaseCommit, v.AgentID, v.Model, v.PromptDigest, v.ScopePromptDigest, v.ProfileDigest, v.Usage, v.UsageComplete, v.PublicationFence}
 		}
 		return equal("repair inputs", immutable(old), immutable(*value))
 	case *PRValidationRun:
@@ -2505,6 +2508,11 @@ func validatePRWorkspaceRecord(value any) error {
 		if err := validatePRWorkspaceRaw("stage evidence", record.Evidence); err != nil {
 			return err
 		}
+		if record.Usage != nil {
+			if err := validatePRImplementationUsage(*record.Usage); err != nil {
+				return err
+			}
+		}
 	case *PRFinding:
 		meta = &record.PRWorkspaceRecord
 		if !validPRFindingDisposition(record.Disposition) {
@@ -2799,6 +2807,21 @@ func validatePRWorkspaceRecord(value any) error {
 		}
 		if len(record.FindingIDs) > maxPRWorkspaceListEntries {
 			return fmt.Errorf("%w: repair finding IDs exceed bound", ErrInvalidPRWorkspace)
+		}
+		if err := validatePRWorkspaceString(
+			"repair profile digest",
+			record.ProfileDigest,
+			maxPRWorkspaceIdentityBytes,
+			false,
+		); err != nil {
+			return err
+		}
+		if err := validatePRTokenUsage(record.Usage); err != nil {
+			return err
+		}
+		if record.UsageComplete && (record.Usage.ProviderCalls == 0 ||
+			record.Usage.ProviderCalls != record.Usage.UsageReportedCalls) {
+			return fmt.Errorf("%w: complete repair usage is missing provider reports", ErrInvalidPRWorkspace)
 		}
 		if record.PublicationFence != nil {
 			fence := record.PublicationFence
@@ -3205,6 +3228,81 @@ func validatePRWorkspaceRaw(field string, value json.RawMessage) error {
 func validatePRChangeMetrics(value PRChangeMetrics) error {
 	if value.Files < 0 || value.SemanticLines < 0 || value.Modules < 0 || value.RawLines < 0 {
 		return fmt.Errorf("%w: change metrics must not be negative", ErrInvalidPRWorkspace)
+	}
+	return nil
+}
+
+func validatePRTokenUsage(value PRTokenUsage) error {
+	values := [...]int64{
+		value.ProviderCalls, value.UsageReportedCalls,
+		value.PromptTokens, value.CachedTokens,
+		value.CompletionTokens, value.ReasoningTokens,
+		value.TotalTokens, value.LatencyMillis,
+	}
+	for _, item := range values {
+		if item < 0 {
+			return fmt.Errorf("%w: token usage must not be negative", ErrInvalidPRWorkspace)
+		}
+	}
+	if value.UsageReportedCalls > value.ProviderCalls || value.CachedTokens > value.PromptTokens ||
+		value.ReasoningTokens > value.CompletionTokens {
+		return fmt.Errorf("%w: token usage subset exceeds its parent", ErrInvalidPRWorkspace)
+	}
+	if value.ProviderCalls == 0 && value != (PRTokenUsage{}) {
+		return fmt.Errorf("%w: token usage without a provider call is invalid", ErrInvalidPRWorkspace)
+	}
+	if value.CompletionTokens > (1<<63-1)-value.PromptTokens ||
+		value.TotalTokens != value.PromptTokens+value.CompletionTokens {
+		return fmt.Errorf("%w: token usage total is inconsistent", ErrInvalidPRWorkspace)
+	}
+	return nil
+}
+
+func addPRTokenUsage(left, right PRTokenUsage) (PRTokenUsage, error) {
+	if err := validatePRTokenUsage(left); err != nil {
+		return PRTokenUsage{}, err
+	}
+	if err := validatePRTokenUsage(right); err != nil {
+		return PRTokenUsage{}, err
+	}
+	pairs := [...][2]int64{
+		{left.ProviderCalls, right.ProviderCalls},
+		{left.UsageReportedCalls, right.UsageReportedCalls},
+		{left.PromptTokens, right.PromptTokens},
+		{left.CachedTokens, right.CachedTokens},
+		{left.CompletionTokens, right.CompletionTokens},
+		{left.ReasoningTokens, right.ReasoningTokens},
+		{left.TotalTokens, right.TotalTokens},
+		{left.LatencyMillis, right.LatencyMillis},
+	}
+	var sums [len(pairs)]int64
+	for index, pair := range pairs {
+		if pair[1] > (1<<63-1)-pair[0] {
+			return PRTokenUsage{}, fmt.Errorf("%w: token usage aggregation overflow", ErrInvalidPRWorkspace)
+		}
+		sums[index] = pair[0] + pair[1]
+	}
+	return PRTokenUsage{
+		ProviderCalls: sums[0], UsageReportedCalls: sums[1],
+		PromptTokens: sums[2], CachedTokens: sums[3], CompletionTokens: sums[4],
+		ReasoningTokens: sums[5], TotalTokens: sums[6], LatencyMillis: sums[7],
+	}, nil
+}
+
+func validatePRImplementationUsage(value PRImplementationUsage) error {
+	if value.Scope != "implementation_lifetime" {
+		return fmt.Errorf("%w: implementation usage scope is invalid", ErrInvalidPRWorkspace)
+	}
+	total, err := addPRTokenUsage(value.Repair, value.Audit)
+	if err != nil {
+		return err
+	}
+	if total != value.Total {
+		return fmt.Errorf("%w: implementation usage total is inconsistent", ErrInvalidPRWorkspace)
+	}
+	if value.Complete && (value.Total.ProviderCalls == 0 ||
+		value.Total.ProviderCalls != value.Total.UsageReportedCalls) {
+		return fmt.Errorf("%w: complete implementation usage is missing provider reports", ErrInvalidPRWorkspace)
 	}
 	return nil
 }

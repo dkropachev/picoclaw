@@ -195,6 +195,28 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 		SessionRevision: "sha256:source-revision", Tools: "none",
 	}
 	sourceExecution.Session = aiExecutionSourceSessionKey(sourceExecution)
+	repairUsage := TokenUsage{
+		ProviderCalls: 2, UsageReportedCalls: 2,
+		PromptTokens: 10, CachedTokens: 4,
+		CompletionTokens: 3, ReasoningTokens: 1, TotalTokens: 13,
+		LatencyMillis: 20,
+	}
+	auditUsage := TokenUsage{
+		ProviderCalls: 1, UsageReportedCalls: 1,
+		PromptTokens: 5, CachedTokens: 2,
+		CompletionTokens: 2, ReasoningTokens: 1, TotalTokens: 7,
+		LatencyMillis: 8,
+	}
+	implementationUsage := ImplementationUsage{
+		Scope: ImplementationUsageScope, Complete: true,
+		Repair: repairUsage, Audit: auditUsage,
+		Total: TokenUsage{
+			ProviderCalls: 3, UsageReportedCalls: 3,
+			PromptTokens: 15, CachedTokens: 6,
+			CompletionTokens: 5, ReasoningTokens: 2, TotalTokens: 20,
+			LatencyMillis: 28,
+		},
+	}
 	patch := AggregatePatch{
 		Phase:           pointer(PhaseImplementation),
 		ExecutionState:  pointer(ExecutionWaitingGate),
@@ -209,6 +231,7 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 		AppendStageRuns: []StageRun{{
 			ID: stageID, Stage: "implementation", State: ExecutionWaitingGate, CharterID: charterID,
 			HeadSHA: provider.HeadSHA, Attempt: 1, PromptDigest: "sha256:stage", StartedAt: now,
+			Usage: &implementationUsage,
 			Evidence: &StageEvidence{
 				Stage: "implementation_completion", RunID: stageID, Summary: "checked completion",
 				Coverage:   Coverage{ReviewedAreas: []string{"pkg/worker"}, TestsConsidered: []string{"go test"}},
@@ -359,6 +382,9 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 				},
 				PromptDigest:      "sha256:repair",
 				ScopePromptDigest: "sha256:scope",
+				ProfileDigest:     "sha256:profile",
+				Usage:             repairUsage,
+				UsageComplete:     true,
 				StartedAt:         now,
 				FinishedAt:        &finished,
 				PublicationFence: &ImplementationPublicationFence{
@@ -387,6 +413,15 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	mutation := Mutation{WorkspaceID: workspaceID, ExpectedVersion: 1, RequestID: "request-mutate-0001", Patch: patch}
 	mutated, err := store.Mutate(ctx, mutation)
 	require.NoError(t, err)
+	replayedMutation, err := store.Mutate(ctx, mutation)
+	require.NoError(t, err)
+	require.True(t, replayedMutation.Replayed)
+	require.Equal(t, mutated.Aggregate.Workspace.Version, replayedMutation.Aggregate.Workspace.Version)
+	require.Equal(
+		t,
+		mutated.Aggregate.StageRuns[0].Usage,
+		replayedMutation.Aggregate.StageRuns[0].Usage,
+	)
 	require.Equal(t, int64(2), mutated.Aggregate.Workspace.Version)
 	require.Len(t, mutated.Aggregate.Gates, 1)
 	require.NotNil(t, mutated.Aggregate.Gates[0].runtime)
@@ -395,10 +430,14 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	require.Equal(t, "workflow-private-1", mutated.Aggregate.Gates[0].runtime.WorkflowRunID)
 	require.Equal(t, gate.Evidence, mutated.Aggregate.Gates[0].Evidence)
 	require.NotNil(t, mutated.Aggregate.StageRuns[0].Evidence)
+	require.Equal(t, implementationUsage, *mutated.Aggregate.StageRuns[0].Usage)
 	require.Equal(t, []string{"pkg/worker"}, mutated.Aggregate.StageRuns[0].Evidence.Coverage.ReviewedAreas)
 	require.Equal(t, charterID, mutated.Aggregate.Messages[0].CharterID)
 	require.Equal(t, provider.HeadSHA, mutated.Aggregate.Messages[0].HeadSHA)
 	require.Equal(t, "sha256:scope", mutated.Aggregate.RepairAttempts[0].ScopePromptDigest)
+	require.Equal(t, "sha256:profile", mutated.Aggregate.RepairAttempts[0].ProfileDigest)
+	require.Equal(t, repairUsage, mutated.Aggregate.RepairAttempts[0].Usage)
+	require.True(t, mutated.Aggregate.RepairAttempts[0].UsageComplete)
 	require.Equal(t, repairID, mutated.Aggregate.ValidationRuns[0].RepairAttemptID)
 	require.NotNil(t, mutated.Aggregate.RepairAttempts[0].PublicationFence)
 	require.Equal(t, "tree-private", mutated.Aggregate.RepairAttempts[0].PublicationFence.Tree)
@@ -523,6 +562,7 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	require.True(t, historicalReplay.Replayed)
 	require.Equal(t, int64(2), historicalReplay.Aggregate.Workspace.Version)
 	require.Equal(t, ExecutionWaitingGate, historicalReplay.Aggregate.StageRuns[0].State)
+	require.Equal(t, implementationUsage, *historicalReplay.Aggregate.StageRuns[0].Usage)
 	require.True(t, historicalReplay.Aggregate.Findings[0].SourceAvailable)
 	require.NotNil(t, historicalReplay.Aggregate.Findings[0].source)
 	require.Equal(t, sourceExecution.Session, historicalReplay.Aggregate.Findings[0].source.Session)
@@ -544,6 +584,7 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	require.NoError(t, err)
 	require.Equal(t, int64(7), durable.Workspace.Version)
 	require.Equal(t, ExecutionSucceeded, durable.StageRuns[0].State)
+	require.Equal(t, implementationUsage, *durable.StageRuns[0].Usage)
 	require.Equal(t, ExecutionSucceeded, durable.Publications[0].State)
 	require.Equal(t, publicationPayload, durable.Publications[0].payload)
 	require.NotNil(t, durable.Gates[0].runtime)
@@ -553,6 +594,8 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	require.Equal(t, "park-private", durable.RepairAttempts[0].PublicationFence.ParkIntentID)
 	require.Equal(t, repairID, durable.ValidationRuns[0].RepairAttemptID)
 	require.Equal(t, WorkCandidatePresent, durable.RepairAttempts[0].Scope.Presence)
+	require.Equal(t, "sha256:profile", durable.RepairAttempts[0].ProfileDigest)
+	require.Equal(t, repairUsage, durable.RepairAttempts[0].Usage)
 	require.Equal(t, "pkg/worker/run.go", durable.RepairAttempts[0].Scope.ChangeEvidence[0].Path)
 	require.Empty(t, durable.DeferredGroups[0].FindingIDs)
 }

@@ -625,6 +625,13 @@ func discoverTests(root string, add func(kind, id, source string)) error {
 			return walkErr
 		}
 		if entry.IsDir() {
+			// docs/plans is intentionally ignored workspace evidence. Benchmark
+			// checkouts and hidden/live artifacts stored there are not repository
+			// product tests and must not enter feature ownership inventory.
+			if entry.Name() == "plans" &&
+				filepath.Clean(filepath.Dir(path)) == filepath.Join(root, "docs") {
+				return filepath.SkipDir
+			}
 			switch entry.Name() {
 			case ".git", ".cache", "build", "dist", "node_modules", "vendor":
 				if path != root {

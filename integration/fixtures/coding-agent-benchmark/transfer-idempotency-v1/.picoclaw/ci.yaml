@@ -1,0 +1,25 @@
+version: 1
+steps:
+  - id: format
+    name: Go format
+    kind: lint
+    run: |
+      files="$(gofmt -l .)"
+      test -z "$files"
+    shell: sh
+    timeout-seconds: 30
+  - id: vet
+    name: Go vet
+    kind: lint
+    command: [go, vet, ./...]
+    timeout-seconds: 60
+  - id: test
+    name: Go tests
+    kind: test
+    command: [go, test, -count=1, ./...]
+    timeout-seconds: 60
+  - id: race
+    name: Go race tests
+    kind: test
+    command: [go, test, -race, -count=1, ./...]
+    timeout-seconds: 120

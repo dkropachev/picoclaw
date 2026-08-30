@@ -214,19 +214,84 @@ func (service *Service) runCompletionAudit(
 	bundle.Validation = map[string]any{"run": latestValidation}
 	stats := NudgeStrategyStats(aggregate.NudgeRounds, NudgeImplementationDone)
 	var rounds []CompletionRound
+	var completionUsage UsageMeasurement
 	var runErr error
 	if manualNudge {
 		var round CompletionRound
-		round, runErr = service.ai.RunCompletionNudge(ctx, bundle, stats)
+		round, completionUsage, runErr = service.ai.RunCompletionNudge(ctx, bundle, stats)
 		rounds = []CompletionRound{round}
 	} else {
-		rounds, runErr = service.ai.RunCompletionAudit(ctx, bundle, request.NudgePolicy, stats)
+		rounds, completionUsage, runErr = service.ai.RunCompletionAudit(
+			ctx, bundle, request.NudgePolicy, stats,
+		)
+	}
+	priorUsageComplete := false
+	implementationUsage := NewImplementationUsage()
+	if implementationStage.Usage != nil {
+		implementationUsage = *implementationStage.Usage
+		priorUsageComplete = implementationUsage.Complete
+	}
+	implementationUsage, usageErr := AddImplementationAudit(
+		implementationUsage,
+		completionUsage.Usage,
+	)
+	if usageErr != nil {
+		return aggregate, fmt.Errorf("completion audit usage is invalid: %w", usageErr)
+	}
+	implementationUsage, usageErr = FinalizeImplementationUsage(
+		implementationUsage,
+		priorUsageComplete && completionUsage.Complete,
+	)
+	if usageErr != nil {
+		return aggregate, fmt.Errorf("finalize completion audit usage: %w", usageErr)
+	}
+	implementationStage.Usage = &implementationUsage
+	persistFailedAudit := func(publicError, summary string, cause error) (Aggregate, error) {
+		now := service.now().UTC()
+		runID := stableID("psr_", aggregate.Workspace.ID, request.RequestID)
+		failedState := ExecutionFailed
+		promptDigest := ""
+		if len(rounds) > 0 {
+			promptDigest = rounds[0].PromptDigest
+		}
+		failedStage := StageRun{
+			ID: runID, Stage: "completion_audit", State: ExecutionFailed,
+			PublicError: publicError, CharterID: charter.ID, HeadSHA: charter.HeadSHA,
+			Attempt:      countStageRuns(aggregate.StageRuns, "completion_audit") + 1,
+			PromptDigest: promptDigest, Summary: summary,
+			StartedAt: now, FinishedAt: &now,
+		}
+		result, mutateErr := service.store.Mutate(ctx, Mutation{
+			WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
+			RequestID: request.RequestID,
+			Patch: AggregatePatch{
+				ExecutionState:   &failedState,
+				AppendStageRuns:  []StageRun{failedStage},
+				ReplaceStageRuns: []StageRun{implementationStage},
+				Activity: []Activity{{
+					Kind: "completion.audit_failed", Actor: "ai", EntityID: runID,
+					Summary: summary, CreatedAt: now,
+				}},
+			},
+		})
+		if mutateErr != nil {
+			return result.Aggregate, errors.Join(cause, mutateErr)
+		}
+		return result.Aggregate, cause
 	}
 	if runErr != nil && len(rounds) == 0 {
-		return Aggregate{}, runErr
+		return persistFailedAudit(
+			"completion_audit_failed",
+			"Completion audit stopped before valid structured output",
+			runErr,
+		)
 	}
 	if !completionRoundsMatchCandidateScope(rounds, latestRepair.Scope) {
-		return aggregate, errors.New("completion candidate evidence does not match the exact persisted scope audit")
+		return persistFailedAudit(
+			"completion_candidate_evidence_mismatch",
+			"Completion audit returned evidence for a different candidate scope",
+			errors.New("completion candidate evidence does not match the exact persisted scope audit"),
+		)
 	}
 	now := service.now().UTC()
 	runID := stableID("psr_", aggregate.Workspace.ID, request.RequestID)
@@ -269,6 +334,7 @@ func (service *Service) runCompletionAudit(
 		Phase:             &phase,
 		ExecutionState:    &state,
 		AppendStageRuns:   []StageRun{stage},
+		ReplaceStageRuns:  []StageRun{implementationStage},
 		UpsertFindings:    append(append(missing, deferred...), candidateDrift...),
 		AppendNudgeRounds: nudges,
 		Activity: []Activity{
@@ -293,7 +359,19 @@ func (service *Service) runCompletionAudit(
 			candidateDrift,
 		)
 		if gateErr != nil {
-			return aggregate, gateErr
+			stage.State, stage.PublicError = ExecutionFailed, "completion_scope_gate_failed"
+			failedState := ExecutionFailed
+			failedPhase := aggregate.Workspace.Phase
+			patch.Phase, patch.ExecutionState = &failedPhase, &failedState
+			patch.AppendStageRuns[0] = stage
+			result, mutateErr := service.store.Mutate(ctx, Mutation{
+				WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
+				RequestID: request.RequestID, Patch: patch,
+			})
+			if mutateErr != nil {
+				return result.Aggregate, errors.Join(gateErr, mutateErr)
+			}
+			return result.Aggregate, gateErr
 		}
 		scopeGate.TargetID = latestRepair.ID
 		if _, existing := findGate(aggregate.Gates, scopeGate.ID); !existing {

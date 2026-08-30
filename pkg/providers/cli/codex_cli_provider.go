@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os/exec"
 	"strings"
 
@@ -146,9 +147,10 @@ type codexEventItem struct {
 }
 
 type codexUsage struct {
-	InputTokens       int `json:"input_tokens"`
-	CachedInputTokens int `json:"cached_input_tokens"`
-	OutputTokens      int `json:"output_tokens"`
+	InputTokens           int64 `json:"input_tokens"`
+	CachedInputTokens     int64 `json:"cached_input_tokens"`
+	OutputTokens          int64 `json:"output_tokens"`
+	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
 }
 
 type codexEventErr struct {
@@ -180,12 +182,10 @@ func (p *CodexCliProvider) parseJSONLEvents(output string) (*LLMResponse, error)
 			}
 		case "turn.completed":
 			if event.Usage != nil {
-				promptTokens := event.Usage.InputTokens + event.Usage.CachedInputTokens
-				usage = &UsageInfo{
-					PromptTokens:     promptTokens,
-					CompletionTokens: event.Usage.OutputTokens,
-					TotalTokens:      promptTokens + event.Usage.OutputTokens,
-					CachedTokens:     event.Usage.CachedInputTokens,
+				var err error
+				usage, err = normalizeCodexUsage(*event.Usage)
+				if err != nil {
+					return nil, err
 				}
 			}
 		case "error":
@@ -217,5 +217,51 @@ func (p *CodexCliProvider) parseJSONLEvents(output string) (*LLMResponse, error)
 		ToolCalls:    toolCalls,
 		FinishReason: finishReason,
 		Usage:        usage,
+	}, nil
+}
+
+func normalizeCodexUsage(raw codexUsage) (*UsageInfo, error) {
+	fields := []struct {
+		name  string
+		value int64
+	}{
+		{name: "input_tokens", value: raw.InputTokens},
+		{name: "cached_input_tokens", value: raw.CachedInputTokens},
+		{name: "output_tokens", value: raw.OutputTokens},
+		{name: "reasoning_output_tokens", value: raw.ReasoningOutputTokens},
+	}
+	for _, field := range fields {
+		if field.value < 0 {
+			return nil, fmt.Errorf(
+				"codex cli: invalid usage: %s must be non-negative", field.name,
+			)
+		}
+	}
+	if raw.CachedInputTokens > raw.InputTokens {
+		return nil, fmt.Errorf(
+			"codex cli: invalid usage: cached_input_tokens exceeds input_tokens",
+		)
+	}
+	if raw.ReasoningOutputTokens > raw.OutputTokens {
+		return nil, fmt.Errorf(
+			"codex cli: invalid usage: reasoning_output_tokens exceeds output_tokens",
+		)
+	}
+	if raw.InputTokens > math.MaxInt64-raw.OutputTokens {
+		return nil, fmt.Errorf("codex cli: invalid usage: total token count overflows int64")
+	}
+
+	totalTokens := raw.InputTokens + raw.OutputTokens
+	maxInt := int64(^uint(0) >> 1)
+	if totalTokens > maxInt {
+		return nil, fmt.Errorf("codex cli: invalid usage: token count overflows int")
+	}
+
+	return &UsageInfo{
+		PromptTokens:     int(raw.InputTokens),
+		CompletionTokens: int(raw.OutputTokens),
+		TotalTokens:      int(totalTokens),
+		CachedTokens:     int(raw.CachedInputTokens),
+		ReasoningTokens:  int(raw.ReasoningOutputTokens),
 	}, nil
 }

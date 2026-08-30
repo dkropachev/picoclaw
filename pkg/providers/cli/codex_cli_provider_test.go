@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,7 @@ func TestParseJSONLEvents_AgentMessage(t *testing.T) {
 	events := `{"type":"thread.started","thread_id":"abc-123"}
 {"type":"turn.started"}
 {"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Hello from Codex!"}}
-{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20}}`
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":12}}`
 
 	resp, err := p.parseJSONLEvents(events)
 	if err != nil {
@@ -34,17 +35,85 @@ func TestParseJSONLEvents_AgentMessage(t *testing.T) {
 	if resp.Usage == nil {
 		t.Fatal("Usage should not be nil")
 	}
-	if resp.Usage.PromptTokens != 150 {
-		t.Errorf("PromptTokens = %d, want 150", resp.Usage.PromptTokens)
+	if resp.Usage.PromptTokens != 100 {
+		t.Errorf("PromptTokens = %d, want 100", resp.Usage.PromptTokens)
 	}
 	if resp.Usage.CompletionTokens != 20 {
 		t.Errorf("CompletionTokens = %d, want 20", resp.Usage.CompletionTokens)
 	}
-	if resp.Usage.TotalTokens != 170 {
-		t.Errorf("TotalTokens = %d, want 170", resp.Usage.TotalTokens)
+	if resp.Usage.TotalTokens != 120 {
+		t.Errorf("TotalTokens = %d, want 120", resp.Usage.TotalTokens)
+	}
+	if resp.Usage.CachedTokens != 50 {
+		t.Errorf("CachedTokens = %d, want 50", resp.Usage.CachedTokens)
+	}
+	if resp.Usage.ReasoningTokens != 12 {
+		t.Errorf("ReasoningTokens = %d, want 12", resp.Usage.ReasoningTokens)
 	}
 	if len(resp.ToolCalls) != 0 {
 		t.Errorf("ToolCalls should be empty, got %d", len(resp.ToolCalls))
+	}
+}
+
+func TestParseJSONLEvents_RejectsInvalidUsage(t *testing.T) {
+	p := &CodexCliProvider{}
+	tests := []struct {
+		name      string
+		usageJSON string
+		wantError string
+	}{
+		{
+			name:      "negative input",
+			usageJSON: `{"input_tokens":-1,"output_tokens":1}`,
+			wantError: "input_tokens must be non-negative",
+		},
+		{
+			name:      "negative cached input",
+			usageJSON: `{"input_tokens":1,"cached_input_tokens":-1,"output_tokens":1}`,
+			wantError: "cached_input_tokens must be non-negative",
+		},
+		{
+			name:      "negative output",
+			usageJSON: `{"input_tokens":1,"output_tokens":-1}`,
+			wantError: "output_tokens must be non-negative",
+		},
+		{
+			name:      "negative reasoning output",
+			usageJSON: `{"input_tokens":1,"output_tokens":1,"reasoning_output_tokens":-1}`,
+			wantError: "reasoning_output_tokens must be non-negative",
+		},
+		{
+			name:      "cached input exceeds input",
+			usageJSON: `{"input_tokens":4,"cached_input_tokens":5,"output_tokens":1}`,
+			wantError: "cached_input_tokens exceeds input_tokens",
+		},
+		{
+			name:      "reasoning output exceeds output",
+			usageJSON: `{"input_tokens":1,"output_tokens":4,"reasoning_output_tokens":5}`,
+			wantError: "reasoning_output_tokens exceeds output_tokens",
+		},
+		{
+			name: "total overflow",
+			usageJSON: fmt.Sprintf(
+				`{"input_tokens":%d,"output_tokens":1}`,
+				int64(math.MaxInt64),
+			),
+			wantError: "total token count overflows int64",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := `{"type":"item.completed","item":{"type":"agent_message","text":"response"}}` +
+				"\n" + `{"type":"turn.completed","usage":` + tt.usageJSON + `}`
+			resp, err := p.parseJSONLEvents(events)
+			if err == nil {
+				t.Fatalf("parseJSONLEvents() response = %+v, want error", resp)
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("parseJSONLEvents() error = %q, want it to contain %q", err, tt.wantError)
+			}
+		})
 	}
 }
 
@@ -415,7 +484,7 @@ func TestCodexCliProvider_MockCLI_Success(t *testing.T) {
 		`{"type":"thread.started","thread_id":"test-123"}`,
 		`{"type":"turn.started"}`,
 		`{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Mock response from Codex CLI"}}`,
-		`{"type":"turn.completed","usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15,"reasoning_output_tokens":5}}`,
 	})
 
 	p := NewCodexCliProvider("")
@@ -432,11 +501,44 @@ func TestCodexCliProvider_MockCLI_Success(t *testing.T) {
 	if resp.Usage == nil {
 		t.Fatal("Usage should not be nil")
 	}
-	if resp.Usage.PromptTokens != 60 {
-		t.Errorf("PromptTokens = %d, want 60", resp.Usage.PromptTokens)
+	if resp.Usage.PromptTokens != 50 {
+		t.Errorf("PromptTokens = %d, want 50", resp.Usage.PromptTokens)
 	}
 	if resp.Usage.CompletionTokens != 15 {
 		t.Errorf("CompletionTokens = %d, want 15", resp.Usage.CompletionTokens)
+	}
+	if resp.Usage.TotalTokens != 65 {
+		t.Errorf("TotalTokens = %d, want 65", resp.Usage.TotalTokens)
+	}
+	if resp.Usage.CachedTokens != 10 {
+		t.Errorf("CachedTokens = %d, want 10", resp.Usage.CachedTokens)
+	}
+	if resp.Usage.ReasoningTokens != 5 {
+		t.Errorf("ReasoningTokens = %d, want 5", resp.Usage.ReasoningTokens)
+	}
+}
+
+func TestCodexCliProvider_MockCLI_RejectsInvalidUsage(t *testing.T) {
+	scriptPath := createMockCodexCLI(t, []string{
+		`{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"must not escape"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":6,"output_tokens":1}}`,
+	})
+
+	p := NewCodexCliProvider("")
+	p.command = scriptPath
+
+	resp, err := p.Chat(
+		context.Background(),
+		[]Message{{Role: "user", Content: "Hello"}},
+		nil,
+		"test-model",
+		nil,
+	)
+	if err == nil {
+		t.Fatalf("Chat() response = %+v, want invalid usage error", resp)
+	}
+	if !strings.Contains(err.Error(), "cached_input_tokens exceeds input_tokens") {
+		t.Fatalf("Chat() error = %q, want cached token subset error", err)
 	}
 }
 

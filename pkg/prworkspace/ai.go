@@ -33,8 +33,18 @@ type IsolatedAIRequest struct {
 	SourceBinding     string
 }
 
+// IsolatedAIResult returns the schema-validated object together with the
+// normalized usage from every provider call, including structured-output
+// repair calls. Structured is nil when execution failed before valid output was
+// produced; Usage remains populated when partial telemetry is available.
+type IsolatedAIResult struct {
+	Structured map[string]any
+	Usage      TokenUsage
+	Complete   bool
+}
+
 type IsolatedAIRunner interface {
-	RunIsolated(ctx context.Context, request IsolatedAIRequest) (map[string]any, error)
+	RunIsolated(ctx context.Context, request IsolatedAIRequest) (IsolatedAIResult, error)
 }
 
 type AgentFinding struct {
@@ -175,7 +185,9 @@ func (controller AIController) RunReviewSearch(
 		strategy := SelectNudgeStrategy(workingStats)
 		variantOrdinal := nudgeStrategyAttempts(workingStats, strategy)
 		workingStats = recordNudgeAttempt(workingStats, strategy)
-		challenge := controller.planChallenge(ctx, NudgeReviewSearch, strategy, variantOrdinal, bundle, rounds)
+		challenge, _ := controller.planChallenge(
+			ctx, NudgeReviewSearch, strategy, variantOrdinal, bundle, rounds,
+		)
 		round := ReviewRound{
 			Round: additional + 1, Strategy: strategy, Challenge: challenge.Challenge,
 			VariantDigest: nudgeVariantDigest(NudgeReviewSearch, challenge), State: ExecutionRunning,
@@ -211,7 +223,7 @@ func (controller AIController) RunReviewNudge(
 	}
 	strategy := SelectNudgeStrategy(stats)
 	variantOrdinal := nudgeStrategyAttempts(stats, strategy)
-	challenge := controller.planChallenge(
+	challenge, _ := controller.planChallenge(
 		ctx,
 		NudgeReviewSearch,
 		strategy,
@@ -247,20 +259,22 @@ func (controller AIController) RunCompletionAudit(
 	bundle PRContextBundle,
 	policy NudgePolicy,
 	stats []NudgeStrategyStat,
-) ([]CompletionRound, error) {
+) ([]CompletionRound, UsageMeasurement, error) {
 	if controller.Runner == nil {
-		return nil, errors.New("isolated AI runner is required")
+		return nil, UsageMeasurement{}, errors.New("isolated AI runner is required")
 	}
 	if err := policy.Validate(); err != nil {
-		return nil, err
+		return nil, UsageMeasurement{}, err
 	}
 	initialPrompt, err := CompilePrompt(PromptCompletionAudit, bundle, "")
 	if err != nil {
-		return nil, err
+		return nil, UsageMeasurement{}, err
 	}
-	initial, err := controller.runCompletion(ctx, "completion.initial", initialPrompt, bundle.WorkspaceID)
+	initial, usage, err := controller.runCompletion(
+		ctx, "completion.initial", initialPrompt, bundle.WorkspaceID,
+	)
 	if err != nil {
-		return nil, err
+		return nil, usage, err
 	}
 	rounds := []CompletionRound{
 		{
@@ -285,7 +299,15 @@ func (controller AIController) RunCompletionAudit(
 		strategy := SelectNudgeStrategy(workingStats)
 		variantOrdinal := nudgeStrategyAttempts(workingStats, strategy)
 		workingStats = recordNudgeAttempt(workingStats, strategy)
-		challenge := controller.planChallenge(ctx, NudgeImplementationDone, strategy, variantOrdinal, bundle, rounds)
+		challenge, challengeUsage := controller.planChallenge(
+			ctx, NudgeImplementationDone, strategy, variantOrdinal, bundle, rounds,
+		)
+		nextUsage, usageErr := AddUsageMeasurement(usage, challengeUsage)
+		if usageErr != nil {
+			usage.Complete = false
+			return rounds, usage, usageErr
+		}
+		usage = nextUsage
 		round := CompletionRound{
 			Round: additional + 1, Strategy: strategy, Challenge: challenge.Challenge,
 			VariantDigest: nudgeVariantDigest(NudgeImplementationDone, challenge), State: ExecutionRunning,
@@ -293,13 +315,21 @@ func (controller AIController) RunCompletionAudit(
 		prompt, promptErr := CompilePrompt(PromptCompletionNudge, bundle, challenge.Challenge)
 		if promptErr != nil {
 			round.State, round.PublicError = ExecutionFailed, "nudge_prompt_invalid"
-			return append(rounds, round), promptErr
+			return append(rounds, round), usage, promptErr
 		}
 		round.PromptDigest = prompt.Digest
-		result, runErr := controller.runCompletion(ctx, "completion.nudge", prompt, bundle.WorkspaceID)
+		result, roundUsage, runErr := controller.runCompletion(
+			ctx, "completion.nudge", prompt, bundle.WorkspaceID,
+		)
+		nextUsage, usageErr = AddUsageMeasurement(usage, roundUsage)
+		if usageErr != nil {
+			usage.Complete = false
+			return append(rounds, round), usage, usageErr
+		}
+		usage = nextUsage
 		if runErr != nil {
 			round.State, round.PublicError = ExecutionFailed, "nudge_ai_failed"
-			return append(rounds, round), runErr
+			return append(rounds, round), usage, runErr
 		}
 		findings := append(append([]CompletionFinding{}, result.Missing...), result.OutOfScope...)
 		novel, duplicates = countNovelCompletionFindings(findings, seen)
@@ -309,20 +339,20 @@ func (controller AIController) RunCompletionAudit(
 		rounds = append(rounds, round)
 		previousNovel = novel > 0
 	}
-	return rounds, nil
+	return rounds, usage, nil
 }
 
 func (controller AIController) RunCompletionNudge(
 	ctx context.Context,
 	bundle PRContextBundle,
 	stats []NudgeStrategyStat,
-) (CompletionRound, error) {
+) (CompletionRound, UsageMeasurement, error) {
 	if controller.Runner == nil {
-		return CompletionRound{}, errors.New("isolated AI runner is required")
+		return CompletionRound{}, UsageMeasurement{}, errors.New("isolated AI runner is required")
 	}
 	strategy := SelectNudgeStrategy(stats)
 	variantOrdinal := nudgeStrategyAttempts(stats, strategy)
-	challenge := controller.planChallenge(
+	challenge, usage := controller.planChallenge(
 		ctx,
 		NudgeImplementationDone,
 		strategy,
@@ -337,13 +367,21 @@ func (controller AIController) RunCompletionNudge(
 	prompt, err := CompilePrompt(PromptCompletionNudge, bundle, challenge.Challenge)
 	if err != nil {
 		round.State, round.PublicError = ExecutionFailed, "nudge_prompt_invalid"
-		return round, err
+		return round, usage, err
 	}
 	round.PromptDigest = prompt.Digest
-	result, err := controller.runCompletion(ctx, "completion.nudge", prompt, bundle.WorkspaceID)
+	result, roundUsage, err := controller.runCompletion(
+		ctx, "completion.nudge", prompt, bundle.WorkspaceID,
+	)
+	nextUsage, usageErr := AddUsageMeasurement(usage, roundUsage)
+	if usageErr != nil {
+		usage.Complete = false
+		return round, usage, usageErr
+	}
+	usage = nextUsage
 	if err != nil {
 		round.State, round.PublicError = ExecutionFailed, "nudge_ai_failed"
-		return round, err
+		return round, usage, err
 	}
 	seen := findingFingerprintSet(nil)
 	seedSeenFindings(seen, bundle.Findings)
@@ -351,26 +389,27 @@ func (controller AIController) RunCompletionNudge(
 	round.NovelFindings, round.DuplicateCount = countNovelCompletionFindings(findings, seen)
 	round.State, round.Result = ExecutionSucceeded, result
 	round.Source = result.source
-	return round, nil
+	return round, usage, nil
 }
 
 func (controller AIController) RunScopeAudit(
 	ctx context.Context,
 	bundle PRContextBundle,
-) (ScopeAuditPass, string, error) {
+) (ScopeAuditPass, string, UsageMeasurement, error) {
 	if controller.Runner == nil {
-		return ScopeAuditPass{}, "", errors.New("isolated AI runner is required")
+		return ScopeAuditPass{}, "", UsageMeasurement{}, errors.New("isolated AI runner is required")
 	}
 	prompt, err := CompilePrompt(PromptScopeAudit, bundle, "")
 	if err != nil {
-		return ScopeAuditPass{}, "", err
+		return ScopeAuditPass{}, "", UsageMeasurement{}, err
 	}
-	value, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
+	execution, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: "scope.audit", SystemPrompt: prompt.SystemPrompt,
 		UserPrompt: prompt.UserPrompt, Schema: scopeAuditSchema(),
 	})
+	usage := UsageMeasurement{Complete: execution.Complete, Usage: execution.Usage}
 	if err != nil {
-		return ScopeAuditPass{}, prompt.Digest, err
+		return ScopeAuditPass{}, prompt.Digest, usage, err
 	}
 	var result ScopeAuditPass
 	// Path/hunk identity is the only model-produced candidate binding. Module
@@ -379,10 +418,10 @@ func (controller AIController) RunScopeAudit(
 	// result can authorize validation or publication. Do not reject an
 	// otherwise valid classification merely because the model redistributed
 	// an exact aggregate line count between adjacent hunks.
-	if decodeStructured(value, &result) != nil || !validScopeAuditPassShape(result) {
-		return ScopeAuditPass{}, prompt.Digest, errors.New("scope audit result is invalid")
+	if decodeStructured(execution.Structured, &result) != nil || !validScopeAuditPassShape(result) {
+		return ScopeAuditPass{}, prompt.Digest, usage, errors.New("scope audit result is invalid")
 	}
-	return result, prompt.Digest, nil
+	return result, prompt.Digest, usage, nil
 }
 
 func (controller AIController) runReview(
@@ -391,7 +430,7 @@ func (controller AIController) runReview(
 	prompt CompiledPrompt,
 	workspaceID string,
 ) (ReviewPass, error) {
-	value, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
+	execution, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: operation, SystemPrompt: prompt.SystemPrompt, UserPrompt: prompt.UserPrompt,
 		Schema: reviewSchema(), SourceExecutionID: sourceAIExecutionID(workspaceID, operation, prompt.Digest),
 		SourceWorkspaceID: workspaceID, SourceBinding: prompt.Digest,
@@ -399,6 +438,7 @@ func (controller AIController) runReview(
 	if err != nil {
 		return ReviewPass{}, err
 	}
+	value := execution.Structured
 	source := aiExecutionSourceFromValue(value)
 	value = aiValueWithoutSource(value)
 	var result ReviewPass
@@ -417,49 +457,51 @@ func (controller AIController) runCompletion(
 	operation string,
 	prompt CompiledPrompt,
 	workspaceID string,
-) (CompletionPass, error) {
-	value, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
+) (CompletionPass, UsageMeasurement, error) {
+	execution, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: operation, SystemPrompt: prompt.SystemPrompt, UserPrompt: prompt.UserPrompt,
 		Schema: completionSchema(), SourceExecutionID: sourceAIExecutionID(workspaceID, operation, prompt.Digest),
 		SourceWorkspaceID: workspaceID, SourceBinding: prompt.Digest,
 	})
+	usage := UsageMeasurement{Complete: execution.Complete, Usage: execution.Usage}
 	if err != nil {
-		return CompletionPass{}, err
+		return CompletionPass{}, usage, err
 	}
+	value := execution.Structured
 	source := aiExecutionSourceFromValue(value)
 	value = aiValueWithoutSource(value)
 	var result CompletionPass
 	if err := decodeStructured(value, &result); err != nil {
-		return CompletionPass{}, fmt.Errorf("decode completion result: %w", err)
+		return CompletionPass{}, usage, fmt.Errorf("decode completion result: %w", err)
 	}
 	if len(result.Missing)+len(result.OutOfScope) > maxAIReviewFindings {
-		return CompletionPass{}, errors.New("completion result has too many findings")
+		return CompletionPass{}, usage, errors.New("completion result has too many findings")
 	}
 	if result.Complete != (len(result.Missing) == 0) {
-		return CompletionPass{}, errors.New("completion claim contradicts missing in-scope work")
+		return CompletionPass{}, usage, errors.New("completion claim contradicts missing in-scope work")
 	}
 	if !validBoundedText(result.Summary, maxAITextBytes, true) {
-		return CompletionPass{}, errors.New("completion summary is invalid")
+		return CompletionPass{}, usage, errors.New("completion summary is invalid")
 	}
 	for _, finding := range append(append([]CompletionFinding{}, result.Missing...), result.OutOfScope...) {
 		if err := validateCompletionFinding(finding); err != nil {
-			return CompletionPass{}, err
+			return CompletionPass{}, usage, err
 		}
 	}
 	for _, finding := range result.OutOfScope {
 		if DecideScope(completionFindingScope(finding)) == ScopeActionProceed {
-			return CompletionPass{}, errors.New("out-of-scope list contains an exact small in-scope finding")
+			return CompletionPass{}, usage, errors.New("out-of-scope list contains an exact small in-scope finding")
 		}
 	}
 	for _, finding := range result.Missing {
 		if !finding.TypeCompatible || finding.ScopeDistance != ScopeExact {
-			return CompletionPass{}, errors.New(
+			return CompletionPass{}, usage, errors.New(
 				"missing-in-scope list contains work classified outside the charter or PR type",
 			)
 		}
 	}
 	result.source = source
-	return result, nil
+	return result, usage, nil
 }
 
 func sourceAIExecutionID(workspaceID, operation, promptDigest string) string {
@@ -507,7 +549,7 @@ func (controller AIController) planChallenge(
 	variantOrdinal int,
 	bundle PRContextBundle,
 	prior any,
-) NudgeChallenge {
+) (NudgeChallenge, UsageMeasurement) {
 	request := map[string]any{
 		"stage": stage, "strategy_family": strategy,
 		"charter": bundle.Charter, "prior_rounds": prior, "variant_ordinal": variantOrdinal,
@@ -518,15 +560,16 @@ func (controller AIController) planChallenge(
 		"repository_lessons":      bundle.RepositoryLessons,
 	}
 	encoded, _ := json.Marshal(request)
-	value, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
+	execution, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation:    "nudge.plan",
 		SystemPrompt: `Generate one bounded challenge for another isolated agent. Preserve the exact charter and authority. Use durable variant history to explore untried wording and exploit strategies with confirmed delayed rewards. A missing reward, a failed attempt, or zero findings is unresolved and never success. Target a distinct coverage gap. Do not claim findings or request tools. Return only structured output.`,
 		UserPrompt:   string(encoded),
 		Schema:       nudgeChallengeSchema(),
 	})
+	usage := UsageMeasurement{Complete: execution.Complete, Usage: execution.Usage}
 	if err == nil {
 		var result NudgeChallenge
-		if decodeStructured(value, &result) == nil && result.Strategy == strategy {
+		if decodeStructured(execution.Structured, &result) == nil && result.Strategy == strategy {
 			result.Challenge = fmt.Sprintf("Pass variant %d: %s", variantOrdinal+1, result.Challenge)
 		}
 		if result.Strategy == strategy &&
@@ -535,10 +578,10 @@ func (controller AIController) planChallenge(
 			validBoundedText(result.ExpectedNewEvidence, maxAITextBytes, false) &&
 			validBoundedText(result.Reason, maxAITextBytes, false) &&
 			!priorNudgeChallengeUsed(prior, result.Challenge) {
-			return result
+			return result, usage
 		}
 	}
-	return deterministicNudgeChallenge(stage, strategy, variantOrdinal)
+	return deterministicNudgeChallenge(stage, strategy, variantOrdinal), usage
 }
 
 func seedSeenFindings(seen map[string]struct{}, findings []Finding) {

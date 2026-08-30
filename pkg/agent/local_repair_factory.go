@@ -130,14 +130,19 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 	if localRepairNil(provider) {
 		return nil, errors.New("controller local repair concrete provider is unavailable")
 	}
+	reasoningEffort, err := controllerLocalRepairReasoningEffort(cfg, agent, selected)
+	if err != nil {
+		return nil, errors.New("controller local repair agent configuration is invalid")
+	}
 
 	runner, err := NewLocalRepairRunner(LocalRepairRunnerConfig{
-		Workspaces:    workspaces,
-		Provider:      provider,
-		Model:         model,
-		MaxIterations: agent.MaxIterations,
-		MaxTokens:     agent.MaxTokens,
-		Temperature:   agent.Temperature,
+		Workspaces:      workspaces,
+		Provider:        provider,
+		Model:           model,
+		MaxIterations:   agent.MaxIterations,
+		MaxTokens:       agent.MaxTokens,
+		Temperature:     agent.Temperature,
+		ReasoningEffort: reasoningEffort,
 	})
 	if err != nil {
 		return nil, errors.New("controller local repair agent configuration is invalid")
@@ -215,7 +220,12 @@ func controllerLocalRepairReadyForGeneration(
 	}
 
 	if agent.ModelRouter == nil {
-		return controllerRepairCandidateReady(workspaces, agent, firstRepairCandidate(agent.Candidates))
+		return controllerRepairCandidateReady(
+			cfg,
+			workspaces,
+			agent,
+			firstRepairCandidate(agent.Candidates),
+		)
 	}
 	seen := make(map[string]bool)
 	for _, block := range agent.ModelRouter.Config.Blocks {
@@ -238,6 +248,7 @@ func controllerLocalRepairReadyForGeneration(
 		); router != nil {
 			for _, account := range router.Accounts {
 				if controllerRepairCandidateReady(
+					cfg,
 					workspaces,
 					agent,
 					firstRepairCandidate(account.Candidates),
@@ -257,6 +268,7 @@ func controllerLocalRepairReadyForGeneration(
 			agent.executionPolicy,
 		)
 		if err == nil && controllerRepairCandidateReady(
+			cfg,
 			workspaces,
 			agent,
 			firstRepairCandidate(candidates),
@@ -277,6 +289,7 @@ func firstRepairCandidate(
 }
 
 func controllerRepairCandidateReady(
+	cfg *config.Config,
 	workspaces PinnedWorkspaceAcquirer,
 	agent *AgentInstance,
 	candidate *providers.FallbackCandidate,
@@ -295,15 +308,41 @@ func controllerRepairCandidateReady(
 	if localRepairNil(provider) {
 		return false
 	}
-	_, err := NewLocalRepairRunner(LocalRepairRunnerConfig{
-		Workspaces:    workspaces,
-		Provider:      provider,
-		Model:         model,
-		MaxIterations: agent.MaxIterations,
-		MaxTokens:     agent.MaxTokens,
-		Temperature:   agent.Temperature,
+	reasoningEffort, err := controllerLocalRepairReasoningEffort(cfg, agent, *candidate)
+	if err != nil {
+		return false
+	}
+	_, err = NewLocalRepairRunner(LocalRepairRunnerConfig{
+		Workspaces:      workspaces,
+		Provider:        provider,
+		Model:           model,
+		MaxIterations:   agent.MaxIterations,
+		MaxTokens:       agent.MaxTokens,
+		Temperature:     agent.Temperature,
+		ReasoningEffort: reasoningEffort,
 	})
 	return err == nil
+}
+
+func controllerLocalRepairReasoningEffort(
+	cfg *config.Config,
+	agent *AgentInstance,
+	candidate providers.FallbackCandidate,
+) (string, error) {
+	if cfg == nil || agent == nil {
+		return "", nil
+	}
+	modelConfig := resolveActiveModelConfig(
+		cfg,
+		agent.Workspace,
+		[]providers.FallbackCandidate{candidate},
+		candidate.Model,
+		candidate.Provider,
+	)
+	if modelConfig == nil {
+		return "", nil
+	}
+	return normalizeLocalRepairReasoningEffort(modelConfig.ReasoningEffort)
 }
 
 func controllerRepairExactPrimary(

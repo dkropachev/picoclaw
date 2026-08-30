@@ -117,7 +117,7 @@ func TestNewClaudeCliProvider_EmptyWorkspace(t *testing.T) {
 // --- Chat() tests ---
 
 func TestChat_Success(t *testing.T) {
-	mockJSON := `{"type":"result","subtype":"success","is_error":false,"result":"Hello from mock!","session_id":"sess_123","total_cost_usd":0.005,"duration_ms":200,"duration_api_ms":150,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":0}}`
+	mockJSON := `{"type":"result","subtype":"success","is_error":false,"result":"Hello from mock!","session_id":"sess_123","total_cost_usd":0.005,"duration_ms":200,"duration_api_ms":150,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":7}}`
 	script := createMockCLI(t, mockJSON, "", 0)
 
 	p := NewClaudeCliProvider(t.TempDir())
@@ -141,14 +141,17 @@ func TestChat_Success(t *testing.T) {
 	if resp.Usage == nil {
 		t.Fatal("Usage should not be nil")
 	}
-	if resp.Usage.PromptTokens != 110 { // 10 + 100 + 0
-		t.Errorf("PromptTokens = %d, want 110", resp.Usage.PromptTokens)
+	if resp.Usage.PromptTokens != 117 { // 10 + 100 + 7
+		t.Errorf("PromptTokens = %d, want 117", resp.Usage.PromptTokens)
 	}
 	if resp.Usage.CompletionTokens != 5 {
 		t.Errorf("CompletionTokens = %d, want 5", resp.Usage.CompletionTokens)
 	}
-	if resp.Usage.TotalTokens != 115 { // 110 + 5
-		t.Errorf("TotalTokens = %d, want 115", resp.Usage.TotalTokens)
+	if resp.Usage.TotalTokens != 122 { // 117 + 5
+		t.Errorf("TotalTokens = %d, want 122", resp.Usage.TotalTokens)
+	}
+	if resp.Usage.CachedTokens != 7 {
+		t.Errorf("CachedTokens = %d, want 7", resp.Usage.CachedTokens)
 	}
 }
 

@@ -735,7 +735,8 @@ func TestWorkflowManagedUsageIsPerChildAndAggregate(t *testing.T) {
 			model = *options.ActualModelName
 		}
 		usage := workflows.AgentUsage{
-			Model: model, PromptTokens: 10, CompletionTokens: 2,
+			Model: model, ProviderCalls: 1, UsageReportedCalls: 1,
+			PromptTokens: 10, CompletionTokens: 2,
 			TotalTokens: 12, CachedTokens: 1,
 		}
 		if model == "review-b" {
@@ -766,20 +767,24 @@ func TestWorkflowManagedUsageIsPerChildAndAggregate(t *testing.T) {
 	}
 	wantAggregate := []workflows.AgentUsage{
 		{
-			Model:            "review-a",
-			Reviewer:         "review-a",
-			PromptTokens:     10,
-			CompletionTokens: 2,
-			TotalTokens:      12,
-			CachedTokens:     1,
+			Model:              "review-a",
+			Reviewer:           "review-a",
+			ProviderCalls:      1,
+			UsageReportedCalls: 1,
+			PromptTokens:       10,
+			CompletionTokens:   2,
+			TotalTokens:        12,
+			CachedTokens:       1,
 		},
 		{
-			Model:            "review-b",
-			Reviewer:         "review-b",
-			PromptTokens:     20,
-			CompletionTokens: 2,
-			TotalTokens:      22,
-			CachedTokens:     1,
+			Model:              "review-b",
+			Reviewer:           "review-b",
+			ProviderCalls:      1,
+			UsageReportedCalls: 1,
+			PromptTokens:       20,
+			CompletionTokens:   2,
+			TotalTokens:        22,
+			CachedTokens:       1,
 		},
 	}
 	if got := outputs["usage"]; !reflect.DeepEqual(got, wantAggregate) {
@@ -1073,7 +1078,8 @@ func TestWorkflowManagedUsageObserverErrorStopsAfterCurrentBatch(t *testing.T) {
 				model = *options.ActualModelName
 			}
 			if err := options.UsageObserver(workflows.AgentUsage{
-				Model: model, PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12,
+				Model: model, ProviderCalls: 1, UsageReportedCalls: 1,
+				PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12,
 			}); err != nil {
 				return "", err
 			}
@@ -1240,7 +1246,8 @@ func TestStructuredRepairRetainsOriginalImmutableEvidenceContext(t *testing.T) {
 			return "", errors.New("repair usage observer is nil")
 		}
 		if err := options.UsageObserver(workflows.AgentUsage{
-			Model: "review-model", PromptTokens: len(calls) * 10,
+			Model: "review-model", ProviderCalls: 1, UsageReportedCalls: 1,
+			PromptTokens:     len(calls) * 10,
 			CompletionTokens: len(calls), TotalTokens: len(calls) * 11,
 		}); err != nil {
 			return "", err
@@ -1257,7 +1264,8 @@ func TestStructuredRepairRetainsOriginalImmutableEvidenceContext(t *testing.T) {
 		t.Fatalf("repair result=%#v repairs=%d calls=%#v err=%v", result, repairs, calls, err)
 	}
 	if !reflect.DeepEqual(usage, []workflows.AgentUsage{{
-		Model: "review-model", PromptTokens: 30, CompletionTokens: 3, TotalTokens: 33,
+		Model: "review-model", ProviderCalls: 2, UsageReportedCalls: 2,
+		PromptTokens: 30, CompletionTokens: 3, TotalTokens: 33,
 	}}) {
 		t.Fatalf("repair usage = %#v, want both attempts accumulated", usage)
 	}

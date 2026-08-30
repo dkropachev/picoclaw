@@ -15,25 +15,46 @@ import (
 
 const (
 	// ResultSchemaVersion is the stable machine-output schema.
-	ResultSchemaVersion = 1
-	resultVersion       = ResultSchemaVersion
+	ResultSchemaVersion      = 2
+	resultVersion            = ResultSchemaVersion
+	ImplementationUsageScope = prworkspace.ImplementationUsageScope
 )
 
 var developmentIDPattern = regexp.MustCompile(`^devw_[0-9a-f]{32}$`)
 
 // Result is the only machine-readable output emitted by `picoclaw code`.
 type Result struct {
-	Version           int          `json:"version"`
-	RequestID         string       `json:"request_id"`
-	WorkspaceID       string       `json:"workspace_id"`
-	Phase             string       `json:"phase"`
-	Status            string       `json:"status"`
-	CandidateRevision string       `json:"candidate_revision"`
-	ValidationStatus  string       `json:"validation_status"`
-	PendingGate       *PendingGate `json:"pending_gate"`
-	Branch            string       `json:"branch"`
-	PullRequestURL    string       `json:"pull_request_url"`
-	ErrorCode         string       `json:"error_code"`
+	Version           int                 `json:"version"`
+	RequestID         string              `json:"request_id"`
+	WorkspaceID       string              `json:"workspace_id"`
+	Phase             string              `json:"phase"`
+	Status            string              `json:"status"`
+	CandidateRevision string              `json:"candidate_revision"`
+	ValidationStatus  string              `json:"validation_status"`
+	PendingGate       *PendingGate        `json:"pending_gate"`
+	Branch            string              `json:"branch"`
+	PullRequestURL    string              `json:"pull_request_url"`
+	ErrorCode         string              `json:"error_code"`
+	Usage             ImplementationUsage `json:"usage"`
+}
+
+type TokenUsage struct {
+	ProviderCalls      int64 `json:"provider_calls"`
+	UsageReportedCalls int64 `json:"usage_reported_calls"`
+	PromptTokens       int64 `json:"prompt_tokens"`
+	CachedTokens       int64 `json:"cached_tokens"`
+	CompletionTokens   int64 `json:"completion_tokens"`
+	ReasoningTokens    int64 `json:"reasoning_tokens"`
+	TotalTokens        int64 `json:"total_tokens"`
+	LatencyMillis      int64 `json:"latency_millis"`
+}
+
+type ImplementationUsage struct {
+	Scope    string     `json:"scope"`
+	Complete bool       `json:"complete"`
+	Repair   TokenUsage `json:"repair"`
+	Audit    TokenUsage `json:"audit"`
+	Total    TokenUsage `json:"total"`
 }
 
 type PendingGate struct {
@@ -99,7 +120,13 @@ func classifyAggregate(requestID string, aggregate prworkspace.Aggregate) (lifec
 	snapshot := lifecycleSnapshot{result: Result{
 		Version: resultVersion, RequestID: requestID, WorkspaceID: workspace.ID,
 		Phase: string(workspace.Phase), Status: string(workspace.ExecutionState),
+		Usage: ImplementationUsage{Scope: ImplementationUsageScope},
 	}}
+	usage, usageErr := implementationUsageForResult(aggregate.StageRuns)
+	if usageErr != nil || len(aggregate.RepairAttempts) > 0 && !hasImplementationStage(aggregate.StageRuns) {
+		return lifecycleSnapshot{}, fmt.Errorf("development workspace response is malformed")
+	}
+	snapshot.result.Usage = usage
 	repair, hasRepair := latestSucceededRepair(aggregate.RepairAttempts)
 	if hasRepair {
 		snapshot.result.CandidateRevision = boundedTerminalText(repair.CandidateSHA, 256)
@@ -200,6 +227,50 @@ func classifyAggregate(requestID string, aggregate prworkspace.Aggregate) (lifec
 	}
 	snapshot.action = actionPoll
 	return snapshot, nil
+}
+
+func hasImplementationStage(values []prworkspace.StageRun) bool {
+	for _, stage := range values {
+		if stage.Stage == "implementation" {
+			return true
+		}
+	}
+	return false
+}
+
+func implementationUsageForResult(values []prworkspace.StageRun) (ImplementationUsage, error) {
+	result := ImplementationUsage{Scope: ImplementationUsageScope}
+	for index := len(values) - 1; index >= 0; index-- {
+		stage := values[index]
+		if stage.Stage != "implementation" {
+			continue
+		}
+		if stage.Usage == nil {
+			// Pre-v2 durable stages cannot be reconstructed. Project an honest
+			// incomplete zero measurement while keeping the output contract v2.
+			return result, nil
+		}
+		if err := stage.Usage.Validate(); err != nil {
+			return ImplementationUsage{}, err
+		}
+		result = ImplementationUsage{
+			Scope: stage.Usage.Scope, Complete: stage.Usage.Complete,
+			Repair: projectTokenUsage(stage.Usage.Repair),
+			Audit:  projectTokenUsage(stage.Usage.Audit),
+			Total:  projectTokenUsage(stage.Usage.Total),
+		}
+		return result, nil
+	}
+	return result, nil
+}
+
+func projectTokenUsage(value prworkspace.TokenUsage) TokenUsage {
+	return TokenUsage{
+		ProviderCalls: value.ProviderCalls, UsageReportedCalls: value.UsageReportedCalls,
+		PromptTokens: value.PromptTokens, CachedTokens: value.CachedTokens,
+		CompletionTokens: value.CompletionTokens, ReasoningTokens: value.ReasoningTokens,
+		TotalTokens: value.TotalTokens, LatencyMillis: value.LatencyMillis,
+	}
 }
 
 func terminalExecutionState(value prworkspace.ExecutionState) bool {

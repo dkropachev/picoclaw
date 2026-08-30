@@ -55,6 +55,10 @@ type UsageInfo struct {
 	TotalTokens      int `json:"total_tokens"`
 	CachedTokens     int `json:"cached_tokens,omitempty"`
 	ReasoningTokens  int `json:"reasoning_tokens,omitempty"`
+	// Estimated is true when one or more counts were synthesized locally
+	// instead of being reported by the provider. Consumers may retain the
+	// conservative numbers but must not count the call as usage-reported.
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 // CacheControl marks a content block for LLM-side prefix caching.

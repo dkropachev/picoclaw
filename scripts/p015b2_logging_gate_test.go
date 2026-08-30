@@ -117,7 +117,7 @@ var p015CohortSizes = map[string]int{
 	"C": 23,
 	"R": 7,
 	"X": 1,
-	"F": 22,
+	"F": 24,
 }
 
 // Active rows describe current source calls. Stable rows additionally retain
@@ -131,7 +131,7 @@ var p015ActiveCohortSizes = map[string]int{
 	"C": 23,
 	"R": 7,
 	"X": 1,
-	"F": 14,
+	"F": 16,
 }
 
 var p015ExpectedPreB2CStageCounts = map[string]int{
@@ -144,7 +144,7 @@ var p015ExpectedPreB2CStageCounts = map[string]int{
 	"R|b4_excluded|pico_legacy":         7,
 	"X|crash_artifact|panic_artifact":   1,
 	"F|functional_allow|functional_fmt": 13,
-	"F|functional_allow|functional_io":  1,
+	"F|functional_allow|functional_io":  3,
 	"F|functional_retired|retired":      8,
 }
 
@@ -158,7 +158,7 @@ var p015ExpectedFinalStageCounts = map[string]int{
 	"R|b4_excluded|pico_legacy":         7,
 	"X|crash_artifact|panic_artifact":   1,
 	"F|functional_allow|functional_fmt": 13,
-	"F|functional_allow|functional_io":  1,
+	"F|functional_allow|functional_io":  3,
 	"F|functional_retired|retired":      8,
 }
 
@@ -449,9 +449,9 @@ func TestP015B2LoggingInventoryDetectors(t *testing.T) {
 	if len(p015ReviewedNonLoggingCalls) != 0 {
 		t.Fatalf("unexpected unresolved-receiver allowances: %#v", p015ReviewedNonLoggingCalls)
 	}
-	if len(p015ReviewedNonLoggingMethodValues) != 57 {
+	if len(p015ReviewedNonLoggingMethodValues) != 56 {
 		t.Fatalf(
-			"reviewed unresolved method-value allowances = %d, want exact 57: %#v",
+			"reviewed unresolved method-value allowances = %d, want exact 56: %#v",
 			len(p015ReviewedNonLoggingMethodValues),
 			p015ReviewedNonLoggingMethodValues,
 		)
@@ -2102,8 +2102,8 @@ func p015ValidateLedger(t *testing.T, repoRoot string, rows []p015LoggingSite) {
 	p015RequireExactCounts(t, "P015b2c logger file", b2cLoggerFileCounts, p015B2CLoggerFileCounts)
 	p015RequireExactCounts(t, "P015b2c logger owner", b2cLoggerOwnerCounts, p015B2CLoggerOwnerCounts)
 	p015RequireExactCounts(t, "P015b2c console owner", b2cConsoleOwnerCounts, p015B2CConsoleOwnerCounts)
-	if len(rows) != 379 {
-		t.Errorf("ledger has %d stable rows, want exact 379", len(rows))
+	if len(rows) != 381 {
+		t.Errorf("ledger has %d stable rows, want exact 381", len(rows))
 	}
 	const originalAIdentities = 109
 	if got := activeCounts["A"] + activeCounts["B"] + activeCounts["H"] + activeCounts["G"]; got != 322 {
@@ -2183,8 +2183,8 @@ func p015ValidateLedger(t *testing.T, repoRoot string, rows []p015LoggingSite) {
 	for _, count := range activeCounts {
 		activeTotal += count
 	}
-	if activeTotal != 367 {
-		t.Errorf("ledger has %d active source tuples, want exact 367", activeTotal)
+	if activeTotal != 369 {
+		t.Errorf("ledger has %d active source tuples, want exact 369", activeTotal)
 	}
 }
 

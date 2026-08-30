@@ -793,7 +793,6 @@ var p015ReviewedNonLoggingMethodValues = map[string]struct{}{
 	p015MethodValueKey("pkg/agent/workflow_automations.go", "github.com/sipeed/picoclaw/pkg/agent.(*AgentLoop).loadScheduledWorkflowRuns", 1, "def.Error"):                        {},
 	p015MethodValueKey("pkg/agent/workflow_automations.go", "github.com/sipeed/picoclaw/pkg/agent.(*AgentLoop).handleWorkflowRuntimeEventForGeneration", 1, "def.Error"):          {},
 	p015MethodValueKey("pkg/agent/workflow_managed.go", "github.com/sipeed/picoclaw/pkg/agent.workflowManagedCalibrationSimilarityScore", 1, "entry.OutputSchemaHash"):            {},
-	p015MethodValueKey("pkg/agent/workflow_managed.go", "github.com/sipeed/picoclaw/pkg/agent.workflowRunManagedChildren.$lit1", 1, "req.Output"):                                 {},
 	p015MethodValueKey("pkg/agent/workflow_managed.go", "github.com/sipeed/picoclaw/pkg/agent.workflowStructuredAgentOutputs", 1, "structured.Error"):                             {},
 	p015MethodValueKey("pkg/agent/workflow_managed.go", "github.com/sipeed/picoclaw/pkg/agent.workflowStructuredAgentOutputs", 2, "structured.Error"):                             {},
 	p015MethodValueKey("pkg/agent/workflow_managed.go", "github.com/sipeed/picoclaw/pkg/agent.workflowManagedChildOutput", 1, "result.structured.Error"):                          {},

@@ -1,6 +1,7 @@
 package code
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -10,6 +11,104 @@ import (
 	"github.com/sipeed/picoclaw/pkg/prworkspace"
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
+
+func TestResultSchemaV2AlwaysProjectsBoundedImplementationUsage(t *testing.T) {
+	value := completedAggregate()
+	usage := prworkspace.ImplementationUsage{
+		Scope: prworkspace.ImplementationUsageScope, Complete: true,
+		Repair: prworkspace.TokenUsage{
+			ProviderCalls: 2, UsageReportedCalls: 2,
+			PromptTokens: 10, CachedTokens: 4,
+			CompletionTokens: 3, ReasoningTokens: 1, TotalTokens: 13,
+			LatencyMillis: 20,
+		},
+		Audit: prworkspace.TokenUsage{
+			ProviderCalls: 1, UsageReportedCalls: 1,
+			PromptTokens: 5, CachedTokens: 2,
+			CompletionTokens: 2, ReasoningTokens: 1, TotalTokens: 7,
+			LatencyMillis: 8,
+		},
+		Total: prworkspace.TokenUsage{
+			ProviderCalls: 3, UsageReportedCalls: 3,
+			PromptTokens: 15, CachedTokens: 6,
+			CompletionTokens: 5, ReasoningTokens: 2, TotalTokens: 20,
+			LatencyMillis: 28,
+		},
+	}
+	value.StageRuns = []prworkspace.StageRun{{
+		ID: "psr_stage", Stage: "implementation", Usage: &usage,
+	}}
+	snapshot, err := classifyAggregate("request", value)
+	require.NoError(t, err)
+	require.Equal(t, ResultSchemaVersion, snapshot.result.Version)
+	assert.Equal(t, ImplementationUsage{
+		Scope: usage.Scope, Complete: true,
+		Repair: projectTokenUsage(usage.Repair), Audit: projectTokenUsage(usage.Audit),
+		Total: projectTokenUsage(usage.Total),
+	}, snapshot.result.Usage)
+	legacy := completedAggregate()
+	legacy.StageRuns[0].Usage = nil
+	snapshot, err = classifyAggregate("request", legacy)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		ImplementationUsage{Scope: prworkspace.ImplementationUsageScope},
+		snapshot.result.Usage,
+	)
+
+	encoded, err := json.Marshal(snapshot.result)
+	require.NoError(t, err)
+	var contract map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &contract))
+	assert.ElementsMatch(t, []string{
+		"version", "request_id", "workspace_id", "phase", "status",
+		"candidate_revision", "validation_status", "pending_gate", "branch",
+		"pull_request_url", "error_code", "usage",
+	}, mapKeys(contract))
+	usageJSON, ok := contract["usage"].(map[string]any)
+	require.True(t, ok)
+	assert.ElementsMatch(t, []string{"scope", "complete", "repair", "audit", "total"}, mapKeys(usageJSON))
+	for _, name := range []string{"repair", "audit", "total"} {
+		tokens, tokenOK := usageJSON[name].(map[string]any)
+		require.True(t, tokenOK)
+		assert.ElementsMatch(t, []string{
+			"provider_calls", "usage_reported_calls", "prompt_tokens", "cached_tokens",
+			"completion_tokens", "reasoning_tokens", "total_tokens", "latency_millis",
+		}, mapKeys(tokens))
+	}
+
+	value.StageRuns = nil
+	value.RepairAttempts = nil
+	value.ValidationRuns = nil
+	value.Publications = nil
+	value.Workspace.Phase = prworkspace.PhaseIntake
+	value.Workspace.ExecutionState = prworkspace.ExecutionQueued
+	snapshot, err = classifyAggregate("request", value)
+	require.NoError(t, err)
+	assert.Equal(t, ImplementationUsage{Scope: prworkspace.ImplementationUsageScope}, snapshot.result.Usage)
+
+	usage.Total.TotalTokens--
+	value.StageRuns = []prworkspace.StageRun{{Stage: "implementation", Usage: &usage}}
+	_, err = classifyAggregate("request", value)
+	require.Error(t, err)
+
+	value.StageRuns = []prworkspace.StageRun{{Stage: "implementation"}}
+	snapshot, err = classifyAggregate("request", value)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		ImplementationUsage{Scope: prworkspace.ImplementationUsageScope},
+		snapshot.result.Usage,
+	)
+}
+
+func mapKeys(value map[string]any) []string {
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	return keys
+}
 
 func TestClassifyAggregateRequiresCompleteExactDraftPullEvidence(t *testing.T) {
 	valid := completedAggregate()
@@ -417,6 +516,21 @@ func TestPendingGateProjectionBoundsAndSanitizesAllFields(t *testing.T) {
 }
 
 func completedAggregate() prworkspace.Aggregate {
+	usage := &prworkspace.ImplementationUsage{
+		Scope: prworkspace.ImplementationUsageScope, Complete: true,
+		Repair: prworkspace.TokenUsage{
+			ProviderCalls: 1, UsageReportedCalls: 1,
+			PromptTokens: 10, CachedTokens: 4, CompletionTokens: 3, TotalTokens: 13,
+		},
+		Audit: prworkspace.TokenUsage{
+			ProviderCalls: 1, UsageReportedCalls: 1,
+			PromptTokens: 5, CachedTokens: 2, CompletionTokens: 2, TotalTokens: 7,
+		},
+		Total: prworkspace.TokenUsage{
+			ProviderCalls: 2, UsageReportedCalls: 2,
+			PromptTokens: 15, CachedTokens: 6, CompletionTokens: 5, TotalTokens: 20,
+		},
+	}
 	return prworkspace.Aggregate{
 		Workspace: prworkspace.Workspace{
 			ID: "devw_11111111111111111111111111111111", Phase: prworkspace.PhaseComplete,
@@ -433,6 +547,10 @@ func completedAggregate() prworkspace.Aggregate {
 		RepairAttempts: []prworkspace.RepairAttempt{{
 			ID: "pra_11111111111111111111111111111111", StageRunID: "psr_stage",
 			State: prworkspace.ExecutionSucceeded, CandidateSHA: "commit",
+		}},
+		StageRuns: []prworkspace.StageRun{{
+			ID: "psr_stage", Stage: "implementation", State: prworkspace.ExecutionSucceeded,
+			Usage: usage,
 		}},
 		ValidationRuns: []prworkspace.ValidationRun{{
 			ID: "pvr_11111111111111111111111111111111", StageRunID: "psr_stage",

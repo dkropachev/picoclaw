@@ -10,22 +10,22 @@ import (
 
 type failedReviewNudgeAI struct{}
 
-func (failedReviewNudgeAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[string]any, error) {
+func (failedReviewNudgeAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (IsolatedAIResult, error) {
 	switch request.Operation {
 	case "nudge.plan":
-		return nil, context.Canceled
+		return IsolatedAIResult{}, context.Canceled
 	case "review.nudge":
-		return nil, errors.New("isolated model unavailable")
+		return IsolatedAIResult{}, errors.New("isolated model unavailable")
 	case "review.initial":
-		return map[string]any{
+		return successfulIsolatedAIResult(map[string]any{
 			"summary": "initial complete", "findings": []any{},
 			"coverage": map[string]any{
 				"reviewed_areas": []any{}, "unreviewed_areas": []any{},
 				"tests_considered": []any{}, "residual_risks": []any{},
 			},
-		}, nil
+		}), nil
 	default:
-		return nil, errors.New("unexpected operation")
+		return IsolatedAIResult{}, errors.New("unexpected operation")
 	}
 }
 

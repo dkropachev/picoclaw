@@ -16,13 +16,13 @@ type codeCLIOperationAI struct {
 func (runner *codeCLIOperationAI) RunIsolated(
 	ctx context.Context,
 	request IsolatedAIRequest,
-) (map[string]any, error) {
+) (IsolatedAIResult, error) {
 	if runner.operations == nil {
 		runner.operations = make(map[string]int)
 	}
 	runner.operations[request.Operation]++
 	if request.Operation == "feature.plan" {
-		return developmentPlanningResponse(false), nil
+		return successfulIsolatedAIResult(developmentPlanningResponse(false)), nil
 	}
 	return serviceAI{}.RunIsolated(ctx, request)
 }

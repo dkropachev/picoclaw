@@ -523,7 +523,7 @@ func (service *Service) DraftCharter(ctx context.Context, request DraftCharterRe
 	if promptErr != nil {
 		return Aggregate{}, promptErr
 	}
-	value, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
+	execution, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: "charter.draft", SystemPrompt: prompt.SystemPrompt,
 		UserPrompt: prompt.UserPrompt, Schema: charterDraftSchema(),
 	})
@@ -531,7 +531,7 @@ func (service *Service) DraftCharter(ctx context.Context, request DraftCharterRe
 		return Aggregate{}, runErr
 	}
 	var draft CharterDraftOutput
-	if err := decodeStructured(value, &draft); err != nil || validateCharterDraft(draft) != nil {
+	if err := decodeStructured(execution.Structured, &draft); err != nil || validateCharterDraft(draft) != nil {
 		return Aggregate{}, errors.New("AI charter draft is invalid")
 	}
 	now := service.now().UTC()

@@ -111,14 +111,14 @@ func TestGateSubjectFingerprintBindsPrivateSourceRevision(t *testing.T) {
 
 type provenanceReviewAI struct{}
 
-func (provenanceReviewAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[string]any, error) {
+func (provenanceReviewAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (IsolatedAIResult, error) {
 	source := &AIExecutionSource{
 		ExecutionID: request.SourceExecutionID, WorkspaceID: request.SourceWorkspaceID,
 		Binding: request.SourceBinding, AgentID: "main",
 		SessionRevision: "sha256:source-revision", Tools: "none",
 	}
 	source.Session = aiExecutionSourceSessionKey(source)
-	return map[string]any{
+	return successfulIsolatedAIResult(map[string]any{
 		"summary": "Found one issue.",
 		"findings": []any{map[string]any{
 			"severity": "high", "title": "Issue", "message": "The candidate violates the stated invariant.",
@@ -137,7 +137,7 @@ func (provenanceReviewAI) RunIsolated(_ context.Context, request IsolatedAIReque
 			"source_session": source.Session, "source_revision": "sha256:source-revision",
 			"source_tools": "none",
 		},
-	}, nil
+	}), nil
 }
 
 func TestReviewRoundAndMaterializedFindingRetainSourceProvenance(t *testing.T) {

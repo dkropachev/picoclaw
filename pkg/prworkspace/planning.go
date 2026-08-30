@@ -71,7 +71,7 @@ func (service *Service) RunFeaturePlanning(
 	if scopeRule.Prompt != "" {
 		systemPrompt += "\n\nRepository scope policy (may only tighten or clarify relevance):\n" + scopeRule.Prompt
 	}
-	value, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
+	execution, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: "feature.plan", SystemPrompt: systemPrompt,
 		UserPrompt: string(userPrompt), Schema: reviewSchema(),
 	})
@@ -79,7 +79,7 @@ func (service *Service) RunFeaturePlanning(
 		return aggregate, runErr
 	}
 	var plan ReviewPass
-	if err := decodeStructured(value, &plan); err != nil || validateReviewPass(plan) != nil {
+	if err := decodeStructured(execution.Structured, &plan); err != nil || validateReviewPass(plan) != nil {
 		return aggregate, errors.New("AI feature plan is invalid")
 	}
 	now := service.now().UTC()

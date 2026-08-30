@@ -38,19 +38,19 @@ func TestLatestValidationForRepairRequiresExactRepairAttempt(t *testing.T) {
 	}
 }
 
-func (runner *captureReviewAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[string]any, error) {
+func (runner *captureReviewAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (IsolatedAIResult, error) {
 	if request.Operation == "review.initial" {
 		runner.calls++
 		runner.user = request.UserPrompt
-		return map[string]any{
+		return successfulIsolatedAIResult(map[string]any{
 			"summary": "reviewed exact candidate", "findings": []any{},
 			"coverage": map[string]any{
 				"reviewed_areas": []any{"diff"}, "unreviewed_areas": []any{},
 				"tests_considered": []any{}, "residual_risks": []any{},
 			},
-		}, nil
+		}), nil
 	}
-	return nil, context.Canceled
+	return IsolatedAIResult{}, context.Canceled
 }
 
 func TestReviewHumanGatesResumeWithoutRerunningAIAndUseExactDiff(t *testing.T) {

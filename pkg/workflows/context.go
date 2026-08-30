@@ -143,20 +143,25 @@ type AgentRunner interface {
 	RunAgent(ctx context.Context, req AgentRequest) (map[string]any, error)
 }
 
-// AgentUsage is the provider-reported token usage for one concrete model.
-// It deliberately contains no request, response, account, or credential data.
+// AgentUsage is normalized token usage for one concrete model. ProviderCalls
+// includes every dispatched call; UsageReportedCalls excludes missing or
+// locally estimated usage. It deliberately contains no request, response,
+// account, or credential data.
 type AgentUsage struct {
-	Model            string `json:"model"`
-	Reviewer         string `json:"reviewer,omitempty"`
-	PromptTokens     int    `json:"prompt_tokens"`
-	CompletionTokens int    `json:"completion_tokens"`
-	TotalTokens      int    `json:"total_tokens"`
-	CachedTokens     int    `json:"cached_tokens"`
-	ReasoningTokens  int    `json:"reasoning_tokens,omitempty"`
-	LatencyMillis    int64  `json:"latency_millis,omitempty"`
+	Model              string `json:"model"`
+	Reviewer           string `json:"reviewer,omitempty"`
+	ProviderCalls      int64  `json:"provider_calls"`
+	UsageReportedCalls int64  `json:"usage_reported_calls"`
+	PromptTokens       int    `json:"prompt_tokens"`
+	CompletionTokens   int    `json:"completion_tokens"`
+	TotalTokens        int    `json:"total_tokens"`
+	CachedTokens       int    `json:"cached_tokens"`
+	ReasoningTokens    int    `json:"reasoning_tokens,omitempty"`
+	LatencyMillis      int64  `json:"latency_millis,omitempty"`
 }
 
-// AgentUsageObserver is called once for each completed provider response.
+// AgentUsageObserver is called once after each dispatched provider call,
+// including error calls that returned no response or usage.
 // Returning an error aborts the workflow agent execution.
 type AgentUsageObserver func(AgentUsage) error
 

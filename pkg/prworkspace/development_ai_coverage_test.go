@@ -18,9 +18,12 @@ type developmentAIStub struct {
 func (stub *developmentAIStub) RunIsolated(
 	_ context.Context,
 	request IsolatedAIRequest,
-) (map[string]any, error) {
+) (IsolatedAIResult, error) {
 	stub.requests = append(stub.requests, request)
-	return stub.response, stub.err
+	if stub.err != nil {
+		return IsolatedAIResult{}, stub.err
+	}
+	return successfulIsolatedAIResult(stub.response), nil
 }
 
 type planningEvidenceStub struct {

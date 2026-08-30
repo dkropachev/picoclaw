@@ -30,6 +30,32 @@ func TestParseAgentOutputContractDefaultsRepairAttempts(t *testing.T) {
 	}
 }
 
+func TestAgentRequestDetachStructuredContractOwnsPatternCache(t *testing.T) {
+	t.Parallel()
+
+	original := &AgentOutputContract{
+		Format: "json",
+		Schema: map[string]any{"type": "string"},
+		patterns: map[string]*regexp.Regexp{
+			"^ok$": regexp.MustCompile("^ok$"),
+		},
+	}
+	request := AgentRequest{Output: original}
+	detachedRequest, detached := request.DetachStructuredContract()
+	if detached == nil || detached == original || detachedRequest.Output != detached {
+		t.Fatalf("detached request/contract = %#v / %#v", detachedRequest, detached)
+	}
+	delete(detached.patterns, "^ok$")
+	if original.patterns["^ok$"] == nil {
+		t.Fatal("detached contract shared its pattern map")
+	}
+
+	empty, contract := (AgentRequest{}).DetachStructuredContract()
+	if empty.Output != nil || contract != nil {
+		t.Fatalf("nil contract detach = %#v / %#v", empty, contract)
+	}
+}
+
 func TestParseAgentOutputContractRejectsUnsupportedFormat(t *testing.T) {
 	_, err := ParseAgentOutputContract(map[string]any{"format": "xml"})
 	if err == nil {

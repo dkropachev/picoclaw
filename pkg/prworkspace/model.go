@@ -355,18 +355,19 @@ type Workspace struct {
 }
 
 type StageRun struct {
-	ID           string         `json:"id"`
-	Stage        string         `json:"stage"`
-	State        ExecutionState `json:"state"`
-	CharterID    string         `json:"charter_id"`
-	HeadSHA      string         `json:"head_sha"`
-	Attempt      int            `json:"attempt"`
-	PromptDigest string         `json:"prompt_digest,omitempty"`
-	Summary      string         `json:"summary,omitempty"`
-	Evidence     *StageEvidence `json:"evidence,omitempty"`
-	PublicError  string         `json:"public_error,omitempty"`
-	StartedAt    time.Time      `json:"started_at"`
-	FinishedAt   *time.Time     `json:"finished_at,omitempty"`
+	ID           string               `json:"id"`
+	Stage        string               `json:"stage"`
+	State        ExecutionState       `json:"state"`
+	CharterID    string               `json:"charter_id"`
+	HeadSHA      string               `json:"head_sha"`
+	Attempt      int                  `json:"attempt"`
+	PromptDigest string               `json:"prompt_digest,omitempty"`
+	Summary      string               `json:"summary,omitempty"`
+	Evidence     *StageEvidence       `json:"evidence,omitempty"`
+	Usage        *ImplementationUsage `json:"usage,omitempty"`
+	PublicError  string               `json:"public_error,omitempty"`
+	StartedAt    time.Time            `json:"started_at"`
+	FinishedAt   *time.Time           `json:"finished_at,omitempty"`
 	// inputWorkspaceVersion is restored by the production adapter so later
 	// state replacements retain the immutable CAS input that started the run.
 	inputWorkspaceVersion int64
@@ -420,6 +421,9 @@ type RepairAttempt struct {
 	Scope             ScopeAssessment                 `json:"scope"`
 	PromptDigest      string                          `json:"prompt_digest"`
 	ScopePromptDigest string                          `json:"scope_prompt_digest"`
+	ProfileDigest     string                          `json:"profile_digest,omitempty"`
+	Usage             TokenUsage                      `json:"usage"`
+	UsageComplete     bool                            `json:"usage_complete"`
 	StartedAt         time.Time                       `json:"started_at"`
 	FinishedAt        *time.Time                      `json:"finished_at,omitempty"`
 	PublicationFence  *ImplementationPublicationFence `json:"-"`

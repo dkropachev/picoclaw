@@ -16,9 +16,9 @@ type WorkflowAIRunner struct {
 	AgentID string
 }
 
-func (runner WorkflowAIRunner) RunIsolated(ctx context.Context, request IsolatedAIRequest) (map[string]any, error) {
+func (runner WorkflowAIRunner) RunIsolated(ctx context.Context, request IsolatedAIRequest) (IsolatedAIResult, error) {
 	if runner.Runner == nil || request.SystemPrompt == "" || request.UserPrompt == "" || len(request.Schema) == 0 {
-		return nil, errors.New("isolated PR workspace AI request is incomplete")
+		return IsolatedAIResult{}, errors.New("isolated PR workspace AI request is incomplete")
 	}
 	agentRequest := workflows.AgentRequest{
 		AgentID: runner.AgentID, Message: request.UserPrompt,
@@ -37,21 +37,70 @@ func (runner WorkflowAIRunner) RunIsolated(ctx context.Context, request Isolated
 		}
 	}
 	output, err := runner.Runner.RunAgent(ctx, agentRequest)
+	usage, usageErr := workflowAIUsage(output)
+	usageComplete, completeOK := false, false
+	if output != nil {
+		usageComplete, completeOK = output["usage_complete"].(bool)
+	}
+	if !completeOK {
+		usageErr = errors.Join(
+			usageErr,
+			errors.New("isolated PR workspace AI returned no usage completeness"),
+		)
+	}
+	result := IsolatedAIResult{
+		Usage: usage,
+		Complete: usageErr == nil && usageComplete && usage.ProviderCalls > 0 &&
+			usage.ProviderCalls == usage.UsageReportedCalls,
+	}
+	if usageErr != nil {
+		return result, errors.Join(err, usageErr)
+	}
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	structured, ok := output["structured"].(map[string]any)
 	if !ok || structured == nil {
-		return nil, fmt.Errorf("isolated PR workspace AI returned no structured object")
+		return result, fmt.Errorf("isolated PR workspace AI returned no structured object")
 	}
 	if request.SourceExecutionID != "" {
 		source, sourceErr := workflowAISource(output)
 		if sourceErr != nil {
-			return nil, sourceErr
+			return result, sourceErr
 		}
 		structured["__source-execution"] = source
 	}
-	return structured, nil
+	result.Structured = structured
+	return result, nil
+}
+
+func workflowAIUsage(output map[string]any) (TokenUsage, error) {
+	if output == nil {
+		return TokenUsage{}, nil
+	}
+	raw, exists := output["usage"]
+	if !exists {
+		return TokenUsage{}, errors.New("isolated PR workspace AI returned no usage")
+	}
+	values, ok := raw.([]workflows.AgentUsage)
+	if !ok {
+		return TokenUsage{}, errors.New("isolated PR workspace AI returned malformed usage")
+	}
+	var total TokenUsage
+	for _, value := range values {
+		measurement := TokenUsage{
+			ProviderCalls: value.ProviderCalls, UsageReportedCalls: value.UsageReportedCalls,
+			PromptTokens: int64(value.PromptTokens), CachedTokens: int64(value.CachedTokens),
+			CompletionTokens: int64(value.CompletionTokens), ReasoningTokens: int64(value.ReasoningTokens),
+			TotalTokens: int64(value.TotalTokens), LatencyMillis: value.LatencyMillis,
+		}
+		next, err := AddTokenUsage(total, measurement)
+		if err != nil {
+			return total, fmt.Errorf("isolated PR workspace AI returned invalid usage: %w", err)
+		}
+		total = next
+	}
+	return total, nil
 }
 
 func workflowAISource(output map[string]any) (map[string]any, error) {

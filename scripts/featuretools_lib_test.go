@@ -3,6 +3,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -24,6 +26,36 @@ func TestFrontendExpectedSpecPathsUsesConfiguredRule(t *testing.T) {
 	want := []string{"docs/features/chat-channels.md"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("frontendExpectedSpecPaths() = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiscoverTestsSkipsIgnoredDocsPlansEvidence(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	productTest := filepath.Join(root, "pkg", "feature_test.go")
+	plannedEvidence := filepath.Join(root, "docs", "plans", "run", "candidate_test.go")
+	for _, path := range []string{productTest, plannedEvidence} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			path,
+			[]byte("package fixture\nfunc TestDiscovered(t *testing.T) {}\n"),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	discovered := make(map[string]bool)
+	if err := discoverTests(root, func(_, _, source string) {
+		discovered[source] = true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !discovered["pkg/feature_test.go"] ||
+		discovered["docs/plans/run/candidate_test.go"] || len(discovered) != 1 {
+		t.Fatalf("discovered tests = %#v", discovered)
 	}
 }
 
