@@ -7,7 +7,20 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 )
+
+type gatedCodeMutationErrorStore struct {
+	Store
+}
+
+func (store gatedCodeMutationErrorStore) Mutate(
+	ctx context.Context,
+	mutation Mutation,
+) (MutationResult, error) {
+	current, _ := store.Store.Get(ctx, mutation.WorkspaceID)
+	return MutationResult{Aggregate: current}, errors.New("injected gated-code mutation failure")
+}
 
 func TestGatedCodeCapabilitiesFailClosedForMalformedRuntimeLeases(t *testing.T) {
 	tests := []struct {
@@ -388,4 +401,192 @@ func TestGatedCodePullRequestURLValidationIsExact(t *testing.T) {
 	if validImplementationPullRequestURL("https://github.com/octo/repo/pull/17", badOrigin) {
 		t.Fatal("invalid provider origin accepted")
 	}
+}
+
+func TestGatedCodeRemainingFailClosedBranches(t *testing.T) {
+	t.Run("repository and lease errors", func(t *testing.T) {
+		service, err := NewService(ServiceConfig{
+			Store: NewMemoryStore(),
+			Provider: developmentCatalogResolver{
+				listErr: errors.New("repository catalog unavailable"),
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler, err := NewHTTPHandler(HTTPConfig{
+			Service: service, FeatureRuntimeLease: codeCLISafeFeatureRuntimeLease,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := developmentHTTPRequest(
+			t,
+			handler,
+			http.MethodGet,
+			RuntimeRoutePrefix+"/repositories",
+			"",
+		)
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("repository catalog status = %d: %s", response.Code, response.Body.String())
+		}
+
+		unsafeHandler, handlerErr := NewHTTPHandler(HTTPConfig{
+			Service: service,
+			FeatureRuntimeLease: func(context.Context) (context.Context, func(), error) {
+				return nil, nil, ErrUnsafeProvider
+			},
+		})
+		if handlerErr != nil {
+			t.Fatal(handlerErr)
+		}
+		response = developmentHTTPRequest(
+			t,
+			unsafeHandler,
+			http.MethodPost,
+			RuntimeRoutePrefix+"/repositories/resolve",
+			`{"repository_url":"https://github.com/octo/repo"}`,
+		)
+		if response.Code != http.StatusConflict {
+			t.Fatalf("unsafe resolve status = %d: %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("autonomous guard failures", func(t *testing.T) {
+		service, aggregate := seededDevelopmentAIService(
+			t,
+			PhasePlanning,
+			ExecutionQueued,
+			&codeCLIOperationAI{},
+		)
+		missing, err := NewHTTPHandler(HTTPConfig{Service: service})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = missing.AdvanceDevelopmentWorkspace(
+			t.Context(),
+			aggregate,
+			"request-gated-code-missing-runtime-guard",
+		); err == nil {
+			t.Fatal("missing runtime guard advanced feature work")
+		}
+		transient, err := NewHTTPHandler(HTTPConfig{
+			Service: service,
+			LeasedFeatureGuard: func(context.Context) error {
+				return errors.New("runtime reloading")
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = transient.AdvanceDevelopmentWorkspace(
+			t.Context(),
+			aggregate,
+			"request-gated-code-transient-runtime-guard",
+		); err == nil {
+			t.Fatal("transient runtime guard failure advanced feature work")
+		}
+	})
+
+	t.Run("workspace mutation routing errors", func(t *testing.T) {
+		if workspaceMutationRoute(http.MethodPost, "unknown") {
+			t.Fatal("unknown workspace mutation route was admitted")
+		}
+		service, err := NewService(ServiceConfig{Store: NewMemoryStore()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler := &HTTPHandler{service: service}
+		request := httptest.NewRequest(http.MethodPost, RuntimeRoutePrefix+"/missing/messages", nil)
+		response := httptest.NewRecorder()
+		_, release, admitted := handler.leaseWorkspaceMutation(
+			response,
+			request,
+			"devw_99999999999999999999999999999999",
+		)
+		release()
+		if admitted || response.Code != http.StatusNotFound {
+			t.Fatalf("missing workspace mutation = admitted=%v status=%d", admitted, response.Code)
+		}
+	})
+
+	t.Run("unsafe queued and running publications", func(t *testing.T) {
+		service, aggregate := seededDevelopmentAIService(
+			t,
+			PhasePublication,
+			ExecutionQueued,
+			&codeCLIOperationAI{},
+		)
+		now := time.Date(2026, time.August, 29, 12, 0, 0, 0, time.UTC)
+		publication := Publication{
+			ID: "ppb_99999999999999999999999999999999", Kind: PublicationBranchPush,
+			State: ExecutionQueued, ExpectedHeadSHA: aggregate.ProviderSnapshot.HeadSHA,
+			PayloadDigest: "sha256:gated-code-queued", CreatedAt: now, UpdatedAt: now,
+		}
+		queued, err := service.store.Mutate(t.Context(), Mutation{
+			WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+			RequestID: "request-gated-code-queue-unsafe",
+			Patch:     AggregatePatch{AppendPublications: []Publication{publication}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed, err := service.FailUnsafeProvider(
+			t.Context(),
+			queued.Aggregate,
+			"request-gated-code-fail-queued-unsafe",
+		)
+		if err != nil || failed.Publications[0].State != ExecutionFailed ||
+			failed.Publications[0].PublicErrorCode != "unsafe_provider" {
+			t.Fatalf("queued unsafe failure = %#v, err=%v", failed.Publications, err)
+		}
+
+		runningService, running, runningPublication, _ := codeCLIQueuedFeaturePublication(t)
+		runningPublication.State = ExecutionRunning
+		runningPublication.Attempts = 1
+		claimed, err := runningService.store.Mutate(t.Context(), Mutation{
+			WorkspaceID: running.Workspace.ID, ExpectedVersion: running.Workspace.Version,
+			RequestID:                "request-gated-code-claim-running-unsafe",
+			Patch:                    AggregatePatch{ReplacePublications: []Publication{runningPublication}},
+			branchPublicationLeaseID: runningPublication.ID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runningService.store = gatedCodeMutationErrorStore{Store: runningService.store}
+		if _, err = runningService.FailUnsafeProvider(
+			t.Context(),
+			claimed.Aggregate,
+			"request-gated-code-fail-running-unsafe",
+		); err == nil {
+			t.Fatal("running unsafe publication ignored store failure")
+		}
+	})
+
+	t.Run("invalid implementation failure and charter confirmation", func(t *testing.T) {
+		service, aggregate := seededDevelopmentAIService(
+			t,
+			PhaseTriage,
+			ExecutionQueued,
+			&codeCLIOperationAI{},
+		)
+		if _, err := service.FailImplementationUnavailable(
+			t.Context(),
+			aggregate,
+			"bad",
+		); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid implementation failure error = %v", err)
+		}
+		charterService, _, waiting, _, _ := codeCLIWaitingCharter(t)
+		if _, err := charterService.ConfirmCharterAutomatically(
+			t.Context(),
+			ConfirmCharterRequest{
+				WorkspaceID: waiting.Workspace.ID, CharterID: waiting.Charters[0].ID,
+				ExpectedVersion: waiting.Workspace.Version,
+				RequestID:       "request-gated-code-repeat-charter-confirm",
+			},
+		); !errors.Is(err, ErrConflict) {
+			t.Fatalf("repeat charter confirmation error = %v", err)
+		}
+	})
 }
