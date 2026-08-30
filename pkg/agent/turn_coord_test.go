@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -45,18 +46,31 @@ func TestWorkflowAgentUsageNilSafetyAndAdmissionErrors(t *testing.T) {
 	if err := accumulator.Err(); err != nil {
 		t.Fatalf("nil accumulator error = %v", err)
 	}
-	if usage, ok := workflowAgentUsageFromResponse("model", nil, time.Second); ok || usage.Model != "" {
+	if usage, ok := workflowAgentUsageFromResponse("model", nil, time.Second); !ok ||
+		usage.Model != "model" || usage.ProviderCalls != 1 || usage.UsageReportedCalls != 0 ||
+		usage.LatencyMillis != 1000 {
 		t.Fatalf("nil response usage = (%#v, %t)", usage, ok)
 	}
 	usage, ok := workflowAgentUsageFromResponse(" model ", &providers.LLMResponse{}, -time.Second)
-	if !ok || usage.Model != "model" || usage.LatencyMillis != 0 {
+	if !ok || usage.Model != "model" || usage.LatencyMillis != 0 ||
+		usage.ProviderCalls != 1 || usage.UsageReportedCalls != 0 {
 		t.Fatalf("metadata-only response usage = (%#v, %t)", usage, ok)
 	}
 	usage, ok = workflowAgentUsageFromResponse("concrete", &providers.LLMResponse{
 		Usage: &providers.UsageInfo{CompletionTokens: 10, ReasoningTokens: 7},
 	}, time.Second)
-	if !ok || usage.Model != "concrete" || usage.CompletionTokens != 10 || usage.ReasoningTokens != 7 {
+	if !ok || usage.Model != "concrete" || usage.CompletionTokens != 10 || usage.ReasoningTokens != 7 ||
+		usage.ProviderCalls != 1 || usage.UsageReportedCalls != 1 {
 		t.Fatalf("reasoning response usage = (%#v, %t)", usage, ok)
+	}
+	usage, ok = workflowAgentUsageFromResponse("estimated", &providers.LLMResponse{
+		Usage: &providers.UsageInfo{
+			PromptTokens: 6, CompletionTokens: 2, TotalTokens: 8, Estimated: true,
+		},
+	}, time.Second)
+	if !ok || usage.ProviderCalls != 1 || usage.UsageReportedCalls != 0 ||
+		usage.PromptTokens != 6 || usage.TotalTokens != 8 {
+		t.Fatalf("estimated response usage = (%#v, %t)", usage, ok)
 	}
 	if cloned := cloneWorkflowAgentUsage(nil); cloned == nil || len(cloned) != 0 {
 		t.Fatalf("nil usage clone = %#v", cloned)
@@ -71,6 +85,84 @@ func TestWorkflowAgentUsageNilSafetyAndAdmissionErrors(t *testing.T) {
 	}
 	if err := state.workflowAgentUsageError(); err != nil {
 		t.Fatalf("nil turn usage error = %v", err)
+	}
+}
+
+func TestWorkflowAgentUsageAccumulatorRejectsNegativeAndOverflow(t *testing.T) {
+	accumulator := newWorkflowAgentUsageAccumulator(nil)
+	maximum := int(^uint(0) >> 1)
+	if err := accumulator.Observe(workflows.AgentUsage{
+		Model: "model", ProviderCalls: 1, UsageReportedCalls: 1,
+		PromptTokens: maximum, TotalTokens: maximum,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.Observe(workflows.AgentUsage{
+		Model: "model", ProviderCalls: 1, UsageReportedCalls: 1,
+		PromptTokens: 1, TotalTokens: 1,
+	}); err == nil || !strings.Contains(err.Error(), "aggregation") {
+		t.Fatalf("overflow Observe() error = %v", err)
+	}
+	usage := accumulator.Snapshot()
+	if len(usage) != 1 || usage[0].ProviderCalls != 2 || usage[0].UsageReportedCalls != 1 ||
+		usage[0].PromptTokens != maximum || accumulator.Complete() {
+		t.Fatalf("overflow changed aggregate: %#v", usage)
+	}
+
+	negative := newWorkflowAgentUsageAccumulator(nil)
+	if err := negative.Observe(workflows.AgentUsage{
+		Model: "model", ProviderCalls: -1,
+	}); err == nil {
+		t.Fatal("negative provider calls were accepted")
+	}
+	if usage := negative.Snapshot(); len(usage) != 0 {
+		t.Fatalf("negative usage was retained: %#v", usage)
+	}
+
+	for name, invalid := range map[string]workflows.AgentUsage{
+		"reported calls": {
+			Model: "model", ProviderCalls: 1, UsageReportedCalls: 2,
+		},
+		"cached subset": {
+			Model: "model", ProviderCalls: 1, UsageReportedCalls: 1,
+			PromptTokens: 1, CachedTokens: 2, TotalTokens: 1,
+		},
+		"reasoning subset": {
+			Model: "model", ProviderCalls: 1, UsageReportedCalls: 1,
+			CompletionTokens: 1, ReasoningTokens: 2, TotalTokens: 1,
+		},
+		"total mismatch": {
+			Model: "model", ProviderCalls: 1, UsageReportedCalls: 1,
+			PromptTokens: 2, CompletionTokens: 3, TotalTokens: 4,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := newWorkflowAgentUsageAccumulator(nil)
+			if err := candidate.Observe(invalid); err == nil {
+				t.Fatalf("invalid per-call usage was accepted: %#v", invalid)
+			}
+			if snapshot := candidate.Snapshot(); len(snapshot) != 1 ||
+				snapshot[0].ProviderCalls != 1 || snapshot[0].UsageReportedCalls != 0 ||
+				snapshot[0].PromptTokens != 0 || snapshot[0].CompletionTokens != 0 ||
+				snapshot[0].TotalTokens != 0 || candidate.Complete() {
+				t.Fatalf("invalid per-call usage envelope = %#v", snapshot)
+			}
+		})
+	}
+
+	canceling := newWorkflowAgentUsageAccumulator(nil)
+	for _, invalid := range []workflows.AgentUsage{
+		{Model: "model", ProviderCalls: 1, UsageReportedCalls: 1, PromptTokens: 1, CompletionTokens: 2, TotalTokens: 4},
+		{Model: "model", ProviderCalls: 1, UsageReportedCalls: 1, PromptTokens: 1, CompletionTokens: 2, TotalTokens: 2},
+	} {
+		if err := canceling.Observe(invalid); err == nil {
+			t.Fatalf("canceling invalid usage was accepted: %#v", invalid)
+		}
+	}
+	if snapshot := canceling.Snapshot(); len(snapshot) != 1 ||
+		snapshot[0].ProviderCalls != 2 || snapshot[0].UsageReportedCalls != 0 ||
+		canceling.Complete() {
+		t.Fatalf("canceling invalid calls produced a valid aggregate: %#v", snapshot)
 	}
 }
 
@@ -221,18 +313,36 @@ func TestRunAgentLoopAccumulatesEveryProviderResponseUsage(t *testing.T) {
 		t.Fatalf("runAgentLoop() response = %q, error = %v", response, err)
 	}
 	wantResult := []workflows.AgentUsage{{
-		Model:            "test-model",
-		PromptTokens:     20,
-		CompletionTokens: 5,
-		TotalTokens:      25,
-		CachedTokens:     3,
+		Model:              "test-model",
+		ProviderCalls:      2,
+		UsageReportedCalls: 2,
+		PromptTokens:       20,
+		CompletionTokens:   5,
+		TotalTokens:        25,
+		CachedTokens:       3,
 	}}
 	if !reflect.DeepEqual(resultUsage, wantResult) {
 		t.Fatalf("result usage = %#v, want %#v", resultUsage, wantResult)
 	}
 	if !reflect.DeepEqual(observed, []workflows.AgentUsage{
-		{Model: "test-model", PromptTokens: 8, CompletionTokens: 2, TotalTokens: 10, CachedTokens: 1},
-		{Model: "test-model", PromptTokens: 12, CompletionTokens: 3, TotalTokens: 15, CachedTokens: 2},
+		{
+			Model:              "test-model",
+			ProviderCalls:      1,
+			UsageReportedCalls: 1,
+			PromptTokens:       8,
+			CompletionTokens:   2,
+			TotalTokens:        10,
+			CachedTokens:       1,
+		},
+		{
+			Model:              "test-model",
+			ProviderCalls:      1,
+			UsageReportedCalls: 1,
+			PromptTokens:       12,
+			CompletionTokens:   3,
+			TotalTokens:        15,
+			CachedTokens:       2,
+		},
 	}) {
 		t.Fatalf("observed usage = %#v, want every provider response", observed)
 	}

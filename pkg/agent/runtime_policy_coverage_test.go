@@ -575,7 +575,7 @@ func TestControllerRuntimeBoundaryCoverageEdges(t *testing.T) {
 	}
 
 	if firstRepairCandidate(nil) != nil ||
-		controllerRepairCandidateReady(nil, nil, nil) ||
+		controllerRepairCandidateReady(nil, nil, nil, nil) ||
 		controllerRepairExactPrimary(nil, providers.FallbackCandidate{}) {
 		t.Fatal("incomplete local repair candidate was ready")
 	}
@@ -648,11 +648,11 @@ func TestControllerRuntimeBoundaryCoverageEdges(t *testing.T) {
 	}
 	invalidModel := validCandidate
 	invalidModel.Model = " gpt-coverage"
-	if controllerRepairCandidateReady(workspaces, agent, &invalidModel) {
+	if controllerRepairCandidateReady(nil, workspaces, agent, &invalidModel) {
 		t.Fatal("inexact local repair model was ready")
 	}
 	agent.Provider = nil
-	if controllerRepairCandidateReady(workspaces, agent, &validCandidate) {
+	if controllerRepairCandidateReady(nil, workspaces, agent, &validCandidate) {
 		t.Fatal("missing local repair provider was ready")
 	}
 	agent.Provider = provider

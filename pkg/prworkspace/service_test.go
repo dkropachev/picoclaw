@@ -36,18 +36,29 @@ func (serviceReviewEvidence) LoadReviewEvidence(_ context.Context, snapshot Prov
 
 type serviceAI struct{}
 
-func (serviceAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[string]any, error) {
+func successfulIsolatedAIResult(structured map[string]any) IsolatedAIResult {
+	return IsolatedAIResult{
+		Structured: structured,
+		Usage: TokenUsage{
+			ProviderCalls: 1, UsageReportedCalls: 1,
+			PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
+		},
+		Complete: true,
+	}
+}
+
+func (serviceAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (IsolatedAIResult, error) {
 	switch request.Operation {
 	case "charter.draft":
-		return map[string]any{
+		return successfulIsolatedAIResult(map[string]any{
 			"type": "fix", "goal": "Fix retry handling",
 			"acceptance_criteria": []any{"Retries once"}, "included_areas": []any{"pkg/retry"},
 			"excluded_areas": []any{"unrelated cleanup"}, "non_goals": []any{"new feature"},
-		}, nil
+		}), nil
 	case "nudge.plan":
-		return nil, context.Canceled
+		return IsolatedAIResult{}, context.Canceled
 	case "completion.initial", "completion.nudge":
-		return map[string]any{
+		return successfulIsolatedAIResult(map[string]any{
 			"summary":          "Complete",
 			"complete":         true,
 			"missing_in_scope": []any{},
@@ -58,9 +69,9 @@ func (serviceAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[
 				"tests_considered": []any{},
 				"residual_risks":   []any{},
 			},
-		}, nil
+		}), nil
 	case "scope.audit":
-		return map[string]any{
+		return successfulIsolatedAIResult(map[string]any{
 			"changes": []any{
 				map[string]any{
 					"path":            "pkg/retry.go",
@@ -79,9 +90,9 @@ func (serviceAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[
 			"files": 1, "semantic_lines": 10, "modules": 1,
 			"worst_scope_distance": "S0_exact", "worst_change_size": "XS", "type_compatible": true, "confidence": 1.0,
 			"charter_clauses": []any{"goal"}, "explanation": "The candidate is exactly within the confirmed charter.",
-		}, nil
+		}), nil
 	default:
-		return map[string]any{
+		return successfulIsolatedAIResult(map[string]any{
 			"summary":  "No findings",
 			"findings": []any{},
 			"coverage": map[string]any{
@@ -90,7 +101,7 @@ func (serviceAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[
 				"tests_considered": []any{},
 				"residual_risks":   []any{},
 			},
-		}, nil
+		}), nil
 	}
 }
 

@@ -21,6 +21,44 @@ func (failedImplementationRepair) Repair(context.Context, RepairRequest) (Repair
 	return RepairResult{}, errors.New("private repair failure")
 }
 
+type measuredFailedImplementationRepair struct{}
+
+func (measuredFailedImplementationRepair) Repair(context.Context, RepairRequest) (RepairResult, error) {
+	return RepairResult{
+		WorkspaceID: "local-partial", PromptDigest: "sha256:partial-repair",
+		Usage: TokenUsage{
+			ProviderCalls: 2, UsageReportedCalls: 1,
+			PromptTokens: 8, CachedTokens: 3,
+			CompletionTokens: 2, ReasoningTokens: 1, TotalTokens: 10,
+			LatencyMillis: 30,
+		},
+	}, errors.New("private repair failure")
+}
+
+func TestImplementationPersistsPartialUsageBeforeFailedAttemptTerminalizes(t *testing.T) {
+	service, aggregate := readyImplementationService(t)
+	result, err := service.RunImplementation(t.Context(), ImplementationConfig{
+		Repair: measuredFailedImplementationRepair{}, Validation: implementationValidation{},
+	}, RunImplementationRequest{
+		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+		RequestID: "request-partial-repair-usage", FindingIDs: []string{aggregate.Findings[0].ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := result.StageRuns[len(result.StageRuns)-1]
+	if stage.State != ExecutionFailed || stage.Usage == nil || stage.Usage.Complete ||
+		stage.Usage.Repair.ProviderCalls != 2 || stage.Usage.Repair.UsageReportedCalls != 1 ||
+		stage.Usage.Total.TotalTokens != 10 {
+		t.Fatalf("failed implementation stage = %#v", stage)
+	}
+	if len(result.RepairAttempts) != 1 || result.RepairAttempts[0].State != ExecutionFailed ||
+		result.RepairAttempts[0].UsageComplete ||
+		result.RepairAttempts[0].Usage != stage.Usage.Repair {
+		t.Fatalf("failed repair attempts = %#v", result.RepairAttempts)
+	}
+}
+
 func (repair *implementationRepair) Repair(_ context.Context, request RepairRequest) (RepairResult, error) {
 	repair.calls++
 	repair.last = request
@@ -29,6 +67,51 @@ func (repair *implementationRepair) Repair(_ context.Context, request RepairRequ
 		SemanticLines: 10, Modules: 1, CandidateSHA: "candidate", CandidateDiff: testCandidateDiff,
 		PromptDigest: "sha256:repair",
 	}, nil
+}
+
+type measuredImplementationRepair struct{ implementationRepair }
+
+func (repair *measuredImplementationRepair) Repair(
+	ctx context.Context,
+	request RepairRequest,
+) (RepairResult, error) {
+	result, err := repair.implementationRepair.Repair(ctx, request)
+	result.Usage = TokenUsage{
+		ProviderCalls: 1, UsageReportedCalls: 1,
+		PromptTokens: 10, CachedTokens: 4,
+		CompletionTokens: 3, ReasoningTokens: 1, TotalTokens: 13,
+		LatencyMillis: 20,
+	}
+	result.UsageComplete = true
+	return result, err
+}
+
+func TestImplementationPersistsCumulativeRepairAndAuditUsage(t *testing.T) {
+	service, aggregate := readyImplementationService(t)
+	repair := &measuredImplementationRepair{}
+	result, err := service.RunImplementation(t.Context(), ImplementationConfig{
+		Repair: repair, Validation: implementationValidation{},
+	}, RunImplementationRequest{
+		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+		RequestID: "request-measured-implementation", FindingIDs: []string{aggregate.Findings[0].ID},
+		NudgePolicy: ConfiguredNudgePolicy(0, 0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := result.StageRuns[len(result.StageRuns)-1]
+	if stage.Usage == nil || !stage.Usage.Complete ||
+		stage.Usage.Scope != ImplementationUsageScope ||
+		stage.Usage.Repair.ProviderCalls != 1 || stage.Usage.Repair.PromptTokens != 10 ||
+		stage.Usage.Audit.ProviderCalls != 2 || stage.Usage.Audit.PromptTokens != 2 ||
+		stage.Usage.Total.ProviderCalls != 3 || stage.Usage.Total.PromptTokens != 12 ||
+		stage.Usage.Total.CompletionTokens != 5 || stage.Usage.Total.TotalTokens != 17 {
+		t.Fatalf("implementation usage = %#v", stage.Usage)
+	}
+	if len(result.RepairAttempts) != 1 || !result.RepairAttempts[0].UsageComplete ||
+		result.RepairAttempts[0].Usage != stage.Usage.Repair {
+		t.Fatalf("repair attempt usage = %#v", result.RepairAttempts)
+	}
 }
 
 func TestImplementationRepairReceivesSharedCurrentGuidanceAndSeparatePromptDigests(t *testing.T) {
@@ -498,10 +581,10 @@ func TestImplementationAcknowledgesFinalizationOnlyAfterAggregateMutation(t *tes
 	}
 }
 
-func (failedCompletionNudgeAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[string]any, error) {
+func (failedCompletionNudgeAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (IsolatedAIResult, error) {
 	switch request.Operation {
 	case "scope.audit":
-		return map[string]any{
+		return successfulIsolatedAIResult(map[string]any{
 			"changes": []any{
 				map[string]any{
 					"path":            "pkg/retry.go",
@@ -520,22 +603,22 @@ func (failedCompletionNudgeAI) RunIsolated(_ context.Context, request IsolatedAI
 			"files": 1, "semantic_lines": 10, "modules": 1,
 			"worst_scope_distance": "S0_exact", "worst_change_size": "XS", "type_compatible": true, "confidence": 1.0,
 			"charter_clauses": []any{"goal"}, "explanation": "exact charter work",
-		}, nil
+		}), nil
 	case "nudge.plan":
-		return nil, context.Canceled
+		return IsolatedAIResult{}, context.Canceled
 	case "completion.nudge":
-		return nil, errors.New("completion nudge unavailable")
+		return IsolatedAIResult{}, errors.New("completion nudge unavailable")
 	case "completion.initial":
-		return map[string]any{
+		return successfulIsolatedAIResult(map[string]any{
 			"summary": "complete", "complete": true,
 			"missing_in_scope": []any{}, "out_of_scope": []any{},
 			"coverage": map[string]any{
 				"reviewed_areas": []any{}, "unreviewed_areas": []any{},
 				"tests_considered": []any{}, "residual_risks": []any{},
 			},
-		}, nil
+		}), nil
 	default:
-		return nil, errors.New("unexpected operation")
+		return IsolatedAIResult{}, errors.New("unexpected operation")
 	}
 }
 

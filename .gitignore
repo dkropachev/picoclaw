@@ -16,6 +16,8 @@ cmd/**/workspace
 
 # PicoClaw
 .picoclaw/
+!integration/fixtures/coding-agent-benchmark/transfer-idempotency-v1/.picoclaw/
+!integration/fixtures/coding-agent-benchmark/transfer-idempotency-v1/.picoclaw/ci.yaml
 config.json
 sessions/
 build/

@@ -50,7 +50,7 @@ func (service *Service) RegroupDeferred(ctx context.Context, request RegroupDefe
 	if promptErr != nil {
 		return Aggregate{}, promptErr
 	}
-	value, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
+	execution, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: "deferred.group", SystemPrompt: prompt.SystemPrompt,
 		UserPrompt: prompt.UserPrompt, Schema: deferredGroupingSchema(),
 	})
@@ -58,7 +58,7 @@ func (service *Service) RegroupDeferred(ctx context.Context, request RegroupDefe
 		return Aggregate{}, runErr
 	}
 	var output DeferredGroupingOutput
-	if err := decodeStructured(value, &output); err != nil {
+	if err := decodeStructured(execution.Structured, &output); err != nil {
 		return Aggregate{}, errors.New("deferred grouping output is invalid")
 	}
 	now := service.now().UTC()

@@ -696,6 +696,7 @@ func (r *workflowAgentRunner) RunAgent(
 		}
 		if outputs != nil {
 			outputs["usage"] = usage
+			outputs["usage_complete"] = requestUsage.Complete()
 		}
 	}()
 	leaseCtx, releaseRuntime, acquireErr := r.loop.acquireTrustedRuntimeRoot(ctx)

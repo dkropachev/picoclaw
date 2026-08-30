@@ -25,6 +25,26 @@ type StructuredOutputResult struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// DetachStructuredContract gives one concurrent execution its own lazy pattern
+// cache while retaining the immutable normalized schema graph.
+func (request AgentRequest) DetachStructuredContract() (
+	AgentRequest,
+	*AgentOutputContract,
+) {
+	if request.Output == nil {
+		return request, nil
+	}
+	contract := *request.Output
+	if request.Output.patterns != nil {
+		contract.patterns = make(map[string]*regexp.Regexp, len(request.Output.patterns))
+		for pattern, compiled := range request.Output.patterns {
+			contract.patterns[pattern] = compiled
+		}
+	}
+	request.Output = &contract
+	return request, &contract
+}
+
 const (
 	maxAgentOutputSchemaDepth  = 64
 	maxAgentOutputPatternBytes = 4096

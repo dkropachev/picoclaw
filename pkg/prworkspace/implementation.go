@@ -29,6 +29,9 @@ type RepairResult struct {
 	CandidateSHA     string
 	CandidateDiff    string
 	PromptDigest     string
+	ProfileDigest    string
+	Usage            TokenUsage
+	UsageComplete    bool
 	PublicationFence *ImplementationPublicationFence
 }
 
@@ -180,10 +183,15 @@ func (service *Service) RunImplementation(
 
 	now := service.now().UTC()
 	runID := stableID("psr_", aggregate.Workspace.ID, request.RequestID)
+	lifetimeUsage, measurementsComplete, usageErr := priorImplementationUsage(aggregate.StageRuns)
+	if usageErr != nil {
+		return aggregate, usageErr
+	}
 	stage := StageRun{
 		ID: runID, Stage: "implementation", State: ExecutionRunning,
 		CharterID: charter.ID, HeadSHA: charter.HeadSHA,
 		Attempt: countStageRuns(aggregate.StageRuns, "implementation") + 1, StartedAt: now,
+		Usage: &lifetimeUsage,
 	}
 	patch := AggregatePatch{AppendGates: authorizationGates, AppendStageRuns: []StageRun{stage}}
 	workingFindings := append([]Finding(nil), selected...)
@@ -191,7 +199,7 @@ func (service *Service) RunImplementation(
 	completed := false
 	var validationForNextRepair map[string]any
 	var finalizedRepair *RepairResult
-	var delayedNudgeErr error
+	var delayedImplementationErr error
 	for cycle := 1; cycle <= maxCycles; cycle++ {
 		for _, finding := range workingFindings {
 			addressedFindings[finding.ID] = finding
@@ -209,11 +217,34 @@ func (service *Service) RunImplementation(
 			Context: repairContext, AuthorizedFindingIDs: findingIDs(workingFindings),
 			Instruction: instruction, Attempt: cycle,
 		})
+		updatedUsage, repairUsageErr := AddImplementationRepair(*stage.Usage, repair.Usage)
+		if repairUsageErr != nil {
+			repairErr = errors.Join(repairErr, fmt.Errorf("repair usage is invalid: %w", repairUsageErr))
+			measurementsComplete = false
+		} else {
+			stage.Usage = &updatedUsage
+			measurementsComplete = measurementsComplete && repair.UsageComplete
+		}
 		if repairErr != nil {
 			stage.State = ExecutionFailed
 			stage.PublicError = "repair_failed"
 			finished := service.now().UTC()
 			stage.FinishedAt = &finished
+			attempt := RepairAttempt{
+				ID:         stableID("pra_", aggregate.Workspace.ID, request.RequestID, fmt.Sprint(cycle)),
+				StageRunID: runID, Number: cycle, State: ExecutionFailed,
+				Instruction: instruction, WorkspaceID: repair.WorkspaceID,
+				ResultSummary: repair.Summary,
+				ChangedFiles:  append([]string(nil), repair.ChangedFiles...),
+				FindingIDs:    findingIDsFromMap(addressedFindings), CandidateSHA: repair.CandidateSHA,
+				PromptDigest: repair.PromptDigest, ProfileDigest: repair.ProfileDigest,
+				Usage: repair.Usage, UsageComplete: repair.UsageComplete && repairUsageErr == nil,
+				StartedAt: repairStart, FinishedAt: &finished,
+			}
+			if repairUsageErr != nil {
+				attempt.Usage = TokenUsage{}
+			}
+			patch.AppendRepairs = append(patch.AppendRepairs, attempt)
 			setStageInPatch(&patch, stage)
 			break
 		}
@@ -223,11 +254,30 @@ func (service *Service) RunImplementation(
 			Files: len(repair.ChangedFiles), SemanticLines: repair.SemanticLines,
 			Modules: repair.Modules, ChangedFiles: append([]string(nil), repair.ChangedFiles...),
 		}
-		scopeAudit, scopePromptDigest, scopeErr := service.ai.RunScopeAudit(ctx, scopeBundle)
+		scopeAudit, scopePromptDigest, scopeUsage, scopeErr := service.ai.RunScopeAudit(ctx, scopeBundle)
+		updatedUsage, scopeUsageErr := AddImplementationAudit(*stage.Usage, scopeUsage.Usage)
+		if scopeUsageErr != nil {
+			scopeErr = errors.Join(scopeErr, fmt.Errorf("scope audit usage is invalid: %w", scopeUsageErr))
+			measurementsComplete = false
+		} else {
+			stage.Usage = &updatedUsage
+			measurementsComplete = measurementsComplete && scopeUsage.Complete
+		}
 		if scopeErr != nil {
 			stage.State, stage.PublicError = ExecutionFailed, "scope_audit_ai_failed"
 			finished := service.now().UTC()
 			stage.FinishedAt = &finished
+			patch.AppendRepairs = append(patch.AppendRepairs, RepairAttempt{
+				ID:         stableID("pra_", aggregate.Workspace.ID, request.RequestID, fmt.Sprint(cycle)),
+				StageRunID: runID, Number: cycle, State: ExecutionFailed,
+				Instruction: instruction, WorkspaceID: repair.WorkspaceID,
+				ResultSummary: repair.Summary,
+				ChangedFiles:  append([]string(nil), repair.ChangedFiles...),
+				FindingIDs:    findingIDsFromMap(addressedFindings), CandidateSHA: repair.CandidateSHA,
+				PromptDigest: repair.PromptDigest, ScopePromptDigest: scopePromptDigest,
+				ProfileDigest: repair.ProfileDigest, Usage: repair.Usage, UsageComplete: repair.UsageComplete,
+				StartedAt: repairStart, FinishedAt: &finished,
+			})
 			setStageInPatch(&patch, stage)
 			break
 		}
@@ -237,6 +287,17 @@ func (service *Service) RunImplementation(
 			stage.Summary = "Scope audit evidence mismatch: " + mismatch
 			finished := service.now().UTC()
 			stage.FinishedAt = &finished
+			patch.AppendRepairs = append(patch.AppendRepairs, RepairAttempt{
+				ID:         stableID("pra_", aggregate.Workspace.ID, request.RequestID, fmt.Sprint(cycle)),
+				StageRunID: runID, Number: cycle, State: ExecutionFailed,
+				Instruction: instruction, WorkspaceID: repair.WorkspaceID,
+				ResultSummary: repair.Summary,
+				ChangedFiles:  append([]string(nil), repair.ChangedFiles...),
+				FindingIDs:    findingIDsFromMap(addressedFindings), CandidateSHA: repair.CandidateSHA,
+				PromptDigest: repair.PromptDigest, ScopePromptDigest: scopePromptDigest,
+				ProfileDigest: repair.ProfileDigest, Usage: repair.Usage, UsageComplete: repair.UsageComplete,
+				StartedAt: repairStart, FinishedAt: &finished,
+			})
 			setStageInPatch(&patch, stage)
 			break
 		}
@@ -276,6 +337,7 @@ func (service *Service) RunImplementation(
 			ChangedFiles: append([]string(nil), repair.ChangedFiles...),
 			FindingIDs:   findingIDsFromMap(addressedFindings), CandidateSHA: repair.CandidateSHA,
 			Scope: actualScope, PromptDigest: repair.PromptDigest, ScopePromptDigest: scopePromptDigest,
+			ProfileDigest: repair.ProfileDigest, Usage: repair.Usage, UsageComplete: repair.UsageComplete,
 			StartedAt: repairStart, FinishedAt: &repairFinish,
 		}
 		patch.AppendRepairs = append(patch.AppendRepairs, attempt)
@@ -289,7 +351,11 @@ func (service *Service) RunImplementation(
 				"charter": charter, "repair": attempt, "scope": actualScope, "candidate_drift": scopeBlockers,
 			}, actualScope, scopeBlockers)
 			if gateErr != nil {
-				return Aggregate{}, gateErr
+				delayedImplementationErr = gateErr
+				stage.State, stage.PublicError = ExecutionFailed, "scope_gate_failed"
+				stage.FinishedAt = &repairFinish
+				setStageInPatch(&patch, stage)
+				break
 			}
 			scopeGate.TargetID = attempt.ID
 			patch.AppendGates = append(patch.AppendGates, scopeGate)
@@ -388,14 +454,25 @@ func (service *Service) RunImplementation(
 		}
 		completionBundle.Validation = map[string]any{"run": validation}
 		durableRounds := append(append([]NudgeRoundRecord(nil), aggregate.NudgeRounds...), patch.AppendNudgeRounds...)
-		rounds, completionErr := service.ai.RunCompletionAudit(
+		rounds, completionUsage, completionErr := service.ai.RunCompletionAudit(
 			ctx,
 			completionBundle,
 			request.NudgePolicy,
 			NudgeStrategyStats(durableRounds, NudgeImplementationDone),
 		)
+		updatedUsage, completionUsageErr := AddImplementationAudit(*stage.Usage, completionUsage.Usage)
+		if completionUsageErr != nil {
+			completionErr = errors.Join(
+				completionErr,
+				fmt.Errorf("completion audit usage is invalid: %w", completionUsageErr),
+			)
+			measurementsComplete = false
+		} else {
+			stage.Usage = &updatedUsage
+			measurementsComplete = measurementsComplete && completionUsage.Complete
+		}
 		if completionErr != nil && len(rounds) == 0 {
-			delayedNudgeErr = completionErr
+			delayedImplementationErr = completionErr
 			stage.State = ExecutionFailed
 			stage.PublicError = "completion_audit_failed"
 			stage.FinishedAt = &repairFinish
@@ -434,7 +511,7 @@ func (service *Service) RunImplementation(
 		patch.UpsertFindings = append(patch.UpsertFindings, candidateDrift...)
 		patch.AppendNudgeRounds = append(patch.AppendNudgeRounds, nudges...)
 		if completionErr != nil {
-			delayedNudgeErr = completionErr
+			delayedImplementationErr = completionErr
 			stage.State = ExecutionFailed
 			stage.PublicError = "completion_nudge_failed"
 			stage.FinishedAt = &repairFinish
@@ -469,7 +546,11 @@ func (service *Service) RunImplementation(
 				"charter": charter, "repair": attempt, "scope": actualScope, "candidate_drift": allCandidateDrift,
 			}, actualScope, allCandidateDrift)
 			if gateErr != nil {
-				return Aggregate{}, gateErr
+				delayedImplementationErr = gateErr
+				stage.State, stage.PublicError = ExecutionFailed, "scope_gate_failed"
+				stage.FinishedAt = &repairFinish
+				setStageInPatch(&patch, stage)
+				break
 			}
 			scopeGate.TargetID = attempt.ID
 			completionGates = append(completionGates, scopeGate)
@@ -483,7 +564,11 @@ func (service *Service) RunImplementation(
 		)
 		contextRevision, revisionErr := implementationCompletionContextRevision(projected)
 		if revisionErr != nil {
-			return Aggregate{}, revisionErr
+			delayedImplementationErr = revisionErr
+			stage.State, stage.PublicError = ExecutionFailed, "completion_context_invalid"
+			stage.FinishedAt = &repairFinish
+			setStageInPatch(&patch, stage)
+			break
 		}
 		completeSubject := map[string]any{
 			"charter": charter, "repair": attempt, "validation": validation, "completion_rounds": rounds,
@@ -491,11 +576,19 @@ func (service *Service) RunImplementation(
 		}
 		completeGate, gateErr := service.startGate(ctx, aggregate, "pr.implementation.complete", completeSubject)
 		if gateErr != nil {
-			return Aggregate{}, gateErr
+			delayedImplementationErr = gateErr
+			stage.State, stage.PublicError = ExecutionFailed, "completion_gate_failed"
+			stage.FinishedAt = &repairFinish
+			setStageInPatch(&patch, stage)
+			break
 		}
 		completeGate, gateErr = pinGateSubject(completeGate, completeSubject)
 		if gateErr != nil {
-			return Aggregate{}, gateErr
+			delayedImplementationErr = gateErr
+			stage.State, stage.PublicError = ExecutionFailed, "completion_gate_invalid"
+			stage.FinishedAt = &repairFinish
+			setStageInPatch(&patch, stage)
+			break
 		}
 		completeGate.TargetID = attempt.ID
 		completionGates = append(completionGates, completeGate)
@@ -525,6 +618,12 @@ func (service *Service) RunImplementation(
 		stage.State, stage.PublicError, stage.FinishedAt = ExecutionBlocked, "completion_incomplete", &finished
 		setStageInPatch(&patch, stage)
 	}
+	finalUsage, usageErr := FinalizeImplementationUsage(*stage.Usage, measurementsComplete)
+	if usageErr != nil {
+		return aggregate, fmt.Errorf("finalize implementation usage: %w", usageErr)
+	}
+	stage.Usage = &finalUsage
+	setStageInPatch(&patch, stage)
 	phase, state := PhaseImplementation, ExecutionBlocked
 	if completed {
 		phase, state = PhasePublication, ExecutionWaitingGate
@@ -580,8 +679,8 @@ func (service *Service) RunImplementation(
 			}
 		}
 	}
-	if delayedNudgeErr != nil {
-		return result.Aggregate, delayedNudgeErr
+	if delayedImplementationErr != nil {
+		return result.Aggregate, delayedImplementationErr
 	}
 	return result.Aggregate, nil
 }
@@ -688,6 +787,27 @@ func setStageInPatch(patch *AggregatePatch, stage StageRun) {
 		}
 	}
 	patch.ReplaceStageRuns = []StageRun{stage}
+}
+
+func priorImplementationUsage(values []StageRun) (ImplementationUsage, bool, error) {
+	for index := len(values) - 1; index >= 0; index-- {
+		stage := values[index]
+		if stage.Stage != "implementation" {
+			continue
+		}
+		if stage.Usage == nil {
+			return NewImplementationUsage(), false, nil
+		}
+		usage := *stage.Usage
+		if err := usage.Validate(); err != nil {
+			return ImplementationUsage{}, false, fmt.Errorf(
+				"persisted implementation usage is invalid: %w",
+				err,
+			)
+		}
+		return usage, usage.Complete, nil
+	}
+	return NewImplementationUsage(), true, nil
 }
 
 func selectImplementationFindings(all []Finding, gates []GateRun, ids []string) ([]Finding, error) {

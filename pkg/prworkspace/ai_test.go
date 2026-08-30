@@ -2,6 +2,7 @@ package prworkspace
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 )
@@ -13,16 +14,47 @@ type scriptedIsolatedAI struct {
 	planSystem  string
 }
 
-func (runner *scriptedIsolatedAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[string]any, error) {
+type overflowingCompletionAI struct {
+	planIsMaximum bool
+}
+
+func (runner overflowingCompletionAI) RunIsolated(
+	_ context.Context,
+	request IsolatedAIRequest,
+) (IsolatedAIResult, error) {
+	usage := TokenUsage{
+		ProviderCalls: 1, UsageReportedCalls: 1,
+		PromptTokens: 1, TotalTokens: 1,
+	}
+	if request.Operation == "nudge.plan" {
+		if runner.planIsMaximum {
+			usage.PromptTokens, usage.TotalTokens = math.MaxInt64, math.MaxInt64
+		}
+		return IsolatedAIResult{Usage: usage, Complete: true}, context.Canceled
+	}
+	if !runner.planIsMaximum {
+		usage.PromptTokens, usage.TotalTokens = math.MaxInt64, math.MaxInt64
+	}
+	return IsolatedAIResult{
+		Structured: map[string]any{
+			"summary": "complete", "complete": true,
+			"missing_in_scope": []any{}, "out_of_scope": []any{},
+			"coverage": coverageJSON(),
+		},
+		Usage: usage, Complete: true,
+	}, nil
+}
+
+func (runner *scriptedIsolatedAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (IsolatedAIResult, error) {
 	runner.operations = append(runner.operations, request.Operation)
 	if request.Operation == "nudge.plan" {
 		runner.planPrompts = append(runner.planPrompts, request.UserPrompt)
 		runner.planSystem = request.SystemPrompt
-		return nil, context.Canceled // force deterministic wording; nudge must still run
+		return IsolatedAIResult{}, context.Canceled // force deterministic wording; nudge must still run
 	}
 	runner.reviewCalls++
 	if request.Operation == "completion.initial" || request.Operation == "completion.nudge" {
-		return map[string]any{
+		return successfulIsolatedAIResult(map[string]any{
 			"summary":          "No missing work found.",
 			"complete":         true,
 			"missing_in_scope": []any{},
@@ -33,9 +65,9 @@ func (runner *scriptedIsolatedAI) RunIsolated(_ context.Context, request Isolate
 				"tests_considered": []any{},
 				"residual_risks":   []any{},
 			},
-		}, nil
+		}), nil
 	}
-	return map[string]any{
+	return successfulIsolatedAIResult(map[string]any{
 		"summary":  "No findings.",
 		"findings": []any{},
 		"coverage": map[string]any{
@@ -44,7 +76,7 @@ func (runner *scriptedIsolatedAI) RunIsolated(_ context.Context, request Isolate
 			"tests_considered": []any{},
 			"residual_risks":   []any{},
 		},
-	}, nil
+	}), nil
 }
 
 func testPromptBundle() PRContextBundle {
@@ -78,7 +110,7 @@ func TestReviewSearchRunsMandatoryNudgesAfterNoFindings(t *testing.T) {
 
 func TestCompletionAuditRunsMandatoryNudgesAfterCompleteClaim(t *testing.T) {
 	runner := &scriptedIsolatedAI{}
-	rounds, err := (AIController{Runner: runner}).RunCompletionAudit(
+	rounds, _, err := (AIController{Runner: runner}).RunCompletionAudit(
 		context.Background(), testPromptBundle(), DefaultNudgePolicy(), nil,
 	)
 	if err != nil {
@@ -86,6 +118,31 @@ func TestCompletionAuditRunsMandatoryNudgesAfterCompleteClaim(t *testing.T) {
 	}
 	if len(rounds) != 3 {
 		t.Fatalf("rounds = %d, want initial plus two nudges", len(rounds))
+	}
+}
+
+func TestCompletionAuditOverflowPreservesEarlierUsage(t *testing.T) {
+	rounds, usage, err := (AIController{Runner: overflowingCompletionAI{}}).RunCompletionAudit(
+		context.Background(),
+		testPromptBundle(),
+		ConfiguredNudgePolicy(1, 1),
+		nil,
+	)
+	if err == nil || len(rounds) != 1 || usage.Complete ||
+		usage.Usage.ProviderCalls != 1 || usage.Usage.UsageReportedCalls != 1 ||
+		usage.Usage.PromptTokens != math.MaxInt64 || usage.Usage.TotalTokens != math.MaxInt64 {
+		t.Fatalf("completion overflow result = rounds:%#v usage:%#v error:%v", rounds, usage, err)
+	}
+}
+
+func TestCompletionNudgeOverflowPreservesPlanningUsage(t *testing.T) {
+	_, usage, err := (AIController{
+		Runner: overflowingCompletionAI{planIsMaximum: true},
+	}).RunCompletionNudge(context.Background(), testPromptBundle(), nil)
+	if err == nil || usage.Complete || usage.Usage.ProviderCalls != 1 ||
+		usage.Usage.UsageReportedCalls != 1 || usage.Usage.PromptTokens != math.MaxInt64 ||
+		usage.Usage.TotalTokens != math.MaxInt64 {
+		t.Fatalf("completion nudge overflow usage = %#v, error = %v", usage, err)
 	}
 }
 

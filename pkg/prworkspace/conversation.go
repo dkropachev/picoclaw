@@ -88,7 +88,7 @@ func (service *Service) SendConversationMessage(
 		if marshalErr != nil {
 			return ConversationPage{}, marshalErr
 		}
-		value, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
+		execution, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
 			Operation:    "development.steer.classify",
 			SystemPrompt: "Decide whether the steering request can be applied wholly inside the confirmed charter and primary change type. CI/CD, release, deployment, dependency upgrades, migrations, generated code, broad cleanup, new behavior, and unrelated edits are scope changes unless explicitly named by the charter. Return only structured fields. Do not authorize edits.",
 			UserPrompt:   string(raw),
@@ -104,8 +104,8 @@ func (service *Service) SendConversationMessage(
 		if runErr != nil {
 			return ConversationPage{}, runErr
 		}
-		scopeChange, ok := value["scope_change"].(bool)
-		explanation, explanationOK := value["explanation"].(string)
+		scopeChange, ok := execution.Structured["scope_change"].(bool)
+		explanation, explanationOK := execution.Structured["explanation"].(string)
 		if !ok || !explanationOK || !validBoundedText(explanation, maxCharterTextBytes, false) {
 			return ConversationPage{}, errors.New("development steering classification is invalid")
 		}
@@ -135,7 +135,7 @@ func (service *Service) SendConversationMessage(
 		if marshalErr != nil {
 			return ConversationPage{}, marshalErr
 		}
-		value, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
+		execution, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
 			Operation:    "development.ask",
 			SystemPrompt: "Answer the user's development question from the supplied frozen workspace evidence. Do not claim to edit code, execute commands, change scope, approve gates, or publish anything. State when repository content is unavailable.",
 			UserPrompt:   string(raw),
@@ -147,7 +147,7 @@ func (service *Service) SendConversationMessage(
 		if runErr != nil {
 			return ConversationPage{}, runErr
 		}
-		reply, ok := value["reply"].(string)
+		reply, ok := execution.Structured["reply"].(string)
 		if !ok || !validBoundedText(reply, maxCharterTextBytes, false) {
 			return ConversationPage{}, errors.New("development conversation response is invalid")
 		}

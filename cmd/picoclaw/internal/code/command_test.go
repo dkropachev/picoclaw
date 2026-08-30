@@ -1776,7 +1776,10 @@ func TestSleepFinishAndErrorProjectionBranches(t *testing.T) {
 	var output bytes.Buffer
 	runner := commandRunner{options: commandOptions{json: true}, output: &output}
 	require.NoError(t, runner.finish(Result{}, 0))
-	assert.Contains(t, output.String(), `"version":1`)
+	assert.Contains(t, output.String(), `"version":2`)
+	var empty Result
+	require.NoError(t, json.Unmarshal(output.Bytes(), &empty))
+	assert.Equal(t, ImplementationUsage{Scope: prworkspace.ImplementationUsageScope}, empty.Usage)
 
 	assert.Equal(t, "", errorCode(nil))
 	assert.Equal(t, "gateway_unavailable", errorCode(context.Canceled))

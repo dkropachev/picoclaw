@@ -330,8 +330,11 @@ func TestLocalRepairRunnerExactCapabilitiesPinAndEdit(t *testing.T) {
 		if call.model != "repair-model" {
 			t.Errorf("provider call %d model = %q", index+1, call.model)
 		}
-		if len(call.options) != 2 || call.options["max_tokens"] != 1234 || call.options["temperature"] != 0.25 {
-			t.Errorf("provider call %d options = %#v, want only fixed repair options", index+1, call.options)
+		cacheKey, cacheOK := call.options["prompt_cache_key"].(string)
+		if len(call.options) != 3 || call.options["max_tokens"] != 1234 ||
+			call.options["temperature"] != 0.25 || !cacheOK ||
+			!validLocalRepairOpaqueDigest(cacheKey) {
+			t.Errorf("provider call %d options = %#v, want exact bounded repair profile", index+1, call.options)
 		}
 		var names []string
 		for _, definition := range call.definitions {
@@ -341,6 +344,9 @@ func TestLocalRepairRunnerExactCapabilitiesPinAndEdit(t *testing.T) {
 		if !slices.Equal(names, expectedNames) {
 			t.Errorf("provider call %d tools = %v, want %v", index+1, names, expectedNames)
 		}
+	}
+	if providerCalls[0].options["prompt_cache_key"] != providerCalls[1].options["prompt_cache_key"] {
+		t.Fatalf("repair-loop cache key changed between provider calls")
 	}
 	if len(providerCalls[0].messages) != 2 ||
 		providerCalls[0].messages[0].Role != "system" ||

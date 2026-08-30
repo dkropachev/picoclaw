@@ -87,16 +87,16 @@ type invariantImplementationAI struct {
 func (runner invariantImplementationAI) RunIsolated(
 	_ context.Context,
 	request IsolatedAIRequest,
-) (map[string]any, error) {
+) (IsolatedAIResult, error) {
 	switch request.Operation {
 	case "scope.audit":
-		return exactScopeAuditFixture(), nil
+		return successfulIsolatedAIResult(exactScopeAuditFixture()), nil
 	case "completion.initial":
-		return runner.completion, nil
+		return successfulIsolatedAIResult(runner.completion), nil
 	case "nudge.plan":
-		return nil, context.Canceled
+		return IsolatedAIResult{}, context.Canceled
 	default:
-		return nil, errors.New("unexpected isolated operation")
+		return IsolatedAIResult{}, errors.New("unexpected isolated operation")
 	}
 }
 
@@ -105,7 +105,7 @@ type hardRepairScopeAI struct {
 	compatible bool
 }
 
-func (runner hardRepairScopeAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[string]any, error) {
+func (runner hardRepairScopeAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (IsolatedAIResult, error) {
 	switch request.Operation {
 	case "scope.audit":
 		response := exactScopeAuditFixture()
@@ -114,16 +114,16 @@ func (runner hardRepairScopeAI) RunIsolated(_ context.Context, request IsolatedA
 		change["type_compatible"] = runner.compatible
 		response["worst_scope_distance"] = string(runner.distance)
 		response["type_compatible"] = runner.compatible
-		return response, nil
+		return successfulIsolatedAIResult(response), nil
 	case "completion.initial":
-		return map[string]any{
+		return successfulIsolatedAIResult(map[string]any{
 			"summary": "candidate behavior is complete", "complete": true,
 			"missing_in_scope": []any{}, "out_of_scope": []any{}, "coverage": coverageJSON(),
-		}, nil
+		}), nil
 	case "nudge.plan":
-		return nil, context.Canceled
+		return IsolatedAIResult{}, context.Canceled
 	default:
-		return nil, errors.New("unexpected isolated operation")
+		return IsolatedAIResult{}, errors.New("unexpected isolated operation")
 	}
 }
 
@@ -464,8 +464,8 @@ func TestBranchPublicationRejectsSuccessfulHardScopeRepair(t *testing.T) {
 
 type fixedResponseAI struct{ response map[string]any }
 
-func (runner fixedResponseAI) RunIsolated(context.Context, IsolatedAIRequest) (map[string]any, error) {
-	return runner.response, nil
+func (runner fixedResponseAI) RunIsolated(context.Context, IsolatedAIRequest) (IsolatedAIResult, error) {
+	return successfulIsolatedAIResult(runner.response), nil
 }
 
 func TestScopeAuditDefersUntrustedMetricsToDeterministicCandidateBinding(t *testing.T) {
@@ -480,7 +480,7 @@ func TestScopeAuditDefersUntrustedMetricsToDeterministicCandidateBinding(t *test
 	response["worst_change_size"] = string(ChangeSizeL)
 	response["type_compatible"] = false
 
-	audit, _, err := (AIController{Runner: fixedResponseAI{response: response}}).RunScopeAudit(
+	audit, _, _, err := (AIController{Runner: fixedResponseAI{response: response}}).RunScopeAudit(
 		context.Background(),
 		testPromptBundle(),
 	)
@@ -709,11 +709,11 @@ func TestReviewFindingClassificationUsesScopeGrades(t *testing.T) {
 
 type ambiguousReviewAI struct{}
 
-func (ambiguousReviewAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[string]any, error) {
+func (ambiguousReviewAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (IsolatedAIResult, error) {
 	if request.Operation != "review.initial" {
-		return nil, errors.New("unexpected isolated operation")
+		return IsolatedAIResult{}, errors.New("unexpected isolated operation")
 	}
-	return map[string]any{
+	return successfulIsolatedAIResult(map[string]any{
 		"summary": "one adjacent finding",
 		"findings": []any{
 			map[string]any{
@@ -733,7 +733,7 @@ func (ambiguousReviewAI) RunIsolated(_ context.Context, request IsolatedAIReques
 			},
 		},
 		"coverage": coverageJSON(),
-	}, nil
+	}), nil
 }
 
 func TestStrictPolicyDefersAdjacentReviewFindingWithoutAttentionGate(t *testing.T) {

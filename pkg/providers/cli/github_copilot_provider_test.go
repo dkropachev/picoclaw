@@ -90,12 +90,17 @@ func TestGitHubCopilotUsageNormalizesMissingAndInvalidTransportCounts(t *testing
 	}
 
 	usage := githubCopilotUsageInfo("abcdef", "reply", 0, 0, -2, 1)
-	if usage.PromptTokens != 2 || usage.CompletionTokens != 2 || usage.CachedTokens != 0 || usage.TotalTokens != 4 {
+	if usage.PromptTokens != 2 || usage.CompletionTokens != 2 || usage.CachedTokens != 0 ||
+		usage.TotalTokens != 4 || !usage.Estimated {
 		t.Fatalf("estimated Copilot usage = %#v", usage)
 	}
 	usage = githubCopilotUsageInfo("ignored", "ignored", 4, 3, 8, 10)
-	if usage.CachedTokens != 4 || usage.TotalTokens != 10 {
+	if usage.CachedTokens != 4 || usage.TotalTokens != 7 || !usage.Estimated {
 		t.Fatalf("bounded Copilot usage = %#v", usage)
+	}
+	usage = githubCopilotUsageInfo("ignored", "ignored", 4, 3, 2, 7)
+	if usage.CachedTokens != 2 || usage.TotalTokens != 7 || usage.Estimated {
+		t.Fatalf("reported Copilot usage = %#v", usage)
 	}
 	if githubCopilotEstimatedTokens("") != 0 || githubCopilotEstimatedTokens("four") != 2 {
 		t.Fatal("Copilot token estimate did not use the conservative UTF-8 byte bound")

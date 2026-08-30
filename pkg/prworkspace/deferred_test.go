@@ -9,12 +9,12 @@ import (
 
 type deferredAI struct{}
 
-func (deferredAI) RunIsolated(ctx context.Context, request IsolatedAIRequest) (map[string]any, error) {
+func (deferredAI) RunIsolated(ctx context.Context, request IsolatedAIRequest) (IsolatedAIResult, error) {
 	if request.Operation == "deferred.group" {
-		return map[string]any{"groups": []any{map[string]any{
+		return successfulIsolatedAIResult(map[string]any{"groups": []any{map[string]any{
 			"title": "Follow-up retry design", "body": "Track broader retry design separately.",
 			"finding_ids": []any{"pfn_11111111111111111111111111111111"}, "labels": []any{"follow-up"},
-		}}}, nil
+		}}}), nil
 	}
 	return (serviceAI{}).RunIsolated(ctx, request)
 }

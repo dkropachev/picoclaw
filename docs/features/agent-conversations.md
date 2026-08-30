@@ -189,6 +189,37 @@ registry. Its existing workspace pin, whole-patch guard, response-order
 serialization, cancellation, and postflight checks remain the authority; a nil
 generic-loop policy is never a compatibility fallback.
 
+The factory resolves the exact selected `ModelConfig`, normalizes its optional
+reasoning effort, and freezes it with max tokens and temperature. After the
+pinned workspace and full prompt are known, the runner derives one opaque
+per-run cache key as
+`sha256("picoclaw-local-repair-cache-v1\0" + workspaceID + "\0" + promptDigest)`.
+That key is stable across the tool loop, changes with either input, is never a
+session or account-affinity identity, and joins the effective options only in a
+second opaque profile digest. The validated provider boundary accepts exactly
+max tokens, temperature, that cache key, and optional normalized reasoning
+effort; caller and provider mutation cannot change the retained profile.
+
+Every provider dispatch contributes bounded latency and normalized numeric
+usage even on error or cancellation. Cached tokens remain a prompt subset,
+reasoning tokens remain a completion subset, total equals prompt plus
+completion, and estimated provider counts do not count as usage-reported.
+Every actually dispatched confined tool contributes only calls, failures,
+duration, and result bytes under one of the four fixed names. Snapshots retain
+no arguments, paths, prompts, contents, raw errors, or provider identity and are
+complete only when every provider dispatch supplied valid non-estimated usage.
+
+Only the LocalRepair registry changes its file schemas. An omitted `list_dir`
+path means the repository root. Each successful `read_file` includes the
+whole-file `revision_sha256`; `edit_file` accepts either one non-empty exact
+`old_text` replacement or an inclusive line range with `start_line`,
+`end_line`, and the matching `expected_revision`. The modes are exclusive,
+stale content is rechecked immediately before atomic replacement, and every
+untouched byte, mixed line ending, no-final-newline state, and file mode is
+preserved. Whole-file hashing is limited to the 4 MiB editable-file cap and a
+64 MiB cumulative budget per repair run. Creation and insertion remain guarded `apply_patch` operations.
+Ordinary agent read/edit/list schemas are unchanged.
+
 ## Data And State Model
 
 Agent collection identity is canonical agent `id`. Query fields are sortable
@@ -813,7 +844,7 @@ metadata but does not persist or reinterpret those trust facts.
 | `FR-AGENT-020` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/context_seahorse_test.go](../../pkg/agent/context_seahorse_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/workflows/private_session_test.go](../../pkg/workflows/private_session_test.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 | `FR-AGENT-021` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 | `FR-AGENT-022` | [pkg/agent/agent_message_review_test.go](../../pkg/agent/agent_message_review_test.go), [pkg/agent/agent_scope_admission_race_test.go](../../pkg/agent/agent_scope_admission_race_test.go), [pkg/agent/context_seahorse_test.go](../../pkg/agent/context_seahorse_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/agent_message.go](../../pkg/agent/agent_message.go), [pkg/agent/agent.go](../../pkg/agent/agent.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go) |
-| `FR-AGENT-023` | [pkg/agent/local_repair_test.go](../../pkg/agent/local_repair_test.go), [pkg/agent/local_repair_prompt_test.go](../../pkg/agent/local_repair_prompt_test.go), [pkg/agent/local_repair.go](../../pkg/agent/local_repair.go), [pkg/agent/local_repair_factory.go](../../pkg/agent/local_repair_factory.go), [pkg/agent/local_repair_factory_test.go](../../pkg/agent/local_repair_factory_test.go), [pkg/agent/git_workspace.go](../../pkg/agent/git_workspace.go), [pkg/agent/git_workspace_controller_test.go](../../pkg/agent/git_workspace_controller_test.go), [pkg/tools/toolloop_test.go](../../pkg/tools/toolloop_test.go), [pkg/tools/toolloop_policy_test.go](../../pkg/tools/toolloop_policy_test.go), [pkg/tools/apply_patch_test.go](../../pkg/tools/apply_patch_test.go) |
+| `FR-AGENT-023` | [pkg/agent/local_repair_test.go](../../pkg/agent/local_repair_test.go), [pkg/agent/local_repair_metrics_test.go](../../pkg/agent/local_repair_metrics_test.go), [pkg/agent/local_repair_profile_test.go](../../pkg/agent/local_repair_profile_test.go), [pkg/agent/local_repair_revision_tools_test.go](../../pkg/agent/local_repair_revision_tools_test.go), [pkg/agent/local_repair_prompt_test.go](../../pkg/agent/local_repair_prompt_test.go), [pkg/agent/local_repair.go](../../pkg/agent/local_repair.go), [pkg/agent/local_repair_factory.go](../../pkg/agent/local_repair_factory.go), [pkg/agent/local_repair_factory_test.go](../../pkg/agent/local_repair_factory_test.go), [pkg/agent/git_workspace.go](../../pkg/agent/git_workspace.go), [pkg/agent/git_workspace_controller_test.go](../../pkg/agent/git_workspace_controller_test.go), [pkg/tools/toolloop_test.go](../../pkg/tools/toolloop_test.go), [pkg/tools/toolloop_policy_test.go](../../pkg/tools/toolloop_policy_test.go), [pkg/tools/apply_patch_test.go](../../pkg/tools/apply_patch_test.go) |
 | `FR-AGENT-026` | [pkg/prworkspace/conversation.go](../../pkg/prworkspace/conversation.go), [pkg/prworkspace/implementation.go](../../pkg/prworkspace/implementation.go), [web/frontend/src/api/development-workspaces.test.ts](../../web/frontend/src/api/development-workspaces.test.ts), [web/frontend/src/components/development-workspaces/development-chat.test.tsx](../../web/frontend/src/components/development-workspaces/development-chat.test.tsx) |
 | `FR-AGENT-027` | [pkg/agent/context_manager_test.go](../../pkg/agent/context_manager_test.go), [pkg/agent/context_legacy.go](../../pkg/agent/context_legacy.go), [pkg/agent/steering.go](../../pkg/agent/steering.go) |
 | `FR-AGENT-028` | [pkg/agent/turn_profile_policy_test.go](../../pkg/agent/turn_profile_policy_test.go), [pkg/agent/turn_profile_test.go](../../pkg/agent/turn_profile_test.go), [pkg/agent/turn_profile_policy.go](../../pkg/agent/turn_profile_policy.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |

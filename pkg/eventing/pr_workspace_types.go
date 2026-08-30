@@ -285,22 +285,42 @@ type PRCharterRevision struct {
 
 type PRStageRun struct {
 	PRWorkspaceRecord
-	Phase            PRWorkspacePhase `json:"phase"`
-	Kind             string           `json:"kind"`
-	State            PRExecutionState `json:"state"`
-	Attempt          int              `json:"attempt"`
-	CharterID        string           `json:"charter_id,omitempty"`
-	WorkspaceVersion int64            `json:"workspace_version"`
-	BaseSHA          string           `json:"base_sha,omitempty"`
-	HeadSHA          string           `json:"head_sha,omitempty"`
-	AgentID          string           `json:"agent_id,omitempty"`
-	Model            string           `json:"model,omitempty"`
-	PromptDigest     string           `json:"prompt_digest,omitempty"`
-	Summary          string           `json:"summary,omitempty"`
-	PublicErrorCode  string           `json:"public_error_code,omitempty"`
-	Evidence         json.RawMessage  `json:"evidence,omitempty"`
-	StartedAt        *time.Time       `json:"started_at,omitempty"`
-	FinishedAt       *time.Time       `json:"finished_at,omitempty"`
+	Phase            PRWorkspacePhase       `json:"phase"`
+	Kind             string                 `json:"kind"`
+	State            PRExecutionState       `json:"state"`
+	Attempt          int                    `json:"attempt"`
+	CharterID        string                 `json:"charter_id,omitempty"`
+	WorkspaceVersion int64                  `json:"workspace_version"`
+	BaseSHA          string                 `json:"base_sha,omitempty"`
+	HeadSHA          string                 `json:"head_sha,omitempty"`
+	AgentID          string                 `json:"agent_id,omitempty"`
+	Model            string                 `json:"model,omitempty"`
+	PromptDigest     string                 `json:"prompt_digest,omitempty"`
+	Summary          string                 `json:"summary,omitempty"`
+	PublicErrorCode  string                 `json:"public_error_code,omitempty"`
+	Evidence         json.RawMessage        `json:"evidence,omitempty"`
+	Usage            *PRImplementationUsage `json:"usage,omitempty"`
+	StartedAt        *time.Time             `json:"started_at,omitempty"`
+	FinishedAt       *time.Time             `json:"finished_at,omitempty"`
+}
+
+type PRTokenUsage struct {
+	ProviderCalls      int64 `json:"provider_calls"`
+	UsageReportedCalls int64 `json:"usage_reported_calls"`
+	PromptTokens       int64 `json:"prompt_tokens"`
+	CachedTokens       int64 `json:"cached_tokens"`
+	CompletionTokens   int64 `json:"completion_tokens"`
+	ReasoningTokens    int64 `json:"reasoning_tokens"`
+	TotalTokens        int64 `json:"total_tokens"`
+	LatencyMillis      int64 `json:"latency_millis"`
+}
+
+type PRImplementationUsage struct {
+	Scope    string       `json:"scope"`
+	Complete bool         `json:"complete"`
+	Repair   PRTokenUsage `json:"repair"`
+	Audit    PRTokenUsage `json:"audit"`
+	Total    PRTokenUsage `json:"total"`
 }
 
 type PRChangeMetrics struct {
@@ -517,6 +537,9 @@ type PRRepairAttempt struct {
 	Model               string           `json:"model,omitempty"`
 	PromptDigest        string           `json:"prompt_digest,omitempty"`
 	ScopePromptDigest   string           `json:"scope_prompt_digest,omitempty"`
+	ProfileDigest       string           `json:"profile_digest,omitempty"`
+	Usage               PRTokenUsage     `json:"usage"`
+	UsageComplete       bool             `json:"usage_complete"`
 	PublicErrorCode     string           `json:"public_error_code,omitempty"`
 	StartedAt           *time.Time       `json:"started_at,omitempty"`
 	FinishedAt          *time.Time       `json:"finished_at,omitempty"`

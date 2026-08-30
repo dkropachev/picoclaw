@@ -222,6 +222,7 @@ func main() {
 		if machineJSON && !handled {
 			_ = json.NewEncoder(os.Stdout).Encode(codecmd.Result{
 				Version: codecmd.ResultSchemaVersion, ErrorCode: "invalid_request",
+				Usage: codecmd.ImplementationUsage{Scope: codecmd.ImplementationUsageScope},
 			})
 			handled = true
 		}

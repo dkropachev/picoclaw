@@ -62,6 +62,15 @@ It does three things:
 
 That suite complements [`TestIntegration_StreamableHTTPCompatibility`](../pkg/mcp/manager_integration_test.go), which exercises the same area in-process. Together they cover both protocol behavior and real service wiring.
 
+## Coding-agent benchmark fixture
+
+The deterministic transfer-idempotency smoke fixture is tracked under
+[`fixtures/coding-agent-benchmark/transfer-idempotency-v1/`](fixtures/coding-agent-benchmark/transfer-idempotency-v1/).
+Its hidden tests, fixed mutants, version 2 grader, and ordinary-CI verification
+remain outside the model-visible checkout under
+[`codingagentbenchmark/`](codingagentbenchmark/). Live authenticated model calls
+are not part of ordinary CI.
+
 ## Suite Layout
 
 Each suite directory must contain:

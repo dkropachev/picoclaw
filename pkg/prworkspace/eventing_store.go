@@ -332,6 +332,11 @@ func toEventingStageRun(value StageRun, version int64) eventing.PRStageRun {
 	if inputVersion <= 0 {
 		inputVersion = version
 	}
+	var usage *eventing.PRImplementationUsage
+	if value.Usage != nil {
+		projected := toEventingImplementationUsage(*value.Usage)
+		usage = &projected
+	}
 	return eventing.PRStageRun{
 		PRWorkspaceRecord: toEventingRecord(
 			value.ID,
@@ -349,6 +354,7 @@ func toEventingStageRun(value StageRun, version int64) eventing.PRStageRun {
 		Summary:          value.Summary,
 		PublicErrorCode:  value.PublicError,
 		Evidence:         evidence,
+		Usage:            usage,
 		StartedAt:        started,
 		FinishedAt:       cloneTimePointer(value.FinishedAt),
 	}
@@ -600,6 +606,9 @@ func toEventingRepair(value RepairAttempt) eventing.PRRepairAttempt {
 		ScopeChangeEvidence: toEventingScopeChanges(value.Scope.ChangeEvidence),
 		PromptDigest:        value.PromptDigest,
 		ScopePromptDigest:   value.ScopePromptDigest,
+		ProfileDigest:       value.ProfileDigest,
+		Usage:               toEventingTokenUsage(value.Usage),
+		UsageComplete:       value.UsageComplete,
 		StartedAt:           started,
 		FinishedAt:          cloneTimePointer(value.FinishedAt),
 		PublicationFence:    fence,
@@ -887,6 +896,10 @@ func fromEventingStageRun(value eventing.PRStageRun) StageRun {
 			result.Evidence = &evidence
 		}
 	}
+	if value.Usage != nil {
+		usage := fromEventingImplementationUsage(*value.Usage)
+		result.Usage = &usage
+	}
 	result.inputWorkspaceVersion = value.WorkspaceVersion
 	return result
 }
@@ -1035,6 +1048,9 @@ func fromEventingRepair(value eventing.PRRepairAttempt) RepairAttempt {
 		},
 		PromptDigest:      value.PromptDigest,
 		ScopePromptDigest: value.ScopePromptDigest,
+		ProfileDigest:     value.ProfileDigest,
+		Usage:             fromEventingTokenUsage(value.Usage),
+		UsageComplete:     value.UsageComplete,
 		StartedAt:         timeFromPointer(value.StartedAt, value.CreatedAt),
 		FinishedAt:        cloneTimePointer(value.FinishedAt),
 	}
@@ -1051,6 +1067,40 @@ func fromEventingRepair(value eventing.PRRepairAttempt) RepairAttempt {
 		}
 	}
 	return result
+}
+
+func toEventingTokenUsage(value TokenUsage) eventing.PRTokenUsage {
+	return eventing.PRTokenUsage{
+		ProviderCalls: value.ProviderCalls, UsageReportedCalls: value.UsageReportedCalls,
+		PromptTokens: value.PromptTokens, CachedTokens: value.CachedTokens,
+		CompletionTokens: value.CompletionTokens, ReasoningTokens: value.ReasoningTokens,
+		TotalTokens: value.TotalTokens, LatencyMillis: value.LatencyMillis,
+	}
+}
+
+func fromEventingTokenUsage(value eventing.PRTokenUsage) TokenUsage {
+	return TokenUsage{
+		ProviderCalls: value.ProviderCalls, UsageReportedCalls: value.UsageReportedCalls,
+		PromptTokens: value.PromptTokens, CachedTokens: value.CachedTokens,
+		CompletionTokens: value.CompletionTokens, ReasoningTokens: value.ReasoningTokens,
+		TotalTokens: value.TotalTokens, LatencyMillis: value.LatencyMillis,
+	}
+}
+
+func toEventingImplementationUsage(value ImplementationUsage) eventing.PRImplementationUsage {
+	return eventing.PRImplementationUsage{
+		Scope: value.Scope, Complete: value.Complete,
+		Repair: toEventingTokenUsage(value.Repair), Audit: toEventingTokenUsage(value.Audit),
+		Total: toEventingTokenUsage(value.Total),
+	}
+}
+
+func fromEventingImplementationUsage(value eventing.PRImplementationUsage) ImplementationUsage {
+	return ImplementationUsage{
+		Scope: value.Scope, Complete: value.Complete,
+		Repair: fromEventingTokenUsage(value.Repair), Audit: fromEventingTokenUsage(value.Audit),
+		Total: fromEventingTokenUsage(value.Total),
+	}
 }
 
 func fromEventingValidation(value eventing.PRValidationRun) ValidationRun {

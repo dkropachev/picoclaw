@@ -564,6 +564,9 @@ func githubCopilotUsageInfo(
 	cachedTokens int,
 	totalTokens int,
 ) *UsageInfo {
+	estimated := promptTokens <= 0 || completionTokens <= 0 || cachedTokens < 0 ||
+		cachedTokens > promptTokens || totalTokens < 0 ||
+		totalTokens > 0 && totalTokens != promptTokens+completionTokens
 	if promptTokens <= 0 {
 		promptTokens = githubCopilotEstimatedTokens(prompt)
 	}
@@ -574,10 +577,12 @@ func githubCopilotUsageInfo(
 		cachedTokens = 0
 	}
 	cachedTokens = min(cachedTokens, promptTokens)
-	totalTokens = max(totalTokens, promptTokens+completionTokens)
+	// Normalized usage always treats cached input and reasoning as subsets and
+	// total as prompt plus completion. A transport total cannot be added again.
+	totalTokens = promptTokens + completionTokens
 	return &UsageInfo{
 		PromptTokens: promptTokens, CompletionTokens: completionTokens,
-		TotalTokens: totalTokens, CachedTokens: cachedTokens,
+		TotalTokens: totalTokens, CachedTokens: cachedTokens, Estimated: estimated,
 	}
 }
 

@@ -1018,6 +1018,9 @@ func (runner *commandRunner) finish(result Result, exitCode int) error {
 	if result.WorkspaceID == "" {
 		result.WorkspaceID = runner.workspaceID
 	}
+	if result.Usage.Scope == "" {
+		result.Usage.Scope = ImplementationUsageScope
+	}
 	if runner.options.json {
 		_ = json.NewEncoder(runner.output).Encode(result)
 	} else {

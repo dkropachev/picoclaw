@@ -28,6 +28,7 @@ type workflowAgentUsageAccumulator struct {
 	usage    map[string]workflows.AgentUsage
 	observer workflows.AgentUsageObserver
 	err      error
+	invalid  bool
 }
 
 func newWorkflowAgentUsageAccumulator(
@@ -47,16 +48,54 @@ func (a *workflowAgentUsageAccumulator) Observe(usage workflows.AgentUsage) erro
 	usage.Reviewer = strings.TrimSpace(usage.Reviewer)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if !validWorkflowAgentUsageObservation(usage) {
+		return a.recordUsageErrorWithObservation(usage)
+	}
 	key := usage.Reviewer + "\x00" + usage.Model
 	aggregate := a.usage[key]
 	aggregate.Model = usage.Model
 	aggregate.Reviewer = usage.Reviewer
-	aggregate.PromptTokens += usage.PromptTokens
-	aggregate.CompletionTokens += usage.CompletionTokens
-	aggregate.TotalTokens += usage.TotalTokens
-	aggregate.CachedTokens += usage.CachedTokens
-	aggregate.ReasoningTokens += usage.ReasoningTokens
-	aggregate.LatencyMillis += usage.LatencyMillis
+	var valid bool
+	if aggregate.ProviderCalls, valid = checkedWorkflowUsageInt64(
+		aggregate.ProviderCalls, usage.ProviderCalls,
+	); !valid {
+		return a.recordUsageErrorWithObservation(usage)
+	}
+	if aggregate.UsageReportedCalls, valid = checkedWorkflowUsageInt64(
+		aggregate.UsageReportedCalls, usage.UsageReportedCalls,
+	); !valid {
+		return a.recordUsageErrorWithObservation(usage)
+	}
+	if aggregate.PromptTokens, valid = checkedWorkflowUsageInt(
+		aggregate.PromptTokens, usage.PromptTokens,
+	); !valid {
+		return a.recordUsageErrorWithObservation(usage)
+	}
+	if aggregate.CompletionTokens, valid = checkedWorkflowUsageInt(
+		aggregate.CompletionTokens, usage.CompletionTokens,
+	); !valid {
+		return a.recordUsageErrorWithObservation(usage)
+	}
+	if aggregate.TotalTokens, valid = checkedWorkflowUsageInt(
+		aggregate.TotalTokens, usage.TotalTokens,
+	); !valid {
+		return a.recordUsageErrorWithObservation(usage)
+	}
+	if aggregate.CachedTokens, valid = checkedWorkflowUsageInt(
+		aggregate.CachedTokens, usage.CachedTokens,
+	); !valid {
+		return a.recordUsageErrorWithObservation(usage)
+	}
+	if aggregate.ReasoningTokens, valid = checkedWorkflowUsageInt(
+		aggregate.ReasoningTokens, usage.ReasoningTokens,
+	); !valid {
+		return a.recordUsageErrorWithObservation(usage)
+	}
+	if aggregate.LatencyMillis, valid = checkedWorkflowUsageInt64(
+		aggregate.LatencyMillis, usage.LatencyMillis,
+	); !valid {
+		return a.recordUsageErrorWithObservation(usage)
+	}
 	a.usage[key] = aggregate
 	if a.observer != nil {
 		if err := a.observer(usage); err != nil {
@@ -66,6 +105,77 @@ func (a *workflowAgentUsageAccumulator) Observe(usage workflows.AgentUsage) erro
 		}
 	}
 	return a.err
+}
+
+func (a *workflowAgentUsageAccumulator) recordUsageError() error {
+	a.invalid = true
+	if a.err == nil {
+		a.err = errors.New("workflow agent usage aggregation is invalid or overflowed")
+	}
+	return a.err
+}
+
+// recordUsageErrorWithObservation preserves the fact and latency of a
+// dispatched call whose token fields cannot be trusted. Token/report counts
+// from that call are deliberately excluded.
+func (a *workflowAgentUsageAccumulator) recordUsageErrorWithObservation(
+	usage workflows.AgentUsage,
+) error {
+	key := usage.Reviewer + "\x00" + usage.Model
+	aggregate := a.usage[key]
+	aggregate.Model, aggregate.Reviewer = usage.Model, usage.Reviewer
+	providerCalls, callsOK := checkedWorkflowUsageInt64(
+		aggregate.ProviderCalls,
+		usage.ProviderCalls,
+	)
+	latency, latencyOK := checkedWorkflowUsageInt64(
+		aggregate.LatencyMillis,
+		usage.LatencyMillis,
+	)
+	if callsOK && latencyOK && usage.ProviderCalls > 0 {
+		aggregate.ProviderCalls = providerCalls
+		aggregate.LatencyMillis = latency
+		a.usage[key] = aggregate
+	}
+	return a.recordUsageError()
+}
+
+func checkedWorkflowUsageInt(left, right int) (int, bool) {
+	maximum := int(^uint(0) >> 1)
+	if left < 0 || right < 0 || left > maximum-right {
+		return 0, false
+	}
+	return left + right, true
+}
+
+func checkedWorkflowUsageInt64(left, right int64) (int64, bool) {
+	const maximum = int64(^uint64(0) >> 1)
+	if left < 0 || right < 0 || left > maximum-right {
+		return 0, false
+	}
+	return left + right, true
+}
+
+func validWorkflowAgentUsageObservation(usage workflows.AgentUsage) bool {
+	if usage.ProviderCalls < 0 || usage.UsageReportedCalls < 0 ||
+		usage.UsageReportedCalls > usage.ProviderCalls || usage.PromptTokens < 0 ||
+		usage.CompletionTokens < 0 || usage.TotalTokens < 0 || usage.CachedTokens < 0 ||
+		usage.ReasoningTokens < 0 || usage.LatencyMillis < 0 ||
+		usage.CachedTokens > usage.PromptTokens ||
+		usage.ReasoningTokens > usage.CompletionTokens {
+		return false
+	}
+	if usage.ProviderCalls > 1 || usage.UsageReportedCalls > 1 {
+		return false
+	}
+	if usage.ProviderCalls == 0 && (usage.UsageReportedCalls != 0 ||
+		usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.TotalTokens != 0 ||
+		usage.CachedTokens != 0 || usage.ReasoningTokens != 0 || usage.LatencyMillis != 0) {
+		return false
+	}
+	maximum := int(^uint(0) >> 1)
+	return usage.PromptTokens <= maximum-usage.CompletionTokens &&
+		usage.TotalTokens == usage.PromptTokens+usage.CompletionTokens
 }
 
 func (a *workflowAgentUsageAccumulator) Snapshot() []workflows.AgentUsage {
@@ -96,18 +206,43 @@ func (a *workflowAgentUsageAccumulator) Err() error {
 	return a.err
 }
 
+func (a *workflowAgentUsageAccumulator) Complete() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.invalid {
+		return false
+	}
+	var calls, reported int64
+	for _, usage := range a.usage {
+		var ok bool
+		calls, ok = checkedWorkflowUsageInt64(calls, usage.ProviderCalls)
+		if !ok {
+			return false
+		}
+		reported, ok = checkedWorkflowUsageInt64(reported, usage.UsageReportedCalls)
+		if !ok {
+			return false
+		}
+	}
+	return calls > 0 && calls == reported
+}
+
 func workflowAgentUsageFromResponse(
 	model string,
 	response *providers.LLMResponse,
 	latency time.Duration,
 ) (workflows.AgentUsage, bool) {
-	if response == nil {
-		return workflows.AgentUsage{}, false
-	}
 	usage := workflows.AgentUsage{
-		Model: strings.TrimSpace(model), LatencyMillis: max(0, latency.Milliseconds()),
+		Model: strings.TrimSpace(model), ProviderCalls: 1,
+		LatencyMillis: max(0, latency.Milliseconds()),
 	}
-	if response.Usage != nil {
+	if response != nil && response.Usage != nil {
+		if !response.Usage.Estimated {
+			usage.UsageReportedCalls = 1
+		}
 		usage.PromptTokens = response.Usage.PromptTokens
 		usage.CompletionTokens = response.Usage.CompletionTokens
 		usage.TotalTokens = response.Usage.TotalTokens

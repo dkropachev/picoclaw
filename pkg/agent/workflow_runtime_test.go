@@ -1667,19 +1667,37 @@ func TestWorkflowAgentUsageIncludesNonManagedStructuredRepair(t *testing.T) {
 	}
 	usage, ok := outputs["usage"].([]workflows.AgentUsage)
 	if !ok || !reflect.DeepEqual(usage, []workflows.AgentUsage{{
-		Model:            "test-model",
-		PromptTokens:     30,
-		CompletionTokens: 6,
-		TotalTokens:      36,
-		CachedTokens:     8,
+		Model:              "test-model",
+		ProviderCalls:      2,
+		UsageReportedCalls: 2,
+		PromptTokens:       30,
+		CompletionTokens:   6,
+		TotalTokens:        36,
+		CachedTokens:       8,
 	}}) {
 		t.Fatalf("usage = %#v, want exact initial+repair aggregate", outputs["usage"])
 	}
 	observedMu.Lock()
 	defer observedMu.Unlock()
 	if !reflect.DeepEqual(observed, []workflows.AgentUsage{
-		{Model: "test-model", PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12, CachedTokens: 3},
-		{Model: "test-model", PromptTokens: 20, CompletionTokens: 4, TotalTokens: 24, CachedTokens: 5},
+		{
+			Model:              "test-model",
+			ProviderCalls:      1,
+			UsageReportedCalls: 1,
+			PromptTokens:       10,
+			CompletionTokens:   2,
+			TotalTokens:        12,
+			CachedTokens:       3,
+		},
+		{
+			Model:              "test-model",
+			ProviderCalls:      1,
+			UsageReportedCalls: 1,
+			PromptTokens:       20,
+			CompletionTokens:   4,
+			TotalTokens:        24,
+			CachedTokens:       5,
+		},
 	}) {
 		t.Fatalf("observed usage = %#v, want one event per provider response", observed)
 	}
@@ -1707,7 +1725,8 @@ func TestWorkflowAgentUsageObserverErrorPropagates(t *testing.T) {
 		t.Fatalf("RunAgent() outputs = %#v, error = %v, want observer error", outputs, err)
 	}
 	if !reflect.DeepEqual(outputs["usage"], []workflows.AgentUsage{{
-		Model: "test-model", PromptTokens: 7, CompletionTokens: 2, TotalTokens: 9,
+		Model: "test-model", ProviderCalls: 1, UsageReportedCalls: 1,
+		PromptTokens: 7, CompletionTokens: 2, TotalTokens: 9,
 	}}) {
 		t.Fatalf("observer-error usage = %#v", outputs["usage"])
 	}

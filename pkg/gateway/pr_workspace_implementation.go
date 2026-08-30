@@ -220,14 +220,15 @@ func (runtime *prWorkspaceImplementationRuntime) Repair(
 	result, err := runner.Run(leaseCtx, agent.LocalRepairRequest{
 		Pin: pin, Instruction: request.Instruction, Context: string(contextJSON),
 	})
+	repairResult = projectLocalRepairResult(result)
 	if err != nil {
-		return prworkspace.RepairResult{}, err
+		return repairResult, err
 	}
 	candidate, err := runtime.manager.SnapshotPinnedCandidate(leaseCtx, gitworkspace.PinnedCandidateRequest{
 		Pin: pin, WorkspaceID: result.WorkspaceID,
 	})
 	if err != nil {
-		return prworkspace.RepairResult{}, err
+		return repairResult, err
 	}
 	review, err := runtime.manager.SnapshotPinnedCandidateReview(
 		leaseCtx,
@@ -238,14 +239,14 @@ func (runtime *prWorkspaceImplementationRuntime) Repair(
 		},
 	)
 	if err != nil {
-		return prworkspace.RepairResult{}, err
+		return repairResult, err
 	}
 	storedCandidate := prWorkspaceCandidate{
 		pin: pin, candidate: candidate, charter: request.Context.Charter,
 		lineID: lineID, lease: lineLease,
 	}
 	if err = runtime.saveCandidateCheckpoint(workspaceID, storedCandidate); err != nil {
-		return prworkspace.RepairResult{}, err
+		return repairResult, err
 	}
 	runtime.mu.Lock()
 	if continuing {
@@ -255,14 +256,31 @@ func (runtime *prWorkspaceImplementationRuntime) Repair(
 	runtime.active[workspaceID] = storedCandidate
 	runtime.mu.Unlock()
 	capturePartialOnError = false
+	repairResult.Summary, repairResult.WorkspaceID = result.Content, result.WorkspaceID
+	repairResult.ChangedFiles = append([]string(nil), review.ChangedPaths...)
+	repairResult.SemanticLines = semanticChangedLines(review.UnifiedDiff)
+	repairResult.Modules = changedPathModules(review.ChangedPaths)
+	repairResult.CandidateSHA = candidate.Tree
+	repairResult.CandidateDiff = review.UnifiedDiff
+	return repairResult, nil
+}
+
+func projectLocalRepairResult(value agent.LocalRepairResult) prworkspace.RepairResult {
 	return prworkspace.RepairResult{
-		Summary: result.Content, WorkspaceID: result.WorkspaceID,
-		ChangedFiles:  append([]string(nil), review.ChangedPaths...),
-		SemanticLines: semanticChangedLines(review.UnifiedDiff),
-		Modules:       changedPathModules(review.ChangedPaths), CandidateSHA: candidate.Tree,
-		CandidateDiff: review.UnifiedDiff,
-		PromptDigest:  result.PromptDigest,
-	}, nil
+		Summary: value.Content, WorkspaceID: value.WorkspaceID,
+		PromptDigest: value.PromptDigest, ProfileDigest: value.ProfileDigest,
+		Usage:         localRepairTokenUsage(value.Metrics.Usage),
+		UsageComplete: value.Metrics.Complete,
+	}
+}
+
+func localRepairTokenUsage(value agent.LocalRepairUsage) prworkspace.TokenUsage {
+	return prworkspace.TokenUsage{
+		ProviderCalls: value.ProviderCalls, UsageReportedCalls: value.UsageReportedCalls,
+		PromptTokens: value.PromptTokens, CachedTokens: value.CachedTokens,
+		CompletionTokens: value.CompletionTokens, ReasoningTokens: value.ReasoningTokens,
+		TotalTokens: value.TotalTokens, LatencyMillis: value.LatencyMillis,
+	}
 }
 
 func (runtime *prWorkspaceImplementationRuntime) LoadPlanningEvidence(

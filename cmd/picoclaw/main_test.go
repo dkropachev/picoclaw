@@ -178,6 +178,8 @@ func TestCodeJSONProcessOutputIsOnePureObject(t *testing.T) {
 	require.NoError(t, decoder.Decode(&result))
 	assert.Equal(t, codecmd.ResultSchemaVersion, result.Version)
 	assert.Equal(t, "invalid_request", result.ErrorCode)
+	assert.Equal(t, codecmd.ImplementationUsageScope, result.Usage.Scope)
+	assert.False(t, result.Usage.Complete)
 	var trailing any
 	assert.ErrorIs(t, decoder.Decode(&trailing), io.EOF)
 }
