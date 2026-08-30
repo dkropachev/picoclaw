@@ -202,6 +202,10 @@ candidate authority remain unchanged and owned by this feature.
 - Candidate partial failure remains visible in the final table and does not
   manufacture a score. Cancellation checkpoints completed tasks and never marks
   a partial judge/analyzer result complete.
+- Cancel preserves the caller's initial expected-version fence, retries only
+  progress churn from the same active run token, and never crosses into a newer
+  restarted attempt. An already durable canceled outcome is idempotent, including
+  when concurrent finalizers race after the cancel boundary was persisted.
 - Sparse or underfilled groups retain their actual observed files/content values,
   so a requested maximum is never presented as though it were delivered.
   Oversized individual reviewable files may produce an observed byte count above
