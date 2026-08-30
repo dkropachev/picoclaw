@@ -624,13 +624,14 @@ func toEventingValidation(value ValidationRun) eventing.PRValidationRun {
 			value.StartedAt,
 			timeFromPointer(value.FinishedAt, value.StartedAt),
 		),
-		StageRunID:   value.StageRunID,
-		CandidateSHA: value.CandidateSHA,
-		State:        eventing.PRExecutionState(value.State),
-		Kind:         "checks",
-		Checks:       checks,
-		StartedAt:    started,
-		FinishedAt:   cloneTimePointer(value.FinishedAt),
+		StageRunID:      value.StageRunID,
+		RepairAttemptID: value.RepairAttemptID,
+		CandidateSHA:    value.CandidateSHA,
+		State:           eventing.PRExecutionState(value.State),
+		Kind:            "checks",
+		Checks:          checks,
+		StartedAt:       started,
+		FinishedAt:      cloneTimePointer(value.FinishedAt),
 	}
 }
 
@@ -1061,7 +1062,8 @@ func fromEventingValidation(value eventing.PRValidationRun) ValidationRun {
 		})
 	}
 	return ValidationRun{
-		ID: value.ID, StageRunID: value.StageRunID, State: ExecutionState(value.State),
+		ID: value.ID, StageRunID: value.StageRunID, RepairAttemptID: value.RepairAttemptID,
+		State:        ExecutionState(value.State),
 		CandidateSHA: value.CandidateSHA, Checks: checks,
 		StartedAt: timeFromPointer(value.StartedAt, value.CreatedAt), FinishedAt: cloneTimePointer(value.FinishedAt),
 	}

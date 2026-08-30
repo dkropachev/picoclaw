@@ -24,14 +24,19 @@ const (
 // Missing optional side-effect capabilities leave their routes unavailable;
 // they never silently weaken an authorization or validation decision.
 type HTTPConfig struct {
-	Service               *Service
-	Implementation        ImplementationConfig
-	IssuePublisher        IssuePublisher
-	ReviewPublisher       ReviewPublisher
-	BranchPublisher       BranchPublisher
-	ReviewNudgePolicy     NudgePolicy
-	CompletionNudgePolicy NudgePolicy
-	SizePolicy            SizePolicy
+	Service                 *Service
+	Implementation          ImplementationConfig
+	IssuePublisher          IssuePublisher
+	ReviewPublisher         ReviewPublisher
+	BranchPublisher         BranchPublisher
+	ReviewNudgePolicy       NudgePolicy
+	CompletionNudgePolicy   NudgePolicy
+	SizePolicy              SizePolicy
+	FeatureRuntimeLease     func(context.Context) (context.Context, func(), error)
+	LeasedFeatureGuard      func(context.Context) error
+	RepositoryResolverReady bool
+	GateRuntimeReady        bool
+	DraftPullRequestReady   bool
 }
 
 type DeferredIssueMode string
@@ -43,19 +48,25 @@ const (
 )
 
 func validDeferredIssueMode(value DeferredIssueMode) bool {
-	return value == DeferredIssuesOff || value == DeferredIssuesAsk || value == DeferredIssuesAutomatic
+	return value == DeferredIssuesOff || value == DeferredIssuesAsk ||
+		value == DeferredIssuesAutomatic
 }
 
 // HTTPHandler serves the unified, version-fenced PR workspace contract.
 type HTTPHandler struct {
-	service               *Service
-	implementation        ImplementationConfig
-	issuePublisher        IssuePublisher
-	reviewPublisher       ReviewPublisher
-	branchPublisher       BranchPublisher
-	reviewNudgePolicy     NudgePolicy
-	completionNudgePolicy NudgePolicy
-	sizePolicy            SizePolicy
+	service                 *Service
+	implementation          ImplementationConfig
+	issuePublisher          IssuePublisher
+	reviewPublisher         ReviewPublisher
+	branchPublisher         BranchPublisher
+	reviewNudgePolicy       NudgePolicy
+	completionNudgePolicy   NudgePolicy
+	sizePolicy              SizePolicy
+	featureRuntimeLease     func(context.Context) (context.Context, func(), error)
+	leasedFeatureGuard      func(context.Context) error
+	repositoryResolverReady bool
+	gateRuntimeReady        bool
+	draftPullRequestReady   bool
 }
 
 func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
@@ -83,10 +94,15 @@ func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 	return &HTTPHandler{
 		service: config.Service, implementation: config.Implementation,
 		issuePublisher: config.IssuePublisher, reviewPublisher: config.ReviewPublisher,
-		branchPublisher:       config.BranchPublisher,
-		reviewNudgePolicy:     config.ReviewNudgePolicy,
-		completionNudgePolicy: config.CompletionNudgePolicy,
-		sizePolicy:            config.SizePolicy,
+		branchPublisher:         config.BranchPublisher,
+		reviewNudgePolicy:       config.ReviewNudgePolicy,
+		completionNudgePolicy:   config.CompletionNudgePolicy,
+		sizePolicy:              config.SizePolicy,
+		featureRuntimeLease:     config.FeatureRuntimeLease,
+		leasedFeatureGuard:      config.LeasedFeatureGuard,
+		repositoryResolverReady: config.RepositoryResolverReady,
+		gateRuntimeReady:        config.GateRuntimeReady,
+		draftPullRequestReady:   config.DraftPullRequestReady,
 	}, nil
 }
 
@@ -105,6 +121,10 @@ func (handler *HTTPHandler) ServeHTTP(response http.ResponseWriter, request *htt
 		return
 	}
 	workspaceID := segments[0]
+	if workspaceID == "capabilities" {
+		handler.serveCapabilities(response, request, segments[1:])
+		return
+	}
 	switch workspaceID {
 	case "notifications", "notification-views", "notification-settings", "push-subscriptions":
 		handler.serveNotificationAPI(response, request, workspaceID, segments[1:])
@@ -112,9 +132,20 @@ func (handler *HTTPHandler) ServeHTTP(response http.ResponseWriter, request *htt
 	}
 	if workspaceID == "repositories" {
 		if len(segments) == 1 && request.Method == http.MethodGet && request.URL.RawQuery == "" {
+			leasedRequest, release, admitted := handler.leaseImplementFeature(response, request)
+			if !admitted {
+				return
+			}
+			defer release()
+			request = leasedRequest
 			repositories, err := handler.service.ListConfiguredRepositories(request.Context())
 			if err != nil {
-				writeHTTPError(response, http.StatusServiceUnavailable, "repositories_unavailable", nil)
+				writeHTTPError(
+					response,
+					http.StatusServiceUnavailable,
+					"repositories_unavailable",
+					nil,
+				)
 				return
 			}
 			writeHTTPJSON(response, http.StatusOK, map[string]any{"repositories": repositories})
@@ -127,7 +158,16 @@ func (handler *HTTPHandler) ServeHTTP(response http.ResponseWriter, request *htt
 			if !decodeHTTPBody(response, request, &body) {
 				return
 			}
-			repository, err := handler.service.VerifyConfiguredRepository(request.Context(), body.RepositoryURL)
+			leasedRequest, release, admitted := handler.leaseImplementFeature(response, request)
+			if !admitted {
+				return
+			}
+			defer release()
+			request = leasedRequest
+			repository, err := handler.service.VerifyConfiguredRepository(
+				request.Context(),
+				body.RepositoryURL,
+			)
 			if err != nil {
 				writeHTTPError(response, http.StatusBadRequest, "repository_unavailable", nil)
 				return
@@ -164,6 +204,14 @@ func (handler *HTTPHandler) serveRoot(response http.ResponseWriter, request *htt
 		if !decodeHTTPBody(response, request, &body) {
 			return
 		}
+		if body.Intent == IntentImplementFeature {
+			leasedRequest, release, admitted := handler.leaseImplementFeature(response, request)
+			if !admitted {
+				return
+			}
+			defer release()
+			request = leasedRequest
+		}
 		create := CreateWorkspaceRequest{
 			RequestID: body.RequestID, Intent: body.Intent, PullRequestURL: body.PullRequestURL,
 		}
@@ -182,9 +230,139 @@ func (handler *HTTPHandler) serveRoot(response http.ResponseWriter, request *htt
 	}
 }
 
+type developmentCapabilities struct {
+	Version               int      `json:"version"`
+	ImplementFeatureReady bool     `json:"implement_feature_ready"`
+	Missing               []string `json:"missing"`
+}
+
+func (handler *HTTPHandler) serveCapabilities(
+	response http.ResponseWriter,
+	request *http.Request,
+	tail []string,
+) {
+	if len(tail) != 0 || request.Method != http.MethodGet || request.URL.RawQuery != "" {
+		writeHTTPMethod(response, http.MethodGet)
+		return
+	}
+	missing := handler.implementFeatureMissing(request.Context())
+	writeHTTPJSON(response, http.StatusOK, developmentCapabilities{
+		Version: 1, ImplementFeatureReady: len(missing) == 0, Missing: missing,
+	})
+}
+
+func (handler *HTTPHandler) implementFeatureMissing(ctx context.Context) []string {
+	missing := make([]string, 0, 11)
+	if handler == nil || handler.service == nil || handler.service.provider == nil {
+		missing = append(missing, "provider_resolver", "repository_resolver")
+	} else {
+		_, resolves := handler.service.provider.(RepositoryProviderResolver)
+		_, lists := handler.service.provider.(ConfiguredRepositoryLister)
+		_, verifies := handler.service.provider.(ConfiguredRepositoryVerifier)
+		if !resolves || !lists || !verifies || !handler.repositoryResolverReady {
+			missing = append(missing, "repository_resolver")
+		}
+	}
+	if handler == nil || handler.service == nil || handler.service.ai.Runner == nil {
+		missing = append(missing, "isolated_ai")
+	}
+	if handler == nil || handler.service == nil || handler.service.planningEvidence == nil {
+		missing = append(missing, "planning_evidence")
+	}
+	if handler == nil || handler.service == nil || handler.service.gates == nil ||
+		!handler.gateRuntimeReady {
+		missing = append(missing, "gate_runtime")
+	}
+	if handler == nil || handler.implementation.Repair == nil {
+		missing = append(missing, "repair_runner")
+	}
+	if handler == nil || handler.implementation.Validation == nil {
+		missing = append(missing, "local_ci")
+	}
+	if handler == nil || handler.branchPublisher == nil {
+		missing = append(missing, "branch_publisher")
+	}
+	if handler == nil || !handler.draftPullRequestReady {
+		missing = append(missing, "draft_pull_request_publisher")
+	}
+	if handler == nil || handler.featureRuntimeLease == nil {
+		missing = append(missing, "runtime_guard")
+	} else if leaseCtx, release, err := handler.featureRuntimeLease(ctx); err != nil {
+		if errors.Is(err, ErrUnsafeProvider) {
+			missing = append(missing, "unsafe_provider")
+		} else {
+			missing = append(missing, "runtime_guard")
+		}
+	} else {
+		if leaseCtx == nil || release == nil {
+			missing = append(missing, "runtime_guard")
+			if release != nil {
+				release()
+			}
+		} else {
+			release()
+		}
+	}
+	return missing
+}
+
+func (handler *HTTPHandler) leaseImplementFeature(
+	response http.ResponseWriter,
+	request *http.Request,
+) (*http.Request, func(), bool) {
+	if handler == nil || handler.featureRuntimeLease == nil {
+		writeHTTPError(
+			response,
+			http.StatusServiceUnavailable,
+			"implement_feature_unavailable",
+			nil,
+		)
+		return request, func() {}, false
+	}
+	leaseCtx, release, err := handler.featureRuntimeLease(request.Context())
+	if err != nil {
+		if errors.Is(err, ErrUnsafeProvider) {
+			writeHTTPError(response, http.StatusConflict, "unsafe_provider", nil)
+		} else {
+			writeHTTPError(response, http.StatusServiceUnavailable, "implement_feature_unavailable", nil)
+		}
+		return request, func() {}, false
+	}
+	if leaseCtx == nil || release == nil {
+		if release != nil {
+			release()
+		}
+		writeHTTPError(response, http.StatusServiceUnavailable, "implement_feature_unavailable", nil)
+		return request, func() {}, false
+	}
+	return request.WithContext(leaseCtx), release, true
+}
+
 func (handler *HTTPHandler) advanceDevelopmentWorkspace(
 	ctx context.Context, aggregate Aggregate, requestID string,
 ) (Aggregate, error) {
+	if handler.featureImplementationUnavailable(aggregate) {
+		return handler.service.FailImplementationUnavailable(
+			ctx,
+			aggregate,
+			requestID+":implementation-unavailable",
+		)
+	}
+	if aggregate.Workspace.Intent == IntentImplementFeature {
+		if handler.leasedFeatureGuard == nil {
+			return aggregate, errors.New("implement-feature runtime guard is unavailable")
+		}
+		if err := handler.leasedFeatureGuard(ctx); err != nil {
+			if errors.Is(err, ErrUnsafeProvider) {
+				return handler.service.FailUnsafeProvider(
+					ctx,
+					aggregate,
+					requestID+":unsafe-provider",
+				)
+			}
+			return aggregate, err
+		}
+	}
 	if aggregate.Workspace.Phase == PhaseCharter && len(aggregate.Charters) == 0 {
 		var err error
 		aggregate, err = handler.service.DraftCharter(ctx, DraftCharterRequest{
@@ -196,7 +374,7 @@ func (handler *HTTPHandler) advanceDevelopmentWorkspace(
 		}
 	}
 	if aggregate.Workspace.Phase == PhaseCharter && aggregate.Workspace.ActiveCharterID == "" &&
-		len(aggregate.Charters) > 0 {
+		len(aggregate.Charters) > 0 && !charterConfirmationWasHumanGated(aggregate) {
 		charter := aggregate.Charters[len(aggregate.Charters)-1]
 		var err error
 		aggregate, err = handler.service.ConfirmCharterAutomatically(ctx, ConfirmCharterRequest{
@@ -226,20 +404,67 @@ func (handler *HTTPHandler) advanceDevelopmentWorkspace(
 			return aggregate, err
 		}
 	}
+	if handler.service.deferredMode(aggregate) == DeferredIssuesAutomatic {
+		var err error
+		aggregate, err = handler.applyDeferredIssuePolicy(
+			ctx,
+			aggregate,
+			requestID+":deferred",
+		)
+		if err != nil {
+			return aggregate, err
+		}
+	}
 	if (aggregate.Workspace.Phase == PhaseTriage || aggregate.Workspace.Phase == PhaseImplementation) &&
-		!aggregateHasOpenFindings(aggregate) && handler.implementation.Repair != nil &&
+		!aggregateHasOpenFindings(aggregate) &&
+		handler.implementation.Repair != nil &&
 		handler.implementation.Validation != nil {
-		implemented, err := handler.service.RunImplementation(ctx, handler.implementation, RunImplementationRequest{
-			WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
-			RequestID:   requestID + ":implementation",
-			NudgePolicy: handler.completionNudgePolicy, SizePolicy: handler.sizePolicy,
-		})
+		implemented, err := handler.service.RunImplementation(
+			ctx,
+			handler.implementation,
+			RunImplementationRequest{
+				WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+				RequestID:   requestID + ":implementation",
+				NudgePolicy: handler.completionNudgePolicy, SizePolicy: handler.sizePolicy,
+			},
+		)
 		if err != nil {
 			return implemented, err
 		}
 		return handler.maybeQueueBranchPublication(ctx, implemented, requestID+":publication")
 	}
 	return handler.maybeQueueBranchPublication(ctx, aggregate, requestID+":publication")
+}
+
+// AdmitAutonomousDevelopmentWorkspace audits feature work before a durable
+// claim is recorded. The caller must pass the exact runtime-lease context that
+// remains held through the subsequent claim and advance operation.
+func (handler *HTTPHandler) AdmitAutonomousDevelopmentWorkspace(
+	ctx context.Context,
+	aggregate Aggregate,
+	requestID string,
+) (Aggregate, bool, error) {
+	if aggregate.Workspace.Intent != IntentImplementFeature {
+		return aggregate, true, nil
+	}
+	if handler.featureImplementationUnavailable(aggregate) {
+		return aggregate, true, nil
+	}
+	if handler == nil || handler.service == nil || handler.leasedFeatureGuard == nil {
+		return aggregate, false, errors.New("implement-feature runtime guard is unavailable")
+	}
+	if err := handler.leasedFeatureGuard(ctx); err != nil {
+		if !errors.Is(err, ErrUnsafeProvider) {
+			return aggregate, false, err
+		}
+		failed, failErr := handler.service.FailUnsafeProvider(
+			ctx,
+			aggregate,
+			requestID+":unsafe-provider",
+		)
+		return failed, false, failErr
+	}
+	return aggregate, true, nil
 }
 
 // AdvanceDevelopmentWorkspace resumes one durable autonomous workspace from
@@ -255,11 +480,15 @@ func (handler *HTTPHandler) AdvanceDevelopmentWorkspace(
 // repeatedly selecting lifecycle phases whose configured runtime cannot make
 // progress. It intentionally says nothing about user-triggered operations.
 func (handler *HTTPHandler) AutonomousDevelopmentWorkspaceReady(aggregate Aggregate) bool {
-	if handler == nil {
+	if handler == nil || unsafeProviderFailureRecorded(aggregate) ||
+		developmentFailureRecorded(aggregate, "implementation_unavailable") {
 		return false
 	}
 	switch aggregate.Workspace.Phase {
 	case PhaseCharter:
+		if len(aggregate.Charters) > 0 && charterConfirmationWasHumanGated(aggregate) {
+			return false
+		}
 		return len(aggregate.Charters) > 0 ||
 			(handler.service != nil && handler.service.ai.Runner != nil)
 	case PhasePlanning:
@@ -269,6 +498,9 @@ func (handler *HTTPHandler) AutonomousDevelopmentWorkspaceReady(aggregate Aggreg
 		return handler.service != nil && handler.service.ai.Runner != nil &&
 			handler.service.reviewEvidence != nil && handler.service.reviewWorkflow != nil
 	case PhaseTriage, PhaseImplementation:
+		if handler.featureImplementationUnavailable(aggregate) {
+			return true
+		}
 		return handler.implementation.Repair != nil && handler.implementation.Validation != nil
 	case PhasePublication:
 		return handler.branchPublisher != nil
@@ -287,11 +519,20 @@ func (handler *HTTPHandler) AutonomousDevelopmentWorkspaceClaimRequired(aggregat
 	switch aggregate.Workspace.Phase {
 	case PhaseCharter:
 		return len(aggregate.Charters) == 0
-	case PhasePlanning, PhaseReview, PhaseTriage, PhaseImplementation:
+	case PhasePlanning, PhaseReview:
 		return true
+	case PhaseTriage, PhaseImplementation:
+		return !handler.featureImplementationUnavailable(aggregate)
 	default:
 		return false
 	}
+}
+
+func (handler *HTTPHandler) featureImplementationUnavailable(aggregate Aggregate) bool {
+	return aggregate.Workspace.Intent == IntentImplementFeature &&
+		aggregate.Workspace.Phase == PhaseTriage &&
+		!aggregateHasOpenFindings(aggregate) &&
+		(handler == nil || handler.implementation.Repair == nil || handler.implementation.Validation == nil)
 }
 
 func aggregateHasOpenFindings(aggregate Aggregate) bool {
@@ -326,6 +567,18 @@ func (handler *HTTPHandler) serveWorkspace(
 		writeHTTPError(response, http.StatusBadRequest, "invalid_query", nil)
 		return
 	}
+	if workspaceMutationRoute(request.Method, tail[0]) {
+		leasedRequest, release, admitted := handler.leaseWorkspaceMutation(
+			response,
+			request,
+			workspaceID,
+		)
+		if !admitted {
+			return
+		}
+		defer release()
+		request = leasedRequest
+	}
 	switch tail[0] {
 	case "refresh":
 		handler.serveRefresh(response, request, workspaceID, tail)
@@ -356,6 +609,36 @@ func (handler *HTTPHandler) serveWorkspace(
 	}
 }
 
+func workspaceMutationRoute(method, route string) bool {
+	if method != http.MethodPost && method != http.MethodPut && method != http.MethodPatch {
+		return false
+	}
+	switch route {
+	case "refresh", "charter", "planning-runs", "review-runs", "implementation-runs",
+		"completion-audits", "nudge-runs", "stage-runs", "findings", "corrections",
+		"messages", "conversation", "deferred-groups", "gates", "publications":
+		return true
+	default:
+		return false
+	}
+}
+
+func (handler *HTTPHandler) leaseWorkspaceMutation(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+) (*http.Request, func(), bool) {
+	aggregate, err := handler.service.Get(request.Context(), workspaceID)
+	if err != nil {
+		writeHTTPResult(response, aggregate, err)
+		return request, func() {}, false
+	}
+	if aggregate.Workspace.Intent != IntentImplementFeature {
+		return request, func() {}, true
+	}
+	return handler.leaseImplementFeature(response, request)
+}
+
 func (handler *HTTPHandler) serveCode(
 	response http.ResponseWriter,
 	request *http.Request,
@@ -378,11 +661,19 @@ func (handler *HTTPHandler) serveCode(
 	switch tail[1] {
 	case "tree":
 		value, err = handler.service.ListCodeTree(
-			request.Context(), workspaceID, query.Get("revision"), query.Get("path"), query.Get("cursor"),
+			request.Context(),
+			workspaceID,
+			query.Get("revision"),
+			query.Get("path"),
+			query.Get("cursor"),
 		)
 	case "blob":
 		value, err = handler.service.ReadCodeBlob(
-			request.Context(), workspaceID, query.Get("revision"), query.Get("candidate_revision"), query.Get("path"),
+			request.Context(),
+			workspaceID,
+			query.Get("revision"),
+			query.Get("candidate_revision"),
+			query.Get("path"),
 		)
 	case "diff":
 		value, err = handler.service.ReadCodeDiff(
@@ -431,18 +722,25 @@ func (handler *HTTPHandler) serveConversation(
 		if !decodeHTTPBody(response, request, &body) {
 			return
 		}
-		page, err := handler.service.SendConversationMessage(request.Context(), ConversationMessageRequest{
-			WorkspaceID: workspaceID, ExpectedRevision: body.ExpectedRevision,
-			RequestID: body.RequestID, Mode: body.Mode, Content: body.Content,
-			CandidateRevision: body.CandidateRevision,
-		})
+		page, err := handler.service.SendConversationMessage(
+			request.Context(),
+			ConversationMessageRequest{
+				WorkspaceID: workspaceID, ExpectedRevision: body.ExpectedRevision,
+				RequestID: body.RequestID, Mode: body.Mode, Content: body.Content,
+				CandidateRevision: body.CandidateRevision,
+			},
+		)
 		if err != nil {
 			writeHTTPResult(response, Aggregate{}, err)
 			return
 		}
 		if body.Mode == "steer" {
 			if aggregate, getErr := handler.service.Get(request.Context(), workspaceID); getErr == nil {
-				_, _ = handler.maybeRunImplementation(request.Context(), aggregate, body.RequestID+":implementation")
+				_, _ = handler.maybeRunImplementation(
+					request.Context(),
+					aggregate,
+					body.RequestID+":implementation",
+				)
 			}
 		}
 		writeHTTPJSON(response, http.StatusCreated, page)
@@ -499,7 +797,13 @@ func (handler *HTTPHandler) serveCharter(
 		return
 	}
 	if len(tail) == 1 && tail[0] == "draft" && request.Method == http.MethodPost {
-		if !handler.matchHeadRevision(response, request, workspaceID, body.ExpectedVersion, body.ExpectedHeadRevision) {
+		if !handler.matchHeadRevision(
+			response,
+			request,
+			workspaceID,
+			body.ExpectedVersion,
+			body.ExpectedHeadRevision,
+		) {
 			return
 		}
 		aggregate, err := handler.service.DraftCharter(request.Context(), DraftCharterRequest{
@@ -513,7 +817,13 @@ func (handler *HTTPHandler) serveCharter(
 		IncludedAreas: body.IncludedAreas, ExcludedAreas: body.Exclusions, NonGoals: body.NonGoals,
 	}
 	if len(tail) == 0 && request.Method == http.MethodPut {
-		if !handler.matchHeadRevision(response, request, workspaceID, body.ExpectedVersion, body.ExpectedHeadRevision) {
+		if !handler.matchHeadRevision(
+			response,
+			request,
+			workspaceID,
+			body.ExpectedVersion,
+			body.ExpectedHeadRevision,
+		) {
 			return
 		}
 		aggregate, err := handler.service.SaveCharter(request.Context(), SaveCharterRequest{
@@ -524,7 +834,13 @@ func (handler *HTTPHandler) serveCharter(
 		return
 	}
 	if len(tail) == 1 && tail[0] == "revise" && request.Method == http.MethodPost {
-		if !handler.matchHeadRevision(response, request, workspaceID, body.ExpectedVersion, body.ExpectedHeadRevision) {
+		if !handler.matchHeadRevision(
+			response,
+			request,
+			workspaceID,
+			body.ExpectedVersion,
+			body.ExpectedHeadRevision,
+		) {
 			return
 		}
 		aggregate, err := handler.service.ReviseCharter(request.Context(), ReviseCharterRequest{
@@ -583,16 +899,25 @@ func (handler *HTTPHandler) serveRun(
 		return
 	}
 	if tail[0] != "nudge-runs" &&
-		!handler.matchHeadRevision(response, request, workspaceID, body.ExpectedVersion, body.ExpectedHeadRevision) {
+		!handler.matchHeadRevision(
+			response,
+			request,
+			workspaceID,
+			body.ExpectedVersion,
+			body.ExpectedHeadRevision,
+		) {
 		return
 	}
 	var aggregate Aggregate
 	var err error
 	switch tail[0] {
 	case "planning-runs":
-		aggregate, err = handler.service.RunFeaturePlanning(request.Context(), RunFeaturePlanningRequest{
-			WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion, RequestID: body.RequestID,
-		})
+		aggregate, err = handler.service.RunFeaturePlanning(
+			request.Context(),
+			RunFeaturePlanningRequest{
+				WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion, RequestID: body.RequestID,
+			},
+		)
 	case "review-runs":
 		aggregate, err = handler.service.RunReview(request.Context(), RunReviewRequest{
 			WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
@@ -600,7 +925,12 @@ func (handler *HTTPHandler) serveRun(
 		})
 	case "implementation-runs":
 		if handler.implementation.Repair == nil || handler.implementation.Validation == nil {
-			writeHTTPError(response, http.StatusServiceUnavailable, "implementation_unavailable", nil)
+			writeHTTPError(
+				response,
+				http.StatusServiceUnavailable,
+				"implementation_unavailable",
+				nil,
+			)
 			return
 		}
 		aggregate, err = handler.service.RunImplementation(
@@ -613,10 +943,13 @@ func (handler *HTTPHandler) serveRun(
 			},
 		)
 	case "completion-audits":
-		aggregate, err = handler.service.RunCompletionAudit(request.Context(), RunCompletionAuditRequest{
-			WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
-			RequestID: body.RequestID, NudgePolicy: handler.completionNudgePolicy,
-		})
+		aggregate, err = handler.service.RunCompletionAudit(
+			request.Context(),
+			RunCompletionAuditRequest{
+				WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
+				RequestID: body.RequestID, NudgePolicy: handler.completionNudgePolicy,
+			},
+		)
 	case "nudge-runs":
 		aggregate, err = handler.service.RunNudge(request.Context(), RunNudgeRequest{
 			WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
@@ -625,7 +958,11 @@ func (handler *HTTPHandler) serveRun(
 	}
 	if err == nil {
 		var automatic Aggregate
-		automatic, err = handler.applyDeferredIssuePolicy(request, aggregate, body.RequestID)
+		automatic, err = handler.applyDeferredIssuePolicy(
+			request.Context(),
+			aggregate,
+			body.RequestID,
+		)
 		if automatic.Workspace.ID != "" {
 			aggregate = automatic
 		}
@@ -697,7 +1034,11 @@ func (handler *HTTPHandler) serveFinding(
 		})
 		if err == nil {
 			var automatic Aggregate
-			automatic, err = handler.applyDeferredIssuePolicy(request, aggregate, body.RequestID)
+			automatic, err = handler.applyDeferredIssuePolicy(
+				request.Context(),
+				aggregate,
+				body.RequestID,
+			)
 			if automatic.Workspace.ID != "" {
 				aggregate = automatic
 			}
@@ -759,12 +1100,15 @@ func (handler *HTTPHandler) serveCorrection(
 		return
 	}
 	if len(tail) == 3 && tail[2] == "promote" && request.Method == http.MethodPost {
-		aggregate, err := handler.service.PromoteCorrection(request.Context(), PromoteCorrectionRequest{
-			WorkspaceID:     workspaceID,
-			CorrectionID:    tail[1],
-			ExpectedVersion: body.ExpectedVersion,
-			RequestID:       body.RequestID,
-		})
+		aggregate, err := handler.service.PromoteCorrection(
+			request.Context(),
+			PromoteCorrectionRequest{
+				WorkspaceID:     workspaceID,
+				CorrectionID:    tail[1],
+				ExpectedVersion: body.ExpectedVersion,
+				RequestID:       body.RequestID,
+			},
+		)
 		writeHTTPResult(response, aggregate, err)
 		return
 	}
@@ -843,7 +1187,11 @@ func (handler *HTTPHandler) serveDeferred(
 			err = ErrConflict
 		}
 		if err == nil {
-			aggregate, err = handler.applyDeferredIssuePolicy(request, aggregate, body.RequestID)
+			aggregate, err = handler.applyDeferredIssuePolicy(
+				request.Context(),
+				aggregate,
+				body.RequestID,
+			)
 		}
 		writeHTTPResult(response, aggregate, err)
 		return
@@ -894,22 +1242,40 @@ func (handler *HTTPHandler) serveDeferred(
 			return
 		}
 		if handler.service.deferredMode(current) == DeferredIssuesOff {
-			writeHTTPError(response, http.StatusConflict, "deferred_issue_publication_disabled", nil)
+			writeHTTPError(
+				response,
+				http.StatusConflict,
+				"deferred_issue_publication_disabled",
+				nil,
+			)
 			return
 		}
 		if handler.issuePublisher == nil {
-			writeHTTPError(response, http.StatusServiceUnavailable, "issue_publisher_unavailable", nil)
+			writeHTTPError(
+				response,
+				http.StatusServiceUnavailable,
+				"issue_publisher_unavailable",
+				nil,
+			)
 			return
 		}
-		aggregate, err = handler.service.QueueDeferredPublication(request.Context(), QueueDeferredPublicationRequest{
-			WorkspaceID:     workspaceID,
-			GroupID:         groupID,
-			ExpectedVersion: body.ExpectedVersion,
-			RequestID:       body.RequestID,
-		})
+		aggregate, err = handler.service.QueueDeferredPublication(
+			request.Context(),
+			QueueDeferredPublicationRequest{
+				WorkspaceID:     workspaceID,
+				GroupID:         groupID,
+				ExpectedVersion: body.ExpectedVersion,
+				RequestID:       body.RequestID,
+			},
+		)
 	case "reconcile":
 		if handler.issuePublisher == nil {
-			writeHTTPError(response, http.StatusServiceUnavailable, "issue_publisher_unavailable", nil)
+			writeHTTPError(
+				response,
+				http.StatusServiceUnavailable,
+				"issue_publisher_unavailable",
+				nil,
+			)
 			return
 		}
 		publicationID := body.PublicationID
@@ -976,23 +1342,6 @@ func (handler *HTTPHandler) serveGate(
 		WorkspaceID: workspaceID, GateRunID: tail[1], ExpectedVersion: body.ExpectedVersion,
 		RequestID: body.RequestID, FieldValues: body.FieldValues,
 	})
-	if err == nil && handler.service.deferredMode(aggregate) == DeferredIssuesAutomatic {
-		var automatic Aggregate
-		automatic, err = handler.applyDeferredIssuePolicy(request, aggregate, body.RequestID)
-		if automatic.Workspace.ID != "" {
-			aggregate = automatic
-		}
-	}
-	if err == nil {
-		aggregate, err = handler.maybeRunImplementation(
-			request.Context(), aggregate, body.RequestID+":implementation",
-		)
-	}
-	if err == nil {
-		aggregate, err = handler.maybeQueueBranchPublication(
-			request.Context(), aggregate, body.RequestID+":publication",
-		)
-	}
 	writeHTTPResult(response, aggregate, err)
 }
 
@@ -1008,10 +1357,14 @@ func (handler *HTTPHandler) maybeRunImplementation(
 			aggregate.Workspace.ExecutionState == ExecutionQueued) {
 		return aggregate, nil
 	}
-	implemented, err := handler.service.RunImplementation(ctx, handler.implementation, RunImplementationRequest{
-		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
-		RequestID: requestID, NudgePolicy: handler.completionNudgePolicy, SizePolicy: handler.sizePolicy,
-	})
+	implemented, err := handler.service.RunImplementation(
+		ctx,
+		handler.implementation,
+		RunImplementationRequest{
+			WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+			RequestID: requestID, NudgePolicy: handler.completionNudgePolicy, SizePolicy: handler.sizePolicy,
+		},
+	)
 	if err != nil {
 		return implemented, err
 	}
@@ -1059,7 +1412,13 @@ func (handler *HTTPHandler) servePublication(
 	if !decodeHTTPBody(response, request, &body) {
 		return
 	}
-	if !handler.matchHeadRevision(response, request, workspaceID, body.ExpectedVersion, body.ExpectedHeadRevision) {
+	if !handler.matchHeadRevision(
+		response,
+		request,
+		workspaceID,
+		body.ExpectedVersion,
+		body.ExpectedHeadRevision,
+	) {
 		return
 	}
 	current, err := handler.service.Get(request.Context(), workspaceID)
@@ -1072,23 +1431,39 @@ func (handler *HTTPHandler) servePublication(
 		switch tail[1] {
 		case "review":
 			if handler.reviewPublisher == nil {
-				writeHTTPError(response, http.StatusServiceUnavailable, "review_publisher_unavailable", nil)
+				writeHTTPError(
+					response,
+					http.StatusServiceUnavailable,
+					"review_publisher_unavailable",
+					nil,
+				)
 				return
 			}
-			aggregate, err = handler.service.QueueReviewPublication(request.Context(), QueueReviewPublicationRequest{
-				WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
-				RequestID: body.RequestID, ExpectedHeadSHA: current.ProviderSnapshot.HeadSHA,
-				FindingIDs: body.FindingIDs,
-			})
+			aggregate, err = handler.service.QueueReviewPublication(
+				request.Context(),
+				QueueReviewPublicationRequest{
+					WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
+					RequestID: body.RequestID, ExpectedHeadSHA: current.ProviderSnapshot.HeadSHA,
+					FindingIDs: body.FindingIDs,
+				},
+			)
 		case "implementation":
 			if handler.branchPublisher == nil {
-				writeHTTPError(response, http.StatusServiceUnavailable, "branch_publisher_unavailable", nil)
+				writeHTTPError(
+					response,
+					http.StatusServiceUnavailable,
+					"branch_publisher_unavailable",
+					nil,
+				)
 				return
 			}
-			aggregate, err = handler.service.QueueBranchPublication(request.Context(), QueueBranchPublicationRequest{
-				WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
-				RequestID: body.RequestID, ExpectedHeadSHA: current.ProviderSnapshot.HeadSHA,
-			})
+			aggregate, err = handler.service.QueueBranchPublication(
+				request.Context(),
+				QueueBranchPublicationRequest{
+					WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
+					RequestID: body.RequestID, ExpectedHeadSHA: current.ProviderSnapshot.HeadSHA,
+				},
+			)
 		default:
 			writeHTTPError(response, http.StatusNotFound, "not_found", nil)
 			return
@@ -1113,7 +1488,7 @@ func (handler *HTTPHandler) servePublication(
 }
 
 func (handler *HTTPHandler) applyDeferredIssuePolicy(
-	request *http.Request,
+	ctx context.Context,
 	aggregate Aggregate,
 	requestID string,
 ) (Aggregate, error) {
@@ -1121,13 +1496,13 @@ func (handler *HTTPHandler) applyDeferredIssuePolicy(
 		return aggregate, nil
 	}
 	if hasUngroupedDeferredFindings(aggregate) {
-		next, err := handler.service.RegroupDeferred(request.Context(), RegroupDeferredRequest{
+		next, err := handler.service.RegroupDeferred(ctx, RegroupDeferredRequest{
 			WorkspaceID:     aggregate.Workspace.ID,
 			ExpectedVersion: aggregate.Workspace.Version,
 			RequestID:       stableID("req_", requestID, "automatic-deferred-regroup"),
 		})
 		if err != nil {
-			return handler.deferredPolicyFailureAggregate(request, aggregate, next), err
+			return handler.deferredPolicyFailureAggregate(ctx, aggregate, next), err
 		}
 		aggregate = next
 	}
@@ -1139,7 +1514,7 @@ func (handler *HTTPHandler) applyDeferredIssuePolicy(
 			continue
 		}
 		next, err := handler.service.QueueDeferredPublication(
-			request.Context(),
+			ctx,
 			QueueDeferredPublicationRequest{
 				WorkspaceID:     aggregate.Workspace.ID,
 				GroupID:         group.ID,
@@ -1148,7 +1523,7 @@ func (handler *HTTPHandler) applyDeferredIssuePolicy(
 			},
 		)
 		if err != nil {
-			return handler.deferredPolicyFailureAggregate(request, aggregate, next), err
+			return handler.deferredPolicyFailureAggregate(ctx, aggregate, next), err
 		}
 		aggregate = next
 	}
@@ -1161,16 +1536,18 @@ func (handler *HTTPHandler) applyDeferredIssuePolicy(
 // was queued successfully. Reloading here prevents the HTTP error response from
 // hiding either the caller's retained state or a partially committed advance.
 func (handler *HTTPHandler) deferredPolicyFailureAggregate(
-	request *http.Request,
+	ctx context.Context,
 	retained, subordinate Aggregate,
 ) Aggregate {
 	workspaceID := retained.Workspace.ID
 	best := retained
-	if subordinate.Workspace.ID == workspaceID && subordinate.Workspace.Version >= best.Workspace.Version {
+	if subordinate.Workspace.ID == workspaceID &&
+		subordinate.Workspace.Version >= best.Workspace.Version {
 		best = subordinate
 	}
-	current, err := handler.service.Get(request.Context(), workspaceID)
-	if err == nil && current.Workspace.ID == workspaceID && current.Workspace.Version >= best.Workspace.Version {
+	current, err := handler.service.Get(ctx, workspaceID)
+	if err == nil && current.Workspace.ID == workspaceID &&
+		current.Workspace.Version >= best.Workspace.Version {
 		best = current
 	}
 	return best
@@ -1279,7 +1656,12 @@ func writeHTTPResult(response http.ResponseWriter, aggregate Aggregate, err erro
 	writeHTTPResultStatus(response, aggregate, err, http.StatusOK)
 }
 
-func writeHTTPResultStatus(response http.ResponseWriter, aggregate Aggregate, err error, success int) {
+func writeHTTPResultStatus(
+	response http.ResponseWriter,
+	aggregate Aggregate,
+	err error,
+	success int,
+) {
 	if err == nil {
 		writeHTTPJSON(response, success, publicAggregate(aggregate))
 		return

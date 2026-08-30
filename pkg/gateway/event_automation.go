@@ -284,6 +284,7 @@ func newEventAutomationServiceWithRuntime(
 	var issuePublisher prworkspace.IssuePublisher
 	issuePublicationReady := githubPRWorkspaceIssuePublicationReady(ctx, reviewRuntime.agentLoop)
 	pullCreationReady := githubDevelopmentPullCreationReady(ctx, reviewRuntime.agentLoop)
+	developmentProviderRead := githubDevelopmentProviderReadReady(ctx, reviewRuntime.agentLoop)
 	if reviewRuntime.provider != nil {
 		resolver = &prWorkspaceGitHubResolver{
 			provider:             reviewRuntime.provider,
@@ -400,6 +401,40 @@ func newEventAutomationServiceWithRuntime(
 			provider:  reviewRuntime.provider,
 		}
 	}
+	var leasedFeatureGuard func(context.Context) error
+	if reviewRuntime.agentLoop != nil && reviewRuntime.agentID != "" {
+		leasedFeatureGuard = func(leaseCtx context.Context) error {
+			audit, auditErr := reviewRuntime.agentLoop.AuditRestrictedProviderClosureWithRuntimeLease(
+				leaseCtx,
+				reviewRuntime.agentID,
+			)
+			if auditErr != nil {
+				return auditErr
+			}
+			switch audit.Status {
+			case agent.RestrictedProviderClosureSafe:
+				return nil
+			case agent.RestrictedProviderClosureUnsafe:
+				return prworkspace.ErrUnsafeProvider
+			default:
+				return errors.New("development provider closure audit returned an invalid status")
+			}
+		}
+	}
+	var featureRuntimeLease func(context.Context) (context.Context, func(), error)
+	if acquireRuntime != nil && leasedFeatureGuard != nil {
+		featureRuntimeLease = func(guardCtx context.Context) (context.Context, func(), error) {
+			leaseCtx, release, acquireErr := acquireRuntime(guardCtx)
+			if acquireErr != nil {
+				return nil, nil, acquireErr
+			}
+			if guardErr := leasedFeatureGuard(leaseCtx); guardErr != nil {
+				release()
+				return nil, nil, guardErr
+			}
+			return leaseCtx, release, nil
+		}
+	}
 	reviewNudgePolicy := prworkspace.ConfiguredNudgePolicy(
 		lifecycle.Nudge.ReviewMinimumAdditional,
 		lifecycle.Nudge.ReviewMaximumAdditional,
@@ -414,14 +449,20 @@ func newEventAutomationServiceWithRuntime(
 		M:  prWorkspaceSizeThreshold(lifecycle.Scope.M),
 	}
 	prWorkspaceHandler, err := prworkspace.NewHTTPHandler(prworkspace.HTTPConfig{
-		Service:               prWorkspaceService,
-		Implementation:        implementation,
-		IssuePublisher:        issuePublisher,
-		ReviewPublisher:       reviewPublisher,
-		BranchPublisher:       branchPublisher,
-		ReviewNudgePolicy:     reviewNudgePolicy,
-		CompletionNudgePolicy: completionNudgePolicy,
-		SizePolicy:            sizePolicy,
+		Service:                 prWorkspaceService,
+		Implementation:          implementation,
+		IssuePublisher:          issuePublisher,
+		ReviewPublisher:         reviewPublisher,
+		BranchPublisher:         branchPublisher,
+		ReviewNudgePolicy:       reviewNudgePolicy,
+		CompletionNudgePolicy:   completionNudgePolicy,
+		SizePolicy:              sizePolicy,
+		FeatureRuntimeLease:     featureRuntimeLease,
+		LeasedFeatureGuard:      leasedFeatureGuard,
+		RepositoryResolverReady: developmentProviderRead,
+		GateRuntimeReady:        executor != nil,
+		DraftPullRequestReady: developmentProviderRead && pullCreationReady &&
+			reviewRuntime.provider != nil && branchPublisher != nil,
 	})
 	if err != nil {
 		return nil, closeSetup(err)
@@ -431,6 +472,7 @@ func newEventAutomationServiceWithRuntime(
 		issuePublisher,
 		reviewPublisher,
 		branchPublisher,
+		leasedFeatureGuard,
 	)
 	developmentWorker := &developmentWorkspaceWorker{
 		service: prWorkspaceService, handler: prWorkspaceHandler,

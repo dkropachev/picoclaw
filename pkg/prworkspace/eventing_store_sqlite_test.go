@@ -369,7 +369,8 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 			},
 		},
 		AppendValidations: []ValidationRun{{
-			ID: validationID, StageRunID: stageID, State: ExecutionSucceeded, CandidateSHA: "tip-commit",
+			ID: validationID, StageRunID: stageID, RepairAttemptID: repairID,
+			State: ExecutionSucceeded, CandidateSHA: "tip-commit",
 			Checks:    []ValidationCheck{{ID: "go-test", Name: "go test", Status: "passed", DurationMS: 17}},
 			StartedAt: now, FinishedAt: &finished,
 		}},
@@ -398,6 +399,7 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	require.Equal(t, charterID, mutated.Aggregate.Messages[0].CharterID)
 	require.Equal(t, provider.HeadSHA, mutated.Aggregate.Messages[0].HeadSHA)
 	require.Equal(t, "sha256:scope", mutated.Aggregate.RepairAttempts[0].ScopePromptDigest)
+	require.Equal(t, repairID, mutated.Aggregate.ValidationRuns[0].RepairAttemptID)
 	require.NotNil(t, mutated.Aggregate.RepairAttempts[0].PublicationFence)
 	require.Equal(t, "tree-private", mutated.Aggregate.RepairAttempts[0].PublicationFence.Tree)
 	require.Equal(t, []string{findingID}, mutated.Aggregate.Publications[0].FindingIDs)
@@ -549,6 +551,7 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	require.Equal(t, gate.Evidence, durable.Gates[0].Evidence)
 	require.NotNil(t, durable.RepairAttempts[0].PublicationFence)
 	require.Equal(t, "park-private", durable.RepairAttempts[0].PublicationFence.ParkIntentID)
+	require.Equal(t, repairID, durable.ValidationRuns[0].RepairAttemptID)
 	require.Equal(t, WorkCandidatePresent, durable.RepairAttempts[0].Scope.Presence)
 	require.Equal(t, "pkg/worker/run.go", durable.RepairAttempts[0].Scope.ChangeEvidence[0].Path)
 	require.Empty(t, durable.DeferredGroups[0].FindingIDs)

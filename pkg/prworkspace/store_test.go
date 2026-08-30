@@ -57,6 +57,153 @@ func TestMemoryStoreRejectsProviderIdentityChange(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreFinalizesFirstDraftPullRequestIdentityUnderPublicationLease(t *testing.T) {
+	ctx := context.Background()
+	input := testCreateInput()
+	input.RequestID = "request-create-feature-draft"
+	input.Provider.Intent = IntentImplementFeature
+	input.Provider.SourceKind = SourceBrief
+	input.Provider.SourceID = "brief-memory-draft"
+	input.Provider.SourceNumber = 0
+	input.Provider.PullRequestID = ""
+	input.Provider.PullNumber = 0
+	input.Workspace.Intent = input.Provider.Intent
+	input.Workspace.SourceKind = input.Provider.SourceKind
+	input.Workspace.SourceID = input.Provider.SourceID
+	input.Workspace.SourceNumber = 0
+	input.Workspace.PullRequestID = ""
+	input.Workspace.PullNumber = 0
+
+	memory := NewMemoryStore()
+	created, err := memory.Create(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(ServiceConfig{Store: memory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	publication := Publication{
+		ID: "ppb_11111111111111111111111111111111", Kind: PublicationBranchPush,
+		State: ExecutionQueued, ExpectedHeadSHA: input.Provider.HeadSHA,
+		PayloadDigest: "sha256:draft-publication", CreatedAt: now, UpdatedAt: now,
+	}
+	queued, err := service.store.Mutate(ctx, Mutation{
+		WorkspaceID: input.Workspace.ID, ExpectedVersion: created.Aggregate.Workspace.Version,
+		RequestID: "request-queue-feature-draft",
+		Patch:     AggregatePatch{AppendPublications: []Publication{publication}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication.State = ExecutionRunning
+	publication.Attempts = 1
+	claimed, err := service.store.Mutate(ctx, Mutation{
+		WorkspaceID: input.Workspace.ID, ExpectedVersion: queued.Aggregate.Workspace.Version,
+		RequestID:                "request-claim-feature-draft",
+		Patch:                    AggregatePatch{ReplacePublications: []Publication{publication}},
+		branchPublicationLeaseID: publication.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	provider := claimed.Aggregate.ProviderSnapshot
+	provider.PullRequestID = "pull-17"
+	provider.PullNumber = 17
+	provider.HeadRef = "picoclaw/code-cli"
+	provider.HeadSHA = "candidate-commit"
+	publication.State = ExecutionSucceeded
+	publication.ExternalID = provider.PullRequestID
+	publication.ExternalURL = "https://github.com/octo/repo/pull/17"
+	publication.PublishedAt = &now
+	phase, state := PhaseComplete, ExecutionSucceeded
+	finalized, err := service.store.Mutate(ctx, Mutation{
+		WorkspaceID: input.Workspace.ID, ExpectedVersion: claimed.Aggregate.Workspace.Version,
+		RequestID: "request-finalize-feature-draft",
+		Patch: AggregatePatch{
+			Phase: &phase, ExecutionState: &state, Provider: &provider,
+			ReplacePublications: []Publication{publication},
+		},
+		branchPublicationLeaseID: publication.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalized.Aggregate.Workspace.PullRequestID != provider.PullRequestID ||
+		finalized.Aggregate.Workspace.PullNumber != provider.PullNumber ||
+		finalized.Aggregate.ProviderSnapshot.PullRequestID != provider.PullRequestID ||
+		finalized.Aggregate.Publications[0].State != ExecutionSucceeded {
+		t.Fatalf("finalized draft identity = %#v", finalized.Aggregate)
+	}
+}
+
+func TestFailUnsafeProviderClosesRunningBranchPublicationThroughLeaseFence(t *testing.T) {
+	ctx := context.Background()
+	input := testCreateInput()
+	input.RequestID = "request-create-unsafe-feature"
+	input.Provider.Intent = IntentImplementFeature
+	input.Provider.SourceKind = SourceBrief
+	input.Provider.SourceID = "brief-unsafe-feature"
+	input.Provider.SourceNumber = 0
+	input.Provider.PullRequestID = ""
+	input.Provider.PullNumber = 0
+	input.Workspace.Intent = input.Provider.Intent
+	input.Workspace.SourceKind = input.Provider.SourceKind
+	input.Workspace.SourceID = input.Provider.SourceID
+	input.Workspace.SourceNumber = 0
+	input.Workspace.PullRequestID = ""
+	input.Workspace.PullNumber = 0
+
+	memory := NewMemoryStore()
+	created, err := memory.Create(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(ServiceConfig{Store: memory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	publication := Publication{
+		ID: "ppb_22222222222222222222222222222222", Kind: PublicationBranchPush,
+		State: ExecutionQueued, ExpectedHeadSHA: input.Provider.HeadSHA,
+		PayloadDigest: "sha256:unsafe-publication", CreatedAt: now, UpdatedAt: now,
+	}
+	queued, err := service.store.Mutate(ctx, Mutation{
+		WorkspaceID: input.Workspace.ID, ExpectedVersion: created.Aggregate.Workspace.Version,
+		RequestID: "request-queue-unsafe-feature",
+		Patch:     AggregatePatch{AppendPublications: []Publication{publication}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication.State = ExecutionRunning
+	publication.Attempts = 1
+	claimed, err := service.store.Mutate(ctx, Mutation{
+		WorkspaceID: input.Workspace.ID, ExpectedVersion: queued.Aggregate.Workspace.Version,
+		RequestID:                "request-claim-unsafe-feature",
+		Patch:                    AggregatePatch{ReplacePublications: []Publication{publication}},
+		branchPublicationLeaseID: publication.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failed, err := service.FailUnsafeProvider(ctx, claimed.Aggregate, "request-fail-unsafe-feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Workspace.Version != claimed.Aggregate.Workspace.Version+2 ||
+		failed.Workspace.ExecutionState != ExecutionFailed ||
+		len(failed.Publications) != 1 || failed.Publications[0].State != ExecutionFailed ||
+		failed.Publications[0].PublicErrorCode != "unsafe_provider" ||
+		!unsafeProviderFailureRecorded(failed) {
+		t.Fatalf("unsafe running publication result = %#v", failed)
+	}
+}
+
 func TestMemoryStoreBindsAndFreezesFindingSourceProvenance(t *testing.T) {
 	store := NewMemoryStore()
 	created, err := store.Create(context.Background(), testCreateInput())

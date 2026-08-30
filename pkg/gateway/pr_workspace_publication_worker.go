@@ -48,6 +48,11 @@ type prWorkspacePublicationService interface {
 		branchPublisher prworkspace.BranchPublisher,
 		request prworkspace.ReconcilePhasePublicationRequest,
 	) (prworkspace.Aggregate, error)
+	FailUnsafeProvider(
+		ctx context.Context,
+		aggregate prworkspace.Aggregate,
+		requestID string,
+	) (prworkspace.Aggregate, error)
 }
 
 type prWorkspacePublicationWorker struct {
@@ -55,6 +60,7 @@ type prWorkspacePublicationWorker struct {
 	issue   prworkspace.IssuePublisher
 	review  prworkspace.ReviewPublisher
 	branch  prworkspace.BranchPublisher
+	guard   func(context.Context) error
 	now     func() time.Time
 }
 
@@ -63,6 +69,7 @@ func newPRWorkspacePublicationWorker(
 	issue prworkspace.IssuePublisher,
 	review prworkspace.ReviewPublisher,
 	branch prworkspace.BranchPublisher,
+	guard func(context.Context) error,
 ) *prWorkspacePublicationWorker {
 	if service == nil || issue == nil && review == nil && branch == nil {
 		return nil
@@ -72,6 +79,7 @@ func newPRWorkspacePublicationWorker(
 		issue:   issue,
 		review:  review,
 		branch:  branch,
+		guard:   guard,
 		now:     time.Now,
 	}
 }
@@ -79,6 +87,7 @@ func newPRWorkspacePublicationWorker(
 type prWorkspacePublicationWork struct {
 	workspaceID string
 	version     int64
+	intent      prworkspace.DevelopmentIntent
 	publication prworkspace.Publication
 }
 
@@ -121,6 +130,7 @@ func (worker *prWorkspacePublicationWorker) ProcessOne(ctx context.Context) (boo
 				candidate := prWorkspacePublicationWork{
 					workspaceID: aggregate.Workspace.ID,
 					version:     aggregate.Workspace.Version,
+					intent:      aggregate.Workspace.Intent,
 					publication: publication,
 				}
 				switch publication.State {
@@ -152,10 +162,45 @@ func (worker *prWorkspacePublicationWorker) ProcessOne(ctx context.Context) (boo
 	}
 
 	if interrupted != nil {
+		if guarded, guardErr := worker.guardBranchPublication(ctx, *interrupted); guarded {
+			return true, guardErr
+		}
 		return worker.reconcile(ctx, *interrupted)
 	}
 	if queued != nil {
+		if guarded, guardErr := worker.guardBranchPublication(ctx, *queued); guarded {
+			return true, guardErr
+		}
 		return worker.dispatch(ctx, *queued)
+	}
+	return false, nil
+}
+
+func (worker *prWorkspacePublicationWorker) guardBranchPublication(
+	ctx context.Context,
+	work prWorkspacePublicationWork,
+) (bool, error) {
+	if work.publication.Kind != prworkspace.PublicationBranchPush ||
+		work.intent != prworkspace.IntentImplementFeature {
+		return false, nil
+	}
+	if worker.guard == nil {
+		return true, errors.New("implement-feature publication guard is unavailable")
+	}
+	if err := worker.guard(ctx); err != nil {
+		if !errors.Is(err, prworkspace.ErrUnsafeProvider) {
+			return true, err
+		}
+		aggregate, getErr := worker.service.Get(ctx, work.workspaceID)
+		if getErr != nil {
+			return true, publicationWorkerError(getErr)
+		}
+		_, failErr := worker.service.FailUnsafeProvider(
+			ctx,
+			aggregate,
+			prWorkspacePublicationRequestID("unsafe-provider", work.publication),
+		)
+		return true, publicationWorkerError(failErr)
 	}
 	return false, nil
 }

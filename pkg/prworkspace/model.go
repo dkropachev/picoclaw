@@ -449,13 +449,14 @@ type ValidationCheck struct {
 }
 
 type ValidationRun struct {
-	ID           string            `json:"id"`
-	StageRunID   string            `json:"stage_run_id"`
-	State        ExecutionState    `json:"state"`
-	CandidateSHA string            `json:"candidate_sha"`
-	Checks       []ValidationCheck `json:"checks"`
-	StartedAt    time.Time         `json:"started_at"`
-	FinishedAt   *time.Time        `json:"finished_at,omitempty"`
+	ID              string            `json:"id"`
+	StageRunID      string            `json:"stage_run_id"`
+	RepairAttemptID string            `json:"repair_attempt_id"`
+	State           ExecutionState    `json:"state"`
+	CandidateSHA    string            `json:"candidate_sha"`
+	Checks          []ValidationCheck `json:"checks"`
+	StartedAt       time.Time         `json:"started_at"`
+	FinishedAt      *time.Time        `json:"finished_at,omitempty"`
 }
 
 type GateTurn struct {

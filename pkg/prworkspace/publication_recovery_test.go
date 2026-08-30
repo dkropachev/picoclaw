@@ -432,7 +432,7 @@ func TestAutomaticDeferredPolicyQueuesEligibleGroupsAndHonorsSuppression(t *test
 		t.Fatal(err)
 	}
 	queued, err := handler.applyDeferredIssuePolicy(
-		httptest.NewRequest("POST", "/runtime/eventing/pr-workspaces", nil),
+		httptest.NewRequest("POST", "/runtime/eventing/pr-workspaces", nil).Context(),
 		aggregate, "request-auto-policy",
 	)
 	if err != nil || queued.DeferredGroups[0].PublicationID == "" || queued.Publications[0].State != ExecutionQueued {
@@ -453,7 +453,7 @@ func TestAutomaticDeferredPolicyQueuesEligibleGroupsAndHonorsSuppression(t *test
 		Service: service2, IssuePublisher: &countingIssuePublisher{},
 	})
 	unchanged, err := handler2.applyDeferredIssuePolicy(
-		httptest.NewRequest("POST", "/runtime/eventing/pr-workspaces", nil),
+		httptest.NewRequest("POST", "/runtime/eventing/pr-workspaces", nil).Context(),
 		suppressed.Aggregate, "request-auto-policy-suppressed",
 	)
 	if err != nil || len(unchanged.Publications) != 0 || !unchanged.DeferredGroups[0].PublicationSuppressed {
@@ -617,7 +617,9 @@ func TestAutomaticDeferredSyncReloadsPartialMultiGroupSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	aggregate = seeded.Aggregate
-	service.store = &failNthGetStore{Store: service.store, failAt: 3}
+	// The route first resolves the workspace intent before entering the
+	// mutation; fail the third operation-internal reload after that fence read.
+	service.store = &failNthGetStore{Store: service.store, failAt: 4}
 	handler, err := NewHTTPHandler(HTTPConfig{
 		Service: service, IssuePublisher: &countingIssuePublisher{},
 	})

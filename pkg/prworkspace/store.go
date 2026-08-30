@@ -18,6 +18,7 @@ var (
 	ErrConflict        = errors.New("PR workspace version conflict")
 	ErrRequestConflict = errors.New("PR workspace request ID conflict")
 	ErrInvalid         = errors.New("invalid PR workspace request")
+	ErrUnsafeProvider  = errors.New("unsafe development provider")
 )
 
 type ListFilter struct {
@@ -405,13 +406,20 @@ func applyPatch(aggregate *Aggregate, patch AggregatePatch) error {
 		aggregate.Workspace.ActiveCharterID = *patch.ActiveCharterID
 	}
 	if patch.Provider != nil {
+		pullIdentityMatches := patch.Provider.PullRequestID == aggregate.Workspace.PullRequestID
+		if aggregate.Workspace.Intent == IntentImplementFeature && aggregate.Workspace.PullRequestID == "" &&
+			patch.Provider.Intent == IntentImplementFeature && patch.Provider.PullRequestID != "" &&
+			patch.Provider.PullNumber > 0 {
+			pullIdentityMatches = true
+		}
 		if patch.Provider.RepositoryID != aggregate.Workspace.RepositoryID ||
-			patch.Provider.PullRequestID != aggregate.Workspace.PullRequestID ||
+			!pullIdentityMatches ||
 			patch.Provider.ProviderOrigin != aggregate.Workspace.ProviderOrigin {
 			return ErrInvalid
 		}
 		aggregate.ProviderSnapshot = *patch.Provider
 		aggregate.Workspace.Repository = patch.Provider.Repository
+		aggregate.Workspace.PullRequestID = patch.Provider.PullRequestID
 		aggregate.Workspace.PullNumber = patch.Provider.PullNumber
 		aggregate.Workspace.ProviderHeadSHA = patch.Provider.HeadSHA
 	}

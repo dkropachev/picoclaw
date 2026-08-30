@@ -137,6 +137,25 @@ func TestIdenticalBriefsAreIndependentButRequestRetriesReplay(t *testing.T) {
 	require.NotEqual(t, first.Workspace.ID, second.Workspace.ID)
 }
 
+func TestBriefRequestIDRejectsChangedContent(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(ServiceConfig{
+		Store: NewMemoryStore(), Provider: developmentIntakeResolver{},
+	})
+	require.NoError(t, err)
+	request := CreateWorkspaceRequest{
+		RequestID: "dev_brief_conflict_0001", Intent: IntentImplementFeature,
+		SourceKind: SourceBrief, RepositoryIdentity: "https://github.com|42",
+		Brief: "First exact task",
+	}
+	_, err = service.Create(t.Context(), request)
+	require.NoError(t, err)
+	request.Brief = "Changed task must not replay"
+	_, err = service.Create(t.Context(), request)
+	require.ErrorIs(t, err, ErrRequestConflict)
+}
+
 type fixedPickupResolver struct{ snapshot ProviderSnapshot }
 
 func (resolver fixedPickupResolver) ResolvePullRequest(context.Context, ResolveRequest) (ProviderSnapshot, error) {

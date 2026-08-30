@@ -208,7 +208,7 @@ func TestPRWorkspacePublicationWorkerDispatchesFrozenReviewAfterSQLiteRestart(t 
 		ExternalID:  "review-9001",
 		ExternalURL: "https://github.example.test/octo/frozen-project/pull/19#pullrequestreview-9001",
 	}}
-	worker := newPRWorkspacePublicationWorker(restartedService, nil, publisher, nil)
+	worker := newPRWorkspacePublicationWorker(restartedService, nil, publisher, nil, nil)
 	require.NotNil(t, worker)
 	worker.now = func() time.Time { return restartedAt }
 

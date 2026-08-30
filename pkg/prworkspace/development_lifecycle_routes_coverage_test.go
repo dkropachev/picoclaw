@@ -68,7 +68,10 @@ func developmentLifecycleService(
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHTTPHandler(HTTPConfig{Service: service})
+	handler, err := NewHTTPHandler(HTTPConfig{
+		Service: service, FeatureRuntimeLease: codeCLISafeFeatureRuntimeLease,
+		LeasedFeatureGuard: func(context.Context) error { return nil },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,9 +181,41 @@ func TestDevelopmentCharterRoutesAndAutonomousPlanningAdvance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if advanced.Workspace.Version != aggregate.Workspace.Version ||
+		advanced.Workspace.Phase != PhaseCharter || advanced.Workspace.ActiveCharterID != "" ||
+		advanced.Charters[len(advanced.Charters)-1].Confirmed {
+		t.Fatalf("human-revised charter advanced autonomously = %#v", advanced)
+	}
+	if handler.AutonomousDevelopmentWorkspaceReady(advanced) {
+		t.Fatal("human-gated charter remained autonomously runnable")
+	}
+
+	confirm = developmentCharterBody(
+		advanced,
+		"request-lifecycle-charter-reconfirm",
+		"unused",
+	)
+	confirm["expected_charter_revision"] = advanced.Charters[len(advanced.Charters)-1].Revision
+	response = developmentLifecycleRequest(
+		t,
+		handler,
+		http.MethodPost,
+		"/"+advanced.Workspace.ID+"/charter/confirm",
+		confirm,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("reconfirm status = %d: %s", response.Code, response.Body.String())
+	}
+	advanced = developmentLifecycleAggregate(t, response)
+	advanced, err = handler.AdvanceDevelopmentWorkspace(
+		t.Context(), advanced, "request-lifecycle-human-reconfirmed-advance",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if advanced.Workspace.Phase != PhaseTriage || advanced.Workspace.ExecutionState != ExecutionBlocked ||
 		advanced.Workspace.ActiveCharterID == "" || len(advanced.StageRuns) != 1 {
-		t.Fatalf("autonomous advance = %#v", advanced)
+		t.Fatalf("human-reconfirmed advance = %#v", advanced)
 	}
 	persisted, err := service.Get(t.Context(), advanced.Workspace.ID)
 	if err != nil || persisted.Workspace.Version != advanced.Workspace.Version {
@@ -240,7 +275,9 @@ func TestDevelopmentRunStageMessageAndCorrectionRoutes(t *testing.T) {
 	t.Run("planning and unavailable implementation runs", func(t *testing.T) {
 		runner := &developmentAIStub{response: developmentPlanningResponse(true)}
 		service, aggregate := seededDevelopmentAIService(t, PhasePlanning, ExecutionQueued, runner)
-		handler, err := NewHTTPHandler(HTTPConfig{Service: service})
+		handler, err := NewHTTPHandler(HTTPConfig{
+			Service: service, FeatureRuntimeLease: codeCLISafeFeatureRuntimeLease,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -302,7 +339,9 @@ func TestDevelopmentRunStageMessageAndCorrectionRoutes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		handler, err := NewHTTPHandler(HTTPConfig{Service: service})
+		handler, err := NewHTTPHandler(HTTPConfig{
+			Service: service, FeatureRuntimeLease: codeCLISafeFeatureRuntimeLease,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -329,7 +368,9 @@ func TestDevelopmentRunStageMessageAndCorrectionRoutes(t *testing.T) {
 	t.Run("message correction and promotion", func(t *testing.T) {
 		now := time.Date(2026, 8, 24, 14, 0, 0, 0, time.UTC)
 		service, aggregate := publicationTestService(t, DeferredIssuesAsk, passingGates{}, now)
-		handler, err := NewHTTPHandler(HTTPConfig{Service: service})
+		handler, err := NewHTTPHandler(HTTPConfig{
+			Service: service, FeatureRuntimeLease: codeCLISafeFeatureRuntimeLease,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -443,7 +484,10 @@ func TestDevelopmentReviewPublicationHTTPReconcilesSuccessAndUnknown(t *testing.
 		publisher := &lifecycleReviewPublisher{found: true, result: ReviewPublicationResult{
 			ExternalID: "review-17", ExternalURL: "https://github.com/octo/repo/pull/3",
 		}}
-		handler, err := NewHTTPHandler(HTTPConfig{Service: service, ReviewPublisher: publisher})
+		handler, err := NewHTTPHandler(HTTPConfig{
+			Service: service, ReviewPublisher: publisher,
+			FeatureRuntimeLease: codeCLISafeFeatureRuntimeLease,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -501,7 +545,10 @@ func TestDevelopmentReviewPublicationHTTPReconcilesSuccessAndUnknown(t *testing.
 		aggregate = seedRunningReviewPublication(t, service, aggregate, "request-lifecycle-review-error")
 		publisherErr := errors.New("provider observation unavailable")
 		publisher := &lifecycleReviewPublisher{err: publisherErr}
-		handler, err := NewHTTPHandler(HTTPConfig{Service: service, ReviewPublisher: publisher})
+		handler, err := NewHTTPHandler(HTTPConfig{
+			Service: service, ReviewPublisher: publisher,
+			FeatureRuntimeLease: codeCLISafeFeatureRuntimeLease,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}

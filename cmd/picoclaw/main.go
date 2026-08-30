@@ -7,8 +7,12 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
 	"time"
@@ -19,6 +23,7 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/agent"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/auth"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/cliui"
+	codecmd "github.com/sipeed/picoclaw/cmd/picoclaw/internal/code"
 	configcmd "github.com/sipeed/picoclaw/cmd/picoclaw/internal/config"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/cron"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/events"
@@ -32,6 +37,7 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/version"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/workflow"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/updater"
 )
 
@@ -137,6 +143,7 @@ picoclaw --no-color status`,
 		gateway.NewGatewayCommand(),
 		status.NewStatusCommand(),
 		cron.NewCronCommand(),
+		codecmd.NewCodeCommand(),
 		events.NewEventsCommand(),
 		workflow.NewWorkflowCommand(),
 		mcp.NewMCPCommand(),
@@ -175,33 +182,66 @@ func main() {
 	// Initialize Termux SSL certificate detection before anything else
 	initTermuxSSL()
 
-	cliui.Init(earlyColorDisabled())
-
-	if earlyColorDisabled() {
-		fmt.Print(plainBanner)
-	} else {
-		fmt.Printf("%s", banner)
+	machineJSON := codecmd.IsJSONInvocation(os.Args)
+	cliui.Init(machineJSON || earlyColorDisabled())
+	if machineJSON {
+		logger.DisableConsole()
 	}
 
-	tzEnv := os.Getenv("TZ")
-	if tzEnv != "" {
-		fmt.Println("TZ environment:", tzEnv)
-		zoneinfoEnv := os.Getenv("ZONEINFO")
-		fmt.Println("ZONEINFO environment:", zoneinfoEnv)
-		loc, err := time.LoadLocation(tzEnv)
-		if err != nil {
-			fmt.Println("Error loading time zone:", err)
+	if !machineJSON {
+		if earlyColorDisabled() {
+			fmt.Print(plainBanner)
 		} else {
-			fmt.Println("Time zone loaded successfully:", loc)
-			time.Local = loc //nolint:gosmopolitan // We intentionally set local timezone from TZ env
+			fmt.Printf("%s", banner)
+		}
+
+		tzEnv := os.Getenv("TZ")
+		if tzEnv != "" {
+			fmt.Println("TZ environment:", tzEnv)
+			zoneinfoEnv := os.Getenv("ZONEINFO")
+			fmt.Println("ZONEINFO environment:", zoneinfoEnv)
+			loc, err := time.LoadLocation(tzEnv)
+			if err != nil {
+				fmt.Println("Error loading time zone:", err)
+			} else {
+				fmt.Println("Time zone loaded successfully:", loc)
+				time.Local = loc //nolint:gosmopolitan // We intentionally set local timezone from TZ env
+			}
 		}
 	}
 
 	cmd := NewPicoclawCommand()
+	if codecmd.IsCodeInvocation(os.Args) {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		cmd.SetContext(ctx)
+	}
 	last, err := cmd.ExecuteC()
 	if err != nil {
-		syncCliUIColor(cmd)
-		fmt.Fprint(os.Stderr, cliui.FormatCLIError(err.Error(), last))
-		os.Exit(1)
+		exitCode, handled := commandFailure(err)
+		if machineJSON && !handled {
+			_ = json.NewEncoder(os.Stdout).Encode(codecmd.Result{
+				Version: codecmd.ResultSchemaVersion, ErrorCode: "invalid_request",
+			})
+			handled = true
+		}
+		if !handled {
+			syncCliUIColor(cmd)
+			fmt.Fprint(os.Stderr, cliui.FormatCLIError(err.Error(), last))
+		}
+		os.Exit(exitCode)
 	}
+}
+
+func commandFailure(err error) (int, bool) {
+	exitCode := 1
+	var coded interface{ ExitCode() int }
+	if errors.As(err, &coded) {
+		if candidate := coded.ExitCode(); candidate > 0 && candidate <= 255 {
+			exitCode = candidate
+		}
+	}
+	var rendered interface{ CLIErrorHandled() bool }
+	handled := errors.As(err, &rendered) && rendered.CLIErrorHandled()
+	return exitCode, handled
 }
