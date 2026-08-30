@@ -52,10 +52,9 @@ type repositoryValidationGitMetadata struct {
 func (c *repositoryReviewController) startRepositoryFindingValidation(
 	automations []repoaudit.RepositoryReviewAutomation,
 ) {
-	if c == nil || c.ctx.Err() != nil || !c.validationMu.TryLock() {
+	if c == nil || !c.admitBackgroundWorker(&c.validationMu) {
 		return
 	}
-	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
 		defer c.validationMu.Unlock()

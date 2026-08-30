@@ -243,6 +243,29 @@ func (c *repositoryReviewController) Start() error {
 	return c.startErr
 }
 
+func (c *repositoryReviewController) admitBackgroundWorker(workerMu *sync.Mutex) bool {
+	if c == nil || workerMu == nil || !workerMu.TryLock() {
+		return false
+	}
+	if !c.registerBackgroundWorker() {
+		workerMu.Unlock()
+		return false
+	}
+	return true
+}
+
+func (c *repositoryReviewController) registerBackgroundWorker() bool {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.stopped || c.ctx.Err() != nil {
+		return false
+	}
+	// Stop holds lifecycleMu while it closes admission, so every Add either
+	// happens before Stop begins waiting or is rejected after shutdown starts.
+	c.wg.Add(1)
+	return true
+}
+
 func (c *repositoryReviewController) Stop() {
 	if c == nil {
 		return

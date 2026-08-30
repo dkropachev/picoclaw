@@ -36,10 +36,9 @@ var processRepositoryDeduplicationJobs = func(
 }
 
 func (c *repositoryReviewController) startRepositoryFindingDeduplication() {
-	if c == nil || c.ctx.Err() != nil || !c.deduplicationMu.TryLock() {
+	if c == nil || !c.admitBackgroundWorker(&c.deduplicationMu) {
 		return
 	}
-	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
 		defer c.deduplicationMu.Unlock()

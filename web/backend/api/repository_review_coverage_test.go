@@ -3981,6 +3981,7 @@ func repositoryReviewCoverageLeasedController(
 	controller.startOnce.Do(func() {})
 	controller.leasedStore = store
 	controller.leasedConfig = cfg
+	t.Cleanup(controller.Stop)
 	return controller
 }
 
@@ -4634,6 +4635,51 @@ func TestRepositoryReviewCoverageFinishMismatchedRunAndControllerTiming(t *testi
 	time.Sleep(10 * time.Millisecond)
 	monitor.cancel()
 	<-monitorDone
+}
+
+func TestRepositoryReviewBackgroundWorkerLifecycleFencing(t *testing.T) {
+	controller := newRepositoryReviewController(nil)
+	controller.stopTimeout = time.Second
+	var workerMu sync.Mutex
+	if !controller.admitBackgroundWorker(&workerMu) {
+		t.Fatal("background worker was not admitted")
+	}
+	workerDone := make(chan struct{})
+	go func() {
+		defer controller.wg.Done()
+		defer workerMu.Unlock()
+		<-controller.ctx.Done()
+		close(workerDone)
+	}()
+	controller.Stop()
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("Stop returned without settling the admitted worker")
+	}
+	if controller.admitBackgroundWorker(&workerMu) {
+		t.Fatal("worker was admitted after Stop")
+	}
+	if !workerMu.TryLock() {
+		t.Fatal("settled worker mutex remained locked")
+	}
+	workerMu.Unlock()
+
+	delayed := newRepositoryReviewController(nil)
+	delayed.lifecycleMu.Lock()
+	started := make(chan struct{})
+	admitted := make(chan bool, 1)
+	go func() {
+		close(started)
+		admitted <- delayed.registerBackgroundWorker()
+	}()
+	<-started
+	delayed.stopped = true
+	delayed.cancel()
+	delayed.lifecycleMu.Unlock()
+	if <-admitted {
+		t.Fatal("worker crossed a closed lifecycle admission fence")
+	}
 }
 
 func TestRepositoryReviewCoverageAccountSelectionAndPricingBoundaries(t *testing.T) {

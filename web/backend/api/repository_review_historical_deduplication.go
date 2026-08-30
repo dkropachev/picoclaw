@@ -85,10 +85,9 @@ func (h *Handler) handleRetryRepositoryReviewHistoricalDeduplication(
 func (c *repositoryReviewController) startHistoricalFindingDeduplication(
 	automations []repoaudit.RepositoryReviewAutomation,
 ) {
-	if c == nil || c.ctx.Err() != nil || !c.historicalDeduplicationMu.TryLock() {
+	if c == nil || !c.admitBackgroundWorker(&c.historicalDeduplicationMu) {
 		return
 	}
-	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
 		defer c.historicalDeduplicationMu.Unlock()
