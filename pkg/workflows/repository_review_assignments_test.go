@@ -148,6 +148,21 @@ func TestNativeRepositoryReviewAssignmentPlanBeginAndManagedCallbacks(t *testing
 			t.Fatalf("managed callbacks accepted invalid plan %#v", invalid)
 		}
 	}
+	for name, identity := range map[string]struct {
+		automationID string
+		agentID      string
+	}{
+		"automation": {automationID: "invalid", agentID: "main"},
+		"agent":      {automationID: "rra_assignment_callbacks", agentID: "Main Agent"},
+	} {
+		t.Run("invalid callback "+name, func(t *testing.T) {
+			if _, _, err := repositoryReviewManagedAssignmentCallbacks(
+				exec, output["plan"], identity.automationID, identity.agentID,
+			); err == nil {
+				t.Fatal("managed callbacks accepted invalid durable identity")
+			}
+		})
+	}
 
 	dispatch, checkpoint, err := repositoryReviewManagedAssignmentCallbacks(
 		exec, output["plan"], "rra_assignment_callbacks", "reviewer",

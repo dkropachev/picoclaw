@@ -219,6 +219,15 @@ func appendRepositoryReviewFileAttribution(
 func validateRepositoryReviewFileAttributions(
 	attributions []RepositoryReviewFileAttribution,
 ) error {
+	return validateRepositoryReviewFileAttributionsWithCreditLimit(
+		attributions, maxRepositoryReviewAttributedFileCredits,
+	)
+}
+
+func validateRepositoryReviewFileAttributionsWithCreditLimit(
+	attributions []RepositoryReviewFileAttribution,
+	maximumCredits int,
+) error {
 	if len(attributions) > maxRepositoryReviewFileAttributions {
 		return errors.New("invalid repository review file attributions")
 	}
@@ -234,7 +243,7 @@ func validateRepositoryReviewFileAttributions(
 		}
 		seen[attribution.ID] = struct{}{}
 		totalFiles += len(attribution.AcknowledgedFiles)
-		if totalFiles > maxRepositoryReviewAttributedFileCredits {
+		if totalFiles > maximumCredits {
 			return errors.New("repository review attributed file limit exceeded")
 		}
 	}

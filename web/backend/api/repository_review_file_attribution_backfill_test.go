@@ -1,8 +1,12 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -299,6 +303,183 @@ func TestRepositoryReviewFileAttributionBackfillRequiresOfflineController(t *tes
 	}
 }
 
+func TestBackfillRepositoryReviewFileAttributionsPublicLifecycle(t *testing.T) {
+	fixture := newRepositoryReviewBackfillFixture(t, 2, repositoryReviewBackfillRunSpec{
+		inspected: []int{0},
+	})
+	repositoryReviewPrepareAttributionFixtureRuns(t, &fixture)
+	repositoryReviewPersistAttributionFixtureRuns(t, fixture)
+
+	dry, err := BackfillRepositoryReviewFileAttributions(
+		nil, " "+fixture.workspace+" ", " "+fixture.automation.ID+" ",
+		RepositoryReviewFileAttributionBackfillOptions{},
+	)
+	if err != nil || dry.Applied || dry.Digest == "" || dry.AttributionRecords != 1 {
+		t.Fatalf("public dry run=%#v err=%v", dry, err)
+	}
+	if changed, changedErr := BackfillRepositoryReviewFileAttributions(
+		t.Context(), fixture.workspace, fixture.automation.ID,
+		RepositoryReviewFileAttributionBackfillOptions{ExpectedDigest: "sha256:changed"},
+	); !errors.Is(changedErr, repoaudit.ErrConflict) || changed.Digest != dry.Digest {
+		t.Fatalf("changed digest report=%#v err=%v", changed, changedErr)
+	}
+	if _, missingDigestErr := BackfillRepositoryReviewFileAttributions(
+		t.Context(), fixture.workspace, fixture.automation.ID,
+		RepositoryReviewFileAttributionBackfillOptions{Apply: true},
+	); !errors.Is(missingDigestErr, repoaudit.ErrInvalidPlan) {
+		t.Fatalf("missing apply digest error=%v", missingDigestErr)
+	}
+	applied, err := BackfillRepositoryReviewFileAttributions(
+		t.Context(), fixture.workspace, fixture.automation.ID,
+		RepositoryReviewFileAttributionBackfillOptions{Apply: true, ExpectedDigest: dry.Digest},
+	)
+	if err != nil || !applied.Applied || applied.StateVersionAfter != dry.StateVersionBefore+1 {
+		t.Fatalf("public apply=%#v err=%v", applied, err)
+	}
+	replayed, err := BackfillRepositoryReviewFileAttributions(
+		t.Context(), fixture.workspace, fixture.automation.ID,
+		RepositoryReviewFileAttributionBackfillOptions{Apply: true, ExpectedDigest: dry.Digest},
+	)
+	if err != nil || !replayed.Applied || replayed.Digest != dry.Digest ||
+		replayed.StateVersionAfter != applied.StateVersionAfter ||
+		replayed.ExistingAttributionRecords != 1 {
+		t.Fatalf("public replay=%#v err=%v", replayed, err)
+	}
+}
+
+func TestBackfillRepositoryReviewFileAttributionsPublicErrorsAndNoop(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		workspace   string
+		automation  string
+		options     RepositoryReviewFileAttributionBackfillOptions
+		wantInvalid bool
+	}{
+		{name: "blank workspace", automation: "rra_test", wantInvalid: true},
+		{name: "blank automation", workspace: t.TempDir(), wantInvalid: true},
+		{name: "apply without digest", workspace: t.TempDir(), automation: "rra_test", options: RepositoryReviewFileAttributionBackfillOptions{Apply: true}, wantInvalid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := BackfillRepositoryReviewFileAttributions(
+				t.Context(), test.workspace, test.automation, test.options,
+			)
+			if test.wantInvalid && !errors.Is(err, repoaudit.ErrInvalidPlan) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+	t.Run("missing automation", func(t *testing.T) {
+		_, err := BackfillRepositoryReviewFileAttributions(
+			t.Context(), t.TempDir(), "rra_missing",
+			RepositoryReviewFileAttributionBackfillOptions{},
+		)
+		if err == nil || !strings.Contains(err.Error(), "automation was not found") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("canceled automation read", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := BackfillRepositoryReviewFileAttributions(
+			ctx, t.TempDir(), "rra_missing", RepositoryReviewFileAttributionBackfillOptions{},
+		)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("missing ledger", func(t *testing.T) {
+		workspace := t.TempDir()
+		store := repoaudit.NewStore(workspace)
+		input := testRepositoryReviewAutomation()
+		input.ID = "rra_missing_ledger"
+		created, err := store.CreateAutomation(t.Context(), input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = BackfillRepositoryReviewFileAttributions(
+			t.Context(), workspace, created.ID, RepositoryReviewFileAttributionBackfillOptions{},
+		)
+		if err == nil || !strings.Contains(err.Error(), "ledger was not found") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("corrupt ledger", func(t *testing.T) {
+		fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
+			inspected: []int{0},
+		})
+		entries, err := os.ReadDir(filepath.Join(fixture.workspace, "repository_reviews"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		corrupted := false
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "repo_") &&
+				strings.HasSuffix(entry.Name(), ".json") &&
+				!strings.HasSuffix(entry.Name(), ".summary.json") {
+				if writeErr := os.WriteFile(
+					filepath.Join(fixture.workspace, "repository_reviews", entry.Name()),
+					[]byte("{"), 0o600,
+				); writeErr != nil {
+					t.Fatal(writeErr)
+				}
+				corrupted = true
+				break
+			}
+		}
+		if !corrupted {
+			t.Fatal("repository ledger file was not found")
+		}
+		_, err = BackfillRepositoryReviewFileAttributions(
+			t.Context(), fixture.workspace, fixture.automation.ID,
+			RepositoryReviewFileAttributionBackfillOptions{},
+		)
+		if err == nil || errors.Is(err, repoaudit.ErrInvalidPlan) {
+			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("preparation failure", func(t *testing.T) {
+		fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
+			inspected: []int{0},
+		})
+		_, err := BackfillRepositoryReviewFileAttributions(
+			t.Context(), fixture.workspace, fixture.automation.ID,
+			RepositoryReviewFileAttributionBackfillOptions{},
+		)
+		if !errors.Is(err, repoaudit.ErrInvalidPlan) {
+			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("successful empty acknowledgement apply", func(t *testing.T) {
+		fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
+			inspected: []int{0},
+		})
+		repositoryReviewPrepareAttributionFixtureRuns(t, &fixture)
+		run := fixture.runs[fixture.automation.RunIDs[0]]
+		review := run.Steps["find_bugs/review"]
+		children := review.Outputs["managed_children"].([]map[string]any)
+		structured := children[0]["structured"].(map[string]any)
+		structured["reviewedFiles"] = []string{}
+		children[0]["structured"] = structured
+		review.Outputs["managed_children"] = children
+		run.Steps["find_bugs/review"] = review
+		repositoryReviewPersistAttributionFixtureRuns(t, fixture)
+		dry, err := BackfillRepositoryReviewFileAttributions(
+			t.Context(), fixture.workspace, fixture.automation.ID,
+			RepositoryReviewFileAttributionBackfillOptions{},
+		)
+		if err != nil || dry.AttributionRecords != 0 {
+			t.Fatalf("dry=%#v err=%v", dry, err)
+		}
+		applied, err := BackfillRepositoryReviewFileAttributions(
+			t.Context(), fixture.workspace, fixture.automation.ID,
+			RepositoryReviewFileAttributionBackfillOptions{Apply: true, ExpectedDigest: dry.Digest},
+		)
+		if err != nil || !applied.Applied || applied.StateVersionAfter != applied.StateVersionBefore {
+			t.Fatalf("noop apply=%#v err=%v", applied, err)
+		}
+	})
+}
+
 func repositoryReviewPrepareAttributionFixtureRuns(
 	t *testing.T,
 	fixture *repositoryReviewBackfillFixture,
@@ -319,5 +500,22 @@ func repositoryReviewPrepareAttributionFixtureRuns(
 		review.Outputs["managed_children"] = children
 		run.Steps["find_bugs/review"] = review
 		fixture.runs[runID] = run
+	}
+}
+
+func repositoryReviewPersistAttributionFixtureRuns(
+	t *testing.T,
+	fixture repositoryReviewBackfillFixture,
+) {
+	t.Helper()
+	for _, runID := range fixture.automation.RunIDs {
+		if run := fixture.runs[runID]; run != nil {
+			if err := fixture.runStore.DeleteRun(t.Context(), runID); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.runStore.CreateRun(t.Context(), run); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }

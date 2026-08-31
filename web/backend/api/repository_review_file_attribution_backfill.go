@@ -142,6 +142,15 @@ func BackfillRepositoryReviewFileAttributions(
 	if !options.Apply {
 		return prepared.report, nil
 	}
+	return applyPreparedRepositoryReviewFileAttributionBackfill(ctx, store, state, prepared)
+}
+
+func applyPreparedRepositoryReviewFileAttributionBackfill(
+	ctx context.Context,
+	store repoaudit.Store,
+	state repoaudit.RepositoryState,
+	prepared repositoryReviewPreparedFileAttributionBackfill,
+) (RepositoryReviewFileAttributionBackfillReport, error) {
 	if len(prepared.attributions) == 0 {
 		prepared.report.Applied = true
 		return prepared.report, nil
@@ -372,13 +381,26 @@ func prepareRepositoryReviewFileAttributionBackfill(
 		},
 		Attributions: prepared.attributions,
 	}
+	digest, err := repositoryReviewFileAttributionEnvelopeDigest(
+		envelope, repositoryReviewLegacyBackfillMaxSourceBytes,
+	)
+	if err != nil {
+		return prepared, err
+	}
+	prepared.report.Digest = digest
+	return prepared, nil
+}
+
+func repositoryReviewFileAttributionEnvelopeDigest(
+	envelope repositoryReviewFileAttributionDigestEnvelope,
+	maximumBytes int,
+) (string, error) {
 	encoded, err := json.Marshal(envelope)
-	if err != nil || len(encoded) > repositoryReviewLegacyBackfillMaxSourceBytes {
-		return prepared, repoaudit.ErrInvalidPlan
+	if err != nil || maximumBytes < 1 || len(encoded) > maximumBytes {
+		return "", repoaudit.ErrInvalidPlan
 	}
 	digest := sha256.Sum256(encoded)
-	prepared.report.Digest = "sha256:" + hex.EncodeToString(digest[:])
-	return prepared, nil
+	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
 
 func repositoryReviewFileAttributionEvidenceMatchesLedger(

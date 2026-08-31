@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -26,51 +27,81 @@ type expectedCounts struct {
 }
 
 func main() {
-	workspace := flag.String("workspace", "", "PicoClaw workspace containing repository review state")
-	automationID := flag.String("automation", "", "repository review automation ID")
-	apply := flag.Bool("apply", false, "commit the prepared attribution records")
-	expectedDigest := flag.String("expect-digest", "", "exact sha256 digest printed by a prior dry run")
+	if err := run(os.Args[1:], os.Stdout, os.Stderr, backfillFileAttributions); err != nil {
+		fatal(err)
+	}
+}
+
+type backfillFileAttributionsFunc func(
+	context.Context,
+	string,
+	string,
+	launcherapi.RepositoryReviewFileAttributionBackfillOptions,
+) (launcherapi.RepositoryReviewFileAttributionBackfillReport, error)
+
+var (
+	backfillFileAttributions backfillFileAttributionsFunc = launcherapi.BackfillRepositoryReviewFileAttributions
+	exitProcess                                           = os.Exit
+)
+
+func run(
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	backfill backfillFileAttributionsFunc,
+) error {
+	if stdout == nil || stderr == nil || backfill == nil {
+		return errors.New("command output and backfill operation are required")
+	}
+	flags := flag.NewFlagSet("repository-review-attribution-backfill", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	workspace := flags.String("workspace", "", "PicoClaw workspace containing repository review state")
+	automationID := flags.String("automation", "", "repository review automation ID")
+	apply := flags.Bool("apply", false, "commit the prepared attribution records")
+	expectedDigest := flags.String("expect-digest", "", "exact sha256 digest printed by a prior dry run")
 	expected := expectedCounts{}
-	flag.IntVar(&expected.configuredRuns, "expect-configured-runs", -1, "expected configured workflow runs")
-	flag.IntVar(&expected.recoveredRuns, "expect-recovered-runs", -1, "expected retained ledger runs")
-	flag.IntVar(&expected.nonLedgerRuns, "expect-non-ledger-runs", -1, "expected allowed pre-review runs")
-	flag.IntVar(&expected.childAttempts, "expect-child-attempts", -1, "expected managed child attempts")
-	flag.IntVar(&expected.successfulChildren, "expect-successful-children", -1, "expected successful children")
-	flag.IntVar(&expected.failedChildren, "expect-failed-children", -1, "expected failed children")
-	flag.IntVar(&expected.attributionRecords, "expect-attribution-records", -1, "expected grouped attribution records")
-	flag.IntVar(&expected.acknowledgements, "expect-acknowledgements", -1, "expected acknowledged file occurrences")
-	flag.IntVar(&expected.uniqueFiles, "expect-unique-files", -1, "expected unique files")
-	flag.IntVar(
+	flags.IntVar(&expected.configuredRuns, "expect-configured-runs", -1, "expected configured workflow runs")
+	flags.IntVar(&expected.recoveredRuns, "expect-recovered-runs", -1, "expected retained ledger runs")
+	flags.IntVar(&expected.nonLedgerRuns, "expect-non-ledger-runs", -1, "expected allowed pre-review runs")
+	flags.IntVar(&expected.childAttempts, "expect-child-attempts", -1, "expected managed child attempts")
+	flags.IntVar(&expected.successfulChildren, "expect-successful-children", -1, "expected successful children")
+	flags.IntVar(&expected.failedChildren, "expect-failed-children", -1, "expected failed children")
+	flags.IntVar(&expected.attributionRecords, "expect-attribution-records", -1, "expected grouped attribution records")
+	flags.IntVar(&expected.acknowledgements, "expect-acknowledgements", -1, "expected acknowledged file occurrences")
+	flags.IntVar(&expected.uniqueFiles, "expect-unique-files", -1, "expected unique files")
+	flags.IntVar(
 		&expected.uniqueFileAssignments,
 		"expect-file-assignments",
 		-1,
 		"expected unique file/focus assignments",
 	)
-	flag.Parse()
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
 
 	*workspace = strings.TrimSpace(*workspace)
 	*automationID = strings.TrimSpace(*automationID)
 	*expectedDigest = strings.TrimSpace(*expectedDigest)
 	if *workspace == "" || *automationID == "" {
-		fatal(errors.New("--workspace and --automation are required"))
+		return errors.New("--workspace and --automation are required")
 	}
-	report, err := launcherapi.BackfillRepositoryReviewFileAttributions(
+	report, err := backfill(
 		context.Background(),
 		*workspace,
 		*automationID,
 		launcherapi.RepositoryReviewFileAttributionBackfillOptions{},
 	)
 	if err != nil {
-		fatal(err)
+		return err
 	}
 	if *apply {
 		if *expectedDigest == "" {
-			fatal(errors.New("--apply requires --expect-digest from a prior dry run"))
+			return errors.New("--apply requires --expect-digest from a prior dry run")
 		}
 		if compareErr := compareExpectedCounts(report, expected); compareErr != nil {
-			fatal(compareErr)
+			return compareErr
 		}
-		report, err = launcherapi.BackfillRepositoryReviewFileAttributions(
+		report, err = backfill(
 			context.Background(),
 			*workspace,
 			*automationID,
@@ -79,17 +110,18 @@ func main() {
 			},
 		)
 		if err != nil {
-			fatal(err)
+			return err
 		}
 		if compareErr := compareExpectedCounts(report, expected); compareErr != nil {
-			fatal(compareErr)
+			return compareErr
 		}
 	}
-	encoder := json.NewEncoder(os.Stdout)
+	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(report); err != nil {
-		fatal(err)
+		return err
 	}
+	return nil
 }
 
 func compareExpectedCounts(
@@ -125,5 +157,5 @@ func compareExpectedCounts(
 
 func fatal(err error) {
 	_, _ = fmt.Fprintln(os.Stderr, err)
-	os.Exit(1)
+	exitProcess(1)
 }
