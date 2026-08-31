@@ -243,7 +243,11 @@ function CollectionTableResults<T>({
         aria-label={`${definition.title} table`}
         className="border-border hidden overflow-hidden rounded-lg border md:block"
       >
-        <Table>
+        <Table
+          className={
+            definition.tableLayout === "fixed" ? "table-fixed" : undefined
+          }
+        >
           <TableHeader className="bg-background sticky top-0 z-10">
             <TableRow>
               <TableHead>Identity</TableHead>

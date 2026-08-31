@@ -8280,6 +8280,73 @@ test("repository findings Updated header stays inside the canonical desktop tabl
   expect(errors).toEqual([])
 })
 
+test("repository finding identity text uses the available width in every view", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings?view=list`,
+  )
+
+  const title = "Request retries can repeat a committed ledger update"
+  const metadata =
+    "pkg/repoaudit/transaction_writer.go · TransactionWriter.Commit · medium · Open · Updated Aug 26, 2026"
+
+  for (const view of ["list", "table", "grid"] as const) {
+    const viewButton = page.getByRole("button", {
+      name: `${view[0]!.toUpperCase()}${view.slice(1)} view`,
+    })
+    await viewButton.click()
+    await expect(viewButton).toHaveAttribute("aria-pressed", "true")
+
+    const item = page
+      .locator(`[data-item-id="${repositoryReviewNormalAggregateID}"]`)
+      .filter({ visible: true })
+    await expect(item).toHaveCount(1)
+
+    for (const text of [title, metadata]) {
+      const content = item.getByText(text, { exact: true })
+      await expect(content).toBeVisible()
+      const bounds = await content.evaluate((element) => {
+        let identity = element.parentElement
+        while (identity) {
+          const hasTitle = Array.from(identity.children).some((child) =>
+            child.classList.contains("font-medium"),
+          )
+          if (identity.classList.contains("min-w-0") && hasTitle) break
+          identity = identity.parentElement
+        }
+        if (!identity) throw new Error("Identity block not found")
+        const contentBox = element.getBoundingClientRect()
+        const identityBox = identity.getBoundingClientRect()
+        return {
+          contentLeft: contentBox.left,
+          contentRight: contentBox.right,
+          identityLeft: identityBox.left,
+          identityRight: identityBox.right,
+        }
+      })
+      expect(
+        bounds.contentLeft,
+        `${view} identity content should start at the identity block edge`,
+      ).toBeLessThanOrEqual(bounds.identityLeft + 1)
+      expect(
+        bounds.contentRight,
+        `${view} identity content should use the identity block width`,
+      ).toBeGreaterThanOrEqual(bounds.identityRight - 1)
+      expect(
+        bounds.contentRight,
+        `${view} identity content should stay inside the identity block`,
+      ).toBeLessThanOrEqual(bounds.identityRight + 1)
+    }
+  }
+
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
 test("combined repository finding attention badges stay inside the mobile result", async ({
   page,
 }, testInfo) => {

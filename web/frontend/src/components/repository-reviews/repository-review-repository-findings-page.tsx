@@ -343,25 +343,15 @@ export function RepositoryReviewRepositoryFindingsPage({
       defaultQuery: repositoryReviewRepositoryFindingsDefaultQuery,
       supportedViews: repositoryReviewViews,
       defaultView: "list",
+      tableLayout: "fixed",
       getItemID: (finding) => finding.id,
       getItemLabel: (finding) => finding.canonical_title,
       getItemIdentity: (finding) => {
         const metadata = `${latestLocation(finding) || "Cross-commit diagnosis"} · ${finding.canonical_severity} · ${repositoryFindingLifecycleLabel(finding.lifecycle)} · Updated ${formatCompactDate(finding.updated_at)}`
         return {
-          title: (
-            <span
-              className="block max-w-48 truncate"
-              title={finding.canonical_title}
-            >
-              {finding.canonical_title}
-            </span>
-          ),
+          title: finding.canonical_title,
           description: occurrenceIdentity(finding),
-          metadata: (
-            <span className="block max-w-48 truncate" title={metadata}>
-              {metadata}
-            </span>
-          ),
+          metadata,
         }
       },
       columns: [
