@@ -1370,6 +1370,7 @@ describe("routed repository review pages", () => {
         deduplication_state: "pending",
         disposition: "undecided",
         deduplicated_finding_id: undefined,
+        assignment_id: "historical-replay",
       },
       historical_deduplication: {
         required: true,
@@ -1392,6 +1393,43 @@ describe("routed repository review pages", () => {
     )
     await new Promise((resolve) => setTimeout(resolve, 2_200))
     expect(getRepositoryReviewRawSource).toHaveBeenCalledTimes(1)
+    view.unmount()
+  })
+
+  it("keeps polling a native pending source after historical replay fails", async () => {
+    vi.mocked(getRepositoryReviewRawSource).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      source: {
+        ...rawFinding,
+        deduplication_state: "pending",
+        disposition: "undecided",
+        deduplicated_finding_id: undefined,
+        assignment_id: "native-assignment",
+      },
+      historical_deduplication: {
+        required: true,
+        status: "failed",
+        error: "Campaign recovery failed.",
+      },
+    })
+    const view = renderPage(
+      <RepositoryReviewRawFindingPage
+        automationID={automation.id}
+        sourceID={rawFinding.id}
+        onBack={vi.fn()}
+        onCanonicalSource={vi.fn()}
+        onOpenFinding={vi.fn()}
+      />,
+    )
+
+    await waitFor(
+      () =>
+        expect(getRepositoryReviewRawSource.mock.calls.length).toBeGreaterThan(
+          1,
+        ),
+      { timeout: 3_000 },
+    )
     view.unmount()
   })
 

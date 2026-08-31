@@ -35,10 +35,19 @@ export function RepositoryReviewRawFindingPage({
       getRepositoryReviewRawSource(automationID, sourceID, signal),
     retry: false,
     refetchInterval: (current) => {
-      if (current.state.data?.historical_deduplication?.status === "failed") {
+      const detail = current.state.data
+      const source = detail?.source
+      const isHistoricalSource = Boolean(
+        source?.assignment_id === "historical-replay" ||
+        (source?.legacy_finding_id && !source.assignment_id),
+      )
+      if (
+        isHistoricalSource &&
+        detail?.historical_deduplication?.status === "failed"
+      ) {
         return false
       }
-      const state = current.state.data?.source.deduplication_state
+      const state = source?.deduplication_state
       return state === "pending" || state === "running" ? 2_000 : false
     },
   })
