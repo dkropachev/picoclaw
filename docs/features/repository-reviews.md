@@ -318,6 +318,17 @@ candidate requires confirmation before dispatch. Internal previews use a
 document icon and Review preview; the GitHub icon is reserved for records with
 a validated external GitHub URL.
 
+Each newly failed resolution check records an allowlisted, API-safe failure
+with a stable code, displayable message, retryability, and timestamp on both
+the validation job and its resolution-history entry. Raw provider errors,
+prompts, source content, credentials, and repository paths never enter that
+failure. Repository-finding detail renders the latest failed attempt as a
+visible Fix check failed alert beside the resolution-check facts and retains
+Retry fix check. A legacy failed attempt without structured diagnostics says
+that no failure details were recorded; it never invents a cause from an empty
+candidate set or other circumstantial state. Historical failure details remain
+hidden whenever the current resolution-check state is not `failed`.
+
 Finding health is a separate read model, not a replacement for raw or
 deduplicated collections. Run findings use the selected automation's campaign
 membership. Repository findings and Findings processing use the canonical
@@ -594,7 +605,9 @@ interfaces owned by their existing feature specifications.
     first chronological semantic-version tag. Presentation maps the stable
     states to Resolution check labels and Check for fix, Retry fix check, Fix
     check queued, or Checking for fix… actions without renaming the API/query
-    `validation` field or occurrence diagnosis Validation.
+    `validation` field or occurrence diagnosis Validation. A failed attempt
+    persists only its allowlisted safe failure classification, and detail shows
+    that reason without exposing raw model or repository diagnostics.
 
 ## Cross-Feature Behavior
 

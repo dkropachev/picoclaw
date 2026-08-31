@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -2187,6 +2188,36 @@ func TestRepositoryLifecycleRemainingPureBranches(t *testing.T) {
 		merged.Lifecycle != RepositoryFindingRegressed || len(merged.ResolutionHistory) != 1 ||
 		!pathSymbolHistoryContains(merged.PathSymbolHistory, "rfn") {
 		t.Fatalf("merged record=%#v", merged)
+	}
+	olderResolutions := make([]RepositoryFindingResolution, maxRepositoryResolutionHistory)
+	for index := range olderResolutions {
+		olderResolutions[index] = RepositoryFindingResolution{
+			Outcome: RepositoryValidationFailed,
+			Summary: fmt.Sprintf("older-%03d", index),
+			ValidatedAt: now.Add(
+				time.Duration(index-maxRepositoryResolutionHistory) * time.Minute,
+			),
+		}
+	}
+	newest := RepositoryFindingResolution{
+		Outcome: RepositoryValidationFailed, Summary: "newest-target", ValidatedAt: now,
+		Failure: safeRepositoryValidationFailure(
+			RepositoryValidationFailureCodeModelOutputInvalid,
+			now,
+		),
+	}
+	merged = mergeRepositoryFindingRecords(
+		&RepositoryFinding{ID: "target", ResolutionHistory: []RepositoryFindingResolution{newest}},
+		RepositoryFinding{ID: "source", ResolutionHistory: olderResolutions},
+		now,
+	)
+	if len(merged.ResolutionHistory) != maxRepositoryResolutionHistory ||
+		merged.ResolutionHistory[len(merged.ResolutionHistory)-1].Summary != newest.Summary ||
+		merged.ResolutionHistory[len(merged.ResolutionHistory)-1].Failure == nil ||
+		merged.ResolutionHistory[len(merged.ResolutionHistory)-1].Failure.Code !=
+			RepositoryValidationFailureCodeModelOutputInvalid ||
+		merged.ResolutionHistory[0].Summary != "older-001" {
+		t.Fatalf("chronological merged resolution history=%#v", merged.ResolutionHistory)
 	}
 	if validationJobSequence(
 		[]RepositoryValidationJob{{RepositoryFindingID: "one"}, {RepositoryFindingID: "one"}},

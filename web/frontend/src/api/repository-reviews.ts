@@ -515,6 +515,13 @@ export interface RepositoryFindingIssueAssociation {
   conflict_urls?: string[]
 }
 
+export interface RepositoryValidationFailure {
+  code: string
+  message: string
+  retryable: boolean
+  at: string
+}
+
 export interface RepositoryFindingResolution {
   outcome: RepositoryFindingValidationState
   fix_commit_sha?: string
@@ -522,6 +529,7 @@ export interface RepositoryFindingResolution {
   validated_at: string
   first_containing_tag?: string
   summary?: string
+  failure?: RepositoryValidationFailure
 }
 
 export interface RepositoryFinding {
@@ -589,6 +597,7 @@ export interface RepositoryValidationJob {
   candidate_commits?: string[]
   attempts: number
   error?: string
+  failure?: RepositoryValidationFailure
   reserved_at?: string
   created_at: string
   updated_at: string

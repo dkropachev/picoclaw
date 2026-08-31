@@ -813,40 +813,46 @@ func TestRepositoryValidationAdjudicationRunnerErrorsAndBounds(t *testing.T) {
 	if err != nil || result.Outcome != repoaudit.RepositoryValidationNotFixed {
 		t.Fatalf("validation result=%#v err=%v", result, err)
 	}
+	assertFailureCode := func(
+		t *testing.T,
+		err error,
+		want repoaudit.RepositoryValidationFailureCode,
+	) {
+		t.Helper()
+		got, ok := repoaudit.RepositoryValidationFailureCodeFromError(err)
+		if err == nil || !ok || got != want {
+			t.Fatalf("validation failure code=%q found=%v err=%v; want %q", got, ok, err, want)
+		}
+	}
 	providerFailure := newRepositoryReviewAIAdjudicationHandler(
 		t, http.StatusServiceUnavailable, "",
 	)
-	if _, err := runRepositoryValidationAdjudication(
+	_, err = runRepositoryValidationAdjudication(
 		t.Context(), providerFailure, snapshot, finding, evidence,
-	); err == nil {
-		t.Fatal("validation provider failure was accepted")
-	}
+	)
+	assertFailureCode(t, err, repoaudit.RepositoryValidationFailureCodeModelRequest)
 	invalidStructured := newRepositoryReviewAIAdjudicationHandler(t, http.StatusOK, `{}`)
-	if _, err := runRepositoryValidationAdjudication(
+	_, err = runRepositoryValidationAdjudication(
 		t.Context(), invalidStructured, snapshot, finding, evidence,
-	); err == nil {
-		t.Fatal("invalid validation structured output was accepted")
-	}
-	if _, err := runRepositoryValidationAdjudication(
+	)
+	assertFailureCode(t, err, repoaudit.RepositoryValidationFailureCodeModelOutputInvalid)
+	_, err = runRepositoryValidationAdjudication(
 		t.Context(), NewHandler(t.TempDir()), snapshot, finding, evidence,
-	); err == nil {
-		t.Fatal("missing validation configuration was accepted")
-	}
-	if _, err := runRepositoryValidationAdjudication(
+	)
+	assertFailureCode(t, err, repoaudit.RepositoryValidationFailureCodeModelUnavailable)
+	_, err = runRepositoryValidationAdjudication(
 		t.Context(), valid,
 		repoaudit.RepositoryMappingModelSnapshot{Model: "missing", Account: "missing"},
 		finding, evidence,
-	); err == nil {
-		t.Fatal("unknown validation model snapshot was accepted")
-	}
+	)
+	assertFailureCode(t, err, repoaudit.RepositoryValidationFailureCodeModelUnavailable)
 	oversized := []repoaudit.RepositoryValidationEvidence{{
 		CommitSHA: strings.Repeat("b", 40), Diff: strings.Repeat("x", (2<<20)+1),
 	}}
-	if _, err := runRepositoryValidationAdjudication(
+	_, err = runRepositoryValidationAdjudication(
 		t.Context(), valid, snapshot, finding, oversized,
-	); err == nil || !strings.Contains(err.Error(), "exceeds") {
-		t.Fatalf("oversized validation error=%v", err)
-	}
+	)
+	assertFailureCode(t, err, repoaudit.RepositoryValidationFailureCodeEvidenceInvalid)
 }
 
 func TestRepositoryAdjudicationOutputBoundaryFailures(t *testing.T) {
@@ -901,7 +907,21 @@ func TestRepositoryAdjudicationOutputBoundaryFailures(t *testing.T) {
 			t.Context(), handler, snapshot, validationFinding, nil,
 		); err == nil {
 			t.Fatalf("validation outputs %#v were accepted", outputs)
+		} else if code, ok := repoaudit.RepositoryValidationFailureCodeFromError(err); !ok || code != repoaudit.RepositoryValidationFailureCodeModelOutputInvalid {
+			t.Fatalf("validation outputs %#v failure code=%q found=%v err=%v", outputs, code, ok, err)
 		}
+	}
+	runRepositoryValidationAgent = func(
+		context.Context, *webWorkflowRuntimeRunner, workflows.AgentRequest,
+	) (map[string]any, error) {
+		return nil, context.DeadlineExceeded
+	}
+	if _, err := runRepositoryValidationAdjudication(
+		t.Context(), handler, snapshot, validationFinding, nil,
+	); err == nil {
+		t.Fatal("timed out validation request was accepted")
+	} else if code, ok := repoaudit.RepositoryValidationFailureCodeFromError(err); !ok || code != repoaudit.RepositoryValidationFailureCodeModelTimeout {
+		t.Fatalf("timed out validation failure code=%q found=%v err=%v", code, ok, err)
 	}
 }
 

@@ -594,6 +594,87 @@ func TestRepositoryReviewRepositoryFindingLifecycleAndValidationRoutes(t *testin
 	}
 }
 
+func TestRepositoryReviewRepositoryFindingDetailProjectsSafeFixCheckFailure(t *testing.T) {
+	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	state := seedRepositoryReviewAPIState(t, workspace)
+	store := repoaudit.NewStore(workspace)
+	if _, err := store.ProcessPendingMappingJobs(
+		t.Context(), state.Repository, repoaudit.RepositoryMappingProcessOptions{
+			DefaultBranchVerified: func(context.Context, repoaudit.Finding) (bool, error) {
+				return true, nil
+			},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, found, err := store.Get(state.Repository)
+	if err != nil || !found || len(state.RepositoryFindings) != 1 {
+		t.Fatalf("repository findings=%#v found=%v err=%v", state.RepositoryFindings, found, err)
+	}
+	aggregate := state.RepositoryFindings[0]
+	if _, _, err := store.ReserveValidationJobs(
+		state.Repository,
+		[]string{aggregate.ID},
+		repoaudit.RepositoryMappingModelSnapshot{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	secret := "provider token=secret private/repository/path.go"
+	result, err := store.ProcessPendingValidationJobs(
+		t.Context(),
+		state.Repository,
+		repoaudit.RepositoryValidationProcessOptions{
+			Evidence: func(
+				context.Context,
+				repoaudit.RepositoryFinding,
+				[]string,
+			) ([]repoaudit.RepositoryValidationEvidence, error) {
+				return []repoaudit.RepositoryValidationEvidence{{CurrentSource: "bounded source"}}, nil
+			},
+			Adjudicate: func(
+				context.Context,
+				repoaudit.RepositoryMappingModelSnapshot,
+				repoaudit.RepositoryFinding,
+				[]repoaudit.RepositoryValidationEvidence,
+			) (repoaudit.RepositoryValidationDecision, error) {
+				return repoaudit.RepositoryValidationDecision{}, repoaudit.WrapRepositoryValidationFailure(
+					repoaudit.RepositoryValidationFailureCodeModelOutputInvalid,
+					errors.New(secret),
+				)
+			},
+			VerifyAncestry: func(context.Context, string) (bool, error) { return true, nil },
+		},
+	)
+	if err != nil || result.Failed != 1 {
+		t.Fatalf("validation result=%#v err=%v", result, err)
+	}
+	automation := seedRepositoryReviewDetailAutomation(
+		t, handler, state.Repository, state.Runs[0].ID,
+	)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations/"+automation.ID+
+			"/repository-findings/"+aggregate.ID,
+		nil,
+	))
+	var payload struct {
+		Finding repoaudit.RepositoryFinding `json:"repository_finding"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	history := payload.Finding.ResolutionHistory
+	if response.Code != http.StatusOK || payload.Finding.ValidationState != repoaudit.RepositoryValidationFailed ||
+		len(history) != 1 || history[0].Failure == nil ||
+		history[0].Failure.Code != repoaudit.RepositoryValidationFailureCodeModelOutputInvalid ||
+		strings.Contains(response.Body.String(), secret) ||
+		strings.Contains(response.Body.String(), "private/repository/path.go") {
+		t.Fatalf("detail status=%d payload=%#v body=%s", response.Code, payload, response.Body.String())
+	}
+}
+
 func TestRepositoryReviewReportCurrentMembershipAndEmptyActiveLedger(t *testing.T) {
 	now := time.Now().UTC()
 	state := repoaudit.RepositoryState{
