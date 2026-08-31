@@ -613,12 +613,12 @@ func TestRepositoryReviewRepositoryFindingDetailProjectsSafeFixCheckFailure(t *t
 		t.Fatalf("repository findings=%#v found=%v err=%v", state.RepositoryFindings, found, err)
 	}
 	aggregate := state.RepositoryFindings[0]
-	if _, _, err := store.ReserveValidationJobs(
+	if _, _, reserveErr := store.ReserveValidationJobs(
 		state.Repository,
 		[]string{aggregate.ID},
 		repoaudit.RepositoryMappingModelSnapshot{},
-	); err != nil {
-		t.Fatal(err)
+	); reserveErr != nil {
+		t.Fatal(reserveErr)
 	}
 	secret := "provider token=secret private/repository/path.go"
 	result, err := store.ProcessPendingValidationJobs(
