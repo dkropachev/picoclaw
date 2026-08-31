@@ -163,6 +163,47 @@ describe("StandardCollectionPage", () => {
     await user.click(itemElement())
     expect(screen.queryByText("1 selected")).toBeNull()
   })
+
+  it("retains feature-operation failures with their safe inline message", async () => {
+    const user = userEvent.setup()
+    render(
+      <StandardCollectionPage
+        definition={definition}
+        search={{ q: definition.defaultQuery }}
+        onSearchChange={vi.fn()}
+        items={[thing]}
+        selection={{
+          renderActions: ({ reconcileSelection }) => (
+            <button
+              type="button"
+              onClick={() =>
+                reconcileSelection({
+                  deleted_ids: [],
+                  failures: [
+                    {
+                      id: thing.id,
+                      code: "provider_failed",
+                      blockers: ["The provider is temporarily unavailable."],
+                    },
+                  ],
+                })
+              }
+            >
+              Retry selected
+            </button>
+          ),
+        }}
+      />,
+    )
+
+    await user.click(itemElement())
+    await user.click(screen.getByRole("button", { name: "Retry selected" }))
+
+    expect(screen.getByText("1 selected")).toBeVisible()
+    expect(
+      screen.getByText("The provider is temporarily unavailable."),
+    ).toBeVisible()
+  })
 })
 
 function renderPage({

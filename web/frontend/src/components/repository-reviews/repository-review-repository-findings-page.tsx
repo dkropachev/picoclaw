@@ -1,4 +1,9 @@
-import { IconChecks, IconSparkles } from "@tabler/icons-react"
+import {
+  IconAlertTriangle,
+  IconChecks,
+  IconExternalLink,
+  IconSparkles,
+} from "@tabler/icons-react"
 import { useInfiniteQuery, useMutation } from "@tanstack/react-query"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
@@ -33,6 +38,10 @@ import {
 } from "@/hooks/use-collection-route-state"
 
 import {
+  repositoryReviewAutomationIsActive,
+  useRepositoryReviewFindingHealth,
+} from "./repository-review-finding-health"
+import {
   repositoryFindingAttentionLabel,
   repositoryFindingIssueLabel,
   repositoryFindingLifecycleLabel,
@@ -52,6 +61,7 @@ export function RepositoryReviewRepositoryFindingsPage({
   onSearchChange,
   onBack,
   onOpenFinding,
+  onOpenIncompleteFindings,
   onGenerated,
 }: {
   automationID: string
@@ -59,6 +69,7 @@ export function RepositoryReviewRepositoryFindingsPage({
   onSearchChange: (next: CollectionRouteSearch, replace?: boolean) => void
   onBack: () => void
   onOpenFinding: (findingID: string) => void
+  onOpenIncompleteFindings?: () => void
   onGenerated: (generationID: string) => void
 }) {
   const [instructionsOpen, setInstructionsOpen] = useState(false)
@@ -90,7 +101,7 @@ export function RepositoryReviewRepositoryFindingsPage({
     refetchInterval: (current) =>
       current.state.data?.pages.some(
         (page) =>
-          isActive(page.automation) ||
+          repositoryReviewAutomationIsActive(page.automation) ||
           page.repository_findings.some((finding) =>
             new Set(["pending", "running"]).has(finding.validation_state),
           ),
@@ -100,6 +111,18 @@ export function RepositoryReviewRepositoryFindingsPage({
   })
   const pages = query.data?.pages
   const firstPage = pages?.[0]
+  const healthQuery = useRepositoryReviewFindingHealth(
+    automationID,
+    firstPage?.automation,
+  )
+  const healthUpdatedAt = useRef("")
+  useEffect(() => {
+    const next = healthQuery.data?.updated_at ?? ""
+    const previous = healthUpdatedAt.current
+    healthUpdatedAt.current = next
+    if (!previous || !next || previous === next) return
+    void query.refetch()
+  }, [healthQuery.data?.updated_at, query])
   const findings = useMemo(
     () => pages?.flatMap((page) => page.repository_findings) ?? [],
     [pages],
@@ -553,7 +576,7 @@ export function RepositoryReviewRepositoryFindingsPage({
         schema={firstPage?.query_schema}
         canonicalQuery={firstPage?.canonical_query}
         loading={query.isLoading}
-        fetching={query.isFetching}
+        fetching={query.isFetching || healthQuery.isFetching}
         error={query.error}
         context={{
           backLabel: "Repositories",
@@ -567,7 +590,9 @@ export function RepositoryReviewRepositoryFindingsPage({
             <Badge variant="outline">{firstPage.automation.status}</Badge>
           ) : undefined,
         }}
-        onRefresh={query.refetch}
+        onRefresh={async () => {
+          await Promise.all([query.refetch(), healthQuery.refetch()])
+        }}
         hasNextPage={query.hasNextPage}
         loadingMore={query.isFetchingNextPage}
         onLoadMore={query.fetchNextPage}
@@ -581,6 +606,49 @@ export function RepositoryReviewRepositoryFindingsPage({
             !finding.issue.conflict,
           renderActions: selectionActions,
         }}
+        beforeResults={
+          healthQuery.data &&
+          healthQuery.data.run_findings.unrepresented > 0 ? (
+            <section
+              role="status"
+              aria-labelledby="repository-findings-incomplete"
+              className="border-border flex flex-wrap items-start justify-between gap-3 rounded-lg border p-4"
+            >
+              <div className="flex min-w-0 gap-3">
+                <IconAlertTriangle
+                  className="text-muted-foreground mt-0.5 size-5 shrink-0"
+                  aria-hidden="true"
+                />
+                <div>
+                  <h2
+                    id="repository-findings-incomplete"
+                    className="font-semibold"
+                  >
+                    Repository coverage is incomplete
+                  </h2>
+                  <p className="text-muted-foreground mt-1 text-sm">
+                    {healthQuery.data.run_findings.unrepresented} run finding
+                    {healthQuery.data.run_findings.unrepresented === 1
+                      ? " is"
+                      : "s are"}{" "}
+                    still pending, processing, or failed before representation
+                    in the canonical repository ledger.
+                  </p>
+                </div>
+              </div>
+              {onOpenIncompleteFindings && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={onOpenIncompleteFindings}
+                >
+                  <IconExternalLink /> View unrepresented run findings
+                </Button>
+              )}
+            </section>
+          ) : undefined
+        }
         emptyTitle="No repository findings"
         emptyDescription="This repository does not have a repository finding yet."
       />
@@ -705,20 +773,6 @@ function formatCompactDate(value: string): string {
         month: "short",
         day: "numeric",
       })
-}
-
-function isActive(review: {
-  status: string
-  auto_continue: boolean
-  progress: { stage: string }
-}): boolean {
-  return (
-    review.status === "running" ||
-    review.status === "stopping" ||
-    (review.status === "idle" &&
-      review.auto_continue &&
-      review.progress.stage.trim().toLowerCase() === "next batch queued")
-  )
 }
 
 function repositoryFindingCanBeDrafted(

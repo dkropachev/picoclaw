@@ -169,6 +169,10 @@ const repositoryReviewCollectionStates = [
     route: `/repository-reviews/repositories/${repositoryReviewVisualIDs.automation}/findings`,
   },
   {
+    key: "repository-review-findings-processing",
+    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/findings-processing`,
+  },
+  {
     key: "repository-review-issues",
     route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/issues?generation_id=${repositoryReviewVisualIDs.generation}`,
   },
@@ -214,6 +218,10 @@ const repositoryReviewDetailStates = [
   {
     key: "repository-review-repository-finding-detail",
     route: `/repository-reviews/repositories/${repositoryReviewVisualIDs.automation}/findings/${repositoryReviewVisualIDs.provisionalRepositoryFinding}`,
+  },
+  {
+    key: "repository-review-findings-processing-detail",
+    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/findings-processing/${repositoryReviewVisualIDs.processingFailed}`,
   },
   {
     key: "repository-review-issue-detail",

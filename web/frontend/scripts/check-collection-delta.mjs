@@ -15,6 +15,7 @@ const allowedCapabilities = new Set([
   "pagination",
   "selection",
   "bulk-delete",
+  "bulk-retry",
   "create",
   "detail",
   "edit",

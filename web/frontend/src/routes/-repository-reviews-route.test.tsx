@@ -68,10 +68,12 @@ vi.mock(
       id,
       onFindings,
       onRawFindings,
+      onFindingsProcessing,
     }: {
       id: string
       onFindings: () => void
       onRawFindings: () => void
+      onFindingsProcessing: () => void
     }) => (
       <div>
         <output>Detail {id}</output>
@@ -80,6 +82,9 @@ vi.mock(
         </button>
         <button type="button" onClick={onRawFindings}>
           Open raw findings
+        </button>
+        <button type="button" onClick={onFindingsProcessing}>
+          Open findings processing
         </button>
       </div>
     ),
@@ -128,10 +133,12 @@ vi.mock(
       automationID,
       onBack,
       onOpenFinding,
+      onOpenIncompleteFindings,
     }: {
       automationID: string
       onBack: () => void
       onOpenFinding: (id: string) => void
+      onOpenIncompleteFindings: () => void
     }) => (
       <div>
         <output>Repository findings {automationID}</output>
@@ -140,6 +147,9 @@ vi.mock(
         </button>
         <button type="button" onClick={() => onOpenFinding("rrf_1")}>
           Open repository finding
+        </button>
+        <button type="button" onClick={onOpenIncompleteFindings}>
+          View unrepresented run findings
         </button>
       </div>
     ),
@@ -177,6 +187,42 @@ vi.mock(
     RepositoryReviewRawFindingPage: ({ sourceID }: { sourceID: string }) => (
       <output>Raw finding {sourceID}</output>
     ),
+  }),
+)
+
+vi.mock(
+  "@/components/repository-reviews/repository-review-findings-processing-page",
+  () => ({
+    RepositoryReviewFindingsProcessingPage: ({
+      automationID,
+      onBack,
+      onOpenSource,
+    }: {
+      automationID: string
+      onBack: () => void
+      onOpenSource: (id: string) => void
+    }) => (
+      <div>
+        <output>Findings processing {automationID}</output>
+        <button type="button" onClick={onBack}>
+          Back from findings processing
+        </button>
+        <button type="button" onClick={() => onOpenSource("source_1")}>
+          Open processing source
+        </button>
+      </div>
+    ),
+  }),
+)
+
+vi.mock(
+  "@/components/repository-reviews/repository-review-finding-processing-page",
+  () => ({
+    RepositoryReviewFindingProcessingPage: ({
+      sourceID,
+    }: {
+      sourceID: string
+    }) => <output>Processing source {sourceID}</output>,
   }),
 )
 
@@ -465,6 +511,69 @@ describe("repository review routes", () => {
     })
   })
 
+  it("preserves findings-processing query and parent state through detail", async () => {
+    const router = testRouter(
+      "/repository-reviews?q=status%20%3D%20running&view=grid",
+    )
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await user.click(await screen.findByRole("button", { name: "Open review" }))
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Open findings processing",
+      }),
+    )
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repository-reviews/auto_1/findings-processing",
+      ),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "ALL ORDER BY updated DESC",
+    })
+
+    await router.navigate({
+      to: "/repository-reviews/$id/findings-processing",
+      params: { id: "auto_1" },
+      search: { q: "state = failed ORDER BY updated DESC", view: "table" },
+      state: true,
+      replace: true,
+    })
+    await user.click(
+      screen.getByRole("button", { name: "Open processing source" }),
+    )
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repository-reviews/auto_1/findings-processing/source_1",
+      ),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "state = failed ORDER BY updated DESC",
+      view: "table",
+    })
+    await router.history.back()
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repository-reviews/auto_1/findings-processing",
+      ),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "state = failed ORDER BY updated DESC",
+      view: "table",
+    })
+    await user.click(
+      screen.getByRole("button", { name: "Back from findings processing" }),
+    )
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/repository-reviews/auto_1"),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "status = running",
+      view: "grid",
+    })
+  })
+
   it.each([
     [
       "/repository-reviews/auto_1/findings?view=unsupported&unknown=value",
@@ -477,6 +586,10 @@ describe("repository review routes", () => {
     [
       "/repository-reviews/auto_1/issues?generation_id=rig_1&scope=current&unknown=value",
       { q: "ALL ORDER BY updated DESC", generation_id: "rig_1" },
+    ],
+    [
+      "/repository-reviews/auto_1/findings-processing?view=unsupported&offset=50",
+      { q: "ALL ORDER BY updated DESC" },
     ],
   ])(
     "canonicalizes the child collection address bar for %s",
@@ -686,6 +799,28 @@ describe("repository review routes", () => {
     )
     expect(router.state.location.search).toEqual({
       q: "ORDER BY repository ASC",
+    })
+  })
+
+  it("links incomplete repository coverage to filtered run findings", async () => {
+    const router = testRouter(
+      "/repository-reviews/repositories/auto_1/findings",
+    )
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "View unrepresented run findings",
+      }),
+    )
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repository-reviews/auto_1/findings",
+      ),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "run_status IN (pending, processing, failed) ORDER BY updated DESC",
     })
   })
 
@@ -956,6 +1091,14 @@ describe("repository review routes", () => {
       "Finding finding_1",
     ],
     ["/repository-reviews/auto_1/issues", "Issues auto_1"],
+    [
+      "/repository-reviews/auto_1/findings-processing",
+      "Findings processing auto_1",
+    ],
+    [
+      "/repository-reviews/auto_1/findings-processing/source_1",
+      "Processing source source_1",
+    ],
     ["/repository-reviews/auto_1/issues/draft_1", "Issue draft_1"],
     ["/repository-reviews/repositories", "Repositories workspace"],
     ["/repository-reviews/repositories/new", "New repository configuration"],

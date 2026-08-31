@@ -51,6 +51,23 @@ type DeduplicationProcessResult struct {
 	Deferred   int `json:"deferred"`
 }
 
+// DeduplicationRetryFailure is one safe, source-specific rejection from a
+// bulk retry request. It never exposes stored provider output or internal
+// persistence errors.
+type DeduplicationRetryFailure struct {
+	SourceID string `json:"source_id"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+}
+
+// DeduplicationRetryResult reports every source that was re-admitted and every
+// valid source selection that could not be retried. Both slices are kept in
+// request order.
+type DeduplicationRetryResult struct {
+	RetriedIDs []string                    `json:"retried_ids"`
+	Failures   []DeduplicationRetryFailure `json:"failures"`
+}
+
 type deduplicationProcessOutcome struct {
 	created   bool
 	duplicate bool
@@ -845,21 +862,136 @@ func (s Store) RetryDeduplication(
 	if err != nil {
 		return RepositoryState{}, RawReviewFinding{}, err
 	}
+	now := s.clock()
+	retried, err := retryDeduplicationInState(&state, rawID, now)
+	if err != nil {
+		return RepositoryState{}, RawReviewFinding{}, err
+	}
+	state.Version++
+	state.UpdatedAt = now
+	reconcileFindingsProcessingCounters(&state)
+	state.FindingsProcessing.UpdatedAt = now
+	if err := s.save(&state); err != nil {
+		return RepositoryState{}, RawReviewFinding{}, err
+	}
+	return state, retried, nil
+}
+
+// RetryDeduplications re-admits up to 200 explicitly selected failed sources
+// under one repository lock and one durable write. Selection-shape errors are
+// rejected before the repository is loaded; valid mixed selections receive a
+// safe failure for each ineligible source.
+func (s Store) RetryDeduplications(
+	repository string,
+	sourceIDs []string,
+) (RepositoryState, DeduplicationRetryResult, error) {
+	repository = strings.TrimSpace(repository)
+	normalizedIDs, err := NormalizeDeduplicationRetrySourceIDs(sourceIDs)
+	if err != nil {
+		return RepositoryState{}, DeduplicationRetryResult{}, err
+	}
+	if repository == "" {
+		return RepositoryState{}, DeduplicationRetryResult{}, errors.New("repository is required")
+	}
+	unlock, err := s.lock(repository)
+	if err != nil {
+		return RepositoryState{}, DeduplicationRetryResult{}, err
+	}
+	defer unlock()
+	state, err := s.load(repository)
+	if err != nil {
+		return RepositoryState{}, DeduplicationRetryResult{}, err
+	}
+	result := DeduplicationRetryResult{
+		RetriedIDs: make([]string, 0, len(normalizedIDs)),
+		Failures:   make([]DeduplicationRetryFailure, 0),
+	}
+	now := s.clock()
+	for _, sourceID := range normalizedIDs {
+		rawIndex := rawFindingIndexByID(state.RawFindings, sourceID)
+		if rawIndex < 0 {
+			result.Failures = append(result.Failures, deduplicationRetryFailure(
+				sourceID,
+				"not_found",
+				"Finding processing source was not found.",
+			))
+			continue
+		}
+		if HistoricalDeduplicationRawFinding(state.RawFindings[rawIndex]) {
+			result.Failures = append(result.Failures, deduplicationRetryFailure(
+				sourceID,
+				"historical_replay_required",
+				"Historical sources must be retried through historical consolidation.",
+			))
+			continue
+		}
+		if _, retryErr := retryDeduplicationInState(&state, sourceID, now); retryErr != nil {
+			result.Failures = append(result.Failures, deduplicationRetryFailure(
+				sourceID,
+				"not_retryable",
+				"Finding processing source is not retryable.",
+			))
+			continue
+		}
+		result.RetriedIDs = append(result.RetriedIDs, sourceID)
+	}
+	if len(result.RetriedIDs) == 0 {
+		return state, result, nil
+	}
+	state.Version++
+	state.UpdatedAt = now
+	reconcileFindingsProcessingCounters(&state)
+	state.FindingsProcessing.UpdatedAt = now
+	if err := s.save(&state); err != nil {
+		return RepositoryState{}, DeduplicationRetryResult{}, err
+	}
+	return state, result, nil
+}
+
+// NormalizeDeduplicationRetrySourceIDs validates and normalizes one bounded
+// explicit retry selection without reading or mutating repository state.
+func NormalizeDeduplicationRetrySourceIDs(sourceIDs []string) ([]string, error) {
+	if len(sourceIDs) == 0 || len(sourceIDs) > 200 {
+		return nil, errors.New("one to 200 source IDs are required")
+	}
+	normalized := make([]string, 0, len(sourceIDs))
+	seen := make(map[string]struct{}, len(sourceIDs))
+	for _, sourceID := range sourceIDs {
+		sourceID = strings.TrimSpace(sourceID)
+		if !validBoundedText(sourceID, 256) {
+			return nil, errors.New("invalid source ID")
+		}
+		if _, duplicate := seen[sourceID]; duplicate {
+			return nil, errors.New("duplicate source ID")
+		}
+		seen[sourceID] = struct{}{}
+		normalized = append(normalized, sourceID)
+	}
+	return normalized, nil
+}
+
+func retryDeduplicationInState(
+	state *RepositoryState,
+	rawID string,
+	now time.Time,
+) (RawReviewFinding, error) {
+	if state == nil {
+		return RawReviewFinding{}, errors.New("repository review state is required")
+	}
 	rawIndex := rawFindingIndexByID(state.RawFindings, rawID)
 	if rawIndex < 0 {
-		return RepositoryState{}, RawReviewFinding{}, os.ErrNotExist
+		return RawReviewFinding{}, os.ErrNotExist
 	}
 	jobIndex := deduplicationJobIndexByRawID(state.DeduplicationJobs, rawID)
 	if jobIndex < 0 {
-		return RepositoryState{}, RawReviewFinding{}, errors.New("raw finding deduplication job is missing")
+		return RawReviewFinding{}, errors.New("raw finding deduplication job is missing")
 	}
 	raw := &state.RawFindings[rawIndex]
 	job := &state.DeduplicationJobs[jobIndex]
 	if raw.State != RawFindingDeduplicationFailed || job.State != DeduplicationJobFailed ||
 		raw.DeduplicatedFindingID != "" {
-		return RepositoryState{}, RawReviewFinding{}, ErrConflict
+		return RawReviewFinding{}, ErrConflict
 	}
-	now := s.clock()
 	ordinal := state.NextDeduplicationOrdinal
 	if ordinal == 0 {
 		ordinal = 1
@@ -887,14 +1019,15 @@ func (s Store) RetryDeduplication(
 	job.History = appendDeduplicationJobHistory(job.History, DeduplicationJobHistoryEntry{
 		State: DeduplicationJobPending, At: now,
 	})
-	state.Version++
-	state.UpdatedAt = now
-	reconcileFindingsProcessingCounters(&state)
-	state.FindingsProcessing.UpdatedAt = now
-	if err := s.save(&state); err != nil {
-		return RepositoryState{}, RawReviewFinding{}, err
-	}
-	return state, *raw, nil
+	return *raw, nil
+}
+
+func deduplicationRetryFailure(
+	sourceID string,
+	code string,
+	message string,
+) DeduplicationRetryFailure {
+	return DeduplicationRetryFailure{SourceID: sourceID, Code: code, Message: message}
 }
 
 func deduplicationJobIndexByRawID(jobs []DeduplicationJob, rawID string) int {

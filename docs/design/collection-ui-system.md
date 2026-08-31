@@ -244,17 +244,21 @@ execution state, created time, and updated time and default to
 selection or deletion; intake remains the dedicated New route, and the routed
 workspace retains its specialized lifecycle, chat, code, and activity views.
 
-Repository review run findings, canonical repository findings, and issue
-previews expose automation-scoped typed query/cursor envelopes. Run findings
-remain immutable occurrence evidence; repository findings retain lifecycle and
+Repository review run findings, raw findings, canonical findings processing,
+canonical repository findings, and issue previews expose automation-scoped
+typed query/cursor envelopes. Run findings remain immutable completed occurrence
+evidence; raw findings retain current-campaign evidence; Findings processing is
+the canonical repository-ledger recovery collection with failed-only selection
+and bounded bulk retry; repository findings retain lifecycle and
 issue-generation actions; issue previews retain version-fenced publication
 state. Their list responses contain only compact summaries plus parent context,
 capabilities, `total`, `next_cursor`, `canonical_query`, and `query_schema`.
-Finding messages, commit/blob payloads, model observations, occurrence and
-resolution histories, preview bodies, labels, external issue details, and
-generation instructions remain on ID-addressed detail endpoints. Generation ID
-is a caller-visible, server-enforced issue-preview collection scope and is bound
-into its cursors.
+Finding messages, commit/blob payloads, model observations, safe processing
+failures, occurrence and resolution histories, preview bodies, labels, external
+issue details, and generation instructions remain on ID-addressed detail
+endpoints. Generation ID is a caller-visible, server-enforced issue-preview
+collection scope and is bound into its cursors. Processing retry returns explicit
+per-ID partial outcomes and never implies query-wide selection.
 
 ## Governance And Evidence
 

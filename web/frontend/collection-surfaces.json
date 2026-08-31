@@ -334,6 +334,8 @@
           "/repository-reviews/:id/findings/:findingId",
           "/repository-reviews/:id/raw-findings",
           "/repository-reviews/:id/raw-findings/:sourceId",
+          "/repository-reviews/:id/findings-processing",
+          "/repository-reviews/:id/findings-processing/:sourceId",
           "/repository-reviews/:id/issues",
           "/repository-reviews/:id/issues/:draftId",
           "/repository-reviews/:id/issues/:draftId/edit"
@@ -385,6 +387,40 @@
         "list": "/repository-reviews/:id/raw-findings",
         "detail": "/repository-reviews/:id/raw-findings/:sourceId",
         "related": ["/repository-reviews/:id/findings/:findingId"]
+      }
+    },
+    {
+      "key": "repository-review-findings-processing",
+      "route": "/repository-reviews/:id/findings-processing",
+      "owningSpec": "docs/features/repository-reviews.md",
+      "implementationGlobs": [
+        "src/routes/repository-reviews_.$id_.findings-processing.tsx",
+        "src/routes/repository-reviews_.$id_.findings-processing_.$sourceId.tsx",
+        "src/components/repository-reviews/repository-review-findings-processing-page.tsx",
+        "src/components/repository-reviews/repository-review-finding-processing-page.tsx",
+        "src/components/repository-reviews/repository-review-finding-health.ts",
+        "src/components/repository-reviews/repository-review-findings-processing.tsx",
+        "src/components/repository-reviews/repository-review-processing-labels.ts",
+        "src/components/repository-reviews/repository-review-route-state.ts",
+        "src/api/repository-reviews.ts"
+      ],
+      "capabilities": [
+        "query",
+        "pagination",
+        "selection",
+        "bulk-retry",
+        "detail",
+        "related"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/repository-reviews/:id/findings-processing",
+        "detail": "/repository-reviews/:id/findings-processing/:sourceId",
+        "related": [
+          "/repository-reviews/:id/findings/:findingId",
+          "/repository-reviews/repositories/:id/findings/:findingId"
+        ]
       }
     },
     {

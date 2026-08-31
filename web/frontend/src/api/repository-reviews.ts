@@ -77,6 +77,9 @@ export type RepositoryReviewHistoricalDeduplicationStatus =
   | "merging"
   | "failed"
   | "completed"
+export type RepositoryReviewHistoricalConsolidationStatus =
+  | "not_required"
+  | RepositoryReviewHistoricalDeduplicationStatus
 export type RepositoryReviewFixEffortClass =
   | "tiny"
   | "small"
@@ -263,6 +266,46 @@ export interface RepositoryReviewFindingsProcessingCounters {
   updated_at?: string
 }
 
+export interface RepositoryReviewFindingHealthRunFindings {
+  total: number
+  pending: number
+  processing: number
+  failed: number
+  needs_review: number
+  associated_new: number
+  associated_existing: number
+  unrepresented: number
+}
+
+export interface RepositoryReviewFindingHealthRepositoryFindings {
+  total: number
+  provisional: number
+  validation_failed: number
+  issue_conflicts: number
+}
+
+export interface RepositoryReviewFindingHealthProcessing {
+  total: number
+  pending: number
+  processing: number
+  failed: number
+  completed: number
+}
+
+export interface RepositoryReviewHistoricalConsolidation {
+  required: boolean
+  status: RepositoryReviewHistoricalConsolidationStatus
+  retryable: boolean
+}
+
+export interface RepositoryReviewFindingHealth {
+  run_findings: RepositoryReviewFindingHealthRunFindings
+  repository_findings: RepositoryReviewFindingHealthRepositoryFindings
+  findings_processing: RepositoryReviewFindingHealthProcessing
+  historical_consolidation: RepositoryReviewHistoricalConsolidation
+  updated_at: string
+}
+
 export interface RepositoryReviewRawFindingsPage {
   automation: RepositoryReviewAutomation
   repository?: RepositoryReviewSummary
@@ -292,6 +335,40 @@ export interface RepositoryReviewRawFindingsCollectionPage extends CollectionPag
   raw_findings: RepositoryReviewRawFinding[]
   findings_processing?: RepositoryReviewFindingsProcessingCounters
   historical_deduplication?: RepositoryReviewHistoricalDeduplication
+}
+
+export interface RepositoryReviewFindingsProcessingCollectionPage extends CollectionPageMetadata {
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  sources: RepositoryReviewRawFinding[]
+  findings_processing: RepositoryReviewFindingHealthProcessing
+  historical_consolidation?: RepositoryReviewHistoricalConsolidation
+  capabilities?: RepositoryReviewCapabilities
+}
+
+export interface RepositoryReviewFindingsProcessingDetail {
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  source: RepositoryReviewRawFinding
+  context?: RepositoryReviewFindingContext
+  finding?: RepositoryReviewFinding
+  repository_finding?: RepositoryFinding
+  findings_processing?: RepositoryReviewFindingHealthProcessing
+  historical_consolidation?: RepositoryReviewHistoricalConsolidation
+  health?: RepositoryReviewFindingHealth
+}
+
+export interface RepositoryReviewFindingsProcessingRetryFailure {
+  source_id: string
+  code: string
+  message: string
+}
+
+export interface RepositoryReviewFindingsProcessingRetryResponse {
+  retried_ids: string[]
+  failures: RepositoryReviewFindingsProcessingRetryFailure[]
+  findings_processing: RepositoryReviewFindingHealthProcessing
+  health: RepositoryReviewFindingHealth
 }
 
 export interface RepositoryReviewFindingObservation {
@@ -1457,6 +1534,59 @@ export async function listRepositoryReviewAutomationRawFindingsPage(
   }
 }
 
+export async function getRepositoryReviewFindingHealth(
+  automationID: string,
+  signal?: AbortSignal,
+): Promise<RepositoryReviewFindingHealth> {
+  const value = await requestJSON<Partial<RepositoryReviewFindingHealth>>(
+    `${automationPath(automationID)}/finding-health`,
+    undefined,
+    signal,
+  )
+  return normalizeFindingHealth(value)
+}
+
+export async function listRepositoryReviewFindingsProcessingPage(
+  automationID: string,
+  input: CollectionListRequest = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewFindingsProcessingCollectionPage> {
+  const collectionInput = {
+    ...input,
+    query: input.query?.trim() || "ALL ORDER BY updated DESC",
+  }
+  const page = await collectionRequest<
+    Partial<RepositoryReviewFindingsProcessingCollectionPage> & {
+      raw_findings?: RepositoryReviewRawFinding[]
+    }
+  >(
+    collectionListURL(
+      `${automationPath(automationID)}/findings-processing`,
+      collectionInput,
+    ),
+    undefined,
+    signal,
+  )
+  return {
+    automation: normalizeAutomation(page.automation!),
+    repository: page.repository
+      ? normalizeRepositoryReviewSummary(page.repository)
+      : undefined,
+    sources: (page.sources ?? page.raw_findings ?? []).map(normalizeRawFinding),
+    total: page.total ?? 0,
+    next_cursor: page.next_cursor ?? "",
+    canonical_query: page.canonical_query ?? "",
+    query_schema: page.query_schema ?? { fields: [] },
+    findings_processing: normalizeFindingHealthProcessing(
+      page.findings_processing,
+    ),
+    historical_consolidation: page.historical_consolidation
+      ? normalizeHistoricalConsolidation(page.historical_consolidation)
+      : undefined,
+    capabilities: normalizeCapabilities(page.capabilities),
+  }
+}
+
 export async function listRepositoryReviewAutomationRepositoryFindingsPage(
   automationID: string,
   input: CollectionListRequest = {},
@@ -1589,6 +1719,19 @@ export async function getRepositoryReviewRawSource(
   }
 }
 
+export async function getRepositoryReviewFindingsProcessingSource(
+  automationID: string,
+  sourceID: string,
+  signal?: AbortSignal,
+): Promise<RepositoryReviewFindingsProcessingDetail> {
+  const value = await requestJSON<RepositoryReviewFindingsProcessingDetail>(
+    `${automationPath(automationID)}/findings-processing/sources/${encodeURIComponent(sourceID)}`,
+    undefined,
+    signal,
+  )
+  return normalizeFindingsProcessingDetail(value)
+}
+
 export async function getRepositoryReviewFindingsProcessing(
   automationID: string,
   input: {
@@ -1644,6 +1787,44 @@ export async function retryRepositoryReviewRawSource(
     findings_processing: value.findings_processing
       ? normalizeFindingsProcessingCounters(value.findings_processing)
       : undefined,
+  }
+}
+
+export async function retryRepositoryReviewFindingsProcessingSource(
+  automationID: string,
+  sourceID: string,
+  signal?: AbortSignal,
+): Promise<RepositoryReviewFindingsProcessingDetail> {
+  const value = await requestJSON<RepositoryReviewFindingsProcessingDetail>(
+    `${automationPath(automationID)}/findings-processing/sources/${encodeURIComponent(sourceID)}/retry`,
+    jsonMutation("POST", {}),
+    signal,
+  )
+  return normalizeFindingsProcessingDetail(value)
+}
+
+export async function retryRepositoryReviewFindingsProcessingSources(
+  automationID: string,
+  sourceIDs: string[],
+  signal?: AbortSignal,
+): Promise<RepositoryReviewFindingsProcessingRetryResponse> {
+  const value =
+    await requestJSON<RepositoryReviewFindingsProcessingRetryResponse>(
+      `${automationPath(automationID)}/findings-processing/retry`,
+      jsonMutation("POST", { source_ids: sourceIDs }),
+      signal,
+    )
+  return {
+    retried_ids: value.retried_ids ?? [],
+    failures: (value.failures ?? []).map((failure) => ({
+      source_id: failure.source_id ?? "",
+      code: failure.code ?? "retry_failed",
+      message: failure.message ?? "This finding could not be retried.",
+    })),
+    findings_processing: normalizeFindingHealthProcessing(
+      value.findings_processing,
+    ),
+    health: normalizeFindingHealth(value.health),
   }
 }
 
@@ -2282,6 +2463,101 @@ function normalizeRawFinding(
       ? normalizeFixEffort(finding.fix_effort)
       : undefined,
     history: (finding.history ?? []).map((entry) => ({ ...entry })),
+  }
+}
+
+function normalizeFindingsProcessingDetail(
+  value: RepositoryReviewFindingsProcessingDetail,
+): RepositoryReviewFindingsProcessingDetail {
+  return {
+    ...value,
+    automation: normalizeAutomation(value.automation),
+    repository: value.repository
+      ? normalizeRepositoryReviewSummary(value.repository)
+      : undefined,
+    source: normalizeRawFinding(value.source),
+    context: value.context ? normalizeFindingContext(value.context) : undefined,
+    finding: value.finding ? normalizeFinding(value.finding) : undefined,
+    repository_finding: value.repository_finding
+      ? normalizeRepositoryFinding(value.repository_finding)
+      : undefined,
+    findings_processing: value.findings_processing
+      ? normalizeFindingHealthProcessing(value.findings_processing)
+      : undefined,
+    historical_consolidation: value.historical_consolidation
+      ? normalizeHistoricalConsolidation(value.historical_consolidation)
+      : undefined,
+    health: value.health ? normalizeFindingHealth(value.health) : undefined,
+  }
+}
+
+function normalizeFindingHealth(
+  value: Partial<RepositoryReviewFindingHealth>,
+): RepositoryReviewFindingHealth {
+  const run = value.run_findings
+  const repository = value.repository_findings
+  return {
+    run_findings: {
+      total: run?.total ?? 0,
+      pending: run?.pending ?? 0,
+      processing: run?.processing ?? 0,
+      failed: run?.failed ?? 0,
+      needs_review: run?.needs_review ?? 0,
+      associated_new: run?.associated_new ?? 0,
+      associated_existing: run?.associated_existing ?? 0,
+      unrepresented: run?.unrepresented ?? 0,
+    },
+    repository_findings: {
+      total: repository?.total ?? 0,
+      provisional: repository?.provisional ?? 0,
+      validation_failed: repository?.validation_failed ?? 0,
+      issue_conflicts: repository?.issue_conflicts ?? 0,
+    },
+    findings_processing: normalizeFindingHealthProcessing(
+      value.findings_processing,
+    ),
+    historical_consolidation: normalizeHistoricalConsolidation(
+      value.historical_consolidation,
+    ),
+    updated_at: value.updated_at ?? "",
+  }
+}
+
+function normalizeFindingHealthProcessing(
+  counters?: Partial<RepositoryReviewFindingHealthProcessing>,
+): RepositoryReviewFindingHealthProcessing {
+  return {
+    total: counters?.total ?? 0,
+    pending: counters?.pending ?? 0,
+    processing: counters?.processing ?? 0,
+    failed: counters?.failed ?? 0,
+    completed: counters?.completed ?? 0,
+  }
+}
+
+function normalizeHistoricalConsolidation(
+  value?: Partial<RepositoryReviewHistoricalConsolidation>,
+): RepositoryReviewHistoricalConsolidation {
+  const validStatuses = new Set<RepositoryReviewHistoricalConsolidationStatus>([
+    "not_required",
+    "pending",
+    "replaying",
+    "merging",
+    "failed",
+    "completed",
+  ])
+  const required = value?.required ?? false
+  const status = validStatuses.has(
+    value?.status as RepositoryReviewHistoricalConsolidationStatus,
+  )
+    ? (value?.status as RepositoryReviewHistoricalConsolidationStatus)
+    : required
+      ? "pending"
+      : "not_required"
+  return {
+    required,
+    status,
+    retryable: value?.retryable ?? false,
   }
 }
 

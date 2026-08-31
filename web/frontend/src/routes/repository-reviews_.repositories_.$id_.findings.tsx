@@ -5,6 +5,7 @@ import { RepositoryReviewRepositoryFindingsPage } from "@/components/repository-
 import {
   normalizeRepositoryReviewIssuesSearch,
   normalizeRepositoryReviewRepositoryFindingsSearch,
+  normalizeRepositoryReviewRunFindingsSearch,
   repositoryReviewDefaultQuery,
   repositoryReviewParentNavigationState,
   repositoryReviewParentSearchFromState,
@@ -59,6 +60,16 @@ function RepositoryReviewRepositoryFindingsRoute() {
           to: "/repository-reviews/repositories/$id/findings/$findingId",
           params: { id, findingId: findingID },
           search,
+          state: true,
+        })
+      }
+      onOpenIncompleteFindings={() =>
+        void navigate({
+          to: "/repository-reviews/$id/findings",
+          params: { id },
+          search: normalizeRepositoryReviewRunFindingsSearch({
+            q: "run_status IN (pending, processing, failed) ORDER BY updated DESC",
+          }),
           state: true,
         })
       }
