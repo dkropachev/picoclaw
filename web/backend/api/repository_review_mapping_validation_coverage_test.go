@@ -949,6 +949,11 @@ func TestRepositoryAdjudicationOutputBoundaryFailures(t *testing.T) {
 		{"structured_valid": false},
 		{"structured_valid": true, "structured": make(chan int)},
 		{"structured_valid": true, "structured": map[string]any{
+			"decision": "same", "candidate_id": "unknown", "confidence": .9,
+			"matching_anchors": []any{}, "conflicting_anchors": []any{},
+			"explanation": "same",
+		}},
+		{"structured_valid": true, "structured": map[string]any{
 			"decision": "same", "candidate_id": "opaque", "confidence": .9,
 			"matching_anchors": []any{}, "conflicting_anchors": []any{},
 			"explanation": "same", "unexpected": true,
