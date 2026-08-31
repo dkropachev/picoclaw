@@ -132,8 +132,9 @@ func NewRepositoryReviewFileAttribution(
 
 // PreviewRepositoryReviewFileAttributionCredits derives the exact legacy
 // attribution credits eligible for one recovered campaign without mutating
-// state. Supplied records are evaluated together with retained records, so the
-// same function supports both a dry run and an idempotent post-merge replay.
+// state. Only supplied records may authorize credit: the caller must rederive
+// them from exact workflow evidence. Retained records still participate in the
+// immutable merge conflict check, but cannot silently widen the credit plan.
 func PreviewRepositoryReviewFileAttributionCredits(
 	state RepositoryState,
 	fence RepositoryReviewFileAttributionCreditFence,
@@ -154,9 +155,7 @@ func PreviewRepositoryReviewFileAttributionCredits(
 		return preview, ErrInvalidPlan
 	}
 
-	attributions, err := repositoryReviewFileAttributionCreditCandidates(
-		state.FileAttributions, supplied,
-	)
+	attributions, err := repositoryReviewFileAttributionCreditCandidates(supplied)
 	if err != nil {
 		return preview, err
 	}
@@ -329,14 +328,13 @@ func normalizeRepositoryReviewFileAttributionCreditFence(
 }
 
 func repositoryReviewFileAttributionCreditCandidates(
-	retained []RepositoryReviewFileAttribution,
 	supplied []RepositoryReviewFileAttribution,
 ) ([]RepositoryReviewFileAttribution, error) {
-	if len(retained)+len(supplied) > maxRepositoryReviewFileAttributions*2 {
+	if len(supplied) > maxRepositoryReviewFileAttributions {
 		return nil, ErrInvalidPlan
 	}
-	byID := make(map[string]RepositoryReviewFileAttribution, len(retained)+len(supplied))
-	out := make([]RepositoryReviewFileAttribution, 0, len(retained)+len(supplied))
+	byID := make(map[string]RepositoryReviewFileAttribution, len(supplied))
+	out := make([]RepositoryReviewFileAttribution, 0, len(supplied))
 	appendCandidate := func(input RepositoryReviewFileAttribution) error {
 		attribution, err := NewRepositoryReviewFileAttribution(input)
 		if err != nil {
@@ -351,11 +349,6 @@ func repositoryReviewFileAttributionCreditCandidates(
 		byID[attribution.ID] = attribution
 		out = append(out, attribution)
 		return nil
-	}
-	for _, attribution := range retained {
-		if err := appendCandidate(attribution); err != nil {
-			return nil, err
-		}
 	}
 	for _, attribution := range supplied {
 		if err := appendCandidate(attribution); err != nil {

@@ -38,7 +38,7 @@ type RepositoryReviewFileAttributionBackfillReport struct {
 	CampaignID                    string `json:"campaign_id,omitempty"`
 	CampaignAssignmentCredits     int    `json:"campaign_assignment_credits"`
 	NewCampaignAssignmentCredits  int    `json:"new_campaign_assignment_credits"`
-	CampaignInspectedFiles        int    `json:"campaign_inspected_files"`
+	CampaignAttributedFiles       int    `json:"campaign_attributed_files"`
 	NewCampaignInspectedFiles     int    `json:"new_campaign_inspected_files"`
 	ProjectedCompletedAssignments int    `json:"projected_completed_assignments"`
 	ProjectedPendingAssignments   int    `json:"projected_pending_assignments"`
@@ -73,24 +73,35 @@ type repositoryReviewFileAttributionSourceRun struct {
 }
 
 type repositoryReviewFileAttributionDigestCounts struct {
-	ConfiguredRuns             int `json:"configured_runs"`
-	RecoveredRuns              int `json:"recovered_runs"`
-	AllowedNonLedgerRuns       int `json:"allowed_non_ledger_runs"`
-	ChildAttempts              int `json:"child_attempts"`
-	SuccessfulChildren         int `json:"successful_children"`
-	FailedChildren             int `json:"failed_children"`
-	AttributionRecords         int `json:"attribution_records"`
-	AcknowledgementOccurrences int `json:"acknowledgement_occurrences"`
-	UniqueFiles                int `json:"unique_files"`
-	UniqueFileAssignments      int `json:"unique_file_assignments"`
-	CampaignAssignmentCredits  int `json:"campaign_assignment_credits"`
-	CampaignInspectedFiles     int `json:"campaign_inspected_files"`
+	ConfiguredRuns                int `json:"configured_runs"`
+	RecoveredRuns                 int `json:"recovered_runs"`
+	AllowedNonLedgerRuns          int `json:"allowed_non_ledger_runs"`
+	ChildAttempts                 int `json:"child_attempts"`
+	SuccessfulChildren            int `json:"successful_children"`
+	FailedChildren                int `json:"failed_children"`
+	AttributionRecords            int `json:"attribution_records"`
+	AcknowledgementOccurrences    int `json:"acknowledgement_occurrences"`
+	UniqueFiles                   int `json:"unique_files"`
+	UniqueFileAssignments         int `json:"unique_file_assignments"`
+	CampaignAssignmentCredits     int `json:"campaign_assignment_credits"`
+	CampaignAttributedFiles       int `json:"campaign_attributed_files"`
+	ProjectedCompletedAssignments int `json:"projected_completed_assignments"`
+	ProjectedPendingAssignments   int `json:"projected_pending_assignments"`
+	ProjectedInspectedFiles       int `json:"projected_inspected_files"`
+	ProjectedCompletedFiles       int `json:"projected_completed_files"`
 }
 
 type repositoryReviewFileAttributionDigestCampaignCredit struct {
-	AutomationID string                                                      `json:"automation_id"`
-	CampaignID   string                                                      `json:"campaign_id"`
-	Credits      []repoaudit.RepositoryReviewFileAttributionAssignmentCredit `json:"credits"`
+	AutomationID      string                                                      `json:"automation_id"`
+	CampaignID        string                                                      `json:"campaign_id"`
+	RecoveryDigest    string                                                      `json:"recovery_digest"`
+	CommitSHA         string                                                      `json:"commit_sha"`
+	InventoryHash     string                                                      `json:"inventory_hash"`
+	ProfileHash       string                                                      `json:"profile_hash"`
+	ScopeDigest       string                                                      `json:"scope_digest"`
+	SelectedFiles     int                                                         `json:"selected_files"`
+	AssignmentCatalog []repoaudit.RepositoryReviewAssignment                      `json:"assignment_catalog"`
+	Credits           []repoaudit.RepositoryReviewFileAttributionAssignmentCredit `json:"credits"`
 }
 
 type repositoryReviewFileAttributionDigestEnvelope struct {
@@ -402,7 +413,7 @@ func prepareRepositoryReviewFileAttributionBackfill(
 		prepared.report.CampaignID = campaign.ID
 		prepared.report.CampaignAssignmentCredits = preview.EffectiveAssignmentCredits
 		prepared.report.NewCampaignAssignmentCredits = preview.NewAssignmentCredits
-		prepared.report.CampaignInspectedFiles = preview.EffectiveInspectedFiles
+		prepared.report.CampaignAttributedFiles = preview.EffectiveInspectedFiles
 		prepared.report.NewCampaignInspectedFiles = preview.NewInspectedFiles
 		prepared.report.ProjectedCompletedAssignments = preview.ProjectedCompletedAssignments
 		prepared.report.ProjectedPendingAssignments = preview.ProjectedPendingAssignments
@@ -411,9 +422,19 @@ func prepareRepositoryReviewFileAttributionBackfill(
 	}
 	var campaignCredit *repositoryReviewFileAttributionDigestCampaignCredit
 	if prepared.campaignCredit != nil {
+		campaign := state.CurrentCampaign
 		campaignCredit = &repositoryReviewFileAttributionDigestCampaignCredit{
-			AutomationID: prepared.campaignCredit.AutomationID,
-			CampaignID:   prepared.campaignCredit.CampaignID,
+			AutomationID:   prepared.campaignCredit.AutomationID,
+			CampaignID:     prepared.campaignCredit.CampaignID,
+			RecoveryDigest: campaign.RecoveryDigest,
+			CommitSHA:      campaign.CommitSHA,
+			InventoryHash:  campaign.InventoryHash,
+			ProfileHash:    campaign.ProfileHash,
+			ScopeDigest:    campaign.ScopeDigest,
+			SelectedFiles:  campaign.SelectedFiles,
+			AssignmentCatalog: append(
+				[]repoaudit.RepositoryReviewAssignment(nil), campaign.AssignmentCatalog...,
+			),
 			Credits: append(
 				[]repoaudit.RepositoryReviewFileAttributionAssignmentCredit(nil),
 				prepared.creditPreview.Credits...,
@@ -428,18 +449,22 @@ func prepareRepositoryReviewFileAttributionBackfill(
 		RunIDs:           append([]string(nil), automation.RunIDs...),
 		Runs:             sourceRuns,
 		Counts: repositoryReviewFileAttributionDigestCounts{
-			ConfiguredRuns:             prepared.report.ConfiguredRuns,
-			RecoveredRuns:              prepared.report.RecoveredRuns,
-			AllowedNonLedgerRuns:       prepared.report.AllowedNonLedgerRuns,
-			ChildAttempts:              prepared.report.ChildAttempts,
-			SuccessfulChildren:         prepared.report.SuccessfulChildren,
-			FailedChildren:             prepared.report.FailedChildren,
-			AttributionRecords:         prepared.report.AttributionRecords,
-			AcknowledgementOccurrences: prepared.report.AcknowledgementOccurrences,
-			UniqueFiles:                prepared.report.UniqueFiles,
-			UniqueFileAssignments:      prepared.report.UniqueFileAssignments,
-			CampaignAssignmentCredits:  prepared.report.CampaignAssignmentCredits,
-			CampaignInspectedFiles:     prepared.report.CampaignInspectedFiles,
+			ConfiguredRuns:                prepared.report.ConfiguredRuns,
+			RecoveredRuns:                 prepared.report.RecoveredRuns,
+			AllowedNonLedgerRuns:          prepared.report.AllowedNonLedgerRuns,
+			ChildAttempts:                 prepared.report.ChildAttempts,
+			SuccessfulChildren:            prepared.report.SuccessfulChildren,
+			FailedChildren:                prepared.report.FailedChildren,
+			AttributionRecords:            prepared.report.AttributionRecords,
+			AcknowledgementOccurrences:    prepared.report.AcknowledgementOccurrences,
+			UniqueFiles:                   prepared.report.UniqueFiles,
+			UniqueFileAssignments:         prepared.report.UniqueFileAssignments,
+			CampaignAssignmentCredits:     prepared.report.CampaignAssignmentCredits,
+			CampaignAttributedFiles:       prepared.report.CampaignAttributedFiles,
+			ProjectedCompletedAssignments: prepared.report.ProjectedCompletedAssignments,
+			ProjectedPendingAssignments:   prepared.report.ProjectedPendingAssignments,
+			ProjectedInspectedFiles:       prepared.report.ProjectedInspectedFiles,
+			ProjectedCompletedFiles:       prepared.report.ProjectedCompletedFiles,
 		},
 		Attributions: prepared.attributions, CampaignCredit: campaignCredit,
 	}

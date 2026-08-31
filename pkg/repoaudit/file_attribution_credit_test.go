@@ -149,7 +149,7 @@ func TestRepositoryReviewFileAttributionCampaignCreditAtomicAndIdempotent(t *tes
 	}
 }
 
-func TestRepositoryReviewFileAttributionCampaignCreditStoredOnlyAndFullCompletion(t *testing.T) {
+func TestRepositoryReviewFileAttributionCampaignCreditRetainedReplayAndFullCompletion(t *testing.T) {
 	fixture := newRepositoryReviewAttributionCreditFixture(t)
 	all := append([]RepositoryReviewFileAttribution(nil), fixture.attributions...)
 	for index, focus := range []string{
@@ -181,12 +181,12 @@ func TestRepositoryReviewFileAttributionCampaignCreditStoredOnlyAndFullCompletio
 	credited, err := fixture.store.MergeRepositoryReviewFileAttributions(
 		t.Context(), MergeRepositoryReviewFileAttributionsRequest{
 			Repository: fixture.repository, ExpectedVersion: stored.Version,
-			CampaignCredit: &fence,
+			Attributions: all, CampaignCredit: &fence,
 		},
 	)
 	if err != nil || credited.Version != stored.Version+1 ||
 		credited.ReviewVersion != stored.ReviewVersion+1 {
-		t.Fatalf("stored-only credit = %#v err=%v", credited, err)
+		t.Fatalf("retained replay credit = %#v err=%v", credited, err)
 	}
 	progress := CurrentCampaignAssignmentProgress(credited, fixture.campaignID)
 	metrics := CurrentCampaignMetrics(credited, fixture.campaignID, nil, time.Time{})
@@ -311,6 +311,22 @@ func TestRepositoryReviewFileAttributionCampaignCreditEvidenceGates(t *testing.T
 				}
 				fixture.state.CurrentCampaign.AssignmentCatalog = catalog
 			},
+		},
+		{
+			name: "unrederived retained evidence ignored",
+			mutate: func(t *testing.T, fixture *repositoryReviewAttributionCreditFixture) {
+				extra := fixture.attributions[0]
+				extra.ID = ""
+				extra.ChildIndex = 99
+				extra.FocusID = RepositoryReviewFocusIntegrationValidation
+				extra.AcknowledgedFiles = append([]FileRef(nil), fixture.files[:1]...)
+				normalized, err := NewRepositoryReviewFileAttribution(extra)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fixture.state.FileAttributions = []RepositoryReviewFileAttribution{normalized}
+			},
+			wantCredits: 2,
 		},
 		{
 			name: "inexact campaign",

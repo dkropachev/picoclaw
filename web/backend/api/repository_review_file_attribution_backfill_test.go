@@ -398,7 +398,7 @@ func TestBackfillRepositoryReviewFileAttributionsRepairsRecoveredCampaignCredits
 		RepositoryReviewFileAttributionBackfillOptions{},
 	)
 	if err != nil || dry.CampaignID != campaignID || dry.CampaignAssignmentCredits != 2 ||
-		dry.NewCampaignAssignmentCredits != 2 || dry.CampaignInspectedFiles != 2 ||
+		dry.NewCampaignAssignmentCredits != 2 || dry.CampaignAttributedFiles != 2 ||
 		dry.NewCampaignInspectedFiles != 2 || dry.ProjectedCompletedAssignments != 2 ||
 		dry.ProjectedPendingAssignments != 6 || dry.ProjectedInspectedFiles != 2 ||
 		dry.ProjectedCompletedFiles != 0 || dry.ReviewVersionBefore != zeroCreditState.ReviewVersion ||

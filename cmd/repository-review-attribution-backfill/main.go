@@ -14,18 +14,22 @@ import (
 )
 
 type expectedCounts struct {
-	configuredRuns            int
-	recoveredRuns             int
-	nonLedgerRuns             int
-	childAttempts             int
-	successfulChildren        int
-	failedChildren            int
-	attributionRecords        int
-	acknowledgements          int
-	uniqueFiles               int
-	uniqueFileAssignments     int
-	campaignAssignmentCredits int
-	campaignInspectedFiles    int
+	configuredRuns                int
+	recoveredRuns                 int
+	nonLedgerRuns                 int
+	childAttempts                 int
+	successfulChildren            int
+	failedChildren                int
+	attributionRecords            int
+	acknowledgements              int
+	uniqueFiles                   int
+	uniqueFileAssignments         int
+	campaignAssignmentCredits     int
+	campaignAttributedFiles       int
+	projectedCompletedAssignments int
+	projectedPendingAssignments   int
+	projectedInspectedFiles       int
+	projectedCompletedFiles       int
 }
 
 func main() {
@@ -87,10 +91,34 @@ func run(
 		"expected exact legacy credits mapped into the current campaign",
 	)
 	flags.IntVar(
-		&expected.campaignInspectedFiles,
-		"expect-campaign-inspected-files",
+		&expected.campaignAttributedFiles,
+		"expect-campaign-attributed-files",
 		-1,
-		"expected exact files inspected in the current campaign after credit",
+		"expected exact files carrying legacy attribution credit",
+	)
+	flags.IntVar(
+		&expected.projectedCompletedAssignments,
+		"expect-projected-completed-assignments",
+		-1,
+		"expected total completed assignments after repair",
+	)
+	flags.IntVar(
+		&expected.projectedPendingAssignments,
+		"expect-projected-pending-assignments",
+		-1,
+		"expected total pending assignments after repair",
+	)
+	flags.IntVar(
+		&expected.projectedInspectedFiles,
+		"expect-projected-inspected-files",
+		-1,
+		"expected total inspected files after repair",
+	)
+	flags.IntVar(
+		&expected.projectedCompletedFiles,
+		"expect-projected-completed-files",
+		-1,
+		"expected total fully reviewed files after repair",
 	)
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -166,9 +194,29 @@ func compareExpectedCounts(
 			expected.campaignAssignmentCredits,
 		},
 		{
-			"campaign inspected files",
-			report.CampaignInspectedFiles,
-			expected.campaignInspectedFiles,
+			"campaign attributed files",
+			report.CampaignAttributedFiles,
+			expected.campaignAttributedFiles,
+		},
+		{
+			"projected completed assignments",
+			report.ProjectedCompletedAssignments,
+			expected.projectedCompletedAssignments,
+		},
+		{
+			"projected pending assignments",
+			report.ProjectedPendingAssignments,
+			expected.projectedPendingAssignments,
+		},
+		{
+			"projected inspected files",
+			report.ProjectedInspectedFiles,
+			expected.projectedInspectedFiles,
+		},
+		{
+			"projected completed files",
+			report.ProjectedCompletedFiles,
+			expected.projectedCompletedFiles,
 		},
 	}
 	for _, check := range checks {

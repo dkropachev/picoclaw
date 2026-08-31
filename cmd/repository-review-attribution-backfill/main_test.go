@@ -54,7 +54,9 @@ func TestRunDryAndApply(t *testing.T) {
 		"--expect-successful-children=1", "--expect-failed-children=3",
 		"--expect-attribution-records=1", "--expect-acknowledgements=2",
 		"--expect-unique-files=2", "--expect-file-assignments=2",
-		"--expect-campaign-assignment-credits=0", "--expect-campaign-inspected-files=0",
+		"--expect-campaign-assignment-credits=0", "--expect-campaign-attributed-files=0",
+		"--expect-projected-completed-assignments=0", "--expect-projected-pending-assignments=0",
+		"--expect-projected-inspected-files=0", "--expect-projected-completed-files=0",
 	}
 	if err := run(args, &stdout, &stderr, backfill); err != nil || len(calls) != 2 ||
 		calls[0].Apply || !calls[1].Apply || calls[1].ExpectedDigest != report.Digest ||
@@ -147,7 +149,9 @@ func TestRunApplyFailuresAndEncoding(t *testing.T) {
 		"--expect-child-attempts=1", "--expect-successful-children=1", "--expect-failed-children=0",
 		"--expect-attribution-records=1", "--expect-acknowledgements=1", "--expect-unique-files=1",
 		"--expect-file-assignments=1", "--expect-campaign-assignment-credits=0",
-		"--expect-campaign-inspected-files=0",
+		"--expect-campaign-attributed-files=0", "--expect-projected-completed-assignments=0",
+		"--expect-projected-pending-assignments=0", "--expect-projected-inspected-files=0",
+		"--expect-projected-completed-files=0",
 	}
 	t.Run("missing expectation", func(t *testing.T) {
 		err := run(
@@ -158,7 +162,7 @@ func TestRunApplyFailuresAndEncoding(t *testing.T) {
 				return base, nil
 			},
 		)
-		if err == nil || !strings.Contains(err.Error(), "expectation for campaign inspected files") {
+		if err == nil || !strings.Contains(err.Error(), "expectation for projected completed files") {
 			t.Fatalf("error=%v", err)
 		}
 	})
@@ -239,19 +243,23 @@ func TestCompareExpectedCountsAllFields(t *testing.T) {
 		ChildAttempts: 4, SuccessfulChildren: 5, FailedChildren: 6,
 		AttributionRecords: 7, AcknowledgementOccurrences: 8,
 		UniqueFiles: 9, UniqueFileAssignments: 10,
-		CampaignAssignmentCredits: 11, CampaignInspectedFiles: 12,
+		CampaignAssignmentCredits: 11, CampaignAttributedFiles: 12,
+		ProjectedCompletedAssignments: 13, ProjectedPendingAssignments: 14,
+		ProjectedInspectedFiles: 15, ProjectedCompletedFiles: 16,
 	}
 	expected := expectedCounts{
 		configuredRuns: 1, recoveredRuns: 2, nonLedgerRuns: 3,
 		childAttempts: 4, successfulChildren: 5, failedChildren: 6,
 		attributionRecords: 7, acknowledgements: 8, uniqueFiles: 9,
 		uniqueFileAssignments: 10, campaignAssignmentCredits: 11,
-		campaignInspectedFiles: 12,
+		campaignAttributedFiles: 12, projectedCompletedAssignments: 13,
+		projectedPendingAssignments: 14, projectedInspectedFiles: 15,
+		projectedCompletedFiles: 16,
 	}
 	if err := compareExpectedCounts(report, expected); err != nil {
 		t.Fatal(err)
 	}
-	for index := range 12 {
+	for index := range 16 {
 		candidate := expected
 		fields := []*int{
 			&candidate.configuredRuns,
@@ -265,7 +273,11 @@ func TestCompareExpectedCountsAllFields(t *testing.T) {
 			&candidate.uniqueFiles,
 			&candidate.uniqueFileAssignments,
 			&candidate.campaignAssignmentCredits,
-			&candidate.campaignInspectedFiles,
+			&candidate.campaignAttributedFiles,
+			&candidate.projectedCompletedAssignments,
+			&candidate.projectedPendingAssignments,
+			&candidate.projectedInspectedFiles,
+			&candidate.projectedCompletedFiles,
 		}
 		*fields[index]++
 		if err := compareExpectedCounts(report, candidate); err == nil {
