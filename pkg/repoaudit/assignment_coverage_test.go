@@ -904,7 +904,8 @@ func TestRepositoryReviewAssignmentCheckpointPersistenceCoverage(t *testing.T) {
 	}
 	validFinding := repositoryReviewCampaignFinding(fixture.files[0], "duplicate in one checkpoint")
 	observation := Observation{
-		Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: fixture.catalog[0].FocusID,
+		Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+		Reviewer:   fixture.catalog[0].FocusID,
 		ScopeFiles: []FileRef{fixture.files[0]},
 		RawDigest:  "sha256:" + strings.Repeat("e", 64),
 		Findings:   []FindingCandidate{validFinding, validFinding},
@@ -952,7 +953,8 @@ func TestRepositoryReviewAssignmentCheckpointPersistenceCoverage(t *testing.T) {
 			_, err := persistRepositoryReviewCheckpointObservation(
 				&candidateState, fixture.plan, "bad-run", fixture.catalog[0].ID,
 				Observation{
-					Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: fixture.catalog[0].FocusID,
+					Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+					Reviewer:   fixture.catalog[0].FocusID,
 					ScopeFiles: fixture.files, RawDigest: "sha256:" + strings.Repeat("f", 64),
 					Findings: []FindingCandidate{finding},
 				},

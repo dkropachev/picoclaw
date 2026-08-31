@@ -630,19 +630,21 @@ func TestNativeRepositoryReviewEvidenceContracts(t *testing.T) {
 		{name: "duplicate", structured: map[string]any{"reviewedFiles": []any{"service.go", "service.go"}}, want: "duplicated"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := nativeRepositoryReviewAcknowledgedPaths(test.structured, []repoaudit.FileRef{file}, complete)
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("acknowledgement error = %v, want %q", err, test.want)
+			_, acknowledgementErr := nativeRepositoryReviewAcknowledgedPaths(
+				test.structured, []repoaudit.FileRef{file}, complete,
+			)
+			if acknowledgementErr == nil || !strings.Contains(acknowledgementErr.Error(), test.want) {
+				t.Fatalf("acknowledgement error = %v, want %q", acknowledgementErr, test.want)
 			}
 		})
 	}
 	if got := nativeRepositoryReviewCompletedScopePaths("bad"); got != nil {
 		t.Fatalf("invalid completed scope = %#v", got)
 	}
-	if _, err := nativeRepositoryReviewManagedChildProvenance(map[string]any{
+	if _, provenanceErr := nativeRepositoryReviewManagedChildProvenance(map[string]any{
 		"model": map[string]any{"selected": "review", "actual": "provider/model"},
-	}, false); err == nil || !strings.Contains(err.Error(), "incomplete model provenance") {
-		t.Fatalf("partial managed provenance error = %v", err)
+	}, false); provenanceErr == nil || !strings.Contains(provenanceErr.Error(), "incomplete model provenance") {
+		t.Fatalf("partial managed provenance error = %v", provenanceErr)
 	}
 	legacyProvenance, err := nativeRepositoryReviewManagedChildProvenance(map[string]any{
 		"model": map[string]any{"selected": "legacy-review"},

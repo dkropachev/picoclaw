@@ -1219,29 +1219,33 @@ func TestHistoricalReplayAdditionalAdjacentRepositoryCoverage(t *testing.T) {
 			DeduplicationSnapshot: &checkpointSnapshot,
 		},
 	}
+	checkpointObservation := Observation{
+		Model: "provider/model", ModelAlias: "model", Account: "review-account",
+		Reviewer: "reviewer",
+	}
 	if err := persistRawRepositoryReviewCheckpointFinding(
 		&checkpointState, "raw", "bucket", plan, "run", "assignment", "context",
-		Observation{Model: "provider/model", ModelAlias: "model", Account: "review-account", Reviewer: "reviewer"}, file, candidate, now,
+		checkpointObservation, file, candidate, now,
 	); err != nil {
 		t.Fatal(err)
 	}
 	if err := persistRawRepositoryReviewCheckpointFinding(
 		&checkpointState, "raw", "bucket", plan, "run", "assignment", "context",
-		Observation{Model: "provider/model", ModelAlias: "model", Account: "review-account", Reviewer: "reviewer"}, file, candidate, now,
+		checkpointObservation, file, candidate, now,
 	); err != nil {
 		t.Fatalf("idempotent raw replay error=%v", err)
 	}
 	checkpointState.DeduplicationJobs = nil
 	if err := persistRawRepositoryReviewCheckpointFinding(
 		&checkpointState, "raw", "bucket", plan, "run", "assignment", "context",
-		Observation{Model: "provider/model", ModelAlias: "model", Account: "review-account", Reviewer: "reviewer"}, file, candidate, now,
+		checkpointObservation, file, candidate, now,
 	); err == nil {
 		t.Fatal("raw without job accepted")
 	}
 	candidate.Title = "changed"
 	if err := persistRawRepositoryReviewCheckpointFinding(
 		&checkpointState, "raw", "bucket", plan, "run", "assignment", "context",
-		Observation{Model: "provider/model", ModelAlias: "model", Account: "review-account", Reviewer: "reviewer"}, file, candidate, now,
+		checkpointObservation, file, candidate, now,
 	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("conflicting raw replay error=%v", err)
 	}

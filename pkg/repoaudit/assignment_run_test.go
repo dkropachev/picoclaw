@@ -54,7 +54,8 @@ func TestRepositoryReviewAssignmentCheckpointsAreDurableAndMissingOnly(t *testin
 		t.Fatal(err)
 	}
 	observation := Observation{
-		Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: first.FocusID, ScopeFiles: first.Files,
+		Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+		Reviewer: first.FocusID, ScopeFiles: first.Files,
 		RawDigest: "sha256:" + strings.Repeat("9", 64),
 		Findings:  []FindingCandidate{repositoryReviewCampaignFinding(files[0], "durable finding")},
 	}
@@ -88,7 +89,8 @@ func TestRepositoryReviewAssignmentCheckpointsAreDurableAndMissingOnly(t *testin
 		Plan: plan, RunID: "run-one", AssignmentID: second.AssignmentID,
 		Digest: "sha256:" + strings.Repeat("3", 64), AcknowledgedFiles: files,
 		Observation: Observation{
-			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: second.FocusID, ScopeFiles: second.Files,
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+			Reviewer: second.FocusID, ScopeFiles: second.Files,
 			RawDigest: "sha256:" + strings.Repeat("8", 64),
 		},
 	}
@@ -102,7 +104,8 @@ func TestRepositoryReviewAssignmentCheckpointsAreDurableAndMissingOnly(t *testin
 			Digest:            "sha256:" + strings.Repeat("4", 64),
 			AcknowledgedFiles: []FileRef{files[0]},
 			Observation: Observation{
-				Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: third.FocusID, ScopeFiles: third.Files,
+				Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+				Reviewer: third.FocusID, ScopeFiles: third.Files,
 				RawDigest: "sha256:" + strings.Repeat("6", 64),
 				Findings: []FindingCandidate{{
 					Severity: "high", Title: "unconfirmed", File: files[0].Path,
@@ -177,7 +180,10 @@ func TestRepositoryReviewConcurrentAssignmentCheckpointsMergeAndSurviveInterrupt
 					Digest:            "sha256:" + strings.Repeat(string(rune('1'+index)), 64),
 					AcknowledgedFiles: []FileRef{file},
 					Observation: Observation{
-						Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: assignmentPlan.FocusID,
+						Model:      "provider/review-a",
+						ModelAlias: "review-a",
+						Account:    "review-account",
+						Reviewer:   assignmentPlan.FocusID,
 						ScopeFiles: assignmentPlan.Files,
 						RawDigest:  "sha256:" + strings.Repeat("7", 64),
 					},
@@ -204,7 +210,8 @@ func TestRepositoryReviewConcurrentAssignmentCheckpointsMergeAndSurviveInterrupt
 			Digest:            "sha256:" + strings.Repeat("1", 64),
 			AcknowledgedFiles: []FileRef{file},
 			Observation: Observation{
-				Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: firstPlan.FocusID, ScopeFiles: firstPlan.Files,
+				Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+				Reviewer: firstPlan.FocusID, ScopeFiles: firstPlan.Files,
 				RawDigest: "sha256:" + strings.Repeat("7", 64),
 			},
 		})
@@ -216,7 +223,8 @@ func TestRepositoryReviewConcurrentAssignmentCheckpointsMergeAndSurviveInterrupt
 		Digest:            "sha256:" + strings.Repeat("1", 64),
 		AcknowledgedFiles: []FileRef{file},
 		Observation: Observation{
-			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: firstPlan.FocusID, ScopeFiles: firstPlan.Files,
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+			Reviewer: firstPlan.FocusID, ScopeFiles: firstPlan.Files,
 			RawDigest: "sha256:" + strings.Repeat("7", 64), Summary: "different output",
 		},
 	}
@@ -262,7 +270,8 @@ func TestRepositoryReviewConcurrentAssignmentCheckpointsMergeAndSurviveInterrupt
 			Digest:            "sha256:" + strings.Repeat("1", 64),
 			AcknowledgedFiles: []FileRef{file},
 			Observation: Observation{
-				Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: firstPlan.FocusID, ScopeFiles: firstPlan.Files,
+				Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+				Reviewer: firstPlan.FocusID, ScopeFiles: firstPlan.Files,
 				RawDigest: "sha256:" + strings.Repeat("7", 64),
 			},
 		})
@@ -348,8 +357,12 @@ func TestRepositoryReviewFinalizedCheckpointReplayUsesFrozenReviewableSubset(t *
 		Digest:            "sha256:" + strings.Repeat("a", 64),
 		AcknowledgedFiles: files[:1],
 		Observation: Observation{
-			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: assignmentPlan.FocusID,
-			ScopeFiles: files[:1], RawDigest: "sha256:" + strings.Repeat("b", 64),
+			Model:      "provider/review-a",
+			ModelAlias: "review-a",
+			Account:    "review-account",
+			Reviewer:   assignmentPlan.FocusID,
+			ScopeFiles: files[:1],
+			RawDigest:  "sha256:" + strings.Repeat("b", 64),
 		},
 	}
 	if _, err := store.CheckpointRepositoryReviewAssignment(ctx, checkpoint); err != nil {
