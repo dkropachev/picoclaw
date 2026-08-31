@@ -21,7 +21,10 @@ import {
 } from "@/api/repository-reviews"
 import { CollectionDetailShell } from "@/components/collection"
 import { githubRepositoryPath } from "@/components/repository-reviews/repository-review-actions"
-import { repositoryReviewIssueStateLabel } from "@/components/repository-reviews/repository-review-issue-state"
+import {
+  repositoryReviewIssueStateLabel,
+  safeRepositoryReviewGitHubIssueURL,
+} from "@/components/repository-reviews/repository-review-issue-state"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -156,7 +159,7 @@ export function RepositoryReviewIssuePage({
     !issue?.read_only &&
     detail?.capabilities?.can_publish === true
   const publishBlockers = detail?.capabilities?.publish_blockers ?? []
-  const externalURL = safeGitHubIssueURL(
+  const externalURL = safeRepositoryReviewGitHubIssueURL(
     issue?.external_url,
     detail?.automation.repository,
   )
@@ -571,42 +574,4 @@ function profileSnapshotLabel(
 
 function shortIdentity(value: string): string {
   return value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value
-}
-
-function safeHTTPSURL(value: string | undefined): string | undefined {
-  if (!value) return undefined
-  try {
-    const url = new URL(value)
-    return url.protocol === "https:" && !url.username && !url.password
-      ? url.toString()
-      : undefined
-  } catch {
-    return undefined
-  }
-}
-
-function safeGitHubIssueURL(
-  value: string | undefined,
-  repository: string | undefined,
-): string | undefined {
-  const safeURL = safeHTTPSURL(value)
-  const repositoryPath = repository
-    ? githubRepositoryPath(repository)?.toLowerCase()
-    : undefined
-  if (!safeURL || !repositoryPath) return undefined
-  const url = new URL(safeURL)
-  const segments = url.pathname.split("/").filter(Boolean)
-  if (
-    url.hostname.toLowerCase() !== "github.com" ||
-    url.port ||
-    url.search ||
-    url.hash ||
-    segments.length !== 4 ||
-    `${segments[0]}/${segments[1]}`.toLowerCase() !== repositoryPath ||
-    segments[2]?.toLowerCase() !== "issues" ||
-    !/^[1-9][0-9]*$/u.test(segments[3] ?? "")
-  ) {
-    return undefined
-  }
-  return safeURL
 }

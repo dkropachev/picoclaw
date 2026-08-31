@@ -212,6 +212,10 @@ const repositoryReviewDetailStates = [
     route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/findings/${repositoryReviewVisualIDs.finding}`,
   },
   {
+    key: "repository-review-repository-finding-detail",
+    route: `/repository-reviews/repositories/${repositoryReviewVisualIDs.automation}/findings/${repositoryReviewVisualIDs.provisionalRepositoryFinding}`,
+  },
+  {
     key: "repository-review-issue-detail",
     route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/issues/${repositoryReviewVisualIDs.issue}`,
   },

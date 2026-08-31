@@ -1169,10 +1169,17 @@ export const repositoryReviewVisualIDs = {
   automation: "rra_visual",
   finding: "rdf_visual_1",
   secondFinding: "rdf_visual_2",
+  attentionFinding: "rdf_visual_attention",
   rawFinding: "rrw_visual_1",
   secondRawFinding: "rrw_visual_2",
   thirdRawFinding: "rrw_visual_3",
   repositoryFinding: "rrf_visual_1",
+  normalRepositoryFinding: "rrf_visual_normal",
+  provisionalRepositoryFinding: "rrf_visual_provisional",
+  candidateRepositoryFinding: "rrf_visual_candidate",
+  combinedAttentionRepositoryFinding: "rrf_visual_combined_attention",
+  conflictRepositoryFinding: "rrf_visual_conflict",
+  failedResolutionRepositoryFinding: "rrf_visual_failed_resolution",
   issue: "rrid_visual_1",
   failedIssue: "rrid_visual_2",
   generation: "rig_visual",
@@ -1388,40 +1395,317 @@ const repositoryReviewFindings = [
   },
 ]
 
-const repositoryFindings = repositoryReviewFindings.map((finding, index) => ({
-  id:
-    index === 0
-      ? repositoryReviewVisualIDs.repositoryFinding
-      : `rrf_visual_${index + 1}`,
-  repository: finding.repository,
-  canonical_title: finding.title,
-  canonical_severity: finding.severity,
-  review_finding_ids: [finding.id],
-  found_commits: [finding.commit_sha],
-  path_symbol_history: [
-    {
-      review_finding_id: finding.id,
-      commit_sha: finding.commit_sha,
-      path: finding.file.path,
-      symbol: finding.symbol,
-      observed_at: finding.created_at,
-    },
-  ],
-  match_state: "known",
-  lifecycle: "open",
-  issue: {
-    state: "draft",
-    origin: "ai_generated",
-    title: finding.title,
-    snapshot_at: finding.updated_at,
+const repositoryReviewAttentionFinding = {
+  ...repositoryReviewFindings[1],
+  id: repositoryReviewVisualIDs.attentionFinding,
+  fingerprint: "sha256:visual-provisional-cache-race",
+  file: {
+    ...repositoryReviewFindings[1].file,
+    path: "pkg/cache/refresh_coordinator.go",
+    blob_sha: "d".repeat(40),
+    size_bytes: 11720,
   },
-  validation_state: "not_requested",
+  line: 287,
+  severity: "high",
+  title: "Concurrent refreshes can publish an expired cache generation",
+  symbol: "RefreshCoordinator.publish",
+  message: "The generation comparison happens before the final cache swap.",
+  evidence:
+    "A delayed refresh resumes after a newer generation commits and replaces the current cache pointer with its expired snapshot.",
+  impact:
+    "Readers can observe credentials and routing metadata from an expired cache generation.",
+  validation: {
+    status: "confirmed",
+    summary: "Traced the stale generation through the unlocked publish path.",
+    checks: ["Compared generation fences", "Verified the final swap is stale"],
+  },
+  context_ids: ["rrctx_visual_attention"],
+  models: ["review"],
+  observation_count: 1,
+  issue_draft_id: undefined,
+  repository_finding_id: repositoryReviewVisualIDs.provisionalRepositoryFinding,
+  repository_match_state: "provisional",
+  run_finding_status: "needs_review",
   version: 1,
-  created_at: finding.created_at,
-  updated_at: finding.updated_at,
-}))
+  created_at: "2026-08-25T14:16:00Z",
+  updated_at: "2026-08-25T14:18:00Z",
+  raw_source_total: 1,
+}
 
-const repositoryReviewContexts = repositoryReviewFindings.map(
+const repositoryReviewDetailFindings = [
+  ...repositoryReviewFindings,
+  repositoryReviewAttentionFinding,
+]
+
+const baseRepositoryFindings = repositoryReviewFindings.map(
+  (finding, index) => ({
+    id:
+      index === 0
+        ? repositoryReviewVisualIDs.repositoryFinding
+        : `rrf_visual_${index + 1}`,
+    repository: finding.repository,
+    canonical_title: finding.title,
+    canonical_severity: finding.severity,
+    review_finding_ids: [finding.id],
+    occurrence_count: 1,
+    found_commits: [finding.commit_sha],
+    found_commit_count: 1,
+    path_symbol_history: [
+      {
+        review_finding_id: finding.id,
+        commit_sha: finding.commit_sha,
+        path: finding.file.path,
+        symbol: finding.symbol,
+        observed_at: finding.created_at,
+      },
+    ],
+    match_state: "known",
+    lifecycle: "open",
+    issue: {
+      state: "draft",
+      origin: "ai_generated",
+      title: finding.title,
+      snapshot_at: finding.updated_at,
+      conflict: false,
+    },
+    validation_state: "not_requested",
+    possible_duplicates: [],
+    version: 1,
+    created_at: finding.created_at,
+    updated_at: finding.updated_at,
+  }),
+)
+
+const repositoryFindings = [
+  ...baseRepositoryFindings,
+  {
+    id: repositoryReviewVisualIDs.normalRepositoryFinding,
+    repository: "octo/picoclaw",
+    canonical_title: "Request retries can repeat a committed ledger update",
+    canonical_severity: "medium",
+    review_finding_ids: [
+      "rdf_visual_normal_1",
+      "rdf_visual_normal_2",
+      "rdf_visual_normal_3",
+    ],
+    occurrence_count: 3,
+    found_commits: ["1".repeat(40), "2".repeat(40)],
+    found_commit_count: 2,
+    path_symbol_history: [
+      {
+        review_finding_id: "rdf_visual_normal_1",
+        commit_sha: "1".repeat(40),
+        path: "pkg/repoaudit/ledger_writer.go",
+        symbol: "LedgerWriter.Commit",
+        observed_at: "2026-08-23T09:00:00Z",
+      },
+      {
+        review_finding_id: "rdf_visual_normal_3",
+        commit_sha: "2".repeat(40),
+        path: "pkg/repoaudit/transaction_writer.go",
+        symbol: "TransactionWriter.Commit",
+        observed_at: "2026-08-25T13:40:00Z",
+      },
+    ],
+    match_state: "known",
+    lifecycle: "open",
+    issue: {
+      state: "none",
+      snapshot_at: undefined,
+      conflict: false,
+    },
+    validation_state: "not_requested",
+    possible_duplicates: [],
+    version: 4,
+    created_at: "2026-08-23T09:00:00Z",
+    updated_at: "2026-08-25T13:40:00Z",
+  },
+  {
+    id: repositoryReviewVisualIDs.provisionalRepositoryFinding,
+    repository: "octo/picoclaw",
+    canonical_title: repositoryReviewAttentionFinding.title,
+    canonical_severity: repositoryReviewAttentionFinding.severity,
+    review_finding_ids: [repositoryReviewAttentionFinding.id],
+    occurrence_count: 1,
+    found_commits: [repositoryReviewAttentionFinding.commit_sha],
+    found_commit_count: 1,
+    path_symbol_history: [
+      {
+        review_finding_id: repositoryReviewAttentionFinding.id,
+        commit_sha: repositoryReviewAttentionFinding.commit_sha,
+        path: repositoryReviewAttentionFinding.file.path,
+        symbol: repositoryReviewAttentionFinding.symbol,
+        observed_at: repositoryReviewAttentionFinding.created_at,
+      },
+    ],
+    match_state: "provisional",
+    lifecycle: "open",
+    issue: {
+      state: "none",
+      snapshot_at: undefined,
+      conflict: false,
+    },
+    validation_state: "not_requested",
+    possible_duplicates: [
+      {
+        candidate_id: repositoryReviewVisualIDs.candidateRepositoryFinding,
+        relation: "uncertain",
+        confidence: 0.94,
+        explanation:
+          "Both diagnoses describe an older cache generation replacing a newer committed generation after asynchronous refresh work resumes.",
+        matching_anchors: [
+          "generation fence",
+          "final cache pointer swap",
+          "delayed refresh completion",
+        ],
+        conflicting_anchors: ["different refresh entry point"],
+        created_at: "2026-08-25T14:18:00Z",
+      },
+    ],
+    version: 2,
+    created_at: repositoryReviewAttentionFinding.created_at,
+    updated_at: repositoryReviewAttentionFinding.updated_at,
+  },
+  {
+    id: repositoryReviewVisualIDs.candidateRepositoryFinding,
+    repository: "octo/picoclaw",
+    canonical_title: "Delayed cache refresh overwrites a newer generation",
+    canonical_severity: "high",
+    review_finding_ids: [
+      "rdf_visual_candidate_1",
+      "rdf_visual_candidate_2",
+      "rdf_visual_candidate_3",
+      "rdf_visual_candidate_4",
+    ],
+    occurrence_count: 4,
+    found_commits: ["7".repeat(40), "8".repeat(40), "9".repeat(40)],
+    found_commit_count: 3,
+    path_symbol_history: [
+      {
+        review_finding_id: "rdf_visual_candidate_4",
+        commit_sha: "9".repeat(40),
+        path: "pkg/cache/generation_store.go",
+        symbol: "GenerationStore.Replace",
+        observed_at: "2026-08-24T16:20:00Z",
+      },
+    ],
+    match_state: "known",
+    lifecycle: "open",
+    issue: {
+      state: "none",
+      snapshot_at: undefined,
+      conflict: false,
+    },
+    validation_state: "not_requested",
+    possible_duplicates: [],
+    version: 7,
+    created_at: "2026-08-20T10:00:00Z",
+    updated_at: "2026-08-24T16:20:00Z",
+  },
+  {
+    id: repositoryReviewVisualIDs.combinedAttentionRepositoryFinding,
+    repository: "octo/picoclaw",
+    canonical_title: "Combined attention remains usable on narrow screens",
+    canonical_severity: "critical",
+    review_finding_ids: ["rdf_visual_combined_attention"],
+    occurrence_count: 1,
+    found_commits: ["6".repeat(40)],
+    found_commit_count: 1,
+    path_symbol_history: [
+      {
+        review_finding_id: "rdf_visual_combined_attention",
+        commit_sha: "6".repeat(40),
+        path: "pkg/review/attention_projection.go",
+        symbol: "AttentionProjection.Render",
+        observed_at: "2026-08-25T14:19:00Z",
+      },
+    ],
+    match_state: "provisional",
+    lifecycle: "resolution_pending",
+    issue: {
+      state: "open",
+      snapshot_at: "2026-08-25T14:19:00Z",
+      conflict: true,
+      conflict_urls: [
+        "https://github.com/octo/picoclaw/issues/101",
+        "https://github.com/octo/picoclaw/issues/102",
+      ],
+    },
+    validation_state: "failed",
+    possible_duplicates: [],
+    version: 3,
+    created_at: "2026-08-25T14:18:30Z",
+    updated_at: "2026-08-25T14:19:00Z",
+  },
+  {
+    id: repositoryReviewVisualIDs.conflictRepositoryFinding,
+    repository: "octo/picoclaw",
+    canonical_title: "Merged occurrences reference different GitHub issues",
+    canonical_severity: "high",
+    review_finding_ids: ["rdf_visual_conflict_1", "rdf_visual_conflict_2"],
+    occurrence_count: 2,
+    found_commits: ["3".repeat(40), "4".repeat(40)],
+    found_commit_count: 2,
+    path_symbol_history: [
+      {
+        review_finding_id: "rdf_visual_conflict_2",
+        commit_sha: "4".repeat(40),
+        path: "pkg/issues/association.go",
+        symbol: "Association.Merge",
+        observed_at: "2026-08-25T13:50:00Z",
+      },
+    ],
+    match_state: "known",
+    lifecycle: "open",
+    issue: {
+      state: "open",
+      snapshot_at: "2026-08-25T13:55:00Z",
+      conflict: true,
+      conflict_urls: [
+        "https://github.com/octo/picoclaw/issues/81",
+        "https://github.com/octo/picoclaw/issues/94",
+      ],
+    },
+    validation_state: "not_requested",
+    possible_duplicates: [],
+    version: 3,
+    created_at: "2026-08-24T11:00:00Z",
+    updated_at: "2026-08-25T13:55:00Z",
+  },
+  {
+    id: repositoryReviewVisualIDs.failedResolutionRepositoryFinding,
+    repository: "octo/picoclaw",
+    canonical_title: "Cleanup leaves a stale workspace lease behind",
+    canonical_severity: "medium",
+    review_finding_ids: ["rdf_visual_failed_resolution"],
+    occurrence_count: 1,
+    found_commits: ["5".repeat(40)],
+    found_commit_count: 1,
+    path_symbol_history: [
+      {
+        review_finding_id: "rdf_visual_failed_resolution",
+        commit_sha: "5".repeat(40),
+        path: "pkg/workspace/cleanup.go",
+        symbol: "Cleanup.Release",
+        observed_at: "2026-08-25T14:00:00Z",
+      },
+    ],
+    match_state: "new",
+    lifecycle: "resolution_pending",
+    issue: {
+      state: "closed",
+      snapshot_at: "2026-08-25T14:01:00Z",
+      conflict: false,
+    },
+    validation_state: "failed",
+    possible_duplicates: [],
+    version: 5,
+    created_at: "2026-08-25T12:00:00Z",
+    updated_at: "2026-08-25T14:01:00Z",
+  },
+]
+
+const repositoryReviewContexts = repositoryReviewDetailFindings.map(
   (finding, index) => ({
     id: finding.context_ids[0],
     repository: finding.repository,
@@ -1600,28 +1884,46 @@ const repositoryReviewRunFindingSummaries = repositoryReviewFindings.map(
   }),
 )
 
-const repositoryFindingSummaries = repositoryFindings.map((finding) => {
-  const latest = finding.path_symbol_history.at(-1)
-  return {
-    id: finding.id,
-    repository: finding.repository,
-    canonical_title: finding.canonical_title,
-    canonical_severity: finding.canonical_severity,
-    path: latest?.path,
-    symbol: latest?.symbol,
-    match_state: finding.match_state,
-    lifecycle: finding.lifecycle,
-    issue: {
-      state: finding.issue.state,
-      snapshot_at: finding.issue.snapshot_at,
-    },
-    validation_state: finding.validation_state,
-    occurrence_count: finding.review_finding_ids.length,
-    found_commit_count: finding.found_commits.length,
-    created_at: finding.created_at,
-    updated_at: finding.updated_at,
-  }
-})
+const combinedAttentionRepositoryFinding = repositoryFindings.find(
+  (finding) =>
+    finding.id === repositoryReviewVisualIDs.combinedAttentionRepositoryFinding,
+)!
+const repositoryFindingsForCollection = [
+  ...repositoryFindings.slice(0, 2),
+  combinedAttentionRepositoryFinding,
+  ...repositoryFindings.filter(
+    (finding, index) =>
+      index >= 2 && finding.id !== combinedAttentionRepositoryFinding.id,
+  ),
+]
+
+const repositoryFindingSummaries = repositoryFindingsForCollection.map(
+  (finding) => {
+    const latest = finding.path_symbol_history.at(-1)
+    return {
+      id: finding.id,
+      repository: finding.repository,
+      canonical_title: finding.canonical_title,
+      canonical_severity: finding.canonical_severity,
+      path: latest?.path,
+      symbol: latest?.symbol,
+      match_state: finding.match_state,
+      lifecycle: finding.lifecycle,
+      issue: {
+        state: finding.issue.state,
+        snapshot_at: finding.issue.snapshot_at,
+        conflict: finding.issue.conflict,
+      },
+      validation_state: finding.validation_state,
+      occurrence_count:
+        finding.occurrence_count ?? finding.review_finding_ids.length,
+      found_commit_count:
+        finding.found_commit_count ?? finding.found_commits.length,
+      created_at: finding.created_at,
+      updated_at: finding.updated_at,
+    }
+  },
+)
 
 const repositoryReviewIssueSummaries = repositoryReviewIssues.map((issue) => ({
   id: issue.id,
@@ -2075,7 +2377,7 @@ export async function installCollectionVisualMocks(
             404,
           )
         }
-        const occurrences = repositoryReviewFindings.filter((finding) =>
+        const occurrences = repositoryReviewDetailFindings.filter((finding) =>
           repositoryFinding.review_finding_ids.includes(finding.id),
         )
         const finding = occurrences.at(-1)!
@@ -2086,6 +2388,13 @@ export async function installCollectionVisualMocks(
           action_finding: finding,
           repository_finding: repositoryFinding,
           occurrences,
+          possible_duplicate_findings:
+            repositoryFinding.possible_duplicates?.flatMap((duplicate) => {
+              const candidate = repositoryFindings.find(
+                (finding) => finding.id === duplicate.candidate_id,
+              )
+              return candidate ? [candidate] : []
+            }) ?? [],
           contexts: repositoryReviewContexts.filter((context) =>
             occurrences.some((occurrence) =>
               occurrence.context_ids.includes(context.id),

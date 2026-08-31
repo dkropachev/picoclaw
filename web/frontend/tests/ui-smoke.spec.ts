@@ -1947,6 +1947,14 @@ const repositoryReviewFindingOneID = "rdf_smoke_1"
 const repositoryReviewFindingTwoID = "rdf_smoke_2"
 const repositoryReviewFindingThreeID = "rdf_smoke_3"
 const repositoryReviewFindingFourID = "rdf_smoke_4"
+const repositoryReviewAttentionFindingID = "rdf_smoke_attention"
+const repositoryReviewCandidateFindingID = "rdf_smoke_candidate_4"
+const repositoryReviewNormalAggregateID = "rrf_smoke_normal_attention"
+const repositoryReviewProvisionalID = "rrf_smoke_provisional_attention"
+const repositoryReviewCandidateID = "rrf_smoke_candidate_attention"
+const repositoryReviewCombinedAttentionID = "rrf_smoke_combined_attention"
+const repositoryReviewConflictID = "rrf_smoke_issue_conflict_attention"
+const repositoryReviewFailedCheckID = "rrf_smoke_failed_check_attention"
 const repositoryReviewIssueOneID = "rrid_smoke_1"
 const repositoryReviewIssueTwoID = "rrid_smoke_2"
 const repositoryReviewCommitSHA = "a".repeat(40)
@@ -2204,16 +2212,91 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     updated_at: "2026-08-26T12:04:00Z",
     raw_source_total: 1,
   },
+  {
+    id: repositoryReviewAttentionFindingID,
+    fingerprint: "sha256:attention-cache-generation-race",
+    repository: "octo/repo",
+    commit_sha: repositoryReviewCommitSHA,
+    file: {
+      path: "pkg/cache/refresh_coordinator_with_a_long_operational_name.go",
+      blob_sha: "f".repeat(40),
+      size_bytes: 12_288,
+      category: "hotpath-code",
+    },
+    line: 287,
+    severity: "high",
+    title:
+      "Concurrent refresh completion can publish an expired cache generation after a newer generation commits",
+    symbol: "RefreshCoordinator.publishCompletedGeneration",
+    message: "The generation comparison happens before the final cache swap.",
+    evidence:
+      "A delayed refresh resumes after a newer generation commits and replaces the current pointer with an expired snapshot because the final swap is not fenced.",
+    impact:
+      "Readers can observe credentials and routing metadata from an expired cache generation.",
+    validation: {
+      status: "confirmed",
+      summary: "Traced the stale generation through the unlocked publish path.",
+      checks: ["Compared generation fences", "Verified the stale final swap"],
+    },
+    context_ids: ["rrctx_smoke_attention"],
+    models: ["review"],
+    observation_count: 1,
+    status: "open",
+    repository_finding_id: repositoryReviewProvisionalID,
+    repository_match_state: "provisional",
+    run_finding_status: "needs_review",
+    version: 2,
+    created_at: "2026-08-26T12:04:15Z",
+    updated_at: "2026-08-26T12:04:45Z",
+    raw_source_total: 1,
+  },
+  {
+    id: repositoryReviewCandidateFindingID,
+    fingerprint: "sha256:candidate-cache-generation-race",
+    repository: "octo/repo",
+    commit_sha: "9".repeat(40),
+    file: {
+      path: "pkg/cache/generation_store.go",
+      blob_sha: "9".repeat(40),
+      size_bytes: 9_216,
+      category: "hotpath-code",
+    },
+    line: 164,
+    severity: "high",
+    title: "Delayed cache refresh overwrites a newer generation",
+    symbol: "GenerationStore.Replace",
+    message: "A stale refresh completion is allowed to replace the pointer.",
+    evidence:
+      "The completion path swaps the cached generation without comparing the generation committed while refresh work was in flight.",
+    impact: "Readers can observe an expired cache snapshot.",
+    validation: {
+      status: "confirmed",
+      summary: "Verified the missing generation fence at the final swap.",
+    },
+    context_ids: ["rrctx_smoke_candidate"],
+    models: ["review"],
+    observation_count: 4,
+    status: "open",
+    repository_finding_id: repositoryReviewCandidateID,
+    repository_match_state: "known",
+    run_finding_status: "associated_existing",
+    version: 4,
+    created_at: "2026-08-25T16:20:00Z",
+    updated_at: "2026-08-25T16:20:00Z",
+    raw_source_total: 1,
+  },
 ]
 
-const repositoryFindingsFixture: RepositoryFinding[] =
-  repositoryReviewFindingsFixture.map((finding, index) => ({
+const repositoryFindingsFixture: RepositoryFinding[] = [
+  ...repositoryReviewFindingsFixture.slice(0, 4).map((finding, index) => ({
     id: `rrf_smoke_${index + 1}`,
     repository: finding.repository,
     canonical_title: finding.title,
     canonical_severity: finding.severity,
     review_finding_ids: [finding.id],
+    occurrence_count: 1,
     found_commits: [finding.commit_sha],
+    found_commit_count: 1,
     path_symbol_history: [
       {
         review_finding_id: finding.id,
@@ -2237,7 +2320,216 @@ const repositoryFindingsFixture: RepositoryFinding[] =
     version: 1,
     created_at: finding.created_at,
     updated_at: finding.updated_at,
-  }))
+  })),
+  {
+    id: repositoryReviewNormalAggregateID,
+    repository: "octo/repo",
+    canonical_title: "Request retries can repeat a committed ledger update",
+    canonical_severity: "medium",
+    review_finding_ids: [
+      "rdf_smoke_normal_1",
+      "rdf_smoke_normal_2",
+      "rdf_smoke_normal_3",
+    ],
+    occurrence_count: 3,
+    found_commits: ["1".repeat(40), "2".repeat(40)],
+    found_commit_count: 2,
+    path_symbol_history: [
+      {
+        review_finding_id: "rdf_smoke_normal_1",
+        commit_sha: "1".repeat(40),
+        path: "pkg/repoaudit/ledger_writer.go",
+        symbol: "LedgerWriter.Commit",
+        observed_at: "2026-08-24T09:00:00Z",
+      },
+      {
+        review_finding_id: "rdf_smoke_normal_3",
+        commit_sha: "2".repeat(40),
+        path: "pkg/repoaudit/transaction_writer.go",
+        symbol: "TransactionWriter.Commit",
+        observed_at: "2026-08-26T11:30:00Z",
+      },
+    ],
+    match_state: "known",
+    lifecycle: "open",
+    issue: { state: "none" },
+    validation_state: "not_requested",
+    version: 4,
+    created_at: "2026-08-24T09:00:00Z",
+    updated_at: "2026-08-26T11:30:00Z",
+  },
+  {
+    id: repositoryReviewProvisionalID,
+    repository: "octo/repo",
+    canonical_title:
+      "Concurrent refresh completion can publish an expired cache generation after a newer generation commits",
+    canonical_severity: "high",
+    review_finding_ids: [repositoryReviewAttentionFindingID],
+    occurrence_count: 1,
+    found_commits: [repositoryReviewCommitSHA],
+    found_commit_count: 1,
+    path_symbol_history: [
+      {
+        review_finding_id: repositoryReviewAttentionFindingID,
+        commit_sha: repositoryReviewCommitSHA,
+        path: "pkg/cache/refresh_coordinator_with_a_long_operational_name.go",
+        symbol: "RefreshCoordinator.publishCompletedGeneration",
+        observed_at: "2026-08-26T12:04:15Z",
+      },
+    ],
+    match_state: "provisional",
+    lifecycle: "open",
+    issue: { state: "none" },
+    validation_state: "not_requested",
+    possible_duplicates: [
+      {
+        candidate_id: repositoryReviewCandidateID,
+        relation: "uncertain",
+        confidence: 0.94,
+        matching_anchors: [
+          "generation fence",
+          "final cache pointer swap",
+          "delayed refresh completion",
+        ],
+        conflicting_anchors: ["different refresh entry point"],
+        explanation:
+          "Both diagnoses describe an older cache generation replacing a newer committed generation after asynchronous refresh work resumes.",
+        created_at: "2026-08-26T12:04:45Z",
+      },
+    ],
+    version: 2,
+    created_at: "2026-08-26T12:04:15Z",
+    updated_at: "2026-08-26T12:04:45Z",
+  },
+  {
+    id: repositoryReviewCandidateID,
+    repository: "octo/repo",
+    canonical_title: "Delayed cache refresh overwrites a newer generation",
+    canonical_severity: "high",
+    review_finding_ids: [
+      "rdf_smoke_candidate_1",
+      "rdf_smoke_candidate_2",
+      "rdf_smoke_candidate_3",
+      repositoryReviewCandidateFindingID,
+    ],
+    occurrence_count: 4,
+    found_commits: ["7".repeat(40), "8".repeat(40), "9".repeat(40)],
+    found_commit_count: 3,
+    path_symbol_history: [
+      {
+        review_finding_id: repositoryReviewCandidateFindingID,
+        commit_sha: "9".repeat(40),
+        path: "pkg/cache/generation_store.go",
+        symbol: "GenerationStore.Replace",
+        observed_at: "2026-08-25T16:20:00Z",
+      },
+    ],
+    match_state: "known",
+    lifecycle: "open",
+    issue: { state: "none" },
+    validation_state: "not_requested",
+    version: 7,
+    created_at: "2026-08-20T10:00:00Z",
+    updated_at: "2026-08-25T16:20:00Z",
+  },
+  {
+    id: repositoryReviewCombinedAttentionID,
+    repository: "octo/repo",
+    canonical_title: "Combined attention remains usable on narrow screens",
+    canonical_severity: "critical",
+    review_finding_ids: ["rdf_smoke_combined_attention"],
+    occurrence_count: 1,
+    found_commits: ["6".repeat(40)],
+    found_commit_count: 1,
+    path_symbol_history: [
+      {
+        review_finding_id: "rdf_smoke_combined_attention",
+        commit_sha: "6".repeat(40),
+        path: "pkg/review/attention_projection.go",
+        symbol: "AttentionProjection.Render",
+        observed_at: "2026-08-26T12:04:50Z",
+      },
+    ],
+    match_state: "provisional",
+    lifecycle: "resolution_pending",
+    issue: {
+      state: "open",
+      conflict: true,
+      conflict_urls: [
+        "https://github.com/octo/repo/issues/101",
+        "https://github.com/octo/repo/issues/102",
+      ],
+      snapshot_at: "2026-08-26T12:04:50Z",
+    },
+    validation_state: "failed",
+    version: 3,
+    created_at: "2026-08-26T12:04:40Z",
+    updated_at: "2026-08-26T12:04:50Z",
+  },
+  {
+    id: repositoryReviewConflictID,
+    repository: "octo/repo",
+    canonical_title: "Merged occurrences reference different GitHub issues",
+    canonical_severity: "high",
+    review_finding_ids: ["rdf_smoke_conflict_1", "rdf_smoke_conflict_2"],
+    occurrence_count: 2,
+    found_commits: ["3".repeat(40), "4".repeat(40)],
+    found_commit_count: 2,
+    path_symbol_history: [
+      {
+        review_finding_id: "rdf_smoke_conflict_2",
+        commit_sha: "4".repeat(40),
+        path: "pkg/issues/association.go",
+        symbol: "Association.Merge",
+        observed_at: "2026-08-26T11:50:00Z",
+      },
+    ],
+    match_state: "known",
+    lifecycle: "open",
+    issue: {
+      state: "open",
+      conflict: true,
+      conflict_urls: [
+        "https://github.com/octo/repo/issues/81",
+        "https://github.com/octo/repo/issues/94",
+      ],
+      snapshot_at: "2026-08-26T11:55:00Z",
+    },
+    validation_state: "not_requested",
+    version: 3,
+    created_at: "2026-08-25T11:00:00Z",
+    updated_at: "2026-08-26T11:55:00Z",
+  },
+  {
+    id: repositoryReviewFailedCheckID,
+    repository: "octo/repo",
+    canonical_title: "Cleanup leaves a stale workspace lease behind",
+    canonical_severity: "medium",
+    review_finding_ids: ["rdf_smoke_failed_check"],
+    occurrence_count: 1,
+    found_commits: ["5".repeat(40)],
+    found_commit_count: 1,
+    path_symbol_history: [
+      {
+        review_finding_id: "rdf_smoke_failed_check",
+        commit_sha: "5".repeat(40),
+        path: "pkg/workspace/cleanup.go",
+        symbol: "Cleanup.Release",
+        observed_at: "2026-08-26T12:00:00Z",
+      },
+    ],
+    match_state: "new",
+    lifecycle: "resolution_pending",
+    issue: {
+      state: "closed",
+      snapshot_at: "2026-08-26T12:01:00Z",
+    },
+    validation_state: "failed",
+    version: 5,
+    created_at: "2026-08-26T10:00:00Z",
+    updated_at: "2026-08-26T12:01:00Z",
+  },
+]
 
 const repositoryReviewContextsFixture: RepositoryReviewFindingContext[] =
   repositoryReviewFindingsFixture.map((finding, index) => ({
@@ -2272,7 +2564,7 @@ const repositoryReviewRawFindingsFixture: RepositoryReviewRawFinding[] = [
     2,
   ),
   ...repositoryReviewFindingsFixture
-    .slice(1)
+    .slice(1, 4)
     .map((finding, index) =>
       repositoryReviewRawFindingFixture(
         `rrw_smoke_${index + 3}`,
@@ -6352,6 +6644,11 @@ async function mockRepositoryReviewAutomationRequest(
           ...(actionFinding ? { action_finding: actionFinding } : {}),
           repository_finding: repositoryFinding,
           occurrences,
+          possible_duplicate_findings:
+            repositoryFinding.possible_duplicates?.flatMap((duplicate) => {
+              const candidate = findRepositoryFinding(duplicate.candidate_id)
+              return candidate ? [candidate] : []
+            }) ?? [],
           contexts: state.contexts.filter((context) =>
             occurrences.some((occurrence) =>
               occurrence.context_ids.includes(context.id),
@@ -6710,6 +7007,38 @@ async function mockRepositoryReviewAutomationRequest(
       : json(route, { code: "not_found" }, 404)
   }
 
+  const duplicateDecisionMatch = path.match(
+    new RegExp(`^${automationRoot}/repository-findings/([^/]+)/duplicates$`),
+  )
+  if (duplicateDecisionMatch && method === "POST") {
+    const provisional = findRepositoryFinding(
+      decodeURIComponent(duplicateDecisionMatch[1]!),
+    )
+    const candidateID = String(body?.candidate_id ?? "")
+    const candidate = findRepositoryFinding(candidateID)
+    if (!provisional || !candidate) {
+      return json(route, { code: "not_found" }, 404)
+    }
+    if (body?.decision === "merge") {
+      state.repositoryFindings = state.repositoryFindings.filter(
+        (finding) => finding.id !== provisional.id,
+      )
+      return json(route, {
+        automation: state.automation,
+        repository: state.summary,
+        repository_finding: candidate,
+      })
+    }
+    provisional.match_state = "new"
+    provisional.possible_duplicates = []
+    provisional.version += 1
+    return json(route, {
+      automation: state.automation,
+      repository: state.summary,
+      repository_finding: provisional,
+    })
+  }
+
   const repositoryFindingMatch = path.match(
     new RegExp(`^${automationRoot}/repository-findings/([^/]+)$`),
   )
@@ -7051,6 +7380,283 @@ for (const collection of [
     expect(errors).toEqual([])
   })
 }
+
+test("repository findings Updated header stays inside the canonical desktop table viewport", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "desktop",
+    "Canonical desktop geometry is asserted at the 1280px desktop viewport.",
+  )
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings?view=table`,
+  )
+  await expect(
+    page.getByRole("button", { name: "Table view" }),
+  ).toHaveAttribute("aria-pressed", "true")
+
+  const results = page.locator('[data-slot="collection-results"]')
+  const table = results.locator("table")
+  const updatedHeader = table.getByRole("columnheader", {
+    name: "Updated",
+    exact: true,
+  })
+  await expect(updatedHeader).toBeVisible()
+  const [resultsBox, tableBox, headerBox] = await Promise.all([
+    results.boundingBox(),
+    table.boundingBox(),
+    updatedHeader.boundingBox(),
+  ])
+  expect(resultsBox).not.toBeNull()
+  expect(tableBox).not.toBeNull()
+  expect(headerBox).not.toBeNull()
+  expect(headerBox!.x).toBeGreaterThanOrEqual(tableBox!.x - 1)
+  expect(headerBox!.x + headerBox!.width).toBeLessThanOrEqual(
+    tableBox!.x + tableBox!.width + 1,
+  )
+  expect(headerBox!.x + headerBox!.width).toBeLessThanOrEqual(
+    resultsBox!.x + resultsBox!.width + 1,
+  )
+  expect(headerBox!.x + headerBox!.width).toBeLessThanOrEqual(
+    (page.viewportSize()?.width ?? 0) + 1,
+  )
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("combined repository finding attention badges stay inside the mobile result", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "mobile",
+    "Combined attention wrapping is asserted at the 390px mobile viewport.",
+  )
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings`,
+  )
+
+  const row = page.locator(
+    `[data-item-id="${repositoryReviewCombinedAttentionID}"]`,
+  )
+  await row.scrollIntoViewIfNeeded()
+  await expect(row).toBeVisible()
+  for (const label of [
+    "Duplicate review",
+    "Issue conflict",
+    "Fix check failed",
+  ]) {
+    await expect(row.getByText(label, { exact: true })).toBeVisible()
+  }
+  const badges = row.locator('[data-slot="badge"]')
+  await expect(badges).toHaveCount(3)
+  const rowBox = await row.boundingBox()
+  expect(rowBox).not.toBeNull()
+  for (let index = 0; index < (await badges.count()); index += 1) {
+    const badgeBox = await badges.nth(index).boundingBox()
+    expect(badgeBox).not.toBeNull()
+    expect(badgeBox!.x).toBeGreaterThanOrEqual(rowBox!.x - 1)
+    expect(badgeBox!.x + badgeBox!.width).toBeLessThanOrEqual(
+      rowBox!.x + rowBox!.width + 1,
+    )
+    expect(badgeBox!.x + badgeBox!.width).toBeLessThanOrEqual(
+      (page.viewportSize()?.width ?? 0) + 1,
+    )
+    expect(badgeBox!.y + badgeBox!.height).toBeLessThanOrEqual(
+      rowBox!.y + rowBox!.height + 1,
+    )
+  }
+  const rowWidths = await row.evaluate((element) => ({
+    client: element.clientWidth,
+    scroll: element.scrollWidth,
+  }))
+  expect(rowWidths.scroll).toBeLessThanOrEqual(rowWidths.client + 1)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("repository finding attention states stay actionable without normal-row noise", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const requests: NonNullable<
+    MockLauncherApiOptions["repositoryReviewRequests"]
+  > = []
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings`,
+    { repositoryReviewRequests: requests },
+  )
+
+  const normalRow = page.locator(
+    `[data-item-id="${repositoryReviewNormalAggregateID}"]`,
+  )
+  await expect(normalRow).toBeVisible()
+  await expect(
+    normalRow.getByText("3 occurrences across 2 commits", { exact: true }),
+  ).toBeVisible()
+  await expect(
+    normalRow.getByText("Duplicate review", { exact: true }),
+  ).toHaveCount(0)
+  await expect(
+    normalRow.getByText("Issue conflict", { exact: true }),
+  ).toHaveCount(0)
+  await expect(
+    normalRow.getByText("Fix check failed", { exact: true }),
+  ).toHaveCount(0)
+
+  const provisionalRow = page.locator(
+    `[data-item-id="${repositoryReviewProvisionalID}"]`,
+  )
+  const conflictRow = page.locator(
+    `[data-item-id="${repositoryReviewConflictID}"]`,
+  )
+  const failedCheckRow = page.locator(
+    `[data-item-id="${repositoryReviewFailedCheckID}"]`,
+  )
+  await expect(
+    provisionalRow.getByText("Duplicate review", { exact: true }),
+  ).toBeVisible()
+  await expect(
+    conflictRow.getByText("Issue conflict", { exact: true }),
+  ).toBeVisible()
+  await expect(
+    failedCheckRow.getByText("Fix check failed", { exact: true }),
+  ).toBeVisible()
+
+  await provisionalRow.focus()
+  await page.keyboard.press("Enter")
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings/${repositoryReviewProvisionalID}`,
+    ),
+  )
+  await expect(
+    page.getByText("Needs duplicate review", { exact: true }),
+  ).toBeVisible()
+  const candidateCard = page
+    .getByRole("heading", {
+      name: "Delayed cache refresh overwrites a newer generation",
+    })
+    .locator("xpath=ancestor::article")
+  await expect(candidateCard).toBeVisible()
+  await expect(
+    candidateCard.getByText(/pkg\/cache\/generation_store\.go/u),
+  ).toBeVisible()
+  await expect(candidateCard.getByText("4", { exact: true })).toBeVisible()
+  await expect(candidateCard.getByText("3", { exact: true })).toBeVisible()
+  await expect(
+    candidateCard.getByText(
+      /Both diagnoses describe an older cache generation/u,
+    ),
+  ).toBeVisible()
+
+  await candidateCard.getByRole("button", { name: "View candidate" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings/${repositoryReviewCandidateID}`,
+    ),
+  )
+  await page.goBack()
+  await expect(
+    page.getByRole("button", { name: "Merge with candidate" }),
+  ).toBeVisible()
+
+  await page.getByRole("button", { name: "Merge with candidate" }).click()
+  const confirmation = page.getByRole("alertdialog", {
+    name: "Merge this finding with the candidate?",
+  })
+  await expect(confirmation).toBeVisible()
+  await expectElementFitsViewport(
+    page,
+    '[role="alertdialog"]',
+    "duplicate merge confirmation",
+  )
+  expect(requests.some((request) => request.path.endsWith("/duplicates"))).toBe(
+    false,
+  )
+  await confirmation.getByRole("button", { name: "Cancel" }).click()
+  await expect(confirmation).toBeHidden()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+
+  await page.getByRole("button", { name: "Keep separate" }).click()
+  await expect
+    .poll(() =>
+      requests.find((request) => request.path.endsWith("/duplicates")),
+    )
+    .toMatchObject({
+      body: {
+        candidate_id: repositoryReviewCandidateID,
+        decision: "distinct",
+        expected_provisional_version: 2,
+      },
+    })
+  await expectNoHorizontalOverflow(page)
+  expect(errors).toEqual([])
+})
+
+test("repository finding merge confirmation is keyboard operable at desktop and mobile widths", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const requests: NonNullable<
+    MockLauncherApiOptions["repositoryReviewRequests"]
+  > = []
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings/${repositoryReviewProvisionalID}`,
+    { repositoryReviewRequests: requests },
+  )
+
+  const mergeTrigger = page.getByRole("button", {
+    name: "Merge with candidate",
+  })
+  await mergeTrigger.focus()
+  await expect(mergeTrigger).toBeFocused()
+  await page.keyboard.press("Space")
+  const confirmation = page.getByRole("alertdialog", {
+    name: "Merge this finding with the candidate?",
+  })
+  await expect(confirmation).toBeVisible()
+  expect(requests.some((request) => request.path.endsWith("/duplicates"))).toBe(
+    false,
+  )
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  const cancel = confirmation.getByRole("button", { name: "Cancel" })
+  const confirm = confirmation.getByRole("button", {
+    name: "Merge with candidate",
+  })
+  await expect(cancel).toBeFocused()
+  await page.keyboard.press("Tab")
+  await expect(confirm).toBeFocused()
+  await page.keyboard.press("Enter")
+  await expect
+    .poll(() =>
+      requests.find((request) => request.path.endsWith("/duplicates")),
+    )
+    .toMatchObject({
+      body: {
+        candidate_id: repositoryReviewCandidateID,
+        decision: "merge",
+        expected_provisional_version: 2,
+        expected_candidate_version: 7,
+      },
+    })
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings/${repositoryReviewCandidateID}`,
+    ),
+  )
+  await expectNoHorizontalOverflow(page)
+  expect(errors).toEqual([])
+})
 
 test("repository review raw findings navigate through canonical source detail", async ({
   page,

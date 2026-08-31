@@ -196,6 +196,41 @@ describe("CollectionResults", () => {
     expect(screen.queryByText("Fact five")).not.toBeInTheDocument()
   })
 
+  it("bounds multiple list badges without constraining a single badge", () => {
+    const definition = thingDefinition()
+    const multiBadgeDefinition: CollectionDefinition<Thing> = {
+      ...definition,
+      badges: [
+        ...(definition.badges ?? []),
+        { id: "owner", label: (item) => item.owner, variant: "outline" },
+        { id: "attention", label: () => "Needs attention", variant: "outline" },
+      ],
+    }
+    const { rerender } = render(
+      <CollectionResults
+        definition={multiBadgeDefinition}
+        items={[things[0]!]}
+        view="list"
+      />,
+    )
+    const multiBadgeContainer = item("a").querySelector(
+      '[data-slot="badge"]',
+    )?.parentElement
+    expect(multiBadgeContainer).toHaveClass("max-w-1/2", "justify-end")
+
+    rerender(
+      <CollectionResults
+        definition={definition}
+        items={[things[0]!]}
+        view="list"
+      />,
+    )
+    const singleBadgeContainer = item("a").querySelector(
+      '[data-slot="badge"]',
+    )?.parentElement
+    expect(singleBadgeContainer).not.toHaveClass("max-w-1/2", "justify-end")
+  })
+
   it("uses shared loading, error, and empty states", () => {
     const definition = thingDefinition()
     const { rerender } = render(

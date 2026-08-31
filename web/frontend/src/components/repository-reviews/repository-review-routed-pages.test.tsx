@@ -42,6 +42,7 @@ import {
   publishRepositoryReviewIssues,
   regenerateRepositoryReviewAutomationIssue,
   reserveRepositoryReviewValidations,
+  resolveRepositoryReviewPossibleDuplicate,
   restartRepositoryReviewAutomation,
   resumeRepositoryReviewAutomation,
   retryRepositoryReviewHistoricalDeduplication,
@@ -585,6 +586,11 @@ describe("routed repository review pages", () => {
     })
     vi.mocked(reserveRepositoryReviewValidations).mockResolvedValue({
       validation_jobs: [],
+    })
+    vi.mocked(resolveRepositoryReviewPossibleDuplicate).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      repository_finding: repositoryFinding,
     })
     vi.mocked(retryRepositoryReviewRunFindingStatuses).mockResolvedValue({
       automation,
@@ -1584,9 +1590,7 @@ describe("routed repository review pages", () => {
     ).closest("[data-item-id]")!
     await user.click(item)
     expect(screen.getByText("1 selected", { exact: true })).toBeVisible()
-    await user.click(
-      screen.getByRole("button", { name: "Validate resolutions" }),
-    )
+    await user.click(screen.getByRole("button", { name: "Check for fix" }))
 
     await waitFor(() =>
       expect(reserveRepositoryReviewValidations).toHaveBeenCalledWith(
@@ -1598,6 +1602,139 @@ describe("routed repository review pages", () => {
       expect(
         screen.queryByText("1 selected", { exact: true }),
       ).not.toBeInTheDocument(),
+    )
+  })
+
+  it.each(["list", "table", "grid"] as const)(
+    "shows only actionable repository-finding attention in %s view",
+    async (view) => {
+      const summaries: RepositoryReviewRepositoryFindingSummary[] = [
+        {
+          ...repositoryFindingSummary,
+          id: "rrf_normal",
+          canonical_title: "Normal finding",
+          match_state: "new",
+        },
+        {
+          ...repositoryFindingSummary,
+          id: "rrf_duplicate",
+          canonical_title: "Duplicate decision",
+          match_state: "provisional",
+        },
+        {
+          ...repositoryFindingSummary,
+          id: "rrf_conflict",
+          canonical_title: "Conflicting issue",
+          issue: { ...repositoryFindingSummary.issue, conflict: true },
+        },
+        {
+          ...repositoryFindingSummary,
+          id: "rrf_check_failed",
+          canonical_title: "Failed fix check",
+          validation_state: "failed",
+        },
+      ]
+      vi.mocked(
+        listRepositoryReviewAutomationRepositoryFindingsPage,
+      ).mockResolvedValue({
+        automation,
+        repository: repositorySummary,
+        repository_findings: summaries,
+        total: summaries.length,
+        next_cursor: "",
+        canonical_query: "ALL ORDER BY severity DESC, updated DESC",
+        query_schema: { fields: [] },
+      })
+      renderPage(
+        <RepositoryReviewRepositoryFindingsPage
+          automationID={automation.id}
+          search={{ q: "ALL ORDER BY severity DESC, updated DESC", view }}
+          onSearchChange={vi.fn()}
+          onBack={vi.fn()}
+          onOpenFinding={vi.fn()}
+          onGenerated={vi.fn()}
+        />,
+      )
+
+      expect(
+        (await screen.findAllByText("Duplicate review")).length,
+      ).toBeGreaterThan(0)
+      expect(screen.getAllByText("Issue conflict").length).toBeGreaterThan(0)
+      expect(screen.getAllByText("Fix check failed").length).toBeGreaterThan(0)
+      expect(screen.queryByText("new", { exact: true })).toBeNull()
+      expect(screen.queryByText("known", { exact: true })).toBeNull()
+      expect(
+        screen.getAllByText("1 occurrence across 1 commit").length,
+      ).toBeGreaterThan(0)
+
+      if (view === "table") {
+        for (const header of [
+          "Identity",
+          "Severity",
+          "Occurrences",
+          "Finding state",
+          "Issue",
+          "Resolution check",
+          "Updated",
+        ]) {
+          expect(
+            screen.getByRole("columnheader", { name: header }),
+          ).toBeVisible()
+        }
+        expect(
+          screen.queryByRole("columnheader", { name: "Repository" }),
+        ).toBeNull()
+        expect(
+          screen.queryByRole("columnheader", { name: "Latest location" }),
+        ).toBeNull()
+        expect(
+          screen.getByRole("columnheader", { name: "Updated" }),
+        ).toHaveClass("w-28", "px-2")
+        expect(
+          screen.getAllByTitle("1 occurrence across 1 commit").length,
+        ).toBeGreaterThan(0)
+      }
+    },
+  )
+
+  it("offers Retry fix check for a failed selected repository finding", async () => {
+    const failedSummary: RepositoryReviewRepositoryFindingSummary = {
+      ...repositoryFindingSummary,
+      validation_state: "failed",
+    }
+    vi.mocked(
+      listRepositoryReviewAutomationRepositoryFindingsPage,
+    ).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      repository_findings: [failedSummary],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY severity DESC, updated DESC",
+      query_schema: { fields: [] },
+    })
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewRepositoryFindingsPage
+        automationID={automation.id}
+        search={{ q: "ALL ORDER BY severity DESC, updated DESC" }}
+        onSearchChange={vi.fn()}
+        onBack={vi.fn()}
+        onOpenFinding={vi.fn()}
+        onGenerated={vi.fn()}
+      />,
+    )
+
+    const item = (
+      await screen.findByText(failedSummary.canonical_title)
+    ).closest("[data-item-id]")!
+    await user.click(item)
+    await user.click(screen.getByRole("button", { name: "Retry fix check" }))
+    await waitFor(() =>
+      expect(reserveRepositoryReviewValidations).toHaveBeenCalledWith(
+        automation.id,
+        [failedSummary.id],
+      ),
     )
   })
 
@@ -2078,12 +2215,16 @@ describe("routed repository review pages", () => {
       ...finding,
       issue_draft_id: issue.id,
     }
+    const associatedAggregate: RepositoryFinding = {
+      ...repositoryFinding,
+      issue: { state: "draft", origin: "ai_generated" },
+    }
     vi.mocked(getRepositoryReviewAutomationFinding).mockResolvedValue({
       automation,
       repository: repositorySummary,
       finding: associatedFinding,
       action_finding: associatedFinding,
-      repository_finding: repositoryFinding,
+      repository_finding: associatedAggregate,
       occurrences: [associatedFinding],
       contexts: [],
       issue,
@@ -2109,11 +2250,337 @@ describe("routed repository review pages", () => {
       />,
     )
 
-    await user.click(
-      await screen.findByRole("button", { name: "Open issue record" }),
-    )
+    const reviewPreview = await screen.findByRole("button", {
+      name: "Review preview",
+    })
+    expect(
+      screen.getAllByText("Saved preview · Not on GitHub").length,
+    ).toBeGreaterThan(0)
+    expect(
+      reviewPreview.querySelector(".tabler-icon-file-description"),
+    ).not.toBeNull()
+    expect(reviewPreview.querySelector(".tabler-icon-brand-github")).toBeNull()
+    await user.click(reviewPreview)
     expect(onOpenIssue).toHaveBeenCalledWith(issue.id)
   })
+
+  it("uses the GitHub icon only for an external issue URL", async () => {
+    const associatedFinding: RepositoryReviewFinding = {
+      ...finding,
+      issue_draft_id: issue.id,
+    }
+    const externalAggregate: RepositoryFinding = {
+      ...repositoryFinding,
+      issue: {
+        state: "open",
+        origin: "linked",
+        url: "https://github.com/owner/repo/issues/42",
+      },
+    }
+    vi.mocked(getRepositoryReviewAutomationRepositoryFinding).mockResolvedValue(
+      {
+        automation,
+        repository: repositorySummary,
+        finding: associatedFinding,
+        repository_finding: externalAggregate,
+        occurrences: [associatedFinding],
+        contexts: [],
+        issue,
+        capabilities: { github: true },
+      },
+    )
+    renderPage(
+      <RepositoryReviewFindingPage
+        automationID={automation.id}
+        findingID={externalAggregate.id}
+        resourceKind="repository"
+        onBack={vi.fn()}
+        onOpenRepositoryFinding={vi.fn()}
+        onOpenIssue={vi.fn()}
+        onLinkIssue={vi.fn()}
+        onGenerated={vi.fn()}
+        onOpenThread={vi.fn()}
+      />,
+    )
+
+    const external = await screen.findByRole("link", {
+      name: "Open GitHub issue",
+    })
+    expect(external.querySelector(".tabler-icon-brand-github")).not.toBeNull()
+    const preview = screen.getByRole("button", { name: "Review preview" })
+    expect(
+      preview.querySelector(".tabler-icon-file-description"),
+    ).not.toBeNull()
+    expect(preview.querySelector(".tabler-icon-brand-github")).toBeNull()
+  })
+
+  it.each([
+    ["cross-repository", "https://github.com/other/repo/issues/42"],
+    ["non-GitHub", "https://issues.example.com/owner/repo/42"],
+  ])(
+    "does not brand a %s association URL as a GitHub issue",
+    async (_label, associationURL) => {
+      const associatedFinding: RepositoryReviewFinding = {
+        ...finding,
+        issue_draft_id: issue.id,
+      }
+      const unsafeAggregate: RepositoryFinding = {
+        ...repositoryFinding,
+        issue: {
+          state: "open",
+          origin: "linked",
+          url: associationURL,
+        },
+      }
+      vi.mocked(
+        getRepositoryReviewAutomationRepositoryFinding,
+      ).mockResolvedValue({
+        automation,
+        repository: repositorySummary,
+        finding: associatedFinding,
+        repository_finding: unsafeAggregate,
+        occurrences: [associatedFinding],
+        contexts: [],
+        issue,
+        capabilities: { github: true },
+      })
+      renderPage(
+        <RepositoryReviewFindingPage
+          automationID={automation.id}
+          findingID={unsafeAggregate.id}
+          resourceKind="repository"
+          onBack={vi.fn()}
+          onOpenRepositoryFinding={vi.fn()}
+          onOpenIssue={vi.fn()}
+          onLinkIssue={vi.fn()}
+          onGenerated={vi.fn()}
+          onOpenThread={vi.fn()}
+        />,
+      )
+
+      expect(
+        await screen.findByRole("button", { name: "Review preview" }),
+      ).toBeVisible()
+      expect(
+        screen.queryByRole("link", { name: "Open GitHub issue" }),
+      ).toBeNull()
+      expect(document.querySelector(".tabler-icon-brand-github")).toBeNull()
+    },
+  )
+
+  it("shows enriched duplicate evidence and requires confirmation before merge", async () => {
+    const candidate: RepositoryFinding = {
+      ...repositoryFinding,
+      id: "rrf_candidate",
+      version: 7,
+      canonical_title: "Candidate lost-update finding",
+      canonical_severity: "medium",
+      review_finding_ids: ["finding_candidate_1", "finding_candidate_2"],
+      occurrence_count: 2,
+      found_commits: ["d".repeat(40), "e".repeat(40)],
+      found_commit_count: 2,
+      path_symbol_history: [
+        {
+          review_finding_id: "finding_candidate_2",
+          commit_sha: "e".repeat(40),
+          path: "pkg/new-store.go",
+          symbol: "SaveAgain",
+          observed_at: "2026-08-27T00:00:00Z",
+        },
+      ],
+    }
+    const provisional: RepositoryFinding = {
+      ...repositoryFinding,
+      match_state: "provisional",
+      possible_duplicates: [
+        {
+          candidate_id: candidate.id,
+          relation: "uncertain",
+          confidence: 0.87,
+          matching_anchors: ["version", "atomic rename"],
+          conflicting_anchors: ["writer ownership"],
+          explanation:
+            "Both diagnoses lose a committed update, but writer ownership differs.",
+          created_at: "2026-08-27T00:01:00Z",
+        },
+      ],
+    }
+    vi.mocked(getRepositoryReviewAutomationRepositoryFinding).mockResolvedValue(
+      {
+        automation,
+        repository: repositorySummary,
+        finding,
+        repository_finding: provisional,
+        occurrences: [finding],
+        possible_duplicate_findings: [candidate],
+        contexts: [],
+        capabilities: { github: true, can_generate: false },
+      },
+    )
+    vi.mocked(resolveRepositoryReviewPossibleDuplicate).mockImplementation(
+      async (_automationID, _findingID, request) => ({
+        automation,
+        repository: repositorySummary,
+        repository_finding:
+          request.decision === "merge"
+            ? candidate
+            : {
+                ...provisional,
+                match_state: "new",
+                possible_duplicates: [],
+              },
+      }),
+    )
+    const onOpenRepositoryFinding = vi.fn()
+    const onRepositoryFindingReplaced = vi.fn()
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewFindingPage
+        automationID={automation.id}
+        findingID={provisional.id}
+        resourceKind="repository"
+        onBack={vi.fn()}
+        onOpenRepositoryFinding={onOpenRepositoryFinding}
+        onOpenIssue={vi.fn()}
+        onLinkIssue={vi.fn()}
+        onGenerated={vi.fn()}
+        onOpenThread={vi.fn()}
+        onRepositoryFindingReplaced={onRepositoryFindingReplaced}
+      />,
+    )
+
+    expect(await screen.findByText("Needs duplicate review")).toBeVisible()
+    expect(screen.getByText(candidate.canonical_title)).toBeVisible()
+    expect(screen.getByText("pkg/new-store.go · SaveAgain")).toBeVisible()
+    expect(screen.getAllByText("2", { selector: "dd" }).length).toBe(2)
+    expect(screen.getByText("87%")).toBeVisible()
+    expect(
+      screen.getByText(
+        "Both diagnoses lose a committed update, but writer ownership differs.",
+      ),
+    ).toBeVisible()
+    expect(
+      screen.getByText(/Matching anchors: version, atomic rename/u),
+    ).toBeVisible()
+    expect(
+      screen.getByText(/Conflicting anchors: writer ownership/u),
+    ).toBeVisible()
+
+    const duplicateHeading = screen.getByRole("heading", {
+      name: "Duplicate review",
+    })
+    const issueHeading = screen.getByRole("heading", { name: "Issue" })
+    const provenanceHeading = screen.getByRole("heading", {
+      name: "Location and provenance",
+    })
+    expect(
+      duplicateHeading.compareDocumentPosition(issueHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(
+      issueHeading.compareDocumentPosition(provenanceHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+
+    await user.click(screen.getByRole("button", { name: "View candidate" }))
+    expect(onOpenRepositoryFinding).toHaveBeenCalledWith(candidate.id)
+
+    await user.click(screen.getByRole("button", { name: "Keep separate" }))
+    await waitFor(() =>
+      expect(resolveRepositoryReviewPossibleDuplicate).toHaveBeenCalledWith(
+        automation.id,
+        provisional.id,
+        {
+          candidate_id: candidate.id,
+          decision: "distinct",
+          expected_provisional_version: provisional.version,
+        },
+      ),
+    )
+
+    await user.click(
+      screen.getByRole("button", { name: "Merge with candidate" }),
+    )
+    let dialog = screen.getByRole("alertdialog", {
+      name: "Merge this finding with the candidate?",
+    })
+    expect(
+      vi
+        .mocked(resolveRepositoryReviewPossibleDuplicate)
+        .mock.calls.some(([, , request]) => request.decision === "merge"),
+    ).toBe(false)
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }))
+    expect(
+      vi
+        .mocked(resolveRepositoryReviewPossibleDuplicate)
+        .mock.calls.some(([, , request]) => request.decision === "merge"),
+    ).toBe(false)
+
+    await user.click(
+      screen.getByRole("button", { name: "Merge with candidate" }),
+    )
+    dialog = screen.getByRole("alertdialog", {
+      name: "Merge this finding with the candidate?",
+    })
+    await user.click(
+      within(dialog).getByRole("button", { name: "Merge with candidate" }),
+    )
+    await waitFor(() =>
+      expect(resolveRepositoryReviewPossibleDuplicate).toHaveBeenCalledWith(
+        automation.id,
+        provisional.id,
+        {
+          candidate_id: candidate.id,
+          decision: "merge",
+          expected_provisional_version: provisional.version,
+          expected_candidate_version: candidate.version,
+        },
+      ),
+    )
+    expect(onRepositoryFindingReplaced).toHaveBeenCalledWith(candidate.id)
+  })
+
+  it.each([
+    ["pending", "Fix check queued", true],
+    ["running", "Checking for fix…", true],
+    ["failed", "Retry fix check", false],
+  ] as const)(
+    "renders the %s repository-finding fix-check action",
+    async (validationState, actionLabel, disabled) => {
+      const aggregate: RepositoryFinding = {
+        ...repositoryFinding,
+        validation_state: validationState,
+      }
+      vi.mocked(
+        getRepositoryReviewAutomationRepositoryFinding,
+      ).mockResolvedValue({
+        automation,
+        repository: repositorySummary,
+        finding,
+        repository_finding: aggregate,
+        occurrences: [finding],
+        contexts: [],
+        capabilities: { github: true },
+      })
+      renderPage(
+        <RepositoryReviewFindingPage
+          automationID={automation.id}
+          findingID={aggregate.id}
+          resourceKind="repository"
+          onBack={vi.fn()}
+          onOpenRepositoryFinding={vi.fn()}
+          onOpenIssue={vi.fn()}
+          onLinkIssue={vi.fn()}
+          onGenerated={vi.fn()}
+          onOpenThread={vi.fn()}
+        />,
+      )
+
+      const action = await screen.findByRole("button", { name: actionLabel })
+      if (disabled) expect(action).toBeDisabled()
+      else expect(action).toBeEnabled()
+    },
+  )
 
   it("renders repository finding causal, effort, occurrence, and resolution projections", async () => {
     const aggregate: RepositoryFinding = {
@@ -2184,6 +2651,13 @@ describe("routed repository review pages", () => {
     expect(
       await screen.findByRole("heading", { name: "Repository lifecycle" }),
     ).toBeVisible()
+    const headerLifecycle = screen
+      .getAllByText("Resolved")
+      .find((element) => element.getAttribute("data-slot") === "badge")
+    expect(headerLifecycle?.parentElement).toHaveClass(
+      "flex-wrap",
+      "justify-end",
+    )
     expect(
       screen.getByRole("heading", { name: "Causal identity hints" }),
     ).toBeVisible()
@@ -2196,6 +2670,9 @@ describe("routed repository review pages", () => {
     expect(
       screen.getByRole("heading", { name: "Resolution history" }),
     ).toBeVisible()
+    expect(screen.getByText("Matched existing finding")).toBeVisible()
+    expect(screen.getAllByText("Fix confirmed").length).toBeGreaterThan(0)
+    expect(screen.queryByText("known", { exact: true })).toBeNull()
     expect(screen.getAllByText(/v1\.2\.3/).length).toBeGreaterThan(0)
     expect(
       screen.queryByRole("button", { name: "Discuss with AI" }),
