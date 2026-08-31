@@ -318,7 +318,10 @@ export function RepositoryReviewDetailPage({
                 ],
                 ["Target is default", review.target_is_default ? "Yes" : "No"],
                 ["Stage", review.progress.stage || "waiting"],
-                ["Progress", repositoryReviewFileProgressLabel(review)],
+                [
+                  "Fully resolved progress",
+                  repositoryReviewFileProgressLabel(review),
+                ],
                 [
                   "Reviewer",
                   review.reviewer_models.join(", ") || "Unavailable",
@@ -973,7 +976,10 @@ function FileProcessingAttribution({
                       )}
                     </td>
                     <td className="px-3 py-2 font-mono text-xs">
-                      {attribution.account || "Unrecorded"}
+                      {attribution.account ||
+                        (attribution.source === "legacy"
+                          ? "Legacy account unavailable"
+                          : "Unrecorded")}
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">
                       {attribution.attempts}

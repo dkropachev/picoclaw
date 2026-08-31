@@ -50,6 +50,15 @@ func TestRepositoryReviewCampaignLiveCopyReplay(t *testing.T) {
 		report.UniqueFileAssignments != 53 || report.Digest == "" {
 		t.Fatalf("live-copy attribution backfill = %#v", report)
 	}
+	state, err = store.MergeRepositoryReviewFileAttributions(
+		t.Context(), repoaudit.MergeRepositoryReviewFileAttributionsRequest{
+			Repository: state.Repository, ExpectedVersion: state.Version,
+			Attributions: attributionBackfill.attributions,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	resolved := workflows.RepositoryReviewModelProfile{
 		Revision: "live-copy", AccountRef: "router-1",
 		ReviewerModels: []string{"review"}, MaxContentBytes: 282624,
@@ -66,7 +75,7 @@ func TestRepositoryReviewCampaignLiveCopyReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !prepared.Available || !prepared.Exact ||
-		prepared.Request.Coverage.SelectedFiles != 367 || prepared.InspectedFiles != 0 ||
+		prepared.Request.Coverage.SelectedFiles != 367 || prepared.InspectedFiles != 27 ||
 		prepared.CompletedFiles != 0 || prepared.FindingOccurrences != 87 ||
 		len(prepared.Request.Runs) != 19 || len(prepared.Request.ContextIDs) != 21 ||
 		len(prepared.Request.FindingIDs) != 87 || len(prepared.ScopeSelection.CandidateIDs) != 367 {
@@ -133,8 +142,8 @@ func TestRepositoryReviewCampaignLiveCopyReplay(t *testing.T) {
 	rawSources := repoaudit.CurrentCampaignRawFindings(
 		applied, campaignID, automation.RunIDs, automation.StartedAt,
 	)
-	if !metrics.CoverageExact || metrics.SelectedFiles != 367 || metrics.InspectedFiles != 0 ||
-		metrics.CompletedFiles != 0 || assignmentProgress.Completed != 0 ||
+	if !metrics.CoverageExact || metrics.SelectedFiles != 367 || metrics.InspectedFiles != 27 ||
+		metrics.CompletedFiles != 0 || assignmentProgress.Completed != 53 ||
 		len(taggedFindings) != 87 || len(rawSources) != 87 {
 		t.Fatalf("live-copy metrics = %#v assignments=%#v tagged=%d raw=%d",
 			metrics, assignmentProgress, len(taggedFindings), len(rawSources))

@@ -347,6 +347,94 @@ func TestBackfillRepositoryReviewFileAttributionsPublicLifecycle(t *testing.T) {
 	}
 }
 
+func TestBackfillRepositoryReviewFileAttributionsRepairsRecoveredCampaignCredits(t *testing.T) {
+	fixture := newRepositoryReviewBackfillFixture(t, 2, repositoryReviewBackfillRunSpec{
+		inspected: []int{0, 1},
+	})
+	repositoryReviewPrepareAttributionFixtureRuns(t, &fixture)
+	repositoryReviewPersistAttributionFixtureRuns(t, fixture)
+
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	resolved := workflows.RepositoryReviewModelProfile{
+		Revision: "current-profile-drift", AccountRef: fixture.automation.EffectiveAccountRef,
+		ReviewerModels:  fixture.automation.ReviewerModels,
+		MaxContentBytes: int(fixture.automation.MaxContentBytes),
+	}
+	preparedCampaign, err := prepareRepositoryReviewLegacyCampaignBackfill(
+		t.Context(), fixture.automation, fixture.state, campaignID,
+		repositoryReviewBackfillLoader{runs: fixture.runs, err: map[string]error{}},
+		resolved,
+	)
+	if err != nil || !preparedCampaign.Available || preparedCampaign.InspectedFiles != 0 {
+		t.Fatalf("zero-credit recovered campaign=%#v err=%v", preparedCampaign, err)
+	}
+	installed, preparedCampaign, err := installRepositoryReviewLegacyCampaignAuthority(
+		t.Context(), fixture.store, preparedCampaign,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroCreditState, err := applyRepositoryReviewLegacyCampaignBackfill(
+		t.Context(), fixture.store, preparedCampaign,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed, err = fixture.store.UpdateAutomation(
+		t.Context(), installed.ID, installed.Version,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			return finalizeRepositoryReviewLegacyCampaign(candidate, campaignID, zeroCreditState)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress := repoaudit.CurrentCampaignAssignmentProgress(zeroCreditState, campaignID); progress.Completed != 0 {
+		t.Fatalf("pre-repair progress=%#v", progress)
+	}
+
+	dry, err := BackfillRepositoryReviewFileAttributions(
+		t.Context(), fixture.workspace, installed.ID,
+		RepositoryReviewFileAttributionBackfillOptions{},
+	)
+	if err != nil || dry.CampaignID != campaignID || dry.CampaignAssignmentCredits != 2 ||
+		dry.NewCampaignAssignmentCredits != 2 || dry.CampaignInspectedFiles != 2 ||
+		dry.NewCampaignInspectedFiles != 2 || dry.ProjectedCompletedAssignments != 2 ||
+		dry.ProjectedPendingAssignments != 6 || dry.ProjectedInspectedFiles != 2 ||
+		dry.ProjectedCompletedFiles != 0 || dry.ReviewVersionBefore != zeroCreditState.ReviewVersion ||
+		dry.Digest == "" {
+		t.Fatalf("credit repair dry run=%#v err=%v", dry, err)
+	}
+	applied, err := BackfillRepositoryReviewFileAttributions(
+		t.Context(), fixture.workspace, installed.ID,
+		RepositoryReviewFileAttributionBackfillOptions{Apply: true, ExpectedDigest: dry.Digest},
+	)
+	if err != nil || !applied.Applied || applied.StateVersionAfter != dry.StateVersionBefore+1 ||
+		applied.ReviewVersionAfter != dry.ReviewVersionBefore+1 {
+		t.Fatalf("credit repair apply=%#v err=%v", applied, err)
+	}
+	repaired, found, err := fixture.store.Get(fixture.state.Repository)
+	if err != nil || !found {
+		t.Fatalf("repaired state found=%v err=%v", found, err)
+	}
+	progress := repoaudit.CurrentCampaignAssignmentProgress(repaired, campaignID)
+	metrics := repoaudit.CurrentCampaignMetrics(repaired, campaignID, nil, installed.StartedAt)
+	if progress.Total != 8 || progress.Completed != 2 || progress.Pending != 6 ||
+		metrics.InspectedFiles != 2 || metrics.CompletedFiles != 0 || metrics.RemainingFiles != 2 {
+		t.Fatalf("repaired progress=%#v metrics=%#v", progress, metrics)
+	}
+
+	replayed, err := BackfillRepositoryReviewFileAttributions(
+		t.Context(), fixture.workspace, installed.ID,
+		RepositoryReviewFileAttributionBackfillOptions{Apply: true, ExpectedDigest: dry.Digest},
+	)
+	if err != nil || replayed.Digest != dry.Digest || replayed.NewCampaignAssignmentCredits != 0 ||
+		replayed.NewCampaignInspectedFiles != 0 || replayed.StateVersionAfter != applied.StateVersionAfter ||
+		replayed.ReviewVersionAfter != applied.ReviewVersionAfter {
+		t.Fatalf("credit repair replay=%#v err=%v", replayed, err)
+	}
+}
+
 func TestBackfillRepositoryReviewFileAttributionsPublicErrorsAndNoop(t *testing.T) {
 	for _, test := range []struct {
 		name        string

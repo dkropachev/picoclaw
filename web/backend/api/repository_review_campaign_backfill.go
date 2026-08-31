@@ -430,14 +430,24 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 	result.ScopePlan = scopePlan
 	coveragePaths := make(map[string]repoaudit.RepositoryReviewCampaignPathCoverage)
 	// Historical finding provenance and reusable campaign coverage have
-	// different profile-drift semantics. A current model-graph change must
-	// withhold old assignment credit, but it does not invalidate an immutable
-	// finding that still matches its retained workflow observation and context.
-	// Keep the independently validated historical inspection proof separate so
-	// exact replay recovery does not depend on reusing the old completion.
+	// different profile-drift semantics. Legacy run evidence alone cannot cross
+	// a current model-graph change. An independently persisted attribution may
+	// bridge that drift only after exact source-run and semantic assignment
+	// validation below. Keep historical inspection proof separate so exact
+	// finding replay does not depend on reusable completion credit.
 	historicalInspectionPaths := make(map[string]repoaudit.RepositoryReviewCampaignPathCoverage)
 	requiredAssignments := requiredAssignmentHint
 	recoverableRunIDs := make(map[string]struct{}, len(evidenceRecords))
+	legacyAttributionsByRun := make(map[string][]repoaudit.RepositoryReviewFileAttribution)
+	for _, attribution := range state.FileAttributions {
+		if attribution.AutomationID != automation.ID ||
+			attribution.Source != repoaudit.RepositoryReviewFileAttributionSourceLegacyManagedChild {
+			continue
+		}
+		legacyAttributionsByRun[attribution.RunID] = append(
+			legacyAttributionsByRun[attribution.RunID], attribution,
+		)
+	}
 	for _, record := range evidenceRecords {
 		recoverableRunIDs[record.ledgerRun.ID] = struct{}{}
 	}
@@ -578,6 +588,15 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 			result.Exact = false
 			continue
 		}
+		repositoryReviewCreditLegacyFileAttributions(
+			coveragePaths,
+			assignmentCatalog,
+			selectedByPath,
+			automation.ID,
+			campaignID,
+			record,
+			legacyAttributionsByRun[ledgerRun.ID],
+		)
 		for _, file := range evidence.InspectedFiles {
 			if selectedByPath[file.Path] != file {
 				result.Exact = false
@@ -644,6 +663,88 @@ func repositoryReviewLegacyReviewerIdentityMatches(expected, observed string) bo
 		return observed == "default"
 	}
 	return expected != "" && expected == observed
+}
+
+// repositoryReviewCreditLegacyFileAttributions maps immutable legacy child
+// evidence onto the current catalog by semantic focus and logical reviewer.
+// The historical profile may differ, but every source/run/campaign/snapshot
+// and same-child field must still match before one exact FileRef receives a
+// reusable current assignment bit. Ambiguous records contribute no credit.
+func repositoryReviewCreditLegacyFileAttributions(
+	coveragePaths map[string]repoaudit.RepositoryReviewCampaignPathCoverage,
+	assignmentCatalog []repoaudit.RepositoryReviewAssignment,
+	selectedByPath map[string]repoaudit.FileRef,
+	automationID string,
+	campaignID string,
+	record repositoryReviewLegacyRunEvidenceRecord,
+	attributions []repoaudit.RepositoryReviewFileAttribution,
+) {
+	if len(attributions) == 0 || len(assignmentCatalog) == 0 {
+		return
+	}
+	ledgerRun := record.ledgerRun
+	plan := record.plan
+	if (ledgerRun.CampaignID != "" && ledgerRun.CampaignID != campaignID) ||
+		(plan.CampaignID != "" && plan.CampaignID != campaignID) ||
+		ledgerRun.ID == "" || ledgerRun.PlanID != plan.ID ||
+		ledgerRun.CommitSHA != plan.CommitSHA || ledgerRun.InventoryHash != plan.InventoryHash {
+		return
+	}
+	for _, attribution := range attributions {
+		if attribution.AutomationID != automationID || attribution.RunID != ledgerRun.ID ||
+			attribution.Source != repoaudit.RepositoryReviewFileAttributionSourceLegacyManagedChild ||
+			!attribution.Required || attribution.CommitSHA != plan.CommitSHA ||
+			attribution.InventoryHash != plan.InventoryHash ||
+			attribution.ProfileHash != plan.ProfileHash ||
+			attribution.RootAgentID != "main" ||
+			!attribution.CompletedAt.Equal(ledgerRun.CompletedAt) ||
+			attribution.ChildIndex < 1 || attribution.ChildIndex > len(record.evidence.Children) {
+			continue
+		}
+		child := record.evidence.Children[attribution.ChildIndex-1]
+		if !child.Successful || !child.Required ||
+			attribution.AssignmentID != child.AssignmentID ||
+			attribution.FocusID != child.FocusID ||
+			attribution.ReviewerIdentity != child.ReviewerIdentity ||
+			child.Observation == nil ||
+			attribution.EvidenceDigest != child.Observation.RawDigest ||
+			attribution.Model != child.Observation.Model ||
+			attribution.ModelAlias != child.Observation.ModelAlias ||
+			attribution.Account != child.Observation.Account ||
+			!reflect.DeepEqual(attribution.AcknowledgedFiles, child.AcknowledgedFiles) {
+			continue
+		}
+
+		assignmentIndex := -1
+		for index, assignment := range assignmentCatalog {
+			if !assignment.Required || assignment.FocusID != attribution.FocusID ||
+				!repositoryReviewLegacyReviewerIdentityMatches(
+					assignment.Reviewer, attribution.ReviewerIdentity,
+				) {
+				continue
+			}
+			if assignmentIndex >= 0 {
+				assignmentIndex = -1
+				break
+			}
+			assignmentIndex = index
+		}
+		if assignmentIndex < 0 {
+			continue
+		}
+		assignmentID := assignmentCatalog[assignmentIndex].ID
+		for _, file := range attribution.AcknowledgedFiles {
+			if selectedByPath[file.Path] != file {
+				continue
+			}
+			credited, err := repoaudit.CreditRepositoryReviewAssignment(
+				coveragePaths[file.Path], assignmentCatalog, assignmentID,
+			)
+			if err == nil {
+				coveragePaths[file.Path] = credited
+			}
+		}
+	}
 }
 
 func finalizeRepositoryReviewLegacyCampaignBackfill(

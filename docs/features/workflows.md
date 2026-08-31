@@ -228,7 +228,12 @@ checkpoint writes the durable raw finding and exact acknowledged-file
 attribution before reporting child completion. Missing or partial live
 provenance fails the checkpoint. Legacy recovery may retain its one ambiguous
 model value but never invents an alias or account, and generic managed workflow
-output does not expose concrete-account identity.
+output does not expose concrete-account identity. A trusted repository-review
+repair may translate that legacy acknowledgement into the current campaign's
+same required focus/reviewer bit only when the retained attribution and recovered
+run exactly match the campaign automation, commit, inventory, run profile,
+completion time, and file identity; the generic workflow runtime grants no such
+credit itself.
 
 For `FR-WORKFLOW-046`, an infrastructure failure while rechecking the private
 durable-create fence is canonicalized separately from revision drift. The HTTP

@@ -16,10 +16,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
-// RepositoryReviewFileAttributionBackfillOptions controls the one-shot,
-// evidence-only legacy attribution recovery. Apply requires the digest returned
-// by an earlier dry run so an operator cannot commit a different source set by
-// accident.
+// RepositoryReviewFileAttributionBackfillOptions controls the one-shot legacy
+// attribution and recovered-campaign credit repair. Apply requires the digest
+// returned by an earlier dry run so an operator cannot commit a different
+// evidence or semantic-credit set by accident.
 type RepositoryReviewFileAttributionBackfillOptions struct {
 	Apply          bool   `json:"apply"`
 	ExpectedDigest string `json:"expected_digest,omitempty"`
@@ -29,28 +29,41 @@ type RepositoryReviewFileAttributionBackfillOptions struct {
 // administrative command. It contains counts and identities, never prompts,
 // provider responses, repository content, or account credentials.
 type RepositoryReviewFileAttributionBackfillReport struct {
-	AutomationID               string `json:"automation_id"`
-	Repository                 string `json:"repository"`
-	StateVersionBefore         int64  `json:"state_version_before"`
-	StateVersionAfter          int64  `json:"state_version_after"`
-	ConfiguredRuns             int    `json:"configured_runs"`
-	RecoveredRuns              int    `json:"recovered_runs"`
-	AllowedNonLedgerRuns       int    `json:"allowed_non_ledger_runs"`
-	ChildAttempts              int    `json:"child_attempts"`
-	SuccessfulChildren         int    `json:"successful_children"`
-	FailedChildren             int    `json:"failed_children"`
-	AttributionRecords         int    `json:"attribution_records"`
-	ExistingAttributionRecords int    `json:"existing_attribution_records"`
-	AcknowledgementOccurrences int    `json:"acknowledgement_occurrences"`
-	UniqueFiles                int    `json:"unique_files"`
-	UniqueFileAssignments      int    `json:"unique_file_assignments"`
-	Digest                     string `json:"digest"`
-	Applied                    bool   `json:"applied"`
+	AutomationID                  string `json:"automation_id"`
+	Repository                    string `json:"repository"`
+	StateVersionBefore            int64  `json:"state_version_before"`
+	StateVersionAfter             int64  `json:"state_version_after"`
+	ReviewVersionBefore           int64  `json:"review_version_before"`
+	ReviewVersionAfter            int64  `json:"review_version_after"`
+	CampaignID                    string `json:"campaign_id,omitempty"`
+	CampaignAssignmentCredits     int    `json:"campaign_assignment_credits"`
+	NewCampaignAssignmentCredits  int    `json:"new_campaign_assignment_credits"`
+	CampaignInspectedFiles        int    `json:"campaign_inspected_files"`
+	NewCampaignInspectedFiles     int    `json:"new_campaign_inspected_files"`
+	ProjectedCompletedAssignments int    `json:"projected_completed_assignments"`
+	ProjectedPendingAssignments   int    `json:"projected_pending_assignments"`
+	ProjectedInspectedFiles       int    `json:"projected_inspected_files"`
+	ProjectedCompletedFiles       int    `json:"projected_completed_files"`
+	ConfiguredRuns                int    `json:"configured_runs"`
+	RecoveredRuns                 int    `json:"recovered_runs"`
+	AllowedNonLedgerRuns          int    `json:"allowed_non_ledger_runs"`
+	ChildAttempts                 int    `json:"child_attempts"`
+	SuccessfulChildren            int    `json:"successful_children"`
+	FailedChildren                int    `json:"failed_children"`
+	AttributionRecords            int    `json:"attribution_records"`
+	ExistingAttributionRecords    int    `json:"existing_attribution_records"`
+	AcknowledgementOccurrences    int    `json:"acknowledgement_occurrences"`
+	UniqueFiles                   int    `json:"unique_files"`
+	UniqueFileAssignments         int    `json:"unique_file_assignments"`
+	Digest                        string `json:"digest"`
+	Applied                       bool   `json:"applied"`
 }
 
 type repositoryReviewPreparedFileAttributionBackfill struct {
-	report       RepositoryReviewFileAttributionBackfillReport
-	attributions []repoaudit.RepositoryReviewFileAttribution
+	report         RepositoryReviewFileAttributionBackfillReport
+	attributions   []repoaudit.RepositoryReviewFileAttribution
+	campaignCredit *repoaudit.RepositoryReviewFileAttributionCreditFence
+	creditPreview  repoaudit.RepositoryReviewFileAttributionCreditPreview
 }
 
 type repositoryReviewFileAttributionSourceRun struct {
@@ -70,25 +83,34 @@ type repositoryReviewFileAttributionDigestCounts struct {
 	AcknowledgementOccurrences int `json:"acknowledgement_occurrences"`
 	UniqueFiles                int `json:"unique_files"`
 	UniqueFileAssignments      int `json:"unique_file_assignments"`
+	CampaignAssignmentCredits  int `json:"campaign_assignment_credits"`
+	CampaignInspectedFiles     int `json:"campaign_inspected_files"`
+}
+
+type repositoryReviewFileAttributionDigestCampaignCredit struct {
+	AutomationID string                                                      `json:"automation_id"`
+	CampaignID   string                                                      `json:"campaign_id"`
+	Credits      []repoaudit.RepositoryReviewFileAttributionAssignmentCredit `json:"credits"`
 }
 
 type repositoryReviewFileAttributionDigestEnvelope struct {
-	Schema            string                                      `json:"schema"`
-	AutomationID      string                                      `json:"automation_id"`
-	AutomationVersion int64                                       `json:"automation_version"`
-	Repository        string                                      `json:"repository"`
-	LedgerRepository  string                                      `json:"ledger_repository"`
-	AutomationStatus  repoaudit.RepositoryReviewAutomationStatus  `json:"automation_status"`
-	RunIDs            []string                                    `json:"run_ids"`
-	Runs              []repositoryReviewFileAttributionSourceRun  `json:"runs"`
-	Counts            repositoryReviewFileAttributionDigestCounts `json:"counts"`
-	Attributions      []repoaudit.RepositoryReviewFileAttribution `json:"attributions"`
+	Schema            string                                               `json:"schema"`
+	AutomationID      string                                               `json:"automation_id"`
+	AutomationVersion int64                                                `json:"automation_version"`
+	Repository        string                                               `json:"repository"`
+	LedgerRepository  string                                               `json:"ledger_repository"`
+	AutomationStatus  repoaudit.RepositoryReviewAutomationStatus           `json:"automation_status"`
+	RunIDs            []string                                             `json:"run_ids"`
+	Runs              []repositoryReviewFileAttributionSourceRun           `json:"runs"`
+	Counts            repositoryReviewFileAttributionDigestCounts          `json:"counts"`
+	Attributions      []repoaudit.RepositoryReviewFileAttribution          `json:"attributions"`
+	CampaignCredit    *repositoryReviewFileAttributionDigestCampaignCredit `json:"campaign_credit,omitempty"`
 }
 
 // BackfillRepositoryReviewFileAttributions reconstructs successful historical
-// file acknowledgements from retained workflow evidence. It deliberately does
-// not grant current-profile assignment/completion credit: historical processing
-// remains truthful even when the current model graph is incompatible.
+// file acknowledgements from retained workflow evidence. When an exact legacy
+// campaign has already been recovered, the same digest-fenced operation also
+// seeds strictly matched semantic focus/reviewer credits across profile drift.
 func BackfillRepositoryReviewFileAttributions(
 	ctx context.Context,
 	workspace string,
@@ -151,7 +173,8 @@ func applyPreparedRepositoryReviewFileAttributionBackfill(
 	state repoaudit.RepositoryState,
 	prepared repositoryReviewPreparedFileAttributionBackfill,
 ) (RepositoryReviewFileAttributionBackfillReport, error) {
-	if len(prepared.attributions) == 0 {
+	if len(prepared.attributions) == 0 &&
+		(prepared.campaignCredit == nil || len(prepared.creditPreview.Credits) == 0) {
 		prepared.report.Applied = true
 		return prepared.report, nil
 	}
@@ -159,7 +182,7 @@ func applyPreparedRepositoryReviewFileAttributionBackfill(
 		ctx,
 		repoaudit.MergeRepositoryReviewFileAttributionsRequest{
 			Repository: state.Repository, ExpectedVersion: state.Version,
-			Attributions: prepared.attributions,
+			Attributions: prepared.attributions, CampaignCredit: prepared.campaignCredit,
 		},
 	)
 	if err != nil {
@@ -167,6 +190,7 @@ func applyPreparedRepositoryReviewFileAttributionBackfill(
 	}
 	prepared.report.Applied = true
 	prepared.report.StateVersionAfter = merged.Version
+	prepared.report.ReviewVersionAfter = merged.ReviewVersion
 	return prepared.report, nil
 }
 
@@ -180,6 +204,7 @@ func prepareRepositoryReviewFileAttributionBackfill(
 		report: RepositoryReviewFileAttributionBackfillReport{
 			AutomationID: automation.ID, Repository: state.Repository,
 			StateVersionBefore: state.Version, StateVersionAfter: state.Version,
+			ReviewVersionBefore: state.ReviewVersion, ReviewVersionAfter: state.ReviewVersion,
 			ConfiguredRuns: len(automation.RunIDs),
 		},
 	}
@@ -360,8 +385,43 @@ func prepareRepositoryReviewFileAttributionBackfill(
 	prepared.report.AttributionRecords = len(prepared.attributions)
 	prepared.report.UniqueFiles = len(uniqueFiles)
 	prepared.report.UniqueFileAssignments = len(uniqueAssignments)
+	if campaign := state.CurrentCampaign; campaign != nil && campaign.Exact &&
+		campaign.RecoveryDigest != "" && automation.CampaignID == campaign.ID {
+		fence := repoaudit.RepositoryReviewFileAttributionCreditFence{
+			AutomationID: automation.ID, CampaignID: campaign.ID,
+			ExpectedReviewVersion: state.ReviewVersion,
+		}
+		preview, previewErr := repoaudit.PreviewRepositoryReviewFileAttributionCredits(
+			state, fence, prepared.attributions,
+		)
+		if previewErr != nil {
+			return prepared, previewErr
+		}
+		prepared.campaignCredit = &fence
+		prepared.creditPreview = preview
+		prepared.report.CampaignID = campaign.ID
+		prepared.report.CampaignAssignmentCredits = preview.EffectiveAssignmentCredits
+		prepared.report.NewCampaignAssignmentCredits = preview.NewAssignmentCredits
+		prepared.report.CampaignInspectedFiles = preview.EffectiveInspectedFiles
+		prepared.report.NewCampaignInspectedFiles = preview.NewInspectedFiles
+		prepared.report.ProjectedCompletedAssignments = preview.ProjectedCompletedAssignments
+		prepared.report.ProjectedPendingAssignments = preview.ProjectedPendingAssignments
+		prepared.report.ProjectedInspectedFiles = preview.ProjectedInspectedFiles
+		prepared.report.ProjectedCompletedFiles = preview.ProjectedCompletedFiles
+	}
+	var campaignCredit *repositoryReviewFileAttributionDigestCampaignCredit
+	if prepared.campaignCredit != nil {
+		campaignCredit = &repositoryReviewFileAttributionDigestCampaignCredit{
+			AutomationID: prepared.campaignCredit.AutomationID,
+			CampaignID:   prepared.campaignCredit.CampaignID,
+			Credits: append(
+				[]repoaudit.RepositoryReviewFileAttributionAssignmentCredit(nil),
+				prepared.creditPreview.Credits...,
+			),
+		}
+	}
 	envelope := repositoryReviewFileAttributionDigestEnvelope{
-		Schema:       "repository-review-file-attributions-v1",
+		Schema:       "repository-review-file-attributions-v2",
 		AutomationID: automation.ID, AutomationVersion: automation.Version,
 		Repository: automation.Repository, LedgerRepository: state.Repository,
 		AutomationStatus: automation.Status,
@@ -378,8 +438,10 @@ func prepareRepositoryReviewFileAttributionBackfill(
 			AcknowledgementOccurrences: prepared.report.AcknowledgementOccurrences,
 			UniqueFiles:                prepared.report.UniqueFiles,
 			UniqueFileAssignments:      prepared.report.UniqueFileAssignments,
+			CampaignAssignmentCredits:  prepared.report.CampaignAssignmentCredits,
+			CampaignInspectedFiles:     prepared.report.CampaignInspectedFiles,
 		},
-		Attributions: prepared.attributions,
+		Attributions: prepared.attributions, CampaignCredit: campaignCredit,
 	}
 	digest, err := repositoryReviewFileAttributionEnvelopeDigest(
 		envelope, repositoryReviewLegacyBackfillMaxSourceBytes,

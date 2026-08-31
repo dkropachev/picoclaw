@@ -317,6 +317,58 @@ func newRepositoryReviewBackfillFixture(
 	return fixture
 }
 
+func addRepositoryReviewBackfillFileAttributions(
+	t *testing.T,
+	fixture *repositoryReviewBackfillFixture,
+) int {
+	t.Helper()
+	ledgerRuns := make(map[string]repoaudit.ReviewRun, len(fixture.state.Runs))
+	for _, run := range fixture.state.Runs {
+		ledgerRuns[run.ID] = run
+	}
+	added := 0
+	for _, runID := range fixture.automation.RunIDs {
+		ledgerRun, retained := ledgerRuns[runID]
+		workflowRun := fixture.runs[runID]
+		if !retained || workflowRun == nil {
+			continue
+		}
+		plan, evidence, valid := repositoryReviewLegacyRunEvidence(
+			workflowRun, ledgerRun, fixture.state.Repository,
+		)
+		if !valid {
+			continue
+		}
+		for childIndex, child := range evidence.Children {
+			if !child.Successful || len(child.AcknowledgedFiles) == 0 || child.Observation == nil {
+				continue
+			}
+			attribution, err := repoaudit.NewRepositoryReviewFileAttribution(
+				repoaudit.RepositoryReviewFileAttribution{
+					AutomationID: fixture.automation.ID, RunID: runID,
+					CommitSHA: plan.CommitSHA, InventoryHash: plan.InventoryHash,
+					ProfileHash: plan.ProfileHash, AssignmentID: child.AssignmentID,
+					FocusID: child.FocusID, RootAgentID: "main",
+					ReviewerIdentity: child.ReviewerIdentity,
+					Model:            child.Observation.Model, ModelAlias: child.Observation.ModelAlias,
+					Account:           child.Observation.Account,
+					AcknowledgedFiles: append([]repoaudit.FileRef(nil), child.AcknowledgedFiles...),
+					EvidenceDigest:    child.Observation.RawDigest,
+					Source:            repoaudit.RepositoryReviewFileAttributionSourceLegacyManagedChild,
+					ChildIndex:        childIndex + 1, Required: child.Required,
+					CompletedAt: ledgerRun.CompletedAt,
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.state.FileAttributions = append(fixture.state.FileAttributions, attribution)
+			added++
+		}
+	}
+	return added
+}
+
 func repositoryReviewBackfillLegacyFindingID(
 	finding repoaudit.Finding,
 	runID string,
@@ -492,6 +544,28 @@ func TestRepositoryReviewLegacyCampaignBackfillRestoresFiftyThreeAssignmentCredi
 	}, campaignID)
 	if progress.Completed != 53 || progress.Total != 108 {
 		t.Fatalf("recovered assignment progress = %#v", progress)
+	}
+	if added := addRepositoryReviewBackfillFileAttributions(t, &fixture); added != 2 {
+		t.Fatalf("persisted attribution records = %d, want 2", added)
+	}
+	driftedCampaignID := repoaudit.NewRepositoryReviewCampaignID()
+	drifted, err := prepareRepositoryReviewLegacyCampaignBackfill(
+		t.Context(), fixture.automation, fixture.state, driftedCampaignID,
+		repositoryReviewBackfillLoader{runs: fixture.runs, err: map[string]error{}},
+		workflows.RepositoryReviewModelProfile{
+			Revision: "different-model-graph", AccountRef: fixture.automation.EffectiveAccountRef,
+			ReviewerModels:  fixture.automation.ReviewerModels,
+			MaxContentBytes: int(fixture.automation.MaxContentBytes),
+		},
+	)
+	driftedProgress := repoaudit.CurrentCampaignAssignmentProgress(repoaudit.RepositoryState{
+		CurrentCampaign: &drifted.Request.Coverage,
+	}, driftedCampaignID)
+	if err != nil || !drifted.Available || !drifted.Exact ||
+		drifted.InspectedFiles != 27 || drifted.CompletedFiles != 0 ||
+		driftedProgress.Total != 108 || driftedProgress.Completed != 53 {
+		t.Fatalf("cross-profile attribution recovery = %#v progress=%#v err=%v",
+			drifted, driftedProgress, err)
 	}
 	_, prepared, err = installRepositoryReviewLegacyCampaignAuthority(
 		t.Context(), fixture.store, prepared,
@@ -725,20 +799,139 @@ func TestRepositoryReviewLegacyCampaignBackfillGatesCompletionOnResolvedRevision
 		compatible.CompletedFiles != 2 {
 		t.Fatalf("compatible completion = %#v err=%v", compatible, err)
 	}
+	driftedProfile := workflows.RepositoryReviewModelProfile{
+		Revision: "different-model-graph", AccountRef: fixture.automation.EffectiveAccountRef,
+		ReviewerModels:  fixture.automation.ReviewerModels,
+		MaxContentBytes: int(fixture.automation.MaxContentBytes),
+	}
 	drifted, err := prepareRepositoryReviewLegacyCampaignBackfill(
 		t.Context(), fixture.automation, fixture.state,
 		repoaudit.NewRepositoryReviewCampaignID(),
 		repositoryReviewBackfillLoader{runs: fixture.runs, err: map[string]error{}},
-		workflows.RepositoryReviewModelProfile{
-			Revision: "different-model-graph", AccountRef: fixture.automation.EffectiveAccountRef,
-			ReviewerModels:  fixture.automation.ReviewerModels,
-			MaxContentBytes: int(fixture.automation.MaxContentBytes),
-		},
+		driftedProfile,
 	)
 	if err != nil || !drifted.Available || !drifted.Exact || drifted.InspectedFiles != 0 ||
 		drifted.CompletedFiles != 0 || drifted.FindingOccurrences != 1 ||
 		len(drifted.Request.FindingIDs) != 1 || len(drifted.Request.ContextIDs) != 1 {
 		t.Fatalf("revision-drift completion = %#v err=%v", drifted, err)
+	}
+
+	if added := addRepositoryReviewBackfillFileAttributions(t, &fixture); added != 4 {
+		t.Fatalf("persisted attribution records = %d, want 4", added)
+	}
+	creditedCampaignID := repoaudit.NewRepositoryReviewCampaignID()
+	credited, err := prepareRepositoryReviewLegacyCampaignBackfill(
+		t.Context(), fixture.automation, fixture.state, creditedCampaignID,
+		repositoryReviewBackfillLoader{runs: fixture.runs, err: map[string]error{}},
+		driftedProfile,
+	)
+	progress := repoaudit.CurrentCampaignAssignmentProgress(repoaudit.RepositoryState{
+		CurrentCampaign: &credited.Request.Coverage,
+	}, creditedCampaignID)
+	if err != nil || !credited.Available || !credited.Exact || credited.InspectedFiles != 2 ||
+		credited.CompletedFiles != 2 || progress.Total != 8 || progress.Completed != 8 {
+		t.Fatalf("attribution-bridged revision drift = %#v progress=%#v err=%v", credited, progress, err)
+	}
+}
+
+func TestRepositoryReviewLegacyFileAttributionCreditFailsClosed(t *testing.T) {
+	fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
+		inspected: []int{0},
+	})
+	if added := addRepositoryReviewBackfillFileAttributions(t, &fixture); added != 1 {
+		t.Fatalf("persisted attribution records = %d, want 1", added)
+	}
+	ledgerRun := fixture.state.Runs[0]
+	plan, evidence, valid := repositoryReviewLegacyRunEvidence(
+		fixture.runs[ledgerRun.ID], ledgerRun, fixture.state.Repository,
+	)
+	if !valid {
+		t.Fatal("fixture run evidence is invalid")
+	}
+	record := repositoryReviewLegacyRunEvidenceRecord{
+		ledgerRun: ledgerRun, plan: plan, evidence: evidence,
+	}
+	catalog, err := workflows.RepositoryBugFinderAssignmentCatalog(
+		fixture.automation.ReviewerModels, false,
+		workflows.RepositoryBugFinderPromptRevision, "sha256:current-profile",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := fixture.state.FileAttributions[0].AcknowledgedFiles[0]
+	selected := map[string]repoaudit.FileRef{file.Path: file}
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	credit := func(
+		recordValue repositoryReviewLegacyRunEvidenceRecord,
+		catalogValue []repoaudit.RepositoryReviewAssignment,
+		selectedValue map[string]repoaudit.FileRef,
+		attributions []repoaudit.RepositoryReviewFileAttribution,
+		seed map[string]repoaudit.RepositoryReviewCampaignPathCoverage,
+	) map[string]repoaudit.RepositoryReviewCampaignPathCoverage {
+		t.Helper()
+		if seed == nil {
+			seed = make(map[string]repoaudit.RepositoryReviewCampaignPathCoverage)
+		}
+		repositoryReviewCreditLegacyFileAttributions(
+			seed, catalogValue, selectedValue, fixture.automation.ID, campaignID,
+			recordValue, attributions,
+		)
+		return seed
+	}
+
+	if got := credit(record, nil, selected, fixture.state.FileAttributions, nil); len(got) != 0 {
+		t.Fatalf("empty catalog credited paths = %#v", got)
+	}
+	wrongCampaign := record
+	wrongCampaign.ledgerRun.CampaignID = repoaudit.NewRepositoryReviewCampaignID()
+	if got := credit(wrongCampaign, catalog, selected, fixture.state.FileAttributions, nil); len(got) != 0 {
+		t.Fatalf("foreign campaign credited paths = %#v", got)
+	}
+	wrongAttribution := fixture.state.FileAttributions[0]
+	wrongAttribution.RunID = "wr_other"
+	if got := credit(record, catalog, selected,
+		[]repoaudit.RepositoryReviewFileAttribution{wrongAttribution}, nil); len(got) != 0 {
+		t.Fatalf("foreign run credited paths = %#v", got)
+	}
+	wrongChild := record
+	wrongChild.evidence.Children = append([]repoaudit.RepositoryReviewEvidence(nil), evidence.Children...)
+	wrongChild.evidence.Children[0].FocusID = repoaudit.RepositoryReviewFocusSecurityTrust
+	if got := credit(wrongChild, catalog, selected, fixture.state.FileAttributions, nil); len(got) != 0 {
+		t.Fatalf("mismatched child credited paths = %#v", got)
+	}
+	otherCatalog, err := workflows.RepositoryBugFinderAssignmentCatalog(
+		[]string{"other-reviewer"}, false,
+		workflows.RepositoryBugFinderPromptRevision, "sha256:current-profile",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := credit(record, otherCatalog, selected, fixture.state.FileAttributions, nil); len(got) != 0 {
+		t.Fatalf("unmatched reviewer credited paths = %#v", got)
+	}
+	ambiguousCatalog := append(append([]repoaudit.RepositoryReviewAssignment(nil), catalog...), catalog[0])
+	if got := credit(record, ambiguousCatalog, selected, fixture.state.FileAttributions, nil); len(got) != 0 {
+		t.Fatalf("ambiguous catalog credited paths = %#v", got)
+	}
+	if got := credit(record, catalog, map[string]repoaudit.FileRef{},
+		fixture.state.FileAttributions, nil); len(got) != 0 {
+		t.Fatalf("out-of-scope attribution credited paths = %#v", got)
+	}
+	unsupported := map[string]repoaudit.RepositoryReviewCampaignPathCoverage{
+		file.Path: {Unsupported: true},
+	}
+	if got := credit(
+		record,
+		catalog,
+		selected,
+		fixture.state.FileAttributions,
+		unsupported,
+	); got[file.Path].AssignmentBits != "" {
+		t.Fatalf("unsupported path received assignment bits = %#v", got[file.Path])
+	}
+	credited := credit(record, catalog, selected, fixture.state.FileAttributions, nil)
+	if !credited[file.Path].Inspected || credited[file.Path].AssignmentBits == "" {
+		t.Fatalf("exact attribution was not credited = %#v", credited[file.Path])
 	}
 }
 
