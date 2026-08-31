@@ -59,7 +59,7 @@ type coveragePlan struct {
 const (
 	featureCoverageRegressionToleranceStatements = 10
 	coverageNestedBenchmarkSkipPattern           = `^Test(GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath)$`
-	coverageGoTestParallelism                    = 4
+	coverageGoTestParallelism                    = 1
 )
 
 type listedPackage struct {
