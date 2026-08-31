@@ -1212,6 +1212,36 @@ describe("routed repository review pages", () => {
     expect(restartRepositoryReviewAutomation).not.toHaveBeenCalled()
   })
 
+  it("explains legacy unknown-candidate failures", async () => {
+    const failedReview: RepositoryReviewAutomation = {
+      ...automation,
+      status: "failed",
+      pause_reason: "run_failed",
+      pause_detail: "AI selected an unknown candidate ID",
+    }
+    vi.mocked(getRepositoryReviewAutomation).mockResolvedValue(failedReview)
+
+    renderPage(
+      <RepositoryReviewDetailPage
+        id={failedReview.id}
+        onBack={vi.fn()}
+        onFindings={vi.fn()}
+        onIssues={vi.fn()}
+      />,
+    )
+
+    const alert = await screen.findByRole("alert")
+    expect(alert).toHaveTextContent(
+      /scope planner returned a malformed or stale/i,
+    )
+    expect(alert).toHaveTextContent(/native validation stopped the run/i)
+    expect(alert).toHaveTextContent(
+      /continue retries from the saved review state/i,
+    )
+    expect(alert).not.toHaveTextContent("AI selected an unknown candidate ID")
+    expect(screen.getByRole("button", { name: "Continue" })).toBeVisible()
+  })
+
   it("runs a completed review again from its detail page", async () => {
     const completedReview: RepositoryReviewAutomation = {
       ...automation,

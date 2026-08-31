@@ -105,6 +105,12 @@ aggregate-only reports remain readable.
   responses or durable state; new previews are one finding each while legacy
   grouped drafts remain visible; issue publication and existing-issue
   validation use protected GitHub boundaries.
+- Candidate-scope failures expose bounded shape-only diagnostics: a
+  Git-object-shaped planner value is distinguished from an unknown frozen
+  candidate missing from the rebuilt commit-bound catalog, while the
+  model-provided value is never echoed into durable failure state. The review
+  detail expands the legacy bare unknown-candidate failure into an actionable
+  explanation and keeps Continue available from saved review state.
 
 ## Requirements
 
