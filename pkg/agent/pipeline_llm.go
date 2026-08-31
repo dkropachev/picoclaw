@@ -298,6 +298,11 @@ func (p *Pipeline) CallLLM(
 			}
 			if streamErr == nil {
 				exec.providerToolDefs = authoritativeToolDefs
+				candidate := providers.FallbackCandidate{}
+				if len(exec.activeCandidates) > 0 {
+					candidate = exec.activeCandidates[0]
+				}
+				exec.recordSuccessfulModelCall(candidate, exec.llmModelName, exec.llmModel)
 			}
 			return response, streamErr
 		}
@@ -387,6 +392,7 @@ func (p *Pipeline) CallLLM(
 				exec.providerToolDefs = candidateAuthoritativeToolDefs
 				exec.useNativeSearch = candidateNativeSearch
 				exec.suppressReasoning = shouldSuppressReasoningFor(candidateThinking)
+				exec.recordSuccessfulModelCall(candidate, exec.llmModelName, candidate.Model)
 			}
 			return response, err
 		}
@@ -471,6 +477,11 @@ func (p *Pipeline) CallLLM(
 		}
 		if err == nil {
 			exec.providerToolDefs = authoritativeToolDefs
+			candidate := providers.FallbackCandidate{}
+			if len(exec.activeCandidates) > 0 {
+				candidate = exec.activeCandidates[0]
+			}
+			exec.recordSuccessfulModelCall(candidate, exec.llmModelName, exec.llmModel)
 		}
 		if exec.accountRouter != nil {
 			candidate := providers.FallbackCandidate{}

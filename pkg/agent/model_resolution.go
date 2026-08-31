@@ -7,6 +7,44 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
+type successfulModelProvenance struct {
+	selected string
+	actual   string
+	account  string
+}
+
+func successfulModelProvenanceForCandidate(
+	candidate providers.FallbackCandidate,
+	selectedAlias string,
+	actualModel string,
+) successfulModelProvenance {
+	return successfulModelProvenance{
+		selected: resolvedCandidateModelName(
+			[]providers.FallbackCandidate{candidate},
+			selectedAlias,
+		),
+		actual:  firstNonEmpty(actualModel, candidate.Model),
+		account: accountRefFromCandidateIdentityKey(candidate.IdentityKey),
+	}
+}
+
+func writeSuccessfulModelProvenance(
+	selectedOut *string,
+	actualOut *string,
+	accountOut *string,
+	provenance successfulModelProvenance,
+) {
+	if selectedOut != nil {
+		*selectedOut = strings.TrimSpace(provenance.selected)
+	}
+	if actualOut != nil {
+		*actualOut = strings.TrimSpace(provenance.actual)
+	}
+	if accountOut != nil {
+		*accountOut = strings.TrimSpace(provenance.account)
+	}
+}
+
 func cloneModelConfigForResolution(
 	_ string,
 	modelCfg *config.ModelConfig,

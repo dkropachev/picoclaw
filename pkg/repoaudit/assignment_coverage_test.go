@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -67,7 +68,8 @@ func assignmentCoverageCheckpoint(
 		Digest:            "sha256:" + strings.Repeat(fmt.Sprintf("%x", assignmentIndex+1), 64),
 		AcknowledgedFiles: acknowledged,
 		Observation: Observation{
-			Model: "review-a", Reviewer: assignmentPlan.FocusID,
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+			Reviewer:   assignmentPlan.FocusID,
 			ScopeFiles: assignmentPlan.Files,
 			RawDigest:  "sha256:" + strings.Repeat("c", 64),
 		},
@@ -559,6 +561,12 @@ func TestRepositoryReviewAssignmentRunDefensiveCoverage(t *testing.T) {
 				request.AcknowledgedFiles = []FileRef{repositoryAuditTestFile("outside.go", "f", 1)}
 			},
 			"model": func(request *CheckpointRepositoryReviewAssignmentRequest) { request.Observation.Model = "" },
+			"model alias": func(request *CheckpointRepositoryReviewAssignmentRequest) {
+				request.Observation.ModelAlias = ""
+			},
+			"account": func(request *CheckpointRepositoryReviewAssignmentRequest) {
+				request.Observation.Account = ""
+			},
 			"reviewer": func(request *CheckpointRepositoryReviewAssignmentRequest) {
 				request.Observation.Reviewer = "wrong"
 			},
@@ -896,7 +904,7 @@ func TestRepositoryReviewAssignmentCheckpointPersistenceCoverage(t *testing.T) {
 	}
 	validFinding := repositoryReviewCampaignFinding(fixture.files[0], "duplicate in one checkpoint")
 	observation := Observation{
-		Model: "review-a", Reviewer: fixture.catalog[0].FocusID,
+		Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: fixture.catalog[0].FocusID,
 		ScopeFiles: []FileRef{fixture.files[0]},
 		RawDigest:  "sha256:" + strings.Repeat("e", 64),
 		Findings:   []FindingCandidate{validFinding, validFinding},
@@ -944,7 +952,7 @@ func TestRepositoryReviewAssignmentCheckpointPersistenceCoverage(t *testing.T) {
 			_, err := persistRepositoryReviewCheckpointObservation(
 				&candidateState, fixture.plan, "bad-run", fixture.catalog[0].ID,
 				Observation{
-					Model: "review-a", Reviewer: fixture.catalog[0].FocusID,
+					Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: fixture.catalog[0].FocusID,
 					ScopeFiles: fixture.files, RawDigest: "sha256:" + strings.Repeat("f", 64),
 					Findings: []FindingCandidate{finding},
 				},
@@ -1015,7 +1023,8 @@ func TestRepositoryReviewAssignmentCompletedFinalizeAndArchiveCoverage(t *testin
 			state.Runs[index] = ReviewRun{ID: fmt.Sprintf("old-%04d", index)}
 		}
 		state.Contexts = append(state.Contexts, FindingContext{
-			ID: "context", CampaignID: fixture.campaignID, RunID: "run", Model: "review-a",
+			ID: "context", CampaignID: fixture.campaignID, RunID: "run",
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
 		})
 		for key, reservation := range state.ActiveReviewRun.Reservations {
 			reservation.CheckpointDigest = "sha256:" + strings.Repeat("1", 64)
@@ -1025,7 +1034,8 @@ func TestRepositoryReviewAssignmentCompletedFinalizeAndArchiveCoverage(t *testin
 		}
 		archiveInterruptedRepositoryReviewRun(&state, repositoryAuditTestNow)
 		if state.ActiveReviewRun != nil || len(state.Runs) != 1000 ||
-			!state.Runs[len(state.Runs)-1].Interrupted || len(state.Runs[len(state.Runs)-1].Models) != 1 {
+			!state.Runs[len(state.Runs)-1].Interrupted ||
+			!reflect.DeepEqual(state.Runs[len(state.Runs)-1].Models, []string{"review-a"}) {
 			t.Fatalf("bounded interrupted archive = %#v", state.Runs[len(state.Runs)-1])
 		}
 

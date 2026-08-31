@@ -78,7 +78,10 @@ func TestRepositoryReviewAutomationDetailReportAndFindingRoutes(t *testing.T) {
 		"/findings/" + state.Findings[0].ID
 	finding := httptest.NewRecorder()
 	mux.ServeHTTP(finding, httptest.NewRequest(http.MethodGet, findingPath, nil))
-	if finding.Code != http.StatusOK || !strings.Contains(finding.Body.String(), state.Contexts[0].ID) {
+	if finding.Code != http.StatusOK || !strings.Contains(finding.Body.String(), state.Contexts[0].ID) ||
+		!strings.Contains(finding.Body.String(), `"model":"provider/review-model"`) ||
+		!strings.Contains(finding.Body.String(), `"model_alias":"review-model"`) ||
+		!strings.Contains(finding.Body.String(), `"account":"api"`) {
 		t.Fatalf("finding status=%d body=%s", finding.Code, finding.Body.String())
 	}
 	updated := repositoryReviewAutomationMutation(t, mux, http.MethodPatch, findingPath, map[string]any{
@@ -1858,10 +1861,17 @@ func TestRepositoryReviewIssueWriterAndCapabilityHelperCoverage(t *testing.T) {
 	request := repositoryReviewIssueWriterAgentRequest(
 		repoaudit.RepositoryReviewAutomation{IssueWriterModel: "writer"},
 		repoaudit.Finding{Observations: []repoaudit.FindingObservation{{Title: "private"}}},
-		[]repoaudit.FindingContext{{ID: "context", RawDigest: "private-digest"}},
+		[]repoaudit.FindingContext{{
+			ID: "context", RawDigest: "private-digest", Model: "private-concrete-model",
+			ModelAlias: "private-model-alias", Account: "private-account-ref",
+		}},
 		"instructions", "account",
 	)
-	if strings.Contains(request.Prompt, "private-digest") || strings.Contains(request.Prompt, `"observations"`) {
+	if strings.Contains(request.Prompt, "private-digest") ||
+		strings.Contains(request.Prompt, "private-concrete-model") ||
+		strings.Contains(request.Prompt, "private-model-alias") ||
+		strings.Contains(request.Prompt, "private-account-ref") ||
+		strings.Contains(request.Prompt, `"observations"`) {
 		t.Fatalf("writer prompt retained private projection: %s", request.Prompt)
 	}
 

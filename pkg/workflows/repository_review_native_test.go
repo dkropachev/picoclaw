@@ -271,7 +271,9 @@ func TestNativeRepositoryReviewOptionalDefaultFallbackReviewerDoesNotBlockCovera
 		"managed_children": []map[string]any{
 			{
 				"required": true, "valid": true, "scope": scope,
-				"model": map[string]any{"selected": "primary"},
+				"model": map[string]any{
+					"selected": "primary", "actual": "openai/gpt-5.4", "account": "openai-work",
+				},
 				"structured": map[string]any{
 					"summary": "reviewed", "reviewedFiles": []any{"service.go"},
 					"findings": []any{}, "residualRisks": []any{},
@@ -284,7 +286,10 @@ func TestNativeRepositoryReviewOptionalDefaultFallbackReviewerDoesNotBlockCovera
 			},
 		},
 	}, plan)
-	if err != nil || len(observations) != 1 || !reflect.DeepEqual(completed, []repoaudit.FileRef{file}) {
+	if err != nil || len(observations) != 1 ||
+		observations[0].Model != "openai/gpt-5.4" || observations[0].ModelAlias != "primary" ||
+		observations[0].Account != "openai-work" ||
+		!reflect.DeepEqual(completed, []repoaudit.FileRef{file}) {
 		t.Fatalf("optional reviewer coverage observations=%#v completed=%#v err=%v", observations, completed, err)
 	}
 }
@@ -633,6 +638,18 @@ func TestNativeRepositoryReviewEvidenceContracts(t *testing.T) {
 	}
 	if got := nativeRepositoryReviewCompletedScopePaths("bad"); got != nil {
 		t.Fatalf("invalid completed scope = %#v", got)
+	}
+	if _, err := nativeRepositoryReviewManagedChildProvenance(map[string]any{
+		"model": map[string]any{"selected": "review", "actual": "provider/model"},
+	}, false); err == nil || !strings.Contains(err.Error(), "incomplete model provenance") {
+		t.Fatalf("partial managed provenance error = %v", err)
+	}
+	legacyProvenance, err := nativeRepositoryReviewManagedChildProvenance(map[string]any{
+		"model": map[string]any{"selected": "legacy-review"},
+	}, true)
+	if err != nil || legacyProvenance.Model != "legacy-review" ||
+		legacyProvenance.ModelAlias != "" || legacyProvenance.Account != "" {
+		t.Fatalf("legacy managed provenance = %#v, err=%v", legacyProvenance, err)
 	}
 	if _, err := nativeRepositoryReviewObservation(structured, "bad", "model", "reviewer", "raw"); err == nil ||
 		!strings.Contains(err.Error(), "scope") {

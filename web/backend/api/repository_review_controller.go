@@ -3203,14 +3203,14 @@ func loadRepositoryReviewOutcome(
 			}
 			for _, observation := range finding.Observations {
 				if contextRecord, selected := selectedContexts[observation.ContextID]; selected &&
-					(observation.Model == alias || observation.Reviewer == alias ||
-						contextRecord.Model == alias || contextRecord.Reviewer == alias) {
+					(repositoryReviewObservationMatchesAlias(observation, alias) ||
+						repositoryReviewContextMatchesAlias(contextRecord, alias)) {
 					modelFindingIDs[finding.ID] = struct{}{}
 				}
 			}
 		}
 		for _, findingContext := range selectedContexts {
-			if findingContext.Model != alias && findingContext.Reviewer != alias {
+			if !repositoryReviewContextMatchesAlias(findingContext, alias) {
 				continue
 			}
 			for _, file := range findingContext.Files {
@@ -3257,14 +3257,14 @@ func loadRepositoryReviewCampaignOutcome(
 		for _, finding := range findings {
 			for _, observation := range finding.Observations {
 				if contextRecord, selected := selectedContexts[observation.ContextID]; selected &&
-					(observation.Model == alias || observation.Reviewer == alias ||
-						contextRecord.Model == alias || contextRecord.Reviewer == alias) {
+					(repositoryReviewObservationMatchesAlias(observation, alias) ||
+						repositoryReviewContextMatchesAlias(contextRecord, alias)) {
 					modelFindingIDs[finding.ID] = struct{}{}
 				}
 			}
 		}
 		for _, contextRecord := range selectedContexts {
-			if contextRecord.Model != alias && contextRecord.Reviewer != alias {
+			if !repositoryReviewContextMatchesAlias(contextRecord, alias) {
 				continue
 			}
 			for _, file := range contextRecord.Files {
@@ -3277,6 +3277,26 @@ func loadRepositoryReviewCampaignOutcome(
 		}
 	}
 	return outcome
+}
+
+func repositoryReviewObservationMatchesAlias(
+	observation repoaudit.FindingObservation,
+	alias string,
+) bool {
+	if observation.ModelAlias != "" {
+		return observation.ModelAlias == alias
+	}
+	return observation.Model == alias || observation.Reviewer == alias
+}
+
+func repositoryReviewContextMatchesAlias(
+	contextRecord repoaudit.FindingContext,
+	alias string,
+) bool {
+	if contextRecord.ModelAlias != "" {
+		return contextRecord.ModelAlias == alias
+	}
+	return contextRecord.Model == alias || contextRecord.Reviewer == alias
 }
 
 func applyRepositoryReviewLiveMetrics(

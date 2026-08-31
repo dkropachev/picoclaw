@@ -640,12 +640,26 @@ func TestRepositoryReviewCampaignRecordCoverageTagsAndPromotion(t *testing.T) {
 		repositoryAuditTestFile("pkg/second.go", "2", 90),
 	}
 	plan := planRepositoryReviewCampaignForTest(t, store, repository, campaignID, files, false, 2)
+	legacyObservation := Observation{Model: "review-a", ScopeFiles: files}
+	if _, err := store.Record(context.Background(), RecordRequest{
+		Plan: plan, RunID: "campaign-missing-provenance", CompletedAt: repositoryAuditTestNow,
+		InspectedFiles: []FileRef{files[0]}, CompletedFiles: []FileRef{},
+		ReviewEvidence: []RepositoryReviewEvidence{
+			repositoryReviewCampaignSuccessfulEvidence(
+				files, []FileRef{files[0]}, legacyObservation, true,
+			),
+			{AssignmentID: "assignment-missing-provenance-failed", ScopeFiles: files, Required: true},
+		},
+	}); err == nil || !strings.Contains(err.Error(), "invalid model provenance") {
+		t.Fatalf("campaign missing exact provenance error = %v", err)
+	}
 	request := RecordRequest{
 		Plan: plan, RunID: "campaign-partial", CompletedAt: repositoryAuditTestNow,
 		InspectedFiles: []FileRef{files[0]}, CompletedFiles: []FileRef{},
 		Observations: []Observation{{
-			Model: "review-a", ScopeFiles: files,
-			Findings: []FindingCandidate{repositoryReviewCampaignFinding(files[0], "Partial finding")},
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+			ScopeFiles: files,
+			Findings:   []FindingCandidate{repositoryReviewCampaignFinding(files[0], "Partial finding")},
 		}},
 	}
 	request.ReviewEvidence = []RepositoryReviewEvidence{
@@ -675,7 +689,10 @@ func TestRepositoryReviewCampaignRecordCoverageTagsAndPromotion(t *testing.T) {
 	promotionRequest := RecordRequest{
 		Plan: promotionPlan, RunID: "campaign-promotion", CompletedAt: repositoryAuditTestNow,
 		InspectedFiles: []FileRef{files[0]}, CompletedFiles: []FileRef{files[0]},
-		Observations: []Observation{{Model: "review-a", ScopeFiles: []FileRef{files[0]}}},
+		Observations: []Observation{{
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+			ScopeFiles: []FileRef{files[0]},
+		}},
 	}
 	promotionRequest.ReviewEvidence = []RepositoryReviewEvidence{
 		repositoryReviewCampaignSuccessfulEvidence(
@@ -711,7 +728,10 @@ func TestRepositoryReviewCampaignRecordCoverageTagsAndPromotion(t *testing.T) {
 	}
 
 	zeroFindingPlan := planRepositoryReviewCampaignForTest(t, store, repository, campaignID, files, false, 2)
-	zeroObservation := Observation{Model: "review-a", ScopeFiles: []FileRef{files[1]}}
+	zeroObservation := Observation{
+		Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+		ScopeFiles: []FileRef{files[1]},
+	}
 	zeroFinding, err := store.Record(context.Background(), RecordRequest{
 		Plan: zeroFindingPlan, RunID: "campaign-zero-finding", CompletedAt: repositoryAuditTestNow,
 		InspectedFiles: []FileRef{files[1]}, CompletedFiles: []FileRef{},
@@ -749,7 +769,10 @@ func TestRepositoryReviewCampaignRecordBindsAuthorizedUnboundScope(t *testing.T)
 		UnchangedFiles: []FileRef{}, CreatedAt: repositoryAuditTestNow,
 	}
 	plan.ID = planDigest(plan)
-	directObservation := Observation{Model: "review-a", ScopeFiles: []FileRef{file}}
+	directObservation := Observation{
+		Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+		ScopeFiles: []FileRef{file},
+	}
 	result, err := store.Record(context.Background(), RecordRequest{
 		Plan: plan, RunID: "direct-binding", CompletedAt: repositoryAuditTestNow,
 		InspectedFiles: []FileRef{file}, CompletedFiles: []FileRef{},
@@ -862,8 +885,9 @@ func TestRepositoryReviewCampaignRecordRejectsUngroundedEvidence(t *testing.T) {
 				Plan: plan, RunID: "invalid-campaign-record", CompletedAt: repositoryAuditTestNow,
 				InspectedFiles: []FileRef{file}, CompletedFiles: []FileRef{},
 				Observations: []Observation{{
-					Model: "review-a", ScopeFiles: []FileRef{file},
-					Findings: []FindingCandidate{repositoryReviewCampaignFinding(file, "Finding")},
+					Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+					ScopeFiles: []FileRef{file},
+					Findings:   []FindingCandidate{repositoryReviewCampaignFinding(file, "Finding")},
 				}},
 			}
 			request.ReviewEvidence = []RepositoryReviewEvidence{
@@ -916,7 +940,10 @@ func TestRepositoryReviewCampaignEvidenceRejectsIncompleteOrForgedAssignments(t 
 
 	t.Run("omitted failed required child", func(t *testing.T) {
 		store, request, files := newRequest(t, 2)
-		observation := Observation{Model: "review-a", ScopeFiles: files}
+		observation := Observation{
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+			ScopeFiles: files,
+		}
 		request.Observations = []Observation{observation}
 		request.InspectedFiles = files
 		request.ReviewEvidence = []RepositoryReviewEvidence{
@@ -950,7 +977,10 @@ func TestRepositoryReviewCampaignEvidenceRejectsIncompleteOrForgedAssignments(t 
 
 	t.Run("acknowledgement outside child scope", func(t *testing.T) {
 		store, request, files := newRequest(t, 1)
-		observation := Observation{Model: "review-a", ScopeFiles: []FileRef{files[0]}}
+		observation := Observation{
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+			ScopeFiles: []FileRef{files[0]},
+		}
 		request.ReviewEvidence = []RepositoryReviewEvidence{
 			repositoryReviewCampaignSuccessfulEvidence(
 				[]FileRef{files[0]}, []FileRef{files[1]}, observation, true,
@@ -965,10 +995,14 @@ func TestRepositoryReviewCampaignEvidenceRejectsIncompleteOrForgedAssignments(t 
 	t.Run("cross-child finding acknowledgement laundering", func(t *testing.T) {
 		store, request, files := newRequest(t, 1)
 		firstObservation := Observation{
-			Model: "review-a", ScopeFiles: files,
-			Findings: []FindingCandidate{repositoryReviewCampaignFinding(files[0], "Laundered")},
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+			ScopeFiles: files,
+			Findings:   []FindingCandidate{repositoryReviewCampaignFinding(files[0], "Laundered")},
 		}
-		secondObservation := Observation{Model: "review-b", ScopeFiles: files}
+		secondObservation := Observation{
+			Model: "provider/review-b", ModelAlias: "review-b", Account: "review-account",
+			ScopeFiles: files,
+		}
 		first := repositoryReviewCampaignSuccessfulEvidence(
 			files, []FileRef{files[1]}, firstObservation, true,
 		)

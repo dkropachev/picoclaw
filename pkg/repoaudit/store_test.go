@@ -228,7 +228,8 @@ func TestStoreRecordPersistsCommitBlobContextAndModelProvenance(t *testing.T) {
 		Plan:  plan,
 		RunID: "provenance-run",
 		Observations: []Observation{{
-			Model: "review-model-a", Reviewer: "reviewer-a", ScopeFiles: files,
+			Model: "openai/gpt-5.4", ModelAlias: "review-model-a",
+			Account: "credential:openai:work", Reviewer: "reviewer-a", ScopeFiles: files,
 			RawDigest: "sha256:raw-observation",
 			Findings: []FindingCandidate{
 				{
@@ -257,6 +258,12 @@ func TestStoreRecordPersistsCommitBlobContextAndModelProvenance(t *testing.T) {
 	}
 	finding := result.State.Findings[0]
 	contextRecord := result.State.Contexts[0]
+	if len(result.State.RawFindings) != 1 ||
+		result.State.RawFindings[0].Model != "openai/gpt-5.4" ||
+		result.State.RawFindings[0].ModelAlias != "review-model-a" ||
+		result.State.RawFindings[0].Account != "credential:openai:work" {
+		t.Fatalf("raw finding provenance = %#v", result.State.RawFindings)
+	}
 	if finding.CommitSHA != plan.CommitSHA || !reflect.DeepEqual(finding.File, primary) {
 		t.Errorf(
 			"finding provenance = commit %q file %#v, want %q %#v",
@@ -269,11 +276,19 @@ func TestStoreRecordPersistsCommitBlobContextAndModelProvenance(t *testing.T) {
 	if !reflect.DeepEqual(finding.Models, []string{"review-model-a"}) || finding.ObservationCount != 1 {
 		t.Errorf("finding model provenance = models %#v count %d", finding.Models, finding.ObservationCount)
 	}
+	if len(finding.Observations) != 1 ||
+		finding.Observations[0].Model != "openai/gpt-5.4" ||
+		finding.Observations[0].ModelAlias != "review-model-a" ||
+		finding.Observations[0].Account != "credential:openai:work" {
+		t.Errorf("raw finding source provenance = %#v", finding.Observations)
+	}
 	if !reflect.DeepEqual(finding.ContextIDs, []string{contextRecord.ID}) {
 		t.Errorf("finding context IDs = %#v, want %q", finding.ContextIDs, contextRecord.ID)
 	}
 	if contextRecord.CommitSHA != plan.CommitSHA || contextRecord.InventoryHash != plan.InventoryHash ||
-		contextRecord.RunID != "provenance-run" || contextRecord.Model != "review-model-a" ||
+		contextRecord.RunID != "provenance-run" || contextRecord.Model != "openai/gpt-5.4" ||
+		contextRecord.ModelAlias != "review-model-a" ||
+		contextRecord.Account != "credential:openai:work" ||
 		contextRecord.Reviewer != "reviewer-a" || contextRecord.RawDigest != "sha256:raw-observation" ||
 		!reflect.DeepEqual(contextRecord.Files, files) {
 		t.Errorf("context provenance = %#v", contextRecord)

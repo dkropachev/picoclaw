@@ -261,6 +261,9 @@ type ManagedAssignmentDispatchObserver func(ManagedAssignmentDispatchEvent) erro
 // CheckpointDigest binds the assignment, exact scope, model, and output together.
 type ManagedAssignmentCheckpointEvent struct {
 	ManagedAssignmentDispatchEvent
+	ConcreteModel    string `json:"concrete_model,omitempty"`
+	ModelAlias       string `json:"model_alias,omitempty"`
+	Account          string `json:"account,omitempty"`
 	Output           any    `json:"output"`
 	OutputDigest     string `json:"output_digest"`
 	CheckpointDigest string `json:"checkpoint_digest"`
@@ -375,6 +378,11 @@ type AgentRequest struct {
 	// explicit assignment's initial provider request and all output repairs. Zero
 	// retains the caller's existing context deadline without adding another one.
 	AssignmentTimeoutSeconds int
+	// CaptureFindingSourceProvenance asks the trusted repository-review step to
+	// return the successful concrete model, alias, and concrete account needed
+	// for immutable raw-finding attribution. Generic managed workflow outputs do
+	// not expose this operational routing identity.
+	CaptureFindingSourceProvenance bool
 	// CallAdmission is checked before every provider request, including queued
 	// managed children, fallbacks, retries, and structured-output repairs.
 	CallAdmission AgentCallAdmission

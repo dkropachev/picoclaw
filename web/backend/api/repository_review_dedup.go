@@ -78,6 +78,8 @@ type repositoryReviewRawFindingSummary struct {
 	Title                 string                                 `json:"title"`
 	Symbol                string                                 `json:"symbol,omitempty"`
 	Model                 string                                 `json:"model"`
+	ModelAlias            string                                 `json:"model_alias,omitempty"`
+	Account               string                                 `json:"account,omitempty"`
 	Reviewer              string                                 `json:"reviewer,omitempty"`
 	DeduplicationState    repoaudit.RawFindingDeduplicationState `json:"deduplication_state"`
 	Disposition           repoaudit.RawFindingDisposition        `json:"disposition"`
@@ -560,7 +562,11 @@ func projectRepositoryReviewDeduplicatedFindingSummary(
 		if !found {
 			continue
 		}
-		contributors = appendUniqueRepositoryReviewContributor(contributors, raw.Model)
+		model := raw.ModelAlias
+		if model == "" {
+			model = raw.Model
+		}
+		contributors = appendUniqueRepositoryReviewContributor(contributors, model)
 		contributors = appendUniqueRepositoryReviewContributor(contributors, raw.Reviewer)
 	}
 	return repositoryReviewDeduplicatedFindingSummary{
@@ -595,7 +601,8 @@ func projectRepositoryReviewRawFindingSummary(
 	return repositoryReviewRawFindingSummary{
 		ID: raw.ID, CampaignID: raw.CampaignID, Path: raw.File.Path, Line: raw.Line,
 		Severity: raw.Severity, Title: raw.Title, Symbol: raw.Symbol,
-		Model: raw.Model, Reviewer: raw.Reviewer, DeduplicationState: raw.State,
+		Model: raw.Model, ModelAlias: raw.ModelAlias, Account: raw.Account,
+		Reviewer: raw.Reviewer, DeduplicationState: raw.State,
 		Disposition: raw.Disposition, DeduplicatedFindingID: raw.DeduplicatedFindingID,
 		Failure: raw.Failure, CreatedAt: raw.CreatedAt, UpdatedAt: raw.UpdatedAt,
 	}

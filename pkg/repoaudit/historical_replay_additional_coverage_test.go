@@ -693,7 +693,14 @@ func TestHistoricalReplayAdditionalAdmissionAndRawBuilderBranches(t *testing.T) 
 		t.Fatal("invalid historical raw identity accepted")
 	}
 	contexts := map[string]FindingContext{
-		"ctx": {ID: "ctx", Model: "context-model", Reviewer: "context-reviewer"},
+		"ctx": {
+			ID: "ctx", Model: "provider/context-model", ModelAlias: "context-model",
+			Account: "context-account", Reviewer: "context-reviewer",
+		},
+		"later": {
+			ID: "later", Model: "provider/later", ModelAlias: "later",
+			Account: "later-account", Reviewer: "later-reviewer",
+		},
 	}
 	withContext := baseFinding
 	withContext.ContextIDs = []string{"missing", "ctx"}
@@ -702,9 +709,25 @@ func TestHistoricalReplayAdditionalAdmissionAndRawBuilderBranches(t *testing.T) 
 		HistoricalDeduplicationReplayBatch{BoundaryID: " batch "}, contexts,
 		snapshot, 0, now,
 	)
-	if err != nil || raw.ContextID != "ctx" || raw.Model != "context-model" ||
+	if err != nil || raw.ContextID != "ctx" || raw.Model != "provider/context-model" ||
+		raw.ModelAlias != "context-model" || raw.Account != "context-account" ||
 		raw.Reviewer != "context-reviewer" || raw.InsertionOrdinal != 1 || job.InsertionOrdinal != 1 {
 		t.Fatalf("context raw=%#v job=%#v err=%v", raw, job, err)
+	}
+	mixedContext := baseFinding
+	mixedContext.ContextIDs = []string{"legacy", "later"}
+	mixedContexts := map[string]FindingContext{
+		"legacy": {ID: "legacy", Model: "legacy-model", Reviewer: "legacy-reviewer"},
+		"later":  contexts["later"],
+	}
+	raw, _, err = historicalRawFindingAndJob(
+		RepositoryState{Repository: "owner/repo"}, mixedContext,
+		HistoricalDeduplicationReplayBatch{BoundaryID: "batch"}, mixedContexts,
+		snapshot, 2, now,
+	)
+	if err != nil || raw.ContextID != "legacy" || raw.Model != "legacy-model" ||
+		raw.ModelAlias != "" || raw.Account != "" || raw.Reviewer != "legacy-reviewer" {
+		t.Fatalf("mixed context provenance=%#v err=%v", raw, err)
 	}
 	withoutContext := baseFinding
 	withoutContext.Models = []string{"finding-model"}
@@ -1198,27 +1221,27 @@ func TestHistoricalReplayAdditionalAdjacentRepositoryCoverage(t *testing.T) {
 	}
 	if err := persistRawRepositoryReviewCheckpointFinding(
 		&checkpointState, "raw", "bucket", plan, "run", "assignment", "context",
-		Observation{Model: "model", Reviewer: "reviewer"}, file, candidate, now,
+		Observation{Model: "provider/model", ModelAlias: "model", Account: "review-account", Reviewer: "reviewer"}, file, candidate, now,
 	); err != nil {
 		t.Fatal(err)
 	}
 	if err := persistRawRepositoryReviewCheckpointFinding(
 		&checkpointState, "raw", "bucket", plan, "run", "assignment", "context",
-		Observation{Model: "model", Reviewer: "reviewer"}, file, candidate, now,
+		Observation{Model: "provider/model", ModelAlias: "model", Account: "review-account", Reviewer: "reviewer"}, file, candidate, now,
 	); err != nil {
 		t.Fatalf("idempotent raw replay error=%v", err)
 	}
 	checkpointState.DeduplicationJobs = nil
 	if err := persistRawRepositoryReviewCheckpointFinding(
 		&checkpointState, "raw", "bucket", plan, "run", "assignment", "context",
-		Observation{Model: "model", Reviewer: "reviewer"}, file, candidate, now,
+		Observation{Model: "provider/model", ModelAlias: "model", Account: "review-account", Reviewer: "reviewer"}, file, candidate, now,
 	); err == nil {
 		t.Fatal("raw without job accepted")
 	}
 	candidate.Title = "changed"
 	if err := persistRawRepositoryReviewCheckpointFinding(
 		&checkpointState, "raw", "bucket", plan, "run", "assignment", "context",
-		Observation{Model: "model", Reviewer: "reviewer"}, file, candidate, now,
+		Observation{Model: "provider/model", ModelAlias: "model", Account: "review-account", Reviewer: "reviewer"}, file, candidate, now,
 	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("conflicting raw replay error=%v", err)
 	}

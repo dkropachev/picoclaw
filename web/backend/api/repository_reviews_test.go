@@ -270,7 +270,8 @@ func seedRepositoryReviewAPIState(t *testing.T, workspace string) repoaudit.Repo
 	result, err := store.Record(context.Background(), repoaudit.RecordRequest{
 		Plan: plan, RunID: "api-run",
 		Observations: []repoaudit.Observation{{
-			Model: "review-model", ScopeFiles: []repoaudit.FileRef{file},
+			Model: "provider/review-model", ModelAlias: "review-model", Account: "api",
+			ScopeFiles: []repoaudit.FileRef{file},
 			Findings: []repoaudit.FindingCandidate{
 				{
 					Severity: "high",

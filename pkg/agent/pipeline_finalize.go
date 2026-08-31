@@ -22,6 +22,7 @@ func (p *Pipeline) Finalize(
 	finalContent string,
 ) (turnResult, error) {
 	al := p.al
+	modelProvenance := exec.resultModelProvenance()
 
 	// When allResponsesHandled=true, ExecuteTools already finalized
 	// (added handledToolResponseSummary, saved session, set phase to Completed).
@@ -37,7 +38,9 @@ func (p *Pipeline) Finalize(
 		ts.setPhase(TurnPhaseCompleted)
 		return turnResult{
 			finalContent: finalContent,
-			modelName:    exec.llmModelName,
+			modelName:    modelProvenance.selected,
+			actualModel:  modelProvenance.actual,
+			accountRef:   modelProvenance.account,
 			usage:        ts.workflowAgentUsageSnapshot(),
 			status:       turnStatus,
 			followUps:    append([]bus.InboundMessage(nil), ts.followUps...),
@@ -106,7 +109,9 @@ func (p *Pipeline) Finalize(
 	ts.setPhase(TurnPhaseCompleted)
 	return turnResult{
 		finalContent: finalContent,
-		modelName:    exec.llmModelName,
+		modelName:    modelProvenance.selected,
+		actualModel:  modelProvenance.actual,
+		accountRef:   modelProvenance.account,
 		usage:        ts.workflowAgentUsageSnapshot(),
 		status:       turnStatus,
 		followUps:    append([]bus.InboundMessage(nil), ts.followUps...),

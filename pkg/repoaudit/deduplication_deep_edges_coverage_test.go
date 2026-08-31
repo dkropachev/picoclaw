@@ -1372,7 +1372,10 @@ func TestDeduplicationDeepLegacyRecordCoverage(t *testing.T) {
 	file := repositoryAuditTestFile("pkg/legacy.go", "a", 10)
 	candidate := repositoryReviewCampaignFinding(file, "legacy deep")
 	contextRecord := FindingContext{ID: "context", Repository: repository}
-	observation := Observation{Model: "review", Reviewer: "reviewer"}
+	observation := Observation{
+		Model: "provider/review", ModelAlias: "review", Account: "review-account",
+		Reviewer: "reviewer",
+	}
 	if _, err := persistLegacyRecordFinding(
 		&RepositoryState{},
 		plan,
@@ -1709,7 +1712,10 @@ func TestDeduplicationDeepLegacyPureBoundaries(t *testing.T) {
 	file := repositoryAuditTestFile("pkg/raw.go", "a", 1)
 	candidate := repositoryReviewCampaignFinding(file, "raw boundary")
 	plan := Plan{Repository: "owner/raw-boundary", CampaignID: "campaign", CommitSHA: strings.Repeat("a", 40)}
-	observation := Observation{Model: "review", Reviewer: "reviewer"}
+	observation := Observation{
+		Model: "provider/review", ModelAlias: "review", Account: "review-account",
+		Reviewer: "reviewer",
+	}
 	state := RepositoryState{}
 	if err := persistRawRepositoryReviewCheckpointFinding(
 		&state, "raw", "bucket", plan, "run", "assignment", "context",

@@ -360,13 +360,17 @@ func (s Store) CheckpointRepositoryReviewAssignment(
 		acknowledgedPaths[file.Path] = struct{}{}
 	}
 	request.Observation.Model = strings.TrimSpace(request.Observation.Model)
+	request.Observation.ModelAlias = strings.TrimSpace(request.Observation.ModelAlias)
+	request.Observation.Account = strings.TrimSpace(request.Observation.Account)
 	request.Observation.Reviewer = strings.TrimSpace(request.Observation.Reviewer)
 	request.Observation.RawDigest = strings.TrimSpace(request.Observation.RawDigest)
 	request.Observation.Summary = strings.TrimSpace(request.Observation.Summary)
 	assignmentIndex, assignmentFound := repositoryReviewAssignmentIndex(
 		assignmentCatalog, request.AssignmentID,
 	)
-	if !validBoundedText(request.Observation.Model, 256) ||
+	if !validFindingSourceProvenance(
+		request.Observation.Model, request.Observation.ModelAlias, request.Observation.Account,
+	) || request.Observation.ModelAlias == "" || request.Observation.Account == "" ||
 		!assignmentFound ||
 		request.Observation.Reviewer !=
 			assignmentCatalog[assignmentIndex].FocusID ||
@@ -504,7 +508,8 @@ func persistRepositoryReviewCheckpointObservation(
 		CampaignID: plan.CampaignID,
 		Repository: plan.Repository, CommitSHA: plan.CommitSHA,
 		InventoryHash: plan.InventoryHash, ProfileHash: plan.ProfileHash,
-		RunID: runID, Model: observation.Model, Reviewer: observation.Reviewer,
+		RunID: runID, Model: observation.Model, ModelAlias: observation.ModelAlias,
+		Account: observation.Account, Reviewer: observation.Reviewer,
 		Files:     append([]FileRef(nil), observation.ScopeFiles...),
 		RawDigest: observation.RawDigest, CreatedAt: completedAt,
 	}
@@ -543,8 +548,13 @@ func persistRepositoryReviewCheckpointObservation(
 		}
 		acceptedIDs = append(acceptedIDs, rawID)
 		candidateObservation := findingObservationFrom(
-			candidate, contextRecord.ID, observation.Model, observation.Reviewer,
+			candidate, contextRecord.ID, observation.Model,
+			observation.ModelAlias, observation.Account, observation.Reviewer,
 		)
+		contributorModel := observation.ModelAlias
+		if contributorModel == "" {
+			contributorModel = observation.Model
+		}
 		index := findingIndexByFingerprint(state.Findings[initialFindingCount:], fingerprint)
 		if index >= 0 {
 			index += initialFindingCount
@@ -567,7 +577,7 @@ func persistRepositoryReviewCheckpointObservation(
 				Message: candidate.Message, Evidence: candidate.Evidence,
 				Impact: candidate.Impact, Validation: candidate.Validation,
 				MatchHints: candidate.MatchHints, FixEffort: candidate.FixEffort,
-				ContextIDs: []string{contextRecord.ID}, Models: []string{observation.Model},
+				ContextIDs: []string{contextRecord.ID}, Models: []string{contributorModel},
 				ObservationCount: 1, Status: FindingOpen,
 				DeduplicationPending: true, RawFindingIDs: []string{rawID},
 				Observations:            []FindingObservation{candidateObservation},
@@ -587,7 +597,7 @@ func persistRepositoryReviewCheckpointObservation(
 			finding.Observations, candidateObservation,
 		)
 		finding.ContextIDs = findingObservationContextIDs(finding.Observations)
-		finding.Models = appendUnique(finding.Models, observation.Model)
+		finding.Models = appendUnique(finding.Models, contributorModel)
 		finding.ObservationCount = len(finding.Observations)
 		finding.RawFindingIDs = appendUnique(finding.RawFindingIDs, rawID)
 		finding.Version++
@@ -655,6 +665,11 @@ func persistRawRepositoryReviewCheckpointFinding(
 	candidate FindingCandidate,
 	completedAt time.Time,
 ) error {
+	if !validFindingSourceProvenance(
+		observation.Model, observation.ModelAlias, observation.Account,
+	) || observation.ModelAlias == "" || observation.Account == "" {
+		return ErrInvalidPlan
+	}
 	for _, existing := range state.RawFindings {
 		if existing.ID != rawID {
 			continue
@@ -664,6 +679,7 @@ func persistRawRepositoryReviewCheckpointFinding(
 			existing.CommitSHA != plan.CommitSHA || existing.File != primary ||
 			existing.ContextID != contextID || existing.RunID != runID ||
 			existing.AssignmentID != assignmentID || existing.Model != observation.Model ||
+			existing.ModelAlias != observation.ModelAlias || existing.Account != observation.Account ||
 			existing.Reviewer != observation.Reviewer ||
 			!reflect.DeepEqual(rawFindingCandidate(existing), candidate) {
 			return ErrConflict
@@ -680,8 +696,12 @@ func persistRawRepositoryReviewCheckpointFinding(
 		ordinal = 1
 	}
 	state.NextDeduplicationOrdinal = ordinal + 1
+	reviewerModel := observation.ModelAlias
+	if reviewerModel == "" {
+		reviewerModel = observation.Model
+	}
 	snapshot := repositoryReviewCheckpointDeduplicationSnapshot(
-		state.CurrentCampaign, observation.Model,
+		state.CurrentCampaign, reviewerModel,
 	)
 	raw := RawReviewFinding{
 		ID: rawID, Version: 1, CampaignID: plan.CampaignID,
@@ -692,8 +712,9 @@ func persistRawRepositoryReviewCheckpointFinding(
 		Impact: candidate.Impact, Validation: candidate.Validation,
 		MatchHints: candidate.MatchHints, FixEffort: candidate.FixEffort,
 		ContextID: contextID, RunID: runID, AssignmentID: assignmentID,
-		Model: observation.Model, Reviewer: observation.Reviewer,
-		State: RawFindingDeduplicationPending, Disposition: RawFindingDispositionUndecided,
+		Model: observation.Model, ModelAlias: observation.ModelAlias, Account: observation.Account,
+		Reviewer: observation.Reviewer,
+		State:    RawFindingDeduplicationPending, Disposition: RawFindingDispositionUndecided,
 		CreatedAt: completedAt, UpdatedAt: completedAt,
 	}
 	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(raw)
@@ -826,7 +847,11 @@ func (s Store) FinalizeRepositoryReviewRun(
 	}
 	for _, contextRecord := range state.Contexts {
 		if contextRecord.RunID == request.RunID && contextRecord.CampaignID == request.Plan.CampaignID {
-			models = appendUnique(models, contextRecord.Model)
+			model := contextRecord.ModelAlias
+			if model == "" {
+				model = contextRecord.Model
+			}
+			models = appendUnique(models, model)
 		}
 	}
 	completedFiles := 0
@@ -1004,7 +1029,11 @@ func archiveInterruptedRepositoryReviewRun(state *RepositoryState, completedAt t
 	}
 	for _, contextRecord := range state.Contexts {
 		if contextRecord.RunID == active.ID && contextRecord.CampaignID == active.CampaignID {
-			models = appendUnique(models, contextRecord.Model)
+			model := contextRecord.ModelAlias
+			if model == "" {
+				model = contextRecord.Model
+			}
+			models = appendUnique(models, model)
 		}
 	}
 	unreviewedPaths := make([]string, 0, len(reserved))

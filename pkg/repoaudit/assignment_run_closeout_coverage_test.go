@@ -162,6 +162,12 @@ func TestRepositoryReviewAssignmentCheckpointCloseoutDefenses(t *testing.T) {
 			value.AcknowledgedFiles = []FileRef{repositoryAuditTestFile("outside.go", "e", 1)}
 		},
 		"model": func(value *CheckpointRepositoryReviewAssignmentRequest) { value.Observation.Model = "" },
+		"model alias": func(value *CheckpointRepositoryReviewAssignmentRequest) {
+			value.Observation.ModelAlias = ""
+		},
+		"account": func(value *CheckpointRepositoryReviewAssignmentRequest) {
+			value.Observation.Account = ""
+		},
 		"reviewer": func(value *CheckpointRepositoryReviewAssignmentRequest) {
 			value.Observation.Reviewer = "wrong"
 		},

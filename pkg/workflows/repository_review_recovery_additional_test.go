@@ -118,12 +118,16 @@ func TestDecodeRepositoryReviewManagedEvidenceDerivesExactCoverage(t *testing.T)
 	children := []map[string]any{
 		{
 			"scope": scope, "valid": true, "label": "correctness", "text": "primary",
-			"model":      map[string]any{"default": "review-default"},
+			"model": map[string]any{
+				"default": "review-default", "actual": "provider/review-default", "account": "account",
+			},
 			"structured": repositoryReviewRecoveryEmptyOutput(zeta.Path, alpha.Path),
 		},
 		{
 			"scope": scope, "required": false, "valid": true, "label": "optional",
-			"model":      map[string]any{"selected": "review-optional"},
+			"model": map[string]any{
+				"selected": "review-optional", "actual": "provider/review-optional", "account": "account",
+			},
 			"structured": repositoryReviewRecoveryEmptyOutput(zeta.Path),
 		},
 	}
@@ -146,8 +150,9 @@ func TestDecodeRepositoryReviewManagedEvidenceDerivesExactCoverage(t *testing.T)
 			wantFiles,
 		)
 	}
-	if got := decoded.Observations[0].Model; got != "review-default" {
-		t.Fatalf("default model = %q", got)
+	if got := decoded.Observations[0]; got.Model != "provider/review-default" ||
+		got.ModelAlias != "review-default" || got.Account != "account" {
+		t.Fatalf("default model provenance = %#v", got)
 	}
 }
 
@@ -160,7 +165,9 @@ func TestDecodeRepositoryReviewManagedEvidenceHandlesFailuresAndUnsupportedFiles
 	children := []map[string]any{
 		{
 			"scope": repositoryReviewRecoveryScope(regular), "valid": true,
-			"model":      map[string]any{"selected": "review"},
+			"model": map[string]any{
+				"selected": "review", "actual": "provider/review", "account": "account",
+			},
 			"structured": repositoryReviewRecoveryEmptyOutput(regular.Path),
 		},
 		{

@@ -427,7 +427,7 @@ func TestRepositoryReviewCandidateAndSimilarityBoundaries(t *testing.T) {
 	if err := ValidateGeneratedFindingCandidate(valid); err != nil {
 		t.Fatalf("valid generated candidate was rejected: %v", err)
 	}
-	observation := findingObservationFrom(valid, "context", "model", "reviewer")
+	observation := findingObservationFrom(valid, "context", "model", "", "", "reviewer")
 	if observation.MatchHints.Operation != valid.MatchHints.Operation ||
 		observation.FixEffort.Quality.LOCMax != valid.FixEffort.Quality.LOCMax {
 		t.Fatalf("finding observation lost enrichment: %#v", observation)
@@ -834,6 +834,15 @@ func TestRepositoryReviewStorePlanningAndRecordValidationBoundaries(t *testing.T
 				Plan:         plan,
 				RunID:        "model",
 				Observations: []Observation{{ScopeFiles: []FileRef{file}}},
+			},
+		},
+		{
+			name: "observation without exact account",
+			request: RecordRequest{
+				Plan: plan, RunID: "partial-provenance",
+				Observations: []Observation{{
+					Model: "provider/model", ModelAlias: "review", ScopeFiles: []FileRef{file},
+				}},
 			},
 		},
 		{

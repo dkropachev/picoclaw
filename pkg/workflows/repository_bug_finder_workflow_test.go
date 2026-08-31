@@ -177,7 +177,8 @@ func (runner *repositoryBugFinderTestAgent) RunAgent(
 	if request.ScopeContent == "metadata" {
 		if request.Tools != AgentToolsNone || request.Session != "" ||
 			!request.EphemeralSession || !request.SuppressDefaultContext ||
-			request.ReviewSystemPrompt != RepositoryBugFinderSystemPrompt {
+			request.ReviewSystemPrompt != RepositoryBugFinderSystemPrompt ||
+			request.CaptureFindingSourceProvenance {
 			runner.t.Fatalf("scope planner authority=%#v", request)
 		}
 		if request.Model != "review-a" {
@@ -193,7 +194,8 @@ func (runner *repositoryBugFinderTestAgent) RunAgent(
 	}
 	if request.Tools != AgentToolsNone || request.ScopeContent != "frozen_git" ||
 		request.Session != "" || !request.EphemeralSession || !request.SuppressDefaultContext ||
-		request.ReviewSystemPrompt != RepositoryBugFinderSystemPrompt {
+		request.ReviewSystemPrompt != RepositoryBugFinderSystemPrompt ||
+		!request.CaptureFindingSourceProvenance {
 		runner.t.Fatalf("review authority=%#v", request)
 	}
 	if strings.Contains(request.ReviewSystemPrompt, "include patches") ||
@@ -266,6 +268,9 @@ func (runner *repositoryBugFinderTestAgent) RunAgent(
 		digest := fmt.Sprintf("sha256:%064x", index+1)
 		if err := request.ManagedAssignmentCheckpoint(ManagedAssignmentCheckpointEvent{
 			ManagedAssignmentDispatchEvent: dispatch,
+			ConcreteModel:                  "provider/" + model,
+			ModelAlias:                     model,
+			Account:                        "review-account",
 			Output:                         childStructured,
 			OutputDigest:                   digest,
 			CheckpointDigest:               digest,
@@ -276,7 +281,9 @@ func (runner *repositoryBugFinderTestAgent) RunAgent(
 			"index": index + 1, "required": true,
 			"assignment_id": assignmentID, "focus_id": focusID,
 			"label": focusID, "valid": true,
-			"scope": scope, "model": map[string]any{"selected": model},
+			"scope": scope, "model": map[string]any{
+				"selected": model, "actual": "provider/" + model, "account": "review-account",
+			},
 			"structured": childStructured, "text": fmt.Sprintf("validated challenge %d", index+1),
 		})
 	}

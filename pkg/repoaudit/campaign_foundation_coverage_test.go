@@ -1016,7 +1016,10 @@ func TestRepositoryReviewCampaignEvidenceValidationMatrix(t *testing.T) {
 	first := repositoryAuditTestFile("a.go", "1", 1)
 	second := repositoryAuditTestFile("b.go", "2", 1)
 	allowed := map[string]FileRef{first.Path: first, second.Path: second}
-	observation := Observation{Model: "review-a", ScopeFiles: []FileRef{first}}
+	observation := Observation{
+		Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+		ScopeFiles: []FileRef{first},
+	}
 	valid := RepositoryReviewEvidence{
 		AssignmentID: "assignment-a", ScopeFiles: []FileRef{first}, Required: true,
 		Successful: true, AcknowledgedFiles: []FileRef{first}, Observation: &observation,
@@ -1057,7 +1060,10 @@ func TestRepositoryReviewCampaignEvidenceValidationMatrix(t *testing.T) {
 					ScopeFiles:   []FileRef{first},
 					Required:     true,
 					Successful:   true,
-					Observation:  &Observation{Model: "review-a", ScopeFiles: []FileRef{second}},
+					Observation: &Observation{
+						Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+						ScopeFiles: []FileRef{second},
+					},
 				},
 			},
 			required: 1,
@@ -1125,7 +1131,10 @@ func TestRepositoryReviewCampaignEvidenceValidationMatrix(t *testing.T) {
 	optional.Required = false
 	optional.ScopeFiles = []FileRef{second}
 	optional.AcknowledgedFiles = []FileRef{second}
-	optionalObservation := Observation{Model: "review-b", ScopeFiles: []FileRef{second}}
+	optionalObservation := Observation{
+		Model: "provider/review-b", ModelAlias: "review-b", Account: "review-account",
+		ScopeFiles: []FileRef{second},
+	}
 	optional.Observation = &optionalObservation
 	observations, inspected, completed, err = deriveRepositoryReviewCampaignEvidence(
 		[]RepositoryReviewEvidence{valid, optional}, allowed, 1, map[string]struct{}{second.Path: {}},
@@ -1139,7 +1148,10 @@ func TestRepositoryReviewCampaignEvidenceValidationMatrix(t *testing.T) {
 func TestRepositoryReviewCampaignEvidenceProjectionOrderingAndNestedBounds(t *testing.T) {
 	first := repositoryAuditTestFile("a.go", "a", 1)
 	second := repositoryAuditTestFile("b.go", "b", 1)
-	observation := Observation{Model: "review-a", ScopeFiles: []FileRef{first, second}}
+	observation := Observation{
+		Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+		ScopeFiles: []FileRef{first, second},
+	}
 	observations, inspected, completed, err := deriveRepositoryReviewCampaignEvidence(
 		[]RepositoryReviewEvidence{{
 			AssignmentID: "assignment", ScopeFiles: []FileRef{first, second}, Required: true,
@@ -1440,7 +1452,10 @@ func TestRepositoryReviewCampaignRecordBoundaryFailures(t *testing.T) {
 
 	t.Run("unsupported overlaps inspection", func(t *testing.T) {
 		store, request, file := newRequest(t)
-		observation := Observation{Model: "review-a", ScopeFiles: []FileRef{file}}
+		observation := Observation{
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+			ScopeFiles: []FileRef{file},
+		}
 		request.InspectedFiles = []FileRef{file}
 		request.CompletedFiles = []FileRef{file}
 		request.ReviewEvidence = []RepositoryReviewEvidence{
@@ -1518,7 +1533,10 @@ func TestRepositoryReviewCampaignRecordRejectsDurableCoverageConflicts(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		observation := Observation{Model: "review-a", ScopeFiles: []FileRef{file}}
+		observation := Observation{
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+			ScopeFiles: []FileRef{file},
+		}
 		if _, err := store.Record(context.Background(), RecordRequest{
 			Plan: plan, RunID: "inspect-conflict", CompletedAt: repositoryAuditTestNow,
 			InspectedFiles: []FileRef{file}, CompletedFiles: []FileRef{file},

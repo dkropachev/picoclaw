@@ -74,6 +74,11 @@ synthetic hook fulfillment, or registry effect.
   `authorizeAgentTool`, and the exact successful-provider catalog retained by
   `turnExecution`.
 - Runtime ordering: normalize input, resolve route/session, build prompt, select model candidate, call provider, execute tool calls, stream/finalize response, persist history, emit runtime events.
+- Successful provider provenance keeps the exact selected alias, concrete model,
+  and concrete account together across primary, fallback, streaming, side-question,
+  and structured-repair paths. That identity remains private caller-owned state;
+  generic managed outputs do not expose it, while a narrowly trusted repository
+  review checkpoint may request the complete tuple for immutable attribution.
 - Non-obvious constraints: tool iteration limits, media limits, turn profile block
   disabling, fallback candidates, child-turn concurrency, exact transient-UX
   ownership, and source-compatible channel/streaming fallbacks must stay
