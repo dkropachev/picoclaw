@@ -84,8 +84,6 @@ ifeq ($(UNAME_S),Linux)
 		ARCH=loong64
 	else ifeq ($(UNAME_M),riscv64)
 		ARCH=riscv64
-	else ifeq ($(UNAME_M),mipsel)
-		ARCH=mipsle
 	else
 		ARCH=$(UNAME_M)
 	endif

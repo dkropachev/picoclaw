@@ -146,8 +146,9 @@ PicoClaw 将数据存储在您配置的工作区中（默认：`~/.picoclaw/work
 用 **picoclaw-launcher** 打开浏览器控制台前需要先使用密码登录。首次启动时打开 `/launcher-setup` 创建 dashboard 登录密码；后续手动登录使用 `/launcher-login`。
 
 - **配置文件**：与 `config.json` 同一目录（若设置了 `PICOCLAW_CONFIG`，则与它所指的文件同目录）。启动器专用文件名为 `launcher-config.json`。
-- **密码存储**：支持的平台会把 bcrypt 后的密码哈希存入 `launcher-auth.db`。如果当前平台不支持 SQLite 密码存储，则把 bcrypt 哈希存入 `launcher-config.json`。
-- **旧配置迁移**：旧版 `launcher_token` 会一次性迁移为密码登录，并从保存后的 launcher 配置中移除。
+- **密码存储**：密码只会以 bcrypt 哈希形式存入 `~/.picoclaw/launcher-auth.db`。该数据库启用 SQLite WAL 并使用私有文件权限；若数据库无法打开或迁移，launcher 会以安全方式终止启动。`launcher-config.json` 此后只保存 launcher 设置。
+- **旧配置迁移**：升级后首次启动时，会从 `launcher-config.json` 一次性导入已移除的 `dashboard_password_hash` 和 `launcher_token` 字段；若数据库中已有凭据，则以数据库为准。移除这些字段前，原文件会以不覆盖已有文件的方式复制到 launcher 配置旁的 `legacy-json/launcher-auth-v1/launcher-config.json`。
+- **升级与回滚**：升级前应停止所有 PicoClaw 进程。需要回滚时，先停止 PicoClaw，恢复归档的 launcher 配置，并删除或恢复 `launcher-auth.db` 及与之匹配的 `-wal`、`-shm` 文件。不支持新旧进程共用同一个 home 目录。
 - **本地自动登录**：launcher 启动后自动打开本地浏览器时，会使用仅允许 loopback 访问的一次性引导入口自动设置会话 Cookie。
 - **不再支持的鉴权方式**：不再支持 URL token 登录（`?token=...`）、`PICOCLAW_LAUNCHER_TOKEN` 和 `Authorization: Bearer` dashboard 鉴权。
 - **退出登录**：应使用 **`POST /api/auth/logout`**，且请求头为 **`Content-Type: application/json`**（请求体可为 `{}`），勿使用可被第三方页面触发的 GET 链接登出。

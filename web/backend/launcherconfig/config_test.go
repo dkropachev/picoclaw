@@ -1,10 +1,10 @@
 package launcherconfig
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -52,11 +52,18 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	if got.AllowLocalhostBypass != want.AllowLocalhostBypass {
 		t.Fatalf("allow_localhost_bypass = %t, want %t", got.AllowLocalhostBypass, want.AllowLocalhostBypass)
 	}
-	if got.DashboardPasswordHash != want.DashboardPasswordHash {
-		t.Fatalf("dashboard_password_hash = %q, want %q", got.DashboardPasswordHash, want.DashboardPasswordHash)
+	if got.DashboardPasswordHash != "" {
+		t.Fatalf("dashboard_password_hash = %q, want empty after Save", got.DashboardPasswordHash)
 	}
 	if got.LegacyLauncherToken != "" {
 		t.Fatalf("legacy launcher_token = %q, want empty after Save", got.LegacyLauncherToken)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) == "" || containsLegacyAuthField(raw) {
+		t.Fatalf("saved launcher settings contain auth fields: %s", raw)
 	}
 	if len(got.AllowedCIDRs) != len(want.AllowedCIDRs) {
 		t.Fatalf("allowed_cidrs len = %d, want %d", len(got.AllowedCIDRs), len(want.AllowedCIDRs))
@@ -90,7 +97,11 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 
 func TestLoadReadsLegacyLauncherTokenForMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "launcher-config.json")
-	if err := os.WriteFile(path, []byte(`{"port":18800,"launcher_token":"legacy-token"}`), 0o600); err != nil {
+	if err := os.WriteFile(
+		path,
+		[]byte(`{"port":18800,"dashboard_password_hash":"legacy-hash","launcher_token":"legacy-token"}`),
+		0o600,
+	); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
@@ -100,6 +111,9 @@ func TestLoadReadsLegacyLauncherTokenForMigration(t *testing.T) {
 	}
 	if got.LegacyLauncherToken != "legacy-token" {
 		t.Fatalf("legacy launcher_token = %q, want legacy-token", got.LegacyLauncherToken)
+	}
+	if got.DashboardPasswordHash != "legacy-hash" {
+		t.Fatalf("legacy dashboard_password_hash = %q, want legacy-hash", got.DashboardPasswordHash)
 	}
 }
 
@@ -217,41 +231,7 @@ func TestNormalizeCIDRs(t *testing.T) {
 	}
 }
 
-func TestPasswordStoreSetAndVerify(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "launcher-config.json")
-	store := NewPasswordStore(path, Default())
-	ctx := context.Background()
-
-	initialized, err := store.IsInitialized(ctx)
-	if err != nil {
-		t.Fatalf("IsInitialized() error = %v", err)
-	}
-	if initialized {
-		t.Fatal("IsInitialized() = true, want false before SetPassword")
-	}
-
-	if err = store.SetPassword(ctx, "dashboard-password"); err != nil {
-		t.Fatalf("SetPassword() error = %v", err)
-	}
-	initialized, err = store.IsInitialized(ctx)
-	if err != nil {
-		t.Fatalf("IsInitialized() after SetPassword error = %v", err)
-	}
-	if !initialized {
-		t.Fatal("IsInitialized() = false, want true after SetPassword")
-	}
-	ok, err := store.VerifyPassword(ctx, "dashboard-password")
-	if err != nil {
-		t.Fatalf("VerifyPassword() error = %v", err)
-	}
-	if !ok {
-		t.Fatal("VerifyPassword(correct) = false, want true")
-	}
-	ok, err = store.VerifyPassword(ctx, "wrong-password")
-	if err != nil {
-		t.Fatalf("VerifyPassword(wrong) error = %v", err)
-	}
-	if ok {
-		t.Fatal("VerifyPassword(wrong) = true, want false")
-	}
+func containsLegacyAuthField(data []byte) bool {
+	text := string(data)
+	return strings.Contains(text, "dashboard_password_hash") || strings.Contains(text, "launcher_token")
 }

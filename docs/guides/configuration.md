@@ -148,8 +148,9 @@ Example clean web policy:
 **picoclaw-launcher** serves a browser UI that requires password sign-in first. On first run, open `/launcher-setup` to create the dashboard password. Later manual sign-ins use `/launcher-login`.
 
 - **Config file**: Same directory as `config.json` (or the file pointed to by `PICOCLAW_CONFIG`). The launcher-specific file is `launcher-config.json`.
-- **Password storage**: On supported platforms, the password is stored as a bcrypt hash in `launcher-auth.db`. On platforms where the SQLite password store is unavailable, the bcrypt hash is stored in `launcher-config.json`.
-- **Legacy migration**: Older `launcher_token` values are migrated once into password login and removed from saved launcher config.
+- **Password storage**: The password is stored only as a bcrypt hash in `~/.picoclaw/launcher-auth.db`. The database uses SQLite WAL mode and private permissions; launcher startup fails closed if it cannot be opened or migrated. `launcher-config.json` stores launcher settings only.
+- **Legacy migration**: On the first upgraded startup, removed `dashboard_password_hash` and `launcher_token` fields are imported from `launcher-config.json`; an existing database credential wins. Before those fields are removed, the original file is copied without overwrite to `legacy-json/launcher-auth-v1/launcher-config.json` beside the launcher config.
+- **Upgrade and rollback**: Stop all PicoClaw processes before upgrading. To roll back, stop PicoClaw, restore the archived launcher config, and remove or restore `launcher-auth.db` together with its matching `-wal` and `-shm` files. Mixed old/new processes against one home are unsupported.
 - **Local auto-login**: When the launcher auto-opens a local browser after startup, it uses a one-shot loopback-only bootstrap endpoint to set the session cookie automatically.
 - **Unsupported auth paths**: URL token login (`?token=...`), `PICOCLAW_LAUNCHER_TOKEN`, and `Authorization: Bearer` dashboard auth are no longer supported.
 - **Sign-out**: Use **`POST /api/auth/logout`** with **`Content-Type: application/json`** (body may be `{}`). Do not rely on a GET URL for logout (CSRF-safe pattern).

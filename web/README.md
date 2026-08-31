@@ -137,9 +137,10 @@ The dashboard is protected by password login.
 - Successful login sets an HttpOnly session cookie.
 - Existing sessions are invalidated when the launcher process restarts; otherwise the browser cookie expires after 31 days.
 - When the launcher auto-opens a local browser after startup, it uses a one-shot loopback-only bootstrap endpoint to set the session cookie automatically.
-- On supported platforms, the password is stored as a bcrypt hash in `launcher-auth.db`.
-- On platforms where the SQLite password store is unavailable, the launcher stores the bcrypt hash in `launcher-config.json`.
-- Legacy `launcher_token` values are migrated once into password login and are removed from saved launcher config.
+- The password is stored only as a bcrypt hash in `~/.picoclaw/launcher-auth.db`; launcher startup fails closed if this database cannot be opened or migrated.
+- `launcher-auth.db` uses SQLite WAL mode, foreign keys, full synchronous durability, and private file permissions. Stop all PicoClaw processes before upgrading or restoring it.
+- Legacy `dashboard_password_hash` and `launcher_token` values are imported once from `launcher-config.json`; an existing database credential wins. The original settings file is copied without overwrite to `legacy-json/launcher-auth-v1/launcher-config.json` before those fields are removed, and `launcher-config.json` stores settings only afterward.
+- To roll back after migration, stop PicoClaw, restore the archived `launcher-config.json`, and remove or restore `launcher-auth.db` together with matching `launcher-auth.db-wal` and `launcher-auth.db-shm` files. Do not mix old and new binaries against the same home.
 - `PICOCLAW_LAUNCHER_TOKEN` is deprecated and ignored; after upgrading from env-token auth, open `/launcher-setup` to create a password.
 - URL token login and `Authorization: Bearer` dashboard auth are not supported.
 
@@ -318,6 +319,7 @@ What they do today:
 web/
 ├── backend/
 │   ├── api/             # REST API handlers and launcher runtime endpoints
+│   ├── dashboardauth/   # launcher-auth.db schema, migration, and password store
 │   ├── launcherconfig/  # launcher-config.json load/save/validation
 │   ├── middleware/      # auth, content type, logging, CIDR allowlist
 │   ├── model/           # Go data structures and logic wrappers

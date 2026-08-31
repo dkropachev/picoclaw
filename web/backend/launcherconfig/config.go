@@ -26,10 +26,43 @@ type Config struct {
 	AllowLocalhostBypass       bool            `json:"allow_localhost_bypass"`
 	AllowLocalhostBypassSource BoolFieldSource `json:"-"`
 	TrustedProxyCIDRs          []string        `json:"trusted_proxy_cidrs,omitempty"`
-	DashboardPasswordHash      string          `json:"dashboard_password_hash,omitempty"`
-	// LegacyLauncherToken is read only for one-time migration from the removed
-	// token login flow. Save always clears it so new configs do not persist it.
-	LegacyLauncherToken string `json:"launcher_token,omitempty"`
+	// DashboardPasswordHash and LegacyLauncherToken are decode-only migration
+	// inputs. Launcher settings are never allowed to persist credentials.
+	DashboardPasswordHash string `json:"-"`
+	LegacyLauncherToken   string `json:"-"`
+}
+
+// UnmarshalJSON accepts removed authentication fields for the one-time SQLite
+// migration while keeping them out of every serialized launcher config.
+func (cfg *Config) UnmarshalJSON(data []byte) error {
+	type configJSON struct {
+		Port                  int      `json:"port"`
+		Public                bool     `json:"public"`
+		AllowedCIDRs          []string `json:"allowed_cidrs,omitempty"`
+		AllowLocalhostBypass  bool     `json:"allow_localhost_bypass"`
+		TrustedProxyCIDRs     []string `json:"trusted_proxy_cidrs,omitempty"`
+		DashboardPasswordHash string   `json:"dashboard_password_hash"`
+		LegacyLauncherToken   string   `json:"launcher_token"`
+	}
+
+	wire := configJSON{
+		Port:                 cfg.Port,
+		Public:               cfg.Public,
+		AllowedCIDRs:         cfg.AllowedCIDRs,
+		AllowLocalhostBypass: cfg.AllowLocalhostBypass,
+		TrustedProxyCIDRs:    cfg.TrustedProxyCIDRs,
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	cfg.Port = wire.Port
+	cfg.Public = wire.Public
+	cfg.AllowedCIDRs = wire.AllowedCIDRs
+	cfg.AllowLocalhostBypass = wire.AllowLocalhostBypass
+	cfg.TrustedProxyCIDRs = wire.TrustedProxyCIDRs
+	cfg.DashboardPasswordHash = wire.DashboardPasswordHash
+	cfg.LegacyLauncherToken = wire.LegacyLauncherToken
+	return nil
 }
 
 // BoolFieldSource tracks whether a JSON boolean field was omitted, explicitly
@@ -145,8 +178,6 @@ func detectBoolFieldSource(data []byte, field string) BoolFieldSource {
 func Save(path string, cfg Config) error {
 	cfg.AllowedCIDRs = NormalizeCIDRs(cfg.AllowedCIDRs)
 	cfg.TrustedProxyCIDRs = NormalizeCIDRs(cfg.TrustedProxyCIDRs)
-	cfg.DashboardPasswordHash = strings.TrimSpace(cfg.DashboardPasswordHash)
-	cfg.LegacyLauncherToken = ""
 	if err := Validate(cfg); err != nil {
 		return err
 	}
