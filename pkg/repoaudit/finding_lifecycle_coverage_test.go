@@ -567,7 +567,8 @@ func TestRepositoryMappingConflictFieldPersistenceHelperCoverage(t *testing.T) {
 		!repositoryMappingAdjudicationAutoAssociates(nonBlocking) {
 		t.Fatal("valid non-blocking conflict did not permit auto-association")
 	}
-	if completion := repositoryCompletionFromAdjudication("job", nonBlocking, nil, true); completion.RepositoryFindingID != "candidate" ||
+	completion := repositoryCompletionFromAdjudication("job", nonBlocking, nil, true)
+	if completion.RepositoryFindingID != "candidate" ||
 		completion.CreateMatchState != "" || len(completion.PossibleDuplicates) != 0 {
 		t.Fatalf("non-blocking completion = %#v", completion)
 	}
