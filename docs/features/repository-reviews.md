@@ -446,11 +446,13 @@ interfaces owned by their existing feature specifications.
    automation it scans at most 1,000 retained workflow runs, accepts inspection
    only from validated same-child acknowledgements (including zero-finding
    responses), and installs one recovered campaign, manifest, coverage, and
-   provenance through automation/campaign/review-version CAS. Missing, corrupt,
-   truncated, inconsistent, or bound-limited history fails closed without
-   installing a campaign, changing raw provenance, or hiding legacy findings;
-   Resume and historical replay retry remain unavailable until exact provenance
-   can be recovered.
+   provenance through automation/campaign/review-version CAS. Current runtime
+   profile drift withholds historical assignment/completion credit while
+   independently envelope-validated finding provenance remains eligible for
+   replay. Missing, corrupt, truncated, inconsistent, or bound-limited history
+   fails closed without installing a campaign, changing raw provenance, or
+   hiding legacy findings; Resume and historical replay retry remain unavailable
+   until exact provenance can be recovered.
 10. The monitor only reconciles orphaned active runs after launcher failure; it
    does not poll account limits or auto-resume a guard pause. Explicit Resume
    causes the next worker pickup to fetch current telemetry and evaluate again.
