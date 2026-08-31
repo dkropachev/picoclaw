@@ -48,7 +48,7 @@ func TestRepositoryReviewFileAttributionConstructorAndMergeCAS(t *testing.T) {
 	}
 	forged := attribution
 	forged.ID = "rfa_forged"
-	if _, err := NewRepositoryReviewFileAttribution(forged); err == nil {
+	if _, forgedErr := NewRepositoryReviewFileAttribution(forged); forgedErr == nil {
 		t.Fatal("forged attribution ID accepted")
 	}
 	legacy := repositoryReviewFileAttributionForTest(4)
@@ -56,12 +56,12 @@ func TestRepositoryReviewFileAttributionConstructorAndMergeCAS(t *testing.T) {
 	legacy.Model = "review"
 	legacy.ModelAlias = ""
 	legacy.Account = ""
-	if _, err := NewRepositoryReviewFileAttribution(legacy); err != nil {
-		t.Fatalf("legacy ambiguous provenance rejected: %v", err)
+	if _, legacyErr := NewRepositoryReviewFileAttribution(legacy); legacyErr != nil {
+		t.Fatalf("legacy ambiguous provenance rejected: %v", legacyErr)
 	}
 	liveAmbiguous := legacy
 	liveAmbiguous.Source = RepositoryReviewFileAttributionSourceLiveCheckpoint
-	if _, err := NewRepositoryReviewFileAttribution(liveAmbiguous); err == nil {
+	if _, liveErr := NewRepositoryReviewFileAttribution(liveAmbiguous); liveErr == nil {
 		t.Fatal("live ambiguous provenance accepted")
 	}
 
@@ -92,24 +92,24 @@ func TestRepositoryReviewFileAttributionConstructorAndMergeCAS(t *testing.T) {
 	}
 	conflict := attribution
 	conflict.Model = "provider/other"
-	if _, err := store.MergeRepositoryReviewFileAttributions(
+	if _, conflictErr := store.MergeRepositoryReviewFileAttributions(
 		context.Background(),
 		MergeRepositoryReviewFileAttributionsRequest{
 			Repository: repository, ExpectedVersion: 1,
 			Attributions: []RepositoryReviewFileAttribution{conflict},
 		},
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("conflicting logical child error = %v", err)
+	); !errors.Is(conflictErr, ErrConflict) {
+		t.Fatalf("conflicting logical child error = %v", conflictErr)
 	}
 	stale := repositoryReviewFileAttributionForTest(5)
-	if _, err := store.MergeRepositoryReviewFileAttributions(
+	if _, staleErr := store.MergeRepositoryReviewFileAttributions(
 		context.Background(),
 		MergeRepositoryReviewFileAttributionsRequest{
 			Repository: repository, ExpectedVersion: 0,
 			Attributions: []RepositoryReviewFileAttribution{stale},
 		},
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("stale merge error = %v", err)
+	); !errors.Is(staleErr, ErrConflict) {
+		t.Fatalf("stale merge error = %v", staleErr)
 	}
 	loaded, found, err := store.Get(repository)
 	if err != nil || !found || !reflect.DeepEqual(loaded.FileAttributions, merged.FileAttributions) {
@@ -233,15 +233,15 @@ func TestRepositoryReviewCheckpointReplayVerifiesAndRepairsAttribution(t *testin
 	reservation := legacy.ActiveReviewRun.Reservations[checkpoint.AssignmentID]
 	reservation.CheckpointDigest = repositoryReviewLegacyCheckpointRequestDigest(checkpoint)
 	legacy.ActiveReviewRun.Reservations[checkpoint.AssignmentID] = reservation
-	if err := fixture.store.save(&legacy); err != nil {
-		t.Fatal(err)
+	if saveErr := fixture.store.save(&legacy); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	insufficient := checkpoint
 	insufficient.CompletedAt = time.Time{}
-	if _, err := fixture.store.CheckpointRepositoryReviewAssignment(
+	if _, insufficientErr := fixture.store.CheckpointRepositoryReviewAssignment(
 		t.Context(), insufficient,
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("timestamp-free legacy repair error = %v", err)
+	); !errors.Is(insufficientErr, ErrConflict) {
+		t.Fatalf("timestamp-free legacy repair error = %v", insufficientErr)
 	}
 	repaired, err := fixture.store.CheckpointRepositoryReviewAssignment(t.Context(), checkpoint)
 	if err != nil || !repaired.Idempotent || len(repaired.State.FileAttributions) != 1 ||

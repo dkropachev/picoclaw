@@ -100,8 +100,8 @@ func (s Store) MergeRepositoryReviewFileAttributions(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := ctx.Err(); err != nil {
-		return RepositoryState{}, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return RepositoryState{}, contextErr
 	}
 	request.Repository = strings.TrimSpace(request.Repository)
 	if !validBoundedText(request.Repository, maxRepositoryIdentityBytes) ||
@@ -131,8 +131,8 @@ func (s Store) MergeRepositoryReviewFileAttributions(
 		return RepositoryState{}, err
 	}
 	defer unlock()
-	if err := ctx.Err(); err != nil {
-		return RepositoryState{}, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return RepositoryState{}, contextErr
 	}
 	state, err := s.load(request.Repository)
 	if err != nil {

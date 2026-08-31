@@ -157,7 +157,8 @@ func TestRepositoryReviewFileAttributionSummariesKeepProvenanceDistinct(t *testi
 		t, "rra_summary_distinct", "run-one", repoaudit.RepositoryReviewFocusSecurityTrust,
 		"assignment-security", 1, completedAt, file,
 	)
-	inputs := []repoaudit.RepositoryReviewFileAttribution{base}
+	inputs := make([]repoaudit.RepositoryReviewFileAttribution, 0, 4)
+	inputs = append(inputs, base)
 	for index, mutate := range []func(*repoaudit.RepositoryReviewFileAttribution){
 		func(value *repoaudit.RepositoryReviewFileAttribution) {
 			value.RootAgentID = "secondary"

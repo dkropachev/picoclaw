@@ -40,7 +40,12 @@ func main() {
 	flag.IntVar(&expected.attributionRecords, "expect-attribution-records", -1, "expected grouped attribution records")
 	flag.IntVar(&expected.acknowledgements, "expect-acknowledgements", -1, "expected acknowledged file occurrences")
 	flag.IntVar(&expected.uniqueFiles, "expect-unique-files", -1, "expected unique files")
-	flag.IntVar(&expected.uniqueFileAssignments, "expect-file-assignments", -1, "expected unique file/focus assignments")
+	flag.IntVar(
+		&expected.uniqueFileAssignments,
+		"expect-file-assignments",
+		-1,
+		"expected unique file/focus assignments",
+	)
 	flag.Parse()
 
 	*workspace = strings.TrimSpace(*workspace)
@@ -62,8 +67,8 @@ func main() {
 		if *expectedDigest == "" {
 			fatal(errors.New("--apply requires --expect-digest from a prior dry run"))
 		}
-		if err := compareExpectedCounts(report, expected); err != nil {
-			fatal(err)
+		if compareErr := compareExpectedCounts(report, expected); compareErr != nil {
+			fatal(compareErr)
 		}
 		report, err = launcherapi.BackfillRepositoryReviewFileAttributions(
 			context.Background(),
@@ -76,8 +81,8 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
-		if err := compareExpectedCounts(report, expected); err != nil {
-			fatal(err)
+		if compareErr := compareExpectedCounts(report, expected); compareErr != nil {
+			fatal(compareErr)
 		}
 	}
 	encoder := json.NewEncoder(os.Stdout)

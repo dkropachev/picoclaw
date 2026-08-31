@@ -103,7 +103,12 @@ func TestRepositoryReviewFileAttributionBackfillRestoresExactAcknowledgements(t 
 	if err != nil || reprepared.report.ExistingAttributionRecords != 2 ||
 		reprepared.report.Digest != prepared.report.Digest ||
 		!reflect.DeepEqual(reprepared.attributions, prepared.attributions) {
-		t.Fatalf("reprepared legacy attributions=%#v report=%#v err=%v", reprepared.attributions, reprepared.report, err)
+		t.Fatalf(
+			"reprepared legacy attributions=%#v report=%#v err=%v",
+			reprepared.attributions,
+			reprepared.report,
+			err,
+		)
 	}
 }
 
@@ -207,7 +212,12 @@ func TestRepositoryReviewFileAttributionBackfillAllowsSuccessfulEmptyAcknowledge
 	if err != nil || prepared.report.SuccessfulChildren != 1 ||
 		prepared.report.AttributionRecords != 0 || len(prepared.attributions) != 0 ||
 		prepared.report.Digest == "" {
-		t.Fatalf("empty acknowledgement report=%#v attributions=%#v err=%v", prepared.report, prepared.attributions, err)
+		t.Fatalf(
+			"empty acknowledgement report=%#v attributions=%#v err=%v",
+			prepared.report,
+			prepared.attributions,
+			err,
+		)
 	}
 }
 
