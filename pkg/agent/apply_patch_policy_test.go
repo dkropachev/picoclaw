@@ -465,6 +465,9 @@ func TestAgentModelMayUseCodexCompatibleToolsForApplyPatchRegistration(t *testin
 func TestAgentApplyPatchPolicyProtectsRootAndOwnerControlPaths(t *testing.T) {
 	t.Setenv(config.EnvHome, t.TempDir())
 	workspace := t.TempDir()
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	fixtures := map[string]string{
 		"sessions/private.jsonl":                                        "session\n",
 		"account_router_state.json":                                     "account\n",
@@ -514,7 +517,7 @@ func TestAgentApplyPatchPolicyProtectsRootAndOwnerControlPaths(t *testing.T) {
 
 	for label, tool := range map[string]tools.Tool{"root": rootTool, "owner": ownerTool} {
 		for _, relative := range []string{
-			"sessions/private.jsonl",
+			"legacy-json/sessions-v1/sessions/private.jsonl",
 			"account_router_state.json",
 			"state/account-router.db",
 			"state/account-router.db.locks/store.lock",

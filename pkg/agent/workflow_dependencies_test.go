@@ -40,7 +40,7 @@ func (workflowDependencyTestTool) Execute(
 func TestResolveWorkflowDependencyAgentsFunctionsAndTools(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	defaultAgent := loop.registry.GetDefaultAgent()
 	defaultAgent.Tools.Register(workflowDependencyTestTool{name: "ready_tool"})
 	defaultAgent.Tools.RegisterHidden(workflowDependencyTestTool{name: "hidden_tool"})
@@ -151,7 +151,7 @@ func TestResolveWorkflowDependencyDetectsNormalizedAgentCollision(t *testing.T) 
 		{ID: "Review Agent", Workspace: t.TempDir()},
 		{ID: "review-agent", Workspace: t.TempDir()},
 	}
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	got := loop.ResolveWorkflowDependency(
 		context.Background(),
 		workflows.WorkflowDependencyOccurrence{
@@ -233,7 +233,7 @@ func TestResolveWorkflowDependencyMCPConfigurationStates(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := config.DefaultConfig()
 			cfg.Agents.Defaults.Workspace = t.TempDir()
-			loop := workflowDependencyTestLoop(cfg)
+			loop := workflowDependencyTestLoop(t, cfg)
 			test.configure(cfg, loop)
 			got := loop.ResolveWorkflowDependency(
 				context.Background(),
@@ -334,7 +334,7 @@ func workflowDependencyConnectedMCPTestLoop(
 		}
 	})
 
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	loop.mcp.setManager(manager)
 	loop.mcp.initOnce.Do(func() {})
 	defaultAgent := loop.registry.GetDefaultAgent()
@@ -379,7 +379,10 @@ func workflowDependencyMCPTestServer(
 	return httpServer
 }
 
-func workflowDependencyTestLoop(cfg *config.Config) *AgentLoop {
+func workflowDependencyTestLoop(t *testing.T, cfg *config.Config) *AgentLoop {
+	t.Helper()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	ensureStrictTestWorkspaces(cfg)
 	return &AgentLoop{
 		cfg:      cfg,
 		registry: NewAgentRegistry(cfg, nil),

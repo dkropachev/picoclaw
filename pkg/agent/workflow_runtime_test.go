@@ -2654,11 +2654,13 @@ func TestWorkflowAgentRunnerLiteralEphemeralSessionKeyRemainsDurable(t *testing.
 		t.Fatalf("literal durable session scope = %#v, want persisted workflow metadata", scope)
 	}
 	files := workflowDirectoryFileSnapshot(t, filepath.Join(agent.Workspace, "sessions"))
-	if _, ok := files["ephemeral.jsonl"]; !ok {
-		t.Fatalf("session files = %#v, want ephemeral.jsonl", files)
+	if _, ok := files["sessions.db"]; !ok {
+		t.Fatalf("session files = %#v, want sessions.db", files)
 	}
-	if _, ok := files["ephemeral.meta.json"]; !ok {
-		t.Fatalf("session files = %#v, want ephemeral.meta.json", files)
+	for name := range files {
+		if strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".jsonl") {
+			t.Fatalf("literal durable session created mutable JSON: %s", name)
+		}
 	}
 }
 

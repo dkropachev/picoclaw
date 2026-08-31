@@ -1066,7 +1066,7 @@ func TestHandleDeleteSession_RevalidatesOwnerAfterLookup(t *testing.T) {
 			newErr,
 		)
 	}
-	if currentRef, findErr := h.findPicoJSONLSession(ctx, dir, sessionID); !errors.Is(findErr, os.ErrNotExist) {
+	if currentRef, findErr := h.findPicoSQLiteSession(ctx, dir, sessionID); !errors.Is(findErr, os.ErrNotExist) {
 		t.Fatalf("current Pico owner = %#v, err=%v", currentRef, findErr)
 	}
 }

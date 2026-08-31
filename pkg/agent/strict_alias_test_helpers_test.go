@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
@@ -18,6 +20,7 @@ func newTestAgentLoopWithStrictModels(
 	provider providers.LLMProvider,
 	opts ...AgentLoopOption,
 ) *AgentLoop {
+	ensureStrictTestWorkspaces(cfg)
 	hadExplicitAccount := cfg != nil &&
 		strings.TrimSpace(cfg.Agents.Defaults.AccountRef) != ""
 	ensureStrictTestModelSelection(cfg, provider)
@@ -35,6 +38,7 @@ func newTestAgentLoopWithStrictModelsAndExecutionPolicy(
 	policy isolation.ExecutionPolicy,
 	opts ...AgentLoopOption,
 ) *AgentLoop {
+	ensureStrictTestWorkspaces(cfg)
 	hadExplicitAccount := cfg != nil &&
 		strings.TrimSpace(cfg.Agents.Defaults.AccountRef) != ""
 	ensureStrictTestModelSelection(cfg, provider)
@@ -49,6 +53,35 @@ func newTestAgentLoopWithStrictModelsAndExecutionPolicy(
 		bindLegacyTestProviderToAliases(loop, cfg, provider)
 	}
 	return loop
+}
+
+func ensureStrictTestWorkspaces(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	workspaceValue := strings.TrimSpace(cfg.Agents.Defaults.Workspace)
+	defaultWorkspace := strings.TrimSpace(config.DefaultConfig().Agents.Defaults.Workspace)
+	if workspaceValue == "" || workspaceValue == defaultWorkspace {
+		workspace, err := os.MkdirTemp("", "picoclaw-agent-test-")
+		if err != nil {
+			panic(err)
+		}
+		cfg.Agents.Defaults.Workspace = workspace
+	}
+	for index := range cfg.Agents.List {
+		if strings.TrimSpace(cfg.Agents.List[index].Workspace) != "" {
+			continue
+		}
+		if cfg.Agents.List[index].Default || strings.TrimSpace(cfg.Agents.List[index].ID) == "main" {
+			cfg.Agents.List[index].Workspace = cfg.Agents.Defaults.Workspace
+			continue
+		}
+		cfg.Agents.List[index].Workspace = filepath.Join(
+			cfg.Agents.Defaults.Workspace,
+			".test-agents",
+			strings.TrimSpace(cfg.Agents.List[index].ID),
+		)
+	}
 }
 
 func bindLegacyTestProviderToAliases(

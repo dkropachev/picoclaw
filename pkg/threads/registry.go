@@ -1,20 +1,20 @@
+//nolint:govet,sqlclosecheck // Transactional SQL uses narrow error scopes and explicit closes before dependent queries.
 package threads
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/fileutil"
-	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 )
@@ -46,755 +46,268 @@ func (s Store) withDefaults() Store {
 	return s
 }
 
-func (s Store) ensureThreadDirs() error {
-	s = s.withDefaults()
-	if err := os.MkdirAll(s.ThreadsDir, 0o755); err != nil {
-		return err
-	}
-	return os.MkdirAll(s.HandoffsDir, 0o755)
-}
-
+// Deprecated legacy path helpers remain for source compatibility and import
+// fixture construction. Runtime thread state is stored only in sessions.db.
 func (s Store) threadPath(id string) string {
 	s = s.withDefaults()
 	return filepath.Join(s.ThreadsDir, sanitizeThreadID(id)+".json")
 }
 
-func (s Store) handoffPath(id string) string {
-	s = s.withDefaults()
-	return filepath.Join(s.HandoffsDir, sanitizeThreadID(id)+".json")
+func threadTimeParts(value time.Time) (int64, int) {
+	return value.Unix(), value.Nanosecond()
+}
+
+func nullableThreadTimeParts(value *time.Time) (any, any) {
+	if value == nil || value.IsZero() {
+		return nil, nil
+	}
+	return value.Unix(), value.Nanosecond()
+}
+
+func scanThreadTime(seconds, nanos int64) time.Time {
+	return time.Unix(seconds, nanos).UTC()
+}
+
+func resolveSessionKeySQL(
+	ctx context.Context,
+	queryer interface {
+		QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+		QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	},
+	requested string,
+) (string, bool, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return "", false, nil
+	}
+	var key string
+	err := queryer.QueryRowContext(ctx,
+		`SELECT session_key FROM sessions WHERE session_key = ?`, requested).Scan(&key)
+	if err == nil {
+		return key, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, err
+	}
+	rows, err := queryer.QueryContext(ctx, `SELECT session_key FROM session_aliases
+        WHERE alias = ? ORDER BY session_key LIMIT 2`, requested)
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+	owners := make([]string, 0, 2)
+	for rows.Next() {
+		var owner string
+		if err := rows.Scan(&owner); err != nil {
+			return "", false, err
+		}
+		owners = append(owners, owner)
+	}
+	if len(owners) > 1 {
+		return "", false, fmt.Errorf("threads: session alias %q is ambiguous", requested)
+	}
+	if len(owners) == 0 {
+		return "", false, rows.Err()
+	}
+	return owners[0], true, rows.Err()
+}
+
+func rejectReviewSessionSQL(ctx context.Context, conn *sql.Conn, key string) error {
+	var channel string
+	err := conn.QueryRowContext(ctx,
+		`SELECT channel FROM session_scopes WHERE session_key = ?`, key).Scan(&channel)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(strings.TrimSpace(channel), "review") {
+		return errReviewScope
+	}
+	return nil
+}
+
+func ensureThreadSessionSQL(ctx context.Context, conn *sql.Conn, key string, now time.Time) error {
+	seconds, nanos := threadTimeParts(now)
+	_, err := conn.ExecContext(ctx, `INSERT INTO sessions (
+        session_key, created_seconds, created_nanos, updated_seconds, updated_nanos, version
+    ) VALUES (?, ?, ?, ?, ?, 1) ON CONFLICT(session_key) DO NOTHING`,
+		key, seconds, nanos, seconds, nanos)
+	return err
+}
+
+func readThreadMetaSQL(
+	ctx context.Context,
+	queryer interface {
+		QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+		QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	},
+	id string,
+) (ThreadMeta, bool, int64, error) {
+	var meta ThreadMeta
+	var droppedSeconds, droppedNanos sql.NullInt64
+	var createdSeconds, createdNanos, updatedSeconds, updatedNanos, version int64
+	err := queryer.QueryRowContext(ctx, `SELECT thread_id, ui_session_id,
+        primary_session_key, agent_id, owner_identity, title, thread_type, source_query,
+        registration, dropped_seconds, dropped_nanos, created_seconds, created_nanos,
+        updated_seconds, updated_nanos, version FROM threads WHERE thread_id = ?`, id).Scan(
+		&meta.ID, &meta.UISessionID, &meta.PrimarySessionKey, &meta.AgentID,
+		&meta.OwnerIdentity, &meta.Title, &meta.Type, &meta.SourceQuery, &meta.Registration,
+		&droppedSeconds, &droppedNanos, &createdSeconds, &createdNanos,
+		&updatedSeconds, &updatedNanos, &version,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ThreadMeta{}, false, 0, nil
+	}
+	if err != nil {
+		return ThreadMeta{}, false, 0, err
+	}
+	meta.CreatedAt = scanThreadTime(createdSeconds, createdNanos)
+	meta.UpdatedAt = scanThreadTime(updatedSeconds, updatedNanos)
+	if droppedSeconds.Valid && droppedNanos.Valid {
+		dropped := scanThreadTime(droppedSeconds.Int64, droppedNanos.Int64)
+		meta.DroppedAt = &dropped
+	}
+	contextRows, err := queryer.QueryContext(ctx,
+		`SELECT key, value FROM thread_context WHERE thread_id = ? ORDER BY key`, id)
+	if err != nil {
+		return ThreadMeta{}, false, 0, err
+	}
+	for contextRows.Next() {
+		var key, value string
+		if err := contextRows.Scan(&key, &value); err != nil {
+			_ = contextRows.Close()
+			return ThreadMeta{}, false, 0, err
+		}
+		if meta.Context == nil {
+			meta.Context = make(map[string]string)
+		}
+		meta.Context[key] = value
+	}
+	if rowsErr := contextRows.Err(); rowsErr != nil {
+		_ = contextRows.Close()
+		return ThreadMeta{}, false, 0, rowsErr
+	}
+	if err := contextRows.Close(); err != nil {
+		return ThreadMeta{}, false, 0, err
+	}
+	aliasRows, err := queryer.QueryContext(ctx,
+		`SELECT alias FROM thread_aliases WHERE thread_id = ? ORDER BY sequence`, id)
+	if err != nil {
+		return ThreadMeta{}, false, 0, err
+	}
+	for aliasRows.Next() {
+		var alias string
+		if err := aliasRows.Scan(&alias); err != nil {
+			_ = aliasRows.Close()
+			return ThreadMeta{}, false, 0, err
+		}
+		meta.Aliases = append(meta.Aliases, alias)
+	}
+	if rowsErr := aliasRows.Err(); rowsErr != nil {
+		_ = aliasRows.Close()
+		return ThreadMeta{}, false, 0, rowsErr
+	}
+	if err := aliasRows.Close(); err != nil {
+		return ThreadMeta{}, false, 0, err
+	}
+	sessionRows, err := queryer.QueryContext(ctx, `SELECT session_key FROM thread_sessions
+        WHERE thread_id = ? ORDER BY sequence`, id)
+	if err != nil {
+		return ThreadMeta{}, false, 0, err
+	}
+	for sessionRows.Next() {
+		var key string
+		if err := sessionRows.Scan(&key); err != nil {
+			_ = sessionRows.Close()
+			return ThreadMeta{}, false, 0, err
+		}
+		meta.SessionKeys = append(meta.SessionKeys, key)
+	}
+	if rowsErr := sessionRows.Err(); rowsErr != nil {
+		_ = sessionRows.Close()
+		return ThreadMeta{}, false, 0, rowsErr
+	}
+	if err := sessionRows.Close(); err != nil {
+		return ThreadMeta{}, false, 0, err
+	}
+	return normalizeThreadMeta(meta), true, version, nil
 }
 
 func (s Store) readThreadMeta(id string) (ThreadMeta, error) {
-	data, err := os.ReadFile(s.threadPath(id))
+	store, err := s.openSessionStore()
 	if err != nil {
 		return ThreadMeta{}, err
 	}
-	var meta ThreadMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
+	defer store.Close()
+	meta, found, _, err := readThreadMetaSQL(context.Background(), store.SQLDB(), id)
+	if err != nil {
 		return ThreadMeta{}, err
 	}
-	meta.ID = strings.TrimSpace(meta.ID)
-	if meta.ID == "" {
-		meta.ID = strings.TrimSpace(id)
+	if !found {
+		return ThreadMeta{}, os.ErrNotExist
 	}
-	return normalizeThreadMeta(meta), nil
+	return meta, nil
 }
 
 func (s Store) GetMeta(id string) (ThreadMeta, bool, error) {
-	meta, err := s.readThreadMeta(id)
-	if os.IsNotExist(err) {
+	meta, err := s.readThreadMeta(strings.TrimSpace(id))
+	if errors.Is(err, os.ErrNotExist) {
 		return ThreadMeta{}, false, nil
 	}
-	if err != nil {
-		return ThreadMeta{}, false, err
-	}
-	return meta, true, nil
+	return meta, err == nil, err
 }
 
 func (s Store) writeThreadMeta(meta ThreadMeta) error {
-	s = s.withDefaults()
-	if err := s.ensureThreadDirs(); err != nil {
-		return err
-	}
-	meta, data, err := marshalThreadMeta(meta)
+	store, err := s.openSessionStore()
 	if err != nil {
 		return err
 	}
-	if s.testHooks != nil && s.testHooks.writeThreadMeta != nil {
-		if err := s.testHooks.writeThreadMeta(meta); err != nil {
+	defer store.Close()
+	meta = normalizeThreadMeta(meta)
+	return store.Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
+		resolvedPrimary, found, err := resolveSessionKeySQL(ctx, conn, meta.PrimarySessionKey)
+		if err != nil {
 			return err
 		}
-	}
-	return fileutil.WriteFileAtomic(s.threadPath(meta.ID), data, 0o644)
-}
-
-func marshalThreadMeta(meta ThreadMeta) (ThreadMeta, []byte, error) {
-	meta = normalizeThreadMeta(meta)
-	if meta.ID == "" {
-		return ThreadMeta{}, nil, errors.New("threads: thread id is empty")
-	}
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return ThreadMeta{}, nil, err
-	}
-	return meta, data, nil
-}
-
-type durableFileBackup struct {
-	path     string
-	data     []byte
-	mode     os.FileMode
-	existed  bool
-	expected []byte
-}
-
-func readDurableFileBackup(path string) (durableFileBackup, error) {
-	backup := durableFileBackup{path: path, mode: 0o644}
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return backup, nil
-	}
-	if err != nil {
-		return durableFileBackup{}, err
-	}
-	backup.data = data
-	backup.existed = true
-	if info, statErr := os.Stat(path); statErr == nil {
-		backup.mode = info.Mode().Perm()
-	} else {
-		return durableFileBackup{}, statErr
-	}
-	return backup, nil
-}
-
-func (b durableFileBackup) expecting(data []byte) durableFileBackup {
-	b.expected = append([]byte(nil), data...)
-	return b
-}
-
-func (b durableFileBackup) restore() error {
-	current, err := os.ReadFile(b.path)
-	currentExists := err == nil
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if currentExists == b.existed && (!currentExists || slices.Equal(current, b.data)) {
-		return nil
-	}
-	if !currentExists || b.expected == nil || !slices.Equal(current, b.expected) {
-		return errors.New("threads: artifact changed concurrently; conditional rollback refused")
-	}
-	if b.existed {
-		return fileutil.WriteFileAtomic(b.path, b.data, b.mode)
-	}
-	if err := fileutil.RemoveDurable(b.path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
-func (s Store) listThreadMetas() ([]ThreadMeta, error) {
-	s = s.withDefaults()
-	if err := s.migrateSessionThreads(context.Background()); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(s.ThreadsDir)
-	if os.IsNotExist(err) {
-		return []ThreadMeta{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	items := make([]ThreadMeta, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
+		if found {
+			meta.PrimarySessionKey = resolvedPrimary
+			meta.SessionKeys = uniqueStrings(append([]string{resolvedPrimary}, meta.SessionKeys...))
+		} else if err := ensureThreadSessionSQL(
+			ctx,
+			conn,
+			meta.PrimarySessionKey,
+			time.Now().UTC(),
+		); err != nil {
+			return err
 		}
-		id := strings.TrimSuffix(entry.Name(), ".json")
-		meta, err := s.readThreadMeta(id)
+		_, found, version, err := readThreadMetaSQL(ctx, conn, meta.ID)
 		if err != nil {
-			continue
+			return err
 		}
-		items = append(items, meta)
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		return items[i].UpdatedAt.After(items[j].UpdatedAt)
+		if !found {
+			return insertThreadSQL(ctx, conn, meta)
+		}
+		updatedSeconds, updatedNanos := threadTimeParts(meta.UpdatedAt)
+		droppedSeconds, droppedNanos := nullableThreadTimeParts(meta.DroppedAt)
+		result, err := conn.ExecContext(ctx, `UPDATE threads SET ui_session_id = ?,
+            primary_session_key = ?, agent_id = ?, owner_identity = ?, title = ?,
+            thread_type = ?, source_query = ?, registration = ?, dropped_seconds = ?,
+            dropped_nanos = ?, updated_seconds = ?, updated_nanos = ?, version = version + 1
+            WHERE thread_id = ? AND version = ?`, meta.UISessionID, meta.PrimarySessionKey,
+			meta.AgentID, meta.OwnerIdentity, meta.Title, meta.Type, meta.SourceQuery,
+			meta.Registration, droppedSeconds, droppedNanos, updatedSeconds, updatedNanos,
+			meta.ID, version)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return errors.New("threads: thread changed concurrently")
+		}
+		return writeThreadChildrenSQL(ctx, conn, meta)
 	})
-	return items, nil
-}
-
-func (s Store) threadFromRegistryMeta(meta ThreadMeta) (Thread, bool) {
-	s = s.withDefaults()
-	meta = normalizeThreadMeta(meta)
-	if meta.ID == "" || meta.PrimarySessionKey == "" {
-		return Thread{}, false
-	}
-	state, err := s.readOrdinarySessionState(
-		context.Background(),
-		meta.PrimarySessionKey,
-		true,
-	)
-	if err != nil {
-		// Registry records are derived. Ownership, metadata, and scope failures
-		// hide the complete projection rather than exposing stale identifiers.
-		return Thread{}, false
-	}
-	return threadFromOrdinarySessionState(meta, state)
-}
-
-func threadFromOrdinarySessionState(
-	meta ThreadMeta,
-	state ordinarySessionState,
-) (Thread, bool) {
-	meta = normalizeThreadMeta(meta)
-	if !state.found || state.key == "" {
-		return Thread{}, false
-	}
-	if state.key != meta.PrimarySessionKey {
-		meta.SessionKeys = uniqueStrings(append([]string{state.key}, meta.SessionKeys...))
-		meta.PrimarySessionKey = state.key
-	}
-	sessionMeta := state.meta
-	messages := state.history
-	historyModifiedAt := state.historyModifiedAt
-	visible := visibleMessages(messages)
-	preview := ""
-	for _, msg := range visible {
-		if msg.Role == "user" {
-			preview = messagePreview(msg)
-			break
-		}
-	}
-	if preview == "" {
-		preview = strings.TrimSpace(sessionMeta.Summary)
-	}
-	if preview == "" {
-		preview = strings.TrimSpace(meta.SourceQuery)
-	}
-	if preview == "" {
-		preview = strings.TrimSpace(meta.Title)
-	}
-	if preview == "" {
-		preview = "(empty)"
-	}
-
-	title := strings.TrimSpace(meta.Title)
-	if title == "" {
-		title = preview
-	}
-	if title == "" {
-		title = "New thread"
-	}
-	updated := meta.UpdatedAt
-	if sessionMeta.UpdatedAt.After(updated) {
-		updated = sessionMeta.UpdatedAt
-	}
-	if updated.IsZero() {
-		updated = meta.CreatedAt
-	}
-	if updated.IsZero() {
-		updated = historyModifiedAt
-	}
-	created := meta.CreatedAt
-	if created.IsZero() {
-		created = sessionMeta.CreatedAt
-	}
-	if created.IsZero() {
-		created = updated
-	}
-	if created.IsZero() && updated.IsZero() {
-		return Thread{}, false
-	}
-
-	return Thread{
-		ID:                meta.ID,
-		UISessionID:       meta.UISessionID,
-		SessionKey:        meta.PrimarySessionKey,
-		PrimarySessionKey: meta.PrimarySessionKey,
-		AgentID:           meta.AgentID,
-		OwnerIdentity:     meta.OwnerIdentity,
-		Title:             truncateRunes(title, 80),
-		Preview:           truncateRunes(preview, 120),
-		Type:              NormalizeType(meta.Type),
-		Context:           MergeContext(scopeContext(sessionMeta.Scope), meta.Context),
-		MessageCount:      len(visible),
-		Created:           created,
-		Updated:           updated,
-		SourceQuery:       strings.TrimSpace(meta.SourceQuery),
-		Discoverable:      meta.DroppedAt == nil,
-		DroppedAt:         meta.DroppedAt,
-	}, true
-}
-
-func (s Store) CreateThread(ctx context.Context, req CreateRequest) (Thread, error) {
-	s = s.withDefaults()
-	now := time.Now().UTC()
-	threadID := strings.TrimSpace(req.ID)
-	if threadID == "" {
-		threadID = GenerateSessionID()
-	}
-	primarySessionKey := strings.TrimSpace(req.PrimarySessionKey)
-	if primarySessionKey == "" {
-		return Thread{}, errors.New("threads: primary session key is empty")
-	}
-	primarySessionKey, err := s.canonicalSessionKey(ctx, primarySessionKey)
-	if err != nil {
-		return Thread{}, err
-	}
-	if s.testHooks != nil && s.testHooks.afterCreatePreflight != nil {
-		s.testHooks.afterCreatePreflight()
-	}
-	registryBackup, err := readDurableFileBackup(s.threadPath(threadID))
-	if err != nil {
-		return Thread{}, fmt.Errorf("threads: snapshot registry before create: %w", err)
-	}
-	uiSessionID := strings.TrimSpace(req.UISessionID)
-	if uiSessionID == "" {
-		uiSessionID = threadID
-	}
-	registration := normalizeRegistration(req.Registration)
-	if registration == "" {
-		registration = RegistrationManual
-	}
-	sourceQuery := strings.TrimSpace(firstNonEmpty(req.SourceQuery, req.Title, "New thread"))
-	sessionKeys := append([]string{primarySessionKey}, req.SessionKeys...)
-	meta := ThreadMeta{
-		ID:                threadID,
-		UISessionID:       uiSessionID,
-		PrimarySessionKey: primarySessionKey,
-		AgentID:           firstNonEmpty(req.AgentID, routingAgentFromSessionKey(primarySessionKey), "main"),
-		OwnerIdentity:     firstNonEmpty(req.OwnerIdentity, "unknown"),
-		Title:             truncateRunes(firstNonEmpty(req.Title, sourceQuery, "New thread"), 80),
-		Type:              NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+sourceQuery))),
-		Context:           MergeContext(ExtractContext(sourceQuery+" "+req.Title), req.Context),
-		SourceQuery:       sourceQuery,
-		SessionKeys:       uniqueStrings(sessionKeys),
-		Registration:      registration,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-	// Claim the session under the JSONL store's directory/session locks before
-	// publishing a registry record. If review admission won after the preflight,
-	// the callback rejects it without leaving a discoverable thread behind. If
-	// this callback wins, the resulting metadata makes later review admission
-	// conflict before the registry record is published.
-	linkChange, err := s.claimSessionThreadLink(ctx, primarySessionKey, threadID, now, false)
-	if err != nil {
-		return Thread{}, err
-	}
-	primarySessionKey = linkChange.key
-	meta.PrimarySessionKey = primarySessionKey
-	meta.SessionKeys = uniqueStrings(append([]string{primarySessionKey}, meta.SessionKeys...))
-	_, registryExpected, err := marshalThreadMeta(meta)
-	if err != nil {
-		return Thread{}, rollbackThreadOperation(ctx, err, nil, linkChange)
-	}
-	registryBackup = registryBackup.expecting(registryExpected)
-	if err := s.writeThreadMeta(meta); err != nil {
-		return Thread{}, rollbackThreadOperation(ctx, err, []durableFileBackup{registryBackup}, linkChange)
-	}
-	thread, ok := s.threadFromRegistryMeta(meta)
-	if !ok {
-		err := errors.New("threads: created thread could not be loaded")
-		return Thread{}, rollbackThreadOperation(ctx, err, []durableFileBackup{registryBackup}, linkChange)
-	}
-	return thread, nil
-}
-
-func (s Store) UpdateThread(id string, req UpdateRequest) (Thread, bool, error) {
-	meta, err := s.readThreadMeta(id)
-	if os.IsNotExist(err) {
-		return Thread{}, false, nil
-	}
-	if err != nil {
-		return Thread{}, false, err
-	}
-	state, err := s.readOrdinarySessionState(
-		context.Background(),
-		meta.PrimarySessionKey,
-		true,
-	)
-	if err != nil {
-		return Thread{}, false, err
-	}
-	meta.PrimarySessionKey = state.key
-	meta.SessionKeys = uniqueStrings(append([]string{state.key}, meta.SessionKeys...))
-	if strings.TrimSpace(req.Title) != "" {
-		meta.Title = truncateRunes(req.Title, 80)
-	}
-	if strings.TrimSpace(req.Type) != "" {
-		meta.Type = NormalizeType(req.Type)
-	}
-	if req.Context != nil {
-		meta.Context = cleanContext(req.Context)
-	}
-	if strings.TrimSpace(req.SourceQuery) != "" {
-		meta.SourceQuery = strings.TrimSpace(req.SourceQuery)
-	}
-	if req.Discoverable != nil {
-		if *req.Discoverable {
-			meta.DroppedAt = nil
-		} else if meta.DroppedAt == nil {
-			now := time.Now().UTC()
-			meta.DroppedAt = &now
-		}
-	}
-	meta.UpdatedAt = time.Now().UTC()
-	thread, ok := threadFromOrdinarySessionState(meta, state)
-	if !ok {
-		return Thread{}, false, errors.New("threads: updated thread could not be projected")
-	}
-	if err := s.writeThreadMeta(meta); err != nil {
-		return Thread{}, false, err
-	}
-	return thread, true, nil
-}
-
-func (s Store) DropThread(id string) (Thread, bool, error) {
-	thread, ok, err := s.Get(id)
-	if err != nil || !ok {
-		return Thread{}, ok, err
-	}
-	discoverable := false
-	return s.UpdateThread(thread.ID, UpdateRequest{Discoverable: &discoverable})
-}
-
-func (s Store) RegisterCurrent(ctx context.Context, cfg CreateRequest, scope *session.SessionScope) (Thread, error) {
-	s = s.withDefaults()
-	if err := rejectReviewThreadSessionScope(scope); err != nil {
-		return Thread{}, err
-	}
-	sessionKey := strings.TrimSpace(cfg.PrimarySessionKey)
-	if sessionKey == "" {
-		return Thread{}, errors.New("threads: current session key is empty")
-	}
-	uiSessionID := strings.TrimSpace(cfg.UISessionID)
-	if uiSessionID == "" {
-		if scope != nil {
-			if id, ok := picoSessionIDFromScope(*scope); ok {
-				uiSessionID = id
-			}
-		}
-	}
-	if uiSessionID == "" {
-		uiSessionID = strings.TrimSpace(cfg.ID)
-	}
-	if uiSessionID == "" {
-		uiSessionID = sessionKey
-	}
-	cfg.UISessionID = uiSessionID
-	cfg.Registration = firstNonEmpty(cfg.Registration, RegistrationTool)
-	cfg.OwnerIdentity = firstNonEmpty(cfg.OwnerIdentity, ownerIdentityFromScope(scope))
-	return s.CreateThread(ctx, cfg)
-}
-
-func (s Store) AttachCurrent(ctx context.Context, req AttachRequest) (Thread, ThreadHandoff, error) {
-	s = s.withDefaults()
-	if err := rejectReviewThreadSessionScope(req.Scope); err != nil {
-		return Thread{}, ThreadHandoff{}, err
-	}
-	if strings.TrimSpace(req.ThreadID) == "" {
-		return Thread{}, ThreadHandoff{}, errors.New("threads: thread id is empty")
-	}
-	if strings.TrimSpace(req.SessionKey) == "" {
-		return Thread{}, ThreadHandoff{}, errors.New("threads: current session key is empty")
-	}
-	meta, err := s.readThreadMeta(req.ThreadID)
-	if err != nil {
-		return Thread{}, ThreadHandoff{}, err
-	}
-	originSessionKey, err := s.canonicalSessionKey(ctx, req.SessionKey)
-	if err != nil {
-		return Thread{}, ThreadHandoff{}, err
-	}
-	primarySessionKey, err := s.canonicalSessionKey(ctx, meta.PrimarySessionKey)
-	if err != nil {
-		return Thread{}, ThreadHandoff{}, err
-	}
-	if s.testHooks != nil && s.testHooks.afterAttachPreflight != nil {
-		s.testHooks.afterAttachPreflight()
-	}
-	// Registry targets must already be authoritative ordinary sessions. This
-	// read is repeated after the deterministic race boundary: a missing target
-	// is never synthesized and no origin/registry/handoff state changes first.
-	targetState, err := s.readOrdinarySessionState(ctx, primarySessionKey, true)
-	if err != nil {
-		return Thread{}, ThreadHandoff{}, err
-	}
-	primarySessionKey = targetState.key
-	now := time.Now().UTC()
-	meta.PrimarySessionKey = targetState.key
-	meta.SessionKeys = uniqueStrings(append(meta.SessionKeys, originSessionKey, targetState.key))
-	if req.OwnerIdentity != "" && meta.OwnerIdentity == "" {
-		meta.OwnerIdentity = req.OwnerIdentity
-	}
-	if req.AgentID != "" && meta.AgentID == "" {
-		meta.AgentID = req.AgentID
-	}
-	meta.UpdatedAt = now
-	handoff := ThreadHandoff{
-		ID:               GenerateHandoffID(),
-		OriginSessionKey: originSessionKey,
-		OriginSessionID:  strings.TrimSpace(req.OriginSessionID),
-		TargetThreadID:   meta.ID,
-		TargetSessionID:  meta.UISessionID,
-		AgentID:          firstNonEmpty(req.AgentID, meta.AgentID),
-		Summary:          strings.TrimSpace(req.Summary),
-		CreatedAt:        now,
-	}
-	projected, ok := threadFromOrdinarySessionState(meta, targetState)
-	if !ok {
-		return Thread{}, ThreadHandoff{}, errors.New("threads: attached thread could not be projected")
-	}
-	registryBackup, err := readDurableFileBackup(s.threadPath(meta.ID))
-	if err != nil {
-		return Thread{}, ThreadHandoff{}, fmt.Errorf("threads: snapshot registry before attach: %w", err)
-	}
-	handoffBackup, err := readDurableFileBackup(s.handoffPath(handoff.ID))
-	if err != nil {
-		return Thread{}, ThreadHandoff{}, fmt.Errorf("threads: snapshot handoff before attach: %w", err)
-	}
-
-	// Origin ownership is the commit guard. The strict mutation arbitrates with
-	// review admission before registry, handoff, or target history changes.
-	linkChange, err := s.claimSessionThreadLink(ctx, originSessionKey, meta.ID, now, false)
-	if err != nil {
-		return Thread{}, ThreadHandoff{}, err
-	}
-	originSessionKey = linkChange.key
-	meta.SessionKeys = uniqueStrings(append(meta.SessionKeys, originSessionKey))
-	handoff.OriginSessionKey = originSessionKey
-	_, registryExpected, err := marshalThreadMeta(meta)
-	if err != nil {
-		return Thread{}, ThreadHandoff{}, rollbackThreadOperation(
-			ctx,
-			err,
-			nil,
-			linkChange,
-		)
-	}
-	handoffExpected, err := marshalHandoff(handoff)
-	if err != nil {
-		return Thread{}, ThreadHandoff{}, rollbackThreadOperation(
-			ctx,
-			err,
-			nil,
-			linkChange,
-		)
-	}
-	registryBackup = registryBackup.expecting(registryExpected)
-	handoffBackup = handoffBackup.expecting(handoffExpected)
-	if err := s.writeThreadMeta(meta); err != nil {
-		return Thread{}, ThreadHandoff{}, rollbackThreadOperation(
-			ctx,
-			err,
-			[]durableFileBackup{registryBackup},
-			linkChange,
-		)
-	}
-	if err := s.writeHandoff(handoff); err != nil {
-		return Thread{}, ThreadHandoff{}, rollbackThreadOperation(
-			ctx,
-			err,
-			[]durableFileBackup{registryBackup, handoffBackup},
-			linkChange,
-		)
-	}
-	if handoff.Summary != "" && primarySessionKey != originSessionKey {
-		message := providers.Message{
-			Role:    "user",
-			Content: "Continued from another session.\n\n" + handoff.Summary,
-		}
-		var appendErr error
-		if s.testHooks != nil && s.testHooks.appendSummary != nil {
-			appendErr = s.testHooks.appendSummary(ctx, primarySessionKey, message)
-		} else if store, openErr := memory.NewJSONLStore(s.Dir); openErr != nil {
-			appendErr = openErr
-		} else {
-			appendErr = store.AddFullMessage(ctx, primarySessionKey, message)
-		}
-		if appendErr != nil {
-			// Attach and handoff are already durable. Summary projection is an
-			// explicitly best-effort enrichment; failure cannot safely roll back a
-			// possibly committed append, so report it operationally without turning
-			// a successful attach into a partial-state error.
-			log.Printf("threads: attach %s summary projection failed: %v", handoff.ID, appendErr)
-		}
-	}
-	return projected, handoff, nil
-}
-
-func (s Store) DetachCurrent(sessionKey string) error {
-	return s.clearSessionThreadLink(sessionKey)
-}
-
-func (s Store) ReturnToOrigin(handoffID string) (ThreadHandoff, bool, error) {
-	handoff, err := s.readHandoff(handoffID)
-	if os.IsNotExist(err) {
-		return ThreadHandoff{}, false, nil
-	}
-	if err != nil {
-		return ThreadHandoff{}, false, err
-	}
-	// Handoffs are derived pointers. Validate both authoritative endpoints on
-	// every return so stale files cannot redirect into, or reveal, a review or
-	// corrupt session after their original creation.
-	if _, stateErr := s.readOrdinarySessionState(
-		context.Background(),
-		handoff.OriginSessionKey,
-		true,
-	); stateErr != nil {
-		if errors.Is(stateErr, errSessionMissing) {
-			return ThreadHandoff{}, false, nil
-		}
-		return ThreadHandoff{}, false, stateErr
-	}
-	targetMeta, err := s.readThreadMeta(handoff.TargetThreadID)
-	if os.IsNotExist(err) {
-		return ThreadHandoff{}, false, nil
-	}
-	if err != nil {
-		return ThreadHandoff{}, false, err
-	}
-	if _, err := s.readOrdinarySessionState(
-		context.Background(),
-		targetMeta.PrimarySessionKey,
-		true,
-	); err != nil {
-		if errors.Is(err, errSessionMissing) {
-			return ThreadHandoff{}, false, nil
-		}
-		return ThreadHandoff{}, false, err
-	}
-	return handoff, true, nil
-}
-
-func (s Store) writeHandoff(handoff ThreadHandoff) error {
-	s = s.withDefaults()
-	if err := s.ensureThreadDirs(); err != nil {
-		return err
-	}
-	data, err := marshalHandoff(handoff)
-	if err != nil {
-		return err
-	}
-	if s.testHooks != nil && s.testHooks.writeHandoff != nil {
-		if err := s.testHooks.writeHandoff(handoff); err != nil {
-			return err
-		}
-	}
-	return fileutil.WriteFileAtomic(s.handoffPath(handoff.ID), data, 0o644)
-}
-
-func marshalHandoff(handoff ThreadHandoff) ([]byte, error) {
-	if strings.TrimSpace(handoff.ID) == "" {
-		return nil, errors.New("threads: handoff id is empty")
-	}
-	return json.MarshalIndent(handoff, "", "  ")
-}
-
-func (s Store) readHandoff(id string) (ThreadHandoff, error) {
-	data, err := os.ReadFile(s.handoffPath(id))
-	if err != nil {
-		return ThreadHandoff{}, err
-	}
-	var handoff ThreadHandoff
-	if err := json.Unmarshal(data, &handoff); err != nil {
-		return ThreadHandoff{}, err
-	}
-	return handoff, nil
-}
-
-type sessionThreadLinkChange struct {
-	store           *memory.JSONLStore
-	key             string
-	before          memory.SessionMeta
-	after           memory.SessionMeta
-	sessionExisted  bool
-	metadataExisted bool
-}
-
-func (c *sessionThreadLinkChange) rollback() error {
-	if c == nil || c.store == nil || c.key == "" {
-		return nil
-	}
-	var replacement *memory.SessionMeta
-	if c.metadataExisted {
-		before := c.before
-		replacement = &before
-	} else if !c.sessionExisted {
-		deleted, err := c.store.CompareAndDeleteEmptySessionStrict(
-			context.Background(),
-			c.key,
-			c.after,
-		)
-		if err != nil {
-			return fmt.Errorf("threads: roll back empty session thread link: %w", err)
-		}
-		if !deleted {
-			return errors.New(
-				"threads: roll back empty session thread link: session changed concurrently",
-			)
-		}
-		return nil
-	}
-	restored, err := c.store.CompareAndSwapSessionMetaStrict(
-		context.Background(),
-		c.key,
-		c.after,
-		replacement,
-	)
-	if err != nil {
-		return fmt.Errorf("threads: roll back session thread link: %w", err)
-	}
-	if !restored {
-		return errors.New("threads: roll back session thread link: metadata changed concurrently")
-	}
-	return nil
-}
-
-func rollbackThreadOperation(
-	_ context.Context,
-	operationErr error,
-	artifacts []durableFileBackup,
-	linkChange *sessionThreadLinkChange,
-) error {
-	errs := []error{operationErr}
-	for index := len(artifacts) - 1; index >= 0; index-- {
-		if err := artifacts[index].restore(); err != nil {
-			errs = append(errs, fmt.Errorf("threads: roll back %s: %w", artifacts[index].path, err))
-		}
-	}
-	if err := linkChange.rollback(); err != nil {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
-}
-
-func (s Store) claimSessionThreadLink(
-	ctx context.Context,
-	sessionKey,
-	threadID string,
-	attachedAt time.Time,
-	requireExisting bool,
-) (*sessionThreadLinkChange, error) {
-	sessionKey = strings.TrimSpace(sessionKey)
-	if sessionKey == "" {
-		return nil, errors.New("threads: session key is empty")
-	}
-	sessionStore, err := s.openSessionStore()
-	if err != nil {
-		return nil, err
-	}
-	change := &sessionThreadLinkChange{store: sessionStore}
-	canonicalKey, _, err := sessionStore.UpdateSessionMetaStrict(
-		ctx,
-		sessionKey,
-		func(meta *memory.SessionMeta, state memory.SessionMetaMutationState) error {
-			if scopeErr := rejectReviewThreadScope(meta.Scope); scopeErr != nil {
-				return scopeErr
-			}
-			if requireExisting && !state.SessionExists {
-				return errSessionMissing
-			}
-			change.before = *meta
-			change.sessionExisted = state.SessionExists
-			change.metadataExisted = state.MetadataExists
-			if meta.CreatedAt.IsZero() {
-				meta.CreatedAt = attachedAt
-			}
-			meta.UpdatedAt = attachedAt
-			meta.ThreadID = strings.TrimSpace(threadID)
-			meta.ThreadAttachedAt = attachedAt
-			change.after = *meta
-			return nil
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-	change.key = canonicalKey
-	return change, nil
 }
 
 func (s Store) setSessionThreadLink(
@@ -803,232 +316,930 @@ func (s Store) setSessionThreadLink(
 	threadID string,
 	attachedAt time.Time,
 ) error {
-	if strings.TrimSpace(sessionKey) == "" {
-		return nil
-	}
-	_, err := s.claimSessionThreadLink(ctx, sessionKey, threadID, attachedAt, false)
-	return err
-}
-
-func (s Store) clearSessionThreadLink(sessionKey string) error {
-	sessionKey = strings.TrimSpace(sessionKey)
-	if sessionKey == "" {
-		return nil
-	}
-	sessionStore, err := s.openSessionStore()
+	store, err := s.openSessionStore()
 	if err != nil {
 		return err
 	}
-	_, _, err = sessionStore.UpdateSessionMetaStrict(
-		context.Background(),
-		sessionKey,
-		func(meta *memory.SessionMeta, state memory.SessionMetaMutationState) error {
-			if scopeErr := rejectReviewThreadScope(meta.Scope); scopeErr != nil {
-				return scopeErr
-			}
-			if !state.SessionExists {
-				return errSessionMissing
-			}
-			meta.ThreadID = ""
-			meta.ThreadAttachedAt = time.Time{}
-			meta.UpdatedAt = time.Now().UTC()
-			return nil
-		},
-	)
-	if errors.Is(err, errSessionMissing) {
-		return nil
-	}
-	return err
-}
-
-func (s Store) migrateSessionThreads(ctx context.Context) error {
-	s = s.withDefaults()
-	entries, err := os.ReadDir(s.Dir)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	sessionStore, err := s.openSessionStore()
-	if err != nil {
-		return err
-	}
-	seenCanonical := make(map[string]struct{})
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".meta.json") {
-			continue
+	defer store.Close()
+	return store.Immediate(contextOrBackground(ctx), func(ctx context.Context, conn *sql.Conn) error {
+		key, found, err := resolveSessionKeySQL(ctx, conn, sessionKey)
+		if err != nil || !found {
+			return firstThreadError(err, errSessionMissing)
 		}
-		base := strings.TrimSuffix(entry.Name(), ".meta.json")
-		candidate, err := readMeta(
-			filepath.Join(s.Dir, entry.Name()),
-			sessionKeyFromSanitizedBase(base),
-		)
-		if err != nil {
+		if _, threadFound, _, err := readThreadMetaSQL(ctx, conn, threadID); err != nil {
 			return err
-		}
-		candidateKey := candidate.Key
-		canonicalKey, messages, meta, historyModifiedAt, found, err := sessionStore.ReadSessionStateStrict(
-			ctx,
-			candidateKey,
-		)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
+		} else if !threadFound {
+			now := attachedAt.UTC()
+			placeholder := ThreadMeta{
+				ID: threadID, UISessionID: threadID, PrimarySessionKey: key,
+				AgentID: "main", OwnerIdentity: "unknown", Title: "New thread",
+				Type: TypeGeneral, Registration: RegistrationMigrated,
+				SessionKeys: []string{key}, CreatedAt: now, UpdatedAt: now,
 			}
-			return err
-		}
-		if !found {
-			continue
-		}
-		// Review working contexts are private derived sessions, never threads.
-		// Skip them before consulting legacy thread fields or writing registry
-		// metadata, including when old metadata already contains those fields.
-		if scopeErr := rejectReviewThreadScope(meta.Scope); scopeErr != nil {
-			if errors.Is(scopeErr, errReviewScope) {
-				continue
-			}
-			return scopeErr
-		}
-		meta.Key = canonicalKey
-		if _, seen := seenCanonical[canonicalKey]; seen {
-			continue
-		}
-		seenCanonical[canonicalKey] = struct{}{}
-		if !shouldMigrateSessionMeta(meta) {
-			continue
-		}
-		threadID := strings.TrimSpace(meta.ThreadID)
-		picoID, hasPicoID := picoSessionIDFromMeta(meta)
-		if threadID == "" && hasPicoID {
-			threadID = picoID
-		}
-		if threadID == "" {
-			threadID = GenerateSessionID()
-		}
-		if _, threadErr := s.readThreadMeta(threadID); threadErr == nil {
-			continue
-		}
-		scope := scopeFromMeta(meta)
-		title, _ := titleAndPreview(meta, visibleMessages(messages))
-		reg := RegistrationMigrated
-		if meta.ThreadID != "" {
-			reg = RegistrationTool
-		}
-		uiSessionID := threadID
-		if hasPicoID {
-			uiSessionID = picoID
-		}
-		threadMeta := ThreadMeta{
-			ID:                threadID,
-			UISessionID:       uiSessionID,
-			PrimarySessionKey: meta.Key,
-			AgentID:           agentIDFromScope(scope),
-			OwnerIdentity:     ownerIdentityFromScope(scope),
-			Title:             title,
-			Type:              NormalizeType(firstNonEmpty(meta.ThreadType, InferType(title+" "+meta.Summary))),
-			Context:           MergeContext(scopeContext(meta.Scope), meta.ThreadContext),
-			SourceQuery:       strings.TrimSpace(meta.ThreadSourceQuery),
-			SessionKeys:       []string{meta.Key},
-			Aliases:           append([]string(nil), meta.Aliases...),
-			Registration:      reg,
-			CreatedAt:         meta.CreatedAt,
-			UpdatedAt:         meta.UpdatedAt,
-		}
-		if threadMeta.CreatedAt.IsZero() || threadMeta.UpdatedAt.IsZero() {
-			if threadMeta.CreatedAt.IsZero() {
-				threadMeta.CreatedAt = historyModifiedAt
-			}
-			if threadMeta.UpdatedAt.IsZero() {
-				threadMeta.UpdatedAt = historyModifiedAt
-			}
-		}
-		registryBackup, err := readDurableFileBackup(s.threadPath(threadID))
-		if err != nil {
-			return err
-		}
-		_, registryExpected, err := marshalThreadMeta(threadMeta)
-		if err != nil {
-			return err
-		}
-		registryBackup = registryBackup.expecting(registryExpected)
-		var linkChange *sessionThreadLinkChange
-		if meta.ThreadID == "" {
-			linkChange, err = s.claimSessionThreadLink(
-				ctx,
-				meta.Key,
-				threadID,
-				time.Now().UTC(),
-				true,
-			)
-			if err != nil {
+			if err := insertThreadSQL(ctx, conn, placeholder); err != nil {
 				return err
 			}
 		}
-		if err := s.writeThreadMeta(threadMeta); err != nil {
-			if linkChange != nil {
-				return rollbackThreadOperation(
-					ctx,
-					err,
-					[]durableFileBackup{registryBackup},
-					linkChange,
-				)
+		seconds, nanos := threadTimeParts(attachedAt)
+		_, err = conn.ExecContext(ctx, `INSERT INTO session_thread_links (
+            session_key, thread_id, attached_seconds, attached_nanos
+        ) VALUES (?, ?, ?, ?) ON CONFLICT(session_key) DO UPDATE SET
+            thread_id = excluded.thread_id, attached_seconds = excluded.attached_seconds,
+            attached_nanos = excluded.attached_nanos`, key, threadID, seconds, nanos)
+		return err
+	})
+}
+
+func (s Store) listThreadMetas() ([]ThreadMeta, error) {
+	store, err := s.openSessionStore()
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	if err := store.Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
+		return migrateUnregisteredPicoSessionsSQL(ctx, conn)
+	}); err != nil {
+		return nil, err
+	}
+	rows, err := store.SQLDB().Query(`SELECT thread_id FROM threads
+        ORDER BY updated_seconds DESC, updated_nanos DESC, thread_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	items := make([]ThreadMeta, 0, len(ids))
+	for _, id := range ids {
+		meta, found, _, err := readThreadMetaSQL(context.Background(), store.SQLDB(), id)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			items = append(items, meta)
+		}
+	}
+	return items, nil
+}
+
+type picoSessionMigrationCandidate struct {
+	key                          string
+	summary                      string
+	createdSeconds, createdNanos sql.NullInt64
+	updatedSeconds, updatedNanos sql.NullInt64
+	agentID, channel, account    string
+}
+
+// migrateUnregisteredPicoSessionsSQL preserves the launcher-era behavior
+// where a Pico conversation becomes discoverable as a thread even when no
+// explicit registration call was made. The projection is now created once in
+// the same database transaction instead of by writing registry JSON.
+func migrateUnregisteredPicoSessionsSQL(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `SELECT s.session_key, s.summary,
+        s.created_seconds, s.created_nanos, s.updated_seconds, s.updated_nanos,
+        sc.agent_id, sc.channel, sc.account
+        FROM sessions s JOIN session_scopes sc ON sc.session_key = s.session_key
+        WHERE NOT EXISTS (
+            SELECT 1 FROM thread_sessions ts WHERE ts.session_key = s.session_key
+        ) AND NOT EXISTS (
+            SELECT 1 FROM session_thread_links sl WHERE sl.session_key = s.session_key
+        ) ORDER BY s.session_key`)
+	if err != nil {
+		return err
+	}
+	candidates := make([]picoSessionMigrationCandidate, 0)
+	for rows.Next() {
+		var candidate picoSessionMigrationCandidate
+		if err := rows.Scan(
+			&candidate.key, &candidate.summary,
+			&candidate.createdSeconds, &candidate.createdNanos,
+			&candidate.updatedSeconds, &candidate.updatedNanos,
+			&candidate.agentID, &candidate.channel, &candidate.account,
+		); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		_ = rows.Close()
+		return rowsErr
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, candidate := range candidates {
+		if !strings.EqualFold(strings.TrimSpace(candidate.channel), "pico") {
+			continue
+		}
+		scope := session.SessionScope{
+			Version: 1, AgentID: candidate.agentID, Channel: candidate.channel,
+			Account: candidate.account, Values: make(map[string]string),
+		}
+		dimensionRows, err := conn.QueryContext(ctx, `SELECT dimension, value, is_dimension
+            FROM session_scope_dimensions WHERE session_key = ? ORDER BY sequence`, candidate.key)
+		if err != nil {
+			return err
+		}
+		for dimensionRows.Next() {
+			var dimension, value string
+			var isDimension int
+			if err := dimensionRows.Scan(&dimension, &value, &isDimension); err != nil {
+				_ = dimensionRows.Close()
+				return err
 			}
+			if isDimension == 1 {
+				scope.Dimensions = append(scope.Dimensions, dimension)
+			}
+			scope.Values[dimension] = value
+		}
+		if rowsErr := dimensionRows.Err(); rowsErr != nil {
+			_ = dimensionRows.Close()
+			return rowsErr
+		}
+		if err := dimensionRows.Close(); err != nil {
+			return err
+		}
+		picoID, ok := picoSessionIDFromScope(scope)
+		if !ok {
+			continue
+		}
+		var existing int
+		if err := conn.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM threads WHERE thread_id = ?`, picoID,
+		).Scan(&existing); err != nil {
+			return err
+		}
+		if existing != 0 {
+			continue
+		}
+
+		aliases := make([]string, 0)
+		aliasRows, err := conn.QueryContext(ctx, `SELECT alias FROM session_aliases
+            WHERE session_key = ? ORDER BY sequence`, candidate.key)
+		if err != nil {
+			return err
+		}
+		for aliasRows.Next() {
+			var alias string
+			if err := aliasRows.Scan(&alias); err != nil {
+				_ = aliasRows.Close()
+				return err
+			}
+			aliases = append(aliases, alias)
+		}
+		if rowsErr := aliasRows.Err(); rowsErr != nil {
+			_ = aliasRows.Close()
+			return rowsErr
+		}
+		if err := aliasRows.Close(); err != nil {
+			return err
+		}
+
+		preview := ""
+		if err := conn.QueryRowContext(ctx, `SELECT content FROM session_messages
+            WHERE session_key = ? AND role = 'user' AND trim(content) <> ''
+            ORDER BY sequence LIMIT 1`, candidate.key).Scan(&preview); err != nil &&
+			!errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		title := truncateRunes(firstNonEmpty(preview, candidate.summary, "New thread"), 80)
+		created := time.Unix(0, 0).UTC()
+		if candidate.createdSeconds.Valid && candidate.createdNanos.Valid {
+			created = scanThreadTime(candidate.createdSeconds.Int64, candidate.createdNanos.Int64)
+		}
+		updated := created
+		if candidate.updatedSeconds.Valid && candidate.updatedNanos.Valid {
+			updated = scanThreadTime(candidate.updatedSeconds.Int64, candidate.updatedNanos.Int64)
+		}
+		meta := ThreadMeta{
+			ID: picoID, UISessionID: picoID, PrimarySessionKey: candidate.key,
+			AgentID:       firstNonEmpty(scope.AgentID, "main"),
+			OwnerIdentity: ownerIdentityFromScope(&scope), Title: title,
+			Type:        NormalizeType(InferType(title + " " + candidate.summary)),
+			Context:     scopeContext(mustMarshalThreadScope(scope)),
+			SessionKeys: []string{candidate.key}, Aliases: aliases,
+			Registration: RegistrationMigrated, CreatedAt: created, UpdatedAt: updated,
+		}
+		if err := insertThreadSQL(ctx, conn, meta); err != nil {
+			return err
+		}
+		seconds, nanos := threadTimeParts(updated)
+		if _, err := conn.ExecContext(ctx, `INSERT INTO session_thread_links (
+            session_key, thread_id, attached_seconds, attached_nanos
+        ) VALUES (?, ?, ?, ?)`, candidate.key, picoID, seconds, nanos); err != nil {
 			return err
 		}
 	}
-	_ = ctx
 	return nil
 }
 
-func shouldMigrateSessionMeta(meta memory.SessionMeta) bool {
-	if strings.TrimSpace(meta.Key) == "" {
-		return false
+func mustMarshalThreadScope(scope session.SessionScope) json.RawMessage {
+	data, _ := json.Marshal(scope)
+	return data
+}
+
+func (s Store) threadFromRegistryMeta(meta ThreadMeta) (Thread, bool) {
+	state, err := s.readOrdinarySessionState(context.Background(), meta.PrimarySessionKey, true)
+	if err != nil {
+		return Thread{}, false
 	}
-	if rejectReviewThreadScope(meta.Scope) != nil {
-		return false
+	return threadFromOrdinarySessionState(meta, state)
+}
+
+func threadFromOrdinarySessionState(meta ThreadMeta, state ordinarySessionState) (Thread, bool) {
+	meta = normalizeThreadMeta(meta)
+	if !state.found || state.key == "" {
+		return Thread{}, false
 	}
-	if strings.TrimSpace(meta.ThreadID) != "" ||
-		strings.TrimSpace(meta.ThreadTitle) != "" ||
-		strings.TrimSpace(meta.ThreadType) != "" ||
-		strings.TrimSpace(meta.ThreadSourceQuery) != "" ||
-		len(meta.ThreadContext) > 0 {
-		return true
+	if state.key != meta.PrimarySessionKey {
+		meta.SessionKeys = uniqueStrings(append([]string{state.key}, meta.SessionKeys...))
+		meta.PrimarySessionKey = state.key
 	}
-	_, ok := picoSessionIDFromMeta(meta)
-	return ok
+	visible := visibleMessages(state.history)
+	preview := ""
+	for _, message := range visible {
+		if message.Role == "user" {
+			preview = messagePreview(message)
+			break
+		}
+	}
+	preview = firstNonEmpty(preview, state.meta.Summary, meta.SourceQuery, meta.Title, "(empty)")
+	title := firstNonEmpty(meta.Title, preview, "New thread")
+	updated := meta.UpdatedAt
+	if state.meta.UpdatedAt.After(updated) {
+		updated = state.meta.UpdatedAt
+	}
+	updated = firstThreadTime(updated, meta.CreatedAt, state.historyModifiedAt)
+	created := firstThreadTime(meta.CreatedAt, state.meta.CreatedAt, updated)
+	if created.IsZero() && updated.IsZero() {
+		return Thread{}, false
+	}
+	return Thread{
+		ID: meta.ID, UISessionID: meta.UISessionID, SessionKey: meta.PrimarySessionKey,
+		PrimarySessionKey: meta.PrimarySessionKey, AgentID: meta.AgentID,
+		OwnerIdentity: meta.OwnerIdentity, Title: truncateRunes(title, 80),
+		Preview: truncateRunes(preview, 120), Type: NormalizeType(meta.Type),
+		Context:      MergeContext(scopeContext(state.meta.Scope), meta.Context),
+		MessageCount: len(visible), Created: created, Updated: updated,
+		SourceQuery: strings.TrimSpace(meta.SourceQuery), Discoverable: meta.DroppedAt == nil,
+		DroppedAt: meta.DroppedAt,
+	}, true
+}
+
+func firstThreadTime(values ...time.Time) time.Time {
+	for _, value := range values {
+		if !value.IsZero() {
+			return value
+		}
+	}
+	return time.Time{}
+}
+
+func writeThreadChildrenSQL(ctx context.Context, conn *sql.Conn, meta ThreadMeta) error {
+	type linkRow struct {
+		sessionKey      string
+		attachedSeconds int64
+		attachedNanos   int64
+	}
+	linkRows, err := conn.QueryContext(ctx, `SELECT session_key, attached_seconds,
+        attached_nanos FROM session_thread_links WHERE thread_id = ? ORDER BY session_key`, meta.ID)
+	if err != nil {
+		return err
+	}
+	links := make([]linkRow, 0)
+	for linkRows.Next() {
+		var link linkRow
+		if err := linkRows.Scan(
+			&link.sessionKey, &link.attachedSeconds, &link.attachedNanos,
+		); err != nil {
+			_ = linkRows.Close()
+			return err
+		}
+		links = append(links, link)
+	}
+	if rowsErr := linkRows.Err(); rowsErr != nil {
+		_ = linkRows.Close()
+		return rowsErr
+	}
+	if err := linkRows.Close(); err != nil {
+		return err
+	}
+	for _, table := range []string{"thread_context", "thread_aliases", "thread_sessions"} {
+		if _, err := conn.ExecContext(ctx, "DELETE FROM "+table+" WHERE thread_id = ?", meta.ID); err != nil {
+			return err
+		}
+	}
+	contextKeys := make([]string, 0, len(meta.Context))
+	for key := range meta.Context {
+		contextKeys = append(contextKeys, key)
+	}
+	sort.Strings(contextKeys)
+	for _, key := range contextKeys {
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO thread_context(thread_id, key, value) VALUES (?, ?, ?)`,
+			meta.ID, key, meta.Context[key]); err != nil {
+			return err
+		}
+	}
+	for index, alias := range uniqueStrings(meta.Aliases) {
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO thread_aliases(thread_id, sequence, alias) VALUES (?, ?, ?)`,
+			meta.ID, index, alias); err != nil {
+			return err
+		}
+	}
+	position := 0
+	retainedSessions := make(map[string]struct{})
+	for _, key := range uniqueStrings(append([]string{meta.PrimarySessionKey}, meta.SessionKeys...)) {
+		var exists int
+		if err := conn.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sessions WHERE session_key = ?`, key).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			continue
+		}
+		retainedSessions[key] = struct{}{}
+		primary := 0
+		if key == meta.PrimarySessionKey {
+			primary = 1
+		}
+		if _, err := conn.ExecContext(ctx, `INSERT INTO thread_sessions (
+            thread_id, sequence, session_key, is_primary
+        ) VALUES (?, ?, ?, ?)`, meta.ID, position, key, primary); err != nil {
+			return err
+		}
+		position++
+	}
+	for _, link := range links {
+		if _, retained := retainedSessions[link.sessionKey]; !retained {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, `INSERT INTO session_thread_links (
+            session_key, thread_id, attached_seconds, attached_nanos
+        ) VALUES (?, ?, ?, ?)`, link.sessionKey, meta.ID,
+			link.attachedSeconds, link.attachedNanos); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func insertThreadSQL(ctx context.Context, conn *sql.Conn, meta ThreadMeta) error {
+	meta = normalizeThreadMeta(meta)
+	if meta.ID == "" || meta.PrimarySessionKey == "" {
+		return errors.New("threads: thread identity is invalid")
+	}
+	createdSeconds, createdNanos := threadTimeParts(meta.CreatedAt)
+	updatedSeconds, updatedNanos := threadTimeParts(meta.UpdatedAt)
+	droppedSeconds, droppedNanos := nullableThreadTimeParts(meta.DroppedAt)
+	if _, err := conn.ExecContext(ctx, `INSERT INTO threads (
+        thread_id, ui_session_id, primary_session_key, agent_id, owner_identity, title,
+        thread_type, source_query, registration, dropped_seconds, dropped_nanos,
+        created_seconds, created_nanos, updated_seconds, updated_nanos, version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+		meta.ID, meta.UISessionID, meta.PrimarySessionKey, meta.AgentID, meta.OwnerIdentity,
+		meta.Title, meta.Type, meta.SourceQuery, meta.Registration, droppedSeconds, droppedNanos,
+		createdSeconds, createdNanos, updatedSeconds, updatedNanos); err != nil {
+		return err
+	}
+	return writeThreadChildrenSQL(ctx, conn, meta)
+}
+
+func (s Store) CreateThread(ctx context.Context, request CreateRequest) (Thread, error) {
+	ctx = contextOrBackground(ctx)
+	store, err := s.openSessionStore()
+	if err != nil {
+		return Thread{}, err
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	id := strings.TrimSpace(request.ID)
+	if id == "" {
+		id = GenerateSessionID()
+	}
+	primary := strings.TrimSpace(request.PrimarySessionKey)
+	if primary == "" {
+		return Thread{}, errors.New("threads: primary session key is empty")
+	}
+	if resolved, found, err := resolveSessionKeySQL(ctx, store.SQLDB(), primary); err != nil {
+		return Thread{}, err
+	} else if found {
+		primary = resolved
+		if err := rejectReviewSessionDB(ctx, store.SQLDB(), primary); err != nil {
+			return Thread{}, err
+		}
+	}
+	if s.testHooks != nil && s.testHooks.afterCreatePreflight != nil {
+		s.testHooks.afterCreatePreflight()
+	}
+	err = store.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		resolved, found, err := resolveSessionKeySQL(ctx, conn, primary)
+		if err != nil {
+			return err
+		}
+		if found {
+			primary = resolved
+		} else if err := ensureThreadSessionSQL(ctx, conn, primary, now); err != nil {
+			return err
+		}
+		if err := rejectReviewSessionSQL(ctx, conn, primary); err != nil {
+			return err
+		}
+		meta := ThreadMeta{
+			ID:                id,
+			UISessionID:       firstNonEmpty(request.UISessionID, id),
+			PrimarySessionKey: primary,
+			AgentID:           firstNonEmpty(request.AgentID, routingAgentFromSessionKey(primary), "main"),
+			OwnerIdentity:     firstNonEmpty(request.OwnerIdentity, "unknown"),
+			Title:             truncateRunes(firstNonEmpty(request.Title, request.SourceQuery, "New thread"), 80),
+			Type: NormalizeType(
+				firstNonEmpty(request.Type, InferType(request.Title+" "+request.SourceQuery)),
+			),
+			Context:      MergeContext(ExtractContext(request.SourceQuery+" "+request.Title), request.Context),
+			SourceQuery:  strings.TrimSpace(firstNonEmpty(request.SourceQuery, request.Title, "New thread")),
+			SessionKeys:  uniqueStrings(append([]string{primary}, request.SessionKeys...)),
+			Registration: firstNonEmpty(normalizeRegistration(request.Registration), RegistrationManual),
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if s.testHooks != nil && s.testHooks.writeThreadMeta != nil {
+			if err := s.testHooks.writeThreadMeta(meta); err != nil {
+				return err
+			}
+		}
+		if err := insertThreadSQL(ctx, conn, meta); err != nil {
+			return err
+		}
+		seconds, nanos := threadTimeParts(now)
+		_, err = conn.ExecContext(ctx, `INSERT INTO session_thread_links (
+            session_key, thread_id, attached_seconds, attached_nanos
+        ) VALUES (?, ?, ?, ?) ON CONFLICT(session_key) DO UPDATE SET
+            thread_id = excluded.thread_id, attached_seconds = excluded.attached_seconds,
+            attached_nanos = excluded.attached_nanos`, primary, id, seconds, nanos)
+		return err
+	})
+	if err != nil {
+		return Thread{}, err
+	}
+	thread, found, err := s.Get(id)
+	if err != nil {
+		return Thread{}, err
+	}
+	if !found {
+		return Thread{}, errors.New("threads: created thread could not be loaded")
+	}
+	return thread, nil
+}
+
+func (s Store) UpdateThread(id string, request UpdateRequest) (Thread, bool, error) {
+	store, err := s.openSessionStore()
+	if err != nil {
+		return Thread{}, false, err
+	}
+	defer store.Close()
+	found := false
+	err = store.Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
+		meta, exists, version, err := readThreadMetaSQL(ctx, conn, strings.TrimSpace(id))
+		if err != nil || !exists {
+			return err
+		}
+		primary, primaryFound, err := resolveSessionKeySQL(ctx, conn, meta.PrimarySessionKey)
+		if err != nil {
+			return err
+		}
+		if !primaryFound {
+			return errSessionMissing
+		}
+		if err := rejectReviewSessionSQL(ctx, conn, primary); err != nil {
+			return err
+		}
+		meta.PrimarySessionKey = primary
+		meta.SessionKeys = uniqueStrings(append([]string{primary}, meta.SessionKeys...))
+		found = true
+		if strings.TrimSpace(request.Title) != "" {
+			meta.Title = truncateRunes(request.Title, 80)
+		}
+		if strings.TrimSpace(request.Type) != "" {
+			meta.Type = NormalizeType(request.Type)
+		}
+		if request.Context != nil {
+			meta.Context = cleanContext(request.Context)
+		}
+		if strings.TrimSpace(request.SourceQuery) != "" {
+			meta.SourceQuery = strings.TrimSpace(request.SourceQuery)
+		}
+		if request.Discoverable != nil {
+			if *request.Discoverable {
+				meta.DroppedAt = nil
+			} else if meta.DroppedAt == nil {
+				dropped := time.Now().UTC()
+				meta.DroppedAt = &dropped
+			}
+		}
+		meta.UpdatedAt = time.Now().UTC()
+		if s.testHooks != nil && s.testHooks.writeThreadMeta != nil {
+			if err := s.testHooks.writeThreadMeta(meta); err != nil {
+				return err
+			}
+		}
+		updatedSeconds, updatedNanos := threadTimeParts(meta.UpdatedAt)
+		droppedSeconds, droppedNanos := nullableThreadTimeParts(meta.DroppedAt)
+		result, err := conn.ExecContext(ctx, `UPDATE threads SET title = ?, thread_type = ?,
+            source_query = ?, dropped_seconds = ?, dropped_nanos = ?, updated_seconds = ?,
+            updated_nanos = ?, version = version + 1 WHERE thread_id = ? AND version = ?`,
+			meta.Title, meta.Type, meta.SourceQuery, droppedSeconds, droppedNanos,
+			updatedSeconds, updatedNanos, meta.ID, version)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return errors.New("threads: thread changed concurrently")
+		}
+		return writeThreadChildrenSQL(ctx, conn, meta)
+	})
+	if err != nil || !found {
+		return Thread{}, found, err
+	}
+	thread, found, err := s.Get(id)
+	return thread, found, err
+}
+
+func (s Store) DropThread(id string) (Thread, bool, error) {
+	discoverable := false
+	return s.UpdateThread(id, UpdateRequest{Discoverable: &discoverable})
+}
+
+func (s Store) RegisterCurrent(
+	ctx context.Context,
+	request CreateRequest,
+	scope *session.SessionScope,
+) (Thread, error) {
+	if err := rejectReviewThreadSessionScope(scope); err != nil {
+		return Thread{}, err
+	}
+	if strings.TrimSpace(request.PrimarySessionKey) == "" {
+		return Thread{}, errors.New("threads: current session key is empty")
+	}
+	uiSessionID := strings.TrimSpace(request.UISessionID)
+	if uiSessionID == "" && scope != nil {
+		if picoID, ok := picoSessionIDFromScope(*scope); ok {
+			uiSessionID = picoID
+		}
+	}
+	request.UISessionID = firstNonEmpty(uiSessionID, request.ID, request.PrimarySessionKey)
+	request.Registration = firstNonEmpty(request.Registration, RegistrationTool)
+	request.OwnerIdentity = firstNonEmpty(request.OwnerIdentity, ownerIdentityFromScope(scope))
+	return s.CreateThread(ctx, request)
+}
+
+func appendSummarySQL(
+	ctx context.Context,
+	conn *sql.Conn,
+	key string,
+	message providers.Message,
+) error {
+	payload, err := json.Marshal(struct {
+		Media       []string                 `json:"media,omitempty"`
+		Attachments []providers.Attachment   `json:"attachments,omitempty"`
+		Parts       []providers.PromptPart   `json:"parts,omitempty"`
+		SystemParts []providers.ContentBlock `json:"system_parts,omitempty"`
+		ToolCalls   []providers.ToolCall     `json:"tool_calls,omitempty"`
+	}{message.Media, message.Attachments, message.Parts, message.SystemParts, message.ToolCalls})
+	if err != nil {
+		return err
+	}
+	if string(payload) == "{}" {
+		payload = nil
+	} else {
+		decoder := json.NewDecoder(bytes.NewReader(payload))
+		decoder.UseNumber()
+		var decoded any
+		if err := decoder.Decode(&decoded); err != nil {
+			return err
+		}
+		payload, err = json.Marshal(decoded)
+		if err != nil {
+			return err
+		}
+	}
+	var sequence int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(sequence) + 1, 0) FROM session_messages WHERE session_key = ?`,
+		key).Scan(&sequence); err != nil {
+		return err
+	}
+	seconds, nanos := threadTimeParts(*message.CreatedAt)
+	_, err = conn.ExecContext(ctx, `INSERT INTO session_messages (
+        session_key, sequence, role, content, model_name, created_seconds, created_nanos,
+        reasoning_content, tool_call_id, nested_payload
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, key, sequence, message.Role,
+		message.Content, message.ModelName, seconds, nanos, message.ReasoningContent,
+		message.ToolCallID, payload)
+	if err != nil {
+		return err
+	}
+	result, err := conn.ExecContext(ctx, `UPDATE sessions SET updated_seconds = ?,
+        updated_nanos = ?, version = version + 1 WHERE session_key = ?`,
+		seconds, nanos, key)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return errors.New("threads: continuation session disappeared")
+	}
+	return nil
+}
+
+func (s Store) AttachCurrent(
+	ctx context.Context,
+	request AttachRequest,
+) (Thread, ThreadHandoff, error) {
+	ctx = contextOrBackground(ctx)
+	if err := rejectReviewThreadSessionScope(request.Scope); err != nil {
+		return Thread{}, ThreadHandoff{}, err
+	}
+	if strings.TrimSpace(request.ThreadID) == "" || strings.TrimSpace(request.SessionKey) == "" {
+		return Thread{}, ThreadHandoff{}, errors.New("threads: attach identity is invalid")
+	}
+	store, err := s.openSessionStore()
+	if err != nil {
+		return Thread{}, ThreadHandoff{}, err
+	}
+	defer store.Close()
+	preflightMeta, found, _, err := readThreadMetaSQL(ctx, store.SQLDB(), request.ThreadID)
+	if err != nil {
+		return Thread{}, ThreadHandoff{}, err
+	}
+	if !found {
+		return Thread{}, ThreadHandoff{}, os.ErrNotExist
+	}
+	if origin, originFound, err := resolveSessionKeySQL(ctx, store.SQLDB(), request.SessionKey); err != nil {
+		return Thread{}, ThreadHandoff{}, err
+	} else if originFound {
+		if err := rejectReviewSessionDB(ctx, store.SQLDB(), origin); err != nil {
+			return Thread{}, ThreadHandoff{}, err
+		}
+	}
+	if target, targetFound, err := resolveSessionKeySQL(
+		ctx,
+		store.SQLDB(),
+		preflightMeta.PrimarySessionKey,
+	); err != nil {
+		return Thread{}, ThreadHandoff{}, err
+	} else if targetFound {
+		if err := rejectReviewSessionDB(ctx, store.SQLDB(), target); err != nil {
+			return Thread{}, ThreadHandoff{}, err
+		}
+	}
+	if s.testHooks != nil && s.testHooks.afterAttachPreflight != nil {
+		s.testHooks.afterAttachPreflight()
+	}
+	var handoff ThreadHandoff
+	err = store.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		meta, found, version, err := readThreadMetaSQL(ctx, conn, request.ThreadID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return os.ErrNotExist
+		}
+		origin, originFound, err := resolveSessionKeySQL(ctx, conn, request.SessionKey)
+		if err != nil || !originFound {
+			return firstThreadError(err, errSessionMissing)
+		}
+		target, targetFound, err := resolveSessionKeySQL(ctx, conn, meta.PrimarySessionKey)
+		if err != nil || !targetFound {
+			return firstThreadError(err, errSessionMissing)
+		}
+		if err := rejectReviewSessionSQL(ctx, conn, origin); err != nil {
+			return err
+		}
+		if err := rejectReviewSessionSQL(ctx, conn, target); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		meta.PrimarySessionKey = target
+		meta.SessionKeys = uniqueStrings(append(meta.SessionKeys, origin, target))
+		meta.OwnerIdentity = firstNonEmpty(meta.OwnerIdentity, request.OwnerIdentity)
+		meta.AgentID = firstNonEmpty(meta.AgentID, request.AgentID)
+		meta.UpdatedAt = now
+		handoff = ThreadHandoff{
+			ID: GenerateHandoffID(), OriginSessionKey: origin,
+			OriginSessionID: strings.TrimSpace(request.OriginSessionID),
+			TargetThreadID:  meta.ID, TargetSessionID: meta.UISessionID,
+			AgentID: firstNonEmpty(request.AgentID, meta.AgentID),
+			Summary: strings.TrimSpace(request.Summary), CreatedAt: now,
+		}
+		if s.testHooks != nil && s.testHooks.writeThreadMeta != nil {
+			if err := s.testHooks.writeThreadMeta(meta); err != nil {
+				return err
+			}
+		}
+		if s.testHooks != nil && s.testHooks.writeHandoff != nil {
+			if err := s.testHooks.writeHandoff(handoff); err != nil {
+				return err
+			}
+		}
+		seconds, nanos := threadTimeParts(now)
+		result, err := conn.ExecContext(ctx, `UPDATE threads SET primary_session_key = ?,
+            agent_id = ?, owner_identity = ?, updated_seconds = ?, updated_nanos = ?,
+            version = version + 1 WHERE thread_id = ? AND version = ?`, target,
+			meta.AgentID, meta.OwnerIdentity, seconds, nanos, meta.ID, version)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return errors.New("threads: thread changed concurrently")
+		}
+		if err := writeThreadChildrenSQL(ctx, conn, meta); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `INSERT INTO session_thread_links (
+            session_key, thread_id, attached_seconds, attached_nanos
+        ) VALUES (?, ?, ?, ?) ON CONFLICT(session_key) DO UPDATE SET
+            thread_id = excluded.thread_id, attached_seconds = excluded.attached_seconds,
+            attached_nanos = excluded.attached_nanos`, origin, meta.ID, seconds, nanos); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `INSERT INTO thread_handoffs (
+            handoff_id, origin_session_key, origin_session_id, target_thread_id,
+            target_session_id, agent_id, summary, created_seconds, created_nanos, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`, handoff.ID, origin,
+			handoff.OriginSessionID, meta.ID, meta.UISessionID, handoff.AgentID,
+			handoff.Summary, seconds, nanos); err != nil {
+			return err
+		}
+		if handoff.Summary != "" && target != origin {
+			message := providers.Message{
+				Role: "user", Content: "Continued from another session.\n\n" + handoff.Summary,
+				CreatedAt: &now,
+			}
+			if s.testHooks != nil && s.testHooks.appendSummary != nil {
+				if err := s.testHooks.appendSummary(ctx, target, message); err != nil {
+					log.Printf("threads: attach %s summary projection failed: %v", handoff.ID, err)
+					return nil
+				}
+			}
+			if err := appendSummarySQL(ctx, conn, target, message); err != nil {
+				log.Printf("threads: attach %s summary projection failed: %v", handoff.ID, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return Thread{}, ThreadHandoff{}, err
+	}
+	thread, found, err := s.Get(request.ThreadID)
+	if err != nil || !found {
+		return Thread{}, ThreadHandoff{}, firstThreadError(
+			err,
+			errors.New("threads: attached thread could not be loaded"),
+		)
+	}
+	return thread, handoff, nil
+}
+
+func firstThreadError(actual, fallback error) error {
+	if actual != nil {
+		return actual
+	}
+	return fallback
+}
+
+func (s Store) DetachCurrent(sessionKey string) error {
+	store, err := s.openSessionStore()
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
+		key, found, err := resolveSessionKeySQL(ctx, conn, sessionKey)
+		if err != nil || !found {
+			return err
+		}
+		if err := rejectReviewSessionSQL(ctx, conn, key); err != nil {
+			return err
+		}
+		_, err = conn.ExecContext(ctx, `DELETE FROM session_thread_links WHERE session_key = ?`, key)
+		return err
+	})
+}
+
+func readHandoffSQL(
+	ctx context.Context,
+	queryer interface {
+		QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	},
+	id string,
+) (ThreadHandoff, bool, error) {
+	var handoff ThreadHandoff
+	var seconds, nanos int64
+	err := queryer.QueryRowContext(ctx, `SELECT handoff_id, origin_session_key,
+        origin_session_id, target_thread_id, target_session_id, agent_id, summary,
+        created_seconds, created_nanos FROM thread_handoffs WHERE handoff_id = ?`, id).Scan(
+		&handoff.ID, &handoff.OriginSessionKey, &handoff.OriginSessionID,
+		&handoff.TargetThreadID, &handoff.TargetSessionID, &handoff.AgentID,
+		&handoff.Summary, &seconds, &nanos)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ThreadHandoff{}, false, nil
+	}
+	if err != nil {
+		return ThreadHandoff{}, false, err
+	}
+	handoff.CreatedAt = scanThreadTime(seconds, nanos)
+	return handoff, true, nil
+}
+
+func (s Store) ReturnToOrigin(handoffID string) (ThreadHandoff, bool, error) {
+	store, err := s.openSessionStore()
+	if err != nil {
+		return ThreadHandoff{}, false, err
+	}
+	defer store.Close()
+	handoff, found, err := readHandoffSQL(context.Background(), store.SQLDB(), handoffID)
+	if err != nil || !found {
+		return handoff, found, err
+	}
+	if _, found, err := resolveSessionKeySQL(
+		context.Background(), store.SQLDB(), handoff.OriginSessionKey,
+	); err != nil || !found {
+		return ThreadHandoff{}, false, err
+	}
+	if origin, _, err := resolveSessionKeySQL(
+		context.Background(), store.SQLDB(), handoff.OriginSessionKey,
+	); err != nil {
+		return ThreadHandoff{}, false, err
+	} else if err := rejectReviewSessionDB(context.Background(), store.SQLDB(), origin); err != nil {
+		return ThreadHandoff{}, false, err
+	}
+	targetMeta, threadFound, _, err := readThreadMetaSQL(
+		context.Background(), store.SQLDB(), handoff.TargetThreadID,
+	)
+	if err != nil || !threadFound {
+		return ThreadHandoff{}, false, err
+	}
+	if target, found, err := resolveSessionKeySQL(
+		context.Background(), store.SQLDB(), targetMeta.PrimarySessionKey,
+	); err != nil || !found {
+		return ThreadHandoff{}, false, err
+	} else if err := rejectReviewSessionDB(context.Background(), store.SQLDB(), target); err != nil {
+		return ThreadHandoff{}, false, err
+	}
+	return handoff, true, nil
+}
+
+func rejectReviewSessionDB(ctx context.Context, db *sql.DB, key string) error {
+	var channel string
+	err := db.QueryRowContext(ctx,
+		`SELECT channel FROM session_scopes WHERE session_key = ?`, key).Scan(&channel)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(strings.TrimSpace(channel), "review") {
+		return errReviewScope
+	}
+	return nil
 }
 
 func normalizeThreadMeta(meta ThreadMeta) ThreadMeta {
 	meta.ID = strings.TrimSpace(meta.ID)
-	meta.UISessionID = strings.TrimSpace(meta.UISessionID)
-	if meta.UISessionID == "" {
-		meta.UISessionID = meta.ID
-	}
+	meta.UISessionID = strings.TrimSpace(firstNonEmpty(meta.UISessionID, meta.ID))
 	meta.PrimarySessionKey = strings.TrimSpace(meta.PrimarySessionKey)
-	meta.AgentID = strings.TrimSpace(meta.AgentID)
-	if meta.AgentID == "" {
-		meta.AgentID = "main"
-	}
-	meta.OwnerIdentity = strings.TrimSpace(meta.OwnerIdentity)
-	if meta.OwnerIdentity == "" {
-		meta.OwnerIdentity = "unknown"
-	}
-	meta.Title = truncateRunes(firstNonEmpty(meta.Title, meta.SourceQuery, "New thread"), 80)
+	meta.AgentID = strings.TrimSpace(firstNonEmpty(meta.AgentID, "main"))
+	meta.OwnerIdentity = strings.TrimSpace(firstNonEmpty(meta.OwnerIdentity, "unknown"))
+	meta.Title = truncateRunes(firstNonEmpty(meta.Title, "New thread"), 80)
 	meta.Type = NormalizeType(meta.Type)
 	meta.Context = cleanContext(meta.Context)
 	meta.SourceQuery = strings.TrimSpace(meta.SourceQuery)
 	meta.SessionKeys = uniqueStrings(append([]string{meta.PrimarySessionKey}, meta.SessionKeys...))
 	meta.Aliases = uniqueStrings(meta.Aliases)
-	meta.Registration = normalizeRegistration(meta.Registration)
-	if meta.Registration == "" {
-		meta.Registration = RegistrationManual
-	}
+	meta.Registration = firstNonEmpty(normalizeRegistration(meta.Registration), RegistrationManual)
 	if meta.DroppedAt != nil && meta.DroppedAt.IsZero() {
 		meta.DroppedAt = nil
 	}
 	if meta.CreatedAt.IsZero() {
-		meta.CreatedAt = time.Now()
+		meta.CreatedAt = time.Now().UTC()
 	}
 	if meta.UpdatedAt.IsZero() {
 		meta.UpdatedAt = meta.CreatedAt
@@ -1051,35 +1262,20 @@ func normalizeRegistration(value string) string {
 	}
 }
 
-func GenerateHandoffID() string {
-	return "handoff-" + GenerateSessionID()
-}
+func GenerateHandoffID() string { return "handoff-" + GenerateSessionID() }
 
 func sanitizeThreadID(id string) string {
 	id = strings.TrimSpace(id)
-	if id == "" {
-		return "thread"
-	}
-	return sanitizeSessionKey(id)
-}
-
-func scopeFromMeta(meta memory.SessionMeta) *session.SessionScope {
-	if len(meta.Scope) == 0 {
-		return nil
-	}
-	var scope session.SessionScope
-	if err := json.Unmarshal(meta.Scope, &scope); err != nil {
-		return nil
-	}
-	return &scope
+	id = strings.NewReplacer(":", "_", "/", "_", "\\", "_").Replace(id)
+	return id
 }
 
 func ownerIdentityFromScope(scope *session.SessionScope) string {
 	if scope == nil {
 		return "unknown"
 	}
-	for _, key := range []string{"sender", "chat", "space"} {
-		if value := strings.TrimSpace(scope.Values[key]); value != "" {
+	for _, dimension := range []string{"sender", "chat", "space"} {
+		if value := strings.TrimSpace(scope.Values[dimension]); value != "" {
 			return strings.ToLower(value)
 		}
 	}
@@ -1092,13 +1288,6 @@ func ownerIdentityFromScope(scope *session.SessionScope) string {
 	return "unknown"
 }
 
-func agentIDFromScope(scope *session.SessionScope) string {
-	if scope == nil || strings.TrimSpace(scope.AgentID) == "" {
-		return "main"
-	}
-	return strings.TrimSpace(scope.AgentID)
-}
-
 func routingAgentFromSessionKey(sessionKey string) string {
 	if parsed := session.ParseLegacyAgentSessionKey(sessionKey); parsed != nil {
 		return parsed.AgentID
@@ -1107,8 +1296,8 @@ func routingAgentFromSessionKey(sessionKey string) string {
 }
 
 func uniqueStrings(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := map[string]struct{}{}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
 		if value == "" {
@@ -1118,7 +1307,14 @@ func uniqueStrings(values []string) []string {
 			continue
 		}
 		seen[value] = struct{}{}
-		out = append(out, value)
+		result = append(result, value)
 	}
-	return out
+	return result
+}
+
+func contextOrBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }

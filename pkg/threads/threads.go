@@ -1,8 +1,10 @@
+//nolint:govet // Transaction callbacks intentionally reuse short-lived error bindings.
 package threads
 
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,8 +34,6 @@ const (
 
 	DefaultLimit = 50
 	MaxLimit     = 200
-
-	legacyPicoSessionPrefix = "agent:main:pico:direct:pico:"
 )
 
 var (
@@ -201,24 +201,9 @@ func NewStoreFromWorkspace(workspace string) Store {
 	}
 }
 
-func (s Store) openSessionStore() (*memory.JSONLStore, error) {
+func (s Store) openSessionStore() (*memory.SQLiteStore, error) {
 	s = s.withDefaults()
-	return memory.NewJSONLStore(s.Dir)
-}
-
-func (s Store) canonicalSessionKey(ctx context.Context, sessionKey string) (string, error) {
-	sessionKey = strings.TrimSpace(sessionKey)
-	if sessionKey == "" {
-		return "", nil
-	}
-	state, err := s.readOrdinarySessionState(ctx, sessionKey, false)
-	if err != nil {
-		return "", err
-	}
-	if state.found {
-		return state.key, nil
-	}
-	return sessionKey, nil
+	return memory.NewSQLiteStore(s.Dir)
 }
 
 type ordinarySessionState struct {
@@ -245,6 +230,7 @@ func (s Store) readOrdinarySessionState(
 	if err != nil {
 		return ordinarySessionState{}, err
 	}
+	defer store.Close()
 	canonicalKey, history, meta, modifiedAt, found, err := store.ReadSessionStateStrict(
 		ctx,
 		sessionKey,
@@ -377,10 +363,6 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 	if strings.TrimSpace(s.Dir) == "" {
 		s.Dir = ResolveSessionsDir(cfg.Agents.Defaults.Workspace)
 	}
-	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
-		return Thread{}, err
-	}
-
 	allocation := AllocatePicoThread(cfg, req.ID)
 	if allocation.SessionID == "" || allocation.Key == "" {
 		return Thread{}, errors.New("threads: failed to allocate pico thread")
@@ -391,88 +373,85 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 		return Thread{}, err
 	}
 
-	rawScope, err := json.Marshal(allocation.Scope)
-	if err != nil {
-		return Thread{}, err
-	}
-
-	now := time.Now()
+	defer sessionStore.Close()
+	now := time.Now().UTC()
 	sourceQuery := strings.TrimSpace(firstNonEmpty(req.SourceQuery, req.Title, "New thread"))
-	var meta memory.SessionMeta
-	initialChange := &sessionThreadLinkChange{store: sessionStore}
-	canonicalKey, _, err := sessionStore.UpdateSessionMetaStrict(
-		ctx,
-		allocation.Key,
-		func(current *memory.SessionMeta, state memory.SessionMetaMutationState) error {
-			if scopeErr := rejectReviewThreadScope(current.Scope); scopeErr != nil {
-				return scopeErr
-			}
-			initialChange.before = *current
-			initialChange.sessionExisted = state.SessionExists
-			initialChange.metadataExisted = state.MetadataExists
-			initializeSessionIdentity := current.CreatedAt.IsZero() &&
-				current.UpdatedAt.IsZero() &&
-				current.Skip == 0 &&
-				current.Count == 0 &&
-				current.HistorySlot == "" &&
-				strings.TrimSpace(current.Summary) == "" &&
-				len(current.Scope) == 0 &&
-				len(current.Aliases) == 0
-			if current.CreatedAt.IsZero() {
-				current.CreatedAt = now
-			}
-			current.UpdatedAt = now
-			current.Key = allocation.Key
-			if initializeSessionIdentity {
-				current.Scope = rawScope
-				current.Aliases = normalizeAliases(allocation.Key, allocation.Aliases)
-			}
-			current.ThreadType = NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+sourceQuery)))
-			current.ThreadTitle = truncateRunes(firstNonEmpty(req.Title, req.SourceQuery, "New thread"), 80)
-			current.ThreadContext = MergeContext(ExtractContext(sourceQuery+" "+req.Title), req.Context)
-			current.ThreadSourceQuery = sourceQuery
-			current.ThreadID = allocation.SessionID
-			current.ThreadAttachedAt = now
-			if initializeSessionIdentity {
-				current.Summary = current.ThreadTitle
-			}
-			meta = *current
-			initialChange.after = *current
-			return nil
-		},
-	)
-	if err != nil {
-		return Thread{}, err
+	threadType := NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+sourceQuery)))
+	title := truncateRunes(firstNonEmpty(req.Title, req.SourceQuery, "New thread"), 80)
+	threadContext := MergeContext(ExtractContext(sourceQuery+" "+req.Title), req.Context)
+	threadMeta := ThreadMeta{
+		ID: allocation.SessionID, UISessionID: allocation.SessionID,
+		PrimarySessionKey: allocation.Key, SessionKeys: []string{allocation.Key},
+		AgentID:       firstNonEmpty(req.AgentID, allocation.AgentID),
+		OwnerIdentity: firstNonEmpty(req.OwnerIdentity, ownerIdentityFromScope(&allocation.Scope)),
+		Type:          threadType, Title: title, Context: threadContext, SourceQuery: sourceQuery,
+		Registration: firstNonEmpty(req.Registration, RegistrationManual),
+		CreatedAt:    now, UpdatedAt: now,
 	}
-	initialChange.key = canonicalKey
-	// The metadata claim above establishes ordinary ownership before creating
-	// the legacy history file used by session discovery/detail APIs. A review
-	// reservation can no longer win this key, and an empty new thread remains
-	// immediately openable even before its first message.
-	if historyErr := sessionStore.EnsureSessionHistory(ctx, allocation.Key); historyErr != nil {
-		return Thread{}, rollbackThreadOperation(
-			ctx,
-			fmt.Errorf("threads: initialize pico session history: %w", historyErr),
-			nil,
-			initialChange,
-		)
-	}
-
-	thread, err := s.CreateThread(ctx, CreateRequest{
-		ID:                allocation.SessionID,
-		UISessionID:       allocation.SessionID,
-		PrimarySessionKey: allocation.Key,
-		SessionKeys:       []string{allocation.Key},
-		AgentID:           firstNonEmpty(req.AgentID, allocation.AgentID),
-		OwnerIdentity:     firstNonEmpty(req.OwnerIdentity, ownerIdentityFromScope(&allocation.Scope)),
-		Type:              meta.ThreadType,
-		Title:             meta.ThreadTitle,
-		Context:           meta.ThreadContext,
-		SourceQuery:       meta.ThreadSourceQuery,
-		Registration:      firstNonEmpty(req.Registration, RegistrationManual),
+	err = sessionStore.Immediate(contextOrBackground(ctx), func(ctx context.Context, conn *sql.Conn) error {
+		seconds, nanos := threadTimeParts(now)
+		if _, err := conn.ExecContext(ctx, `INSERT INTO sessions (
+            session_key, summary, created_seconds, created_nanos, updated_seconds, updated_nanos, version
+        ) VALUES (?, ?, ?, ?, ?, ?, 1) ON CONFLICT(session_key) DO NOTHING`,
+			allocation.Key, title, seconds, nanos, seconds, nanos); err != nil {
+			return err
+		}
+		if err := rejectReviewSessionSQL(ctx, conn, allocation.Key); err != nil {
+			return err
+		}
+		var scopeCount int
+		if err := conn.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM session_scopes WHERE session_key = ?`, allocation.Key).Scan(&scopeCount); err != nil {
+			return err
+		}
+		if scopeCount == 0 {
+			if _, err := conn.ExecContext(ctx, `INSERT INTO session_scopes (
+                session_key, scope_version, agent_id, channel, account
+            ) VALUES (?, ?, ?, ?, ?)`, allocation.Key, allocation.Scope.Version,
+				allocation.Scope.AgentID, allocation.Scope.Channel, allocation.Scope.Account); err != nil {
+				return err
+			}
+			for index, dimension := range allocation.Scope.Dimensions {
+				if _, err := conn.ExecContext(ctx, `INSERT INTO session_scope_dimensions (
+                    session_key, sequence, dimension, value, is_dimension
+                ) VALUES (?, ?, ?, ?, 1)`, allocation.Key, index, dimension,
+					allocation.Scope.Values[dimension]); err != nil {
+					return err
+				}
+			}
+			for index, alias := range normalizeAliases(allocation.Key, allocation.Aliases) {
+				if _, err := conn.ExecContext(ctx, `INSERT INTO session_aliases (
+                    session_key, sequence, alias
+                ) VALUES (?, ?, ?)`, allocation.Key, index, alias); err != nil {
+					return err
+				}
+			}
+		}
+		if s.testHooks != nil && s.testHooks.writeThreadMeta != nil {
+			if err := s.testHooks.writeThreadMeta(threadMeta); err != nil {
+				return err
+			}
+		}
+		if err := insertThreadSQL(ctx, conn, threadMeta); err != nil {
+			return err
+		}
+		_, err := conn.ExecContext(ctx, `INSERT INTO session_thread_links (
+            session_key, thread_id, attached_seconds, attached_nanos
+        ) VALUES (?, ?, ?, ?) ON CONFLICT(session_key) DO UPDATE SET
+            thread_id = excluded.thread_id, attached_seconds = excluded.attached_seconds,
+            attached_nanos = excluded.attached_nanos`, allocation.Key, allocation.SessionID,
+			seconds, nanos)
+		return err
 	})
 	if err != nil {
-		return Thread{}, rollbackThreadOperation(ctx, err, nil, initialChange)
+		return Thread{}, err
+	}
+	thread, found, err := s.Get(allocation.SessionID)
+	if err != nil {
+		return Thread{}, err
+	}
+	if !found {
+		return Thread{}, errors.New("threads: created Pico thread could not be loaded")
 	}
 	return thread, nil
 }
@@ -656,36 +635,6 @@ func MergeContext(base map[string]string, overlays ...map[string]string) map[str
 	return merged
 }
 
-func titleAndPreview(meta memory.SessionMeta, messages []providers.Message) (string, string) {
-	title := strings.TrimSpace(meta.ThreadTitle)
-	preview := ""
-	for _, msg := range messages {
-		if msg.Role != "user" {
-			continue
-		}
-		preview = messagePreview(msg)
-		if preview != "" {
-			break
-		}
-	}
-	if preview == "" {
-		preview = strings.TrimSpace(meta.Summary)
-	}
-	if preview == "" && title != "" {
-		preview = title
-	}
-	if title == "" {
-		title = preview
-	}
-	if title == "" {
-		title = "New thread"
-	}
-	if preview == "" {
-		preview = "(empty)"
-	}
-	return truncateRunes(title, 80), truncateRunes(preview, 120)
-}
-
 func visibleMessages(messages []providers.Message) []providers.Message {
 	visible := make([]providers.Message, 0, len(messages))
 	for _, msg := range messages {
@@ -794,26 +743,6 @@ func paginate(items []Thread, offset, limit int) []Thread {
 	return items[offset:end]
 }
 
-func picoSessionIDFromMeta(meta memory.SessionMeta) (string, bool) {
-	if len(meta.Scope) > 0 {
-		var scope session.SessionScope
-		if err := json.Unmarshal(meta.Scope, &scope); err == nil {
-			if id, ok := picoSessionIDFromScope(scope); ok {
-				return id, true
-			}
-		}
-	}
-	if id, ok := legacyPicoID(meta.Key); ok {
-		return id, true
-	}
-	for _, alias := range meta.Aliases {
-		if id, ok := legacyPicoID(alias); ok {
-			return id, true
-		}
-	}
-	return "", false
-}
-
 func picoSessionIDFromScope(scope session.SessionScope) (string, bool) {
 	if !strings.EqualFold(strings.TrimSpace(scope.Channel), "pico") {
 		return "", false
@@ -872,43 +801,6 @@ func contextText(context map[string]string) string {
 		parts = append(parts, key+":"+context[key])
 	}
 	return strings.Join(parts, " ")
-}
-
-func readMeta(path, fallbackKey string) (memory.SessionMeta, error) {
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return memory.SessionMeta{Key: fallbackKey}, nil
-	}
-	if err != nil {
-		return memory.SessionMeta{}, err
-	}
-	var meta memory.SessionMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return memory.SessionMeta{}, fmt.Errorf(
-			"threads: decode session metadata %s: %w",
-			filepath.Base(path),
-			err,
-		)
-	}
-	if meta.Key == "" {
-		meta.Key = fallbackKey
-	}
-	return meta, nil
-}
-
-func sessionKeyFromSanitizedBase(base string) string {
-	if session.IsOpaqueSessionKey(base) {
-		return base
-	}
-	return strings.ReplaceAll(base, "_", ":")
-}
-
-func legacyPicoID(key string) (string, bool) {
-	if strings.HasPrefix(key, legacyPicoSessionPrefix) {
-		id := strings.TrimPrefix(key, legacyPicoSessionPrefix)
-		return id, id != ""
-	}
-	return "", false
 }
 
 func sanitizeSessionKey(key string) string {

@@ -6090,53 +6090,17 @@ func TestProcessMessage_PersistsReasoningToolResponseAsSingleAssistantRecord(t *
 		t.Fatalf("ReadDir(%q) error = %v", sessionDir, err)
 	}
 
-	var jsonlPath string
+	databaseFound := false
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
+		if entry.Name() == "sessions.db" {
+			databaseFound = true
 		}
-		jsonlPath = filepath.Join(sessionDir, entry.Name())
-		break
-	}
-	if jsonlPath == "" {
-		t.Fatal("expected session jsonl file to be created")
-	}
-
-	data, err := os.ReadFile(jsonlPath)
-	if err != nil {
-		t.Fatalf("ReadFile(%q) error = %v", jsonlPath, err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) < 3 {
-		t.Fatalf("jsonl lines = %d, want at least 3", len(lines))
-	}
-
-	matchingRecords := 0
-	for _, line := range lines {
-		var msg providers.Message
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			t.Fatalf("Unmarshal(jsonl line) error = %v", err)
-		}
-		if msg.Role != "assistant" {
-			continue
-		}
-		if msg.Content == "I'll inspect that file now." || msg.ReasoningContent == "Read the file before answering." {
-			matchingRecords++
-			toolName := ""
-			if len(msg.ToolCalls) == 1 {
-				toolName = providers.NormalizeToolCall(msg.ToolCalls[0]).Name
-			}
-			if msg.Content != "I'll inspect that file now." ||
-				msg.ReasoningContent != "Read the file before answering." ||
-				len(msg.ToolCalls) != 1 ||
-				toolName != "read_file" {
-				t.Fatalf("assistant jsonl record = %+v, want content+reasoning+tool_calls in one line", msg)
-			}
+		if strings.HasSuffix(entry.Name(), ".json") || strings.HasSuffix(entry.Name(), ".jsonl") {
+			t.Fatalf("mutable session JSON created: %s", entry.Name())
 		}
 	}
-	if matchingRecords != 1 {
-		t.Fatalf("matching assistant jsonl records = %d, want exactly 1 canonical assistant record", matchingRecords)
+	if !databaseFound {
+		t.Fatal("expected sessions.db to be created")
 	}
 }
 
