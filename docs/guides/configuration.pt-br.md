@@ -55,7 +55,7 @@ O PicoClaw armazena dados no seu workspace configurado (padrão: `~/.picoclaw/wo
 ~/.picoclaw/workspace/
 ├── sessions/          # Sessões de conversa e histórico
 ├── memory/           # Memória de longo prazo (MEMORY.md)
-├── state/            # Estado SQLite de runtime (runtime.db, último canal/chat)
+├── state/            # Estado SQLite de runtime (runtime.db, account-router.db)
 ├── cron/             # Banco de dados de tarefas agendadas
 ├── skills/           # Skills personalizadas
 ├── AGENT.md          # Guia de comportamento do agente

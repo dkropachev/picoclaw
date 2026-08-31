@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -213,4 +214,69 @@ func mustAgentRuntimeFileMutationProtectedRoots(configPath string) []string {
 
 func cloneAgentRuntimeFileMutationProtectedRoots(roots []string) []string {
 	return append([]string(nil), roots...)
+}
+
+func agentWorkspaceAccountRouterProtectedRoots(workspace string) ([]string, error) {
+	workspace, err := filepath.Abs(filepath.Clean(workspace))
+	if err != nil {
+		return nil, fmt.Errorf("resolve account-router workspace: %w", err)
+	}
+	database := filepath.Join(workspace, "state", "account-router.db")
+	lockDirectory := database + ".locks"
+	legacySource := filepath.Join(workspace, "account_router_state.json")
+	archiveRoot := filepath.Join(workspace, "state", "legacy-json", "account-router-v1")
+	roots := []string{
+		database,
+		database + "-wal",
+		database + "-shm",
+		lockDirectory,
+		filepath.Join(lockDirectory, "store.lock"),
+		legacySource,
+		archiveRoot,
+		filepath.Join(archiveRoot, "account_router_state.json"),
+	}
+	entries, err := os.ReadDir(workspace)
+	if os.IsNotExist(err) {
+		entries = nil
+	} else if err != nil {
+		return nil, fmt.Errorf("enumerate account-router legacy state: %w", err)
+	}
+	for _, entry := range entries {
+		if agentAccountRouterLegacySidecarName(entry.Name()) {
+			roots = append(roots, filepath.Join(workspace, entry.Name()))
+		}
+	}
+	if err := filepath.WalkDir(archiveRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if os.IsNotExist(walkErr) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if path != archiveRoot && !entry.IsDir() {
+			roots = append(roots, path)
+		}
+		return nil
+	}); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("enumerate account-router archives: %w", err)
+	}
+	slices.Sort(roots)
+	return slices.Compact(roots), nil
+}
+
+func agentAccountRouterLegacySidecarName(name string) bool {
+	suffix, ok := strings.CutPrefix(name, "account_router_state.json.auth-invalidation.")
+	if !ok || len(suffix) != 32 || suffix != strings.ToLower(suffix) {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
+}
+
+func mustAgentWorkspaceAccountRouterProtectedRoots(workspace string) []string {
+	roots, err := agentWorkspaceAccountRouterProtectedRoots(workspace)
+	if err != nil {
+		panic(fmt.Sprintf("build account-router file-mutation policy: %v", err))
+	}
+	return roots
 }

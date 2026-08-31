@@ -135,6 +135,20 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 		return nil, errors.New("controller local repair agent configuration is invalid")
 	}
 
+	protectedRoots := append(
+		[]string(nil),
+		al.fileMutationProtectedRoots...,
+	)
+	if strings.TrimSpace(agent.Workspace) != "" {
+		protectedRoots = append(
+			protectedRoots,
+			mustAgentWorkspaceFileMutationProtectedRoots(agent.Workspace)...,
+		)
+		protectedRoots = append(
+			protectedRoots,
+			mustAgentWorkspaceAccountRouterProtectedRoots(agent.Workspace)...,
+		)
+	}
 	runner, err := NewLocalRepairRunner(LocalRepairRunnerConfig{
 		Workspaces:      workspaces,
 		Provider:        provider,
@@ -143,9 +157,7 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 		MaxTokens:       agent.MaxTokens,
 		Temperature:     agent.Temperature,
 		ReasoningEffort: reasoningEffort,
-		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
-			al.fileMutationProtectedRoots,
-		),
+		ProtectedRoots:  protectedRoots,
 	})
 	if err != nil {
 		return nil, errors.New("controller local repair agent configuration is invalid")

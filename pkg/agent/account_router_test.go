@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -116,8 +115,8 @@ func TestAgentLoopSelectCandidatesUsesBuiltAccountRouter(t *testing.T) {
 	if router == nil {
 		t.Fatal("buildAccountRouterWithAliases() = nil")
 	}
-	if got := router.StatePath; got != filepath.Join(workspace, "account_router_state.json") {
-		t.Fatalf("state path = %q, want workspace account_router_state.json", got)
+	if got := router.StatePath; got != accountrouter.DatabasePath(workspace) {
+		t.Fatalf("state path = %q, want workspace account-router.db", got)
 	}
 
 	loop := &AgentLoop{}

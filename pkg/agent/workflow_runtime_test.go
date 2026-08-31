@@ -17,6 +17,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -2712,7 +2713,7 @@ func TestWorkflowAgentRunnerEphemeralDisablesAccountRouterSessionAffinity(t *tes
 	if agent == nil || agent.AccountRouter == nil {
 		t.Fatalf("account-routed agent = %#v, want active router", agent)
 	}
-	statePath := filepath.Join(workspace, "account_router_state.json")
+	statePath := accountrouter.DatabasePath(workspace)
 	beforeRouterSessions := workflowRawMessageKeySet(
 		workflowAccountRouterSessionState(t, statePath, "decision-router"),
 	)
@@ -2739,12 +2740,10 @@ func TestWorkflowAgentRunnerEphemeralDisablesAccountRouterSessionAffinity(t *tes
 			afterRouterSessions,
 		)
 	}
-	stateData, readErr := os.ReadFile(statePath)
-	if readErr != nil {
-		t.Fatalf("read account router state: %v", readErr)
-	}
-	if strings.Contains(string(stateData), "workflow:ephemeral:") {
-		t.Fatalf("account router state leaked internal ephemeral identity: %s", stateData)
+	for sessionKey := range afterRouterSessions {
+		if strings.Contains(sessionKey, "workflow:ephemeral:") {
+			t.Fatalf("account router state leaked internal ephemeral identity: %s", sessionKey)
+		}
 	}
 	workflowAssertSessionStoreUnchanged(
 		t,
@@ -2832,16 +2831,12 @@ func TestWorkflowAgentRunnerPrivateEphemeralFallbackRedactsAccountRouterErrors(t
 	if outputs["text"] != "private fallback decision" {
 		t.Fatalf("text = %#v, want fallback decision", outputs["text"])
 	}
-	statePath := filepath.Join(workspace, "account_router_state.json")
-	stateData, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatalf("read account router state: %v", err)
+	accountState, ok := agent.AccountRouter.AccountStateSnapshot("account-a")
+	if !ok || strings.Contains(accountState.LastError, privateCanary) {
+		t.Fatalf("account router state leaked private provider error: %#v", accountState)
 	}
-	if strings.Contains(string(stateData), privateCanary) {
-		t.Fatalf("account router state leaked private provider error: %s", stateData)
-	}
-	if !strings.Contains(string(stateData), "provider request failed") {
-		t.Fatalf("account router state omitted canonical private failure: %s", stateData)
+	if accountState.LastError != "provider request failed" {
+		t.Fatalf("account router state omitted canonical private failure: %#v", accountState)
 	}
 }
 
@@ -5624,23 +5619,15 @@ func workflowAccountRouterSessionState(
 	routerName string,
 ) map[string]json.RawMessage {
 	t.Helper()
-	data, err := os.ReadFile(statePath)
+	keys, err := accountrouter.SessionKeys(statePath, routerName)
 	if err != nil {
 		t.Fatalf("read account router state: %v", err)
 	}
-	var state struct {
-		Routers map[string]struct {
-			Sessions map[string]json.RawMessage `json:"sessions"`
-		} `json:"routers"`
+	sessions := make(map[string]json.RawMessage, len(keys))
+	for _, key := range keys {
+		sessions[key] = nil
 	}
-	if err := json.Unmarshal(data, &state); err != nil {
-		t.Fatalf("decode account router state: %v", err)
-	}
-	router, ok := state.Routers[routerName]
-	if !ok {
-		t.Fatalf("account router state has no %q entry: %s", routerName, data)
-	}
-	return router.Sessions
+	return sessions
 }
 
 func workflowRawMessageKeySet(values map[string]json.RawMessage) map[string]struct{} {

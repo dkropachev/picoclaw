@@ -944,7 +944,9 @@ func stopRuntimeProducers(
 		runningServices.HeartbeatService.Stop()
 	}
 	if runningServices.CronService != nil {
-		runningServices.CronService.Stop()
+		if err := runningServices.CronService.Close(); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("stop cron service: %w", err))
+		}
 	}
 	return cleanupErr
 }

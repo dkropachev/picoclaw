@@ -430,6 +430,12 @@ func TestCronService_PersistenceIntegrity(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].Name != "PersistMe" {
 		t.Errorf("Data corruption after reload. Got: %+v", jobs)
 	}
+	if err := cs1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs2.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// test loading a corrupt SQLite database
 	if err := os.WriteFile(databasePath, []byte("not sqlite"), 0o600); err != nil {
@@ -438,7 +444,7 @@ func TestCronService_PersistenceIntegrity(t *testing.T) {
 	cs3 := NewCronService(tmpFile, nil)
 	err := cs3.loadStore()
 	if err == nil {
-		t.Error("Should return error when loading invalid JSON")
+		t.Error("Should return error when loading invalid SQLite")
 	}
 }
 

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -217,12 +216,15 @@ func TestRecordPrivateFallbackResultRedactsProviderErrorAndPreservesHealth(t *te
 	if state.LastError != errPrivateProviderRequest.Error() {
 		t.Fatalf("last error = %q, want canonical private error", state.LastError)
 	}
-	data, err := os.ReadFile(router.StatePath)
-	if err != nil {
-		t.Fatalf("ReadFile(account router state) error = %v", err)
+	db := openRawAccountRouterDB(t, router.StatePath)
+	defer db.Close()
+	var persistedError string
+	if err := db.QueryRow(`SELECT last_error FROM account_router_accounts
+        WHERE router_name = 'router-main' AND account_ref = 'account-a'`).Scan(&persistedError); err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(string(data), privateCanary) {
-		t.Fatalf("account router state contains private provider error: %s", data)
+	if persistedError != errPrivateProviderRequest.Error() || strings.Contains(persistedError, privateCanary) {
+		t.Fatalf("persisted private error = %q", persistedError)
 	}
 }
 
@@ -527,9 +529,10 @@ func TestFallbackAttemptIdentityKeepsSameProviderModelAccountsSeparate(t *testin
 	}
 }
 
-func TestStoreRenamesCorruptStateAndContinues(t *testing.T) {
+func TestStoreAuditsAndArchivesMalformedLegacyState(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "account_router_state.json")
-	if err := os.WriteFile(statePath, []byte("{not-json"), 0o600); err != nil {
+	legacyData := []byte("{not-json")
+	if err := os.WriteFile(statePath, legacyData, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
@@ -555,15 +558,18 @@ func TestStoreRenamesCorruptStateAndContinues(t *testing.T) {
 		t.Fatalf("selected account = %q, want account-a", got)
 	}
 
-	matches, err := filepath.Glob(statePath + ".corrupt.*")
-	if err != nil {
-		t.Fatalf("Glob() error = %v", err)
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("legacy state remains after archive: %v", err)
 	}
-	if len(matches) != 1 {
-		t.Fatalf("corrupt backups = %v, want one", matches)
-	}
-	if _, err := os.Stat(statePath); err != nil {
-		t.Fatalf("state file not rewritten: %v", err)
+	archivePath := filepath.Join(
+		filepath.Dir(statePath),
+		"legacy-json",
+		accountRouterLegacyArchiveLabel,
+		filepath.Base(statePath),
+	)
+	archived, err := os.ReadFile(archivePath)
+	if err != nil || string(archived) != string(legacyData) {
+		t.Fatalf("malformed archive = %q, %v", archived, err)
 	}
 }
 
@@ -619,7 +625,7 @@ func TestCredentialAuthInvalidationRecoversExactAliasAccountAcrossRoutersAfterRe
 	// Simulate the gateway starting after the launcher wrote the durable
 	// invalidation. The main state file still contains the old failure until a
 	// router operation consumes the sidecar generation.
-	stores.Delete(filepath.Clean(statePath))
+	stores.Delete(primary.StatePath)
 	restarted := newRouter("router-primary")
 	selection := restarted.Select("", SelectReasonInitial)
 	if got := selectedAccount(t, selection); got != target {
@@ -751,99 +757,35 @@ func TestCredentialAuthInvalidationValidatesInputsAndFilesystemState(t *testing.
 			t.Fatalf("WriteFile() error = %v", err)
 		}
 		err := InvalidateCredentialAuthFailure(filepath.Join(parentFile, "state.json"), "openai:work")
-		if err == nil || !strings.Contains(err.Error(), "stat account router state") {
+		if err == nil || !strings.Contains(err.Error(), "stat account router") {
 			t.Fatalf("stat error = %v", err)
 		}
 	})
 
-	t.Run("marker write error", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("directory write permissions are Unix-specific")
-		}
+	t.Run("generation error", func(t *testing.T) {
 		dir := t.TempDir()
 		statePath := filepath.Join(dir, "state.json")
-		if err := os.WriteFile(statePath, []byte(`{"version":1}`), 0o600); err != nil {
-			t.Fatalf("WriteFile() error = %v", err)
+		router := New("router", &config.AccountRouterConfig{
+			Enabled: true,
+			Entry:   "account",
+			Blocks: []config.AccountRouterBlock{{
+				ID: "account", Type: config.AccountRouterBlockTypeAccount, Account: "account-a",
+			}},
+		}, map[string]Account{
+			"account-a": {Candidates: []providers.FallbackCandidate{candidate("account-a")}},
+		}, statePath)
+		if router == nil {
+			t.Fatal("New() returned nil")
 		}
-		if err := os.Chmod(dir, 0o500); err != nil {
-			t.Fatalf("Chmod(read-only) error = %v", err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		_ = router.Select("", SelectReasonInitial)
+		original := accountRouterRandomRead
+		accountRouterRandomRead = func([]byte) (int, error) { return 0, errors.New("injected random failure") }
+		t.Cleanup(func() { accountRouterRandomRead = original })
 		err := InvalidateCredentialAuthFailure(statePath, "openai:work")
-		if err == nil || !strings.Contains(err.Error(), "write account router auth invalidation") {
-			t.Fatalf("marker write error = %v", err)
+		if err == nil || !strings.Contains(err.Error(), "generate") {
+			t.Fatalf("generation error = %v", err)
 		}
 	})
-}
-
-func TestCredentialAuthInvalidationMarkerValidationAndSparseState(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "state.json")
-	normalizedID := "openai:work"
-	markerPath := credentialAuthInvalidationPath(statePath, normalizedID)
-	if _, err := normalizeCredentialID(" "); err == nil || !strings.Contains(err.Error(), "credential id is required") {
-		t.Fatalf("normalizeCredentialID(empty) error = %v", err)
-	}
-
-	if _, ok := readCredentialAuthInvalidation(statePath, normalizedID); ok {
-		t.Fatal("missing marker was accepted")
-	}
-	for name, data := range map[string]string{
-		"malformed":           "{not-json",
-		"unsupported version": `{"version":2,"credential_id":"openai:work","generation":"next"}`,
-		"missing generation":  `{"version":1,"credential_id":"openai:work"}`,
-		"invalid id":          `{"version":1,"credential_id":"openai:bad/name","generation":"next"}`,
-		"different id":        `{"version":1,"credential_id":"openai:other","generation":"next"}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := os.WriteFile(markerPath, []byte(data), 0o600); err != nil {
-				t.Fatalf("WriteFile() error = %v", err)
-			}
-			if marker, ok := readCredentialAuthInvalidation(statePath, normalizedID); ok {
-				t.Fatalf("invalid marker accepted: %#v", marker)
-			}
-		})
-	}
-
-	valid := `{"version":1,"credential_id":"OPENAI:WORK","generation":"next"}`
-	if err := os.WriteFile(markerPath, []byte(valid), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-	if marker, ok := readCredentialAuthInvalidation(statePath, normalizedID); !ok ||
-		marker.CredentialID != normalizedID || marker.Generation != "next" {
-		t.Fatalf("valid marker = (%#v, %v)", marker, ok)
-	}
-
-	for _, accountRef := range []string{
-		"account-a",
-		"credential:unsupported:work",
-		"credential:openai:bad/name",
-	} {
-		if credentialID, ok := normalizedCredentialIDForAccount(accountRef); ok {
-			t.Fatalf("normalizedCredentialIDForAccount(%q) = (%q, true)", accountRef, credentialID)
-		}
-	}
-
-	var nilStore *Store
-	nilStore.applyCredentialAuthInvalidations()
-	(&Store{}).applyCredentialAuthInvalidations()
-	(&Store{path: statePath, st: State{Routers: map[string]*RouterState{
-		"nil-router": nil,
-		"sparse": {
-			Accounts: map[string]*AccountState{
-				"nil-account":                 nil,
-				"account-a":                   {},
-				"credential:unsupported:work": {},
-			},
-		},
-	}}}).applyCredentialAuthInvalidations()
-
-	if got := accountAuthInvalidationGeneration(nil, "account"); got != "" {
-		t.Fatalf("generation from nil state = %q", got)
-	}
-	if got := accountAuthInvalidationGeneration(&RouterState{}, "account"); got != "" {
-		t.Fatalf("generation from empty state = %q", got)
-	}
-	resetAccountAuthFailure(nil)
 }
 
 func newTestRouter(t *testing.T, cfg *config.AccountRouterConfig, now time.Time) *Router {

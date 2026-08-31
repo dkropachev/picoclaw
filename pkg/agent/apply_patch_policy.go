@@ -196,8 +196,8 @@ func agentApplyPatchProtectedRoots(
 ) []string {
 	roots := []string{
 		filepath.Join(workspace, "sessions"),
-		filepath.Join(workspace, "account_router_state.json"),
 	}
+	roots = append(roots, mustAgentWorkspaceAccountRouterProtectedRoots(workspace)...)
 	if cfg != nil {
 		roots = append(roots, cfg.GitWorkspaceRootPath())
 	}

@@ -357,6 +357,10 @@ func newAgentInstanceWithRuntimePolicies(
 		cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots),
 		mustAgentWorkspaceFileMutationProtectedRoots(workspace)...,
 	)
+	fileMutationProtectedRoots = append(
+		fileMutationProtectedRoots,
+		mustAgentWorkspaceAccountRouterProtectedRoots(workspace)...,
+	)
 	fileMutationPolicy := tools.FileMutationPolicy{
 		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
 			fileMutationProtectedRoots,

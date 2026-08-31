@@ -55,7 +55,7 @@ PicoClaw 将数据存储在您配置的工作区中（默认：`~/.picoclaw/work
 ~/.picoclaw/workspace/
 ├── sessions/          # 对话会话和历史
 ├── memory/           # 长期记忆 (MEMORY.md)
-├── state/            # SQLite 运行时状态 (runtime.db，最近频道/聊天)
+├── state/            # SQLite 运行时状态 (runtime.db、account-router.db)
 ├── cron/             # 定时任务数据库
 ├── skills/           # 自定义技能
 ├── AGENT.md          # Agent 行为指南
