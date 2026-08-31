@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,12 @@ func TestRepositoryValidationFailureWrapperIsAllowlisted(t *testing.T) {
 	code, ok = RepositoryValidationFailureCodeFromError(unknown)
 	if !ok || code != RepositoryValidationFailureCodeProcessing {
 		t.Fatalf("unknown wrapped code=%q found=%v", code, ok)
+	}
+	invalidWrapped := &repositoryValidationFailureError{
+		code: RepositoryValidationFailureCode("provider_secret"), cause: cause,
+	}
+	if code, ok = RepositoryValidationFailureCodeFromError(invalidWrapped); ok || code != "" {
+		t.Fatalf("invalid internal wrapped code=%q found=%v", code, ok)
 	}
 
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
@@ -94,6 +101,18 @@ func TestCompleteValidationJobPersistsSafeFailureAndAcceptsHistoricalNil(t *test
 	if err := validateRepositoryLifecycleState(historical); err != nil {
 		t.Fatalf("historical failed state without diagnostics was rejected: %v", err)
 	}
+	if _, _, _, err := store.CompleteValidationJob(state.Repository, RepositoryValidationCompletion{
+		JobID: pending.ID, Outcome: RepositoryValidationNotFixed,
+		FailureCode: RepositoryValidationFailureCodeModelRequest,
+	}); err == nil {
+		t.Fatal("non-failed completion accepted a failure code")
+	}
+	if _, _, _, err := store.CompleteValidationJob(state.Repository, RepositoryValidationCompletion{
+		JobID: pending.ID, Outcome: RepositoryValidationNotFixed,
+		FirstContainingTag: strings.Repeat("x", 257),
+	}); err == nil {
+		t.Fatal("oversized completion metadata was accepted")
+	}
 
 	var malformed RepositoryState
 	if err := json.Unmarshal(encoded, &malformed); err != nil {
@@ -115,11 +134,14 @@ func TestValidationWorkerPersistsSafeStageFailureCodes(t *testing.T) {
 		{name: "evidence invalid", code: RepositoryValidationFailureCodeEvidenceInvalid},
 		{name: "evidence changed", code: RepositoryValidationFailureCodeEvidenceChanged},
 		{name: "model request", code: RepositoryValidationFailureCodeModelRequest},
+		{name: "model unavailable override", code: RepositoryValidationFailureCodeModelUnavailable},
 		{name: "model timeout override", code: RepositoryValidationFailureCodeModelTimeout},
 		{name: "model output override", code: RepositoryValidationFailureCodeModelOutputInvalid},
 		{name: "invalid result", code: RepositoryValidationFailureCodeResultInvalid},
+		{name: "selected evidence missing commit time", code: RepositoryValidationFailureCodeEvidenceInvalid},
 		{name: "default branch verification", code: RepositoryValidationFailureCodeDefaultBranchVerification},
 		{name: "release tag", code: RepositoryValidationFailureCodeReleaseTag},
+		{name: "invalid release tag", code: RepositoryValidationFailureCodeReleaseTag},
 		{name: "processing override", code: RepositoryValidationFailureCodeProcessing},
 	}
 	for index, test := range cases {
@@ -144,8 +166,15 @@ func TestValidationWorkerPersistsSafeStageFailureCodes(t *testing.T) {
 					return nil, errors.New(secret)
 				}
 			case RepositoryValidationFailureCodeEvidenceInvalid:
-				options.Evidence = func(context.Context, RepositoryFinding, []string) ([]RepositoryValidationEvidence, error) {
-					return []RepositoryValidationEvidence{{CommitSHA: "invalid"}}, nil
+				if test.name == "selected evidence missing commit time" {
+					options.Evidence = func(context.Context, RepositoryFinding, []string) ([]RepositoryValidationEvidence, error) {
+						return []RepositoryValidationEvidence{{CommitSHA: commit}}, nil
+					}
+					options.Adjudicate = confirmedValidationDecision(commit)
+				} else {
+					options.Evidence = func(context.Context, RepositoryFinding, []string) ([]RepositoryValidationEvidence, error) {
+						return []RepositoryValidationEvidence{{CommitSHA: "invalid"}}, nil
+					}
 				}
 			case RepositoryValidationFailureCodeEvidenceChanged:
 				_, running, _, claimed, err := store.ClaimValidationJob(state.Repository, pending.ID)
@@ -165,6 +194,7 @@ func TestValidationWorkerPersistsSafeStageFailureCodes(t *testing.T) {
 					return RepositoryValidationDecision{}, errors.New(secret)
 				}
 			case RepositoryValidationFailureCodeModelTimeout,
+				RepositoryValidationFailureCodeModelUnavailable,
 				RepositoryValidationFailureCodeModelOutputInvalid,
 				RepositoryValidationFailureCodeProcessing:
 				options.Adjudicate = func(context.Context, RepositoryMappingModelSnapshot, RepositoryFinding, []RepositoryValidationEvidence) (RepositoryValidationDecision, error) {
@@ -183,8 +213,14 @@ func TestValidationWorkerPersistsSafeStageFailureCodes(t *testing.T) {
 				}
 			case RepositoryValidationFailureCodeReleaseTag:
 				options.Adjudicate = confirmedValidationDecision(commit)
-				options.FirstSemanticTag = func(context.Context, string) (string, error) {
-					return "", errors.New(secret)
+				if test.name == "invalid release tag" {
+					options.FirstSemanticTag = func(context.Context, string) (string, error) {
+						return "not-semver", nil
+					}
+				} else {
+					options.FirstSemanticTag = func(context.Context, string) (string, error) {
+						return "", errors.New(secret)
+					}
 				}
 			}
 
@@ -210,6 +246,41 @@ func TestValidationWorkerPersistsSafeStageFailureCodes(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("completion persistence failure is returned safely", func(t *testing.T) {
+		store, state, _ := newLifecycleCoverageValidationStore(t, "safe-completion-failure")
+		commit := strings.Repeat("e", 40)
+		statePath := store.path(state.Repository)
+		backupPath := statePath + ".validation-failure-backup"
+		moved := false
+		defer func() {
+			if moved {
+				if err := os.Rename(backupPath, statePath); err != nil {
+					t.Errorf("restore validation state: %v", err)
+				}
+			}
+		}()
+		result, err := store.ProcessPendingValidationJobs(
+			t.Context(), state.Repository, RepositoryValidationProcessOptions{
+				Evidence: func(context.Context, RepositoryFinding, []string) ([]RepositoryValidationEvidence, error) {
+					return []RepositoryValidationEvidence{{CommitSHA: commit, CommitTime: time.Now().UTC()}}, nil
+				},
+				Adjudicate: func(context.Context, RepositoryMappingModelSnapshot, RepositoryFinding, []RepositoryValidationEvidence) (RepositoryValidationDecision, error) {
+					if err := os.Rename(statePath, backupPath); err != nil {
+						return RepositoryValidationDecision{}, err
+					}
+					moved = true
+					return RepositoryValidationDecision{
+						Outcome: RepositoryValidationNotFixed, Summary: "No fix found.",
+					}, nil
+				},
+				VerifyAncestry: func(context.Context, string) (bool, error) { return true, nil },
+			},
+		)
+		if err == nil || result.Completed != 0 {
+			t.Fatalf("completion persistence result=%#v err=%v", result, err)
+		}
+	})
 }
 
 func confirmedValidationDecision(commit string) RepositoryValidationAdjudicator {

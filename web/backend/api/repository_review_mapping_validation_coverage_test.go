@@ -846,6 +846,12 @@ func TestRepositoryValidationAdjudicationRunnerErrorsAndBounds(t *testing.T) {
 		finding, evidence,
 	)
 	assertFailureCode(t, err, repoaudit.RepositoryValidationFailureCodeModelUnavailable)
+	expired, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	_, err = runRepositoryValidationAdjudication(
+		expired, valid, snapshot, finding, evidence,
+	)
+	assertFailureCode(t, err, repoaudit.RepositoryValidationFailureCodeModelTimeout)
 	oversized := []repoaudit.RepositoryValidationEvidence{{
 		CommitSHA: strings.Repeat("b", 40), Diff: strings.Repeat("x", (2<<20)+1),
 	}}
