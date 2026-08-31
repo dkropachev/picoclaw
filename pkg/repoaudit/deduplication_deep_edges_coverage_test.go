@@ -1934,7 +1934,7 @@ func TestDeduplicationDeepPersistenceErrorPropagation(t *testing.T) {
 	checkpoint.Observation.Findings = []FindingCandidate{candidate}
 	checkpointState := dedupDeepState(t, checkpointFixture)
 	rawID := stableID(
-		"rrf_", checkpoint.Plan.Repository, checkpoint.Plan.CampaignID,
+		"rrw_", checkpoint.Plan.Repository, checkpoint.Plan.CampaignID,
 		checkpoint.Plan.CommitSHA, checkpoint.RunID, checkpoint.AssignmentID,
 		"0", findingFingerprint(checkpointFixture.files[0], candidate),
 	)
@@ -1977,7 +1977,7 @@ func TestDeduplicationDeepPersistenceErrorPropagation(t *testing.T) {
 	}
 	boundaryID := stableID("rrc_", plan.Repository, recordRequest.RunID)
 	recordRawID := stableID(
-		"rrl_", plan.Repository, boundaryID, plan.CommitSHA, recordRequest.RunID,
+		"rrw_", plan.Repository, boundaryID, plan.CommitSHA, recordRequest.RunID,
 		"0", "0", findingFingerprint(recordFile, recordCandidate),
 	)
 	recordState.RawFindings = append(recordState.RawFindings, RawReviewFinding{ID: recordRawID})

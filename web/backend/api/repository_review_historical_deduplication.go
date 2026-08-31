@@ -6,10 +6,40 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
+
+var errRepositoryReviewHistoricalCampaignRecovery = errors.New(
+	"exact historical campaign recovery is unavailable",
+)
+
+var recoverRepositoryReviewHistoricalCampaignForRetry = recoverRepositoryReviewHistoricalCampaign
+
+var resolveRepositoryReviewHistoricalCampaignProfile = resolveRepositoryReviewCampaignProfile
+
+var prepareRepositoryReviewHistoricalCampaignBackfill = prepareRepositoryReviewLegacyCampaignBackfill
+
+var updateRepositoryReviewHistoricalAutomation = func(
+	ctx context.Context,
+	store repoaudit.Store,
+	installed repoaudit.RepositoryReviewAutomation,
+	prepared repositoryReviewLegacyCampaignBackfill,
+	reconciled repoaudit.RepositoryState,
+) (repoaudit.RepositoryReviewAutomation, error) {
+	return store.UpdateAutomation(
+		ctx, installed.ID, installed.Version,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			return finalizeRepositoryReviewLegacyCampaign(
+				candidate, prepared.Request.Coverage.ID, reconciled,
+			)
+		},
+	)
+}
 
 var admitNextHistoricalDeduplicationBatch = func(
 	store repoaudit.Store,
@@ -58,7 +88,7 @@ func (h *Handler) handleGetRepositoryReviewHistoricalDeduplication(
 	}
 	rawFindings := make([]repositoryReviewRawFindingSummary, 0)
 	for _, raw := range ledger.State.RawFindings {
-		if raw.LegacyFindingID != "" && strings.HasPrefix(raw.ID, "rrw_") {
+		if repoaudit.HistoricalDeduplicationRawFinding(raw) {
 			rawFindings = append(rawFindings, projectRepositoryReviewRawFindingSummary(raw))
 		}
 	}
@@ -98,19 +128,208 @@ func (h *Handler) handleRetryRepositoryReviewHistoricalDeduplication(
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
+	if ledger.State.HistoricalDeduplication.Required &&
+		ledger.State.HistoricalDeduplication.Status == repoaudit.HistoricalDeduplicationPending &&
+		ledger.State.HistoricalDeduplication.Attempts == 0 {
+		writeRepositoryReviewAutomationError(w, repoaudit.ErrConflict)
+		return
+	}
+	controller := h.repositoryReviewControllerInstance()
+	if ledger.State.HistoricalDeduplication.Required &&
+		ledger.State.HistoricalDeduplication.Status != repoaudit.HistoricalDeduplicationCompleted &&
+		!repositoryReviewHistoricalCampaignRecovered(ledger.Automation, ledger.State) {
+		cfg, configErr := config.LoadConfig(h.configPath)
+		if configErr != nil {
+			writeRepositoryReviewAutomationError(w, configErr)
+			return
+		}
+		resolvedProfile, profileErr := resolveRepositoryReviewHistoricalCampaignProfile(
+			r.Context(), h.configPath, cfg, ledger.Automation,
+		)
+		if profileErr != nil {
+			writeRepositoryReviewAutomationError(w, profileErr)
+			return
+		}
+		ledger.Automation, ledger.State, err = recoverRepositoryReviewHistoricalCampaignForRetry(
+			r.Context(), ledger.Store, cfg.WorkspacePath(), ledger.Automation,
+			ledger.State, resolvedProfile,
+		)
+		if errors.Is(err, errRepositoryReviewHistoricalCampaignRecovery) {
+			writeRepositoryReviewJSON(w, http.StatusConflict, map[string]string{
+				"code":    "historical_deduplication_campaign_recovery_required",
+				"message": "Historical deduplication cannot be retried because the exact retained review campaign could not be recovered. Restore the automation's workflow run history, then retry.",
+			})
+			return
+		}
+		if err != nil {
+			writeRepositoryReviewAutomationError(w, err)
+			return
+		}
+	}
 	state, replay, err := ledger.Store.RetryHistoricalDeduplicationReplay(ledger.State.Repository)
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	if controller := h.repositoryReviewControllerInstance(); controller != nil {
-		controller.wakeHistoricalFindingDeduplication()
-	}
+	controller.wakeHistoricalFindingDeduplication()
 	writeRepositoryReviewJSON(w, http.StatusAccepted, map[string]any{
 		"automation":               projectRepositoryReviewAutomation(ledger.Automation),
 		"repository":               repoaudit.Summarize(state),
 		"historical_deduplication": replay,
 	})
+}
+
+func repositoryReviewHistoricalCampaignRecovered(
+	automation repoaudit.RepositoryReviewAutomation,
+	state repoaudit.RepositoryState,
+) bool {
+	commitSHA := repositoryReviewRememberedCommit(automation)
+	coverage := state.CurrentCampaign
+	if !repoaudit.ValidRepositoryReviewCampaignID(automation.CampaignID) ||
+		automation.CampaignRecoveryPending || commitSHA == "" ||
+		coverage == nil || coverage.ID != automation.CampaignID ||
+		coverage.CommitSHA != commitSHA || !coverage.Exact ||
+		coverage.RecoveryDigest == "" || len(coverage.AssignmentCatalog) == 0 ||
+		state.CampaignHistory[coverage.ID] != coverage.CommitSHA {
+		return false
+	}
+	wantedRuns := make(map[string]struct{}, len(automation.RunIDs))
+	for _, runID := range automation.RunIDs {
+		if runID = strings.TrimSpace(runID); runID != "" {
+			wantedRuns[runID] = struct{}{}
+		}
+	}
+	for _, run := range state.Runs {
+		if _, selected := wantedRuns[run.ID]; !selected ||
+			!automation.StartedAt.IsZero() && run.CompletedAt.Before(automation.StartedAt) {
+			continue
+		}
+		if run.CampaignID != automation.CampaignID {
+			return false
+		}
+	}
+	for _, finding := range repoaudit.CurrentCampaignFindings(
+		state, automation.RunIDs, automation.StartedAt,
+	) {
+		if finding.CampaignID != automation.CampaignID {
+			return false
+		}
+	}
+	return true
+}
+
+// recoverRepositoryReviewHistoricalCampaign runs the existing exact legacy
+// recovery adapter before replay is made pending. Its staged automation marker,
+// BeginCampaign, ReconcileCampaign, and final CAS are deliberately reused so a
+// crash or lost response at any phase is safe to repeat.
+func recoverRepositoryReviewHistoricalCampaign(
+	ctx context.Context,
+	store repoaudit.Store,
+	workspace string,
+	automation repoaudit.RepositoryReviewAutomation,
+	state repoaudit.RepositoryState,
+	resolvedProfile workflows.RepositoryReviewModelProfile,
+) (repoaudit.RepositoryReviewAutomation, repoaudit.RepositoryState, error) {
+	if err := ctx.Err(); err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
+	}
+	if repositoryReviewHistoricalCampaignRecovered(automation, state) {
+		return automation, state, nil
+	}
+	if strings.TrimSpace(workspace) == "" || automation.ActiveRunID != "" ||
+		automation.Status == repoaudit.RepositoryReviewAutomationRunning ||
+		automation.Status == repoaudit.RepositoryReviewAutomationStopping {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
+			errRepositoryReviewHistoricalCampaignRecovery
+	}
+	campaignID := automation.CampaignID
+	if campaignID == "" {
+		campaignID = repoaudit.NewRepositoryReviewCampaignID()
+	} else if !repoaudit.ValidRepositoryReviewCampaignID(campaignID) {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
+			errRepositoryReviewHistoricalCampaignRecovery
+	}
+	prepared, err := prepareRepositoryReviewHistoricalCampaignBackfill(
+		ctx, automation, repositoryReviewHistoricalRecoveryProjection(state), campaignID,
+		workflows.NewFileRunStore(workspace), resolvedProfile,
+	)
+	if err != nil {
+		if errors.Is(err, repoaudit.ErrInvalidAutomation) ||
+			errors.Is(err, repoaudit.ErrInvalidPlan) || errors.Is(err, os.ErrNotExist) {
+			return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
+				errRepositoryReviewHistoricalCampaignRecovery
+		}
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
+			err
+	}
+	if !prepared.Available || !prepared.Exact || !prepared.Request.Coverage.Exact ||
+		prepared.Request.Coverage.CommitSHA == "" {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
+			errRepositoryReviewHistoricalCampaignRecovery
+	}
+	installed, prepared, err := installRepositoryReviewLegacyCampaignAuthority(
+		ctx, store, prepared,
+	)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
+	}
+	reconciled, err := applyRepositoryReviewLegacyCampaignBackfill(ctx, store, prepared)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
+	}
+	final, err := updateRepositoryReviewHistoricalAutomation(
+		ctx, store, installed, prepared, reconciled,
+	)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
+	}
+	return final, reconciled, nil
+}
+
+// repositoryReviewHistoricalRecoveryProjection removes only replay-created
+// processing projections from the evidence view passed to legacy recovery.
+// The durable state is left untouched. In particular, original rfn_* findings
+// and their contexts remain available for exact workflow-envelope validation.
+func repositoryReviewHistoricalRecoveryProjection(
+	state repoaudit.RepositoryState,
+) repoaudit.RepositoryState {
+	replayRawIDs := make(map[string]struct{})
+	replayContextIDs := make(map[string]struct{})
+	for _, raw := range state.RawFindings {
+		if !repoaudit.HistoricalDeduplicationRawFinding(raw) {
+			continue
+		}
+		replayRawIDs[raw.ID] = struct{}{}
+		replayContextIDs[raw.ContextID] = struct{}{}
+	}
+	replayFindingIDs := make(map[string]struct{})
+	for _, finding := range state.DeduplicatedFindings {
+		for _, rawID := range finding.RawSourceIDs {
+			if _, replaySource := replayRawIDs[rawID]; replaySource {
+				replayFindingIDs[finding.ID] = struct{}{}
+				break
+			}
+		}
+	}
+	contexts := make([]repoaudit.FindingContext, 0, len(state.Contexts))
+	for _, contextRecord := range state.Contexts {
+		_, replayContext := replayContextIDs[contextRecord.ID]
+		if replayContext && contextRecord.InventoryHash == "historical-replay" &&
+			contextRecord.ProfileHash == "historical-replay" {
+			continue
+		}
+		contexts = append(contexts, contextRecord)
+	}
+	findings := make([]repoaudit.Finding, 0, len(state.Findings))
+	for _, finding := range state.Findings {
+		if _, replayProjection := replayFindingIDs[finding.ID]; replayProjection {
+			continue
+		}
+		findings = append(findings, finding)
+	}
+	state.Contexts = contexts
+	state.Findings = findings
+	return state
 }
 
 func (c *repositoryReviewController) startHistoricalFindingDeduplication(

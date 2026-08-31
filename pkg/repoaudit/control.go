@@ -129,16 +129,19 @@ type RepositoryReviewAssignmentProgress struct {
 }
 
 type RepositoryReviewProgress struct {
-	Stage                  string                             `json:"stage,omitempty"`
-	CompletedBatches       int                                `json:"completed_batches"`
-	TotalBatches           int                                `json:"total_batches"`
-	CoverageAvailable      bool                               `json:"coverage_available"`
-	CoverageExact          bool                               `json:"coverage_exact"`
-	SelectedFiles          int                                `json:"selected_files"`
-	InspectedFiles         int                                `json:"inspected_files"`
-	ReviewedFiles          int                                `json:"reviewed_files"`
-	RemainingFiles         int                                `json:"remaining_files"`
-	UnsupportedFiles       int                                `json:"unsupported_files"`
+	Stage                string `json:"stage,omitempty"`
+	CompletedBatches     int    `json:"completed_batches"`
+	TotalBatches         int    `json:"total_batches"`
+	CoverageAvailable    bool   `json:"coverage_available"`
+	CoverageExact        bool   `json:"coverage_exact"`
+	SelectedFiles        int    `json:"selected_files"`
+	InspectedFiles       int    `json:"inspected_files"`
+	ReviewedFiles        int    `json:"reviewed_files"`
+	RemainingFiles       int    `json:"remaining_files"`
+	UnsupportedFiles     int    `json:"unsupported_files"`
+	RawFindings          int    `json:"raw_findings"`
+	DeduplicatedFindings int    `json:"deduplicated_findings"`
+	// Findings is the deprecated alias for DeduplicatedFindings.
 	Findings               int                                `json:"findings"`
 	FindingAggregates      int                                `json:"finding_aggregates"`
 	PendingFindingMappings int                                `json:"unaggregated_findings"`
@@ -586,6 +589,13 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 	_ = json.Unmarshal(data, &persistedFields)
 	_, hadDeduplicationThreshold := persistedFields["deduplication_similarity_threshold"]
 	_, hadDeduplicationCandidateLimit := persistedFields["deduplication_candidate_limit"]
+	var persistedProgress map[string]json.RawMessage
+	_ = json.Unmarshal(persistedFields["progress"], &persistedProgress)
+	_, hadRawFindingProgress := persistedProgress["raw_findings"]
+	_, hadDeduplicatedFindingProgress := persistedProgress["deduplicated_findings"]
+	if !hadDeduplicatedFindingProgress {
+		automation.Progress.DeduplicatedFindings = automation.Progress.Findings
+	}
 	automation.DeduplicationSettingsSpecified = hadDeduplicationThreshold ||
 		hadDeduplicationCandidateLimit
 	// unmarshalRepositoryReviewGuardState already decoded this exact JSON.
@@ -614,7 +624,8 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 	}
 	if hasLegacyPriceMetadata || hadLegacyGuard || hadLegacyIssueWriter ||
 		hadLegacyAssignmentTimeout || hadLegacySchema ||
-		!hadDeduplicationThreshold || !hadDeduplicationCandidateLimit {
+		!hadDeduplicationThreshold || !hadDeduplicationCandidateLimit ||
+		!hadRawFindingProgress || !hadDeduplicatedFindingProgress {
 		if err := s.saveAutomation(automation); err != nil {
 			return RepositoryReviewAutomation{}, false, err
 		}
@@ -744,6 +755,12 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	automation.CampaignID = strings.TrimSpace(automation.CampaignID)
 	automation.ActiveRunID = strings.TrimSpace(automation.ActiveRunID)
 	automation.Progress.Stage = strings.TrimSpace(automation.Progress.Stage)
+	if automation.Progress.DeduplicatedFindings == 0 && automation.Progress.Findings > 0 {
+		automation.Progress.DeduplicatedFindings = automation.Progress.Findings
+	}
+	if automation.Progress.Findings == 0 && automation.Progress.DeduplicatedFindings > 0 {
+		automation.Progress.Findings = automation.Progress.DeduplicatedFindings
+	}
 	automation.Status = RepositoryReviewAutomationStatus(strings.ToLower(strings.TrimSpace(string(automation.Status))))
 	automation.PauseReason = RepositoryReviewPauseReason(
 		strings.ToLower(strings.TrimSpace(string(automation.PauseReason))),
@@ -1121,7 +1138,10 @@ func validateProgress(progress RepositoryReviewProgress) error {
 		progress.ReviewedFiles < 0 || progress.ReviewedFiles > maxReviewFiles ||
 		progress.RemainingFiles < 0 || progress.RemainingFiles > maxReviewFiles ||
 		progress.UnsupportedFiles < 0 || progress.UnsupportedFiles > maxReviewFiles ||
+		progress.RawFindings < 0 || progress.RawFindings > maxReviewObservations ||
+		progress.DeduplicatedFindings < 0 || progress.DeduplicatedFindings > maxReviewObservations ||
 		progress.Findings < 0 || progress.Findings > maxReviewObservations ||
+		progress.DeduplicatedFindings != progress.Findings ||
 		progress.FindingAggregates < 0 || progress.FindingAggregates > maxReviewObservations ||
 		progress.PendingFindingMappings < 0 || progress.PendingFindingMappings > maxReviewObservations ||
 		progress.FindingAggregates+progress.PendingFindingMappings > progress.Findings ||

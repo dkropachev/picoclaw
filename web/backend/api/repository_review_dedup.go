@@ -49,6 +49,33 @@ var repositoryReviewDeduplicatedFindingCollectionSchema = mustCollectionQuerySch
 	},
 )
 
+var repositoryReviewRawFindingCollectionSchema = mustCollectionQuerySchema(
+	[]collectionquery.FieldSchema{
+		{Name: "id", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "path", Type: collectionquery.TypeString, Sortable: true},
+		{
+			Name: "severity", Type: collectionquery.TypeEnum, Sortable: true,
+			SuggestedValues: []string{"critical", "high", "medium", "low"},
+		},
+		{Name: "title", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "symbol", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "model", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "reviewer", Type: collectionquery.TypeString, Sortable: true},
+		{
+			Name: "deduplication_state", Type: collectionquery.TypeEnum, Sortable: true,
+			SuggestedValues: []string{"pending", "running", "failed", "completed"},
+		},
+		{
+			Name: "disposition", Type: collectionquery.TypeEnum, Sortable: true,
+			SuggestedValues: []string{"undecided", "new", "duplicate"},
+		},
+		{Name: "finding", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "created", Type: collectionquery.TypeTimestamp, Sortable: true},
+		{Name: "updated", Type: collectionquery.TypeTimestamp, Sortable: true},
+	},
+	[]collectionquery.SortField{{Field: "created", Direction: collectionquery.Descending}},
+)
+
 // repositoryReviewDeduplicatedFindingSummary keeps diagnosis evidence,
 // history, and source identities on their dedicated detail routes.
 type repositoryReviewDeduplicatedFindingSummary struct {
@@ -104,15 +131,11 @@ func (h *Handler) handleListRepositoryReviewDeduplicatedFindingsCollection(
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	// Pre-deduplication ledgers retain their legacy collection projection. New
-	// ledgers never expose an undecided raw finding through the Findings route.
-	if ledger.Found && len(ledger.State.RawFindings) == 0 &&
-		len(ledger.State.DeduplicationJobs) == 0 && len(ledger.State.DeduplicatedFindings) == 0 &&
-		!ledger.State.HistoricalDeduplication.Required {
-		h.handleListRepositoryReviewRunFindingsCollection(w, r)
-		return
-	}
 	findings := repositoryReviewCurrentDeduplicatedFindings(ledger.Automation, ledger.State)
+	rawFindings := repoaudit.CurrentCampaignRawFindings(
+		ledger.State, repositoryReviewSelectionCampaignID(ledger.Automation),
+		ledger.Automation.RunIDs, ledger.Automation.StartedAt,
+	)
 	statusIndex := newRepositoryReviewRunFindingStatusIndex(ledger.State)
 	rawByID := make(map[string]repoaudit.RawReviewFinding, len(ledger.State.RawFindings))
 	for _, raw := range ledger.State.RawFindings {
@@ -125,7 +148,8 @@ func (h *Handler) handleListRepositoryReviewDeduplicatedFindingsCollection(
 		))
 	}
 	contextID := repositoryReviewCollectionCursorContext(
-		"deduplicated-findings", ledger.Automation.ID, ledger.Automation.CampaignID,
+		"deduplicated-findings", ledger.Automation.ID,
+		repositoryReviewCurrentCampaignCursorKey(ledger.Automation),
 	)
 	page, pageErr := collectionquery.Paginate(
 		summaries,
@@ -160,7 +184,77 @@ func (h *Handler) handleListRepositoryReviewDeduplicatedFindingsCollection(
 				"symbol": symbols, "contributors": contributors,
 			},
 		),
-		"capabilities": repositoryReviewGlobalCapabilities(ledger),
+		"capabilities":             repositoryReviewGlobalCapabilities(ledger),
+		"findings_processing":      repositoryReviewFindingsProcessingCounters(rawFindings),
+		"historical_deduplication": ledger.State.HistoricalDeduplication,
+	}
+	if ledger.Found {
+		response["repository"] = repoaudit.Summarize(ledger.State)
+	}
+	writeRepositoryReviewJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) handleListRepositoryReviewRawFindingsCollection(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	listRequest, ok := parseCollectionListRequest(w, r, repositoryReviewRawFindingCollectionSchema)
+	if !ok {
+		return
+	}
+	ledger, err := h.repositoryReviewAutomationLedger(r.Context(), r.PathValue("automation_id"))
+	if err != nil {
+		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
+	rawFindings := repoaudit.CurrentCampaignRawFindings(
+		ledger.State, repositoryReviewSelectionCampaignID(ledger.Automation),
+		ledger.Automation.RunIDs, ledger.Automation.StartedAt,
+	)
+	summaries := make([]repositoryReviewRawFindingSummary, 0, len(rawFindings))
+	for _, raw := range rawFindings {
+		summaries = append(summaries, projectRepositoryReviewRawFindingSummary(raw))
+	}
+	contextID := repositoryReviewCollectionCursorContext(
+		"raw-findings", ledger.Automation.ID, repositoryReviewCurrentCampaignCursorKey(ledger.Automation),
+	)
+	page, pageErr := collectionquery.Paginate(
+		summaries,
+		listRequest.Query,
+		listRequest.Cursor,
+		listRequest.Limit,
+		listRequest.Now,
+		repositoryReviewRawFindingPageOptions(contextID),
+	)
+	if pageErr != nil {
+		writeCollectionPageError(w, pageErr)
+		return
+	}
+	titles, paths, symbols, models, reviewers, findings := []string{}, []string{}, []string{}, []string{}, []string{}, []string{}
+	for _, raw := range summaries {
+		titles = append(titles, raw.Title)
+		paths = append(paths, raw.Path)
+		symbols = append(symbols, raw.Symbol)
+		models = append(models, raw.Model)
+		reviewers = append(reviewers, raw.Reviewer)
+		findings = append(findings, raw.DeduplicatedFindingID)
+	}
+	response := map[string]any{
+		"automation":      projectRepositoryReviewAutomation(ledger.Automation),
+		"raw_findings":    page.Items,
+		"total":           page.Total,
+		"next_cursor":     page.NextCursor,
+		"canonical_query": listRequest.Query.Canonical(),
+		"query_schema": collectionSchemaWithSuggestions(
+			repositoryReviewRawFindingCollectionSchema,
+			map[collectionquery.Field][]string{
+				"title": titles, "path": paths, "symbol": symbols,
+				"model": models, "reviewer": reviewers, "finding": findings,
+			},
+		),
+		"capabilities":             repositoryReviewGlobalCapabilities(ledger),
+		"findings_processing":      repositoryReviewFindingsProcessingCounters(rawFindings),
+		"historical_deduplication": ledger.State.HistoricalDeduplication,
 	}
 	if ledger.Found {
 		response["repository"] = repoaudit.Summarize(ledger.State)
@@ -174,10 +268,20 @@ func (h *Handler) writeRepositoryReviewDeduplicatedFindingsPage(
 	scope string,
 	offset, limit int,
 ) {
-	findings := append([]repoaudit.DeduplicatedReviewFinding(nil), ledger.State.DeduplicatedFindings...)
-	if scope != "all" {
+	findings := make([]repoaudit.DeduplicatedReviewFinding, 0, len(ledger.State.DeduplicatedFindings))
+	if scope == "all" {
+		for _, finding := range ledger.State.DeduplicatedFindings {
+			if strings.HasPrefix(finding.ID, "rdf_") {
+				findings = append(findings, finding)
+			}
+		}
+	} else {
 		findings = repositoryReviewCurrentDeduplicatedFindings(ledger.Automation, ledger.State)
 	}
+	rawFindings := repoaudit.CurrentCampaignRawFindings(
+		ledger.State, repositoryReviewSelectionCampaignID(ledger.Automation),
+		ledger.Automation.RunIDs, ledger.Automation.StartedAt,
+	)
 	total := len(findings)
 	offset = min(offset, total)
 	end := min(total, offset+limit)
@@ -189,14 +293,16 @@ func (h *Handler) writeRepositoryReviewDeduplicatedFindingsPage(
 		}
 	}
 	response := map[string]any{
-		"automation":          projectRepositoryReviewAutomation(ledger.Automation),
-		"repository":          repoaudit.Summarize(ledger.State),
-		"findings":            page,
-		"repository_findings": []repoaudit.RepositoryFinding{},
-		"scope":               scope,
-		"offset":              offset,
-		"total":               total,
-		"capabilities":        repositoryReviewGlobalCapabilities(ledger),
+		"automation":               projectRepositoryReviewAutomation(ledger.Automation),
+		"repository":               repoaudit.Summarize(ledger.State),
+		"findings":                 page,
+		"repository_findings":      []repoaudit.RepositoryFinding{},
+		"scope":                    scope,
+		"offset":                   offset,
+		"total":                    total,
+		"capabilities":             repositoryReviewGlobalCapabilities(ledger),
+		"findings_processing":      repositoryReviewFindingsProcessingCounters(rawFindings),
+		"historical_deduplication": ledger.State.HistoricalDeduplication,
 	}
 	if end < total {
 		response["next_offset"] = end
@@ -230,23 +336,25 @@ func (h *Handler) handleGetRepositoryReviewDeduplicatedFinding(
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	if ledger.Found && len(ledger.State.RawFindings) == 0 &&
-		len(ledger.State.DeduplicationJobs) == 0 && len(ledger.State.DeduplicatedFindings) == 0 &&
-		!ledger.State.HistoricalDeduplication.Required {
-		h.handleGetRepositoryReviewAutomationFinding(w, r)
-		return
+	findingID := strings.TrimSpace(r.PathValue("finding_id"))
+	var finding repoaudit.DeduplicatedReviewFinding
+	found := false
+	for _, candidate := range repositoryReviewCurrentDeduplicatedFindings(
+		ledger.Automation, ledger.State,
+	) {
+		if candidate.ID == findingID {
+			finding, found = candidate, true
+			break
+		}
 	}
-	finding, found := repositoryReviewDeduplicatedFindingByID(
-		ledger.State, strings.TrimSpace(r.PathValue("finding_id")),
-	)
 	if !found {
 		if _, aggregateFound := repositoryReviewRepositoryFindingByID(
-			ledger.State, strings.TrimSpace(r.PathValue("finding_id")),
-		); !aggregateFound {
-			writeRepositoryReviewAutomationError(w, os.ErrNotExist)
+			ledger.State, findingID,
+		); aggregateFound {
+			h.handleGetRepositoryReviewAutomationFinding(w, r)
 			return
 		}
-		h.handleGetRepositoryReviewAutomationFinding(w, r)
+		writeRepositoryReviewAutomationError(w, os.ErrNotExist)
 		return
 	}
 	capabilities := repositoryReviewGlobalCapabilities(ledger)
@@ -299,9 +407,17 @@ func (h *Handler) handleListRepositoryReviewRawSources(w http.ResponseWriter, r 
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	finding, found := repositoryReviewDeduplicatedFindingByID(
-		ledger.State, strings.TrimSpace(r.PathValue("finding_id")),
-	)
+	requestedFindingID := strings.TrimSpace(r.PathValue("finding_id"))
+	var finding repoaudit.DeduplicatedReviewFinding
+	found := false
+	for _, candidate := range repositoryReviewCurrentDeduplicatedFindings(
+		ledger.Automation, ledger.State,
+	) {
+		if candidate.ID == requestedFindingID {
+			finding, found = candidate, true
+			break
+		}
+	}
 	if !found {
 		writeRepositoryReviewAutomationError(w, os.ErrNotExist)
 		return
@@ -339,14 +455,15 @@ func (h *Handler) handleGetRepositoryReviewRawSource(w http.ResponseWriter, r *h
 		return
 	}
 	response := map[string]any{
-		"automation": projectRepositoryReviewAutomation(ledger.Automation),
-		"repository": repoaudit.Summarize(ledger.State),
-		"source":     raw,
+		"automation":               projectRepositoryReviewAutomation(ledger.Automation),
+		"repository":               repoaudit.Summarize(ledger.State),
+		"source":                   projectRepositoryReviewRawFindingDetail(raw),
+		"historical_deduplication": ledger.State.HistoricalDeduplication,
 	}
 	if contextRecord, found := repositoryReviewContextByID(ledger.State, raw.ContextID); found {
 		response["context"] = contextRecord
 	}
-	if raw.DeduplicatedFindingID != "" {
+	if strings.HasPrefix(raw.DeduplicatedFindingID, "rdf_") {
 		if finding, found := repositoryReviewDeduplicatedFindingByID(
 			ledger.State, raw.DeduplicatedFindingID,
 		); found {
@@ -377,6 +494,14 @@ func (h *Handler) handleRetryRepositoryReviewRawSource(w http.ResponseWriter, r 
 	if !ok {
 		return
 	}
+	persistedRaw, persisted := repositoryReviewRawFindingByID(ledger.State, raw.ID)
+	if !persisted || repoaudit.HistoricalDeduplicationRawFinding(persistedRaw) {
+		writeRepositoryReviewError(w, errors.Join(
+			repoaudit.ErrConflict,
+			errors.New("historical raw findings require retrying the whole historical deduplication replay"),
+		))
+		return
+	}
 	state, retried, err := ledger.Store.RetryDeduplication(ledger.State.Repository, raw.ID)
 	if err != nil {
 		writeRepositoryReviewError(w, err)
@@ -385,17 +510,15 @@ func (h *Handler) handleRetryRepositoryReviewRawSource(w http.ResponseWriter, r 
 	if controller := h.repositoryReviewControllerInstance(); controller != nil {
 		controller.wakeRepositoryFindingDeduplication()
 	}
-	campaignRaw := make([]repoaudit.RawReviewFinding, 0)
-	for _, candidate := range state.RawFindings {
-		if candidate.CampaignID == retried.CampaignID {
-			campaignRaw = append(campaignRaw, candidate)
-		}
-	}
+	currentRaw := repoaudit.CurrentCampaignRawFindings(
+		state, repositoryReviewSelectionCampaignID(ledger.Automation),
+		ledger.Automation.RunIDs, ledger.Automation.StartedAt,
+	)
 	writeRepositoryReviewJSON(w, http.StatusAccepted, map[string]any{
 		"automation":          projectRepositoryReviewAutomation(ledger.Automation),
 		"repository":          repoaudit.Summarize(state),
-		"source":              retried,
-		"findings_processing": repositoryReviewFindingsProcessingCounters(campaignRaw),
+		"source":              projectRepositoryReviewRawFindingDetail(retried),
+		"findings_processing": repositoryReviewFindingsProcessingCounters(currentRaw),
 	})
 }
 
@@ -414,20 +537,25 @@ func (h *Handler) handleGetRepositoryReviewFindingsProcessing(
 		return
 	}
 	campaignID := strings.TrimSpace(r.PathValue("campaign_id"))
-	if campaignID == "" {
-		campaignID = ledger.Automation.CampaignID
-	}
-	if campaignID == "" || len(campaignID) > 256 || strings.ContainsRune(campaignID, 0) {
+	if campaignID != "" && (len(campaignID) > 256 || strings.ContainsRune(campaignID, 0)) {
 		writeRepositoryReviewError(w, errors.New("a valid campaign is required"))
 		return
 	}
 	campaignRaw := make([]repoaudit.RawReviewFinding, 0)
-	rawFindings := make([]repoaudit.RawReviewFinding, 0)
-	for _, raw := range ledger.State.RawFindings {
-		if raw.CampaignID != campaignID {
-			continue
+	if campaignID == "" {
+		campaignRaw = repoaudit.CurrentCampaignRawFindings(
+			ledger.State, repositoryReviewSelectionCampaignID(ledger.Automation),
+			ledger.Automation.RunIDs, ledger.Automation.StartedAt,
+		)
+	} else {
+		for _, raw := range ledger.State.RawFindings {
+			if raw.CampaignID == campaignID {
+				campaignRaw = append(campaignRaw, raw)
+			}
 		}
-		campaignRaw = append(campaignRaw, raw)
+	}
+	rawFindings := make([]repoaudit.RawReviewFinding, 0)
+	for _, raw := range campaignRaw {
 		if stateFilter == "" || string(raw.State) == stateFilter {
 			rawFindings = append(rawFindings, raw)
 		}
@@ -471,20 +599,37 @@ func (h *Handler) repositoryReviewRawSource(
 		writeRepositoryReviewAutomationError(w, err)
 		return repositoryReviewAutomationLedger{}, repoaudit.RawReviewFinding{}, false
 	}
-	raw, found := repositoryReviewRawFindingByID(
-		ledger.State, strings.TrimSpace(r.PathValue("source_id")),
-	)
+	requestedID := strings.TrimSpace(r.PathValue("source_id"))
+	campaignID := strings.TrimSpace(r.PathValue("campaign_id"))
+	var candidates []repoaudit.RawReviewFinding
+	if campaignID != "" {
+		for _, raw := range ledger.State.RawFindings {
+			if raw.CampaignID == campaignID {
+				candidates = append(candidates, raw)
+			}
+		}
+	} else {
+		candidates = repoaudit.CurrentCampaignRawFindings(
+			ledger.State, repositoryReviewSelectionCampaignID(ledger.Automation),
+			ledger.Automation.RunIDs, ledger.Automation.StartedAt,
+		)
+	}
+	raw, found := repositoryReviewRawFindingByAlias(candidates, requestedID)
 	if !found {
 		writeRepositoryReviewAutomationError(w, os.ErrNotExist)
 		return repositoryReviewAutomationLedger{}, repoaudit.RawReviewFinding{}, false
 	}
-	if campaignID := strings.TrimSpace(r.PathValue("campaign_id")); campaignID != "" &&
-		raw.CampaignID != campaignID {
-		writeRepositoryReviewAutomationError(w, os.ErrNotExist)
-		return repositoryReviewAutomationLedger{}, repoaudit.RawReviewFinding{}, false
-	}
 	if findingID := strings.TrimSpace(r.PathValue("finding_id")); findingID != "" {
-		finding, exists := repositoryReviewDeduplicatedFindingByID(ledger.State, findingID)
+		var finding repoaudit.DeduplicatedReviewFinding
+		exists := false
+		for _, candidate := range repositoryReviewCurrentDeduplicatedFindings(
+			ledger.Automation, ledger.State,
+		) {
+			if candidate.ID == findingID {
+				finding, exists = candidate, true
+				break
+			}
+		}
 		if !exists || !containsRepositoryReviewSourceID(finding.RawSourceIDs, raw.ID) {
 			writeRepositoryReviewAutomationError(w, os.ErrNotExist)
 			return repositoryReviewAutomationLedger{}, repoaudit.RawReviewFinding{}, false
@@ -497,15 +642,38 @@ func repositoryReviewCurrentDeduplicatedFindings(
 	automation repoaudit.RepositoryReviewAutomation,
 	state repoaudit.RepositoryState,
 ) []repoaudit.DeduplicatedReviewFinding {
-	result := make([]repoaudit.DeduplicatedReviewFinding, 0, len(state.DeduplicatedFindings))
-	for _, finding := range state.DeduplicatedFindings {
-		if automation.CampaignID == "" || repoaudit.DeduplicatedFindingBelongsToCampaign(
-			state, finding, automation.CampaignID,
-		) {
+	selected := repoaudit.CurrentCampaignDeduplicatedFindings(
+		state, repositoryReviewSelectionCampaignID(automation),
+		automation.RunIDs, automation.StartedAt,
+	)
+	result := make([]repoaudit.DeduplicatedReviewFinding, 0, len(selected))
+	for _, finding := range selected {
+		if strings.HasPrefix(finding.ID, "rdf_") {
 			result = append(result, finding)
 		}
 	}
 	return result
+}
+
+func repositoryReviewSelectionCampaignID(
+	automation repoaudit.RepositoryReviewAutomation,
+) string {
+	if automation.CampaignRecoveryPending {
+		return ""
+	}
+	return automation.CampaignID
+}
+
+func repositoryReviewCurrentCampaignCursorKey(
+	automation repoaudit.RepositoryReviewAutomation,
+) string {
+	if !automation.StartedAt.IsZero() {
+		return automation.StartedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if automation.CampaignID != "" {
+		return automation.CampaignID
+	}
+	return "current"
 }
 
 func repositoryReviewDeduplicatedFindingByID(
@@ -532,6 +700,44 @@ func repositoryReviewRawFindingByID(
 		}
 	}
 	return repoaudit.RawReviewFinding{}, false
+}
+
+func repositoryReviewRawFindingByAlias(
+	findings []repoaudit.RawReviewFinding,
+	id string,
+) (repoaudit.RawReviewFinding, bool) {
+	id = strings.TrimSpace(id)
+	for _, finding := range findings {
+		if finding.ID == id {
+			return finding, true
+		}
+	}
+	if !strings.HasPrefix(id, "rfn_") {
+		return repoaudit.RawReviewFinding{}, false
+	}
+	var selected repoaudit.RawReviewFinding
+	found := false
+	for _, finding := range findings {
+		if finding.LegacyFindingID != id && finding.DeduplicatedFindingID != id {
+			continue
+		}
+		if !found || repositoryReviewRawFindingBefore(finding, selected) {
+			selected, found = finding, true
+		}
+	}
+	return selected, found
+}
+
+func repositoryReviewRawFindingBefore(
+	left, right repoaudit.RawReviewFinding,
+) bool {
+	if left.InsertionOrdinal != right.InsertionOrdinal {
+		return left.InsertionOrdinal < right.InsertionOrdinal
+	}
+	if !left.CreatedAt.Equal(right.CreatedAt) {
+		return left.CreatedAt.Before(right.CreatedAt)
+	}
+	return left.ID < right.ID
 }
 
 func repositoryReviewContextByID(
@@ -598,13 +804,72 @@ func appendUniqueRepositoryReviewContributor(values []string, value string) []st
 func projectRepositoryReviewRawFindingSummary(
 	raw repoaudit.RawReviewFinding,
 ) repositoryReviewRawFindingSummary {
+	parentID := raw.DeduplicatedFindingID
+	if !strings.HasPrefix(parentID, "rdf_") {
+		parentID = ""
+	}
 	return repositoryReviewRawFindingSummary{
 		ID: raw.ID, CampaignID: raw.CampaignID, Path: raw.File.Path, Line: raw.Line,
 		Severity: raw.Severity, Title: raw.Title, Symbol: raw.Symbol,
 		Model: raw.Model, ModelAlias: raw.ModelAlias, Account: raw.Account,
 		Reviewer: raw.Reviewer, DeduplicationState: raw.State,
-		Disposition: raw.Disposition, DeduplicatedFindingID: raw.DeduplicatedFindingID,
+		Disposition: raw.Disposition, DeduplicatedFindingID: parentID,
 		Failure: raw.Failure, CreatedAt: raw.CreatedAt, UpdatedAt: raw.UpdatedAt,
+	}
+}
+
+func projectRepositoryReviewRawFindingDetail(
+	raw repoaudit.RawReviewFinding,
+) repoaudit.RawReviewFinding {
+	if !strings.HasPrefix(raw.DeduplicatedFindingID, "rdf_") {
+		raw.DeduplicatedFindingID = ""
+	}
+	return raw
+}
+
+func repositoryReviewRawFindingPageOptions(
+	contextID string,
+) collectionquery.PageOptions[repositoryReviewRawFindingSummary] {
+	return collectionquery.PageOptions[repositoryReviewRawFindingSummary]{
+		ID: func(finding repositoryReviewRawFindingSummary) (string, error) {
+			return repositoryReviewCollectionCursorItemID(contextID, finding.ID)
+		},
+		ValidateID: repositoryReviewCollectionCursorIDValidator(contextID),
+		Resolve: func(
+			finding repositoryReviewRawFindingSummary,
+			field collectionquery.Field,
+			_ time.Time,
+		) (collectionquery.FieldValue, bool) {
+			switch field {
+			case "id":
+				return collectionquery.StringValue(finding.ID), true
+			case "path":
+				return collectionquery.StringValue(finding.Path), true
+			case "severity":
+				return collectionquery.EnumValue(finding.Severity), true
+			case "title":
+				return collectionquery.StringValue(finding.Title), true
+			case "symbol":
+				return collectionquery.StringValue(finding.Symbol), true
+			case "model":
+				return collectionquery.StringValue(finding.Model), true
+			case "reviewer":
+				return collectionquery.StringValue(finding.Reviewer), true
+			case "deduplication_state":
+				return collectionquery.EnumValue(string(finding.DeduplicationState)), true
+			case "disposition":
+				return collectionquery.EnumValue(string(finding.Disposition)), true
+			case "finding":
+				return collectionquery.StringValue(finding.DeduplicatedFindingID), true
+			case "created":
+				return collectionquery.TimestampValue(finding.CreatedAt), true
+			case "updated":
+				return collectionquery.TimestampValue(finding.UpdatedAt), true
+			default:
+				return collectionquery.FieldValue{}, false
+			}
+		},
+		Compare: repositoryReviewSeverityComparator,
 	}
 }
 

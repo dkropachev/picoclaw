@@ -2,7 +2,9 @@ import { createFileRoute, useLocation } from "@tanstack/react-router"
 import { useCallback, useEffect, useMemo } from "react"
 
 import {
+  normalizeRepositoryReviewRawFindingsSearch,
   repositoryReviewDefaultQuery,
+  repositoryReviewParentNavigationState,
   repositoryReviewViews,
 } from "@/components/repository-reviews/repository-review-route-state"
 import { RepositoryReviewRunsPage } from "@/components/repository-reviews/repository-review-runs-page"
@@ -73,6 +75,17 @@ function RepositoryReviewsRoutePage() {
           to: "/repository-reviews/$id",
           params: { id: review.id },
           search,
+        })
+      }
+      onOpenRawFindings={(review) =>
+        void navigate({
+          to: "/repository-reviews/$id/raw-findings",
+          params: { id: review.id },
+          search: normalizeRepositoryReviewRawFindingsSearch({}),
+          state: repositoryReviewParentNavigationState(
+            search,
+            repositoryReviewDefaultQuery,
+          ),
         })
       }
     />

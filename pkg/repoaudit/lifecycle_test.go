@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,8 @@ func TestRecordPersistsLifecycleProvenanceAndMappingJobAtomically(t *testing.T) 
 		finding.TargetBranch != "main" || finding.AdvertisedDefaultBranch != "main" ||
 		!finding.TargetIsDefault || len(state.MappingJobs) != 1 || len(state.RawFindings) != 1 ||
 		len(state.DeduplicatedFindings) != 1 || len(state.DeduplicationJobs) != 1 ||
+		!strings.HasPrefix(state.RawFindings[0].ID, "rrw_") ||
+		!strings.HasPrefix(state.DeduplicatedFindings[0].ID, "rdf_") ||
 		state.MappingJobs[0].ReviewFindingID != state.DeduplicatedFindings[0].ID ||
 		state.RawFindings[0].DeduplicatedFindingID != state.DeduplicatedFindings[0].ID {
 		t.Fatalf("recorded lifecycle state = %#v / %#v", finding, state.MappingJobs)
@@ -100,6 +103,217 @@ func TestSchemaOneListMigrationAndExplicitJobReconciliation(t *testing.T) {
 	if err != nil || !strings.Contains(string(persisted), fmt.Sprintf(`"schema_version":%d`, SchemaVersion)) ||
 		!strings.Contains(string(persisted), `"mapping_jobs"`) {
 		t.Fatalf("persisted migration = %s, err=%v", persisted, err)
+	}
+}
+
+func TestRawFindingIDMigrationRewritesEveryDurableReference(t *testing.T) {
+	for _, oldID := range []string{"rrf_native", "rrl_compatibility"} {
+		t.Run(oldID, func(t *testing.T) {
+			state := RepositoryState{
+				RawFindings:       []RawReviewFinding{{ID: oldID}},
+				DeduplicationJobs: []DeduplicationJob{{RawFindingID: oldID}},
+				DeduplicatedFindings: []DeduplicatedReviewFinding{{
+					RawSourceIDs: []string{oldID},
+					History:      []DeduplicatedFindingHistoryEntry{{RawFindingID: oldID}},
+				}},
+				Findings: []Finding{{RawFindingIDs: []string{oldID}}},
+				Runs:     []ReviewRun{{FindingIDs: []string{oldID}}},
+				ActiveReviewRun: &RepositoryReviewActiveRun{
+					FindingIDs: []string{oldID},
+				},
+			}
+			migrated, err := migrateRepositoryReviewRawFindingIDs(&state)
+			want := "rrw_" + oldID[len("rrf_"):]
+			if err != nil || !migrated || state.RawFindings[0].ID != want ||
+				state.DeduplicationJobs[0].RawFindingID != want ||
+				state.DeduplicatedFindings[0].RawSourceIDs[0] != want ||
+				state.DeduplicatedFindings[0].History[0].RawFindingID != want ||
+				state.Findings[0].RawFindingIDs[0] != want ||
+				state.Runs[0].FindingIDs[0] != want ||
+				state.ActiveReviewRun.FindingIDs[0] != want {
+				t.Fatalf("migrated=%v state=%#v err=%v", migrated, state, err)
+			}
+			if migratedAgain, err := migrateRepositoryReviewRawFindingIDs(&state); err != nil || migratedAgain {
+				t.Fatalf("second migration=%v err=%v", migratedAgain, err)
+			}
+		})
+	}
+	collision := RepositoryState{RawFindings: []RawReviewFinding{
+		{ID: "rrf_same"}, {ID: "rrw_same"},
+	}}
+	if _, err := migrateRepositoryReviewRawFindingIDs(&collision); err == nil {
+		t.Fatal("raw ID collision was accepted")
+	}
+}
+
+func TestCompatibilityParentMigrationRewritesLifecycleReferences(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	oldRawID := "rrl_compatibility"
+	newRawID := "rrw_compatibility"
+	oldParentID := "rfn_compatibility"
+	newParentID := stableID("rdf_", newRawID)
+	raw := RawReviewFinding{
+		ID: oldRawID, DeduplicatedFindingID: oldParentID,
+		AssignmentID: "record-000-000",
+		History:      []RawFindingHistoryEntry{{DeduplicatedFindingID: oldParentID}},
+	}
+	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(raw)
+	state := RepositoryState{
+		RawFindings: []RawReviewFinding{raw},
+		DeduplicationJobs: []DeduplicationJob{{
+			RawFindingID:      oldRawID,
+			CandidateVersions: []DeduplicationCandidateVersion{{CandidateID: oldParentID}},
+			ShortlistedScores: []DeduplicationCandidateScore{{CandidateID: oldParentID}},
+			Decision:          DeduplicationJudgment{CandidateID: oldParentID},
+		}},
+		DeduplicatedFindings: []DeduplicatedReviewFinding{{
+			ID: oldParentID, DiagnosisDigest: raw.DiagnosisDigest,
+			RawSourceIDs: []string{oldRawID},
+			History:      []DeduplicatedFindingHistoryEntry{{RawFindingID: oldRawID}},
+		}},
+		Findings: []Finding{{
+			ID: oldParentID, RawFindingIDs: []string{oldRawID},
+			PostResolutionFindingID: oldParentID,
+		}},
+		MappingJobs: []RepositoryMappingJob{{
+			ID: mappingJobID(oldParentID), ReviewFindingID: oldParentID,
+		}},
+		RepositoryFindings: []RepositoryFinding{{
+			ReviewFindingIDs: []string{oldParentID},
+			PathSymbolHistory: []RepositoryFindingPathSymbol{{
+				ReviewFindingID: oldParentID, ObservedAt: now,
+			}},
+		}},
+		IssueDrafts: []IssueDraft{{FindingIDs: []string{oldParentID}}},
+		Runs:        []ReviewRun{{FindingIDs: []string{oldParentID}}},
+		ActiveReviewRun: &RepositoryReviewActiveRun{
+			FindingIDs: []string{oldRawID},
+		},
+	}
+	migrated, err := migrateRepositoryReviewRawFindingIDs(&state)
+	if err != nil || !migrated {
+		t.Fatalf("migration=%v err=%v", migrated, err)
+	}
+	migratedRaw := state.RawFindings[0]
+	if migratedRaw.ID != newRawID || migratedRaw.LegacyFindingID != oldParentID ||
+		migratedRaw.DeduplicatedFindingID != newParentID ||
+		migratedRaw.History[0].DeduplicatedFindingID != newParentID ||
+		migratedRaw.DiagnosisDigest != RawReviewFindingDiagnosisDigest(migratedRaw) ||
+		state.DeduplicatedFindings[0].ID != newParentID ||
+		state.DeduplicatedFindings[0].DiagnosisDigest != migratedRaw.DiagnosisDigest ||
+		state.DeduplicatedFindings[0].RawSourceIDs[0] != newRawID ||
+		state.DeduplicatedFindings[0].History[0].RawFindingID != newRawID ||
+		state.Findings[0].ID != newParentID ||
+		state.Findings[0].PostResolutionFindingID != newParentID ||
+		state.Findings[0].RawFindingIDs[0] != newRawID ||
+		state.MappingJobs[0].ReviewFindingID != newParentID ||
+		state.MappingJobs[0].ID != mappingJobID(newParentID) ||
+		state.RepositoryFindings[0].ReviewFindingIDs[0] != newParentID ||
+		state.RepositoryFindings[0].PathSymbolHistory[0].ReviewFindingID != newParentID ||
+		state.IssueDrafts[0].FindingIDs[0] != newParentID ||
+		state.Runs[0].FindingIDs[0] != newParentID ||
+		state.ActiveReviewRun.FindingIDs[0] != newRawID ||
+		state.DeduplicationJobs[0].RawFindingID != newRawID ||
+		state.DeduplicationJobs[0].CandidateVersions[0].CandidateID != newParentID ||
+		state.DeduplicationJobs[0].ShortlistedScores[0].CandidateID != newParentID ||
+		state.DeduplicationJobs[0].Decision.CandidateID != newParentID {
+		t.Fatalf("migrated state=%#v", state)
+	}
+	if migratedAgain, err := migrateRepositoryReviewRawFindingIDs(&state); err != nil || migratedAgain {
+		t.Fatalf("second migration=%v err=%v", migratedAgain, err)
+	}
+
+	collisionRaw := raw
+	collision := RepositoryState{
+		RawFindings: []RawReviewFinding{collisionRaw},
+		DeduplicatedFindings: []DeduplicatedReviewFinding{
+			{ID: oldParentID}, {ID: newParentID},
+		},
+		Findings: []Finding{{ID: oldParentID}, {ID: newParentID}},
+	}
+	if _, err := migrateRepositoryReviewRawFindingIDs(&collision); err == nil {
+		t.Fatal("compatibility parent collision was accepted")
+	}
+}
+
+func TestCompatibilityParentMigrationPersistsCanonicalIdentityOnLoad(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewStore(workspace)
+	state, _ := recordLifecycleFinding(
+		t, store, strings.Repeat("a", 40), strings.Repeat("b", 40), "legacy-record-run",
+		"main", "main", true, "legacy compatibility parent",
+	)
+	oldParentID := "rfn_persisted_compatibility"
+	newRawID := state.RawFindings[0].ID
+	oldRawID := "rrl_" + strings.TrimPrefix(newRawID, "rrw_")
+	newParentID := stableID("rdf_", newRawID)
+	originalParentID := state.DeduplicatedFindings[0].ID
+	raw := &state.RawFindings[0]
+	raw.ID = oldRawID
+	raw.LegacyFindingID = ""
+	raw.DeduplicatedFindingID = oldParentID
+	for index := range raw.History {
+		raw.History[index].DeduplicatedFindingID = oldParentID
+	}
+	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(*raw)
+	deduplicated := &state.DeduplicatedFindings[0]
+	deduplicated.ID = oldParentID
+	deduplicated.DiagnosisDigest = raw.DiagnosisDigest
+	deduplicated.RawSourceIDs[0] = oldRawID
+	for index := range deduplicated.History {
+		deduplicated.History[index].RawFindingID = oldRawID
+	}
+	for index := range state.Findings {
+		if state.Findings[index].ID == originalParentID {
+			state.Findings[index].ID = oldParentID
+		}
+	}
+	for index := range state.DeduplicationJobs {
+		state.DeduplicationJobs[index].RawFindingID = oldRawID
+	}
+	for index := range state.MappingJobs {
+		state.MappingJobs[index].ID = mappingJobID(oldParentID)
+		state.MappingJobs[index].ReviewFindingID = oldParentID
+	}
+	for runIndex := range state.Runs {
+		for findingIndex := range state.Runs[runIndex].FindingIDs {
+			if state.Runs[runIndex].FindingIDs[findingIndex] == originalParentID {
+				state.Runs[runIndex].FindingIDs[findingIndex] = oldParentID
+			}
+		}
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(store.path(state.Repository), encoded, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	loaded, found, err := store.Get(state.Repository)
+	if err != nil || !found {
+		t.Fatalf("load found=%v err=%v", found, err)
+	}
+	if loaded.RawFindings[0].ID != newRawID ||
+		loaded.RawFindings[0].LegacyFindingID != oldParentID ||
+		loaded.RawFindings[0].DeduplicatedFindingID != newParentID ||
+		loaded.RawFindings[0].DiagnosisDigest != RawReviewFindingDiagnosisDigest(loaded.RawFindings[0]) ||
+		loaded.DeduplicatedFindings[0].ID != newParentID ||
+		loaded.DeduplicatedFindings[0].DiagnosisDigest != loaded.RawFindings[0].DiagnosisDigest ||
+		loaded.Findings[0].ID != newParentID ||
+		loaded.MappingJobs[0].ID != mappingJobID(newParentID) ||
+		loaded.MappingJobs[0].ReviewFindingID != newParentID ||
+		loaded.Runs[0].FindingIDs[0] != newParentID {
+		t.Fatalf("loaded migration=%#v", loaded)
+	}
+	persisted, err := os.ReadFile(store.path(state.Repository))
+	if err != nil || !strings.Contains(string(persisted), `"legacy_finding_id":"`+oldParentID+`"`) ||
+		!strings.Contains(string(persisted), `"id":"`+newParentID+`"`) {
+		t.Fatalf("persisted migration=%s err=%v", persisted, err)
+	}
+	reloaded, found, err := store.Get(state.Repository)
+	if err != nil || !found || !reflect.DeepEqual(loaded, reloaded) {
+		t.Fatalf("idempotent reload found=%v err=%v\nfirst=%#v\nsecond=%#v", found, err, loaded, reloaded)
 	}
 }
 

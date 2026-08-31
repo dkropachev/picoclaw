@@ -11,6 +11,14 @@ import { describe, expect, it, vi } from "vitest"
 
 import { routeTree } from "@/routeTree.gen"
 
+vi.mock("@/api/repository-reviews", () => ({
+  getRepositoryReviewRawSource: vi.fn(
+    async (_automationID: string, sourceID: string) => ({
+      source: { id: sourceID.startsWith("rfn_") ? "rrw_1" : sourceID },
+    }),
+  ),
+}))
+
 vi.mock("@/api/launcher-auth", () => ({
   getLauncherAuthStatus: vi.fn().mockResolvedValue({
     authenticated: true,
@@ -37,12 +45,19 @@ vi.mock("@/components/app-layout", () => ({
 vi.mock("@/components/repository-reviews/repository-review-runs-page", () => ({
   RepositoryReviewRunsPage: ({
     onOpen,
+    onOpenRawFindings,
   }: {
     onOpen: (item: { id: string }) => void
+    onOpenRawFindings: (item: { id: string }) => void
   }) => (
-    <button type="button" onClick={() => onOpen({ id: "auto_1" })}>
-      Open review
-    </button>
+    <>
+      <button type="button" onClick={() => onOpen({ id: "auto_1" })}>
+        Open review
+      </button>
+      <button type="button" onClick={() => onOpenRawFindings({ id: "auto_1" })}>
+        Open raw findings from review row
+      </button>
+    </>
   ),
 }))
 
@@ -52,14 +67,19 @@ vi.mock(
     RepositoryReviewDetailPage: ({
       id,
       onFindings,
+      onRawFindings,
     }: {
       id: string
       onFindings: () => void
+      onRawFindings: () => void
     }) => (
       <div>
         <output>Detail {id}</output>
         <button type="button" onClick={onFindings}>
           Open findings
+        </button>
+        <button type="button" onClick={onRawFindings}>
+          Open raw findings
         </button>
       </div>
     ),
@@ -122,6 +142,40 @@ vi.mock(
           Open repository finding
         </button>
       </div>
+    ),
+  }),
+)
+
+vi.mock(
+  "@/components/repository-reviews/repository-review-raw-findings-page",
+  () => ({
+    RepositoryReviewRawFindingsPage: ({
+      automationID,
+      onBack,
+      onOpenRawFinding,
+    }: {
+      automationID: string
+      onBack: () => void
+      onOpenRawFinding: (id: string) => void
+    }) => (
+      <div>
+        <output>Raw findings {automationID}</output>
+        <button type="button" onClick={onBack}>
+          Back from raw findings
+        </button>
+        <button type="button" onClick={() => onOpenRawFinding("rrw_1")}>
+          Open raw finding
+        </button>
+      </div>
+    ),
+  }),
+)
+
+vi.mock(
+  "@/components/repository-reviews/repository-review-raw-finding-page",
+  () => ({
+    RepositoryReviewRawFindingPage: ({ sourceID }: { sourceID: string }) => (
+      <output>Raw finding {sourceID}</output>
     ),
   }),
 )
@@ -361,6 +415,56 @@ describe("repository review routes", () => {
     })
   })
 
+  it("preserves raw finding collection state through detail and back navigation", async () => {
+    const router = testRouter(
+      "/repository-reviews?q=status%20%3D%20running&view=grid",
+    )
+    const user = userEvent.setup()
+    render(<RouterProvider router={router} />)
+
+    await user.click(await screen.findByRole("button", { name: "Open review" }))
+    await user.click(
+      await screen.findByRole("button", { name: "Open raw findings" }),
+    )
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repository-reviews/auto_1/raw-findings",
+      ),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "ALL ORDER BY created DESC",
+    })
+
+    await user.click(screen.getByRole("button", { name: "Open raw finding" }))
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repository-reviews/auto_1/raw-findings/rrw_1",
+      ),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "ALL ORDER BY created DESC",
+    })
+    await router.history.back()
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repository-reviews/auto_1/raw-findings",
+      ),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "ALL ORDER BY created DESC",
+    })
+    await user.click(
+      screen.getByRole("button", { name: "Back from raw findings" }),
+    )
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/repository-reviews/auto_1"),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "status = running",
+      view: "grid",
+    })
+  })
+
   it.each([
     [
       "/repository-reviews/auto_1/findings?view=unsupported&unknown=value",
@@ -487,11 +591,11 @@ describe("repository review routes", () => {
   it.each([
     [
       "/repository-reviews/auto_1/findings/rfn_legacy?scope=all",
-      "/repository-reviews/repositories/auto_1/findings/rrf_1",
+      "/repository-reviews/auto_1/raw-findings/rrw_1",
     ],
     [
       "/repository-reviews/auto_1/findings/rfn_legacy/link-issue?scope=all",
-      "/repository-reviews/repositories/auto_1/findings/rrf_1/link-issue",
+      "/repository-reviews/auto_1/raw-findings/rrw_1",
     ],
   ])(
     "resolves a legacy action occurrence URL into %s",
@@ -501,7 +605,7 @@ describe("repository review routes", () => {
 
       await waitFor(() => expect(router.state.location.pathname).toBe(target))
       expect(router.state.location.search).toEqual({
-        q: "ALL ORDER BY severity DESC, updated DESC",
+        q: "ALL ORDER BY created DESC",
       })
     },
   )
@@ -614,11 +718,11 @@ describe("repository review routes", () => {
     )
     await waitFor(() =>
       expect(runRouter.state.location.pathname).toBe(
-        "/repository-reviews/auto_1/findings/rfn_1",
+        "/repository-reviews/auto_1/raw-findings/rrw_1",
       ),
     )
     expect(runRouter.state.location.search).toEqual({
-      q: "ALL ORDER BY severity DESC, updated DESC",
+      q: "ALL ORDER BY created DESC",
     })
     runView.unmount()
 

@@ -16,6 +16,7 @@ import type {
   RepositoryReviewFinding,
   RepositoryReviewIssueDraft,
   RepositoryReviewIssueSummary,
+  RepositoryReviewRawFinding,
   RepositoryReviewRepositoryFindingSummary,
   RepositoryReviewRunFindingSummary,
   RepositoryReviewSummary,
@@ -30,16 +31,21 @@ import {
   getRepositoryReviewAutomationIssue,
   getRepositoryReviewAutomationRepositoryFinding,
   getRepositoryReviewCommitOptions,
+  getRepositoryReviewRawSource,
   linkRepositoryReviewIssue,
   listRepositoryReviewAutomationFindingsPage,
   listRepositoryReviewAutomationIssuesPage,
+  listRepositoryReviewAutomationRawFindingsPage,
   listRepositoryReviewAutomationRepositoryFindingsPage,
+  listRepositoryReviewFindingRawSources,
   publishRepositoryReviewAutomationIssue,
   publishRepositoryReviewIssues,
   regenerateRepositoryReviewAutomationIssue,
   reserveRepositoryReviewValidations,
   restartRepositoryReviewAutomation,
   resumeRepositoryReviewAutomation,
+  retryRepositoryReviewHistoricalDeduplication,
+  retryRepositoryReviewRawSource,
   retryRepositoryReviewRunFindingStatuses,
   startRepositoryReviewAutomation,
   unlinkRepositoryReviewIssue,
@@ -53,6 +59,8 @@ import { RepositoryReviewIssueEditorPage } from "@/components/repository-reviews
 import { RepositoryReviewIssuePage } from "@/components/repository-reviews/repository-review-issue-page"
 import { RepositoryReviewIssuesPage } from "@/components/repository-reviews/repository-review-issues-page"
 import { RepositoryReviewLinkIssuePage } from "@/components/repository-reviews/repository-review-link-issue-page"
+import { RepositoryReviewRawFindingPage } from "@/components/repository-reviews/repository-review-raw-finding-page"
+import { RepositoryReviewRawFindingsPage } from "@/components/repository-reviews/repository-review-raw-findings-page"
 import { RepositoryReviewRepositoryFindingsPage } from "@/components/repository-reviews/repository-review-repository-findings-page"
 import { switchChatSessionAndSend } from "@/features/chat/controller"
 import { resetCollectionRouteStateMemoryForTests } from "@/hooks/use-collection-route-state"
@@ -72,9 +80,12 @@ vi.mock("@/api/repository-reviews", () => ({
   getRepositoryReviewAutomation: vi.fn(),
   getRepositoryReviewAutomationFinding: vi.fn(),
   getRepositoryReviewAutomationRepositoryFinding: vi.fn(),
+  getRepositoryReviewRawSource: vi.fn(),
   getRepositoryReviewAutomationIssue: vi.fn(),
   listRepositoryReviewAutomationFindingsPage: vi.fn(),
   listRepositoryReviewAutomationRepositoryFindingsPage: vi.fn(),
+  listRepositoryReviewAutomationRawFindingsPage: vi.fn(),
+  listRepositoryReviewFindingRawSources: vi.fn(),
   listRepositoryReviewAutomationIssuesPage: vi.fn(),
   getRepositoryReviewCommitOptions: vi.fn(),
   startRepositoryReviewAutomation: vi.fn(),
@@ -91,6 +102,8 @@ vi.mock("@/api/repository-reviews", () => ({
   reserveRepositoryReviewValidations: vi.fn(),
   resolveRepositoryReviewPossibleDuplicate: vi.fn(),
   retryRepositoryReviewRunFindingStatuses: vi.fn(),
+  retryRepositoryReviewHistoricalDeduplication: vi.fn(),
+  retryRepositoryReviewRawSource: vi.fn(),
   syncRepositoryReviewFinding: vi.fn(),
   updateRepositoryReviewFindingLifecycle: vi.fn(),
   findRepositoryReviewIssueCandidates: vi.fn(),
@@ -277,6 +290,33 @@ const finding: RepositoryReviewFinding = {
   updated_at: "2026-08-26T00:00:00Z",
 }
 
+const rawFinding: RepositoryReviewRawFinding = {
+  id: "rrw_1",
+  version: 1,
+  campaign_id: "rrc_1",
+  repository: finding.repository,
+  commit_sha: finding.commit_sha,
+  file: finding.file,
+  line: finding.line,
+  severity: finding.severity,
+  title: finding.title,
+  symbol: finding.symbol,
+  message: finding.message,
+  evidence: finding.evidence,
+  impact: finding.impact,
+  validation: finding.validation,
+  context_id: finding.context_ids[0],
+  run_id: "run_1",
+  assignment_id: "rra_1",
+  model: finding.models[0]!,
+  reviewer: "reviewer-1",
+  deduplication_state: "completed",
+  disposition: "new",
+  deduplicated_finding_id: finding.id,
+  created_at: finding.created_at,
+  updated_at: finding.updated_at,
+}
+
 const repositoryFinding: RepositoryFinding = {
   id: "rrf_1",
   repository: "owner/repo",
@@ -334,6 +374,7 @@ const findingSummary: RepositoryReviewRunFindingSummary = {
   association: "existing",
   repository_finding_id: finding.repository_finding_id,
   contributors: finding.models,
+  raw_source_count: 1,
   created_at: finding.created_at,
   updated_at: finding.updated_at,
 }
@@ -429,6 +470,7 @@ describe("routed repository review pages", () => {
           created_at: "2026-08-26T00:00:00Z",
         },
       ],
+      raw_source_total: 1,
       capabilities: { github: true, can_generate: true, can_link_issue: true },
     })
     vi.mocked(
@@ -447,6 +489,61 @@ describe("routed repository review pages", () => {
       canonical_query: "ALL ORDER BY severity DESC, updated DESC",
       query_schema: { fields: [] },
       capabilities: { can_generate: true, github: true },
+    })
+    vi.mocked(listRepositoryReviewFindingRawSources).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      finding_id: finding.id,
+      sources: [rawFinding],
+      raw_findings: [],
+      offset: 0,
+      total: 1,
+    })
+    vi.mocked(listRepositoryReviewAutomationRawFindingsPage).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      raw_findings: [rawFinding],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY created DESC",
+      query_schema: { fields: [] },
+      findings_processing: {
+        raw_total: 1,
+        pending: 0,
+        processing: 0,
+        failed: 0,
+        completed: 1,
+        new: 1,
+        duplicates: 0,
+      },
+    })
+    vi.mocked(getRepositoryReviewRawSource).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      source: rawFinding,
+      finding,
+      context: {
+        id: "context_1",
+        repository: finding.repository,
+        commit_sha: finding.commit_sha,
+        inventory_hash: "inventory",
+        profile_hash: "profile",
+        run_id: "run_1",
+        model: rawFinding.model,
+        reviewer: rawFinding.reviewer,
+        files: [finding.file],
+        created_at: finding.created_at,
+      },
+    })
+    vi.mocked(retryRepositoryReviewRawSource).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      source: { ...rawFinding, deduplication_state: "pending" },
+    })
+    vi.mocked(retryRepositoryReviewHistoricalDeduplication).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      historical_deduplication: { required: true, status: "pending" },
     })
     vi.mocked(listRepositoryReviewAutomationIssuesPage).mockResolvedValue({
       automation,
@@ -574,12 +671,14 @@ describe("routed repository review pages", () => {
 
   it("keeps findings and issue previews available while a review is active", async () => {
     const onFindings = vi.fn()
+    const onRawFindings = vi.fn()
     const onIssues = vi.fn()
     renderPage(
       <RepositoryReviewDetailPage
         id={automation.id}
         onBack={vi.fn()}
         onFindings={onFindings}
+        onRawFindings={onRawFindings}
         onIssues={onIssues}
       />,
     )
@@ -590,12 +689,15 @@ describe("routed repository review pages", () => {
     await userEvent.click(
       screen.getByRole("button", { name: /Issue previews/ }),
     )
+    await userEvent.click(screen.getByRole("button", { name: /Raw findings/ }))
     expect(onFindings).toHaveBeenCalled()
+    expect(onRawFindings).toHaveBeenCalled()
     expect(onIssues).toHaveBeenCalled()
     expect(screen.getByText("writer")).toBeVisible()
     expect(screen.getByText("4 of 8 files (50%)")).toBeVisible()
     expect(screen.getByText("Fully reviewed files")).toBeVisible()
-    expect(screen.getByText("Finding occurrences")).toBeVisible()
+    expect(screen.getAllByText("Findings").length).toBeGreaterThan(0)
+    expect(screen.getAllByText("Raw findings").length).toBeGreaterThan(0)
     expect(screen.getByText("Unassociated occurrences")).toBeVisible()
     expect(screen.getByText("Unknown")).toBeVisible()
     expect(screen.getByText("Review assignment coverage")).toBeVisible()
@@ -969,6 +1071,7 @@ describe("routed repository review pages", () => {
     expect(message.content).toContain(`Blob SHA: ${finding.file.blob_sha}`)
     expect(message.content).toContain(`Evidence: ${finding.evidence}`)
     expect(message.content).toContain(`Impact: ${finding.impact}`)
+    expect(message.content).toContain("Raw source count: 1")
     expect(message.content).toContain(`- Context ${finding.context_ids[0]}`)
     expect(onOpenThread).toHaveBeenCalledWith(discussionThread.ui_session_id)
     expect(generateRepositoryReviewIssues).not.toHaveBeenCalled()
@@ -1006,6 +1109,328 @@ describe("routed repository review pages", () => {
       screen.getByRole("button", { name: "View repository findings" }),
     )
     expect(onOpenRepositoryFindings).toHaveBeenCalledOnce()
+  })
+
+  it("shows paginated raw sources on a finding and opens canonical raw detail", async () => {
+    const secondSource: RepositoryReviewRawFinding = {
+      ...rawFinding,
+      id: "rrw_2",
+      title: "Second raw diagnosis",
+      disposition: "duplicate",
+    }
+    vi.mocked(getRepositoryReviewAutomationFinding).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      finding,
+      contexts: [],
+      raw_source_total: 2,
+      capabilities: { github: true },
+    })
+    vi.mocked(listRepositoryReviewFindingRawSources).mockImplementation(
+      async (_automationID, _findingID, input) => ({
+        automation,
+        repository: repositorySummary,
+        finding_id: finding.id,
+        sources: input?.offset === 25 ? [secondSource] : [rawFinding],
+        raw_findings: [],
+        offset: input?.offset ?? 0,
+        total: 2,
+        ...(input?.offset === 25 ? {} : { next_offset: 25 }),
+      }),
+    )
+    const onOpenRawFinding = vi.fn()
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewFindingPage
+        automationID={automation.id}
+        findingID={finding.id}
+        resourceKind="run"
+        onBack={vi.fn()}
+        onOpenRepositoryFinding={vi.fn()}
+        onOpenRawFinding={onOpenRawFinding}
+        onOpenIssue={vi.fn()}
+        onLinkIssue={vi.fn()}
+        onGenerated={vi.fn()}
+        onOpenThread={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText(/2 raw sources support/u)).toBeVisible()
+    await user.click(
+      await screen.findByRole("button", {
+        name: new RegExp(rawFinding.title, "u"),
+      }),
+    )
+    expect(onOpenRawFinding).toHaveBeenCalledWith(rawFinding.id)
+    await user.click(
+      screen.getByRole("button", { name: "Load more raw findings" }),
+    )
+    await user.click(
+      await screen.findByRole("button", { name: /Second raw diagnosis/u }),
+    )
+    expect(onOpenRawFinding).toHaveBeenLastCalledWith(secondSource.id)
+    expect(listRepositoryReviewFindingRawSources).toHaveBeenCalledWith(
+      automation.id,
+      finding.id,
+      { offset: 25, limit: 25 },
+      expect.any(AbortSignal),
+    )
+  })
+
+  it("shows raw processing counters and explicitly retries a failed historical replay", async () => {
+    vi.mocked(listRepositoryReviewAutomationFindingsPage).mockResolvedValue({
+      automation: { ...automation, status: "failed" },
+      repository: repositorySummary,
+      findings: [findingSummary],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY severity DESC, updated DESC",
+      query_schema: { fields: [] },
+      findings_processing: {
+        raw_total: 87,
+        pending: 4,
+        processing: 0,
+        failed: 1,
+        completed: 82,
+        new: 40,
+        duplicates: 42,
+      },
+      historical_deduplication: {
+        required: true,
+        status: "failed",
+        error: "Campaign recovery must be retried.",
+      },
+    })
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewFindingsPage
+        automationID={automation.id}
+        search={{ q: "ALL ORDER BY severity DESC, updated DESC" }}
+        onSearchChange={vi.fn()}
+        onBack={vi.fn()}
+        onOpenFinding={vi.fn()}
+        onOpenRawFindings={vi.fn()}
+        onOpenRepositoryFindings={vi.fn()}
+        onOpenRepositoryFinding={vi.fn()}
+        onOpenThread={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText("87")).toBeVisible()
+    expect(screen.getByText("Campaign recovery must be retried.")).toBeVisible()
+    await user.click(
+      screen.getByRole("button", {
+        name: "Retry historical deduplication",
+      }),
+    )
+    await waitFor(() =>
+      expect(retryRepositoryReviewHistoricalDeduplication).toHaveBeenCalledWith(
+        automation.id,
+      ),
+    )
+  })
+
+  it("loads the typed raw collection and normalizes a legacy source detail", async () => {
+    const onOpenRawFinding = vi.fn()
+    const user = userEvent.setup()
+    const collectionView = renderPage(
+      <RepositoryReviewRawFindingsPage
+        automationID={automation.id}
+        search={{ q: "ALL ORDER BY created DESC" }}
+        onSearchChange={vi.fn()}
+        onBack={vi.fn()}
+        onOpenRawFinding={onOpenRawFinding}
+        onOpenFinding={vi.fn()}
+      />,
+    )
+
+    const item = (await screen.findByText(rawFinding.title)).closest(
+      "[data-item-id]",
+    )!
+    await user.dblClick(item)
+    expect(onOpenRawFinding).toHaveBeenCalledWith(rawFinding.id)
+    expect(listRepositoryReviewAutomationRawFindingsPage).toHaveBeenCalledWith(
+      automation.id,
+      {
+        query: "ALL ORDER BY created DESC",
+        cursor: undefined,
+        limit: 50,
+      },
+      expect.any(AbortSignal),
+    )
+    collectionView.unmount()
+
+    const failedSource: RepositoryReviewRawFinding = {
+      ...rawFinding,
+      deduplication_state: "failed",
+      disposition: "undecided",
+      deduplicated_finding_id: undefined,
+      failure: {
+        code: "provider_failed",
+        message: "The deduplication provider failed.",
+        retryable: true,
+        at: rawFinding.updated_at,
+      },
+    }
+    vi.mocked(getRepositoryReviewRawSource).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      source: failedSource,
+    })
+    const onCanonicalSource = vi.fn()
+    renderPage(
+      <RepositoryReviewRawFindingPage
+        automationID={automation.id}
+        sourceID="rfn_legacy"
+        onBack={vi.fn()}
+        onCanonicalSource={onCanonicalSource}
+        onOpenFinding={vi.fn()}
+      />,
+    )
+
+    expect(
+      await screen.findByText("The deduplication provider failed."),
+    ).toBeVisible()
+    await waitFor(() =>
+      expect(onCanonicalSource).toHaveBeenCalledWith(failedSource.id),
+    )
+    await user.click(screen.getByRole("button", { name: "Retry raw finding" }))
+    await waitFor(() =>
+      expect(retryRepositoryReviewRawSource).toHaveBeenCalledWith(
+        automation.id,
+        failedSource.id,
+      ),
+    )
+  })
+
+  it("shows exact model provenance for a raw source and its immutable context", async () => {
+    const source = {
+      ...rawFinding,
+      model_alias: "raw-reviewer-alias",
+      account: "raw-review-account",
+    }
+    vi.mocked(getRepositoryReviewRawSource).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      source,
+      finding,
+      context: {
+        id: "context_1",
+        repository: finding.repository,
+        commit_sha: finding.commit_sha,
+        inventory_hash: "inventory",
+        profile_hash: "profile",
+        run_id: "run_1",
+        model: source.model,
+        model_alias: "context-reviewer-alias",
+        account: "context-review-account",
+        reviewer: source.reviewer,
+        files: [finding.file],
+        created_at: finding.created_at,
+      },
+    })
+
+    renderPage(
+      <RepositoryReviewRawFindingPage
+        automationID={automation.id}
+        sourceID={source.id}
+        onBack={vi.fn()}
+        onCanonicalSource={vi.fn()}
+        onOpenFinding={vi.fn()}
+      />,
+    )
+
+    const sourceProvenance = await screen.findByRole("region", {
+      name: "Location and provenance",
+    })
+    expect(
+      within(sourceProvenance).getByText("raw-reviewer-alias"),
+    ).toBeVisible()
+    expect(
+      within(sourceProvenance).getByText("raw-review-account"),
+    ).toBeVisible()
+
+    const immutableContext = screen.getByRole("region", {
+      name: "Immutable context",
+    })
+    expect(
+      within(immutableContext).getByText("context-reviewer-alias"),
+    ).toBeVisible()
+    expect(
+      within(immutableContext).getByText("context-review-account"),
+    ).toBeVisible()
+  })
+
+  it("stops polling a pending raw source after historical replay fails", async () => {
+    vi.mocked(getRepositoryReviewRawSource).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      source: {
+        ...rawFinding,
+        deduplication_state: "pending",
+        disposition: "undecided",
+        deduplicated_finding_id: undefined,
+        assignment_id: "historical-replay",
+      },
+      historical_deduplication: {
+        required: true,
+        status: "failed",
+        error: "Campaign recovery failed.",
+      },
+    })
+    const view = renderPage(
+      <RepositoryReviewRawFindingPage
+        automationID={automation.id}
+        sourceID={rawFinding.id}
+        onBack={vi.fn()}
+        onCanonicalSource={vi.fn()}
+        onOpenFinding={vi.fn()}
+      />,
+    )
+
+    await waitFor(() =>
+      expect(getRepositoryReviewRawSource).toHaveBeenCalledTimes(1),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 2_200))
+    expect(getRepositoryReviewRawSource).toHaveBeenCalledTimes(1)
+    view.unmount()
+  })
+
+  it("keeps polling a native pending source after historical replay fails", async () => {
+    vi.mocked(getRepositoryReviewRawSource).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      source: {
+        ...rawFinding,
+        deduplication_state: "pending",
+        disposition: "undecided",
+        deduplicated_finding_id: undefined,
+        assignment_id: "native-assignment",
+      },
+      historical_deduplication: {
+        required: true,
+        status: "failed",
+        error: "Campaign recovery failed.",
+      },
+    })
+    const view = renderPage(
+      <RepositoryReviewRawFindingPage
+        automationID={automation.id}
+        sourceID={rawFinding.id}
+        onBack={vi.fn()}
+        onCanonicalSource={vi.fn()}
+        onOpenFinding={vi.fn()}
+      />,
+    )
+
+    await waitFor(
+      () =>
+        expect(
+          vi.mocked(getRepositoryReviewRawSource).mock.calls.length,
+        ).toBeGreaterThan(1),
+      { timeout: 3_000 },
+    )
+    view.unmount()
   })
 
   it("opens an associated repository finding from a single run selection", async () => {

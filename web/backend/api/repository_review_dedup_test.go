@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,6 +103,10 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 	t.Cleanup(handler.Shutdown)
 	state := seedRepositoryReviewAPIState(t, workspace)
 	campaignID := "rrc_api_dedup"
+	state.HistoricalDeduplication = repoaudit.HistoricalDeduplicationReplay{
+		Required: true, Status: repoaudit.HistoricalDeduplicationFailed,
+		Attempts: 2, Error: "historical replay failed", UpdatedAt: time.Now().UTC(),
+	}
 	state = seedRepositoryReviewDeduplicationAPIState(t, workspace, state, campaignID)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 	base := "/api/repository-reviews/automations/" + automation.ID
@@ -114,8 +119,60 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 		!strings.Contains(findings.Body.String(), `"raw_source_count":1`) ||
 		!strings.Contains(findings.Body.String(), `"contributors":["review-model"]`) ||
 		!strings.Contains(findings.Body.String(), state.DeduplicatedFindings[0].ID) ||
+		!strings.Contains(findings.Body.String(), `"findings_processing"`) ||
+		!strings.Contains(findings.Body.String(), `"historical_deduplication"`) ||
 		strings.Contains(findings.Body.String(), state.RawFindings[1].ID) {
 		t.Fatalf("deduplicated findings status=%d body=%s", findings.Code, findings.Body.String())
+	}
+
+	rawCollection := httptest.NewRecorder()
+	mux.ServeHTTP(rawCollection, httptest.NewRequest(
+		http.MethodGet, base+"/raw-findings?limit=2", nil,
+	))
+	var rawPage struct {
+		RawFindings    []repositoryReviewRawFindingSummary `json:"raw_findings"`
+		Total          int                                 `json:"total"`
+		NextCursor     string                              `json:"next_cursor"`
+		CanonicalQuery string                              `json:"canonical_query"`
+	}
+	if err := json.Unmarshal(rawCollection.Body.Bytes(), &rawPage); err != nil {
+		t.Fatal(err)
+	}
+	if rawCollection.Code != http.StatusOK || rawPage.Total != 3 || len(rawPage.RawFindings) != 2 ||
+		rawPage.NextCursor == "" || rawPage.CanonicalQuery != "ALL ORDER BY created DESC" ||
+		rawPage.RawFindings[0].ID != state.RawFindings[2].ID ||
+		!strings.Contains(rawCollection.Body.String(), `"findings_processing"`) ||
+		!strings.Contains(rawCollection.Body.String(), `"historical_deduplication"`) {
+		t.Fatalf("raw findings status=%d page=%#v body=%s", rawCollection.Code, rawPage, rawCollection.Body.String())
+	}
+
+	failedRawCollection := httptest.NewRecorder()
+	mux.ServeHTTP(failedRawCollection, httptest.NewRequest(
+		http.MethodGet,
+		base+"/raw-findings?query="+url.QueryEscape("deduplication_state = failed ORDER BY created DESC"),
+		nil,
+	))
+	var failedRawPage struct {
+		RawFindings []repositoryReviewRawFindingSummary `json:"raw_findings"`
+		Total       int                                 `json:"total"`
+	}
+	if err := json.Unmarshal(failedRawCollection.Body.Bytes(), &failedRawPage); err != nil {
+		t.Fatal(err)
+	}
+	if failedRawCollection.Code != http.StatusOK || failedRawPage.Total != 1 ||
+		len(failedRawPage.RawFindings) != 1 || failedRawPage.RawFindings[0].ID != state.RawFindings[2].ID {
+		t.Fatalf("filtered raw findings status=%d body=%s", failedRawCollection.Code, failedRawCollection.Body.String())
+	}
+
+	wrongCursor := httptest.NewRecorder()
+	mux.ServeHTTP(wrongCursor, httptest.NewRequest(
+		http.MethodGet,
+		base+"/findings?query=ALL&cursor="+url.QueryEscape(rawPage.NextCursor),
+		nil,
+	))
+	if wrongCursor.Code != http.StatusBadRequest ||
+		!strings.Contains(wrongCursor.Body.String(), `"code":"invalid_cursor"`) {
+		t.Fatalf("wrong raw cursor status=%d body=%s", wrongCursor.Code, wrongCursor.Body.String())
 	}
 
 	runFindings := httptest.NewRecorder()
@@ -181,11 +238,36 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 		!strings.Contains(failedDetail.Body.String(), `"retryable":true`) {
 		t.Fatalf("failed raw detail status=%d body=%s", failedDetail.Code, failedDetail.Body.String())
 	}
+	canonicalDetail := httptest.NewRecorder()
+	mux.ServeHTTP(canonicalDetail, httptest.NewRequest(
+		http.MethodGet, base+"/raw-findings/"+state.RawFindings[0].ID, nil,
+	))
+	var canonicalPayload struct {
+		HistoricalDeduplication repoaudit.HistoricalDeduplicationReplay `json:"historical_deduplication"`
+	}
+	if err := json.Unmarshal(canonicalDetail.Body.Bytes(), &canonicalPayload); err != nil {
+		t.Fatal(err)
+	}
+	if canonicalDetail.Code != http.StatusOK ||
+		!strings.Contains(canonicalDetail.Body.String(), state.RawFindings[0].Evidence) ||
+		!strings.Contains(canonicalDetail.Body.String(), `"context"`) ||
+		!strings.Contains(canonicalDetail.Body.String(), `"finding"`) ||
+		canonicalPayload.HistoricalDeduplication.Status != repoaudit.HistoricalDeduplicationFailed ||
+		canonicalPayload.HistoricalDeduplication.Error != "historical replay failed" {
+		t.Fatalf("canonical raw detail status=%d body=%s", canonicalDetail.Code, canonicalDetail.Body.String())
+	}
+	aliasDetail := httptest.NewRecorder()
+	mux.ServeHTTP(aliasDetail, httptest.NewRequest(
+		http.MethodGet, base+"/raw-findings/rfn_api_legacy", nil,
+	))
+	if aliasDetail.Code != http.StatusOK ||
+		!strings.Contains(aliasDetail.Body.String(), `"id":"`+state.RawFindings[0].ID+`"`) {
+		t.Fatalf("raw alias detail status=%d body=%s", aliasDetail.Code, aliasDetail.Body.String())
+	}
 
 	retryRequest := httptest.NewRequest(
 		http.MethodPost,
-		base+"/campaigns/"+campaignID+"/findings-processing/sources/"+
-			state.RawFindings[2].ID+"/retry",
+		base+"/raw-findings/"+state.RawFindings[2].ID+"/retry",
 		strings.NewReader(`{}`),
 	)
 	setRepositoryReviewMutationHeaders(retryRequest)
@@ -281,6 +363,8 @@ func seedRepositoryReviewDeduplicationAPIState(
 		return value
 	}
 	completed := raw("rrw_api_completed", 1, repoaudit.RawFindingDeduplicationCompleted)
+	completed.LegacyFindingID = "rfn_api_legacy"
+	completed.DiagnosisDigest = repoaudit.RawReviewFindingDiagnosisDigest(completed)
 	completed.Disposition = repoaudit.RawFindingDispositionNew
 	completed.DeduplicatedFindingID = finding.ID
 	completed.History = []repoaudit.RawFindingHistoryEntry{{

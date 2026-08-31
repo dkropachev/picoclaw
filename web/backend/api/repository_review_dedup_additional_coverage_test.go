@@ -139,7 +139,7 @@ func TestRepositoryReviewDedupAdditionalRouteCoverage(t *testing.T) {
 		{base + "/findings/" + state.DeduplicatedFindings[0].ID + "/sources/rrw_missing", http.StatusNotFound},
 		{base + "/campaigns/wrong/findings-processing/sources/" + state.RawFindings[0].ID, http.StatusNotFound},
 		{base + "/campaigns/" + campaignID + "/findings-processing?state=unknown", http.StatusBadRequest},
-		{base + "/findings-processing", http.StatusBadRequest},
+		{base + "/findings-processing", http.StatusOK},
 	}
 	for _, test := range requests {
 		response := httptest.NewRecorder()
@@ -189,6 +189,14 @@ func TestRepositoryReviewDedupAdditionalRouteCoverage(t *testing.T) {
 func TestRepositoryReviewHistoricalDedupAdditionalRouteCoverage(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
+	cfg, err := config.LoadConfig(handler.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ModelList[0].APIKeys = config.SecureStrings{config.NewSecureString("test-api-key")}
+	if saveErr := config.SaveConfig(handler.configPath, cfg); saveErr != nil {
+		t.Fatal(saveErr)
+	}
 	state := seedRepositoryReviewAPIState(t, workspace)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 	now := time.Now().UTC()
@@ -216,7 +224,7 @@ func TestRepositoryReviewHistoricalDedupAdditionalRouteCoverage(t *testing.T) {
 		ReviewerModel: "cheap", DeduplicationModel: "cheap", AccountRef: "api",
 		SimilarityThreshold: 90, CandidateLimit: 4,
 	}
-	state, _, err := store.FreezeHistoricalDeduplicationReplay(state.Repository, snapshot)
+	state, _, err = store.FreezeHistoricalDeduplicationReplay(state.Repository, snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,9 +259,182 @@ func TestRepositoryReviewHistoricalDedupAdditionalRouteCoverage(t *testing.T) {
 	setRepositoryReviewMutationHeaders(retryRequest)
 	retried := httptest.NewRecorder()
 	mux.ServeHTTP(retried, retryRequest)
-	if retried.Code != http.StatusAccepted ||
-		!strings.Contains(retried.Body.String(), `"status":"pending"`) {
+	if retried.Code != http.StatusConflict || !strings.Contains(
+		retried.Body.String(), `"code":"historical_deduplication_campaign_recovery_required"`,
+	) {
 		t.Fatalf("historical retry status=%d body=%s", retried.Code, retried.Body.String())
+	}
+	unchanged, found, err := store.Get(state.Repository)
+	if err != nil || !found ||
+		unchanged.HistoricalDeduplication.Status != repoaudit.HistoricalDeduplicationFailed {
+		t.Fatalf("inexact retry mutated replay=%#v found=%v err=%v", unchanged.HistoricalDeduplication, found, err)
+	}
+}
+
+func TestRepositoryReviewHistoricalRetryRecoversOneCampaignAcrossAutomationRuns(t *testing.T) {
+	fixture := newRepositoryReviewBackfillFixture(
+		t,
+		2,
+		repositoryReviewBackfillRunSpec{inspected: []int{0}, occurrences: 1},
+		repositoryReviewBackfillRunSpec{inspected: []int{0}, occurrences: 1},
+	)
+	state := fixture.state
+	state.RawFindings = nil
+	state.DeduplicationJobs = nil
+	state.DeduplicatedFindings = nil
+	state.MappingJobs = nil
+	state.NextDeduplicationOrdinal = 0
+	state.FindingsProcessing = repoaudit.FindingsProcessingCounters{}
+	state.HistoricalDeduplication = repoaudit.HistoricalDeduplicationReplay{
+		Required: true, Status: repoaudit.HistoricalDeduplicationPending,
+		UpdatedAt: time.Now().UTC(),
+	}
+	state.Version++
+	state.UpdatedAt = state.HistoricalDeduplication.UpdatedAt
+	persistRepositoryReviewAdditionalCoverageState(t, fixture.workspace, state)
+	snapshot := repoaudit.RepositoryReviewDeduplicationSnapshot{
+		ReviewerModel: "review-a", DeduplicationModel: "review-a",
+		AccountRef:          fixture.automation.EffectiveAccountRef,
+		SimilarityThreshold: 90, CandidateLimit: 4,
+	}
+	state, _, err := fixture.store.FreezeHistoricalDeduplicationReplay(state.Repository, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, admission, err := fixture.store.AdmitNextHistoricalDeduplicationBatch(state.Repository)
+	if err != nil || admission.Admitted == 0 {
+		t.Fatalf("synthetic pre-recovery admission=%#v err=%v", admission, err)
+	}
+	state, _, err = fixture.store.FailHistoricalDeduplicationReplay(state.Repository, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repositoryReviewHistoricalRecoveryProjection(state).Contexts) >= len(state.Contexts) {
+		t.Fatal("replay-created context was not removed from exact recovery projection")
+	}
+	resolved := workflows.RepositoryReviewModelProfile{
+		Revision:        "legacy-automation-profile",
+		AccountRef:      fixture.automation.EffectiveAccountRef,
+		ReviewerModels:  fixture.automation.ReviewerModels,
+		MaxContentBytes: int(fixture.automation.MaxContentBytes),
+	}
+	projected := repositoryReviewHistoricalRecoveryProjection(state)
+	prepared, prepareErr := prepareRepositoryReviewLegacyCampaignBackfill(
+		t.Context(), fixture.automation, projected, repoaudit.NewRepositoryReviewCampaignID(),
+		fixture.runStore, resolved,
+	)
+	if prepareErr != nil || !prepared.Available || !prepared.Exact {
+		t.Fatalf("exact pre-retry recovery projection=%#v err=%v", prepared, prepareErr)
+	}
+	final, recovered, err := recoverRepositoryReviewHistoricalCampaign(
+		t.Context(), fixture.store, fixture.workspace, fixture.automation, state, resolved,
+	)
+	if err != nil || !repoaudit.ValidRepositoryReviewCampaignID(final.CampaignID) ||
+		final.CampaignRecoveryPending || recovered.CurrentCampaign == nil ||
+		!recovered.CurrentCampaign.Exact || recovered.CurrentCampaign.ID != final.CampaignID ||
+		recovered.CampaignHistory[final.CampaignID] != recovered.CurrentCampaign.CommitSHA {
+		t.Fatalf("historical campaign recovery final=%#v campaign=%#v err=%v", final, recovered.CurrentCampaign, err)
+	}
+	for _, run := range recovered.Runs {
+		if run.CampaignID != final.CampaignID {
+			t.Fatalf("workflow batch retained a split campaign: %#v", recovered.Runs)
+		}
+	}
+	for _, finding := range recovered.Findings {
+		if finding.CampaignID != final.CampaignID {
+			t.Fatalf("legacy finding retained a split campaign: %#v", recovered.Findings)
+		}
+	}
+	replayed, replayedState, err := recoverRepositoryReviewHistoricalCampaign(
+		t.Context(), fixture.store, fixture.workspace, final, recovered, resolved,
+	)
+	if err != nil || replayed.Version != final.Version || replayedState.Version != recovered.Version {
+		t.Fatalf("idempotent campaign recovery automation=%#v state=%#v err=%v", replayed, replayedState, err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = fixture.workspace
+	if saveErr := config.SaveConfig(configPath, cfg); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	handler := NewHandler(configPath)
+	t.Cleanup(handler.Shutdown)
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	retryPath := "/api/repository-reviews/automations/" + final.ID +
+		"/historical-deduplication/retry"
+	retry := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, retryPath, strings.NewReader(`{}`))
+		setRepositoryReviewMutationHeaders(request)
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		return response
+	}
+	firstRetry := retry()
+	if firstRetry.Code != http.StatusAccepted ||
+		!strings.Contains(firstRetry.Body.String(), `"status":"pending"`) {
+		t.Fatalf("recovered retry status=%d body=%s", firstRetry.Code, firstRetry.Body.String())
+	}
+	afterFirstRetry, _, err := fixture.store.Get(state.Repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRetry := retry()
+	afterSecondRetry, _, err := fixture.store.Get(state.Repository)
+	if err != nil || secondRetry.Code != http.StatusAccepted ||
+		afterSecondRetry.Version != afterFirstRetry.Version {
+		t.Fatalf(
+			"idempotent API retry status=%d first=%d second=%d err=%v body=%s",
+			secondRetry.Code, afterFirstRetry.Version, afterSecondRetry.Version, err,
+			secondRetry.Body.String(),
+		)
+	}
+	_, _, err = fixture.store.FreezeHistoricalDeduplicationReplay(state.Repository, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reset, nextAdmission, err := fixture.store.AdmitNextHistoricalDeduplicationBatch(state.Repository)
+	if err != nil || nextAdmission.Admitted != 1 || len(reset.RawFindings) != 2 {
+		t.Fatalf("recovered cross-batch admission=%#v raws=%#v err=%v", nextAdmission, reset.RawFindings, err)
+	}
+	for _, raw := range reset.RawFindings {
+		if raw.CampaignID != final.CampaignID {
+			t.Fatalf("recovered processing identities remained split: %#v", reset.RawFindings)
+		}
+	}
+}
+
+func TestRepositoryReviewHistoricalCampaignRecoveredRequiresBackfillProof(t *testing.T) {
+	started := time.Date(2026, 8, 30, 18, 0, 0, 0, time.UTC)
+	commitSHA := strings.Repeat("a", 40)
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	automation := repoaudit.RepositoryReviewAutomation{
+		CampaignID: campaignID, ResolvedCommitSHA: commitSHA,
+		RunIDs: []string{"wr_legacy"}, StartedAt: started,
+	}
+	state := repoaudit.RepositoryState{
+		CampaignHistory: map[string]string{campaignID: commitSHA},
+		CurrentCampaign: &repoaudit.RepositoryReviewCampaignCoverage{
+			ID: campaignID, CommitSHA: commitSHA, Exact: true,
+			AssignmentCatalog: []repoaudit.RepositoryReviewAssignment{{ID: "assignment"}},
+		},
+		Runs: []repoaudit.ReviewRun{{
+			ID: "wr_legacy", FindingIDs: []string{"rfn_legacy"},
+			CompletedAt: started.Add(time.Minute),
+		}},
+		Findings: []repoaudit.Finding{{ID: "rfn_legacy"}},
+	}
+	if repositoryReviewHistoricalCampaignRecovered(automation, state) {
+		t.Fatal("native exact campaign bypassed historical recovery without a recovery digest")
+	}
+	state.CurrentCampaign.RecoveryDigest = "sha256:" + strings.Repeat("b", 64)
+	if repositoryReviewHistoricalCampaignRecovered(automation, state) {
+		t.Fatal("recovery digest bypassed untagged legacy runs/findings")
+	}
+	state.Runs[0].CampaignID = campaignID
+	state.Findings[0].CampaignID = campaignID
+	if !repositoryReviewHistoricalCampaignRecovered(automation, state) {
+		t.Fatal("exact backfill proof and tagged legacy records were not recognized")
 	}
 }
 
@@ -355,15 +536,18 @@ func TestRepositoryReviewDedupAdditionalLegacyAndSourcePagingCoverage(t *testing
 		state.NextDeduplicationOrdinal = 0
 		persistRepositoryReviewAdditionalCoverageState(t, workspace, state)
 		base := "/api/repository-reviews/automations/" + automation.ID
-		for _, target := range []string{
-			base + "/findings",
-			base + "/findings/" + state.Findings[0].ID,
-			base + "/findings?scope=all&offset=2&limit=1",
+		for _, target := range []struct {
+			path string
+			want int
+		}{
+			{base + "/findings", http.StatusOK},
+			{base + "/findings/" + state.Findings[0].ID, http.StatusNotFound},
+			{base + "/findings?scope=all&offset=2&limit=1", http.StatusOK},
 		} {
 			response := httptest.NewRecorder()
-			mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
-			if response.Code != http.StatusOK {
-				t.Fatalf("legacy fallback %s status=%d body=%s", target, response.Code, response.Body.String())
+			mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target.path, nil))
+			if response.Code != target.want {
+				t.Fatalf("strict legacy %s status=%d body=%s", target.path, response.Code, response.Body.String())
 			}
 		}
 	})

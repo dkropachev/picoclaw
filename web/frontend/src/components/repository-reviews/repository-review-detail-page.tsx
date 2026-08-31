@@ -71,11 +71,13 @@ export function RepositoryReviewDetailPage({
   id,
   onBack,
   onFindings,
+  onRawFindings,
   onIssues,
 }: {
   id: string
   onBack: () => void
   onFindings: () => void
+  onRawFindings?: () => void
   onIssues: () => void
 }) {
   const [continueDialog, setContinueDialog] =
@@ -192,15 +194,23 @@ export function RepositoryReviewDetailPage({
       >
         {review && (
           <div className="space-y-6">
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-3 sm:grid-cols-3">
               <RelatedButton
                 icon={<IconFileDescription />}
                 label="Findings"
-                detail={`${review.progress.findings} finding occurrence${review.progress.findings === 1 ? "" : "s"}`}
+                detail={`${deduplicatedFindingCount(review)} deduplicated finding${deduplicatedFindingCount(review) === 1 ? "" : "s"}`}
                 onClick={onFindings}
               />
+              {onRawFindings && (
+                <RelatedButton
+                  icon={<IconListDetails />}
+                  label="Raw findings"
+                  detail={`${rawFindingCount(review)} validated raw finding${rawFindingCount(review) === 1 ? "" : "s"}`}
+                  onClick={onRawFindings}
+                />
+              )}
               <RelatedButton
-                icon={<IconListDetails />}
+                icon={<IconFileDescription />}
                 label="Issue previews"
                 detail="Review, edit, link, and post saved previews"
                 onClick={onIssues}
@@ -266,9 +276,10 @@ export function RepositoryReviewDetailPage({
                 label="Unsupported files"
                 value={review.progress.unsupported_files}
               />
+              <Metric label="Raw findings" value={rawFindingCount(review)} />
               <Metric
-                label="Finding occurrences"
-                value={review.progress.findings}
+                label="Findings"
+                value={deduplicatedFindingCount(review)}
               />
               <Metric
                 label="Aggregated findings"
@@ -282,8 +293,8 @@ export function RepositoryReviewDetailPage({
 
             <p className="text-muted-foreground text-sm">
               Fully reviewed files count only after every required reviewer
-              acknowledges the file. Finding occurrences may be retained from
-              partial inspection before a file is fully reviewed.
+              acknowledges the file. Raw findings may be retained from partial
+              inspection before a file is fully reviewed.
             </p>
 
             {repositoryReviewInspectedFilesLabel(review) === "Unknown" && (
@@ -798,6 +809,14 @@ function resolvedCommit(
   review: RepositoryReviewAutomation,
 ): string | undefined {
   return review.resolved_commit_sha || review.scope_plan?.commit_sha
+}
+
+function rawFindingCount(review: RepositoryReviewAutomation): number {
+  return review.progress.raw_findings ?? 0
+}
+
+function deduplicatedFindingCount(review: RepositoryReviewAutomation): number {
+  return review.progress.deduplicated_findings ?? review.progress.findings ?? 0
 }
 
 function isQueuedHandoff(review: RepositoryReviewAutomation): boolean {

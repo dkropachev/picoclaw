@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-const maxHistoricalDeduplicationMergeGroups = 100_000
+const (
+	maxHistoricalDeduplicationMergeGroups = 100_000
+	historicalReplayAssignmentID          = "historical-replay"
+)
 
 var (
 	// ErrHistoricalDeduplicationInProgress is returned by merge-sensitive
@@ -105,6 +108,21 @@ type HistoricalDeduplicationQuiescence struct {
 	Publications     int `json:"publications"`
 	Mappings         int `json:"mappings"`
 	Validations      int `json:"validations"`
+}
+
+// HistoricalDeduplicationRawFinding reports whether raw was admitted by the
+// historical replay adapter. AssignmentID is the durable discriminator. The
+// prefix-only fallback accepts records written by early development builds
+// and deliberately excludes native findings, whose assignment identity is
+// always nonempty.
+func HistoricalDeduplicationRawFinding(raw RawReviewFinding) bool {
+	if strings.TrimSpace(raw.LegacyFindingID) == "" {
+		return false
+	}
+	if raw.AssignmentID == historicalReplayAssignmentID {
+		return true
+	}
+	return raw.AssignmentID == "" && strings.HasPrefix(raw.ID, "rrw_")
 }
 
 func (q HistoricalDeduplicationQuiescence) Ready() bool {
@@ -278,15 +296,26 @@ func (s Store) AdmitNextHistoricalDeduplicationBatch(
 				return RepositoryState{}, HistoricalDeduplicationAdmission{}, admissionErr
 			}
 			if _, exists := contextsByID[raw.ContextID]; !exists {
+				contextRunID := raw.RunID
+				if !ValidRepositoryReviewCampaignID(strings.TrimSpace(batch.CampaignID)) {
+					// A replay-only context must not temporarily claim the real run.
+					// Exact recovery can tag that run before retry rebinds this clone.
+					contextRunID = stableID("historical-run_", raw.RunID, raw.LegacyFindingID)
+				}
 				contextRecord := FindingContext{
 					ID: raw.ContextID, Repository: raw.Repository, CommitSHA: raw.CommitSHA,
 					InventoryHash: "historical-replay", ProfileHash: "historical-replay",
-					RunID: raw.RunID, Model: raw.Model, ModelAlias: raw.ModelAlias,
+					RunID: contextRunID, Model: raw.Model, ModelAlias: raw.ModelAlias,
 					Account: raw.Account, Reviewer: raw.Reviewer,
 					Files: []FileRef{raw.File}, CreatedAt: raw.CreatedAt,
 				}
 				state.Contexts = append(state.Contexts, contextRecord)
 				contextsByID[contextRecord.ID] = contextRecord
+			}
+			if bindErr := bindHistoricalDeduplicationCampaign(
+				&state, finding.ID, raw.ContextID, raw.CampaignID, raw.CommitSHA,
+			); bindErr != nil {
+				return RepositoryState{}, HistoricalDeduplicationAdmission{}, bindErr
 			}
 			if state.NextDeduplicationOrdinal == 0 {
 				state.NextDeduplicationOrdinal = 1
@@ -333,12 +362,15 @@ func historicalRawFindingAndJob(
 	if ordinal == 0 {
 		ordinal = 1
 	}
-	boundaryID := historicalDeduplicationBoundaryID(batch.BoundaryID)
-	bucket, err := DeduplicationAdmissionBucket(boundaryID, finding.File, finding.Symbol)
+	campaignID := historicalDeduplicationCampaignID(
+		state.Repository, finding.CommitSHA, batch,
+	)
+	bucket, err := DeduplicationAdmissionBucket(campaignID, finding.File, finding.Symbol)
 	if err != nil {
 		return RawReviewFinding{}, DeduplicationJob{}, err
 	}
 	contextID := ""
+	runID := ""
 	reviewer := ""
 	model := ""
 	modelAlias := ""
@@ -349,6 +381,7 @@ func historicalRawFindingAndJob(
 			continue
 		}
 		contextID = contextRecord.ID
+		runID = strings.TrimSpace(contextRecord.RunID)
 		model = strings.TrimSpace(contextRecord.Model)
 		candidateAlias := strings.TrimSpace(contextRecord.ModelAlias)
 		candidateAccount := strings.TrimSpace(contextRecord.Account)
@@ -359,8 +392,24 @@ func historicalRawFindingAndJob(
 		reviewer = strings.TrimSpace(contextRecord.Reviewer)
 		break
 	}
-	if contextID == "" {
-		contextID = stableID("legacy-context_", finding.ID)
+	if !ValidRepositoryReviewCampaignID(strings.TrimSpace(batch.CampaignID)) {
+		// Keep unproven legacy contexts untouched so a later exact campaign
+		// recovery can still validate their original stable identities. The
+		// replay-only clone carries synthetic processing authority instead.
+		contextID = stableID("legacy-context_", state.Repository, finding.ID)
+	} else if contextID == "" {
+		contextID = stableID("legacy-context_", state.Repository, finding.ID)
+	}
+	if runID == "" {
+		for _, run := range state.Runs {
+			if containsExactString(run.FindingIDs, finding.ID) {
+				runID = strings.TrimSpace(run.ID)
+				break
+			}
+		}
+	}
+	if runID == "" {
+		runID = batch.BoundaryID
 	}
 	if model == "" && len(finding.Models) > 0 {
 		model = strings.TrimSpace(finding.Models[0])
@@ -373,13 +422,13 @@ func historicalRawFindingAndJob(
 	}
 	raw := RawReviewFinding{
 		ID: stableID("rrw_", state.Repository, "historical", finding.ID), Version: 1,
-		CampaignID: boundaryID, AdmissionBucket: bucket, InsertionOrdinal: ordinal,
+		CampaignID: campaignID, AdmissionBucket: bucket, InsertionOrdinal: ordinal,
 		LegacyFindingID: finding.ID, Repository: finding.Repository,
 		CommitSHA: finding.CommitSHA, File: finding.File, Line: finding.Line,
 		Severity: finding.Severity, Title: finding.Title, Symbol: finding.Symbol,
 		Message: finding.Message, Evidence: finding.Evidence, Impact: finding.Impact,
 		Validation: finding.Validation, MatchHints: finding.MatchHints, FixEffort: finding.FixEffort,
-		ContextID: contextID, RunID: batch.BoundaryID, AssignmentID: "historical-replay",
+		ContextID: contextID, RunID: runID, AssignmentID: historicalReplayAssignmentID,
 		Model: model, ModelAlias: modelAlias, Account: account, Reviewer: reviewer,
 		State:       RawFindingDeduplicationPending,
 		Disposition: RawFindingDispositionUndecided, CreatedAt: finding.CreatedAt, UpdatedAt: now,
@@ -404,12 +453,105 @@ func historicalRawFindingAndJob(
 	return raw, job, nil
 }
 
+func historicalDeduplicationCampaignID(
+	repository string,
+	commitSHA string,
+	batch HistoricalDeduplicationReplayBatch,
+) string {
+	if campaignID := strings.TrimSpace(batch.CampaignID); ValidRepositoryReviewCampaignID(campaignID) {
+		return campaignID
+	}
+	return stableID(
+		"rrc_",
+		strings.TrimSpace(repository),
+		strings.ToLower(strings.TrimSpace(commitSHA)),
+		"historical-replay-boundary",
+		historicalDeduplicationBoundaryID(batch.BoundaryID),
+	)
+}
+
 func historicalDeduplicationBoundaryID(value string) string {
 	value = strings.TrimSpace(value)
 	if value != "" && len(value) <= 256 && !strings.ContainsRune(value, 0) {
 		return value
 	}
 	return stableID("rrb_", value)
+}
+
+// bindHistoricalDeduplicationCampaign installs only the minimum processing
+// authority required for a replay-derived deduplicated projection to pass the
+// ordinary campaign invariants. Exact recovery has already tagged proven
+// records. Unproven records receive an isolated synthetic campaign without
+// claiming that their workflow run belongs to a wider campaign.
+func bindHistoricalDeduplicationCampaign(
+	state *RepositoryState,
+	legacyFindingID string,
+	rawContextID string,
+	campaignID string,
+	commitSHA string,
+) error {
+	if state == nil || !ValidRepositoryReviewCampaignID(campaignID) ||
+		!validRepositoryReviewCommitSHA(commitSHA) {
+		return ErrInvalidPlan
+	}
+	if state.CampaignHistory == nil {
+		state.CampaignHistory = make(map[string]string)
+	}
+	if existing := state.CampaignHistory[campaignID]; existing != "" && existing != commitSHA {
+		return ErrConflict
+	}
+	state.CampaignHistory[campaignID] = commitSHA
+
+	contextIndexes := make(map[string]int, len(state.Contexts))
+	for index := range state.Contexts {
+		contextRecord := state.Contexts[index]
+		if contextRecord.ID != "" {
+			contextIndexes[contextRecord.ID] = index
+		}
+	}
+	tagContext := func(contextID string, replayContext bool) error {
+		index, found := contextIndexes[contextID]
+		if !found {
+			return ErrConflict
+		}
+		contextRecord := &state.Contexts[index]
+		if contextRecord.CommitSHA != commitSHA {
+			return ErrConflict
+		}
+		if contextRecord.CampaignID != "" && contextRecord.CampaignID != campaignID &&
+			(!replayContext || contextRecord.InventoryHash != "historical-replay" ||
+				contextRecord.ProfileHash != "historical-replay") {
+			return ErrConflict
+		}
+		contextRecord.CampaignID = campaignID
+		return nil
+	}
+	if err := tagContext(rawContextID, true); err != nil {
+		return err
+	}
+
+	findingIndex := findingIndexByID(state.Findings, legacyFindingID)
+	if findingIndex < 0 {
+		return ErrConflict
+	}
+	finding := &state.Findings[findingIndex]
+	if finding.CommitSHA != commitSHA ||
+		(finding.CampaignID != "" && finding.CampaignID != campaignID) {
+		return ErrConflict
+	}
+	if len(finding.ContextIDs) == 0 || finding.CampaignID == "" {
+		// Very old context-free occurrences retain their original untagged
+		// provenance. Unproven campaign-less occurrences do the same so exact
+		// recovery can still validate their original identities later. The
+		// replay-only raw context is sufficient for the new projection.
+		return nil
+	}
+	for _, contextID := range finding.ContextIDs {
+		if err := tagContext(contextID, false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func HistoricalDeduplicationMergeInProgress(state RepositoryState) bool {
@@ -465,7 +607,7 @@ func HistoricalDeduplicationRepositoryMergeGroups(
 	historicalRaw := 0
 	for _, raw := range state.RawFindings {
 		rawByID[raw.ID] = raw
-		if raw.LegacyFindingID == "" || !strings.HasPrefix(raw.ID, "rrw_") {
+		if !HistoricalDeduplicationRawFinding(raw) {
 			continue
 		}
 		historicalRaw++
@@ -504,7 +646,7 @@ func HistoricalDeduplicationRepositoryMergeGroups(
 		hasHistoricalSource := false
 		for _, rawID := range deduplicated.RawSourceIDs {
 			raw, exists := rawByID[rawID]
-			if !exists || raw.LegacyFindingID == "" || !strings.HasPrefix(raw.ID, "rrw_") {
+			if !exists || !HistoricalDeduplicationRawFinding(raw) {
 				continue
 			}
 			hasHistoricalSource = true
@@ -634,7 +776,7 @@ func resetHistoricalDeduplicationModelWork(
 	rawIndexes := make(map[string]int, len(state.RawFindings))
 	for index, raw := range state.RawFindings {
 		rawIndexes[raw.ID] = index
-		if raw.LegacyFindingID != "" && strings.HasPrefix(raw.ID, "rrw_") {
+		if HistoricalDeduplicationRawFinding(raw) {
 			historicalRawIDs[raw.ID] = struct{}{}
 		}
 	}
@@ -643,8 +785,59 @@ func resetHistoricalDeduplicationModelWork(
 		job := &state.DeduplicationJobs[index]
 		jobsByRawID[job.RawFindingID] = job
 	}
+	// Production callers always pass a loaded repository state. A handful of
+	// narrow pure-helper tests use detached zero-value fixtures; they still
+	// exercise graph reset behavior but have no campaign ledger to migrate.
+	if state.Repository != "" {
+		campaignByLegacyFinding := make(map[string]string, len(historicalRawIDs))
+		for _, batch := range HistoricalDeduplicationReplayBatches(*state) {
+			for _, findingID := range batch.FindingIDs {
+				findingIndex := findingIndexByID(state.Findings, findingID)
+				if findingIndex < 0 {
+					return ErrConflict
+				}
+				campaignByLegacyFinding[findingID] = historicalDeduplicationCampaignID(
+					state.Repository, state.Findings[findingIndex].CommitSHA, batch,
+				)
+			}
+		}
+		for rawID := range historicalRawIDs {
+			rawIndex := rawIndexes[rawID]
+			raw := &state.RawFindings[rawIndex]
+			job := jobsByRawID[raw.ID]
+			if job == nil {
+				return ErrConflict
+			}
+			campaignID := campaignByLegacyFinding[raw.LegacyFindingID]
+			if campaignID == "" {
+				findingIndex := findingIndexByID(state.Findings, raw.LegacyFindingID)
+				if findingIndex < 0 {
+					return ErrConflict
+				}
+				campaignID = historicalDeduplicationCampaignID(
+					state.Repository,
+					raw.CommitSHA,
+					HistoricalDeduplicationReplayBatch{BoundaryID: raw.RunID},
+				)
+			}
+			if err := bindHistoricalDeduplicationCampaign(
+				state, raw.LegacyFindingID, raw.ContextID, campaignID, raw.CommitSHA,
+			); err != nil {
+				return err
+			}
+			bucket, err := DeduplicationAdmissionBucket(campaignID, raw.File, raw.Symbol)
+			if err != nil {
+				return err
+			}
+			raw.CampaignID = campaignID
+			raw.AdmissionBucket = bucket
+			raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(*raw)
+			job.AdmissionBucket = bucket
+		}
+	}
 	removedDeduplicated := make(map[string]struct{})
 	replacementIDs := make(map[string]string)
+	rehomedLegacyIDs := make(map[string]string)
 	replacements := make([]DeduplicatedReviewFinding, 0)
 	keptDeduplicated := make([]DeduplicatedReviewFinding, 0, len(state.DeduplicatedFindings))
 	for _, finding := range state.DeduplicatedFindings {
@@ -663,6 +856,13 @@ func resetHistoricalDeduplicationModelWork(
 		}
 		removedDeduplicated[finding.ID] = struct{}{}
 		if len(nonHistoricalRawIDs) == 0 {
+			legacyID, rehomeErr := rehomeHistoricalDeduplicatedLifecycle(
+				state, finding, historicalRawIDs, rawIndexes, now,
+			)
+			if rehomeErr != nil {
+				return rehomeErr
+			}
+			rehomedLegacyIDs[finding.ID] = legacyID
 			continue
 		}
 		firstIndex, found := rawIndexes[nonHistoricalRawIDs[0]]
@@ -698,22 +898,34 @@ func resetHistoricalDeduplicationModelWork(
 		replacements = append(replacements, replacement)
 		replacementIDs[finding.ID] = replacement.ID
 	}
+	referenceReplacementID := func(id string) string {
+		if replacementID := replacementIDs[id]; replacementID != "" {
+			return replacementID
+		}
+		return rehomedLegacyIDs[id]
+	}
 	for repositoryIndex := range state.RepositoryFindings {
 		repositoryFinding := &state.RepositoryFindings[repositoryIndex]
 		changed := false
-		for occurrenceIndex, occurrenceID := range repositoryFinding.ReviewFindingIDs {
-			if replacementID := replacementIDs[occurrenceID]; replacementID != "" {
-				repositoryFinding.ReviewFindingIDs[occurrenceIndex] = replacementID
-				changed = true
+		reviewFindingIDs := make([]string, 0, len(repositoryFinding.ReviewFindingIDs))
+		for _, occurrenceID := range repositoryFinding.ReviewFindingIDs {
+			replacementID := referenceReplacementID(occurrenceID)
+			if replacementID != "" {
+				changed = changed || replacementID != occurrenceID
+				occurrenceID = replacementID
 			} else if _, removed := removedDeduplicated[occurrenceID]; removed {
 				return ErrConflict
 			}
+			before := len(reviewFindingIDs)
+			reviewFindingIDs = appendUnique(reviewFindingIDs, occurrenceID)
+			changed = changed || len(reviewFindingIDs) == before
 		}
+		repositoryFinding.ReviewFindingIDs = reviewFindingIDs
 		for historyIndex := range repositoryFinding.PathSymbolHistory {
 			historyFindingID := repositoryFinding.PathSymbolHistory[historyIndex].ReviewFindingID
-			if replacementID := replacementIDs[historyFindingID]; replacementID != "" {
+			if replacementID := referenceReplacementID(historyFindingID); replacementID != "" {
 				repositoryFinding.PathSymbolHistory[historyIndex].ReviewFindingID = replacementID
-				changed = true
+				changed = changed || replacementID != historyFindingID
 			}
 		}
 		if changed {
@@ -748,12 +960,17 @@ func resetHistoricalDeduplicationModelWork(
 		for draftIndex := range state.IssueDrafts {
 			draft := &state.IssueDrafts[draftIndex]
 			changed := false
-			for findingIndex, findingID := range draft.FindingIDs {
-				if replacementID := replacementIDs[findingID]; replacementID != "" {
-					draft.FindingIDs[findingIndex] = replacementID
-					changed = true
+			findingIDs := make([]string, 0, len(draft.FindingIDs))
+			for _, findingID := range draft.FindingIDs {
+				if replacementID := referenceReplacementID(findingID); replacementID != "" {
+					changed = changed || replacementID != findingID
+					findingID = replacementID
 				}
+				before := len(findingIDs)
+				findingIDs = appendUnique(findingIDs, findingID)
+				changed = changed || len(findingIDs) == before
 			}
+			draft.FindingIDs = findingIDs
 			if changed {
 				draft.Version++
 				draft.UpdatedAt = now
@@ -761,7 +978,7 @@ func resetHistoricalDeduplicationModelWork(
 		}
 		for runIndex := range state.Runs {
 			for findingIndex, findingID := range state.Runs[runIndex].FindingIDs {
-				if replacementID := replacementIDs[findingID]; replacementID != "" {
+				if replacementID := referenceReplacementID(findingID); replacementID != "" {
 					state.Runs[runIndex].FindingIDs[findingIndex] = replacementID
 				}
 			}
@@ -810,7 +1027,7 @@ func resetHistoricalDeduplicationModelWork(
 			continue
 		}
 		job := jobsByRawID[raw.ID]
-		if job == nil || job.State == DeduplicationJobRunning {
+		if job == nil {
 			return ErrConflict
 		}
 		raw.State = RawFindingDeduplicationPending
@@ -841,6 +1058,151 @@ func resetHistoricalDeduplicationModelWork(
 	reconcileFindingsProcessingCounters(state)
 	state.FindingsProcessing.UpdatedAt = now
 	return nil
+}
+
+// rehomeHistoricalDeduplicatedLifecycle moves user-controlled lifecycle and
+// association state from a replay-derived rdf_* projection back onto its
+// retained legacy occurrence while model work is reset. The legacy occurrence
+// is stable across retry attempts and gives drafts/repository history a valid
+// durable referent until completion restores the canonical rdf_* identity.
+func rehomeHistoricalDeduplicatedLifecycle(
+	state *RepositoryState,
+	finding DeduplicatedReviewFinding,
+	historicalRawIDs map[string]struct{},
+	rawIndexes map[string]int,
+	now time.Time,
+) (string, error) {
+	if state == nil {
+		return "", errors.New("repository review state is required")
+	}
+	legacyID := ""
+	for _, rawID := range finding.RawSourceIDs {
+		if _, historical := historicalRawIDs[rawID]; !historical {
+			continue
+		}
+		rawIndex, found := rawIndexes[rawID]
+		if !found {
+			return "", ErrConflict
+		}
+		legacyID = state.RawFindings[rawIndex].LegacyFindingID
+		if legacyID != "" {
+			break
+		}
+	}
+	legacyIndex := findingIndexByID(state.Findings, legacyID)
+	if legacyID == "" || legacyIndex < 0 {
+		return "", ErrConflict
+	}
+	legacy := &state.Findings[legacyIndex]
+	if finding.Status == FindingOpen || finding.Status == FindingDismissed ||
+		finding.Status == FindingPosted {
+		legacy.Status = finding.Status
+	}
+	if finding.IssueDraftID != "" {
+		legacy.IssueDraftID = finding.IssueDraftID
+	}
+	if finding.RepositoryFindingID != "" {
+		legacy.RepositoryFindingID = finding.RepositoryFindingID
+		legacy.RepositoryMatchState = finding.RepositoryMatchState
+	}
+	legacy.TargetBranch = finding.TargetBranch
+	legacy.AdvertisedDefaultBranch = finding.AdvertisedDefaultBranch
+	legacy.TargetIsDefault = finding.TargetIsDefault
+	legacy.Version++
+	legacy.UpdatedAt = now
+	return legacyID, nil
+}
+
+// restoreHistoricalDeduplicatedLifecycle moves draft ownership and lifecycle
+// status from the retained legacy occurrence onto the canonical rdf_* selected
+// by replay. Repository associations deliberately remain on the legacy
+// occurrence until the historical repository merge consumes that provenance.
+func restoreHistoricalDeduplicatedLifecycle(
+	state *RepositoryState,
+	raw RawReviewFinding,
+	targetID string,
+	now time.Time,
+) error {
+	if state == nil || !HistoricalDeduplicationRawFinding(raw) {
+		return nil
+	}
+	legacyIndex := findingIndexByID(state.Findings, raw.LegacyFindingID)
+	targetIndex := deduplicatedFindingIndexByID(state.DeduplicatedFindings, targetID)
+	projectionIndex := findingIndexByID(state.Findings, targetID)
+	if legacyIndex < 0 || targetIndex < 0 || projectionIndex < 0 {
+		return ErrConflict
+	}
+	legacy := &state.Findings[legacyIndex]
+	target := &state.DeduplicatedFindings[targetIndex]
+	projection := &state.Findings[projectionIndex]
+	status := mergeHistoricalFindingStatus(target.Status, legacy.Status)
+	target.Status = status
+	projection.Status = status
+	restoreDraft := target.IssueDraftID == "" || legacy.IssueDraftID == "" ||
+		target.IssueDraftID == legacy.IssueDraftID
+	if restoreDraft {
+		if target.IssueDraftID == "" {
+			target.IssueDraftID = legacy.IssueDraftID
+		}
+		if projection.IssueDraftID == "" {
+			projection.IssueDraftID = legacy.IssueDraftID
+		}
+		for draftIndex := range state.IssueDrafts {
+			draft := &state.IssueDrafts[draftIndex]
+			changed := false
+			findingIDs := make([]string, 0, len(draft.FindingIDs))
+			for _, findingID := range draft.FindingIDs {
+				if findingID == legacy.ID {
+					findingID = target.ID
+					changed = true
+				}
+				before := len(findingIDs)
+				findingIDs = appendUnique(findingIDs, findingID)
+				changed = changed || len(findingIDs) == before
+			}
+			if changed {
+				draft.FindingIDs = findingIDs
+				draft.Version++
+				draft.UpdatedAt = now
+			}
+		}
+		legacy.IssueDraftID = ""
+	}
+	legacy.Version++
+	legacy.UpdatedAt = now
+	target.Version++
+	target.UpdatedAt = now
+	target.History = appendDeduplicatedFindingHistory(
+		target.History,
+		DeduplicatedFindingHistoryEntry{
+			Action: "historical_lifecycle_restored", RawFindingID: raw.ID, At: now,
+		},
+	)
+	projection.Version++
+	projection.UpdatedAt = now
+	return nil
+}
+
+func mergeHistoricalFindingStatus(left, right FindingStatus) FindingStatus {
+	rank := func(status FindingStatus) int {
+		switch status {
+		case FindingPosted:
+			return 3
+		case FindingDismissed:
+			return 2
+		case FindingOpen:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(right) > rank(left) {
+		return right
+	}
+	if rank(left) == 0 {
+		return FindingOpen
+	}
+	return left
 }
 
 func (s Store) AcquireHistoricalDeduplicationMerge(
@@ -963,7 +1325,7 @@ func associateHistoricalDeduplicatedFindings(state *RepositoryState, now time.Ti
 		historical := false
 		for _, rawID := range deduplicated.RawSourceIDs {
 			raw, found := rawByID[rawID]
-			if !found || !strings.HasPrefix(raw.ID, "rrw_") || raw.LegacyFindingID == "" {
+			if !found || !HistoricalDeduplicationRawFinding(raw) {
 				continue
 			}
 			historical = true
@@ -1070,6 +1432,14 @@ func (s Store) RetryHistoricalDeduplicationReplay(
 	}
 	replay := &state.HistoricalDeduplication
 	if !replay.Required || replay.Status == HistoricalDeduplicationCompleted {
+		return state, *replay, nil
+	}
+	// A lost HTTP response may race the background worker through any of these
+	// states. Returning the durable state makes the explicit retry idempotent;
+	// importantly, it never clears or repeats already-running model work.
+	if replay.Status == HistoricalDeduplicationPending ||
+		replay.Status == HistoricalDeduplicationReplaying ||
+		replay.Status == HistoricalDeduplicationMerging {
 		return state, *replay, nil
 	}
 	if replay.Status != HistoricalDeduplicationFailed {

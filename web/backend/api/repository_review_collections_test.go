@@ -142,6 +142,13 @@ func TestRepositoryReviewRunFindingsSurviveFailedHistoricalDeduplication(t *test
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
 	state := seedRepositoryReviewAPIState(t, workspace)
+	state.Findings[0].ID = "rfn_failed_historical"
+	for runIndex := range state.Runs {
+		for findingIndex := range state.Runs[runIndex].FindingIDs {
+			state.Runs[runIndex].FindingIDs[findingIndex] = state.Findings[0].ID
+		}
+	}
+	state.MappingJobs = nil
 	want := state.Findings[0]
 	state.RawFindings = nil
 	state.DeduplicatedFindings = nil
@@ -160,6 +167,27 @@ func TestRepositoryReviewRunFindingsSurviveFailedHistoricalDeduplication(t *test
 	)
 
 	query := url.QueryEscape("ALL ORDER BY severity DESC, updated DESC")
+	strictResponse := httptest.NewRecorder()
+	mux.ServeHTTP(strictResponse, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations/"+automation.ID+"/findings?query="+query,
+		nil,
+	))
+	var strictPage struct {
+		Findings                []repositoryReviewDeduplicatedFindingSummary `json:"findings"`
+		Total                   int                                          `json:"total"`
+		FindingsProcessing      repoaudit.FindingsProcessingCounters         `json:"findings_processing"`
+		HistoricalDeduplication repoaudit.HistoricalDeduplicationReplay      `json:"historical_deduplication"`
+	}
+	if err := json.Unmarshal(strictResponse.Body.Bytes(), &strictPage); err != nil {
+		t.Fatal(err)
+	}
+	if strictResponse.Code != http.StatusOK || strictPage.Total != 0 ||
+		len(strictPage.Findings) != 0 || strictPage.FindingsProcessing.RawTotal != 1 ||
+		strictPage.HistoricalDeduplication.Status != repoaudit.HistoricalDeduplicationFailed {
+		t.Fatalf("strict findings page=%#v body=%s", strictPage, strictResponse.Body.String())
+	}
+
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(
 		http.MethodGet,

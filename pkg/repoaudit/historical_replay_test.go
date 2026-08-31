@@ -1,12 +1,267 @@
 package repoaudit
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestHistoricalReplayRetryMigratesProcessingIdentityAndMergesWorkflowDuplicates(t *testing.T) {
+	store := NewStore(t.TempDir())
+	now := time.Date(2026, 8, 30, 19, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	commitSHA := strings.Repeat("a", 40)
+	blobSHA := strings.Repeat("b", 40)
+	state, first := recordLifecycleFinding(
+		t, store, commitSHA, blobSHA, "wr_recovered_one",
+		"main", "main", true, "same retained defect",
+	)
+	if len(state.Contexts) != 1 || len(state.Runs) != 1 {
+		t.Fatalf("unexpected seed state contexts=%#v runs=%#v", state.Contexts, state.Runs)
+	}
+	campaignID := NewRepositoryReviewCampaignID()
+	first.CampaignID = campaignID
+	first.RepositoryFindingID = ""
+	first.RepositoryMatchState = ""
+	firstContext := state.Contexts[0]
+	firstContext.CampaignID = campaignID
+	secondContext := firstContext
+	secondContext.ID = "rctx_recovered_second"
+	secondContext.RunID = "wr_recovered_two"
+	secondContext.CreatedAt = now.Add(time.Minute)
+	second := first
+	second.ID = "rfn_recovered_second"
+	second.ContextIDs = []string{secondContext.ID}
+	second.Observations = append([]FindingObservation(nil), first.Observations...)
+	second.Observations[0].ContextID = secondContext.ID
+	second.CreatedAt = now.Add(time.Minute)
+	second.UpdatedAt = second.CreatedAt
+	secondRun := state.Runs[0]
+	secondRun.ID = secondContext.RunID
+	secondRun.FindingIDs = []string{second.ID}
+	secondRun.CompletedAt = now.Add(time.Minute)
+	state.Findings = []Finding{first, second}
+	state.Contexts = []FindingContext{firstContext, secondContext}
+	state.Runs[0].FindingIDs = []string{first.ID}
+	state.Runs = append(state.Runs[:1], secondRun)
+	state.RawFindings = nil
+	state.DeduplicatedFindings = nil
+	state.DeduplicationJobs = nil
+	state.MappingJobs = nil
+	state.RepositoryFindings = nil
+	state.NextDeduplicationOrdinal = 0
+	state.FindingsProcessing = FindingsProcessingCounters{}
+	state.CampaignHistory = map[string]string{campaignID: commitSHA}
+	state.HistoricalDeduplication = HistoricalDeduplicationReplay{
+		Required: true, Status: HistoricalDeduplicationPending, UpdatedAt: now,
+	}
+	state.Version++
+	state.UpdatedAt = now
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	snapshot := RepositoryReviewDeduplicationSnapshot{
+		ReviewerModel: "reviewer", DeduplicationModel: "reviewer",
+		SimilarityThreshold: 90, CandidateLimit: 4,
+	}
+	state, _, err := store.FreezeHistoricalDeduplicationReplay(state.Repository, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, admission, err := store.AdmitNextHistoricalDeduplicationBatch(state.Repository)
+	if err != nil || admission.Admitted != 2 || len(state.RawFindings) != 2 {
+		t.Fatalf("admission=%#v raws=%#v err=%v", admission, state.RawFindings, err)
+	}
+	for _, raw := range state.RawFindings {
+		if raw.CampaignID != campaignID || !ValidRepositoryReviewCampaignID(raw.CampaignID) {
+			t.Fatalf("recovered raw campaign=%#v", raw)
+		}
+	}
+	provenance := make(map[string]RawReviewFinding, len(state.RawFindings))
+	for _, raw := range state.RawFindings {
+		provenance[raw.ID] = raw
+	}
+	for index := range state.RawFindings {
+		raw := &state.RawFindings[index]
+		raw.CampaignID = "wr_legacy_batch_" + string(rune('a'+index))
+		raw.AdmissionBucket, err = DeduplicationAdmissionBucket(
+			raw.CampaignID, raw.File, raw.Symbol,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(*raw)
+		for jobIndex := range state.DeduplicationJobs {
+			job := &state.DeduplicationJobs[jobIndex]
+			if job.RawFindingID == raw.ID {
+				job.AdmissionBucket = raw.AdmissionBucket
+			}
+		}
+	}
+	stuckRaw := &state.RawFindings[0]
+	stuckJob := &state.DeduplicationJobs[0]
+	stuckRaw.State = RawFindingDeduplicationRunning
+	stuckRaw.Version++
+	stuckRaw.UpdatedAt = now
+	stuckJob.State = DeduplicationJobRunning
+	stuckJob.Attempts = 2
+	stuckJob.LeaseID = "rdl_stuck"
+	stuckJob.LeaseExpiresAt = now.Add(time.Hour)
+	stuckJob.UpdatedAt = now
+	state.HistoricalDeduplication.Status = HistoricalDeduplicationFailed
+	state.HistoricalDeduplication.Error = "Historical deduplication failed."
+	state.HistoricalDeduplication.UpdatedAt = now
+	state.Version++
+	state.UpdatedAt = now
+	reconcileFindingsProcessingCounters(&state)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+
+	pendingState, pending, err := store.RetryHistoricalDeduplicationReplay(state.Repository)
+	if err != nil || pending.Status != HistoricalDeduplicationPending {
+		t.Fatalf("retry state=%#v replay=%#v err=%v", pendingState, pending, err)
+	}
+	repeatedState, repeated, err := store.RetryHistoricalDeduplicationReplay(state.Repository)
+	if err != nil || repeated.Status != HistoricalDeduplicationPending ||
+		repeatedState.Version != pendingState.Version {
+		t.Fatalf("idempotent retry state=%#v replay=%#v err=%v", repeatedState, repeated, err)
+	}
+	now = now.Add(time.Minute)
+	state, _, err = store.FreezeHistoricalDeduplicationReplay(state.Repository, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, raw := range state.RawFindings {
+		before := provenance[raw.ID]
+		job := state.DeduplicationJobs[index]
+		if raw.CampaignID != campaignID || !ValidRepositoryReviewCampaignID(raw.CampaignID) ||
+			raw.AdmissionBucket != state.RawFindings[0].AdmissionBucket ||
+			job.AdmissionBucket != raw.AdmissionBucket ||
+			raw.DiagnosisDigest != RawReviewFindingDiagnosisDigest(raw) ||
+			raw.State != RawFindingDeduplicationPending || job.State != DeduplicationJobPending ||
+			job.Attempts != 0 || job.LeaseID != "" ||
+			raw.LegacyFindingID != before.LegacyFindingID || raw.RunID != before.RunID ||
+			raw.ContextID != before.ContextID || raw.Model != before.Model ||
+			raw.Evidence != before.Evidence || raw.CreatedAt != before.CreatedAt {
+			t.Fatalf("migrated raw=%#v job=%#v before=%#v", raw, job, before)
+		}
+	}
+	processed, err := store.ProcessPendingDeduplicationJobs(
+		t.Context(), state.Repository, DeduplicationProcessOptions{
+			Score: func(
+				_ context.Context,
+				_ RepositoryReviewDeduplicationSnapshot,
+				_ string,
+				request DeduplicationScoringRequest,
+			) (DeduplicationScoringResponse, error) {
+				scores := make([]DeduplicationCandidateScore, 0, len(request.Candidates))
+				for _, candidate := range request.Candidates {
+					scores = append(scores, DeduplicationCandidateScore{
+						CandidateID: candidate.ID, Score: 100,
+						Explanation: "Same retained mechanism, trigger, invariant, and outcome.",
+					})
+				}
+				return DeduplicationScoringResponse{Scores: scores}, nil
+			},
+			Judge: func(
+				_ context.Context,
+				_ RepositoryReviewDeduplicationSnapshot,
+				_ string,
+				request DeduplicationJudgeRequest,
+			) (DeduplicationJudgment, error) {
+				return DeduplicationJudgment{
+					Decision: "duplicate", CandidateID: request.Candidates[0].OpaqueID,
+				}, nil
+			},
+		},
+	)
+	if err != nil || processed.Completed != 2 || processed.Created != 1 ||
+		processed.Duplicates != 1 {
+		t.Fatalf("cross-workflow processing=%#v err=%v", processed, err)
+	}
+	state, _, err = store.Get(state.Repository)
+	if err != nil || len(state.DeduplicatedFindings) != 1 ||
+		len(state.DeduplicatedFindings[0].RawSourceIDs) != 2 {
+		t.Fatalf("cross-workflow result=%#v err=%v", state.DeduplicatedFindings, err)
+	}
+}
+
+func TestHistoricalReplaySyntheticCampaignPersistsProjectionWithoutRewritingLegacyProvenance(t *testing.T) {
+	store := NewStore(t.TempDir())
+	now := time.Date(2026, 8, 30, 20, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	state, legacy := recordLifecycleFinding(
+		t, store, strings.Repeat("c", 40), strings.Repeat("d", 40),
+		"wr_orphaned_history", "main", "main", true, "orphaned retained defect",
+	)
+	originalContextID := legacy.ContextIDs[0]
+	state.RawFindings = nil
+	state.DeduplicatedFindings = nil
+	state.DeduplicationJobs = nil
+	state.MappingJobs = nil
+	state.NextDeduplicationOrdinal = 0
+	state.FindingsProcessing = FindingsProcessingCounters{}
+	state.HistoricalDeduplication = HistoricalDeduplicationReplay{
+		Required: true, Status: HistoricalDeduplicationPending, UpdatedAt: now,
+	}
+	state.Version++
+	state.UpdatedAt = now
+	if err := store.save(&state); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := RepositoryReviewDeduplicationSnapshot{
+		ReviewerModel: "reviewer", DeduplicationModel: "reviewer",
+		SimilarityThreshold: 90, CandidateLimit: 4,
+	}
+	state, _, err := store.FreezeHistoricalDeduplicationReplay(state.Repository, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, admission, err := store.AdmitNextHistoricalDeduplicationBatch(state.Repository)
+	if err != nil || admission.Admitted != 1 || len(admission.RawFindings) != 1 {
+		t.Fatalf("synthetic admission=%#v err=%v", admission, err)
+	}
+	raw := admission.RawFindings[0]
+	if !ValidRepositoryReviewCampaignID(raw.CampaignID) ||
+		state.CampaignHistory[raw.CampaignID] != raw.CommitSHA ||
+		raw.ContextID == originalContextID || raw.AssignmentID != historicalReplayAssignmentID {
+		t.Fatalf("synthetic processing identity raw=%#v history=%#v", raw, state.CampaignHistory)
+	}
+	legacyIndex := findingIndexByID(state.Findings, legacy.ID)
+	originalContextIndex := -1
+	rawContextIndex := -1
+	for index := range state.Contexts {
+		switch state.Contexts[index].ID {
+		case originalContextID:
+			originalContextIndex = index
+		case raw.ContextID:
+			rawContextIndex = index
+		}
+	}
+	if legacyIndex < 0 || originalContextIndex < 0 || rawContextIndex < 0 ||
+		state.Findings[legacyIndex].CampaignID != "" ||
+		state.Contexts[originalContextIndex].CampaignID != "" ||
+		state.Contexts[rawContextIndex].CampaignID != raw.CampaignID ||
+		state.Contexts[rawContextIndex].InventoryHash != "historical-replay" {
+		t.Fatalf("legacy provenance was rewritten: finding=%#v contexts=%#v", state.Findings, state.Contexts)
+	}
+	processed, err := store.ProcessPendingDeduplicationJobs(
+		t.Context(), state.Repository, DeduplicationProcessOptions{},
+	)
+	if err != nil || processed.Completed != 1 || processed.Created != 1 {
+		t.Fatalf("synthetic processing=%#v err=%v", processed, err)
+	}
+	state, _, err = store.Get(state.Repository)
+	if err != nil || len(state.DeduplicatedFindings) != 1 ||
+		state.DeduplicatedFindings[0].CampaignID != raw.CampaignID ||
+		len(state.DeduplicatedFindings[0].RawSourceIDs) != 1 {
+		t.Fatalf("synthetic persisted projection=%#v err=%v", state.DeduplicatedFindings, err)
+	}
+}
 
 func TestHistoricalDeduplicationReplayBatchesAreOldestFirstAndBatchScoped(t *testing.T) {
 	base := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)

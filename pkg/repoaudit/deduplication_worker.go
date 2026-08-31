@@ -371,6 +371,13 @@ func (s Store) CompleteDeduplicationJob(
 	job.History = appendDeduplicationJobHistory(job.History, DeduplicationJobHistoryEntry{
 		State: DeduplicationJobCompleted, Attempt: job.Attempts, At: now,
 	})
+	if HistoricalDeduplicationRawFinding(*raw) {
+		if restoreErr := restoreHistoricalDeduplicatedLifecycle(
+			&state, *raw, target.ID, now,
+		); restoreErr != nil {
+			return RepositoryState{}, DeduplicatedReviewFinding{}, false, restoreErr
+		}
+	}
 	state.Version++
 	state.UpdatedAt = now
 	reconcileFindingsProcessingCounters(&state)
@@ -464,6 +471,11 @@ func newDeduplicatedReviewFinding(
 	}
 	if legacyIndex := findingIndexByID(projections, raw.LegacyFindingID); legacyIndex >= 0 {
 		legacy := projections[legacyIndex]
+		if legacy.Status == FindingOpen || legacy.Status == FindingDismissed ||
+			legacy.Status == FindingPosted {
+			finding.Status = legacy.Status
+		}
+		finding.IssueDraftID = legacy.IssueDraftID
 		finding.TargetBranch = legacy.TargetBranch
 		finding.AdvertisedDefaultBranch = legacy.AdvertisedDefaultBranch
 		finding.TargetIsDefault = legacy.TargetIsDefault

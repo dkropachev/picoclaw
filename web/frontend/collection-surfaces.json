@@ -332,6 +332,8 @@
         "related": [
           "/repository-reviews/:id/findings",
           "/repository-reviews/:id/findings/:findingId",
+          "/repository-reviews/:id/raw-findings",
+          "/repository-reviews/:id/raw-findings/:sourceId",
           "/repository-reviews/:id/issues",
           "/repository-reviews/:id/issues/:draftId",
           "/repository-reviews/:id/issues/:draftId/edit"
@@ -348,6 +350,7 @@
         "src/routes/repository-reviews_.$id_.findings_.$findingId_.link-issue.tsx",
         "src/components/repository-reviews/repository-review-findings-page.tsx",
         "src/components/repository-reviews/repository-review-finding-page.tsx",
+        "src/components/repository-reviews/repository-review-findings-processing.tsx",
         "src/components/repository-reviews/repository-review-route-state.ts",
         "src/components/repository-reviews/repository-review-run-finding-status.ts"
       ],
@@ -357,7 +360,31 @@
       "routes": {
         "list": "/repository-reviews/:id/findings",
         "detail": "/repository-reviews/:id/findings/:findingId",
-        "related": ["/repository-reviews/repositories/:id/findings/:findingId"]
+        "related": [
+          "/repository-reviews/:id/raw-findings/:sourceId",
+          "/repository-reviews/repositories/:id/findings/:findingId"
+        ]
+      }
+    },
+    {
+      "key": "repository-review-raw-findings",
+      "route": "/repository-reviews/:id/raw-findings",
+      "owningSpec": "docs/features/repository-reviews.md",
+      "implementationGlobs": [
+        "src/routes/repository-reviews_.$id_.raw-findings.tsx",
+        "src/routes/repository-reviews_.$id_.raw-findings_.$sourceId.tsx",
+        "src/components/repository-reviews/repository-review-raw-findings-page.tsx",
+        "src/components/repository-reviews/repository-review-raw-finding-page.tsx",
+        "src/components/repository-reviews/repository-review-findings-processing.tsx",
+        "src/components/repository-reviews/repository-review-route-state.ts"
+      ],
+      "capabilities": ["query", "pagination", "detail", "related"],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/repository-reviews/:id/raw-findings",
+        "detail": "/repository-reviews/:id/raw-findings/:sourceId",
+        "related": ["/repository-reviews/:id/findings/:findingId"]
       }
     },
     {

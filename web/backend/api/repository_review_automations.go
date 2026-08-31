@@ -79,6 +79,7 @@ var repositoryReviewAutomationCollectionSchema = mustCollectionQuerySchema(
 		},
 		{Name: "progress", Type: collectionquery.TypeNumber, Sortable: true},
 		{Name: "reviewed", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "raw_findings", Type: collectionquery.TypeNumber, Sortable: true},
 		{Name: "findings", Type: collectionquery.TypeNumber, Sortable: true},
 		{Name: "updated", Type: collectionquery.TypeTimestamp, Sortable: true},
 	},
@@ -159,6 +160,18 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/findings/{finding_id}/sources/{source_id}",
 		h.handleGetRepositoryReviewRawSource,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/raw-findings",
+		h.handleListRepositoryReviewRawFindingsCollection,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/raw-findings/{source_id}",
+		h.handleGetRepositoryReviewRawSource,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/raw-findings/{source_id}/retry",
+		h.handleRetryRepositoryReviewRawSource,
 	)
 	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/findings-processing",
@@ -412,6 +425,8 @@ func repositoryReviewAutomationCollectionField(
 		return collectionquery.NumberValue(progress.Percent), true
 	case "reviewed":
 		return collectionquery.NumberValue(float64(automation.Progress.ReviewedFiles)), true
+	case "raw_findings":
+		return collectionquery.NumberValue(float64(automation.Progress.RawFindings)), true
 	case "findings":
 		return collectionquery.NumberValue(float64(automation.Progress.Findings)), true
 	case "updated":
@@ -729,6 +744,7 @@ func projectRepositoryReviewAutomationWithStore(
 	if state, found, err := store.ResolveRepositoryState(
 		automation.Repository, automation.RunIDs,
 	); err == nil && found {
+		applyRepositoryReviewLiveMetrics(&automation, state)
 		automation.Progress.AssignmentProgress = repoaudit.CurrentCampaignAssignmentProgress(
 			state,
 			automation.CampaignID,

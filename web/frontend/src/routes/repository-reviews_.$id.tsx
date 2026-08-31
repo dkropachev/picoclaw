@@ -4,6 +4,7 @@ import { RepositoryReviewDetailPage } from "@/components/repository-reviews/repo
 import {
   collectionSearchFromReviewSearch,
   normalizeRepositoryReviewIssuesSearch,
+  normalizeRepositoryReviewRawFindingsSearch,
   normalizeRepositoryReviewRunFindingsSearch,
   repositoryReviewDefaultQuery,
   repositoryReviewParentNavigationState,
@@ -38,6 +39,17 @@ function RepositoryReviewDetailRoute() {
           to: "/repository-reviews/$id/findings",
           params: { id },
           search: normalizeRepositoryReviewRunFindingsSearch({}),
+          state: repositoryReviewParentNavigationState(
+            search,
+            repositoryReviewDefaultQuery,
+          ),
+        })
+      }
+      onRawFindings={() =>
+        void navigate({
+          to: "/repository-reviews/$id/raw-findings",
+          params: { id },
+          search: normalizeRepositoryReviewRawFindingsSearch({}),
           state: repositoryReviewParentNavigationState(
             search,
             repositoryReviewDefaultQuery,
