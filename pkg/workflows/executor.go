@@ -18,6 +18,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
+	"github.com/sipeed/picoclaw/pkg/routing"
 )
 
 const defaultMaxCallDepth = 4
@@ -243,6 +244,11 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 	if workflowRef == RepositoryBugFinderWorkflowRef {
 		if err := validateRepositoryBugFinderRepositoryInput(req.Inputs["repository"]); err != nil {
 			return nil, err
+		}
+		if !repoaudit.ValidRepositoryReviewAutomationID(
+			strings.TrimSpace(fmt.Sprint(req.Inputs["automation_id"])),
+		) {
+			return nil, errors.New("repository bug finder requires a canonical automation ID")
 		}
 	}
 	admittedExecutor, admissionErr := e.admitHumanTaskClosure(
@@ -2381,6 +2387,8 @@ func (e *Executor) runStepTarget(
 			managedAssignmentDispatch, managedAssignmentCheckpoint, err = repositoryReviewManagedAssignmentCallbacks(
 				execCtx,
 				with["review_plan"],
+				strings.TrimSpace(fmt.Sprint(execCtx.Inputs["automation_id"])),
+				agentID,
 			)
 			if err != nil {
 				return nil, err
@@ -2472,13 +2480,19 @@ func repositoryReviewAgentContext(ctx context.Context, repositoryReview bool) (c
 func repositoryReviewManagedAssignmentCallbacks(
 	exec ExecutionContext,
 	planValue any,
+	automationID string,
+	agentID string,
 ) (
 	ManagedAssignmentDispatchObserver,
 	ManagedAssignmentCheckpointObserver,
 	error,
 ) {
+	automationID = strings.TrimSpace(automationID)
+	agentID = strings.TrimSpace(agentID)
 	plan, err := nativeRepositoryReviewPlan(planValue)
-	if err != nil || plan.ID == "" {
+	if err != nil || plan.ID == "" ||
+		!repoaudit.ValidRepositoryReviewAutomationID(automationID) ||
+		!routing.IsCanonicalAgentID(agentID) {
 		return nil, nil, errors.New("repository review managed assignments require a durable plan")
 	}
 	if len(plan.AssignmentCatalog) == 0 {
@@ -2540,6 +2554,7 @@ func repositoryReviewManagedAssignmentCallbacks(
 			context.Background(),
 			repoaudit.CheckpointRepositoryReviewAssignmentRequest{
 				Plan: plan, RunID: exec.RunID, AssignmentID: event.AssignmentID,
+				AutomationID: automationID, AgentID: agentID, ChildIndex: event.Index,
 				Digest: event.CheckpointDigest, AcknowledgedFiles: acknowledged,
 				Observation: observation,
 			},

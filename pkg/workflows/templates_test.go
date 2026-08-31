@@ -101,6 +101,8 @@ func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T)
 		call.Inputs["scope_planned"].Default != false ||
 		call.Inputs["scope_selection"].Type != "object" ||
 		call.Inputs["scope_plan"].Type != "object" ||
+		call.Inputs["automation_id"].Type != "string" ||
+		!call.Inputs["automation_id"].Required ||
 		call.Inputs["campaign_id"].Type != "string" ||
 		call.Inputs["campaign_id"].Default != "" {
 		t.Fatalf("frozen scope inputs=%#v", call)

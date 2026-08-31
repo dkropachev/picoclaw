@@ -829,6 +829,24 @@ export type RepositoryReviewFocusID =
   | "concurrency_recovery"
   | "integration_validation"
 
+export interface RepositoryReviewFileAttribution {
+  id: string
+  path: string
+  commit_sha: string
+  blob_sha: string
+  focus_id: RepositoryReviewFocusID
+  root_agent_id?: string
+  reviewer_identity?: string
+  account?: string
+  model?: string
+  source: "legacy" | "live" | "mixed"
+  sources: string[]
+  attempts: number
+  run_ids: string[]
+  run_count: number
+  latest_completed_at: string
+}
+
 export interface RepositoryReviewAssignmentFocusProgress {
   total: number
   completed: number
@@ -1001,6 +1019,12 @@ export interface RepositoryReviewAutomationOptions {
 
 export interface RepositoryReviewAutomationPage extends CollectionPageMetadata {
   automations: RepositoryReviewAutomation[]
+}
+
+export interface RepositoryReviewFileAttributionPage extends CollectionPageMetadata {
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  file_attributions: RepositoryReviewFileAttribution[]
 }
 
 export interface RepositoryReviewProfilePage extends CollectionPageMetadata {
@@ -1273,6 +1297,41 @@ export async function getRepositoryReviewAutomation(
     RepositoryReviewAutomation | AutomationMutationResult
   >(automationPath(automationID), undefined, signal)
   return automationFromMutation(value)
+}
+
+export async function listRepositoryReviewAutomationFileAttributionsPage(
+  automationID: string,
+  input: CollectionListRequest = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewFileAttributionPage> {
+  const collectionInput = {
+    ...input,
+    query:
+      input.query?.trim() || "ALL ORDER BY path ASC, focus ASC, reviewer ASC",
+  }
+  const page = await collectionRequest<
+    Partial<RepositoryReviewFileAttributionPage>
+  >(
+    collectionListURL(
+      `${automationPath(automationID)}/file-attributions`,
+      collectionInput,
+    ),
+    undefined,
+    signal,
+  )
+  return {
+    automation: normalizeAutomation(page.automation!),
+    repository: page.repository
+      ? normalizeRepositoryReviewSummary(page.repository)
+      : undefined,
+    file_attributions: (page.file_attributions ?? []).map(
+      normalizeFileAttribution,
+    ),
+    total: page.total ?? 0,
+    next_cursor: page.next_cursor ?? "",
+    canonical_query: page.canonical_query ?? "",
+    query_schema: page.query_schema ?? { fields: [] },
+  }
 }
 
 export async function getRepositoryReviewAutomationFindings(
@@ -2150,6 +2209,32 @@ function normalizeRepositoryReviewSummary(
   value: RepositoryReviewSummary,
 ): RepositoryReviewSummary {
   return { ...value, review_version: value.review_version ?? 0 }
+}
+
+function normalizeFileAttribution(
+  attribution: RepositoryReviewFileAttribution,
+): RepositoryReviewFileAttribution {
+  return {
+    id: attribution.id ?? "",
+    path: attribution.path ?? "",
+    commit_sha: attribution.commit_sha ?? "",
+    blob_sha: attribution.blob_sha ?? "",
+    focus_id: attribution.focus_id,
+    ...(attribution.root_agent_id
+      ? { root_agent_id: attribution.root_agent_id }
+      : {}),
+    ...(attribution.reviewer_identity
+      ? { reviewer_identity: attribution.reviewer_identity }
+      : {}),
+    ...(attribution.account ? { account: attribution.account } : {}),
+    ...(attribution.model ? { model: attribution.model } : {}),
+    source: attribution.source ?? "legacy",
+    sources: attribution.sources ?? [],
+    attempts: attribution.attempts ?? 0,
+    run_ids: attribution.run_ids ?? [],
+    run_count: attribution.run_count ?? attribution.run_ids?.length ?? 0,
+    latest_completed_at: attribution.latest_completed_at ?? "",
+  }
 }
 
 function normalizeRunFindingSummary(

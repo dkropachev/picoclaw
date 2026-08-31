@@ -33,6 +33,7 @@ import {
   getRepositoryReviewCommitOptions,
   getRepositoryReviewRawSource,
   linkRepositoryReviewIssue,
+  listRepositoryReviewAutomationFileAttributionsPage,
   listRepositoryReviewAutomationFindingsPage,
   listRepositoryReviewAutomationIssuesPage,
   listRepositoryReviewAutomationRawFindingsPage,
@@ -83,6 +84,7 @@ vi.mock("@/api/repository-reviews", () => ({
   getRepositoryReviewAutomationRepositoryFinding: vi.fn(),
   getRepositoryReviewRawSource: vi.fn(),
   getRepositoryReviewAutomationIssue: vi.fn(),
+  listRepositoryReviewAutomationFileAttributionsPage: vi.fn(),
   listRepositoryReviewAutomationFindingsPage: vi.fn(),
   listRepositoryReviewAutomationRepositoryFindingsPage: vi.fn(),
   listRepositoryReviewAutomationRawFindingsPage: vi.fn(),
@@ -439,6 +441,35 @@ describe("routed repository review pages", () => {
     vi.resetAllMocks()
     resetCollectionRouteStateMemoryForTests()
     vi.mocked(getRepositoryReviewAutomation).mockResolvedValue(automation)
+    vi.mocked(
+      listRepositoryReviewAutomationFileAttributionsPage,
+    ).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      file_attributions: [
+        {
+          id: "attribution_1",
+          path: "pkg/store.go",
+          commit_sha: "a".repeat(40),
+          blob_sha: "b".repeat(40),
+          focus_id: "security_trust",
+          root_agent_id: "main",
+          reviewer_identity: "review",
+          account: "review-account",
+          model: "gpt-5.6-sol",
+          source: "legacy",
+          sources: ["legacy_managed_child"],
+          attempts: 2,
+          run_ids: ["run_1", "run_2"],
+          run_count: 2,
+          latest_completed_at: "2026-08-26T01:00:00Z",
+        },
+      ],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY path ASC, focus ASC, reviewer ASC",
+      query_schema: { fields: [] },
+    })
     vi.mocked(listRepositoryReviewAutomationFindingsPage).mockResolvedValue({
       automation,
       repository: repositorySummary,
@@ -724,6 +755,88 @@ describe("routed repository review pages", () => {
     expect(
       screen.getByText(/inspected-file coverage is unknown/i),
     ).toBeVisible()
+    expect(
+      await screen.findByRole("heading", {
+        name: "File processing attribution",
+      }),
+    ).toBeVisible()
+    const attributionTable = screen.getByRole("table")
+    expect(within(attributionTable).getByText("pkg/store.go")).toBeVisible()
+    expect(
+      within(attributionTable).getByText("Security and trust"),
+    ).toBeVisible()
+    expect(within(attributionTable).getByText("main")).toBeVisible()
+    expect(within(attributionTable).getByText("gpt-5.6-sol")).toBeVisible()
+    expect(within(attributionTable).getByText("review-account")).toBeVisible()
+    expect(
+      within(attributionTable).getByText("Historical replay"),
+    ).toBeVisible()
+    expect(
+      listRepositoryReviewAutomationFileAttributionsPage,
+    ).toHaveBeenCalledWith(
+      automation.id,
+      { cursor: undefined, limit: 200 },
+      expect.anything(),
+    )
+  })
+
+  it("loads file attribution rows beyond the first 200", async () => {
+    const attribution = (index: number) => ({
+      id: `attribution_${index}`,
+      path: `pkg/file_${index.toString().padStart(3, "0")}.go`,
+      commit_sha: "a".repeat(40),
+      blob_sha: index.toString(16).padStart(40, "0"),
+      focus_id: "security_trust" as const,
+      root_agent_id: "main",
+      reviewer_identity: "review",
+      account: "review-account",
+      model: "gpt-5.6-sol",
+      source: "live" as const,
+      sources: ["live_checkpoint"],
+      attempts: 1,
+      run_ids: [`run_${index}`],
+      run_count: 1,
+      latest_completed_at: "2026-08-26T01:00:00Z",
+    })
+    vi.mocked(
+      listRepositoryReviewAutomationFileAttributionsPage,
+    ).mockImplementation(async (_automationID, input) => ({
+      automation,
+      repository: repositorySummary,
+      file_attributions: input?.cursor
+        ? [attribution(200)]
+        : Array.from({ length: 200 }, (_, index) => attribution(index)),
+      total: 201,
+      next_cursor: input?.cursor ? "" : "attribution-cursor-2",
+      canonical_query: "ALL ORDER BY path ASC, focus ASC, reviewer ASC",
+      query_schema: { fields: [] },
+    }))
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewDetailPage
+        id={automation.id}
+        onBack={vi.fn()}
+        onFindings={vi.fn()}
+        onIssues={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText("pkg/file_000.go")).toBeVisible()
+    expect(screen.queryByText("pkg/file_200.go")).not.toBeInTheDocument()
+    await user.click(
+      screen.getByRole("button", { name: "Load more file attributions" }),
+    )
+    expect(await screen.findByText("pkg/file_200.go")).toBeVisible()
+    expect(
+      screen.queryByRole("button", { name: "Load more file attributions" }),
+    ).not.toBeInTheDocument()
+    expect(
+      listRepositoryReviewAutomationFileAttributionsPage,
+    ).toHaveBeenLastCalledWith(
+      automation.id,
+      { cursor: "attribution-cursor-2", limit: 200 },
+      expect.anything(),
+    )
   })
 
   it("shows truthful zero file progress for a finding-only paused campaign", async () => {

@@ -173,6 +173,7 @@ func TestAssignmentCheckpointAtomicallyAdmitsRawFindingAndJob(t *testing.T) {
 	result, err := fixture.store.CheckpointRepositoryReviewAssignment(
 		context.Background(), CheckpointRepositoryReviewAssignmentRequest{
 			Plan: plan, RunID: "dedup-checkpoint", AssignmentID: assignment.AssignmentID,
+			AutomationID: "rra_dedup_checkpoint", AgentID: "main", ChildIndex: 1,
 			Digest:            "sha256:" + strings.Repeat("d", 64),
 			AcknowledgedFiles: assignment.Files, Observation: observation,
 		},
@@ -209,6 +210,7 @@ func TestAssignmentCheckpointAtomicallyAdmitsRawFindingAndJob(t *testing.T) {
 	replayed, err := fixture.store.CheckpointRepositoryReviewAssignment(
 		context.Background(), CheckpointRepositoryReviewAssignmentRequest{
 			Plan: plan, RunID: "dedup-checkpoint", AssignmentID: assignment.AssignmentID,
+			AutomationID: "rra_dedup_checkpoint", AgentID: "main", ChildIndex: 1,
 			Digest:            "sha256:" + strings.Repeat("d", 64),
 			AcknowledgedFiles: assignment.Files, Observation: observation,
 		},

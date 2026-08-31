@@ -2,7 +2,7 @@ package repoaudit
 
 import "time"
 
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 type FileRef struct {
 	Path      string `json:"path"`
@@ -28,6 +28,33 @@ type UnsupportedFile struct {
 	ForceCampaignID string    `json:"force_campaign_id,omitempty"`
 	Reason          string    `json:"reason"`
 	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// RepositoryReviewFileAttribution records one successful review child and the
+// exact files it acknowledged. Records are append-only evidence: current
+// campaign coverage may move forward, while attribution remains tied to the
+// immutable run, assignment, source, and child index that produced it.
+type RepositoryReviewFileAttribution struct {
+	ID                string                                `json:"id"`
+	AutomationID      string                                `json:"automation_id"`
+	RunID             string                                `json:"run_id"`
+	CommitSHA         string                                `json:"commit_sha"`
+	InventoryHash     string                                `json:"inventory_hash"`
+	ProfileHash       string                                `json:"profile_hash"`
+	AssignmentID      string                                `json:"assignment_id"`
+	FocusID           string                                `json:"focus_id"`
+	RootAgentID       string                                `json:"root_agent_id"`
+	ReviewerIdentity  string                                `json:"reviewer_identity"`
+	Model             string                                `json:"model"`
+	ModelAlias        string                                `json:"model_alias"`
+	Account           string                                `json:"account"`
+	UsageModel        string                                `json:"usage_model,omitempty"`
+	AcknowledgedFiles []FileRef                             `json:"acknowledged_files"`
+	EvidenceDigest    string                                `json:"evidence_digest"`
+	Source            RepositoryReviewFileAttributionSource `json:"source"`
+	ChildIndex        int                                   `json:"child_index"`
+	Required          bool                                  `json:"required"`
+	CompletedAt       time.Time                             `json:"completed_at"`
 }
 
 type Plan struct {
@@ -571,6 +598,7 @@ type RepositoryState struct {
 	FindingsProcessing       FindingsProcessingCounters        `json:"findings_processing"`
 	Contexts                 []FindingContext                  `json:"contexts"`
 	Runs                     []ReviewRun                       `json:"runs"`
+	FileAttributions         []RepositoryReviewFileAttribution `json:"file_attributions"`
 	IssueDrafts              []IssueDraft                      `json:"issue_drafts"`
 	RepositoryFindings       []RepositoryFinding               `json:"repository_findings"`
 	MappingJobs              []RepositoryMappingJob            `json:"mapping_jobs"`

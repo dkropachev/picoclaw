@@ -1668,6 +1668,7 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		WorkflowRef: workflows.RepositoryBugFinderWorkflowRef,
 		Inputs: map[string]any{
 			"repository":                 automation.Repository,
+			"automation_id":              automation.ID,
 			"account_ref":                repositoryReviewEffectiveAccountRef(cfg, automation.EffectiveAccountRef),
 			"ref":                        repositoryReviewExecutionRef(automation),
 			"target_branch":              automation.ResolvedTargetBranch,

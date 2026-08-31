@@ -123,9 +123,11 @@ func migrateRepositoryState(state *RepositoryState) (bool, error) {
 		return false, errors.New("repository review state is required")
 	}
 	migrated := false
-	legacySchema := state.SchemaVersion > 0 && state.SchemaVersion < SchemaVersion
+	// Historical deduplication was introduced by schema 4. The schema 5
+	// attribution-only migration must not requeue already migrated findings.
+	legacyDeduplicationSchema := state.SchemaVersion > 0 && state.SchemaVersion < 4
 	switch state.SchemaVersion {
-	case 1, 2, 3:
+	case 1, 2, 3, 4:
 		state.SchemaVersion = SchemaVersion
 		migrated = true
 	case SchemaVersion:
@@ -174,7 +176,7 @@ func migrateRepositoryState(state *RepositoryState) (bool, error) {
 	if reconcileFindingsProcessingCounters(state) {
 		migrated = true
 	}
-	if legacySchema && (len(state.Findings) > 0 || len(state.RepositoryFindings) > 0) &&
+	if legacyDeduplicationSchema && (len(state.Findings) > 0 || len(state.RepositoryFindings) > 0) &&
 		!state.HistoricalDeduplication.Required {
 		state.HistoricalDeduplication.Required = true
 		state.HistoricalDeduplication.Status = HistoricalDeduplicationPending
@@ -187,6 +189,10 @@ func migrateRepositoryState(state *RepositoryState) (bool, error) {
 	}
 	if state.Runs == nil {
 		state.Runs = []ReviewRun{}
+		migrated = true
+	}
+	if state.FileAttributions == nil {
+		state.FileAttributions = []RepositoryReviewFileAttribution{}
 		migrated = true
 	}
 	if state.IssueDrafts == nil {

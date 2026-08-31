@@ -47,6 +47,7 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 		WorkflowRef: RepositoryBugFinderWorkflowRef,
 		Inputs: map[string]any{
 			"repository": repo, "ref": "HEAD", "target": "all",
+			"automation_id": "rra_workflow_test",
 			"campaign_id":   campaignID,
 			"review_models": "review-a,review-b",
 			"planner_model": "review-a",

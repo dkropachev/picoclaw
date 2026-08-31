@@ -37,6 +37,9 @@ type CheckpointRepositoryReviewAssignmentRequest struct {
 	Plan              Plan        `json:"plan"`
 	RunID             string      `json:"run_id"`
 	AssignmentID      string      `json:"assignment_id"`
+	AutomationID      string      `json:"automation_id"`
+	AgentID           string      `json:"agent_id"`
+	ChildIndex        int         `json:"child_index"`
 	Digest            string      `json:"digest"`
 	AcknowledgedFiles []FileRef   `json:"acknowledged_files"`
 	Observation       Observation `json:"observation"`
@@ -273,9 +276,14 @@ func (s Store) CheckpointRepositoryReviewAssignment(
 	}
 	request.RunID = strings.TrimSpace(request.RunID)
 	request.AssignmentID = strings.TrimSpace(request.AssignmentID)
+	request.AutomationID = strings.TrimSpace(request.AutomationID)
+	request.AgentID = strings.TrimSpace(request.AgentID)
 	request.Digest = strings.TrimSpace(request.Digest)
 	if !validBoundedText(request.RunID, 1024) ||
 		!validBoundedText(request.AssignmentID, 128) ||
+		(request.AutomationID != "" && !validAutomationID(request.AutomationID)) ||
+		(request.AgentID != "" && !validRepositoryReviewAttributionAgentID(request.AgentID)) ||
+		request.ChildIndex < 0 || request.ChildIndex > maxRepositoryReviewAttributionChildIndex ||
 		!validRepositoryReviewCheckpointDigest(request.Digest) ||
 		request.Plan.ID == "" || request.Plan.ID != planDigest(request.Plan) {
 		return CheckpointRepositoryReviewAssignmentResult{}, ErrInvalidPlan
@@ -355,6 +363,11 @@ func (s Store) CheckpointRepositoryReviewAssignment(
 		return CheckpointRepositoryReviewAssignmentResult{}, err
 	}
 	request.AcknowledgedFiles = acknowledged
+	if len(acknowledged) > 0 &&
+		(!validAutomationID(request.AutomationID) ||
+			!validRepositoryReviewAttributionAgentID(request.AgentID) || request.ChildIndex < 1) {
+		return CheckpointRepositoryReviewAssignmentResult{}, ErrInvalidPlan
+	}
 	acknowledgedPaths := make(map[string]struct{}, len(acknowledged))
 	for _, file := range acknowledged {
 		acknowledgedPaths[file.Path] = struct{}{}
@@ -400,8 +413,25 @@ func (s Store) CheckpointRepositoryReviewAssignment(
 	}
 	checkpointDigest := repositoryReviewCheckpointRequestDigest(request)
 	if existingDigest != "" {
-		if existingDigest != checkpointDigest {
+		legacyCheckpointDigest := repositoryReviewLegacyCheckpointRequestDigest(request)
+		if existingDigest != checkpointDigest && existingDigest != legacyCheckpointDigest {
 			return CheckpointRepositoryReviewAssignmentResult{}, ErrConflict
+		}
+		if len(acknowledged) > 0 {
+			assignment := assignmentCatalog[assignmentIndex]
+			changed, attributionErr := reconcileRepositoryReviewCheckpointAttribution(
+				&state, request, assignment, acknowledged,
+			)
+			if attributionErr != nil {
+				return CheckpointRepositoryReviewAssignmentResult{}, attributionErr
+			}
+			if changed {
+				state.Version++
+				state.UpdatedAt = s.clock()
+				if saveErr := s.save(&state); saveErr != nil {
+					return CheckpointRepositoryReviewAssignmentResult{}, saveErr
+				}
+			}
 		}
 		return CheckpointRepositoryReviewAssignmentResult{
 			State: state,
@@ -414,6 +444,15 @@ func (s Store) CheckpointRepositoryReviewAssignment(
 	completedAt := request.CompletedAt.UTC()
 	if completedAt.IsZero() {
 		completedAt = s.clock()
+	}
+	if len(acknowledged) > 0 {
+		assignment := assignmentCatalog[assignmentIndex]
+		if _, attributionErr := appendRepositoryReviewFileAttribution(
+			&state,
+			repositoryReviewCheckpointAttribution(request, assignment, acknowledged, completedAt),
+		); attributionErr != nil {
+			return CheckpointRepositoryReviewAssignmentResult{}, attributionErr
+		}
 	}
 	acceptedIDs, persistErr := persistRepositoryReviewCheckpointObservation(
 		&state,
@@ -464,6 +503,84 @@ func (s Store) CheckpointRepositoryReviewAssignment(
 	return CheckpointRepositoryReviewAssignmentResult{
 		State: state, AcceptedFindingIDs: acceptedIDs,
 	}, nil
+}
+
+func repositoryReviewCheckpointAttribution(
+	request CheckpointRepositoryReviewAssignmentRequest,
+	assignment RepositoryReviewAssignment,
+	acknowledged []FileRef,
+	completedAt time.Time,
+) RepositoryReviewFileAttribution {
+	return RepositoryReviewFileAttribution{
+		AutomationID:      request.AutomationID,
+		RunID:             request.RunID,
+		CommitSHA:         request.Plan.CommitSHA,
+		InventoryHash:     request.Plan.InventoryHash,
+		ProfileHash:       request.Plan.ProfileHash,
+		AssignmentID:      request.AssignmentID,
+		FocusID:           assignment.FocusID,
+		RootAgentID:       request.AgentID,
+		ReviewerIdentity:  assignment.Reviewer,
+		Model:             request.Observation.Model,
+		ModelAlias:        request.Observation.ModelAlias,
+		Account:           request.Observation.Account,
+		AcknowledgedFiles: acknowledged,
+		EvidenceDigest:    request.Observation.RawDigest,
+		Source:            RepositoryReviewFileAttributionSourceLiveCheckpoint,
+		ChildIndex:        request.ChildIndex,
+		Required:          assignment.Required,
+		CompletedAt:       completedAt,
+	}
+}
+
+// reconcileRepositoryReviewCheckpointAttribution verifies a replay against
+// the immutable retained child evidence. A schema-4 checkpoint can be repaired
+// only when its original completion time is supplied explicitly; guessing a
+// historical timestamp would turn recovery into fabricated provenance.
+func reconcileRepositoryReviewCheckpointAttribution(
+	state *RepositoryState,
+	request CheckpointRepositoryReviewAssignmentRequest,
+	assignment RepositoryReviewAssignment,
+	acknowledged []FileRef,
+) (bool, error) {
+	if state == nil {
+		return false, ErrInvalidPlan
+	}
+	base := repositoryReviewCheckpointAttribution(
+		request, assignment, acknowledged, request.CompletedAt.UTC(),
+	)
+	expectedID := repositoryReviewFileAttributionID(base)
+	retainedIndex := -1
+	for index := range state.FileAttributions {
+		retained := state.FileAttributions[index]
+		if retained.RunID == request.RunID && retained.AssignmentID == request.AssignmentID &&
+			retained.ID != expectedID {
+			return false, ErrConflict
+		}
+		if retained.ID != expectedID {
+			continue
+		}
+		if retainedIndex >= 0 {
+			return false, ErrConflict
+		}
+		retainedIndex = index
+	}
+	if retainedIndex >= 0 {
+		retained := state.FileAttributions[retainedIndex]
+		if !request.CompletedAt.IsZero() && !retained.CompletedAt.Equal(request.CompletedAt) {
+			return false, ErrConflict
+		}
+		base.CompletedAt = retained.CompletedAt
+		expected, err := NewRepositoryReviewFileAttribution(base)
+		if err != nil || !reflect.DeepEqual(expected, retained) {
+			return false, ErrConflict
+		}
+		return false, nil
+	}
+	if request.CompletedAt.IsZero() {
+		return false, ErrConflict
+	}
+	return appendRepositoryReviewFileAttribution(state, base)
 }
 
 func repositoryReviewCheckpointRawFindingIDs(
@@ -1075,6 +1192,34 @@ func archiveInterruptedRepositoryReviewRun(state *RepositoryState, completedAt t
 }
 
 func repositoryReviewCheckpointRequestDigest(
+	request CheckpointRepositoryReviewAssignmentRequest,
+) string {
+	data, _ := json.Marshal(struct {
+		PlanID            string      `json:"plan_id"`
+		CampaignID        string      `json:"campaign_id"`
+		RunID             string      `json:"run_id"`
+		AssignmentID      string      `json:"assignment_id"`
+		AutomationID      string      `json:"automation_id"`
+		AgentID           string      `json:"agent_id"`
+		ChildIndex        int         `json:"child_index"`
+		ProviderDigest    string      `json:"provider_digest"`
+		AcknowledgedFiles []FileRef   `json:"acknowledged_files"`
+		Observation       Observation `json:"observation"`
+	}{
+		PlanID: request.Plan.ID, CampaignID: request.Plan.CampaignID,
+		RunID: request.RunID, AssignmentID: request.AssignmentID,
+		AutomationID: request.AutomationID, AgentID: request.AgentID, ChildIndex: request.ChildIndex,
+		ProviderDigest:    request.Digest,
+		AcknowledgedFiles: request.AcknowledgedFiles,
+		Observation:       request.Observation,
+	})
+	return stableID("sha256:", string(data))
+}
+
+// repositoryReviewLegacyCheckpointRequestDigest preserves the schema-4
+// checkpoint fence solely so a replay carrying enough exact attribution
+// evidence can repair the newly introduced provenance record.
+func repositoryReviewLegacyCheckpointRequestDigest(
 	request CheckpointRepositoryReviewAssignmentRequest,
 ) string {
 	data, _ := json.Marshal(struct {

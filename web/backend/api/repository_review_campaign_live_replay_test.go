@@ -36,6 +36,20 @@ func TestRepositoryReviewCampaignLiveCopyReplay(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("state found=%v err=%v", found, err)
 	}
+	attributionBackfill, err := prepareRepositoryReviewFileAttributionBackfill(
+		t.Context(), automation, state, workflows.NewFileRunStore(workspace),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report := attributionBackfill.report; report.ConfiguredRuns != 23 ||
+		report.RecoveredRuns != 19 || report.AllowedNonLedgerRuns != 4 ||
+		report.ChildAttempts != 76 || report.SuccessfulChildren != 21 ||
+		report.FailedChildren != 55 || report.AttributionRecords != 21 ||
+		report.AcknowledgementOccurrences != 504 || report.UniqueFiles != 27 ||
+		report.UniqueFileAssignments != 53 || report.Digest == "" {
+		t.Fatalf("live-copy attribution backfill = %#v", report)
+	}
 	resolved := workflows.RepositoryReviewModelProfile{
 		Revision: "live-copy", AccountRef: "router-1",
 		ReviewerModels: []string{"review"}, MaxContentBytes: 282624,

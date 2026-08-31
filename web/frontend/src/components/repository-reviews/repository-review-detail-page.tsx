@@ -6,8 +6,8 @@ import {
   IconPlayerPlay,
   IconRotateClockwise,
 } from "@tabler/icons-react"
-import { useMutation, useQuery } from "@tanstack/react-query"
-import { useState } from "react"
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query"
+import { useMemo, useState } from "react"
 import { toast } from "sonner"
 
 import {
@@ -16,9 +16,11 @@ import {
   type RepositoryReviewAutomation,
   type RepositoryReviewCommitOption,
   type RepositoryReviewCommitOptions,
+  type RepositoryReviewFileAttribution,
   type RepositoryReviewFocusID,
   getRepositoryReviewAutomation,
   getRepositoryReviewCommitOptions,
+  listRepositoryReviewAutomationFileAttributionsPage,
   pauseRepositoryReviewAutomation,
   restartRepositoryReviewAutomation,
   resumeRepositoryReviewAutomation,
@@ -90,6 +92,31 @@ export function RepositoryReviewDetailPage({
       state.state.data && isActive(state.state.data) ? 2_000 : false,
   })
   const review = query.data
+  const attributionQuery = useInfiniteQuery({
+    queryKey: ["repository-review-file-attributions", id],
+    initialPageParam: "",
+    queryFn: ({ signal, pageParam }) =>
+      listRepositoryReviewAutomationFileAttributionsPage(
+        id,
+        { cursor: pageParam || undefined, limit: 200 },
+        signal,
+      ),
+    getNextPageParam: (page) => page.next_cursor || undefined,
+    enabled: Boolean(review),
+    retry: false,
+    refetchInterval: review && isActive(review) ? 2_000 : false,
+  })
+  const attributionPages = attributionQuery.data?.pages
+  const attributions = useMemo(() => {
+    const byID = new Map<string, RepositoryReviewFileAttribution>()
+    for (const attribution of attributionPages?.flatMap(
+      (page) => page.file_attributions,
+    ) ?? []) {
+      byID.set(attribution.id, attribution)
+    }
+    return [...byID.values()]
+  }, [attributionPages])
+  const attributionTotal = attributionPages?.[0]?.total ?? 0
   const notFound =
     query.error instanceof RepositoryReviewAPIError &&
     query.error.status === 404
@@ -126,7 +153,7 @@ export function RepositoryReviewDetailPage({
     },
     onSuccess: async () => {
       setContinueDialog(null)
-      await query.refetch()
+      await Promise.all([query.refetch(), attributionQuery.refetch()])
       toast.success("Repository review action started.")
     },
     onError: (error) => {
@@ -306,6 +333,17 @@ export function RepositoryReviewDetailPage({
 
             <AssignmentCoverage
               progress={review.progress.assignment_progress}
+            />
+
+            <FileProcessingAttribution
+              attributions={attributions}
+              total={attributionTotal}
+              hasMore={attributionQuery.hasNextPage}
+              loading={attributionQuery.isLoading}
+              loadingMore={attributionQuery.isFetchingNextPage}
+              error={attributionQuery.error}
+              onRetry={() => void attributionQuery.refetch()}
+              onLoadMore={() => void attributionQuery.fetchNextPage()}
             />
 
             <section aria-labelledby="review-usage" className="space-y-3">
@@ -792,6 +830,189 @@ function AssignmentCoverage({
       </dl>
     </section>
   )
+}
+
+function FileProcessingAttribution({
+  attributions,
+  total,
+  hasMore,
+  loading,
+  loadingMore,
+  error,
+  onRetry,
+  onLoadMore,
+}: {
+  attributions: RepositoryReviewFileAttribution[]
+  total: number
+  hasMore: boolean
+  loading: boolean
+  loadingMore: boolean
+  error: Error | null
+  onRetry: () => void
+  onLoadMore: () => void
+}) {
+  return (
+    <section aria-labelledby="review-file-attribution" className="space-y-3">
+      <div>
+        <h2 id="review-file-attribution" className="font-semibold">
+          File processing attribution
+        </h2>
+        <p className="text-muted-foreground mt-1 text-sm">
+          Successful file acknowledgements, grouped by review focus and reviewer
+          model.
+        </p>
+      </div>
+      {loading ? (
+        <p role="status" className="text-muted-foreground text-sm">
+          Loading file processing attribution…
+        </p>
+      ) : error && attributions.length === 0 ? (
+        <div className="flex items-center gap-3">
+          <p role="alert" className="text-destructive text-sm">
+            File processing attribution could not be loaded.
+          </p>
+          <Button type="button" size="sm" variant="outline" onClick={onRetry}>
+            Retry
+          </Button>
+        </div>
+      ) : attributions.length === 0 ? (
+        <p className="text-muted-foreground text-sm">
+          No successful file acknowledgements have been recorded yet.
+        </p>
+      ) : (
+        <>
+          <div className="border-border overflow-x-auto rounded-lg border">
+            <table className="w-full min-w-[66rem] text-left text-sm">
+              <caption className="sr-only">File processing attribution</caption>
+              <thead className="bg-muted/40 text-muted-foreground text-xs">
+                <tr>
+                  <th className="px-3 py-2 font-medium">File</th>
+                  <th className="px-3 py-2 font-medium">Focus</th>
+                  <th className="px-3 py-2 font-medium">Agent</th>
+                  <th className="px-3 py-2 font-medium">Reviewer / model</th>
+                  <th className="px-3 py-2 font-medium">Account</th>
+                  <th className="px-3 py-2 text-right font-medium">Attempts</th>
+                  <th className="px-3 py-2 text-right font-medium">Runs</th>
+                  <th className="px-3 py-2 font-medium">Last processed</th>
+                </tr>
+              </thead>
+              <tbody className="divide-border divide-y">
+                {attributions.map((attribution) => (
+                  <tr key={attribution.id}>
+                    <td className="max-w-[24rem] px-3 py-2 font-mono text-xs break-all">
+                      <span className="block">{attribution.path}</span>
+                      <span
+                        className="text-muted-foreground block text-[0.6875rem]"
+                        title={`Commit ${attribution.commit_sha}; blob ${attribution.blob_sha}`}
+                      >
+                        commit {shortCommitSHA(attribution.commit_sha)} · blob{" "}
+                        {shortCommitSHA(attribution.blob_sha)}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2">
+                      {assignmentFocusLabel(attribution.focus_id)}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-xs">
+                      {attribution.root_agent_id || "Unrecorded"}
+                    </td>
+                    <td className="px-3 py-2">
+                      <span className="block">
+                        {attribution.reviewer_identity || "Unrecorded"}
+                      </span>
+                      {attribution.model && (
+                        <span className="text-muted-foreground block text-xs">
+                          {attribution.model}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-xs">
+                      {attribution.account || "Unrecorded"}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {attribution.attempts}
+                    </td>
+                    <td
+                      className="px-3 py-2 text-right tabular-nums"
+                      title={attribution.run_ids.join("\n")}
+                      aria-label={fileAttributionRunLabel(attribution)}
+                    >
+                      {attribution.run_count}
+                    </td>
+                    <td className="px-3 py-2">
+                      <span className="block">
+                        {formatTimestamp(attribution.latest_completed_at)}
+                      </span>
+                      <span
+                        className="text-muted-foreground block text-xs"
+                        title={attribution.sources.join(", ")}
+                      >
+                        {fileAttributionSourceLabel(attribution.source)}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {error && (
+            <div className="flex items-center justify-center gap-3">
+              <p role="alert" className="text-destructive text-sm">
+                Additional attribution rows could not be loaded.
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={hasMore ? onLoadMore : onRetry}
+              >
+                Retry
+              </Button>
+            </div>
+          )}
+          {hasMore && !error && (
+            <div className="flex justify-center">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={loadingMore}
+                onClick={onLoadMore}
+              >
+                {loadingMore ? "Loading…" : "Load more file attributions"}
+              </Button>
+            </div>
+          )}
+          {hasMore && (
+            <p className="text-muted-foreground text-xs">
+              Showing {attributions.length.toLocaleString()} of{" "}
+              {total.toLocaleString()} attribution rows.
+            </p>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+function assignmentFocusLabel(focusID: RepositoryReviewFocusID): string {
+  return assignmentFocuses.find(({ id }) => id === focusID)?.label ?? focusID
+}
+
+function fileAttributionSourceLabel(source: string): string {
+  if (source === "legacy") return "Historical replay"
+  if (source === "live") return "Live checkpoint"
+  if (source === "mixed") return "Historical and live"
+  return source.replaceAll("_", " ")
+}
+
+function fileAttributionRunLabel(
+  attribution: RepositoryReviewFileAttribution,
+): string {
+  const sampled = attribution.run_ids.join(", ")
+  const suffix =
+    attribution.run_count > attribution.run_ids.length
+      ? ", sample truncated"
+      : ""
+  return `${attribution.run_count} runs${sampled ? `; sample: ${sampled}${suffix}` : ""}`
 }
 
 function assignmentDeadlineLabel(seconds: number): string {

@@ -681,7 +681,8 @@ jobs:
 	}).Run(context.Background(), RunRequest{
 		Workflow: workflow, WorkflowRef: RepositoryBugFinderWorkflowRef,
 		Inputs: map[string]any{
-			"repository": "owner/repo", "campaign_id": "rrc_runtime_canary",
+			"repository": "owner/repo", "automation_id": "rra_runtime_canary",
+			"campaign_id": "rrc_runtime_canary",
 		},
 	})
 	if err != nil || result.Status != RunStatusSucceeded {
