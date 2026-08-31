@@ -6711,6 +6711,33 @@ async function mockRepositoryReviewAutomationRequest(
     })
   }
 
+  if (path === `${automationRoot}/file-attributions` && method === "GET") {
+    return json(route, {
+      automation: state.automation,
+      repository: state.summary,
+      file_attributions: [],
+      total: 0,
+      next_cursor: "",
+      canonical_query:
+        url.searchParams.get("query") ??
+        "ALL ORDER BY path ASC, focus ASC, reviewer ASC",
+      query_schema: collectionSchema([
+        ["path", "string"],
+        ["commit", "string"],
+        ["blob", "string"],
+        ["focus", "enum"],
+        ["agent", "string"],
+        ["reviewer", "string"],
+        ["account", "string"],
+        ["model", "string"],
+        ["source", "enum"],
+        ["attempts", "number"],
+        ["runs", "number"],
+        ["latest", "timestamp"],
+      ]),
+    })
+  }
+
   if (
     (path === `${automationRoot}/findings` ||
       path === `${automationRoot}/run-findings`) &&

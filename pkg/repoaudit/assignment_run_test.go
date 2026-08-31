@@ -61,6 +61,7 @@ func TestRepositoryReviewAssignmentCheckpointsAreDurableAndMissingOnly(t *testin
 	}
 	checkpoint := CheckpointRepositoryReviewAssignmentRequest{
 		Plan: plan, RunID: "run-one", AssignmentID: first.AssignmentID,
+		AutomationID: "rra_assignment_run", AgentID: "main", ChildIndex: 1,
 		Digest:            "sha256:" + strings.Repeat("1", 64),
 		AcknowledgedFiles: []FileRef{files[0]}, Observation: observation,
 	}
@@ -87,6 +88,7 @@ func TestRepositoryReviewAssignmentCheckpointsAreDurableAndMissingOnly(t *testin
 	second := plan.AssignmentPlans[1]
 	secondCheckpoint := CheckpointRepositoryReviewAssignmentRequest{
 		Plan: plan, RunID: "run-one", AssignmentID: second.AssignmentID,
+		AutomationID: "rra_assignment_run", AgentID: "main", ChildIndex: 2,
 		Digest: "sha256:" + strings.Repeat("3", 64), AcknowledgedFiles: files,
 		Observation: Observation{
 			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
@@ -101,6 +103,7 @@ func TestRepositoryReviewAssignmentCheckpointsAreDurableAndMissingOnly(t *testin
 	if _, err := store.CheckpointRepositoryReviewAssignment(ctx,
 		CheckpointRepositoryReviewAssignmentRequest{
 			Plan: plan, RunID: "run-one", AssignmentID: third.AssignmentID,
+			AutomationID: "rra_assignment_run", AgentID: "main", ChildIndex: 3,
 			Digest:            "sha256:" + strings.Repeat("4", 64),
 			AcknowledgedFiles: []FileRef{files[0]},
 			Observation: Observation{
@@ -177,6 +180,9 @@ func TestRepositoryReviewConcurrentAssignmentCheckpointsMergeAndSurviveInterrupt
 				CheckpointRepositoryReviewAssignmentRequest{
 					Plan: plan, RunID: "run-concurrent",
 					AssignmentID:      assignmentPlan.AssignmentID,
+					AutomationID:      "rra_assignment_run",
+					AgentID:           "main",
+					ChildIndex:        index + 1,
 					Digest:            "sha256:" + strings.Repeat(string(rune('1'+index)), 64),
 					AcknowledgedFiles: []FileRef{file},
 					Observation: Observation{
@@ -207,6 +213,7 @@ func TestRepositoryReviewConcurrentAssignmentCheckpointsMergeAndSurviveInterrupt
 	replayed, replayErr := store.CheckpointRepositoryReviewAssignment(ctx,
 		CheckpointRepositoryReviewAssignmentRequest{
 			Plan: plan, RunID: "run-concurrent", AssignmentID: firstPlan.AssignmentID,
+			AutomationID: "rra_assignment_run", AgentID: "main", ChildIndex: 1,
 			Digest:            "sha256:" + strings.Repeat("1", 64),
 			AcknowledgedFiles: []FileRef{file},
 			Observation: Observation{
@@ -220,6 +227,7 @@ func TestRepositoryReviewConcurrentAssignmentCheckpointsMergeAndSurviveInterrupt
 	}
 	conflictingReplay := CheckpointRepositoryReviewAssignmentRequest{
 		Plan: plan, RunID: "run-concurrent", AssignmentID: firstPlan.AssignmentID,
+		AutomationID: "rra_assignment_run", AgentID: "main", ChildIndex: 1,
 		Digest:            "sha256:" + strings.Repeat("1", 64),
 		AcknowledgedFiles: []FileRef{file},
 		Observation: Observation{
@@ -267,6 +275,7 @@ func TestRepositoryReviewConcurrentAssignmentCheckpointsMergeAndSurviveInterrupt
 	postRestartReplay, postReplayErr := store.CheckpointRepositoryReviewAssignment(ctx,
 		CheckpointRepositoryReviewAssignmentRequest{
 			Plan: plan, RunID: "run-concurrent", AssignmentID: firstPlan.AssignmentID,
+			AutomationID: "rra_assignment_run", AgentID: "main", ChildIndex: 1,
 			Digest:            "sha256:" + strings.Repeat("1", 64),
 			AcknowledgedFiles: []FileRef{file},
 			Observation: Observation{
@@ -354,6 +363,7 @@ func TestRepositoryReviewFinalizedCheckpointReplayUsesFrozenReviewableSubset(t *
 	assignmentPlan := plan.AssignmentPlans[0]
 	checkpoint := CheckpointRepositoryReviewAssignmentRequest{
 		Plan: plan, RunID: "run-subset", AssignmentID: assignmentPlan.AssignmentID,
+		AutomationID: "rra_assignment_run", AgentID: "main", ChildIndex: 1,
 		Digest:            "sha256:" + strings.Repeat("a", 64),
 		AcknowledgedFiles: files[:1],
 		Observation: Observation{

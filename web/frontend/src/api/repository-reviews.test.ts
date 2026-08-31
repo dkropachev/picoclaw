@@ -20,6 +20,7 @@ import {
   getRepositoryReviewCommitOptions,
   getRepositoryReviewProfile,
   getRepositoryReviewRawSource,
+  listRepositoryReviewAutomationFileAttributionsPage,
   listRepositoryReviewAutomationFindingsPage,
   listRepositoryReviewAutomationIssues,
   listRepositoryReviewAutomationIssuesPage,
@@ -815,6 +816,66 @@ describe("repository review API", () => {
     expect(mockedLauncherFetch).toHaveBeenCalledWith(
       "/api/repository-reviews/automations?query=status+%3D+paused+ORDER+BY+repository+ASC&cursor=cursor&limit=50",
       { signal: undefined },
+    )
+  })
+
+  it("loads and normalizes a bounded file attribution page", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        automation: {
+          id: "auto_1",
+          repository: "owner/repo",
+          reviewer_models: ["review"],
+          progress: {},
+        },
+        file_attributions: [
+          {
+            id: "attribution_1",
+            path: "pkg/store.go",
+            commit_sha: "a".repeat(40),
+            blob_sha: "b".repeat(40),
+            focus_id: "security_trust",
+            root_agent_id: "main",
+            reviewer_identity: "review",
+            model: "gpt-5.6-sol",
+            source: "legacy",
+            attempts: 2,
+            run_ids: null,
+            sources: null,
+            latest_completed_at: "2026-08-26T01:00:00Z",
+          },
+        ],
+        total: 1,
+        next_cursor: "next-page",
+        canonical_query: "ALL ORDER BY path ASC, focus ASC, reviewer ASC",
+        query_schema: { fields: [{ name: "path", type: "string" }] },
+      }),
+    )
+
+    await expect(
+      listRepositoryReviewAutomationFileAttributionsPage("auto/slash", {
+        limit: 200,
+      }),
+    ).resolves.toMatchObject({
+      file_attributions: [
+        {
+          id: "attribution_1",
+          path: "pkg/store.go",
+          commit_sha: "a".repeat(40),
+          blob_sha: "b".repeat(40),
+          root_agent_id: "main",
+          attempts: 2,
+          run_ids: [],
+          run_count: 0,
+          sources: [],
+        },
+      ],
+      total: 1,
+      next_cursor: "next-page",
+    })
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      "/api/repository-reviews/automations/auto%2Fslash/file-attributions?query=ALL+ORDER+BY+path+ASC%2C+focus+ASC%2C+reviewer+ASC&limit=200",
+      undefined,
     )
   })
 

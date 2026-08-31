@@ -463,6 +463,7 @@ func TestLoadRepositoryReviewOutcomeUsesAssignmentCampaign(t *testing.T) {
 		if _, err := store.CheckpointRepositoryReviewAssignment(
 			ctx, repoaudit.CheckpointRepositoryReviewAssignmentRequest{
 				Plan: plan, RunID: "assignment-outcome-run", AssignmentID: assignmentPlan.AssignmentID,
+				AutomationID: "rra_assignment_outcome", AgentID: "main", ChildIndex: index + 1,
 				Digest:            "sha256:" + strings.Repeat(string(rune('1'+index)), 64),
 				AcknowledgedFiles: []repoaudit.FileRef{code},
 				Observation: repoaudit.Observation{

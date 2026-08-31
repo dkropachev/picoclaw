@@ -36,6 +36,13 @@ as code review, planning, data extraction, or summarization. Domain-specific
 behavior belongs in the workflow prompt, the agent definition, the workflow
 scope items, and the structured output schema.
 
+When a trusted domain supplies an explicit managed assignment plan and durable
+checkpoint callback, the executor forwards the already-admitted owning
+automation ID, resolved `agent/<id>`, and one-based runtime child ordinal with
+the validated output. Those values identify the callback boundary without
+teaching generic split planning about repository-review semantics or exposing
+them in ordinary managed output.
+
 ## Reconstruction Notes
 
 - Similarity target: recreate a workflow-agent execution layer that preserves

@@ -100,6 +100,9 @@ on:
       repository:
         type: string
         required: true
+      automation_id:
+        type: string
+        required: true
       campaign_id:
         type: string
         default: ""

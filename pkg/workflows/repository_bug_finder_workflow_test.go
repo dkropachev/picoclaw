@@ -47,6 +47,7 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 		WorkflowRef: RepositoryBugFinderWorkflowRef,
 		Inputs: map[string]any{
 			"repository": repo, "ref": "HEAD", "target": "all",
+			"automation_id": "rra_workflow_test",
 			"campaign_id":   campaignID,
 			"review_models": "review-a,review-b",
 			"planner_model": "review-a",
@@ -417,5 +418,30 @@ func TestRepositoryBugFinderRejectsCredentialURLBeforeDurableRunCreation(t *test
 	}
 	if runs, listErr := store.ListRuns(context.Background()); listErr != nil || len(runs) != 0 {
 		t.Fatalf("credentialed repository was durably recorded: runs=%#v err=%v", runs, listErr)
+	}
+}
+
+func TestRepositoryBugFinderRejectsInvalidAutomationBeforeDurableRunCreation(t *testing.T) {
+	for name, automationID := range map[string]string{
+		"missing": "",
+		"invalid": "not-an-automation",
+	} {
+		t.Run(name, func(t *testing.T) {
+			workspace := t.TempDir()
+			store := NewFileRunStore(workspace)
+			_, err := (&Executor{Store: store}).Run(t.Context(), RunRequest{
+				Workflow:    parseWorkflow(t, RepositoryBugFinderWorkflowYAML),
+				WorkflowRef: RepositoryBugFinderWorkflowRef,
+				Inputs: map[string]any{
+					"repository": "owner/repo", "automation_id": automationID,
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), "canonical automation ID") {
+				t.Fatalf("automation admission error = %v", err)
+			}
+			if runs, listErr := store.ListRuns(t.Context()); listErr != nil || len(runs) != 0 {
+				t.Fatalf("invalid automation was durably recorded: runs=%#v err=%v", runs, listErr)
+			}
+		})
 	}
 }

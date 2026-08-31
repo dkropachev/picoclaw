@@ -729,6 +729,12 @@ func validAutomationID(id string) bool {
 	return true
 }
 
+// ValidRepositoryReviewAutomationID reports whether id is already in the
+// canonical durable automation identity form.
+func ValidRepositoryReviewAutomationID(id string) bool {
+	return validAutomationID(id)
+}
+
 func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	if automation == nil {
 		return fmt.Errorf("%w: state is required", ErrInvalidAutomation)

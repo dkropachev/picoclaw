@@ -1121,8 +1121,7 @@ func repositoryReviewSummaryFromEntry(root string, entry os.DirEntry) (Repositor
 	if decodeErr != nil || closeErr != nil {
 		return RepositorySummary{}, errors.Join(decodeErr, closeErr)
 	}
-	if (summary.SchemaVersion != 1 && summary.SchemaVersion != 2 && summary.SchemaVersion != 3 &&
-		summary.SchemaVersion != SchemaVersion) ||
+	if (summary.SchemaVersion < 1 || summary.SchemaVersion > SchemaVersion) ||
 		summary.ID != RepositoryID(summary.Repository) {
 		return RepositorySummary{}, errors.New("invalid repository review summary")
 	}
@@ -1538,6 +1537,7 @@ func (s Store) load(repository string) (RepositoryState, error) {
 		DeduplicationJobs:       []DeduplicationJob{},
 		Contexts:                []FindingContext{},
 		Runs:                    []ReviewRun{},
+		FileAttributions:        []RepositoryReviewFileAttribution{},
 		IssueDrafts:             []IssueDraft{},
 		RepositoryFindings:      []RepositoryFinding{},
 		MappingJobs:             []RepositoryMappingJob{},
@@ -1589,6 +1589,9 @@ func (s Store) load(repository string) (RepositoryState, error) {
 func (s Store) save(state *RepositoryState) error {
 	if state == nil {
 		return errors.New("repository review state is required")
+	}
+	if state.FileAttributions == nil {
+		state.FileAttributions = []RepositoryReviewFileAttribution{}
 	}
 	backfillCanonicalIssueAssociations(state)
 	synchronizeRepositoryFindingIssues(state)
@@ -2619,6 +2622,9 @@ func validateState(state RepositoryState) error {
 		return err
 	}
 	if err := validateRepositoryReviewActiveRun(state); err != nil {
+		return err
+	}
+	if err := validateRepositoryReviewFileAttributions(state.FileAttributions); err != nil {
 		return err
 	}
 	if err := validateDeduplicationState(state); err != nil {

@@ -65,6 +65,7 @@ func assignmentCoverageCheckpoint(
 	assignmentPlan := fixture.plan.AssignmentPlans[assignmentIndex]
 	return CheckpointRepositoryReviewAssignmentRequest{
 		Plan: fixture.plan, RunID: runID, AssignmentID: assignmentPlan.AssignmentID,
+		AutomationID: "rra_assignment_coverage", AgentID: "main", ChildIndex: assignmentIndex + 1,
 		Digest:            "sha256:" + strings.Repeat(fmt.Sprintf("%x", assignmentIndex+1), 64),
 		AcknowledgedFiles: acknowledged,
 		Observation: Observation{

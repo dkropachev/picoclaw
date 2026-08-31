@@ -137,21 +137,40 @@ func TestNativeRepositoryReviewAssignmentPlanBeginAndManagedCallbacks(t *testing
 	}
 
 	if dispatch, checkpoint, err := repositoryReviewManagedAssignmentCallbacks(
-		exec, repoaudit.Plan{ID: "legacy-plan"},
+		exec, repoaudit.Plan{ID: "legacy-plan"}, "rra_assignment_callbacks", "main",
 	); err != nil || dispatch != nil || checkpoint != nil {
 		t.Fatalf("legacy callbacks = (%v, %v, %v)", dispatch, checkpoint, err)
 	}
 	for _, invalid := range []any{map[string]any{}, make(chan int)} {
-		if _, _, err := repositoryReviewManagedAssignmentCallbacks(exec, invalid); err == nil {
+		if _, _, err := repositoryReviewManagedAssignmentCallbacks(
+			exec, invalid, "rra_assignment_callbacks", "main",
+		); err == nil {
 			t.Fatalf("managed callbacks accepted invalid plan %#v", invalid)
 		}
 	}
+	for name, identity := range map[string]struct {
+		automationID string
+		agentID      string
+	}{
+		"automation": {automationID: "invalid", agentID: "main"},
+		"agent":      {automationID: "rra_assignment_callbacks", agentID: "Main Agent"},
+	} {
+		t.Run("invalid callback "+name, func(t *testing.T) {
+			if _, _, err := repositoryReviewManagedAssignmentCallbacks(
+				exec, output["plan"], identity.automationID, identity.agentID,
+			); err == nil {
+				t.Fatal("managed callbacks accepted invalid durable identity")
+			}
+		})
+	}
 
-	dispatch, checkpoint, err := repositoryReviewManagedAssignmentCallbacks(exec, output["plan"])
+	dispatch, checkpoint, err := repositoryReviewManagedAssignmentCallbacks(
+		exec, output["plan"], "rra_assignment_callbacks", "reviewer",
+	)
 	if err != nil || dispatch == nil || checkpoint == nil {
 		t.Fatalf("managed callbacks = (%v, %v, %v)", dispatch, checkpoint, err)
 	}
-	firstEvent := repositoryReviewAssignmentDispatchEventForTest(plan.AssignmentPlans[0], scope)
+	firstEvent := repositoryReviewAssignmentDispatchEventForTest(plan.AssignmentPlans[0], scope, 1)
 	if err := dispatch(firstEvent); err != nil {
 		t.Fatalf("dispatch exact reservation: %v", err)
 	}
@@ -215,6 +234,12 @@ func TestNativeRepositoryReviewAssignmentPlanBeginAndManagedCallbacks(t *testing
 	if err := checkpoint(firstCheckpoint); err != nil {
 		t.Fatalf("checkpoint default model: %v", err)
 	}
+	checkpointedState, found, loadErr := repoaudit.NewStore(workspace).Get(plan.Repository)
+	if loadErr != nil || !found || len(checkpointedState.FileAttributions) != 1 ||
+		checkpointedState.FileAttributions[0].AutomationID != "rra_assignment_callbacks" ||
+		checkpointedState.FileAttributions[0].RootAgentID != "reviewer" {
+		t.Fatalf("checkpoint attribution = %#v, found=%v, err=%v", checkpointedState.FileAttributions, found, loadErr)
+	}
 	if err := checkpoint(firstCheckpoint); err != nil {
 		t.Fatalf("checkpoint idempotent replay: %v", err)
 	}
@@ -228,7 +253,7 @@ func TestNativeRepositoryReviewAssignmentPlanBeginAndManagedCallbacks(t *testing
 	}
 
 	for index := 1; index < len(plan.AssignmentPlans); index++ {
-		event := repositoryReviewAssignmentDispatchEventForTest(plan.AssignmentPlans[index], scope)
+		event := repositoryReviewAssignmentDispatchEventForTest(plan.AssignmentPlans[index], scope, index+1)
 		model, reviewerModel := "", ""
 		if index == 1 {
 			reviewerModel = "review-a"
@@ -349,6 +374,7 @@ func repositoryReviewNativeAssignmentPlanForTest(
 func repositoryReviewAssignmentDispatchEventForTest(
 	plan repoaudit.RepositoryReviewAssignmentPlan,
 	scope []map[string]any,
+	index int,
 ) ManagedAssignmentDispatchEvent {
 	detached := make([]any, len(scope))
 	for index, file := range scope {
@@ -356,6 +382,7 @@ func repositoryReviewAssignmentDispatchEventForTest(
 	}
 	return ManagedAssignmentDispatchEvent{
 		AssignmentID: plan.AssignmentID, FocusID: plan.FocusID,
+		Index: index,
 		Label: plan.Label, ReviewerModel: plan.Reviewer, Required: !plan.Optional,
 		Scope: detached,
 	}
