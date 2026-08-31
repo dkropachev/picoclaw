@@ -1,6 +1,5 @@
 export {
   applyCollectionQuerySuggestion,
-  CollectionQueryInput,
   getCollectionQuerySuggestions,
   type CollectionQueryInputError,
   type CollectionQuerySuggestion,
@@ -16,7 +15,6 @@ export {
 export { CollectionSelectionBar } from "./collection-selection-bar"
 export { CollectionShell } from "./collection-shell"
 export { CollectionContextBar } from "./collection-context-bar"
-export { CollectionToolbar } from "./collection-toolbar"
 export {
   StandardCollectionPage,
   type StandardCollectionBulkDeleteConfirmation,

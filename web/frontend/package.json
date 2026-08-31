@@ -14,7 +14,7 @@
     "lint": "eslint . && pnpm lint:ui",
     "lint:ui": "node ./scripts/lint-ui-rules.mjs",
     "lint:collection-delta": "node ./scripts/check-collection-delta.mjs",
-    "test:collection-governance": "node --test ./scripts/check-collection-delta.test.mjs",
+    "test:collection-governance": "node --test ./scripts/check-collection-delta.test.mjs ./scripts/collection-ui-governance.test.mjs",
     "test": "vitest run",
     "preview": "vite preview",
     "format": "prettier --check .",

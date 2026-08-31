@@ -81,6 +81,23 @@ continues to fail locally until a concrete model is configured.
 | `FR-LAUNCHER-029` | MUST | The authenticated launcher proxies the feature-owned typed Development workspace list contract without narrowing its valid bounded query/cursor transport, and `/development` uses the standard shared collection while `/development/new` and `/development/:id` retain dedicated intake and aggregate detail. Canonical collection `q`/`view` survives routed New/detail navigation independently of workspace tab and evidence state. | Workspace inventory needs server paging and stable Back navigation without changing launcher authentication, direct aggregate authority, or specialized workspace behavior. |
 | `FR-LAUNCHER-030` | MUST | Generic workflow run detail, listing, graph, JSON event, and SSE event routes preserve raw owner-local workflow state while projecting browser-safe detached copies. Repository-review campaign authority and recovery markers are removed recursively from every such response without mutating storage; private PR-lifecycle filtering and event-draft diagnostic masking continue to apply independently. | The launcher must expose useful workflow diagnostics without turning internal campaign identifiers into browser-visible or event-consumable authority. |
 
+The `FR-LAUNCHER-025` query control has one production chain:
+`StandardCollectionPage` renders `CollectionToolbar`, which renders the sole
+`CollectionQueryInput`; frontend governance reserves those components and the
+`collection-query-input` slot from direct feature use. The single-line editor
+is selection-, quote-, escape-, grouping-, `IN`-list-, and top-level-sort-aware,
+but remains only a tolerant aid to the authoritative server parser. It completes
+the schema-allowed grammar, safely quoted typed values, valid relative
+timestamps, additional `IN` values, and up to three unique sort fields.
+Suggestion acceptance preserves suffix text and Unicode scalar boundaries and
+is atomic at the 4096-byte limit. Enter applies when no option is active;
+Enter/Tab accepts an option, arrows wrap and scroll it into view,
+Control/Command+Space opens completion, and Escape restores the active query;
+these shortcuts are inert during IME composition. A server error remains shown
+only while the draft equals its rejected active query, and its validated UTF-8
+byte position is converted without splitting a Unicode scalar. Help, error,
+byte-count, listbox, and active-option state remain programmatically associated.
+
 ## Data And State Model
 
 Account collection identity is a fixed-length base64url SHA-256 digest over the
@@ -275,7 +292,7 @@ Owns: TEST web/backend/api/weixin*
 | HTTP | `/api/config*`, `/api/models*`, `/api/oauth*`, `/api/system*`, `/api/agents*`, `/api/workflows*` | Existing authenticated management surfaces retain their scoped contracts and shared mutation fencing. | `FR-LAUNCHER-001` through `FR-LAUNCHER-012` |
 
 | HTTP/UI | `/api/model-aliases*`; `/models/aliases*` | Name-addressed typed query/list/detail/CRUD, revision-fenced explicit-name bulk delete, catalog templates on creation only, and standard collection/detail/editor routes. | `FR-LAUNCHER-025` |
-| UI governance | `web/frontend/collection-surfaces.json`, shared collection subsystem, UI linter, and base/head guard | Audited standard/legacy/exempt inventory, canonical collection state/presentation, static route/shell enforcement, and touched-legacy migration enforcement. | `FR-LAUNCHER-009`, `FR-LAUNCHER-025` |
+| UI governance | `web/frontend/collection-surfaces.json`, shared collection subsystem, UI linter, and base/head guard | Audited standard/legacy/exempt inventory, canonical collection state/presentation, enforced standard-page/toolbar/query-input ownership and reserved query slot, static route/shell enforcement, and touched-legacy migration enforcement. | `FR-LAUNCHER-009`, `FR-LAUNCHER-025` |
 
 ## Algorithms And Ordering
 

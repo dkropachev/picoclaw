@@ -1,8 +1,11 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { CollectionBulkDeleteResponse } from "@/api/collection"
+import type {
+  CollectionBulkDeleteResponse,
+  CollectionQuerySchema,
+} from "@/api/collection"
 import type { CollectionDefinition } from "@/components/collection/collection-types"
 import { StandardCollectionPage } from "@/components/collection/standard-collection-page"
 import { resetCollectionRouteStateMemoryForTests } from "@/hooks/use-collection-route-state"
@@ -28,6 +31,23 @@ interface Thing {
 }
 
 const thing: Thing = { id: "thing-1", name: "First thing" }
+const querySchema: CollectionQuerySchema = {
+  fields: [
+    {
+      name: "status",
+      type: "enum",
+      operators: ["=", "!=", "IN", "NOT IN"],
+      sortable: true,
+      suggested_values: ["ready", "blocked"],
+    },
+    {
+      name: "name",
+      type: "string",
+      operators: ["=", "!=", "~", "!~"],
+      sortable: true,
+    },
+  ],
+}
 const definition: CollectionDefinition<Thing> = {
   key: "standard-page-test",
   title: "Things",
@@ -203,6 +223,40 @@ describe("StandardCollectionPage", () => {
     expect(
       screen.getByText("The provider is temporarily unavailable."),
     ).toBeVisible()
+  })
+
+  it("carries schema, structured errors, defaults, and apply through the shared editor chain", async () => {
+    const user = userEvent.setup()
+    const onSearchChange = vi.fn()
+    render(
+      <StandardCollectionPage
+        definition={definition}
+        search={{ q: "sta" }}
+        onSearchChange={onSearchChange}
+        items={[thing]}
+        schema={querySchema}
+        canonicalQuery="sta"
+        error={{ message: "Unknown query field", position: 0 }}
+      />,
+    )
+
+    const input = screen.getByRole("combobox", {
+      name: "Collection query",
+    }) as HTMLInputElement
+    expect(
+      document.getElementById(input.getAttribute("aria-errormessage")!),
+    ).toHaveTextContent("Character 1: Unknown query field")
+    await user.click(input)
+    input.setSelectionRange(input.value.length, input.value.length)
+    fireEvent.select(input)
+    await user.keyboard("{ArrowDown}{Enter}{Enter}")
+    expect(onSearchChange).toHaveBeenLastCalledWith({ q: "status" }, false)
+
+    await user.click(screen.getByRole("button", { name: "Clear query" }))
+    expect(onSearchChange).toHaveBeenLastCalledWith(
+      { q: definition.defaultQuery },
+      false,
+    )
   })
 })
 
