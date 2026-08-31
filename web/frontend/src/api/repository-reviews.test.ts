@@ -986,7 +986,14 @@ describe("repository review API", () => {
       state: "editing",
       origin: "ai_generated",
       canonical: true,
-      publishable: true,
+      publishable: false,
+      publish_blockers: [
+        {
+          code: "finding_status_unresolved",
+          count: 3,
+          message: "Three findings still need status processing.",
+        },
+      ],
       version: 3,
       created_at: "2026-08-28T11:00:00Z",
       updated_at: "2026-08-28T12:00:00Z",
@@ -1022,6 +1029,16 @@ describe("repository review API", () => {
           automation,
           issues: [issue],
           generation_id: "generation/slash",
+          capabilities: {
+            can_publish: false,
+            publish_blockers: [
+              {
+                code: "duplicate_review_required",
+                count: 1,
+                message: "One duplicate decision is required.",
+              },
+            ],
+          },
         }),
       )
 
@@ -1073,8 +1090,32 @@ describe("repository review API", () => {
       },
     )
     expect(issuePage).toMatchObject({
-      issues: [{ id: "issue/slash", finding_count: 1, version: 3 }],
+      issues: [
+        {
+          id: "issue/slash",
+          finding_count: 1,
+          version: 3,
+          publishable: false,
+          publish_blockers: [
+            {
+              code: "finding_status_unresolved",
+              count: 3,
+              message: "Three findings still need status processing.",
+            },
+          ],
+        },
+      ],
       generation_id: "generation/slash",
+      capabilities: {
+        can_publish: false,
+        publish_blockers: [
+          {
+            code: "duplicate_review_required",
+            count: 1,
+            message: "One duplicate decision is required.",
+          },
+        ],
+      },
     })
     expect(issuePage.issues[0]).not.toHaveProperty("finding_ids")
     expect(issuePage.issues[0]).not.toHaveProperty("body")
@@ -1310,7 +1351,13 @@ describe("repository review API", () => {
       .mockResolvedValueOnce(
         jsonResponse({ automation, issues: [issue], offset: 0, total: 1 }),
       )
-      .mockResolvedValueOnce(jsonResponse({ automation, issue }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          issue,
+          capabilities: { can_publish: false, publish_blockers: null },
+        }),
+      )
       .mockResolvedValueOnce(jsonResponse({ automation, issue }))
       .mockResolvedValueOnce(
         jsonResponse({ generation_id: "rrig_1", issues: [issue], results: [] }),
@@ -1325,7 +1372,11 @@ describe("repository review API", () => {
       generation_id: "rrig_1",
       limit: 200,
     })
-    await getRepositoryReviewAutomationIssue("auto", "draft/slash")
+    await expect(
+      getRepositoryReviewAutomationIssue("auto", "draft/slash"),
+    ).resolves.toMatchObject({
+      capabilities: { can_publish: false, publish_blockers: [] },
+    })
     await updateRepositoryReviewAutomationIssue("auto", "draft/slash", {
       title: "Title",
       body: "Body",

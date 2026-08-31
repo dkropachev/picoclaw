@@ -404,6 +404,7 @@ const issueSummary: RepositoryReviewIssueSummary = {
   generation_id: issue.generation_id,
   canonical: true,
   publishable: true,
+  publish_blockers: [],
   title: issue.title,
   state: issue.state,
   version: issue.version,
@@ -1634,6 +1635,50 @@ describe("routed repository review pages", () => {
     ).not.toBeInTheDocument()
   })
 
+  it("does not select a preview whose authoritative summary has blockers", async () => {
+    vi.mocked(listRepositoryReviewAutomationIssuesPage).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      issues: [
+        {
+          ...issueSummary,
+          publishable: false,
+          publish_blockers: [
+            {
+              code: "duplicate_review_required",
+              count: 1,
+              message: "Choose whether the possible duplicate should merge.",
+            },
+          ],
+        },
+      ],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY severity DESC, updated DESC",
+      query_schema: { fields: [] },
+      capabilities: { github: true, can_publish: true },
+    })
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewIssuesPage
+        automationID={automation.id}
+        search={{ q: "ALL ORDER BY updated DESC" }}
+        onSearchChange={vi.fn()}
+        onBack={vi.fn()}
+        onOpenIssue={vi.fn()}
+      />,
+    )
+
+    const item = (await screen.findByText(issue.title)).closest(
+      "[data-item-id]",
+    ) as HTMLElement
+    expect(
+      within(item).getByText("Unpublished preview · Not on GitHub"),
+    ).toBeVisible()
+    await user.click(item)
+    expect(screen.queryByText("1 selected", { exact: true })).toBeNull()
+  })
+
   it("saves issue-preview edits through the dedicated version-fenced editor", async () => {
     const savedIssue = {
       ...issue,
@@ -1658,7 +1703,11 @@ describe("routed repository review pages", () => {
       />,
     )
 
-    const title = await screen.findByRole("textbox", { name: "Title" })
+    expect(
+      await screen.findByText("Unpublished preview · Not on GitHub"),
+    ).toBeVisible()
+    expect(screen.queryByText("editing", { exact: true })).toBeNull()
+    const title = screen.getByRole("textbox", { name: "Title" })
     await user.clear(title)
     await user.type(title, savedIssue.title)
     await user.click(screen.getByRole("button", { name: "Save preview" }))
@@ -2389,6 +2438,21 @@ describe("routed repository review pages", () => {
   })
 
   it("renders sanitized GitHub-flavored Markdown and explicit publication controls", async () => {
+    vi.mocked(publishRepositoryReviewAutomationIssue).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      issue,
+      finding,
+      capabilities: {
+        github: true,
+        can_edit: true,
+        can_delete: true,
+        can_regenerate: true,
+        can_publish: true,
+        publish_blockers: [],
+      },
+    })
+    const user = userEvent.setup()
     renderPage(
       <RepositoryReviewIssuePage
         automationID={automation.id}
@@ -2409,7 +2473,270 @@ describe("routed repository review pages", () => {
     expect(
       screen.getByRole("button", { name: "Regenerate with AI" }),
     ).toBeVisible()
-    expect(screen.getByRole("button", { name: "Post issue" })).toBeVisible()
+    const header = screen.getByRole("banner")
+    expect(
+      within(header).getByRole("button", { name: "Post to GitHub" }),
+    ).toBeVisible()
+    expect(
+      screen.getByText("Unpublished preview · Not on GitHub"),
+    ).toBeVisible()
+    await user.click(
+      within(header).getByRole("button", { name: "Post to GitHub" }),
+    )
+    await waitFor(() =>
+      expect(publishRepositoryReviewAutomationIssue).toHaveBeenCalledWith(
+        automation.id,
+        issue.id,
+        { expected_version: issue.version, confirmed: true },
+      ),
+    )
+  })
+
+  it.each([
+    ["cross-repository", "https://github.com/other/repo/issues/42"],
+    ["non-GitHub", "https://issues.example.com/owner/repo/42"],
+  ])(
+    "rejects an unsafe preview external URL from a %s host while editing",
+    async (_label, externalURL) => {
+      vi.mocked(getRepositoryReviewAutomationIssue).mockResolvedValue({
+        automation,
+        repository: repositorySummary,
+        issue: { ...issue, external_url: externalURL },
+        finding,
+        capabilities: {
+          github: true,
+          can_publish: true,
+          publish_blockers: [],
+        },
+      })
+      renderPage(
+        <RepositoryReviewIssuePage
+          automationID={automation.id}
+          draftID={issue.id}
+          onBack={vi.fn()}
+          onDeleted={vi.fn()}
+          onEdit={vi.fn()}
+          onOpenFinding={vi.fn()}
+          onManageLink={vi.fn()}
+        />,
+      )
+
+      expect(
+        await screen.findByRole("button", { name: "Post to GitHub" }),
+      ).toBeEnabled()
+      expect(
+        screen.queryByRole("link", { name: "Open GitHub issue" }),
+      ).toBeNull()
+    },
+  )
+
+  it.each([
+    ["cross-repository", "https://github.com/other/repo/issues/42"],
+    ["non-GitHub", "https://issues.example.com/owner/repo/42"],
+  ])(
+    "rejects an unsafe preview external URL from a %s host while posted",
+    async (_label, externalURL) => {
+      vi.mocked(getRepositoryReviewAutomationIssue).mockResolvedValue({
+        automation,
+        repository: repositorySummary,
+        issue: {
+          ...issue,
+          state: "posted",
+          external_id: "42",
+          external_url: externalURL,
+        },
+        finding,
+        capabilities: {
+          github: true,
+          can_publish: false,
+          publish_blockers: [
+            {
+              code: "state_not_publishable",
+              count: 1,
+              message: "Posted previews cannot be published again.",
+            },
+          ],
+        },
+      })
+      renderPage(
+        <RepositoryReviewIssuePage
+          automationID={automation.id}
+          draftID={issue.id}
+          onBack={vi.fn()}
+          onDeleted={vi.fn()}
+          onEdit={vi.fn()}
+          onOpenFinding={vi.fn()}
+          onManageLink={vi.fn()}
+        />,
+      )
+
+      expect(await screen.findByText("Posted to GitHub")).toBeVisible()
+      expect(
+        screen.queryByRole("link", { name: "Open GitHub issue" }),
+      ).toBeNull()
+    },
+  )
+
+  it("hides publication actions from a canonical read-only eligible-looking preview", async () => {
+    vi.mocked(getRepositoryReviewAutomationIssue).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      issue: { ...issue, read_only: true },
+      finding,
+      capabilities: {
+        github: true,
+        can_publish: true,
+        publish_blockers: [],
+      },
+    })
+    renderPage(
+      <RepositoryReviewIssuePage
+        automationID={automation.id}
+        draftID={issue.id}
+        onBack={vi.fn()}
+        onDeleted={vi.fn()}
+        onEdit={vi.fn()}
+        onOpenFinding={vi.fn()}
+        onManageLink={vi.fn()}
+      />,
+    )
+
+    expect(
+      await screen.findByText("This preview cannot be posted to GitHub yet."),
+    ).toBeVisible()
+    expect(screen.queryByRole("button", { name: "Post to GitHub" })).toBeNull()
+    expect(screen.queryByRole("link", { name: "Open GitHub issue" })).toBeNull()
+  })
+
+  it("keeps a blocked canonical GitHub Post action disabled and explains every blocker", async () => {
+    vi.mocked(getRepositoryReviewAutomationIssue).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      issue: {
+        ...issue,
+        finding_ids: ["finding_1", "finding_2", "finding_3", "finding_4"],
+      },
+      finding,
+      capabilities: {
+        github: true,
+        can_edit: true,
+        can_delete: true,
+        can_regenerate: true,
+        can_publish: false,
+        publish_blockers: [
+          {
+            code: "finding_status_unresolved",
+            count: 3,
+            message: "Three findings still need status processing.",
+          },
+          {
+            code: "duplicate_review_required",
+            count: 1,
+            message: "One duplicate decision is required.",
+          },
+        ],
+      },
+    })
+    renderPage(
+      <RepositoryReviewIssuePage
+        automationID={automation.id}
+        draftID={issue.id}
+        onBack={vi.fn()}
+        onDeleted={vi.fn()}
+        onEdit={vi.fn()}
+        onOpenFinding={vi.fn()}
+        onManageLink={vi.fn()}
+      />,
+    )
+
+    const post = await screen.findByRole("button", { name: "Post to GitHub" })
+    expect(post.closest("header")).not.toBeNull()
+    expect(post).toBeDisabled()
+    expect(
+      screen.getByText("Three findings still need status processing. (3)"),
+    ).toBeVisible()
+    expect(
+      screen.getByText("One duplicate decision is required."),
+    ).toBeVisible()
+  })
+
+  it("explains a local preview without offering a GitHub Post action", async () => {
+    vi.mocked(getRepositoryReviewAutomationIssue).mockResolvedValue({
+      automation: { ...automation, repository: "local/repository" },
+      repository: { ...repositorySummary, repository: "local/repository" },
+      issue: { ...issue, repository: "local/repository" },
+      finding: { ...finding, repository: "local/repository" },
+      capabilities: {
+        github: false,
+        can_publish: false,
+        publish_blockers: [
+          {
+            code: "repository_not_github",
+            count: 1,
+            message: "The repository is not hosted on GitHub.",
+          },
+        ],
+      },
+    })
+    renderPage(
+      <RepositoryReviewIssuePage
+        automationID={automation.id}
+        draftID={issue.id}
+        onBack={vi.fn()}
+        onDeleted={vi.fn()}
+        onEdit={vi.fn()}
+        onOpenFinding={vi.fn()}
+        onManageLink={vi.fn()}
+      />,
+    )
+
+    expect(
+      await screen.findByText(
+        "This preview is saved locally. Posting is unavailable because this review is not bound to a canonical GitHub repository.",
+      ),
+    ).toBeVisible()
+    expect(screen.queryByRole("button", { name: "Post to GitHub" })).toBeNull()
+  })
+
+  it("explains a noncanonical preview without offering a GitHub Post action", async () => {
+    vi.mocked(getRepositoryReviewAutomationIssue).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      issue: {
+        ...issue,
+        canonical: false,
+        read_only: true,
+        conflict_reason: "A newer preview owns the canonical association.",
+      },
+      finding,
+      capabilities: {
+        github: true,
+        can_publish: false,
+        publish_blockers: [
+          {
+            code: "preview_not_canonical",
+            count: 1,
+            message: "This preview is not canonical.",
+          },
+        ],
+      },
+    })
+    renderPage(
+      <RepositoryReviewIssuePage
+        automationID={automation.id}
+        draftID={issue.id}
+        onBack={vi.fn()}
+        onDeleted={vi.fn()}
+        onEdit={vi.fn()}
+        onOpenFinding={vi.fn()}
+        onManageLink={vi.fn()}
+      />,
+    )
+
+    expect(
+      await screen.findByText(/not the finding’s canonical association/u),
+    ).toBeVisible()
+    expect(screen.queryByRole("button", { name: "Post to GitHub" })).toBeNull()
   })
 
   it("opens the associated finding from an issue record", async () => {
@@ -2465,6 +2792,12 @@ describe("routed repository review pages", () => {
         onManageLink={onManageLink}
       />,
     )
+
+    const openGitHubIssue = await screen.findByRole("link", {
+      name: "Open GitHub issue",
+    })
+    expect(openGitHubIssue.closest("header")).not.toBeNull()
+    expect(openGitHubIssue).toHaveAttribute("href", linkedIssue.external_url)
 
     await user.click(
       await screen.findByRole("button", { name: "Manage manual link" }),

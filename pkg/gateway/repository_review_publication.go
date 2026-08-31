@@ -125,11 +125,12 @@ func (handler *repositoryReviewPublicationHandler) ServeHTTP(w http.ResponseWrit
 		writeRepositoryReviewPublicationError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	if !draft.Canonical {
-		writeRepositoryReviewPublicationError(w, http.StatusConflict, "noncanonical_issue_preview")
-		return
-	}
+	eligibility := repoaudit.EvaluateIssuePublication(state, draft)
 	if draft.State == repoaudit.IssueDraftPosted {
+		if !eligibility.AllowsPostedAcknowledgement() {
+			writeRepositoryReviewPublicationEligibilityError(w, eligibility)
+			return
+		}
 		writeRepositoryReviewPublicationJSON(w, http.StatusOK, map[string]any{
 			"repository": repoaudit.Summarize(state), "draft": draft,
 		})
@@ -139,8 +140,8 @@ func (handler *repositoryReviewPublicationHandler) ServeHTTP(w http.ResponseWrit
 		writeRepositoryReviewPublicationError(w, http.StatusConflict, "stale_repository_review")
 		return
 	}
-	if !validRepositoryReviewGitHubIdentity(state.Repository) {
-		writeRepositoryReviewPublicationError(w, http.StatusBadRequest, "repository_not_publishable")
+	if !eligibility.CanPublish {
+		writeRepositoryReviewPublicationEligibilityError(w, eligibility)
 		return
 	}
 	runner, err := handler.newToolRunner(loop, "")
@@ -245,24 +246,7 @@ func (handler *repositoryReviewPublicationHandler) ServeHTTP(w http.ResponseWrit
 }
 
 func validRepositoryReviewGitHubIdentity(repository string) bool {
-	owner, name, ok := strings.Cut(repository, "/")
-	if !ok || owner == "" || name == "" || strings.Contains(name, "/") ||
-		repository != strings.ToLower(repository) {
-		return false
-	}
-	for index, part := range []string{owner, name} {
-		if len(part) > 100 || part == "." || part == ".." {
-			return false
-		}
-		for _, character := range part {
-			if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' ||
-				character == '-' || index == 1 && (character == '_' || character == '.') {
-				continue
-			}
-			return false
-		}
-	}
-	return true
+	return repoaudit.IsCanonicalGitHubRepository(repository)
 }
 
 func repositoryReviewIssueCreateAmbiguous(err error) bool {
@@ -390,6 +374,12 @@ func writeRepositoryReviewPublicationStoreError(w http.ResponseWriter, err error
 		writeRepositoryReviewPublicationError(w, http.StatusNotFound, "not_found")
 	case errors.Is(err, repoaudit.ErrConflict):
 		writeRepositoryReviewPublicationError(w, http.StatusConflict, "stale_repository_review")
+	case errors.Is(err, repoaudit.ErrHistoricalDeduplicationInProgress):
+		writeRepositoryReviewPublicationError(
+			w,
+			http.StatusConflict,
+			string(repoaudit.IssuePublicationHistoricalMergeActive),
+		)
 	default:
 		writeRepositoryReviewPublicationError(w, http.StatusServiceUnavailable, "publication_unavailable")
 	}
@@ -403,6 +393,25 @@ func setRepositoryReviewPublicationHeaders(w http.ResponseWriter) {
 func writeRepositoryReviewPublicationError(w http.ResponseWriter, status int, code string) {
 	writeRepositoryReviewPublicationJSON(w, status, map[string]string{
 		"code": code, "message": strings.ReplaceAll(code, "_", " "),
+	})
+}
+
+func writeRepositoryReviewPublicationEligibilityError(
+	w http.ResponseWriter,
+	eligibility repoaudit.IssuePublicationEligibility,
+) {
+	if eligibility.CanPublish || len(eligibility.PublishBlockers) == 0 {
+		writeRepositoryReviewPublicationError(w, http.StatusConflict, "publication_not_allowed")
+		return
+	}
+	first := eligibility.PublishBlockers[0]
+	status := http.StatusConflict
+	if first.Code == repoaudit.IssuePublicationRepositoryNotGitHub {
+		status = http.StatusBadRequest
+	}
+	writeRepositoryReviewPublicationJSON(w, status, map[string]any{
+		"code": first.Code, "message": first.Message,
+		"publish_blockers": eligibility.PublishBlockers,
 	})
 }
 

@@ -169,9 +169,16 @@ func (h *Handler) handlePublishRepositoryReviewAutomationIssue(w http.ResponseWr
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	if request.ExpectedVersion < 1 || draft.Version != request.ExpectedVersion || !draft.Canonical {
+	if request.ExpectedVersion < 1 || draft.Version != request.ExpectedVersion {
 		writeRepositoryReviewError(w, repoaudit.ErrConflict)
 		return
+	}
+	if draft.State != repoaudit.IssueDraftPosted {
+		eligibility := repoaudit.EvaluateIssuePublication(ledger.State, draft)
+		if !eligibility.CanPublish {
+			writeRepositoryReviewPublicationEligibilityAPIError(w, eligibility)
+			return
+		}
 	}
 	body, _ := json.Marshal(repositoryReviewGatewayPublishRequest{ExpectedVersion: request.ExpectedVersion})
 	upstream := "/runtime/repository-reviews/" + ledger.State.ID +
@@ -252,14 +259,18 @@ func (h *Handler) handlePublishRepositoryReviewAutomationIssues(w http.ResponseW
 	results := make([]map[string]any, 0, len(request.Issues))
 	for _, item := range request.Issues {
 		draft, found := repositoryReviewIssueByID(ledger.State, item.ID)
+		eligibility := repoaudit.IssuePublicationEligibility{CanPublish: true}
+		if found && draft.State != repoaudit.IssueDraftPosted {
+			eligibility = repoaudit.EvaluateIssuePublication(ledger.State, draft)
+		}
 		var result map[string]any
 		switch {
 		case !found:
 			result = repositoryReviewPublicationSelectionFailure(item.ID, "not_found")
-		case !draft.Canonical:
-			result = repositoryReviewPublicationSelectionFailure(item.ID, "noncanonical_issue_preview")
 		case draft.Version != item.ExpectedVersion:
 			result = repositoryReviewPublicationSelectionFailure(item.ID, "stale_repository_review")
+		case !eligibility.CanPublish:
+			result = repositoryReviewPublicationEligibilityResult(item.ID, eligibility)
 		default:
 			result = h.publishRepositoryReviewAutomationDraft(
 				r, ledger, item.ID, item.ExpectedVersion,
@@ -297,10 +308,11 @@ func (h *Handler) publishRepositoryReviewAutomationDraft(
 	h.proxyPRWorkspaceGateway(recorder, r, http.MethodPost, upstream, "", body, time.Minute)
 	result := map[string]any{"id": draftID, "draft_id": draftID, "success": false}
 	var payload struct {
-		Draft   repoaudit.IssueDraft `json:"draft"`
-		Outcome string               `json:"outcome"`
-		Code    string               `json:"code"`
-		Message string               `json:"message"`
+		Draft           repoaudit.IssueDraft                `json:"draft"`
+		Outcome         string                              `json:"outcome"`
+		Code            string                              `json:"code"`
+		Message         string                              `json:"message"`
+		PublishBlockers []repoaudit.IssuePublicationBlocker `json:"publish_blockers"`
 	}
 	_ = json.Unmarshal(recorder.body, &payload)
 	if payload.Draft.ID != "" {
@@ -318,8 +330,41 @@ func (h *Handler) publishRepositoryReviewAutomationDraft(
 		result["outcome"] = "failed"
 		result["code"] = payload.Code
 		result["message"] = payload.Message
+		result["publish_blockers"] = payload.PublishBlockers
 	}
 	return result
+}
+
+func repositoryReviewPublicationEligibilityResult(
+	draftID string,
+	eligibility repoaudit.IssuePublicationEligibility,
+) map[string]any {
+	result := repositoryReviewPublicationSelectionFailure(draftID, "publication_not_allowed")
+	if len(eligibility.PublishBlockers) == 0 {
+		return result
+	}
+	first := eligibility.PublishBlockers[0]
+	result["code"] = first.Code
+	result["message"] = first.Message
+	result["publish_blockers"] = eligibility.PublishBlockers
+	return result
+}
+
+func writeRepositoryReviewPublicationEligibilityAPIError(
+	w http.ResponseWriter,
+	eligibility repoaudit.IssuePublicationEligibility,
+) {
+	result := repositoryReviewPublicationEligibilityResult("", eligibility)
+	delete(result, "id")
+	delete(result, "draft_id")
+	delete(result, "outcome")
+	delete(result, "success")
+	status := http.StatusConflict
+	if len(eligibility.PublishBlockers) > 0 &&
+		eligibility.PublishBlockers[0].Code == repoaudit.IssuePublicationRepositoryNotGitHub {
+		status = http.StatusBadRequest
+	}
+	writeRepositoryReviewJSON(w, status, result)
 }
 
 type repositoryReviewResponseRecorder struct {

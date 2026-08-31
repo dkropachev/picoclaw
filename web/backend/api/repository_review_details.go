@@ -43,17 +43,18 @@ type repositoryReviewAutomationLedger struct {
 }
 
 type repositoryReviewCapabilities struct {
-	GitHub          bool   `json:"github"`
-	CanGenerate     bool   `json:"can_generate"`
-	CanPublish      bool   `json:"can_publish"`
-	CanSearchIssues bool   `json:"can_search_issues"`
-	CanLinkIssue    bool   `json:"can_link_issue"`
-	CanUnlinkIssue  bool   `json:"can_unlink_issue"`
-	CanReplaceIssue bool   `json:"can_replace_issue"`
-	CanEdit         bool   `json:"can_edit"`
-	CanDelete       bool   `json:"can_delete"`
-	CanRegenerate   bool   `json:"can_regenerate"`
-	ReadOnlyReason  string `json:"read_only_reason,omitempty"`
+	GitHub          bool                                `json:"github"`
+	CanGenerate     bool                                `json:"can_generate"`
+	CanPublish      bool                                `json:"can_publish"`
+	PublishBlockers []repoaudit.IssuePublicationBlocker `json:"publish_blockers"`
+	CanSearchIssues bool                                `json:"can_search_issues"`
+	CanLinkIssue    bool                                `json:"can_link_issue"`
+	CanUnlinkIssue  bool                                `json:"can_unlink_issue"`
+	CanReplaceIssue bool                                `json:"can_replace_issue"`
+	CanEdit         bool                                `json:"can_edit"`
+	CanDelete       bool                                `json:"can_delete"`
+	CanRegenerate   bool                                `json:"can_regenerate"`
+	ReadOnlyReason  string                              `json:"read_only_reason,omitempty"`
 }
 
 type repositoryReviewRunFindingStatus string
@@ -1516,6 +1517,7 @@ func repositoryReviewGlobalCapabilities(
 	github := ledger.Found && validRepositoryReviewGitHubIdentityAPI(ledger.State.Repository)
 	return repositoryReviewCapabilities{
 		GitHub: github, CanGenerate: ledger.Found, CanPublish: github,
+		PublishBlockers: []repoaudit.IssuePublicationBlocker{},
 		CanSearchIssues: github, CanLinkIssue: github,
 	}
 }
@@ -1594,7 +1596,11 @@ func repositoryReviewIssueCapabilities(
 	draft repoaudit.IssueDraft,
 ) repositoryReviewCapabilities {
 	github := validRepositoryReviewGitHubIdentityAPI(state.Repository)
-	capabilities := repositoryReviewCapabilities{GitHub: github}
+	eligibility := repoaudit.EvaluateIssuePublication(state, draft)
+	capabilities := repositoryReviewCapabilities{
+		GitHub: github, CanPublish: eligibility.CanPublish,
+		PublishBlockers: eligibility.PublishBlockers,
+	}
 	if !draft.Canonical {
 		capabilities.ReadOnlyReason = "This legacy issue record is not the finding's canonical issue."
 		return capabilities
@@ -1605,11 +1611,6 @@ func repositoryReviewIssueCapabilities(
 	capabilities.CanRegenerate = draft.Origin == repoaudit.IssueDraftOriginAIGenerated &&
 		(draft.State == repoaudit.IssueDraftGenerating ||
 			draft.State == repoaudit.IssueDraftEditing || draft.State == repoaudit.IssueDraftFailed)
-	capabilities.CanPublish = github && draft.Origin != repoaudit.IssueDraftOriginLinked &&
-		draft.Origin != repoaudit.IssueDraftOriginDiscovered &&
-		(draft.State == repoaudit.IssueDraftEditing ||
-			draft.State == repoaudit.IssueDraftPublishing ||
-			draft.State == repoaudit.IssueDraftUnknown)
 	capabilities.CanUnlinkIssue = (draft.Origin == repoaudit.IssueDraftOriginLinked ||
 		draft.Origin == repoaudit.IssueDraftOriginDiscovered) &&
 		draft.State == repoaudit.IssueDraftPosted
@@ -1617,24 +1618,7 @@ func repositoryReviewIssueCapabilities(
 }
 
 func validRepositoryReviewGitHubIdentityAPI(repository string) bool {
-	owner, name, ok := strings.Cut(repository, "/")
-	if !ok || owner == "" || name == "" || strings.Contains(name, "/") ||
-		repository != strings.ToLower(repository) {
-		return false
-	}
-	for index, part := range []string{owner, name} {
-		if len(part) > 100 || part == "." || part == ".." {
-			return false
-		}
-		for _, character := range part {
-			if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' ||
-				character == '-' || index == 1 && (character == '_' || character == '.') {
-				continue
-			}
-			return false
-		}
-	}
-	return true
+	return repoaudit.IsCanonicalGitHubRepository(repository)
 }
 
 func repositoryReviewReportFindings(

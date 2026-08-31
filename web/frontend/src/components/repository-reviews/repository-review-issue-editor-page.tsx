@@ -9,6 +9,7 @@ import {
   updateRepositoryReviewAutomationIssue,
 } from "@/api/repository-reviews"
 import { CollectionDetailShell } from "@/components/collection"
+import { repositoryReviewIssueStateLabel } from "@/components/repository-reviews/repository-review-issue-state"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -99,7 +100,11 @@ export function RepositoryReviewIssueEditorPage({
         </span>
       }
       status={
-        issue ? <Badge variant="outline">{issue.state}</Badge> : undefined
+        issue ? (
+          <Badge variant="outline">
+            {repositoryReviewIssueStateLabel(issue.state)}
+          </Badge>
+        ) : undefined
       }
       loading={query.isLoading}
       error={!notFound ? query.error?.message : undefined}

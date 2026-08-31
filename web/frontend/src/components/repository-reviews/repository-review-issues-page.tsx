@@ -14,6 +14,7 @@ import {
   type StandardCollectionSelectionState,
 } from "@/components/collection"
 import { githubRepositoryPath } from "@/components/repository-reviews/repository-review-actions"
+import { repositoryReviewIssueStateLabel } from "@/components/repository-reviews/repository-review-issue-state"
 import { Button } from "@/components/ui/button"
 import {
   type CollectionRouteSearch,
@@ -135,7 +136,7 @@ export function RepositoryReviewIssuesPage({
   const github =
     firstPage?.capabilities?.github ??
     Boolean(firstPage && githubRepositoryPath(firstPage.automation.repository))
-  const canPublish = firstPage?.capabilities?.can_publish ?? github
+  const canPublish = firstPage?.capabilities?.can_publish === true
   const definition = useMemo<
     CollectionDefinition<RepositoryReviewIssueSummary>
   >(
@@ -170,7 +171,7 @@ export function RepositoryReviewIssuesPage({
         {
           id: "state",
           header: "State",
-          cell: (issue) => issue.state,
+          cell: (issue) => repositoryReviewIssueStateLabel(issue.state),
           className: "w-28",
         },
         {
@@ -203,7 +204,11 @@ export function RepositoryReviewIssuesPage({
           label: "Generation",
           value: (issue) => issue.generation_id || "Legacy",
         },
-        { id: "state", label: "State", value: (issue) => issue.state },
+        {
+          id: "state",
+          label: "State",
+          value: (issue) => repositoryReviewIssueStateLabel(issue.state),
+        },
         {
           id: "updated",
           label: "Updated",
@@ -211,11 +216,10 @@ export function RepositoryReviewIssuesPage({
         },
       ],
       badges: [
-        { id: "state", label: (issue) => issue.state, variant: "outline" },
         {
-          id: "origin",
-          label: (issue) => issue.origin || "legacy",
-          variant: "secondary",
+          id: "state",
+          label: (issue) => repositoryReviewIssueStateLabel(issue.state),
+          variant: "outline",
         },
         {
           id: "conflict",
@@ -345,7 +349,9 @@ export function RepositoryReviewIssuesPage({
 }
 
 function publishable(issue: RepositoryReviewIssueSummary): boolean {
-  return issue.canonical && issue.publishable
+  return (
+    issue.canonical && issue.publishable && issue.publish_blockers.length === 0
+  )
 }
 
 function formatTimestamp(value: string): string {
