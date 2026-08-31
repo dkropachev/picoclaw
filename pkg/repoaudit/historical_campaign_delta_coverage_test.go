@@ -120,13 +120,37 @@ func TestProjectLegacyRawFindingFallbacks(t *testing.T) {
 	fromContext.ContextIDs = []string{"ctx"}
 	contextRaw := projectLegacyRawReviewFinding(RepositoryState{
 		Contexts: []FindingContext{{
-			ID: "ctx", RunID: "wr_context", Model: "context-model", Reviewer: "context-reviewer",
+			ID: "ctx", RunID: "wr_context", Model: "context-model",
+			ModelAlias: "context-model-alias", Account: "context-account",
+			Reviewer: "context-reviewer",
 		}},
 	}, fromContext, 1)
 	if contextRaw.ContextID != "ctx" || contextRaw.RunID != "wr_context" ||
 		contextRaw.CampaignID != contextCampaign || contextRaw.Model != "context-model" ||
+		contextRaw.ModelAlias != "context-model-alias" || contextRaw.Account != "context-account" ||
 		contextRaw.Reviewer != "context-reviewer" {
 		t.Fatalf("context projection raw=%#v", contextRaw)
+	}
+
+	mixedContexts := fromContext
+	mixedContexts.ID = "rfn_mixed_contexts"
+	mixedContexts.ContextIDs = []string{"missing", "first", "later"}
+	mixedRaw := projectLegacyRawReviewFinding(RepositoryState{
+		Contexts: []FindingContext{
+			{
+				ID: "first", RunID: " first-run ", Model: " first-model ",
+				ModelAlias: "unpaired-alias", Reviewer: " first-reviewer ",
+			},
+			{
+				ID: "later", RunID: "later-run", Model: "later-model",
+				ModelAlias: "later-alias", Account: "later-account", Reviewer: "later-reviewer",
+			},
+		},
+	}, mixedContexts, 1)
+	if mixedRaw.ContextID != "first" || mixedRaw.RunID != "first-run" ||
+		mixedRaw.Model != "first-model" || mixedRaw.ModelAlias != "" || mixedRaw.Account != "" ||
+		mixedRaw.Reviewer != "first-reviewer" {
+		t.Fatalf("mixed context projection raw=%#v", mixedRaw)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -253,8 +254,13 @@ func recoverRepositoryReviewHistoricalCampaign(
 		workflows.NewFileRunStore(workspace), resolvedProfile,
 	)
 	if err != nil {
+		if errors.Is(err, repoaudit.ErrInvalidAutomation) ||
+			errors.Is(err, repoaudit.ErrInvalidPlan) || errors.Is(err, os.ErrNotExist) {
+			return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
+				errRepositoryReviewHistoricalCampaignRecovery
+		}
 		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
-			errRepositoryReviewHistoricalCampaignRecovery
+			err
 	}
 	if !prepared.Available || !prepared.Exact || !prepared.Request.Coverage.Exact ||
 		prepared.Request.Coverage.CommitSHA == "" {

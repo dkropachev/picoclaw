@@ -199,6 +199,14 @@ export function RepositoryReviewRawFindingPage({
               />
               <DetailRow label="Model" value={source.model || "Not reported"} />
               <DetailRow
+                label="Model alias"
+                value={source.model_alias || "Not reported"}
+              />
+              <DetailRow
+                label="Account"
+                value={source.account || "Not reported"}
+              />
+              <DetailRow
                 label="Reviewer"
                 value={source.reviewer || "Not reported"}
               />
@@ -336,6 +344,14 @@ export function RepositoryReviewRawFindingPage({
               <dl className="border-border grid gap-2 rounded-lg border p-4 text-sm sm:grid-cols-2">
                 <DetailRow label="Context ID" value={detail.context.id} mono />
                 <DetailRow label="Model" value={detail.context.model} />
+                <DetailRow
+                  label="Model alias"
+                  value={detail.context.model_alias || "Not reported"}
+                />
+                <DetailRow
+                  label="Account"
+                  value={detail.context.account || "Not reported"}
+                />
                 <DetailRow
                   label="Reviewer"
                   value={detail.context.reviewer || "Not reported"}

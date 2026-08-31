@@ -1303,6 +1303,64 @@ describe("routed repository review pages", () => {
     )
   })
 
+  it("shows exact model provenance for a raw source and its immutable context", async () => {
+    const source = {
+      ...rawFinding,
+      model_alias: "raw-reviewer-alias",
+      account: "raw-review-account",
+    }
+    vi.mocked(getRepositoryReviewRawSource).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      source,
+      finding,
+      context: {
+        id: "context_1",
+        repository: finding.repository,
+        commit_sha: finding.commit_sha,
+        inventory_hash: "inventory",
+        profile_hash: "profile",
+        run_id: "run_1",
+        model: source.model,
+        model_alias: "context-reviewer-alias",
+        account: "context-review-account",
+        reviewer: source.reviewer,
+        files: [finding.file],
+        created_at: finding.created_at,
+      },
+    })
+
+    renderPage(
+      <RepositoryReviewRawFindingPage
+        automationID={automation.id}
+        sourceID={source.id}
+        onBack={vi.fn()}
+        onCanonicalSource={vi.fn()}
+        onOpenFinding={vi.fn()}
+      />,
+    )
+
+    const sourceProvenance = await screen.findByRole("region", {
+      name: "Location and provenance",
+    })
+    expect(
+      within(sourceProvenance).getByText("raw-reviewer-alias"),
+    ).toBeVisible()
+    expect(
+      within(sourceProvenance).getByText("raw-review-account"),
+    ).toBeVisible()
+
+    const immutableContext = screen.getByRole("region", {
+      name: "Immutable context",
+    })
+    expect(
+      within(immutableContext).getByText("context-reviewer-alias"),
+    ).toBeVisible()
+    expect(
+      within(immutableContext).getByText("context-review-account"),
+    ).toBeVisible()
+  })
+
   it("opens an associated repository finding from a single run selection", async () => {
     const onOpenRepositoryFinding = vi.fn()
     const user = userEvent.setup()

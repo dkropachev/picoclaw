@@ -604,22 +604,23 @@ func projectLegacyRawReviewFinding(
 	for _, contextRecord := range state.Contexts {
 		contexts[contextRecord.ID] = contextRecord
 	}
-	contextID, runID, model, reviewer := "", "", "", ""
+	contextID, runID, model, modelAlias, account, reviewer := "", "", "", "", "", ""
 	for _, id := range finding.ContextIDs {
 		contextRecord, found := contexts[id]
 		if !found {
 			continue
 		}
-		if contextID == "" {
-			contextID = contextRecord.ID
-			runID = contextRecord.RunID
+		contextID = contextRecord.ID
+		runID = strings.TrimSpace(contextRecord.RunID)
+		model = strings.TrimSpace(contextRecord.Model)
+		candidateAlias := strings.TrimSpace(contextRecord.ModelAlias)
+		candidateAccount := strings.TrimSpace(contextRecord.Account)
+		if candidateAlias != "" && candidateAccount != "" {
+			modelAlias = candidateAlias
+			account = candidateAccount
 		}
-		if model == "" {
-			model = strings.TrimSpace(contextRecord.Model)
-		}
-		if reviewer == "" {
-			reviewer = strings.TrimSpace(contextRecord.Reviewer)
-		}
+		reviewer = strings.TrimSpace(contextRecord.Reviewer)
+		break
 	}
 	if contextID == "" {
 		contextID = stableID("legacy-context_", finding.ID)
@@ -683,7 +684,8 @@ func projectLegacyRawReviewFinding(
 		Evidence: finding.Evidence, Impact: finding.Impact, Validation: finding.Validation,
 		MatchHints: finding.MatchHints, FixEffort: finding.FixEffort,
 		ContextID: contextID, RunID: runID, AssignmentID: "historical-replay",
-		Model: model, Reviewer: reviewer, State: RawFindingDeduplicationPending,
+		Model: model, ModelAlias: modelAlias, Account: account, Reviewer: reviewer,
+		State:       RawFindingDeduplicationPending,
 		Disposition: RawFindingDispositionUndecided, CreatedAt: createdAt, UpdatedAt: updatedAt,
 	}
 	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(raw)

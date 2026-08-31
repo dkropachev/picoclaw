@@ -602,6 +602,53 @@ func TestRepositoryReviewHistoricalRecoveryFinalUpdateErrorCoverage(t *testing.T
 	}
 }
 
+func TestRepositoryReviewHistoricalRecoveryPreparationErrorClassification(t *testing.T) {
+	originalPrepare := prepareRepositoryReviewHistoricalCampaignBackfill
+	t.Cleanup(func() { prepareRepositoryReviewHistoricalCampaignBackfill = originalPrepare })
+	operationalErr := errors.New("historical workflow store failed")
+	tests := []struct {
+		name       string
+		prepareErr error
+		recovery   bool
+	}{
+		{name: "invalid automation", prepareErr: repoaudit.ErrInvalidAutomation, recovery: true},
+		{name: "invalid plan", prepareErr: repoaudit.ErrInvalidPlan, recovery: true},
+		{name: "missing history", prepareErr: os.ErrNotExist, recovery: true},
+		{name: "canceled", prepareErr: context.Canceled},
+		{name: "deadline", prepareErr: context.DeadlineExceeded},
+		{name: "operational", prepareErr: operationalErr},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prepareRepositoryReviewHistoricalCampaignBackfill = func(
+				context.Context,
+				repoaudit.RepositoryReviewAutomation,
+				repoaudit.RepositoryState,
+				string,
+				repositoryReviewWorkflowRunLoader,
+				...workflows.RepositoryReviewModelProfile,
+			) (repositoryReviewLegacyCampaignBackfill, error) {
+				return repositoryReviewLegacyCampaignBackfill{}, test.prepareErr
+			}
+			_, _, err := recoverRepositoryReviewHistoricalCampaign(
+				t.Context(), repoaudit.NewStore(t.TempDir()), "workspace",
+				repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
+				workflows.RepositoryReviewModelProfile{},
+			)
+			if test.recovery {
+				if !errors.Is(err, errRepositoryReviewHistoricalCampaignRecovery) {
+					t.Fatalf("preparation error=%v", err)
+				}
+				return
+			}
+			if !errors.Is(err, test.prepareErr) ||
+				errors.Is(err, errRepositoryReviewHistoricalCampaignRecovery) {
+				t.Fatalf("preparation error=%v", err)
+			}
+		})
+	}
+}
+
 func TestRepositoryReviewHistoricalRecoveryNewErrorCoverage(t *testing.T) {
 	controller := newRepositoryReviewController(nil)
 	controller.leasedConfig = &config.Config{}
