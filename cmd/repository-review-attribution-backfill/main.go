@@ -14,16 +14,22 @@ import (
 )
 
 type expectedCounts struct {
-	configuredRuns        int
-	recoveredRuns         int
-	nonLedgerRuns         int
-	childAttempts         int
-	successfulChildren    int
-	failedChildren        int
-	attributionRecords    int
-	acknowledgements      int
-	uniqueFiles           int
-	uniqueFileAssignments int
+	configuredRuns                int
+	recoveredRuns                 int
+	nonLedgerRuns                 int
+	childAttempts                 int
+	successfulChildren            int
+	failedChildren                int
+	attributionRecords            int
+	acknowledgements              int
+	uniqueFiles                   int
+	uniqueFileAssignments         int
+	campaignAssignmentCredits     int
+	campaignAttributedFiles       int
+	projectedCompletedAssignments int
+	projectedPendingAssignments   int
+	projectedInspectedFiles       int
+	projectedCompletedFiles       int
 }
 
 func main() {
@@ -57,7 +63,10 @@ func run(
 	flags.SetOutput(stderr)
 	workspace := flags.String("workspace", "", "PicoClaw workspace containing repository review state")
 	automationID := flags.String("automation", "", "repository review automation ID")
-	apply := flags.Bool("apply", false, "commit the prepared attribution records")
+	apply := flags.Bool(
+		"apply", false,
+		"commit prepared attribution records and eligible recovered-campaign credits",
+	)
 	expectedDigest := flags.String("expect-digest", "", "exact sha256 digest printed by a prior dry run")
 	expected := expectedCounts{}
 	flags.IntVar(&expected.configuredRuns, "expect-configured-runs", -1, "expected configured workflow runs")
@@ -74,6 +83,42 @@ func run(
 		"expect-file-assignments",
 		-1,
 		"expected unique file/focus assignments",
+	)
+	flags.IntVar(
+		&expected.campaignAssignmentCredits,
+		"expect-campaign-assignment-credits",
+		-1,
+		"expected exact legacy credits mapped into the current campaign",
+	)
+	flags.IntVar(
+		&expected.campaignAttributedFiles,
+		"expect-campaign-attributed-files",
+		-1,
+		"expected exact files carrying legacy attribution credit",
+	)
+	flags.IntVar(
+		&expected.projectedCompletedAssignments,
+		"expect-projected-completed-assignments",
+		-1,
+		"expected total completed assignments after repair",
+	)
+	flags.IntVar(
+		&expected.projectedPendingAssignments,
+		"expect-projected-pending-assignments",
+		-1,
+		"expected total pending assignments after repair",
+	)
+	flags.IntVar(
+		&expected.projectedInspectedFiles,
+		"expect-projected-inspected-files",
+		-1,
+		"expected total inspected files after repair",
+	)
+	flags.IntVar(
+		&expected.projectedCompletedFiles,
+		"expect-projected-completed-files",
+		-1,
+		"expected total fully reviewed files after repair",
 	)
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -143,6 +188,36 @@ func compareExpectedCounts(
 		{"acknowledgements", report.AcknowledgementOccurrences, expected.acknowledgements},
 		{"unique files", report.UniqueFiles, expected.uniqueFiles},
 		{"file assignments", report.UniqueFileAssignments, expected.uniqueFileAssignments},
+		{
+			"campaign assignment credits",
+			report.CampaignAssignmentCredits,
+			expected.campaignAssignmentCredits,
+		},
+		{
+			"campaign attributed files",
+			report.CampaignAttributedFiles,
+			expected.campaignAttributedFiles,
+		},
+		{
+			"projected completed assignments",
+			report.ProjectedCompletedAssignments,
+			expected.projectedCompletedAssignments,
+		},
+		{
+			"projected pending assignments",
+			report.ProjectedPendingAssignments,
+			expected.projectedPendingAssignments,
+		},
+		{
+			"projected inspected files",
+			report.ProjectedInspectedFiles,
+			expected.projectedInspectedFiles,
+		},
+		{
+			"projected completed files",
+			report.ProjectedCompletedFiles,
+			expected.projectedCompletedFiles,
+		},
 	}
 	for _, check := range checks {
 		if check.want < 0 {

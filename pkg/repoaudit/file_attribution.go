@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/routing"
 )
@@ -29,9 +31,47 @@ const (
 // MergeRepositoryReviewFileAttributionsRequest appends immutable attribution
 // evidence at a repository-state compare-and-swap boundary.
 type MergeRepositoryReviewFileAttributionsRequest struct {
-	Repository      string                            `json:"repository"`
-	ExpectedVersion int64                             `json:"expected_version"`
-	Attributions    []RepositoryReviewFileAttribution `json:"attributions"`
+	Repository      string                                      `json:"repository"`
+	ExpectedVersion int64                                       `json:"expected_version"`
+	Attributions    []RepositoryReviewFileAttribution           `json:"attributions"`
+	CampaignCredit  *RepositoryReviewFileAttributionCreditFence `json:"campaign_credit,omitempty"`
+}
+
+// RepositoryReviewFileAttributionCreditFence authorizes one exact recovered
+// campaign to reuse immutable legacy file acknowledgements as current catalog
+// assignment credits. ExpectedReviewVersion fences the campaign authority
+// independently from the repository version used by the attribution merge.
+type RepositoryReviewFileAttributionCreditFence struct {
+	AutomationID          string `json:"automation_id"`
+	CampaignID            string `json:"campaign_id"`
+	ExpectedReviewVersion int64  `json:"expected_review_version"`
+}
+
+// RepositoryReviewFileAttributionAssignmentCredit is one deterministic
+// attribution-to-current-catalog mapping. The exact FileRef and current
+// assignment identity make the dry-run plan suitable for digest binding.
+type RepositoryReviewFileAttributionAssignmentCredit struct {
+	AssignmentID     string  `json:"assignment_id"`
+	FocusID          string  `json:"focus_id"`
+	ReviewerIdentity string  `json:"reviewer_identity"`
+	File             FileRef `json:"file"`
+}
+
+// RepositoryReviewFileAttributionCreditPreview reports the complete eligible
+// semantic credit plan and the subset that would change current campaign
+// coverage. Effective counts describe attribution-backed credits, not all
+// native campaign bits that may already exist independently.
+type RepositoryReviewFileAttributionCreditPreview struct {
+	CampaignID                    string                                            `json:"campaign_id"`
+	Credits                       []RepositoryReviewFileAttributionAssignmentCredit `json:"credits"`
+	EffectiveAssignmentCredits    int                                               `json:"effective_assignment_credits"`
+	NewAssignmentCredits          int                                               `json:"new_assignment_credits"`
+	EffectiveInspectedFiles       int                                               `json:"effective_inspected_files"`
+	NewInspectedFiles             int                                               `json:"new_inspected_files"`
+	ProjectedCompletedAssignments int                                               `json:"projected_completed_assignments"`
+	ProjectedPendingAssignments   int                                               `json:"projected_pending_assignments"`
+	ProjectedInspectedFiles       int                                               `json:"projected_inspected_files"`
+	ProjectedCompletedFiles       int                                               `json:"projected_completed_files"`
 }
 
 // NewRepositoryReviewFileAttribution normalizes and validates one immutable
@@ -90,6 +130,234 @@ func NewRepositoryReviewFileAttribution(
 	return cloneRepositoryReviewFileAttribution(input), nil
 }
 
+// PreviewRepositoryReviewFileAttributionCredits derives the exact legacy
+// attribution credits eligible for one recovered campaign without mutating
+// state. Only supplied records may authorize credit: the caller must rederive
+// them from exact workflow evidence. Retained records still participate in the
+// immutable merge conflict check, but cannot silently widen the credit plan.
+func PreviewRepositoryReviewFileAttributionCredits(
+	state RepositoryState,
+	fence RepositoryReviewFileAttributionCreditFence,
+	supplied []RepositoryReviewFileAttribution,
+) (RepositoryReviewFileAttributionCreditPreview, error) {
+	fence, err := normalizeRepositoryReviewFileAttributionCreditFence(fence)
+	if err != nil {
+		return RepositoryReviewFileAttributionCreditPreview{}, err
+	}
+	preview := RepositoryReviewFileAttributionCreditPreview{CampaignID: fence.CampaignID}
+	coverage := state.CurrentCampaign
+	if coverage == nil || coverage.ID != fence.CampaignID || !coverage.Exact ||
+		coverage.RecoveryDigest == "" || len(coverage.AssignmentCatalog) == 0 {
+		return preview, fmt.Errorf("%w: campaign credit authority changed", ErrConflict)
+	}
+	catalog, err := NormalizeRepositoryReviewAssignmentCatalog(coverage.AssignmentCatalog)
+	if err != nil || !reflect.DeepEqual(catalog, coverage.AssignmentCatalog) {
+		return preview, ErrInvalidPlan
+	}
+
+	attributions, err := repositoryReviewFileAttributionCreditCandidates(supplied)
+	if err != nil {
+		return preview, err
+	}
+	runs := make(map[string]ReviewRun, len(state.Runs))
+	for _, run := range state.Runs {
+		if run.ID == "" {
+			continue
+		}
+		if _, duplicate := runs[run.ID]; duplicate {
+			return preview, fmt.Errorf("%w: duplicate campaign credit run", ErrConflict)
+		}
+		runs[run.ID] = run
+	}
+
+	type assignmentKey struct {
+		focus    string
+		reviewer string
+	}
+	assignments := make(map[assignmentKey]RepositoryReviewAssignment)
+	for _, assignment := range catalog {
+		if !assignment.Required {
+			continue
+		}
+		key := assignmentKey{focus: assignment.FocusID, reviewer: assignment.Reviewer}
+		if _, duplicate := assignments[key]; duplicate {
+			return preview, fmt.Errorf("%w: ambiguous campaign credit assignment", ErrConflict)
+		}
+		assignments[key] = assignment
+	}
+
+	type creditKey struct {
+		path         string
+		assignmentID string
+	}
+	credits := make(map[creditKey]RepositoryReviewFileAttributionAssignmentCredit)
+	filesByPath := make(map[string]FileRef)
+	for _, attribution := range attributions {
+		if attribution.AutomationID != fence.AutomationID ||
+			attribution.Source != RepositoryReviewFileAttributionSourceLegacyManagedChild ||
+			!attribution.Required || attribution.RootAgentID != "main" {
+			continue
+		}
+		run, found := runs[attribution.RunID]
+		if !found || run.CampaignID != fence.CampaignID {
+			continue
+		}
+		if !run.LegacyRecovered || run.CommitSHA != coverage.CommitSHA ||
+			run.InventoryHash != coverage.InventoryHash ||
+			attribution.CommitSHA != run.CommitSHA ||
+			attribution.InventoryHash != run.InventoryHash ||
+			attribution.ProfileHash != run.ProfileHash ||
+			!attribution.CompletedAt.Equal(run.CompletedAt) {
+			return preview, fmt.Errorf("%w: legacy attribution run evidence changed", ErrConflict)
+		}
+		assignment, matched := assignments[assignmentKey{
+			focus: attribution.FocusID, reviewer: attribution.ReviewerIdentity,
+		}]
+		if !matched {
+			continue
+		}
+		for _, file := range attribution.AcknowledgedFiles {
+			if retained, exists := filesByPath[file.Path]; exists && retained != file {
+				return preview, fmt.Errorf("%w: conflicting attributed file revision", ErrConflict)
+			}
+			filesByPath[file.Path] = file
+			if coverage.Paths[file.Path].Unsupported {
+				return preview, fmt.Errorf("%w: attributed path is unsupported", ErrConflict)
+			}
+			key := creditKey{path: file.Path, assignmentID: assignment.ID}
+			credit := RepositoryReviewFileAttributionAssignmentCredit{
+				AssignmentID: assignment.ID, FocusID: assignment.FocusID,
+				ReviewerIdentity: assignment.Reviewer, File: file,
+			}
+			if retained, duplicate := credits[key]; duplicate {
+				if retained != credit {
+					return preview, ErrConflict
+				}
+				continue
+			}
+			credits[key] = credit
+			if len(credits) > maxRepositoryReviewAttributedFileCredits {
+				return preview, ErrInvalidPlan
+			}
+		}
+	}
+
+	preview.Credits = make([]RepositoryReviewFileAttributionAssignmentCredit, 0, len(credits))
+	for _, credit := range credits {
+		preview.Credits = append(preview.Credits, credit)
+	}
+	sort.Slice(preview.Credits, func(i, j int) bool {
+		if preview.Credits[i].File.Path != preview.Credits[j].File.Path {
+			return preview.Credits[i].File.Path < preview.Credits[j].File.Path
+		}
+		return preview.Credits[i].AssignmentID < preview.Credits[j].AssignmentID
+	})
+	preview.EffectiveAssignmentCredits = len(preview.Credits)
+	inspected := make(map[string]struct{}, len(filesByPath))
+	newInspected := make(map[string]struct{}, len(filesByPath))
+	for _, credit := range preview.Credits {
+		inspected[credit.File.Path] = struct{}{}
+		pathCoverage := coverage.Paths[credit.File.Path]
+		complete, completeErr := repositoryReviewAssignmentComplete(
+			pathCoverage, catalog, credit.AssignmentID,
+		)
+		if completeErr != nil {
+			return preview, completeErr
+		}
+		if !complete {
+			preview.NewAssignmentCredits++
+		}
+		if !pathCoverage.Inspected {
+			newInspected[credit.File.Path] = struct{}{}
+		}
+	}
+	preview.EffectiveInspectedFiles = len(inspected)
+	preview.NewInspectedFiles = len(newInspected)
+	projected := state
+	projectedCoverage := cloneRepositoryReviewCampaignCoverage(*coverage)
+	projected.CurrentCampaign = &projectedCoverage
+	if _, err := applyRepositoryReviewFileAttributionCreditPreview(&projected, preview); err != nil {
+		return RepositoryReviewFileAttributionCreditPreview{}, err
+	}
+	progress := CurrentCampaignAssignmentProgress(projected, fence.CampaignID)
+	metrics := CurrentCampaignMetrics(projected, fence.CampaignID, nil, time.Time{})
+	preview.ProjectedCompletedAssignments = progress.Completed
+	preview.ProjectedPendingAssignments = progress.Pending
+	preview.ProjectedInspectedFiles = metrics.InspectedFiles
+	preview.ProjectedCompletedFiles = metrics.CompletedFiles
+	return preview, nil
+}
+
+func applyRepositoryReviewFileAttributionCreditPreview(
+	state *RepositoryState,
+	preview RepositoryReviewFileAttributionCreditPreview,
+) (bool, error) {
+	if state == nil || state.CurrentCampaign == nil ||
+		state.CurrentCampaign.ID != preview.CampaignID {
+		return false, fmt.Errorf("%w: campaign credit authority changed", ErrConflict)
+	}
+	changed := false
+	for _, credit := range preview.Credits {
+		current := state.CurrentCampaign.Paths[credit.File.Path]
+		next, err := CreditRepositoryReviewAssignment(
+			current, state.CurrentCampaign.AssignmentCatalog, credit.AssignmentID,
+		)
+		if err != nil {
+			return false, err
+		}
+		if next == current {
+			continue
+		}
+		state.CurrentCampaign.Paths[credit.File.Path] = next
+		changed = true
+	}
+	return changed, nil
+}
+
+func normalizeRepositoryReviewFileAttributionCreditFence(
+	fence RepositoryReviewFileAttributionCreditFence,
+) (RepositoryReviewFileAttributionCreditFence, error) {
+	fence.AutomationID = strings.TrimSpace(fence.AutomationID)
+	fence.CampaignID = strings.TrimSpace(fence.CampaignID)
+	if !validAutomationID(fence.AutomationID) ||
+		!ValidRepositoryReviewCampaignID(fence.CampaignID) ||
+		fence.ExpectedReviewVersion < 0 {
+		return RepositoryReviewFileAttributionCreditFence{}, ErrInvalidPlan
+	}
+	return fence, nil
+}
+
+func repositoryReviewFileAttributionCreditCandidates(
+	supplied []RepositoryReviewFileAttribution,
+) ([]RepositoryReviewFileAttribution, error) {
+	if len(supplied) > maxRepositoryReviewFileAttributions {
+		return nil, ErrInvalidPlan
+	}
+	byID := make(map[string]RepositoryReviewFileAttribution, len(supplied))
+	out := make([]RepositoryReviewFileAttribution, 0, len(supplied))
+	appendCandidate := func(input RepositoryReviewFileAttribution) error {
+		attribution, err := NewRepositoryReviewFileAttribution(input)
+		if err != nil {
+			return err
+		}
+		if existing, duplicate := byID[attribution.ID]; duplicate {
+			if !reflect.DeepEqual(existing, attribution) {
+				return ErrConflict
+			}
+			return nil
+		}
+		byID[attribution.ID] = attribution
+		out = append(out, attribution)
+		return nil
+	}
+	for _, attribution := range supplied {
+		if err := appendCandidate(attribution); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 // MergeRepositoryReviewFileAttributions appends new immutable evidence. An
 // exact replay succeeds even after the repository version advances; a logical
 // child replay with different evidence conflicts.
@@ -104,8 +372,18 @@ func (s Store) MergeRepositoryReviewFileAttributions(
 		return RepositoryState{}, contextErr
 	}
 	request.Repository = strings.TrimSpace(request.Repository)
+	var creditFence *RepositoryReviewFileAttributionCreditFence
+	if request.CampaignCredit != nil {
+		normalizedFence, err := normalizeRepositoryReviewFileAttributionCreditFence(
+			*request.CampaignCredit,
+		)
+		if err != nil {
+			return RepositoryState{}, err
+		}
+		creditFence = &normalizedFence
+	}
 	if !validBoundedText(request.Repository, maxRepositoryIdentityBytes) ||
-		request.ExpectedVersion < 0 || len(request.Attributions) == 0 ||
+		request.ExpectedVersion < 0 || len(request.Attributions) == 0 && creditFence == nil ||
 		len(request.Attributions) > maxRepositoryReviewFileAttributions {
 		return RepositoryState{}, ErrInvalidPlan
 	}
@@ -152,12 +430,27 @@ func (s Store) MergeRepositoryReviewFileAttributions(
 		}
 		additions = append(additions, attribution)
 	}
-	if len(additions) == 0 {
+	var creditPreview RepositoryReviewFileAttributionCreditPreview
+	creditChanged := false
+	if creditFence != nil {
+		creditPreview, err = PreviewRepositoryReviewFileAttributionCredits(
+			state, *creditFence, normalized,
+		)
+		if err != nil {
+			return RepositoryState{}, err
+		}
+		creditChanged = creditPreview.NewAssignmentCredits > 0
+	}
+	if len(additions) == 0 && !creditChanged {
 		return state, nil
 	}
-	if state.Version != request.ExpectedVersion ||
+	if state.Version != request.ExpectedVersion || creditChanged &&
+		state.ReviewVersion != creditFence.ExpectedReviewVersion ||
 		len(state.FileAttributions)+len(additions) > maxRepositoryReviewFileAttributions {
 		return RepositoryState{}, ErrConflict
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return RepositoryState{}, contextErr
 	}
 	for _, attribution := range additions {
 		state.FileAttributions = append(
@@ -165,6 +458,18 @@ func (s Store) MergeRepositoryReviewFileAttributions(
 		)
 	}
 	sortRepositoryReviewFileAttributions(state.FileAttributions)
+	if creditChanged {
+		changed, creditErr := applyRepositoryReviewFileAttributionCreditPreview(
+			&state, creditPreview,
+		)
+		if creditErr != nil {
+			return RepositoryState{}, creditErr
+		}
+		if !changed {
+			return RepositoryState{}, ErrConflict
+		}
+		state.ReviewVersion++
+	}
 	state.Version++
 	state.UpdatedAt = s.clock()
 	if err := s.save(&state); err != nil {

@@ -826,6 +826,7 @@ describe("routed repository review pages", () => {
     expect(onRawFindings).toHaveBeenCalled()
     expect(onIssues).toHaveBeenCalled()
     expect(screen.getByText("writer")).toBeVisible()
+    expect(screen.getByText("Fully resolved progress")).toBeVisible()
     expect(screen.getByText("4 of 8 files (50%)")).toBeVisible()
     expect(screen.getByText("Fully reviewed files")).toBeVisible()
     expect(screen.getAllByText("Run findings").length).toBeGreaterThan(0)
@@ -874,6 +875,70 @@ describe("routed repository review pages", () => {
       { cursor: undefined, limit: 200 },
       expect.anything(),
     )
+  })
+
+  it("distinguishes unavailable legacy attribution accounts from unrecorded live accounts", async () => {
+    vi.mocked(
+      listRepositoryReviewAutomationFileAttributionsPage,
+    ).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      file_attributions: [
+        {
+          id: "legacy_without_account",
+          path: "pkg/legacy.go",
+          commit_sha: "a".repeat(40),
+          blob_sha: "b".repeat(40),
+          focus_id: "security_trust",
+          root_agent_id: "main",
+          reviewer_identity: "review",
+          account: "",
+          model: "gpt-5.6-sol",
+          source: "legacy",
+          sources: ["legacy_managed_child"],
+          attempts: 1,
+          run_ids: ["legacy_run"],
+          run_count: 1,
+          latest_completed_at: "2026-08-26T01:00:00Z",
+        },
+        {
+          id: "live_without_account",
+          path: "pkg/live.go",
+          commit_sha: "a".repeat(40),
+          blob_sha: "c".repeat(40),
+          focus_id: "concurrency_recovery",
+          root_agent_id: "main",
+          reviewer_identity: "review",
+          account: "",
+          model: "gpt-5.6-sol",
+          source: "live",
+          sources: ["live_checkpoint"],
+          attempts: 1,
+          run_ids: ["live_run"],
+          run_count: 1,
+          latest_completed_at: "2026-08-26T02:00:00Z",
+        },
+      ],
+      total: 2,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY path ASC, focus ASC, reviewer ASC",
+      query_schema: { fields: [] },
+    })
+
+    renderPage(
+      <RepositoryReviewDetailPage
+        id={automation.id}
+        onBack={vi.fn()}
+        onFindings={vi.fn()}
+        onIssues={vi.fn()}
+      />,
+    )
+
+    const attributionTable = await screen.findByRole("table")
+    expect(
+      within(attributionTable).getByText("Legacy account unavailable"),
+    ).toBeVisible()
+    expect(within(attributionTable).getByText("Unrecorded")).toBeVisible()
   })
 
   it("loads file attribution rows beyond the first 200", async () => {
