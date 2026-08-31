@@ -52,6 +52,9 @@ export interface StandardCollectionPageContext {
 export interface StandardCollectionSelectionState {
   selectedIDs: ReadonlySet<string>
   selectedCount: number
+  reconcileSelection: (
+    response: CollectionBulkDeleteResponse,
+  ) => ReadonlyMap<string, CollectionBulkDeleteResponse["failures"][number]>
   clearSelection: () => void
 }
 
@@ -162,9 +165,15 @@ export function StandardCollectionPage<T>({
     () => ({
       selectedIDs: state.selectedIDs,
       selectedCount: state.selectedCount,
+      reconcileSelection: state.reconcileBulkDelete,
       clearSelection: state.clearSelection,
     }),
-    [state.clearSelection, state.selectedCount, state.selectedIDs],
+    [
+      state.clearSelection,
+      state.selectedCount,
+      state.selectedIDs,
+      state.reconcileBulkDelete,
+    ],
   )
 
   const removeSelected = async () => {
@@ -272,7 +281,7 @@ export function StandardCollectionPage<T>({
             selectionEnabled
               ? {
                   selectedIDs: state.selectedIDs,
-                  failuresByID: onBulkDelete ? state.failuresByID : undefined,
+                  failuresByID: state.failuresByID,
                   disabled: deleting || selection?.disabled,
                   maximumSelected: selection?.maximumSelected,
                   isItemDisabled: itemSelectable

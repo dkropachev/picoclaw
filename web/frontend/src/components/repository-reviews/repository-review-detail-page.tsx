@@ -47,6 +47,7 @@ import {
   repositoryReviewFileProgressLabel,
   repositoryReviewInspectedFilesLabel,
 } from "./repository-review-file-progress"
+import { useRepositoryReviewFindingHealth } from "./repository-review-finding-health"
 
 const fullCommitSHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu
 const assignmentFocuses: Array<{
@@ -73,12 +74,16 @@ export function RepositoryReviewDetailPage({
   id,
   onBack,
   onFindings,
+  onRepositoryFindings,
+  onFindingsProcessing,
   onRawFindings,
   onIssues,
 }: {
   id: string
   onBack: () => void
   onFindings: () => void
+  onRepositoryFindings?: () => void
+  onFindingsProcessing?: () => void
   onRawFindings?: () => void
   onIssues: () => void
 }) {
@@ -117,6 +122,10 @@ export function RepositoryReviewDetailPage({
     return [...byID.values()]
   }, [attributionPages])
   const attributionTotal = attributionPages?.[0]?.total ?? 0
+  const healthQuery = useRepositoryReviewFindingHealth(id, review)
+  const health = healthQuery.data
+  const stoppedOrFailed =
+    review?.status === "failed" || review?.status === "paused"
   const notFound =
     query.error instanceof RepositoryReviewAPIError &&
     query.error.status === 404
@@ -153,7 +162,11 @@ export function RepositoryReviewDetailPage({
     },
     onSuccess: async () => {
       setContinueDialog(null)
-      await Promise.all([query.refetch(), attributionQuery.refetch()])
+      await Promise.all([
+        query.refetch(),
+        attributionQuery.refetch(),
+        healthQuery.refetch(),
+      ])
       toast.success("Repository review action started.")
     },
     onError: (error) => {
@@ -216,18 +229,62 @@ export function RepositoryReviewDetailPage({
         error={!notFound ? query.error?.message : undefined}
         notFound={notFound}
         onBack={onBack}
-        onRetry={() => void query.refetch()}
+        onRetry={() =>
+          void Promise.all([query.refetch(), healthQuery.refetch()])
+        }
         backLabel="All repository reviews"
       >
         {review && (
           <div className="space-y-6">
+            {stoppedOrFailed && (
+              <p
+                role="alert"
+                className={
+                  review.status === "failed"
+                    ? "border-destructive/50 bg-destructive/5 rounded-lg border p-3 text-sm"
+                    : "bg-muted rounded-lg border p-3 text-sm"
+                }
+              >
+                {review.status === "failed" ? "Failed" : "Stopped"}:{" "}
+                {review.pause_detail ||
+                  (review.status === "failed"
+                    ? "The review stopped before completion."
+                    : "The review is paused and can be continued.")}
+              </p>
+            )}
+
             <div className="grid gap-3 sm:grid-cols-3">
               <RelatedButton
                 icon={<IconFileDescription />}
-                label="Findings"
-                detail={`${deduplicatedFindingCount(review)} deduplicated finding${deduplicatedFindingCount(review) === 1 ? "" : "s"}`}
+                label="Run findings"
+                detail={healthCountDetail(
+                  health?.run_findings.total,
+                  "run finding",
+                )}
                 onClick={onFindings}
               />
+              {onRepositoryFindings && (
+                <RelatedButton
+                  icon={<IconFileDescription />}
+                  label="Repository findings"
+                  detail={healthCountDetail(
+                    health?.repository_findings.total,
+                    "repository finding",
+                  )}
+                  onClick={onRepositoryFindings}
+                />
+              )}
+              {onFindingsProcessing && (
+                <RelatedButton
+                  icon={<IconListDetails />}
+                  label="Findings processing"
+                  detail={healthCountDetail(
+                    health?.findings_processing.total,
+                    "processing record",
+                  )}
+                  onClick={onFindingsProcessing}
+                />
+              )}
               {onRawFindings && (
                 <RelatedButton
                   icon={<IconListDetails />}
@@ -305,16 +362,16 @@ export function RepositoryReviewDetailPage({
               />
               <Metric label="Raw findings" value={rawFindingCount(review)} />
               <Metric
-                label="Findings"
-                value={deduplicatedFindingCount(review)}
+                label="Run findings"
+                value={health?.run_findings.total ?? "—"}
               />
               <Metric
-                label="Aggregated findings"
-                value={review.progress.finding_aggregates}
+                label="Repository findings"
+                value={health?.repository_findings.total ?? "—"}
               />
               <Metric
-                label="Unassociated occurrences"
-                value={review.progress.unaggregated_findings}
+                label="Unrepresented run findings"
+                value={health?.run_findings.unrepresented ?? "—"}
               />
             </div>
 
@@ -387,16 +444,6 @@ export function RepositoryReviewDetailPage({
                   />
                 </p>
               </section>
-            )}
-
-            {review.pause_detail && (
-              <p
-                role="status"
-                className="bg-muted rounded-lg border p-3 text-sm"
-              >
-                {review.status === "failed" ? "Failed" : "Paused"}:{" "}
-                {review.pause_detail}
-              </p>
             )}
 
             {review.scope_plan && review.progress.scope_frozen === true && (
@@ -1036,8 +1083,9 @@ function rawFindingCount(review: RepositoryReviewAutomation): number {
   return review.progress.raw_findings ?? 0
 }
 
-function deduplicatedFindingCount(review: RepositoryReviewAutomation): number {
-  return review.progress.deduplicated_findings ?? review.progress.findings ?? 0
+function healthCountDetail(value: number | undefined, noun: string): string {
+  if (value == null) return "Loading finding health…"
+  return `${new Intl.NumberFormat().format(value)} ${noun}${value === 1 ? "" : "s"}`
 }
 
 function isQueuedHandoff(review: RepositoryReviewAutomation): boolean {

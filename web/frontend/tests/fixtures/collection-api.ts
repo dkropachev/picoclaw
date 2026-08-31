@@ -1,5 +1,7 @@
 import { type Page, type Route } from "@playwright/test"
 
+import type { RepositoryReviewRawFinding } from "../../src/api/repository-reviews"
+
 export type CollectionVisualState = "ready" | "empty" | "error" | "loading"
 
 const fixedNow = "2026-08-25T14:30:00Z"
@@ -222,6 +224,23 @@ const querySchemas = {
       field("updated", "timestamp"),
     ],
     [{ field: "created", direction: "DESC" }],
+  ),
+  reviewFindingsProcessing: schema(
+    [
+      field("id", "string"),
+      field("campaign", "string"),
+      field("title", "string"),
+      field("path", "string"),
+      field("symbol", "string"),
+      field("severity", "enum", ["critical", "high", "medium", "low"]),
+      field("model", "string"),
+      field("reviewer", "string"),
+      field("state", "enum", ["pending", "running", "failed", "completed"]),
+      field("disposition", "enum", ["undecided", "new", "duplicate"]),
+      field("created", "timestamp"),
+      field("updated", "timestamp"),
+    ],
+    [{ field: "updated", direction: "DESC" }],
   ),
   reviewRepositoryFindings: schema(
     [
@@ -1173,6 +1192,11 @@ export const repositoryReviewVisualIDs = {
   rawFinding: "rrw_visual_1",
   secondRawFinding: "rrw_visual_2",
   thirdRawFinding: "rrw_visual_3",
+  processingPending: "rrw_visual_processing_pending",
+  processingRunning: "rrw_visual_processing_running",
+  processingFailed: "rrw_visual_processing_failed",
+  processingCompleted: "rrw_visual_processing_completed",
+  processingOldCampaign: "rrw_visual_processing_old_campaign",
   repositoryFinding: "rrf_visual_1",
   normalRepositoryFinding: "rrf_visual_normal",
   provisionalRepositoryFinding: "rrf_visual_provisional",
@@ -1216,7 +1240,9 @@ const repositoryReviewAutomation = {
   auto_continue: true,
   model_prices: {},
   budget: { guard_expression: "tokens.total < 250000" },
-  status: "completed",
+  status: "failed",
+  pause_detail:
+    "The reviewer provider stopped after repeated safe failures. Durable checkpoints remain available.",
   run_ids: ["rrun_visual_1", "rrun_visual_2"],
   usage: {
     prompt_tokens: 48240,
@@ -1226,7 +1252,7 @@ const repositoryReviewAutomation = {
   },
   estimated_cost_usd: 1.27,
   progress: {
-    stage: "complete",
+    stage: "failed",
     completed_batches: 5,
     total_batches: 5,
     reviewed_files: 39,
@@ -1751,13 +1777,23 @@ function repositoryReviewRawFinding(
   model: string,
   reviewer: string,
   disposition: "new" | "duplicate",
-) {
+  processing: {
+    state?: "pending" | "running" | "failed" | "completed"
+    campaignID?: string
+    failure?: RepositoryReviewRawFinding["failure"]
+    ordinal?: number
+  } = {},
+): RepositoryReviewRawFinding {
+  const processingState = processing.state ?? "completed"
+  const completed = processingState === "completed"
+  const ordinal =
+    processing.ordinal ?? (repositoryReviewVisualIDs.rawFinding === id ? 1 : 2)
   return {
     id,
     version: 1,
-    campaign_id: "rrc_visual",
+    campaign_id: processing.campaignID ?? "rrc_visual",
     admission_bucket: `rdb_visual_${finding.file.path}`,
-    insertion_ordinal: repositoryReviewVisualIDs.rawFinding === id ? 1 : 2,
+    insertion_ordinal: ordinal,
     diagnosis_digest: `sha256:${id}`,
     repository: finding.repository,
     commit_sha: finding.commit_sha,
@@ -1775,21 +1811,167 @@ function repositoryReviewRawFinding(
     run_id: `rrun_visual_${finding === repositoryReviewFindings[0] ? 1 : 2}`,
     assignment_id: `assignment-${id}`,
     model,
+    model_alias: model,
+    account: "visual-review-account",
     reviewer,
-    deduplication_state: "completed" as const,
-    disposition,
-    deduplicated_finding_id: finding.id,
+    deduplication_state: processingState,
+    disposition: completed ? disposition : "undecided",
+    deduplicated_finding_id: completed ? finding.id : undefined,
     history: [
       {
-        state: "completed" as const,
-        disposition,
-        deduplicated_finding_id: finding.id,
-        attempt: 1,
+        state: processingState,
+        disposition: completed ? disposition : "undecided",
+        deduplicated_finding_id: completed ? finding.id : undefined,
+        attempt: processingState === "pending" ? undefined : 1,
+        failure: processing.failure,
         at: finding.updated_at,
       },
     ],
+    failure: processing.failure,
     created_at: finding.created_at,
     updated_at: finding.updated_at,
+  }
+}
+
+const repositoryReviewProcessingSources: RepositoryReviewRawFinding[] = [
+  repositoryReviewRawFinding(
+    repositoryReviewVisualIDs.processingPending,
+    repositoryReviewFindings[0],
+    "review",
+    "review-child-pending",
+    "new",
+    { state: "pending", ordinal: 11 },
+  ),
+  repositoryReviewRawFinding(
+    repositoryReviewVisualIDs.processingRunning,
+    repositoryReviewFindings[1],
+    "code",
+    "review-child-running",
+    "new",
+    { state: "running", ordinal: 12 },
+  ),
+  repositoryReviewRawFinding(
+    repositoryReviewVisualIDs.processingFailed,
+    repositoryReviewFindings[1],
+    "review",
+    "review-child-failed",
+    "new",
+    {
+      state: "failed",
+      ordinal: 13,
+      failure: {
+        code: "attempt_limit",
+        message: "Finding grouping reached its retry limit.",
+        retryable: true,
+        at: "2026-08-25T14:22:00Z",
+      },
+    },
+  ),
+  repositoryReviewRawFinding(
+    repositoryReviewVisualIDs.processingCompleted,
+    repositoryReviewFindings[0],
+    "review",
+    "review-child-completed",
+    "duplicate",
+    { state: "completed", ordinal: 14 },
+  ),
+  repositoryReviewRawFinding(
+    repositoryReviewVisualIDs.processingOldCampaign,
+    repositoryReviewFindings[1],
+    "legacy-review-model",
+    "historical-review",
+    "new",
+    {
+      state: "failed",
+      campaignID: "rrc_visual_previous",
+      ordinal: 15,
+      failure: {
+        code: "processing_interrupted",
+        message: "Historical finding grouping was interrupted.",
+        retryable: true,
+        at: "2026-08-24T17:00:00Z",
+      },
+    },
+  ),
+]
+
+const repositoryReviewFindingHealth = {
+  run_findings: {
+    total: 6,
+    pending: 1,
+    processing: 1,
+    failed: 1,
+    needs_review: 1,
+    associated_new: 1,
+    associated_existing: 1,
+    unrepresented: 3,
+  },
+  repository_findings: {
+    total: repositoryFindings.length,
+    provisional: 2,
+    validation_failed: 2,
+    issue_conflicts: 2,
+  },
+  findings_processing: repositoryReviewProcessingHealth(
+    repositoryReviewProcessingSources,
+  ),
+  historical_consolidation: {
+    required: true,
+    status: "failed" as
+      | "not_required"
+      | "pending"
+      | "replaying"
+      | "merging"
+      | "failed"
+      | "completed",
+    retryable: true,
+  },
+  updated_at: "2026-08-25T14:22:00Z",
+}
+
+function repositoryReviewProcessingHealth(
+  sources: RepositoryReviewRawFinding[],
+) {
+  return {
+    total: sources.length,
+    pending: sources.filter(
+      (source) => source.deduplication_state === "pending",
+    ).length,
+    processing: sources.filter(
+      (source) => source.deduplication_state === "running",
+    ).length,
+    failed: sources.filter((source) => source.deduplication_state === "failed")
+      .length,
+    completed: sources.filter(
+      (source) => source.deduplication_state === "completed",
+    ).length,
+  }
+}
+
+function repositoryReviewProcessingDetail(
+  source: RepositoryReviewRawFinding,
+  sources: RepositoryReviewRawFinding[],
+  historicalConsolidation: (typeof repositoryReviewFindingHealth)["historical_consolidation"],
+) {
+  const finding = repositoryReviewDetailFindings.find(
+    (candidate) => candidate.id === source.deduplicated_finding_id,
+  )
+  const repositoryFinding = finding?.repository_finding_id
+    ? repositoryFindings.find(
+        (candidate) => candidate.id === finding.repository_finding_id,
+      )
+    : undefined
+  return {
+    automation: repositoryReviewAutomation,
+    repository: repositoryReviewSummary,
+    source,
+    context: repositoryReviewContexts.find(
+      (context) => context.id === source.context_id,
+    ),
+    ...(finding ? { finding } : {}),
+    ...(repositoryFinding ? { repository_finding: repositoryFinding } : {}),
+    findings_processing: repositoryReviewProcessingHealth(sources),
+    historical_consolidation: historicalConsolidation,
   }
 }
 
@@ -1955,6 +2137,8 @@ export async function installCollectionVisualMocks(
   page: Page,
   state: CollectionVisualState = "ready",
 ) {
+  const processingSources = structuredClone(repositoryReviewProcessingSources)
+  const findingHealth = structuredClone(repositoryReviewFindingHealth)
   await page.route(
     (url) => url.pathname.startsWith("/api/"),
     async (route) => {
@@ -1962,6 +2146,7 @@ export async function installCollectionVisualMocks(
       const url = new URL(request.url())
       const path = url.pathname
       const method = request.method()
+      const reviewRoot = `/api/repository-reviews/automations/${repositoryReviewVisualIDs.automation}`
 
       if (method === "GET" && isCollectionList(path)) {
         if (state === "loading") await delay(5_000)
@@ -1979,6 +2164,111 @@ export async function installCollectionVisualMocks(
       }
 
       if (method !== "GET") {
+        if (path === `${reviewRoot}/findings-processing/retry`) {
+          const body = request.postDataJSON() as { source_ids?: unknown }
+          const requested = Array.isArray(body.source_ids)
+            ? body.source_ids.filter(
+                (sourceID): sourceID is string => typeof sourceID === "string",
+              )
+            : []
+          const retriedIDs: string[] = []
+          const failures: Array<{
+            source_id: string
+            code: string
+            message: string
+          }> = []
+          for (const sourceID of requested) {
+            const source = processingSources.find(
+              (candidate) => candidate.id === sourceID,
+            )
+            if (
+              source?.id === repositoryReviewVisualIDs.processingFailed &&
+              source.deduplication_state === "failed"
+            ) {
+              source.deduplication_state = "pending"
+              source.failure = undefined
+              source.disposition = "undecided"
+              retriedIDs.push(sourceID)
+              continue
+            }
+            failures.push({
+              source_id: sourceID,
+              code:
+                source?.id === repositoryReviewVisualIDs.processingOldCampaign
+                  ? "historical_replay_required"
+                  : source
+                    ? "not_retryable"
+                    : "not_found",
+              message:
+                source?.id === repositoryReviewVisualIDs.processingOldCampaign
+                  ? "Historical sources must be retried through historical consolidation."
+                  : source
+                    ? "Finding processing source is not retryable."
+                    : "Finding processing source was not found.",
+            })
+          }
+          findingHealth.findings_processing =
+            repositoryReviewProcessingHealth(processingSources)
+          findingHealth.updated_at = "2026-08-25T14:23:00Z"
+          return json(route, {
+            retried_ids: retriedIDs,
+            failures,
+            findings_processing: findingHealth.findings_processing,
+            health: findingHealth,
+          })
+        }
+        const processingRetryMatch = new RegExp(
+          `^${reviewRoot}/findings-processing/sources/([^/]+)/retry$`,
+        ).exec(path)
+        if (processingRetryMatch) {
+          const sourceID = decodeURIComponent(processingRetryMatch[1])
+          const source = processingSources.find(
+            (candidate) => candidate.id === sourceID,
+          )
+          if (!source) {
+            return json(
+              route,
+              { code: "not_found", message: "Processing source not found" },
+              404,
+            )
+          }
+          if (source.deduplication_state === "failed") {
+            source.deduplication_state = "pending"
+            source.disposition = "undecided"
+            source.failure = undefined
+          }
+          findingHealth.findings_processing =
+            repositoryReviewProcessingHealth(processingSources)
+          return json(
+            route,
+            repositoryReviewProcessingDetail(
+              source,
+              processingSources,
+              findingHealth.historical_consolidation,
+            ),
+            202,
+          )
+        }
+        if (path === `${reviewRoot}/historical-deduplication/retry`) {
+          findingHealth.historical_consolidation = {
+            required: true,
+            status: "pending",
+            retryable: false,
+          }
+          findingHealth.updated_at = "2026-08-25T14:23:00Z"
+          return json(
+            route,
+            {
+              automation: repositoryReviewAutomation,
+              repository: repositoryReviewSummary,
+              historical_deduplication: {
+                required: true,
+                status: "pending",
+              },
+            },
+            202,
+          )
+        }
         if (path === "/api/event-sources/bulk-delete") {
           return json(route, {
             deleted_ids: [],
@@ -2261,9 +2551,112 @@ export async function installCollectionVisualMocks(
           return json(route, modelOptions())
       }
 
-      const reviewRoot = `/api/repository-reviews/automations/${repositoryReviewVisualIDs.automation}`
       if (path === reviewRoot) {
         return json(route, repositoryReviewAutomation)
+      }
+      if (path === `${reviewRoot}/finding-health`) {
+        if (state === "empty") {
+          return json(route, {
+            run_findings: {
+              total: 0,
+              pending: 0,
+              processing: 0,
+              failed: 0,
+              needs_review: 0,
+              associated_new: 0,
+              associated_existing: 0,
+              unrepresented: 0,
+            },
+            repository_findings: {
+              total: 0,
+              provisional: 0,
+              validation_failed: 0,
+              issue_conflicts: 0,
+            },
+            findings_processing: {
+              total: 0,
+              pending: 0,
+              processing: 0,
+              failed: 0,
+              completed: 0,
+            },
+            historical_consolidation: {
+              required: false,
+              status: "not_required",
+              retryable: false,
+            },
+            updated_at: fixedNow,
+          })
+        }
+        return json(route, findingHealth)
+      }
+      if (path === `${reviewRoot}/findings-processing`) {
+        const query =
+          url.searchParams.get("query") ?? "ALL ORDER BY updated DESC"
+        const stateMatch =
+          /\bstate\s*=\s*["']?(pending|running|failed|completed)["']?/iu.exec(
+            query,
+          )
+        const filtered = processingSources
+          .filter(
+            (source) =>
+              !stateMatch || source.deduplication_state === stateMatch[1],
+          )
+          .toSorted((left, right) =>
+            right.updated_at.localeCompare(left.updated_at),
+          )
+        const cursor = Number(url.searchParams.get("cursor") ?? 0)
+        const offset = Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0
+        const limit = Number(url.searchParams.get("limit") ?? 50)
+        const items =
+          state === "empty" ? [] : filtered.slice(offset, offset + limit)
+        return json(route, {
+          automation: repositoryReviewAutomation,
+          repository: repositoryReviewSummary,
+          raw_findings: items,
+          total: state === "empty" ? 0 : filtered.length,
+          next_cursor:
+            state !== "empty" && offset + items.length < filtered.length
+              ? String(offset + items.length)
+              : "",
+          canonical_query: query,
+          query_schema: querySchemas.reviewFindingsProcessing,
+          findings_processing:
+            state === "empty"
+              ? {
+                  total: 0,
+                  pending: 0,
+                  processing: 0,
+                  failed: 0,
+                  completed: 0,
+                }
+              : repositoryReviewProcessingHealth(processingSources),
+          historical_consolidation: findingHealth.historical_consolidation,
+          capabilities: repositoryReviewCapabilities,
+        })
+      }
+      const processingDetailMatch = new RegExp(
+        `^${reviewRoot}/findings-processing/sources/([^/]+)$`,
+      ).exec(path)
+      if (processingDetailMatch) {
+        const sourceID = decodeURIComponent(processingDetailMatch[1])
+        const source = processingSources.find(
+          (candidate) => candidate.id === sourceID,
+        )
+        return source
+          ? json(
+              route,
+              repositoryReviewProcessingDetail(
+                source,
+                processingSources,
+                findingHealth.historical_consolidation,
+              ),
+            )
+          : json(
+              route,
+              { code: "not_found", message: "Processing source not found" },
+              404,
+            )
       }
       if (
         path === `${reviewRoot}/findings` ||
@@ -2798,7 +3191,7 @@ function modelOptions() {
 
 function isCollectionList(path: string) {
   if (
-    /^\/api\/repository-reviews\/automations\/[^/]+\/(findings|repository-findings|issues)$/u.test(
+    /^\/api\/repository-reviews\/automations\/[^/]+\/(findings|findings-processing|repository-findings|issues)$/u.test(
       path,
     )
   ) {

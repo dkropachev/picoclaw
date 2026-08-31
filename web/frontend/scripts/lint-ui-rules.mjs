@@ -223,6 +223,7 @@ function lintCollectionManifest(sourceFiles) {
     "pagination",
     "selection",
     "bulk-delete",
+    "bulk-retry",
     "create",
     "detail",
     "edit",

@@ -134,6 +134,10 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 		h.handleListRepositoryReviewFileAttributionsCollection,
 	)
 	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/finding-health",
+		h.handleGetRepositoryReviewFindingHealth,
+	)
+	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/findings",
 		h.handleGetRepositoryReviewAutomationReport,
 	)
@@ -179,15 +183,19 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 	)
 	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/findings-processing",
-		h.handleGetRepositoryReviewFindingsProcessing,
+		h.handleListRepositoryReviewFindingsProcessing,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/findings-processing/retry",
+		h.handleRetryRepositoryReviewProcessingSources,
 	)
 	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/findings-processing/sources/{source_id}",
-		h.handleGetRepositoryReviewRawSource,
+		h.handleGetRepositoryReviewProcessingSource,
 	)
 	mux.HandleFunc(
 		"POST /api/repository-reviews/automations/{automation_id}/findings-processing/sources/{source_id}/retry",
-		h.handleRetryRepositoryReviewRawSource,
+		h.handleRetryRepositoryReviewProcessingSource,
 	)
 	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/campaigns/{campaign_id}/findings-processing",

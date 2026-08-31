@@ -3743,6 +3743,41 @@ func TestRepositoryReviewCoverageSharedAPIBoundaries(t *testing.T) {
 	if response.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET update status = %d", response.Code)
 	}
+
+	malformed := httptest.NewRecorder()
+	handler.handleUpdate(
+		malformed,
+		httptest.NewRequest(http.MethodPost, "/api/update", strings.NewReader("{")),
+	)
+	if malformed.Code != http.StatusBadRequest {
+		t.Fatalf("malformed update status = %d body = %s", malformed.Code, malformed.Body.String())
+	}
+}
+
+func TestRepositoryReviewCoverageWorkflowReconciliationProjection(t *testing.T) {
+	testedAt := time.Date(2020, time.August, 31, 12, 0, 0, 0, time.UTC)
+	lastTest := &workflows.WorkflowDevelopmentTest{
+		RunID: "wr_previous", Status: workflows.RunStatusRunning,
+		Error: "private diagnostic", TestedAt: testedAt,
+	}
+	session := &workflows.WorkflowDevelopmentSession{
+		Status:   workflows.WorkflowDevelopmentStatusTesting,
+		LastTest: lastTest,
+	}
+
+	projected := projectWorkflowDevelopmentReconciliationFailure(session, "wr_terminal")
+	if projected == session || projected.LastTest == lastTest ||
+		projected.Status != workflows.WorkflowDevelopmentStatusEditing ||
+		projected.LastTest == nil || projected.LastTest.RunID != "wr_terminal" ||
+		projected.LastTest.Status != "reconciliation_failed" ||
+		projected.LastTest.Error == "" || !projected.LastTest.TestedAt.After(testedAt) {
+		t.Fatalf("reconciliation projection=%#v", projected)
+	}
+	if session.Status != workflows.WorkflowDevelopmentStatusTesting ||
+		lastTest.RunID != "wr_previous" || lastTest.Status != workflows.RunStatusRunning ||
+		lastTest.Error != "private diagnostic" || !lastTest.TestedAt.Equal(testedAt) {
+		t.Fatalf("reconciliation projection mutated source session=%#v", session)
+	}
 }
 
 func TestRepositoryReviewCoverageManagedChildOutcomeBranches(t *testing.T) {

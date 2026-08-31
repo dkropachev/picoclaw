@@ -23,6 +23,7 @@ import type {
   RepositoryReviewAutomation,
   RepositoryReviewFinding,
   RepositoryReviewFindingContext,
+  RepositoryReviewHistoricalConsolidation,
   RepositoryReviewIssueDraft,
   RepositoryReviewRawFinding,
   RepositoryReviewSummary,
@@ -111,6 +112,8 @@ const smokeRoutes = [
   "/repository-reviews/rra_smoke/findings/rdf_smoke_3/link-issue",
   "/repository-reviews/rra_smoke/raw-findings",
   "/repository-reviews/rra_smoke/raw-findings/rrw_smoke_1",
+  "/repository-reviews/rra_smoke/findings-processing",
+  "/repository-reviews/rra_smoke/findings-processing/rrw_smoke_processing_failed",
   "/repository-reviews/rra_smoke/issues",
   "/repository-reviews/rra_smoke/issues/rrid_smoke_1",
   "/repository-reviews/rra_smoke/issues/rrid_smoke_1/edit",
@@ -551,6 +554,23 @@ const mockCollectionSchemas = {
       ["updated", "timestamp"],
     ],
     { field: "created", direction: "DESC" },
+  ),
+  reviewFindingsProcessing: collectionSchema(
+    [
+      ["id", "string"],
+      ["campaign", "string"],
+      ["title", "string"],
+      ["path", "string"],
+      ["symbol", "string"],
+      ["severity", "enum", ["critical", "high", "medium", "low"]],
+      ["model", "string"],
+      ["reviewer", "string"],
+      ["state", "enum", ["pending", "running", "failed", "completed"]],
+      ["disposition", "enum", ["undecided", "new", "duplicate"]],
+      ["created", "timestamp"],
+      ["updated", "timestamp"],
+    ],
+    { field: "updated", direction: "DESC" },
   ),
   reviewRepositoryFindings: collectionSchema(
     [
@@ -1957,6 +1977,12 @@ const repositoryReviewConflictID = "rrf_smoke_issue_conflict_attention"
 const repositoryReviewFailedCheckID = "rrf_smoke_failed_check_attention"
 const repositoryReviewIssueOneID = "rrid_smoke_1"
 const repositoryReviewIssueTwoID = "rrid_smoke_2"
+const repositoryReviewProcessingPendingID = "rrw_smoke_processing_pending"
+const repositoryReviewProcessingRunningID = "rrw_smoke_processing_running"
+const repositoryReviewProcessingFailedID = "rrw_smoke_processing_failed"
+const repositoryReviewProcessingCompletedID = "rrw_smoke_processing_completed"
+const repositoryReviewProcessingOldCampaignID =
+  "rrw_smoke_processing_old_campaign"
 const repositoryReviewCommitSHA = "a".repeat(40)
 
 const repositoryReviewAutomationFixture: RepositoryReviewAutomation = {
@@ -2577,6 +2603,62 @@ const repositoryReviewRawFindingsFixture: RepositoryReviewRawFinding[] = [
     ),
 ]
 
+const repositoryReviewProcessingSourcesFixture: RepositoryReviewRawFinding[] = [
+  repositoryReviewProcessingSourceFixture(
+    repositoryReviewProcessingPendingID,
+    repositoryReviewRawFindingsFixture[0]!,
+    "pending",
+    21,
+  ),
+  repositoryReviewProcessingSourceFixture(
+    repositoryReviewProcessingRunningID,
+    repositoryReviewRawFindingsFixture[2]!,
+    "running",
+    22,
+  ),
+  repositoryReviewProcessingSourceFixture(
+    repositoryReviewProcessingFailedID,
+    repositoryReviewRawFindingsFixture[3]!,
+    "failed",
+    23,
+    {
+      code: "attempt_limit",
+      message: "Finding grouping reached its retry limit.",
+      retryable: true,
+      at: "2026-08-26T12:05:10Z",
+    },
+  ),
+  repositoryReviewProcessingSourceFixture(
+    repositoryReviewProcessingCompletedID,
+    repositoryReviewRawFindingsFixture[1]!,
+    "completed",
+    24,
+  ),
+  repositoryReviewProcessingSourceFixture(
+    repositoryReviewProcessingOldCampaignID,
+    repositoryReviewRawFindingsFixture[4]!,
+    "failed",
+    25,
+    {
+      code: "processing_interrupted",
+      message: "Historical finding grouping was interrupted.",
+      retryable: true,
+      at: "2026-08-25T17:00:00Z",
+    },
+    "rrc_smoke_previous",
+  ),
+  ...Array.from({ length: 52 }, (_, index) => ({
+    ...repositoryReviewProcessingSourceFixture(
+      `rrw_smoke_processing_completed_${index + 1}`,
+      repositoryReviewRawFindingsFixture[0]!,
+      "completed",
+      30 + index,
+    ),
+    title: `Completed diagnosis ${index + 1}`,
+    updated_at: `2026-08-26T11:30:${String(index).padStart(2, "0")}Z`,
+  })),
+]
+
 function repositoryReviewRawFindingFixture(
   id: string,
   finding: RepositoryReviewFinding,
@@ -2624,6 +2706,48 @@ function repositoryReviewRawFindingFixture(
     ],
     created_at: finding.created_at,
     updated_at: finding.updated_at,
+  }
+}
+
+function repositoryReviewProcessingSourceFixture(
+  id: string,
+  source: RepositoryReviewRawFinding,
+  processingState: RepositoryReviewRawFinding["deduplication_state"],
+  ordinal: number,
+  failure?: RepositoryReviewRawFinding["failure"],
+  campaignID = "rrc_smoke",
+): RepositoryReviewRawFinding {
+  const completed = processingState === "completed"
+  return {
+    ...structuredClone(source),
+    id,
+    version: 1,
+    campaign_id: campaignID,
+    insertion_ordinal: ordinal,
+    diagnosis_digest: `sha256:${id}`,
+    legacy_finding_id: undefined,
+    assignment_id: `assignment-processing-${ordinal}`,
+    model_alias: source.model,
+    account: "openai-primary",
+    deduplication_state: processingState,
+    disposition: completed ? source.disposition : "undecided",
+    deduplicated_finding_id: completed
+      ? source.deduplicated_finding_id
+      : undefined,
+    history: [
+      {
+        state: processingState,
+        disposition: completed ? source.disposition : "undecided",
+        deduplicated_finding_id: completed
+          ? source.deduplicated_finding_id
+          : undefined,
+        attempt: processingState === "pending" ? undefined : 1,
+        failure,
+        at: failure?.at ?? source.updated_at,
+      },
+    ],
+    failure,
+    updated_at: failure?.at ?? source.updated_at,
   }
 }
 
@@ -2784,9 +2908,13 @@ interface RepositoryReviewMockState {
   summary: RepositoryReviewSummary
   findings: RepositoryReviewFinding[]
   rawFindings: RepositoryReviewRawFinding[]
+  processingSources: RepositoryReviewRawFinding[]
   repositoryFindings: RepositoryFinding[]
   contexts: RepositoryReviewFindingContext[]
   issues: RepositoryReviewIssueDraft[]
+  historicalConsolidation: RepositoryReviewHistoricalConsolidation
+  healthReads: number
+  stagedHealth: boolean
 }
 
 function createRepositoryReviewMockState(): RepositoryReviewMockState {
@@ -2795,9 +2923,19 @@ function createRepositoryReviewMockState(): RepositoryReviewMockState {
     summary: structuredClone(repositoryReviewSummaryFixture),
     findings: structuredClone(repositoryReviewFindingsFixture),
     rawFindings: structuredClone(repositoryReviewRawFindingsFixture),
+    processingSources: structuredClone(
+      repositoryReviewProcessingSourcesFixture,
+    ),
     repositoryFindings: structuredClone(repositoryFindingsFixture),
     contexts: structuredClone(repositoryReviewContextsFixture),
     issues: structuredClone(repositoryReviewIssuesFixture),
+    historicalConsolidation: {
+      required: true,
+      status: "failed",
+      retryable: true,
+    },
+    healthReads: 0,
+    stagedHealth: false,
   }
 }
 
@@ -3286,6 +3424,9 @@ interface MockLauncherApiOptions {
   fetchModelFailures?: Record<string, string>
   modelResponse?: unknown
   repositoryReviewAutomationOptions?: unknown
+  repositoryReviewFailed?: boolean
+  repositoryReviewStagedHealth?: boolean
+  repositoryReviewTerminal?: boolean
   repositoryReviewRequests?: Array<{
     method: string
     path: string
@@ -3387,6 +3528,32 @@ async function mockLauncherApis(
   let currentCapabilityRevision = 1
   let currentDefaultAgentID = "main"
   const repositoryReviewState = createRepositoryReviewMockState()
+  repositoryReviewState.stagedHealth =
+    options.repositoryReviewStagedHealth ?? false
+  if (options.repositoryReviewFailed) {
+    repositoryReviewState.automation.status = "failed"
+    repositoryReviewState.automation.active_run_id = undefined
+    repositoryReviewState.automation.pause_detail =
+      "The reviewer provider stopped after repeated safe failures."
+  }
+  if (options.repositoryReviewTerminal) {
+    repositoryReviewState.automation.status = "completed"
+    repositoryReviewState.automation.active_run_id = undefined
+    repositoryReviewState.processingSources =
+      repositoryReviewState.processingSources.map((source) => ({
+        ...source,
+        deduplication_state: "completed",
+        disposition: source.disposition === "duplicate" ? "duplicate" : "new",
+        deduplicated_finding_id:
+          source.deduplicated_finding_id ?? repositoryReviewFindingOneID,
+        failure: undefined,
+      }))
+    repositoryReviewState.historicalConsolidation = {
+      required: false,
+      status: "completed",
+      retryable: false,
+    }
+  }
   let currentModelEvaluation: Record<string, unknown> | null = null
   let modelEvaluationDetailReads = 0
   const modelEvaluationProfile = {
@@ -6685,6 +6852,74 @@ async function mockRepositoryReviewAutomationRequest(
         issue.canonical !== false,
     },
   })
+  const processingHealth = () => ({
+    total: state.processingSources.length,
+    pending: state.processingSources.filter(
+      (source) => source.deduplication_state === "pending",
+    ).length,
+    processing: state.processingSources.filter(
+      (source) => source.deduplication_state === "running",
+    ).length,
+    failed: state.processingSources.filter(
+      (source) => source.deduplication_state === "failed",
+    ).length,
+    completed: state.processingSources.filter(
+      (source) => source.deduplication_state === "completed",
+    ).length,
+  })
+  const findingHealth = () => ({
+    run_findings: {
+      total: state.findings.length + 3,
+      pending: state.automation.status === "completed" ? 0 : 1,
+      processing: state.automation.status === "completed" ? 0 : 1,
+      failed: 1,
+      needs_review: state.findings.filter(
+        (finding) => finding.run_finding_status === "needs_review",
+      ).length,
+      associated_new: state.findings.filter(
+        (finding) => finding.run_finding_status === "associated_new",
+      ).length,
+      associated_existing: state.findings.filter(
+        (finding) => finding.run_finding_status === "associated_existing",
+      ).length,
+      unrepresented: state.automation.status === "completed" ? 1 : 3,
+    },
+    repository_findings: {
+      total: state.repositoryFindings.length,
+      provisional: state.repositoryFindings.filter(
+        (finding) => finding.match_state === "provisional",
+      ).length,
+      validation_failed: state.repositoryFindings.filter(
+        (finding) => finding.validation_state === "failed",
+      ).length,
+      issue_conflicts: state.repositoryFindings.filter(
+        (finding) => finding.issue.conflict === true,
+      ).length,
+    },
+    findings_processing: processingHealth(),
+    historical_consolidation: state.historicalConsolidation,
+    updated_at: "2026-08-26T12:05:10Z",
+  })
+  const processingDetail = (source: RepositoryReviewRawFinding) => {
+    const finding = source.deduplicated_finding_id
+      ? findFinding(source.deduplicated_finding_id)
+      : undefined
+    const repositoryFinding = finding?.repository_finding_id
+      ? findRepositoryFinding(finding.repository_finding_id)
+      : undefined
+    return {
+      automation: state.automation,
+      repository: state.summary,
+      source,
+      context: state.contexts.find(
+        (context) => context.id === source.context_id,
+      ),
+      ...(finding ? { finding } : {}),
+      ...(repositoryFinding ? { repository_finding: repositoryFinding } : {}),
+      findings_processing: processingHealth(),
+      historical_consolidation: state.historicalConsolidation,
+    }
+  }
 
   if (path === "/api/repository-reviews/automations") {
     if (method !== "GET") {
@@ -6736,6 +6971,186 @@ async function mockRepositoryReviewAutomationRequest(
         ["latest", "timestamp"],
       ]),
     })
+  }
+
+  if (path === `${automationRoot}/finding-health` && method === "GET") {
+    state.healthReads += 1
+    if (state.stagedHealth && state.healthReads === 1) {
+      return json(route, {
+        run_findings: {
+          total: 0,
+          pending: 0,
+          processing: 0,
+          failed: 0,
+          needs_review: 0,
+          associated_new: 0,
+          associated_existing: 0,
+          unrepresented: 0,
+        },
+        repository_findings: {
+          total: 0,
+          provisional: 0,
+          validation_failed: 0,
+          issue_conflicts: 0,
+        },
+        findings_processing: {
+          total: 0,
+          pending: 0,
+          processing: 0,
+          failed: 0,
+          completed: 0,
+        },
+        historical_consolidation: {
+          required: false,
+          status: "not_required",
+          retryable: false,
+        },
+        updated_at: "2026-08-26T12:00:00Z",
+      })
+    }
+    return json(route, findingHealth())
+  }
+
+  if (path === `${automationRoot}/findings-processing` && method === "GET") {
+    const query = url.searchParams.get("query") ?? "ALL ORDER BY updated DESC"
+    const stateMatch =
+      /\bstate\s*=\s*["']?(pending|running|failed|completed)["']?/iu.exec(query)
+    const filtered = state.processingSources
+      .filter(
+        (source) => !stateMatch || source.deduplication_state === stateMatch[1],
+      )
+      .toSorted((left, right) =>
+        right.updated_at.localeCompare(left.updated_at),
+      )
+    const cursor = Number(url.searchParams.get("cursor") ?? 0)
+    const offset = Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0
+    const limit = Number(url.searchParams.get("limit") ?? 50)
+    const sources = filtered.slice(offset, offset + limit)
+    return json(route, {
+      automation: state.automation,
+      repository: state.summary,
+      raw_findings: sources,
+      total: filtered.length,
+      next_cursor:
+        offset + sources.length < filtered.length
+          ? String(offset + sources.length)
+          : "",
+      canonical_query: query,
+      query_schema: mockCollectionSchemas.reviewFindingsProcessing,
+      findings_processing: processingHealth(),
+      historical_consolidation: state.historicalConsolidation,
+      capabilities,
+    })
+  }
+
+  if (
+    path === `${automationRoot}/findings-processing/retry` &&
+    method === "POST"
+  ) {
+    const sourceIDs = Array.isArray(body?.source_ids)
+      ? body.source_ids.filter(
+          (sourceID): sourceID is string => typeof sourceID === "string",
+        )
+      : []
+    const retriedIDs: string[] = []
+    const failures: Array<{
+      source_id: string
+      code: string
+      message: string
+    }> = []
+    for (const sourceID of sourceIDs) {
+      const source = state.processingSources.find(
+        (candidate) => candidate.id === sourceID,
+      )
+      if (
+        source?.id === repositoryReviewProcessingFailedID &&
+        source.deduplication_state === "failed"
+      ) {
+        source.deduplication_state = "pending"
+        source.disposition = "undecided"
+        source.failure = undefined
+        retriedIDs.push(sourceID)
+        continue
+      }
+      failures.push({
+        source_id: sourceID,
+        code:
+          source?.id === repositoryReviewProcessingOldCampaignID
+            ? "historical_replay_required"
+            : source
+              ? "not_retryable"
+              : "not_found",
+        message:
+          source?.id === repositoryReviewProcessingOldCampaignID
+            ? "Historical sources must be retried through historical consolidation."
+            : source
+              ? "Finding processing source is not retryable."
+              : "Finding processing source was not found.",
+      })
+    }
+    return json(
+      route,
+      {
+        retried_ids: retriedIDs,
+        failures,
+        findings_processing: processingHealth(),
+        health: findingHealth(),
+      },
+      202,
+    )
+  }
+
+  const processingRetryMatch = path.match(
+    new RegExp(`^${automationRoot}/findings-processing/sources/([^/]+)/retry$`),
+  )
+  if (processingRetryMatch && method === "POST") {
+    const source = state.processingSources.find(
+      (candidate) =>
+        candidate.id === decodeURIComponent(processingRetryMatch[1]!),
+    )
+    if (!source) return json(route, { code: "not_found" }, 404)
+    if (source.deduplication_state === "failed") {
+      source.deduplication_state = "pending"
+      source.disposition = "undecided"
+      source.failure = undefined
+    }
+    return json(route, processingDetail(source), 202)
+  }
+
+  const processingDetailMatch = path.match(
+    new RegExp(`^${automationRoot}/findings-processing/sources/([^/]+)$`),
+  )
+  if (processingDetailMatch && method === "GET") {
+    const source = state.processingSources.find(
+      (candidate) =>
+        candidate.id === decodeURIComponent(processingDetailMatch[1]!),
+    )
+    return source
+      ? json(route, processingDetail(source))
+      : json(route, { code: "not_found" }, 404)
+  }
+
+  if (
+    path === `${automationRoot}/historical-deduplication/retry` &&
+    method === "POST"
+  ) {
+    state.historicalConsolidation = {
+      required: true,
+      status: "pending",
+      retryable: false,
+    }
+    return json(
+      route,
+      {
+        automation: state.automation,
+        repository: state.summary,
+        historical_deduplication: {
+          required: true,
+          status: "pending",
+        },
+      },
+      202,
+    )
   }
 
   if (
@@ -7362,6 +7777,11 @@ for (const collection of [
     defaultQuery: "ALL ORDER BY created DESC",
   },
   {
+    title: "findings processing",
+    route: `/repository-reviews/${repositoryReviewAutomationID}/findings-processing`,
+    defaultQuery: "ALL ORDER BY updated DESC",
+  },
+  {
     title: "repository findings",
     route: `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings`,
     defaultQuery: "ALL ORDER BY severity DESC, updated DESC",
@@ -7385,6 +7805,13 @@ for (const collection of [
       .poll(() => new URL(page.url()).searchParams.get("q"))
       .toBe(collection.defaultQuery)
 
+    if (collection.title === "findings processing") {
+      await page.getByRole("button", { name: "Load more" }).click()
+      await expect(
+        page.locator('[data-item-id="rrw_smoke_processing_completed_1"]'),
+      ).toBeVisible()
+    }
+
     for (const view of ["list", "table", "grid"] as const) {
       await page
         .getByRole("button", {
@@ -7407,6 +7834,405 @@ for (const collection of [
     expect(errors).toEqual([])
   })
 }
+
+test("findings processing selects only failures and preserves partial bulk retry failures", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const requests: NonNullable<
+    MockLauncherApiOptions["repositoryReviewRequests"]
+  > = []
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/${repositoryReviewAutomationID}/findings-processing`,
+    { repositoryReviewRequests: requests },
+  )
+
+  await expect(
+    page.getByRole("heading", { name: "Historical consolidation" }),
+  ).toBeVisible()
+  await page
+    .getByRole("button", { name: "Retry historical consolidation" })
+    .click()
+  const historicalToast = page.getByText("Historical consolidation queued.")
+  await expect(historicalToast).toBeVisible()
+  await expect
+    .poll(() =>
+      requests.find((request) =>
+        request.path.endsWith("/historical-deduplication/retry"),
+      ),
+    )
+    .toMatchObject({ method: "POST", body: {} })
+  const pending = page.locator(
+    `[data-item-id="${repositoryReviewProcessingPendingID}"]`,
+  )
+  await pending.focus()
+  await page.keyboard.press("Space")
+  await expect(page.getByText("1 selected", { exact: true })).toHaveCount(0)
+
+  const failedQuery = "state = failed ORDER BY updated DESC"
+  const query = page.getByRole("combobox", { name: "Collection query" })
+  await query.fill(failedQuery)
+  await page.keyboard.press("Enter")
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe(failedQuery)
+
+  for (const [index, sourceID] of [
+    repositoryReviewProcessingFailedID,
+    repositoryReviewProcessingOldCampaignID,
+  ].entries()) {
+    const item = page.locator(`[data-item-id="${sourceID}"]`)
+    await expect(item).toBeVisible()
+    await item.focus()
+    await page.keyboard.press(index === 0 ? "Space" : "Control+Space")
+  }
+  await expect(page.getByText("2 selected", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Retry selected" }).click()
+
+  const partialToast = page.getByText(
+    "1 of 2 selected findings queued. 1 remained selected.",
+  )
+  await expect(partialToast).toBeVisible()
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  await expect(
+    page.locator(`[data-item-id="${repositoryReviewProcessingOldCampaignID}"]`),
+  ).toBeVisible()
+  await expect(
+    page
+      .locator(`[data-item-id="${repositoryReviewProcessingOldCampaignID}"]`)
+      .getByText(
+        "Historical sources must be retried through historical consolidation.",
+        { exact: true },
+      ),
+  ).toBeVisible()
+  await expect(
+    page.locator(`[data-item-id="${repositoryReviewProcessingFailedID}"]`),
+  ).toHaveCount(0)
+  await expect
+    .poll(() =>
+      requests.find((request) =>
+        request.path.endsWith("/findings-processing/retry"),
+      ),
+    )
+    .toMatchObject({
+      method: "POST",
+      body: {
+        source_ids: [
+          repositoryReviewProcessingFailedID,
+          repositoryReviewProcessingOldCampaignID,
+        ],
+      },
+    })
+  await expect(historicalToast).toBeHidden({ timeout: 10_000 })
+  await expect(partialToast).toBeHidden({ timeout: 10_000 })
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("findings processing detail exposes safe failure, immutable provenance, links, and retry", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const requests: NonNullable<
+    MockLauncherApiOptions["repositoryReviewRequests"]
+  > = []
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/${repositoryReviewAutomationID}/findings-processing/${repositoryReviewProcessingFailedID}`,
+    { repositoryReviewRequests: requests },
+  )
+
+  await expect(
+    page.getByRole("heading", { name: "Processing failed" }),
+  ).toBeVisible()
+  await expect(
+    page.getByText("Finding grouping reached its retry limit."),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Immutable diagnosis" }),
+  ).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Provenance" })).toBeVisible()
+  await expect(page.getByText("openai-primary", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Retry", exact: true }).click()
+  await expect(page.getByText("Finding processing queued.")).toBeVisible()
+  await expect(page.getByText("Queued", { exact: true })).toBeVisible()
+  await expect
+    .poll(() =>
+      requests.find((request) =>
+        request.path.endsWith(
+          `/findings-processing/sources/${repositoryReviewProcessingFailedID}/retry`,
+        ),
+      ),
+    )
+    .toMatchObject({ method: "POST", body: {} })
+
+  await page.goto(
+    `/repository-reviews/${repositoryReviewAutomationID}/findings-processing/${repositoryReviewProcessingCompletedID}`,
+  )
+  await expect(
+    page.getByRole("heading", { name: "Linked findings" }),
+  ).toBeVisible()
+  await page.getByRole("button", { name: "Deduplicated finding" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/${repositoryReviewAutomationID}/findings/${repositoryReviewFindingOneID}`,
+    ),
+  )
+  await page.goBack()
+  await page.getByRole("button", { name: "Repository finding" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings/rrf_smoke_1`,
+    ),
+  )
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("findings processing Back restores query, view, selection, and scroll", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const search = new URLSearchParams({
+    q: "ALL ORDER BY updated DESC",
+    view: "grid",
+  })
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/${repositoryReviewAutomationID}/findings-processing?${search.toString()}`,
+  )
+  await page.getByRole("button", { name: "Load more" }).click()
+  const item = page.locator(
+    `[data-item-id="${repositoryReviewProcessingOldCampaignID}"]`,
+  )
+  await item.scrollIntoViewIfNeeded()
+  await item.focus()
+  await page.keyboard.press("Space")
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  const scrollContainer = page.locator(
+    '[data-slot="collection-scroll-container"]',
+  )
+  const rememberedScroll = await scrollContainer.evaluate((node) =>
+    Math.floor(node.scrollTop),
+  )
+  expect(rememberedScroll).toBeGreaterThan(0)
+  await page.keyboard.press("Enter")
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/findings-processing/${repositoryReviewProcessingOldCampaignID}`,
+    ),
+  )
+  await expect(
+    page.getByText("rrc_smoke_previous", { exact: true }),
+  ).toBeVisible()
+  await page.goBack()
+
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  const restored = new URL(page.url())
+  expect(restored.searchParams.get("q")).toBe("ALL ORDER BY updated DESC")
+  expect(restored.searchParams.get("view")).toBe("grid")
+  await expect
+    .poll(() => scrollContainer.evaluate((node) => Math.floor(node.scrollTop)))
+    .toBe(rememberedScroll)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("finding health polling runs only while review or processing work is active", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date("2026-08-26T12:06:00Z") })
+  let activeReads = 0
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/finding-health")) {
+      activeReads += 1
+    }
+  })
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/${repositoryReviewAutomationID}/findings-processing`,
+  )
+  await expect.poll(() => activeReads).toBeGreaterThanOrEqual(1)
+  const initialActiveReads = activeReads
+  await page.clock.fastForward(2_100)
+  await expect.poll(() => activeReads).toBeGreaterThan(initialActiveReads)
+
+  const terminalPage = await page.context().newPage()
+  await terminalPage.clock.install({ time: new Date("2026-08-26T12:06:00Z") })
+  let terminalReads = 0
+  terminalPage.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/finding-health")) {
+      terminalReads += 1
+    }
+  })
+  await gotoMockedRoute(
+    terminalPage,
+    `/repository-reviews/${repositoryReviewAutomationID}/findings-processing`,
+    { repositoryReviewTerminal: true },
+  )
+  await expect.poll(() => terminalReads).toBeGreaterThanOrEqual(1)
+  const initialTerminalReads = terminalReads
+  await terminalPage.clock.fastForward(6_100)
+  expect(terminalReads).toBe(initialTerminalReads)
+  await terminalPage.close()
+})
+
+test("active collection keeps polling health when its first snapshot has no work", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date("2026-08-26T12:06:00Z") })
+  let healthReads = 0
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/finding-health")) {
+      healthReads += 1
+    }
+  })
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings`,
+    { repositoryReviewStagedHealth: true },
+  )
+  await expect.poll(() => healthReads).toBeGreaterThanOrEqual(1)
+  await page.clock.fastForward(2_100)
+  await expect(
+    page.getByRole("heading", { name: "Repository coverage is incomplete" }),
+  ).toBeVisible()
+})
+
+test("review health puts a failed alert first and uses exact health cards", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/${repositoryReviewAutomationID}`,
+    { repositoryReviewFailed: true },
+  )
+
+  const failure = page.getByRole("alert").filter({
+    hasText: "The reviewer provider stopped after repeated safe failures.",
+  })
+  await expect(failure).toBeVisible()
+  const runFindings = page.getByRole("button", { name: /^Run findings/u })
+  const repositoryFindings = page.getByRole("button", {
+    name: /^Repository findings/u,
+  })
+  const processing = page.getByRole("button", {
+    name: /^Findings processing/u,
+  })
+  await expect(runFindings).toContainText("9 run findings")
+  await expect(repositoryFindings).toContainText(
+    `${repositoryFindingsFixture.length} repository findings`,
+  )
+  await expect(processing).toContainText(
+    `${repositoryReviewProcessingSourcesFixture.length} processing records`,
+  )
+  const [failureBox, runFindingsBox] = await Promise.all([
+    failure.boundingBox(),
+    runFindings.boundingBox(),
+  ])
+  expect(failureBox).not.toBeNull()
+  expect(runFindingsBox).not.toBeNull()
+  expect(failureBox!.y).toBeLessThan(runFindingsBox!.y)
+
+  const repositoryMetric = page
+    .getByText("Repository findings", { exact: true })
+    .filter({ visible: true })
+    .last()
+    .locator("xpath=..")
+  await expect(repositoryMetric).toContainText(
+    String(repositoryFindingsFixture.length),
+  )
+  const unrepresentedMetric = page
+    .getByText("Unrepresented run findings", { exact: true })
+    .locator("xpath=..")
+  await expect(unrepresentedMetric).toContainText("3")
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("repository findings show one scoped incomplete-coverage notice", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings`,
+  )
+
+  const notice = page.getByRole("heading", {
+    name: "Repository coverage is incomplete",
+  })
+  await expect(notice).toHaveCount(1)
+  const section = notice.locator("xpath=ancestor::section")
+  await expect(section).toContainText(
+    "3 run findings are still pending, processing, or failed",
+  )
+  await section
+    .getByRole("button", { name: "View unrepresented run findings" })
+    .click()
+  await expect(page).toHaveURL(
+    new RegExp(`/repository-reviews/${repositoryReviewAutomationID}/findings`),
+  )
+  expect(new URL(page.url()).searchParams.get("q")).toBe(
+    "run_status IN (pending, processing, failed) ORDER BY updated DESC",
+  )
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("findings processing Updated header stays inside the desktop table viewport", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "desktop",
+    "Canonical desktop geometry is asserted at the 1280px desktop viewport.",
+  )
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/${repositoryReviewAutomationID}/findings-processing?view=table`,
+  )
+  const results = page.locator('[data-slot="collection-results"]')
+  const table = results.locator("table")
+  const updatedHeader = table.getByRole("columnheader", {
+    name: "Updated",
+    exact: true,
+  })
+  await expect(updatedHeader).toBeVisible()
+  const [resultsBox, tableBox, headerBox] = await Promise.all([
+    results.boundingBox(),
+    table.boundingBox(),
+    updatedHeader.boundingBox(),
+  ])
+  expect(resultsBox).not.toBeNull()
+  expect(tableBox).not.toBeNull()
+  expect(headerBox).not.toBeNull()
+  expect(headerBox!.x).toBeGreaterThanOrEqual(tableBox!.x - 1)
+  expect(headerBox!.x + headerBox!.width).toBeLessThanOrEqual(
+    tableBox!.x + tableBox!.width + 1,
+  )
+  expect(headerBox!.x + headerBox!.width).toBeLessThanOrEqual(
+    resultsBox!.x + resultsBox!.width + 1,
+  )
+  expect(headerBox!.x + headerBox!.width).toBeLessThanOrEqual(
+    (page.viewportSize()?.width ?? 0) + 1,
+  )
+  const headerWidths = await updatedHeader.evaluate((element) => ({
+    client: element.clientWidth,
+    scroll: element.scrollWidth,
+  }))
+  expect(headerWidths.scroll).toBeLessThanOrEqual(headerWidths.client + 1)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
 
 test("repository findings Updated header stays inside the canonical desktop table viewport", async ({
   page,
@@ -7771,7 +8597,7 @@ test("repository review routing preserves run context through repository finding
 
   await page.getByRole("button", { name: "Stop safely" }).click()
   await expect(page.getByText("paused", { exact: true })).toBeVisible()
-  await page.getByRole("button", { name: /^Findings/ }).click()
+  await page.getByRole("button", { name: /^Run findings/ }).click()
   await expect(page).toHaveURL(
     new RegExp(`/repository-reviews/${repositoryReviewAutomationID}/findings`),
   )

@@ -11,6 +11,8 @@ export const repositoryReviewRunFindingsDefaultQuery =
   "ALL ORDER BY severity DESC, updated DESC"
 export const repositoryReviewRawFindingsDefaultQuery =
   "ALL ORDER BY created DESC"
+export const repositoryReviewFindingsProcessingDefaultQuery =
+  "ALL ORDER BY updated DESC"
 export const repositoryReviewRepositoryFindingsDefaultQuery =
   "ALL ORDER BY severity DESC, updated DESC"
 export const repositoryReviewIssuesDefaultQuery = "ALL ORDER BY updated DESC"
@@ -40,6 +42,15 @@ export function normalizeRepositoryReviewRawFindingsSearch(
 ): RepositoryReviewCollectionSearch {
   return normalizeCollectionRouteSearch(raw, {
     defaultQuery: repositoryReviewRawFindingsDefaultQuery,
+    supportedViews: repositoryReviewViews,
+  })
+}
+
+export function normalizeRepositoryReviewFindingsProcessingSearch(
+  raw: Record<string, unknown>,
+): RepositoryReviewCollectionSearch {
+  return normalizeCollectionRouteSearch(raw, {
+    defaultQuery: repositoryReviewFindingsProcessingDefaultQuery,
     supportedViews: repositoryReviewViews,
   })
 }

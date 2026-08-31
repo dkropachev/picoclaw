@@ -17,7 +17,15 @@ import {
   normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
 
-import { RepositoryReviewFindingsProcessing } from "./repository-review-findings-processing"
+import {
+  repositoryReviewFindingHealthNeedsPolling,
+  repositoryReviewHistoricalConsolidationIsActive,
+  useRepositoryReviewFindingHealth,
+} from "./repository-review-finding-health"
+import {
+  RepositoryReviewFindingsProcessing,
+  RepositoryReviewHistoricalConsolidationNotice,
+} from "./repository-review-findings-processing"
 import {
   type RepositoryReviewCollectionSearch,
   repositoryReviewRawFindingsDefaultQuery,
@@ -61,19 +69,16 @@ export function RepositoryReviewRawFindingsPage({
     refetchInterval: (current) => {
       const pages = current.state.data?.pages ?? []
       return pages.some((page) => {
-        if (isReviewActive(page.automation)) return true
-        if (
-          page.historical_deduplication?.required &&
-          page.historical_deduplication.status === "failed"
-        ) {
-          return false
-        }
         return (
+          isReviewActive(page.automation) ||
           Boolean(
             page.findings_processing &&
             (page.findings_processing.pending > 0 ||
               page.findings_processing.processing > 0),
-          ) || historicalReplayIsActive(page.historical_deduplication)
+          ) ||
+          repositoryReviewHistoricalConsolidationIsActive(
+            page.historical_deduplication,
+          )
         )
       })
         ? 2_000
@@ -82,6 +87,10 @@ export function RepositoryReviewRawFindingsPage({
   })
   const pages = query.data?.pages
   const firstPage = pages?.[0]
+  const healthQuery = useRepositoryReviewFindingHealth(
+    automationID,
+    firstPage?.automation,
+  )
   const rawFindings = useMemo(
     () => pages?.flatMap((page) => page.raw_findings) ?? [],
     [pages],
@@ -90,14 +99,14 @@ export function RepositoryReviewRawFindingsPage({
     mutationFn: () =>
       retryRepositoryReviewHistoricalDeduplication(automationID),
     onSuccess: async () => {
-      await query.refetch()
-      toast.success("Historical deduplication queued.")
+      await Promise.all([query.refetch(), healthQuery.refetch()])
+      toast.success("Historical consolidation queued.")
     },
     onError: (error) => {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Historical deduplication could not be retried.",
+          : "Historical consolidation could not be retried.",
       )
       void query.refetch()
     },
@@ -221,7 +230,7 @@ export function RepositoryReviewRawFindingsPage({
       schema={firstPage?.query_schema}
       canonicalQuery={firstPage?.canonical_query}
       loading={query.isLoading}
-      fetching={query.isFetching}
+      fetching={query.isFetching || healthQuery.isFetching}
       error={query.error}
       context={{
         backLabel: "Review details",
@@ -235,25 +244,33 @@ export function RepositoryReviewRawFindingsPage({
           <Badge variant="outline">{firstPage.automation.status}</Badge>
         ) : undefined,
       }}
-      onRefresh={query.refetch}
+      onRefresh={async () => {
+        await Promise.all([query.refetch(), healthQuery.refetch()])
+      }}
       hasNextPage={query.hasNextPage}
       loadingMore={query.isFetchingNextPage}
       onLoadMore={query.fetchNextPage}
       onOpenItem={(finding) => onOpenRawFinding(finding.id)}
       beforeResults={
         firstPage ? (
-          <RepositoryReviewFindingsProcessing
-            counters={firstPage.findings_processing}
-            historical={firstPage.historical_deduplication}
-            retryingHistorical={retryHistorical.isPending}
-            onRetryHistorical={() => retryHistorical.mutate()}
-          />
+          <>
+            <RepositoryReviewFindingsProcessing
+              counters={firstPage.findings_processing}
+            />
+            <RepositoryReviewHistoricalConsolidationNotice
+              consolidation={healthQuery.data?.historical_consolidation}
+              retrying={retryHistorical.isPending}
+              onRetry={() => retryHistorical.mutate()}
+            />
+          </>
         ) : undefined
       }
       emptyTitle={
         firstPage &&
-        (isReviewActive(firstPage.automation) ||
-          historicalReplayIsActive(firstPage.historical_deduplication))
+        repositoryReviewFindingHealthNeedsPolling(
+          firstPage.automation,
+          healthQuery.data,
+        )
           ? "Raw findings are pending"
           : "No raw findings"
       }
@@ -269,16 +286,6 @@ export function RepositoryReviewRawFindingsPage({
 function rawFindingLocation(finding: RepositoryReviewRawFinding): string {
   const path = finding.path || finding.file?.path || "Unknown path"
   return `${path}${finding.line == null ? "" : `:${finding.line}`}${finding.symbol ? ` · ${finding.symbol}` : ""}`
-}
-
-function historicalReplayIsActive(historical?: {
-  required: boolean
-  status?: string
-}): boolean {
-  return Boolean(
-    historical?.required &&
-    new Set(["pending", "replaying", "merging"]).has(historical.status ?? ""),
-  )
 }
 
 function isReviewActive(review: {

@@ -22,7 +22,10 @@ import {
   type StandardCollectionSelectionState,
 } from "@/components/collection"
 import { discussionPrompt } from "@/components/repository-reviews/repository-review-actions"
-import { RepositoryReviewFindingsProcessing } from "@/components/repository-reviews/repository-review-findings-processing"
+import {
+  RepositoryReviewFindingsProcessing,
+  RepositoryReviewHistoricalConsolidationNotice,
+} from "@/components/repository-reviews/repository-review-findings-processing"
 import {
   runFindingRepositoryFindingID,
   runFindingStatusCanRetry,
@@ -39,6 +42,11 @@ import {
 } from "@/hooks/use-collection-route-state"
 import { threadOpenSessionIdAtom } from "@/store/threads"
 
+import {
+  repositoryReviewFindingHealthNeedsPolling,
+  repositoryReviewHistoricalConsolidationIsActive,
+  useRepositoryReviewFindingHealth,
+} from "./repository-review-finding-health"
 import {
   type RepositoryReviewCollectionSearch,
   repositoryReviewRunFindingsDefaultQuery,
@@ -96,12 +104,6 @@ export function RepositoryReviewFindingsPage({
     refetchInterval: (current) =>
       current.state.data?.pages.some((page) => {
         if (isActive(page.automation)) return true
-        if (
-          page.historical_deduplication?.required &&
-          page.historical_deduplication.status === "failed"
-        ) {
-          return false
-        }
         return (
           page.findings.some(runFindingStatusIsInProgress) ||
           Boolean(
@@ -109,7 +111,9 @@ export function RepositoryReviewFindingsPage({
             (page.findings_processing.pending > 0 ||
               page.findings_processing.processing > 0),
           ) ||
-          historicalReplayIsActive(page.historical_deduplication)
+          repositoryReviewHistoricalConsolidationIsActive(
+            page.historical_deduplication,
+          )
         )
       })
         ? 2_000
@@ -117,6 +121,10 @@ export function RepositoryReviewFindingsPage({
   })
   const pages = query.data?.pages
   const firstPage = pages?.[0]
+  const healthQuery = useRepositoryReviewFindingHealth(
+    automationID,
+    firstPage?.automation,
+  )
   const findings = useMemo(
     () => pages?.flatMap((page) => page.findings) ?? [],
     [pages],
@@ -167,14 +175,14 @@ export function RepositoryReviewFindingsPage({
     mutationFn: () =>
       retryRepositoryReviewHistoricalDeduplication(automationID),
     onSuccess: async () => {
-      await query.refetch()
-      toast.success("Historical deduplication queued.")
+      await Promise.all([query.refetch(), healthQuery.refetch()])
+      toast.success("Historical consolidation queued.")
     },
     onError: (error) => {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Historical deduplication could not be retried.",
+          : "Historical consolidation could not be retried.",
       )
       void query.refetch()
     },
@@ -422,7 +430,7 @@ export function RepositoryReviewFindingsPage({
       schema={firstPage?.query_schema}
       canonicalQuery={firstPage?.canonical_query}
       loading={query.isLoading}
-      fetching={query.isFetching}
+      fetching={query.isFetching || healthQuery.isFetching}
       error={query.error}
       context={{
         backLabel: "Review details",
@@ -436,7 +444,9 @@ export function RepositoryReviewFindingsPage({
           <Badge variant="outline">{firstPage.automation.status}</Badge>
         ) : undefined,
       }}
-      onRefresh={query.refetch}
+      onRefresh={async () => {
+        await Promise.all([query.refetch(), healthQuery.refetch()])
+      }}
       hasNextPage={query.hasNextPage}
       loadingMore={query.isFetchingNextPage}
       onLoadMore={query.fetchNextPage}
@@ -451,10 +461,12 @@ export function RepositoryReviewFindingsPage({
           <>
             <RepositoryReviewFindingsProcessing
               counters={firstPage.findings_processing}
-              historical={firstPage.historical_deduplication}
-              retryingHistorical={retryHistorical.isPending}
-              onRetryHistorical={() => retryHistorical.mutate()}
               onOpenRawFindings={onOpenRawFindings}
+            />
+            <RepositoryReviewHistoricalConsolidationNotice
+              consolidation={healthQuery.data?.historical_consolidation}
+              retrying={retryHistorical.isPending}
+              onRetry={() => retryHistorical.mutate()}
             />
             <div className="flex justify-end">
               <Button
@@ -470,7 +482,11 @@ export function RepositoryReviewFindingsPage({
         ) : undefined
       }
       emptyTitle={
-        firstPage && isActive(firstPage.automation)
+        firstPage &&
+        repositoryReviewFindingHealthNeedsPolling(
+          firstPage.automation,
+          healthQuery.data,
+        )
           ? "Review in progress"
           : "No findings"
       }
@@ -494,16 +510,6 @@ function associationLabel(finding: RepositoryReviewRunFindingSummary): string {
     default:
       return runFindingStatusLabel(finding)
   }
-}
-
-function historicalReplayIsActive(historical?: {
-  required: boolean
-  status?: string
-}): boolean {
-  return Boolean(
-    historical?.required &&
-    new Set(["pending", "replaying", "merging"]).has(historical.status ?? ""),
-  )
 }
 
 function findingLocation(finding: RepositoryReviewRunFindingSummary): string {

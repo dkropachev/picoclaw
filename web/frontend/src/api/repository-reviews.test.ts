@@ -18,6 +18,8 @@ import {
   getRepositoryReviewAutomationOptions,
   getRepositoryReviewAutomationRepositoryFinding,
   getRepositoryReviewCommitOptions,
+  getRepositoryReviewFindingHealth,
+  getRepositoryReviewFindingsProcessingSource,
   getRepositoryReviewProfile,
   getRepositoryReviewRawSource,
   listRepositoryReviewAutomationFileAttributionsPage,
@@ -29,6 +31,7 @@ import {
   listRepositoryReviewAutomations,
   listRepositoryReviewAutomationsPage,
   listRepositoryReviewFindingRawSources,
+  listRepositoryReviewFindingsProcessingPage,
   listRepositoryReviewProfiles,
   listRepositoryReviewProfilesPage,
   listRepositoryReviews,
@@ -37,6 +40,8 @@ import {
   repositoryReviewDefaultIssuePrompt,
   restartRepositoryReviewAutomation,
   resumeRepositoryReviewAutomation,
+  retryRepositoryReviewFindingsProcessingSource,
+  retryRepositoryReviewFindingsProcessingSources,
   retryRepositoryReviewHistoricalDeduplication,
   retryRepositoryReviewRawSource,
   retryRepositoryReviewRunFindingStatuses,
@@ -1337,6 +1342,185 @@ describe("repository review API", () => {
       4,
       "/api/repository-reviews/automations/auto%2Fslash/historical-deduplication/retry",
       expect.objectContaining({ method: "POST", body: "{}" }),
+    )
+  })
+
+  it("uses health-backed findings-processing collection and recovery endpoints", async () => {
+    const automation = { id: "auto/slash", repository: "owner/repo" }
+    const source = {
+      id: "source/slash",
+      path: "pkg/store.go",
+      severity: "high",
+      title: "Lost update",
+      model: "reviewer",
+      reviewer: "correctness",
+      deduplication_state: "failed",
+      disposition: "undecided",
+      failure: {
+        code: "provider_failed",
+        message: "The provider is temporarily unavailable.",
+        retryable: true,
+        at: "2026-08-31T12:00:00Z",
+      },
+      created_at: "2026-08-31T11:00:00Z",
+      updated_at: "2026-08-31T12:00:00Z",
+    }
+    const counters = {
+      total: 4,
+      pending: 1,
+      processing: 1,
+      failed: 1,
+      completed: 1,
+    }
+    const health = {
+      run_findings: {
+        total: 3,
+        pending: 1,
+        processing: 0,
+        failed: 1,
+        needs_review: 0,
+        associated_new: 1,
+        associated_existing: 0,
+        unrepresented: 2,
+      },
+      repository_findings: {
+        total: 1,
+        provisional: 0,
+        validation_failed: 0,
+        issue_conflicts: 0,
+      },
+      findings_processing: counters,
+      historical_consolidation: {
+        required: true,
+        status: "failed",
+        retryable: true,
+      },
+      updated_at: "2026-08-31T12:00:00Z",
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(jsonResponse(health))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          raw_findings: [source],
+          total: 1,
+          next_cursor: "next/source",
+          canonical_query: "state = failed ORDER BY updated DESC",
+          query_schema: { fields: [] },
+          findings_processing: counters,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          source,
+          repository_finding: { id: "rrf_1", issue: { state: "none" } },
+          historical_consolidation: health.historical_consolidation,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          source: { ...source, deduplication_state: "pending" },
+          findings_processing: { ...counters, pending: 2, failed: 0 },
+          health: {
+            ...health,
+            findings_processing: { ...counters, pending: 2, failed: 0 },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          retried_ids: ["source/slash"],
+          failures: [
+            {
+              source_id: "source/blocked",
+              code: "not_retryable",
+              message: "This source is not retryable.",
+            },
+          ],
+          findings_processing: { ...counters, pending: 2, failed: 0 },
+          health,
+        }),
+      )
+
+    await expect(
+      getRepositoryReviewFindingHealth("auto/slash"),
+    ).resolves.toMatchObject({
+      run_findings: { unrepresented: 2 },
+      findings_processing: { total: 4 },
+      historical_consolidation: { status: "failed", retryable: true },
+    })
+    await expect(
+      listRepositoryReviewFindingsProcessingPage("auto/slash", {
+        query: "state = failed ORDER BY updated DESC",
+        cursor: "next/source",
+        limit: 25,
+      }),
+    ).resolves.toMatchObject({
+      sources: [{ id: "source/slash", path: "pkg/store.go" }],
+      next_cursor: "next/source",
+      findings_processing: { total: 4, failed: 1 },
+    })
+    await expect(
+      getRepositoryReviewFindingsProcessingSource("auto/slash", "source/slash"),
+    ).resolves.toMatchObject({
+      source: { id: "source/slash" },
+      repository_finding: { id: "rrf_1", review_finding_ids: [] },
+    })
+    await expect(
+      retryRepositoryReviewFindingsProcessingSource(
+        "auto/slash",
+        "source/slash",
+      ),
+    ).resolves.toMatchObject({
+      source: { deduplication_state: "pending" },
+      health: { findings_processing: { pending: 2 } },
+    })
+    await expect(
+      retryRepositoryReviewFindingsProcessingSources("auto/slash", [
+        "source/slash",
+        "source/blocked",
+      ]),
+    ).resolves.toMatchObject({
+      retried_ids: ["source/slash"],
+      failures: [
+        {
+          source_id: "source/blocked",
+          message: "This source is not retryable.",
+        },
+      ],
+    })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/repository-reviews/automations/auto%2Fslash/finding-health",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/repository-reviews/automations/auto%2Fslash/findings-processing?query=state+%3D+failed+ORDER+BY+updated+DESC&cursor=next%2Fsource&limit=25",
+      undefined,
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      3,
+      "/api/repository-reviews/automations/auto%2Fslash/findings-processing/sources/source%2Fslash",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      4,
+      "/api/repository-reviews/automations/auto%2Fslash/findings-processing/sources/source%2Fslash/retry",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      5,
+      "/api/repository-reviews/automations/auto%2Fslash/findings-processing/retry",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          source_ids: ["source/slash", "source/blocked"],
+        }),
+      }),
     )
   })
 

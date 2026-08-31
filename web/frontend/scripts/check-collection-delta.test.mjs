@@ -96,6 +96,7 @@ test("repository-review child collections remain fully standard", () => {
   )
   for (const key of [
     "repository-review-run-findings",
+    "repository-review-findings-processing",
     "repository-findings",
     "repository-review-issue-previews",
   ]) {
@@ -105,6 +106,23 @@ test("repository-review child collections remain fully standard", () => {
     assert.equal(candidate?.capabilities.includes("query"), true, key)
     assert.equal(candidate?.capabilities.includes("pagination"), true, key)
   }
+  assert.equal(
+    byKey
+      .get("repository-review-findings-processing")
+      ?.capabilities.includes("bulk-retry"),
+    true,
+  )
+})
+
+test("bulk retry is an allowed selection capability", () => {
+  const candidate = standardSurface("processing", {
+    capabilities: ["query", "pagination", "selection", "bulk-retry", "detail"],
+    routes: {
+      list: "/processing",
+      detail: "/processing/:id",
+    },
+  })
+  assert.deepEqual(validateCollectionManifest(manifest(candidate)), [])
 })
 
 test("standard surfaces require complete metadata", () => {

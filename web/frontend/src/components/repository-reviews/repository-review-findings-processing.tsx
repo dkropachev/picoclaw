@@ -2,28 +2,81 @@ import { IconExternalLink, IconRefresh } from "@tabler/icons-react"
 
 import type {
   RepositoryReviewFindingsProcessingCounters,
-  RepositoryReviewHistoricalDeduplication,
+  RepositoryReviewHistoricalConsolidation,
 } from "@/api/repository-reviews"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 
+import { repositoryReviewHistoricalConsolidationLabel } from "./repository-review-processing-labels"
+
+export function RepositoryReviewHistoricalConsolidationNotice({
+  consolidation,
+  retrying = false,
+  onRetry,
+}: {
+  consolidation?: RepositoryReviewHistoricalConsolidation
+  retrying?: boolean
+  onRetry?: () => void
+}) {
+  if (
+    !consolidation?.required ||
+    consolidation.status === "not_required" ||
+    consolidation.status === "completed"
+  ) {
+    return null
+  }
+  const failed = consolidation.status === "failed"
+  return (
+    <section
+      className={
+        failed
+          ? "border-destructive/50 bg-destructive/5 rounded-lg border p-4"
+          : "border-border rounded-lg border p-4"
+      }
+      role={failed ? "alert" : "status"}
+      aria-labelledby="historical-consolidation-notice"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 id="historical-consolidation-notice" className="font-semibold">
+            Historical consolidation
+          </h2>
+          <p className="text-muted-foreground mt-1 text-sm">
+            {failed
+              ? "Historical findings could not be consolidated into the canonical repository ledger."
+              : "Historical findings are being replayed into the canonical repository ledger."}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline">
+            {repositoryReviewHistoricalConsolidationLabel(consolidation.status)}
+          </Badge>
+          {failed && consolidation.retryable && onRetry && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={retrying}
+              onClick={onRetry}
+            >
+              <IconRefresh />
+              {retrying ? "Retrying…" : "Retry historical consolidation"}
+            </Button>
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 export function RepositoryReviewFindingsProcessing({
   counters,
-  historical,
-  retryingHistorical = false,
-  onRetryHistorical,
   onOpenRawFindings,
 }: {
   counters?: RepositoryReviewFindingsProcessingCounters
-  historical?: RepositoryReviewHistoricalDeduplication
-  retryingHistorical?: boolean
-  onRetryHistorical?: () => void
   onOpenRawFindings?: () => void
 }) {
-  if (!counters && !historical?.required) return null
-  const replayActive =
-    historical?.required &&
-    new Set(["pending", "replaying", "merging"]).has(historical.status ?? "")
+  if (!counters) return null
   return (
     <section
       aria-labelledby="findings-processing-summary"
@@ -40,15 +93,6 @@ export function RepositoryReviewFindingsProcessing({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {historical?.required && historical.status && (
-            <Badge
-              variant={
-                historical.status === "failed" ? "destructive" : "outline"
-              }
-            >
-              Historical replay {historical.status}
-            </Badge>
-          )}
           {onOpenRawFindings && (
             <Button
               type="button"
@@ -62,51 +106,15 @@ export function RepositoryReviewFindingsProcessing({
         </div>
       </div>
 
-      {counters && (
-        <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4 lg:grid-cols-7">
-          <Counter label="Raw" value={counters.raw_total} />
-          <Counter label="Completed" value={counters.completed} />
-          <Counter label="New" value={counters.new} />
-          <Counter label="Duplicates" value={counters.duplicates} />
-          <Counter label="Pending" value={counters.pending} />
-          <Counter label="Processing" value={counters.processing} />
-          <Counter label="Failed" value={counters.failed} />
-        </dl>
-      )}
-
-      {replayActive && (
-        <p className="text-muted-foreground text-sm" role="status">
-          Historical findings are being replayed as one review campaign.
-        </p>
-      )}
-      {historical?.required && historical.status === "failed" && (
-        <div
-          className="border-destructive/50 bg-destructive/5 flex flex-wrap items-start justify-between gap-3 rounded-md border p-3 text-sm"
-          role="alert"
-        >
-          <div>
-            <p className="font-medium">Historical deduplication failed</p>
-            <p className="text-muted-foreground mt-1">
-              {historical.error ||
-                "Inspect the raw findings, then retry the complete historical replay."}
-            </p>
-          </div>
-          {onRetryHistorical && (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={retryingHistorical}
-              onClick={onRetryHistorical}
-            >
-              <IconRefresh />
-              {retryingHistorical
-                ? "Retrying…"
-                : "Retry historical deduplication"}
-            </Button>
-          )}
-        </div>
-      )}
+      <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4 lg:grid-cols-7">
+        <Counter label="Raw" value={counters.raw_total} />
+        <Counter label="Completed" value={counters.completed} />
+        <Counter label="New" value={counters.new} />
+        <Counter label="Duplicates" value={counters.duplicates} />
+        <Counter label="Pending" value={counters.pending} />
+        <Counter label="Processing" value={counters.processing} />
+        <Counter label="Failed" value={counters.failed} />
+      </dl>
     </section>
   )
 }
