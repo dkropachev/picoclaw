@@ -175,6 +175,23 @@ func TestPrepareRepositoryReviewFileAttributionBackfillBoundaries(t *testing.T) 
 			t.Fatalf("error=%v", err)
 		}
 	})
+	t.Run("invalid recovered campaign credit preview", func(t *testing.T) {
+		campaignID := repoaudit.NewRepositoryReviewCampaignID()
+		automation := fixture.automation
+		automation.CampaignID = campaignID
+		state := fixture.state
+		state.CurrentCampaign = &repoaudit.RepositoryReviewCampaignCoverage{
+			ID: campaignID, Exact: true, RecoveryDigest: "sha256:recovered",
+			AssignmentCatalog: []repoaudit.RepositoryReviewAssignment{{}},
+			Paths:             map[string]repoaudit.RepositoryReviewCampaignPathCoverage{},
+		}
+		_, err := prepareRepositoryReviewFileAttributionBackfill(
+			t.Context(), automation, state, loader,
+		)
+		if !errors.Is(err, repoaudit.ErrInvalidPlan) {
+			t.Fatalf("error=%v", err)
+		}
+	})
 }
 
 func TestPrepareRepositoryReviewFileAttributionBackfillRunFailures(t *testing.T) {

@@ -548,6 +548,14 @@ func TestRepositoryReviewLegacyCampaignBackfillRestoresFiftyThreeAssignmentCredi
 	if added := addRepositoryReviewBackfillFileAttributions(t, &fixture); added != 2 {
 		t.Fatalf("persisted attribution records = %d, want 2", added)
 	}
+	unrelated := fixture.state.FileAttributions[0]
+	unrelated.ID = ""
+	unrelated.AutomationID = "rra_unrelated"
+	unrelated, err = repoaudit.NewRepositoryReviewFileAttribution(unrelated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.state.FileAttributions = append(fixture.state.FileAttributions, unrelated)
 	driftedCampaignID := repoaudit.NewRepositoryReviewCampaignID()
 	drifted, err := prepareRepositoryReviewLegacyCampaignBackfill(
 		t.Context(), fixture.automation, fixture.state, driftedCampaignID,

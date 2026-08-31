@@ -394,3 +394,120 @@ func TestRepositoryReviewFileAttributionCampaignCreditEvidenceGates(t *testing.T
 		})
 	}
 }
+
+func TestRepositoryReviewFileAttributionCreditHelperBoundaries(t *testing.T) {
+	fixture := newRepositoryReviewAttributionCreditFixture(t)
+
+	if _, err := PreviewRepositoryReviewFileAttributionCredits(
+		fixture.state,
+		RepositoryReviewFileAttributionCreditFence{},
+		fixture.attributions,
+	); !errors.Is(err, ErrInvalidPlan) {
+		t.Fatalf("invalid preview fence error = %v", err)
+	}
+
+	invalidCatalog := fixture.state
+	invalidCatalog.CurrentCampaign = func() *RepositoryReviewCampaignCoverage {
+		coverage := cloneRepositoryReviewCampaignCoverage(*fixture.state.CurrentCampaign)
+		coverage.AssignmentCatalog[0].ID = "rra_forged"
+		return &coverage
+	}()
+	if _, err := PreviewRepositoryReviewFileAttributionCredits(
+		invalidCatalog, fixture.fence, fixture.attributions,
+	); !errors.Is(err, ErrInvalidPlan) {
+		t.Fatalf("invalid preview catalog error = %v", err)
+	}
+
+	invalidAttribution := fixture.attributions[0]
+	invalidAttribution.ID = ""
+	invalidAttribution.RunID = ""
+	if _, err := PreviewRepositoryReviewFileAttributionCredits(
+		fixture.state, fixture.fence, []RepositoryReviewFileAttribution{invalidAttribution},
+	); !errors.Is(err, ErrInvalidPlan) {
+		t.Fatalf("invalid preview attribution error = %v", err)
+	}
+
+	blankRun := fixture.state
+	blankRun.Runs = append([]ReviewRun{{}}, blankRun.Runs...)
+	preview, err := PreviewRepositoryReviewFileAttributionCredits(
+		blankRun, fixture.fence, fixture.attributions,
+	)
+	if err != nil || len(preview.Credits) != 3 {
+		t.Fatalf("blank run preview = %#v err=%v", preview, err)
+	}
+
+	optionalCatalog := fixture.state
+	optionalCatalog.CurrentCampaign = func() *RepositoryReviewCampaignCoverage {
+		coverage := cloneRepositoryReviewCampaignCoverage(*fixture.state.CurrentCampaign)
+		assignment, assignmentErr := NewRepositoryReviewAssignment(
+			RepositoryReviewFocusCorrectnessState,
+			"optional-reviewer",
+			"prompt-v1",
+			coverage.ProfileHash,
+			false,
+		)
+		if assignmentErr != nil {
+			t.Fatal(assignmentErr)
+		}
+		coverage.AssignmentCatalog = append(coverage.AssignmentCatalog, assignment)
+		return &coverage
+	}()
+	preview, err = PreviewRepositoryReviewFileAttributionCredits(
+		optionalCatalog, fixture.fence, fixture.attributions,
+	)
+	if err != nil || len(preview.Credits) != 3 {
+		t.Fatalf("optional catalog preview = %#v err=%v", preview, err)
+	}
+
+	duplicate := append([]RepositoryReviewFileAttribution(nil), fixture.attributions...)
+	duplicate = append(duplicate, fixture.attributions[0])
+	preview, err = PreviewRepositoryReviewFileAttributionCredits(
+		fixture.state, fixture.fence, duplicate,
+	)
+	if err != nil || len(preview.Credits) != 3 {
+		t.Fatalf("duplicate attribution preview = %#v err=%v", preview, err)
+	}
+
+	if _, err := applyRepositoryReviewFileAttributionCreditPreview(
+		nil,
+		RepositoryReviewFileAttributionCreditPreview{CampaignID: fixture.campaignID},
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("nil preview state error = %v", err)
+	}
+	if _, err := applyRepositoryReviewFileAttributionCreditPreview(
+		&RepositoryState{},
+		RepositoryReviewFileAttributionCreditPreview{CampaignID: fixture.campaignID},
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("missing preview campaign error = %v", err)
+	}
+	otherCampaign := fixture.state
+	otherCampaign.CurrentCampaign = func() *RepositoryReviewCampaignCoverage {
+		coverage := cloneRepositoryReviewCampaignCoverage(*fixture.state.CurrentCampaign)
+		coverage.ID = NewRepositoryReviewCampaignID()
+		return &coverage
+	}()
+	if _, err := applyRepositoryReviewFileAttributionCreditPreview(
+		&otherCampaign,
+		RepositoryReviewFileAttributionCreditPreview{CampaignID: fixture.campaignID},
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed preview campaign error = %v", err)
+	}
+
+	unknownAssignment := fixture.state
+	unknownAssignment.CurrentCampaign = func() *RepositoryReviewCampaignCoverage {
+		coverage := cloneRepositoryReviewCampaignCoverage(*fixture.state.CurrentCampaign)
+		return &coverage
+	}()
+	if _, err := applyRepositoryReviewFileAttributionCreditPreview(
+		&unknownAssignment,
+		RepositoryReviewFileAttributionCreditPreview{
+			CampaignID: fixture.campaignID,
+			Credits: []RepositoryReviewFileAttributionAssignmentCredit{{
+				AssignmentID: "rra_unknown",
+				File:         fixture.files[0],
+			}},
+		},
+	); !errors.Is(err, ErrInvalidPlan) {
+		t.Fatalf("unknown preview assignment error = %v", err)
+	}
+}
