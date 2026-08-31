@@ -449,6 +449,7 @@ func TestAgentModelMayUseCodexCompatibleToolsForApplyPatchRegistration(t *testin
 }
 
 func TestAgentApplyPatchPolicyProtectsRootAndOwnerControlPaths(t *testing.T) {
+	t.Setenv(config.EnvHome, t.TempDir())
 	workspace := t.TempDir()
 	fixtures := map[string]string{
 		"sessions/private.jsonl":         "session\n",
@@ -536,6 +537,7 @@ func TestAgentApplyPatchPolicyProtectsRootAndOwnerControlPaths(t *testing.T) {
 }
 
 func TestAgentApplyPatchOwnerFactoryUsesFrozenProtectedRoots(t *testing.T) {
+	t.Setenv(config.EnvHome, t.TempDir())
 	workspace := t.TempDir()
 	controlA := filepath.Join(workspace, "control-a")
 	controlB := filepath.Join(workspace, "control-b")

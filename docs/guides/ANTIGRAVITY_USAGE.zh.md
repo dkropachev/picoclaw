@@ -54,7 +54,8 @@ picoclaw agent -m "Hello" --model claude-opus-4-6-thinking
 2.  **身份验证持久化**：
     如果你已在本地登录，可以将凭据复制到服务器：
     ```bash
-    scp ~/.picoclaw/auth.json user@your-server:~/.picoclaw/
+    # 先停止本地 PicoClaw，以便 SQLite 完成 WAL 检查点。
+    scp ~/.picoclaw/auth.db user@your-server:~/.picoclaw/
     ```
     *或者*，如果你有终端访问权限，可以在服务器上运行一次 `auth login` 命令。
 

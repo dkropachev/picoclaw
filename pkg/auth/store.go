@@ -1,18 +1,19 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
-	"encoding/json"
+	"database/sql"
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 type AuthCredential struct {
@@ -54,7 +55,7 @@ const (
 )
 
 var (
-	authStoreWriteMu       sync.Mutex
+	authDatabaseAccessMu   sync.Mutex
 	credentialRefreshLocks sync.Map
 )
 
@@ -70,10 +71,6 @@ func (c *AuthCredential) NeedsRefresh() bool {
 		return false
 	}
 	return time.Now().Add(5 * time.Minute).After(c.ExpiresAt)
-}
-
-func authFilePath() string {
-	return filepath.Join(config.GetHome(), "auth.json")
 }
 
 func canonicalProvider(provider string) string {
@@ -232,7 +229,13 @@ func normalizeStore(store *AuthStore) {
 	normalized := make(map[string]*AuthCredential, len(store.Credentials))
 	canonicalFlags := make(map[string]bool, len(store.Credentials))
 
-	for provider, cred := range store.Credentials {
+	credentialIDs := make([]string, 0, len(store.Credentials))
+	for credentialID := range store.Credentials {
+		credentialIDs = append(credentialIDs, credentialID)
+	}
+	sort.Strings(credentialIDs)
+	for _, provider := range credentialIDs {
+		cred := store.Credentials[provider]
 		normalizedProvider := strings.ToLower(strings.TrimSpace(provider))
 		canonical := canonicalCredentialID(provider)
 		normalizedCred := cloneCredential(cred)
@@ -260,105 +263,124 @@ func normalizeStore(store *AuthStore) {
 }
 
 func LoadStore() (*AuthStore, error) {
-	path := authFilePath()
-	data, err := os.ReadFile(path)
+	ctx := context.Background()
+	db, err := openAuthDatabase(ctx)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return &AuthStore{Credentials: make(map[string]*AuthCredential)}, nil
-		}
 		return nil, err
 	}
-
-	var store AuthStore
-	if err := json.Unmarshal(data, &store); err != nil {
-		return nil, err
-	}
-	normalizeStore(&store)
-	return &store, nil
+	defer closeAuthDatabase(db)
+	return loadAuthStore(ctx, db)
 }
 
 func SaveStore(store *AuthStore) error {
-	unlock, err := lockAuthStoreForWrite()
+	normalized, err := normalizedAuthStore(store)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	db, unlock, err := openAuthDatabaseForWrite(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-
-	return saveStore(store)
+	defer closeAuthDatabase(db)
+	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		return replaceAuthStore(ctx, conn, normalized, maximumAuthCredentials)
+	})
 }
 
-func lockAuthStoreForWrite() (func(), error) {
-	authStoreWriteMu.Lock()
-	unlockFile, err := lockAuthStore(authFilePath())
-	if err != nil {
-		authStoreWriteMu.Unlock()
-		return nil, err
+func replaceAuthStore(
+	ctx context.Context,
+	conn *sql.Conn,
+	store *AuthStore,
+	maximum int,
+) error {
+	if store == nil || maximum < 1 || len(store.Credentials) > maximum {
+		return errors.New("auth store exceeds its credential limit")
 	}
-	return func() {
-		unlockFile()
-		authStoreWriteMu.Unlock()
-	}, nil
-}
-
-func saveStore(store *AuthStore) error {
-	path := authFilePath()
-	data, err := json.MarshalIndent(store, "", "  ")
+	existing, err := existingCredentialIDs(ctx, conn)
 	if err != nil {
 		return err
 	}
-
-	// Use unified atomic write utility with explicit sync for flash storage reliability.
-	return fileutil.WriteFileAtomic(path, data, 0o600)
+	credentialIDs := make([]string, 0, len(store.Credentials))
+	for credentialID := range store.Credentials {
+		credentialIDs = append(credentialIDs, credentialID)
+	}
+	sort.Strings(credentialIDs)
+	retained := make(map[string]struct{}, len(credentialIDs))
+	for _, credentialID := range credentialIDs {
+		retained[credentialID] = struct{}{}
+	}
+	// Delete stale identities first so replacing a store already at its bound
+	// never needs a transient over-limit state. The surrounding immediate
+	// transaction restores these rows if a later validated upsert fails.
+	for _, credentialID := range existing {
+		if _, ok := retained[credentialID]; ok {
+			continue
+		}
+		if _, err := conn.ExecContext(
+			ctx,
+			`DELETE FROM auth_credentials WHERE credential_id = ?`,
+			credentialID,
+		); err != nil {
+			return err
+		}
+	}
+	for _, credentialID := range credentialIDs {
+		if err := upsertCredentialUnchecked(
+			ctx,
+			conn,
+			credentialID,
+			store.Credentials[credentialID],
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func GetCredential(provider string) (*AuthCredential, error) {
-	store, err := LoadStore()
+	ctx := context.Background()
+	db, err := openAuthDatabase(ctx)
 	if err != nil {
 		return nil, err
 	}
-	cred, ok := store.Credentials[canonicalCredentialID(provider)]
-	if !ok {
+	defer closeAuthDatabase(db)
+	credentialID := canonicalCredentialID(provider)
+	_, credential, _, err := scanCredential(db.QueryRowContext(
+		ctx,
+		selectCredentialSQL+" WHERE credential_id = ?",
+		credentialID,
+	))
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	return cred, nil
+	if err != nil {
+		return nil, err
+	}
+	return credential, nil
 }
 
 func getCredentialAfterWriters(credentialID string) (*AuthCredential, error) {
-	unlock, err := lockAuthStoreForWrite()
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-	store, err := LoadStore()
-	if err != nil {
-		return nil, err
-	}
-	return cloneCredential(store.Credentials[canonicalCredentialID(credentialID)]), nil
+	return GetCredential(credentialID)
 }
 
 func SetCredential(provider string, cred *AuthCredential) error {
-	unlock, err := lockAuthStoreForWrite()
+	canonical := canonicalCredentialID(provider)
+	normalized, err := normalizeCredentialForStorage(canonical, cred)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	db, unlock, err := openAuthDatabaseForWrite(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-
-	store, err := LoadStore()
-	if err != nil {
-		return err
-	}
-
-	canonical := canonicalCredentialID(provider)
-	normalized := cloneCredential(cred)
-	if normalized != nil {
-		normalized.Provider = canonicalProvider(normalized.Provider)
-		if normalized.Provider == "" {
-			normalized.Provider = credentialProvider(canonical)
-		}
-	}
-
-	store.Credentials[canonical] = normalized
-	return saveStore(store)
+	defer closeAuthDatabase(db)
+	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		return upsertCredential(ctx, conn, canonical, normalized)
+	})
 }
 
 // PersistCredentialIfCurrent saves replacement only when the stored
@@ -390,34 +412,55 @@ func persistCredentialIfCurrentDetailed(
 		return nil, false, fmt.Errorf("replacement credential is required")
 	}
 
-	unlock, err := lockAuthStoreForWrite()
+	ctx := context.Background()
+	db, unlock, err := openAuthDatabaseForWrite(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 	defer unlock()
-
-	store, err := LoadStore()
-	if err != nil {
-		return nil, false, err
-	}
+	defer closeAuthDatabase(db)
 	canonical := canonicalCredentialID(credentialID)
-	current := store.Credentials[canonical]
-	if !reflect.DeepEqual(current, source) {
-		return cloneCredential(current), false, nil
-	}
-
-	normalized, err := normalizeCredentialReplacement(canonical, current, replacement)
+	var authoritative *AuthCredential
+	committed := false
+	err = sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		current, version, _, loadErr := loadCredentialFromConn(ctx, conn, canonical)
+		if loadErr != nil {
+			return loadErr
+		}
+		if !reflect.DeepEqual(current, source) {
+			authoritative = cloneCredential(current)
+			return nil
+		}
+		normalized, normalizeErr := normalizeCredentialReplacement(canonical, current, replacement)
+		if normalizeErr != nil {
+			return normalizeErr
+		}
+		normalized, normalizeErr = normalizeCredentialForStorage(canonical, normalized)
+		if normalizeErr != nil {
+			return normalizeErr
+		}
+		if reflect.DeepEqual(current, normalized) {
+			authoritative = cloneCredential(normalized)
+			committed = true
+			return nil
+		}
+		if updateErr := updateCredentialVersioned(
+			ctx,
+			conn,
+			canonical,
+			normalized,
+			version,
+		); updateErr != nil {
+			return updateErr
+		}
+		authoritative = cloneCredential(normalized)
+		committed = true
+		return nil
+	})
 	if err != nil {
 		return nil, false, err
 	}
-	if reflect.DeepEqual(current, normalized) {
-		return cloneCredential(normalized), true, nil
-	}
-	store.Credentials[canonical] = normalized
-	if err := saveStore(store); err != nil {
-		return nil, false, err
-	}
-	return cloneCredential(normalized), true, nil
+	return authoritative, committed, nil
 }
 
 func lockCredentialRefresh(credentialID string) (func(), error) {
@@ -426,8 +469,12 @@ func lockCredentialRefresh(credentialID string) (func(), error) {
 	localLock := localLockValue.(*sync.Mutex)
 	localLock.Lock()
 
-	lockID := sha256.Sum256([]byte(canonical))
-	unlockFile, err := lockAuthStore(fmt.Sprintf("%s.refresh.%x", authFilePath(), lockID))
+	lockPath, err := credentialRefreshLockPath(canonical)
+	if err != nil {
+		localLock.Unlock()
+		return nil, err
+	}
+	unlockFile, err := lockAuthPath(lockPath)
 	if err != nil {
 		localLock.Unlock()
 		return nil, err
@@ -436,6 +483,16 @@ func lockCredentialRefresh(credentialID string) (func(), error) {
 		unlockFile()
 		localLock.Unlock()
 	}, nil
+}
+
+func credentialRefreshLockPath(credentialID string) (string, error) {
+	canonical := canonicalCredentialID(credentialID)
+	lockID := sha256.Sum256([]byte(canonical))
+	lockDirectory, err := resolvedAuthLockDirectoryPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(lockDirectory, fmt.Sprintf("refresh-%x", lockID)), nil
 }
 
 // RefreshCredential serializes network work for one credential across
@@ -526,64 +583,86 @@ func UpdateCredential(
 	if update == nil {
 		return nil, fmt.Errorf("credential update callback is required")
 	}
-	unlock, err := lockAuthStoreForWrite()
+	ctx := context.Background()
+	db, unlock, err := openAuthDatabaseForWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-
-	store, err := LoadStore()
-	if err != nil {
-		return nil, err
-	}
+	defer closeAuthDatabase(db)
 	canonical := canonicalCredentialID(provider)
-	replacement, err := update(cloneCredential(store.Credentials[canonical]))
+	var authoritative *AuthCredential
+	err = sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		current, version, found, loadErr := loadCredentialFromConn(ctx, conn, canonical)
+		if loadErr != nil {
+			return loadErr
+		}
+		replacement, callbackErr := update(cloneCredential(current))
+		if callbackErr != nil {
+			return callbackErr
+		}
+		if replacement == nil {
+			return fmt.Errorf("credential update returned nil")
+		}
+		normalized, normalizeErr := normalizeCredentialForStorage(canonical, replacement)
+		if normalizeErr != nil {
+			return normalizeErr
+		}
+		if reflect.DeepEqual(current, normalized) {
+			authoritative = cloneCredential(normalized)
+			return nil
+		}
+		if !found {
+			if _, insertErr := insertCredential(ctx, conn, canonical, normalized); insertErr != nil {
+				return insertErr
+			}
+		} else if updateErr := updateCredentialVersioned(
+			ctx,
+			conn,
+			canonical,
+			normalized,
+			version,
+		); updateErr != nil {
+			return updateErr
+		}
+		authoritative = cloneCredential(normalized)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if replacement == nil {
-		return nil, fmt.Errorf("credential update returned nil")
-	}
-	normalized := cloneCredential(replacement)
-	normalized.Provider = canonicalProvider(normalized.Provider)
-	if normalized.Provider == "" {
-		normalized.Provider = credentialProvider(canonical)
-	}
-	if reflect.DeepEqual(store.Credentials[canonical], normalized) {
-		return cloneCredential(normalized), nil
-	}
-	store.Credentials[canonical] = normalized
-	if err := saveStore(store); err != nil {
-		return nil, err
-	}
-	return cloneCredential(normalized), nil
+	return authoritative, nil
 }
 
 func DeleteCredential(provider string) error {
-	unlock, err := lockAuthStoreForWrite()
+	ctx := context.Background()
+	db, unlock, err := openAuthDatabaseForWrite(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-
-	store, err := LoadStore()
-	if err != nil {
+	defer closeAuthDatabase(db)
+	credentialID := canonicalCredentialID(provider)
+	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		_, err := conn.ExecContext(
+			ctx,
+			`DELETE FROM auth_credentials WHERE credential_id = ?`,
+			credentialID,
+		)
 		return err
-	}
-	delete(store.Credentials, canonicalCredentialID(provider))
-	return saveStore(store)
+	})
 }
 
 func DeleteAllCredentials() error {
-	unlock, err := lockAuthStoreForWrite()
+	ctx := context.Background()
+	db, unlock, err := openAuthDatabaseForWrite(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-
-	path := authFilePath()
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	defer closeAuthDatabase(db)
+	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		_, err := conn.ExecContext(ctx, `DELETE FROM auth_credentials`)
 		return err
-	}
-	return nil
+	})
 }

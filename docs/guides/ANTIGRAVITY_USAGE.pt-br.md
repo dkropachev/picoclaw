@@ -54,7 +54,8 @@ Se você está implantando via Coolify ou Docker, siga estas etapas para testar:
 2.  **Persistência da autenticação**:
     Se você já fez login localmente, pode copiar suas credenciais para o servidor:
     ```bash
-    scp ~/.picoclaw/auth.json user@your-server:~/.picoclaw/
+    # Pare o PicoClaw local primeiro para concluir o WAL do SQLite.
+    scp ~/.picoclaw/auth.db user@your-server:~/.picoclaw/
     ```
     *Alternativamente*, execute o comando `auth login` uma vez no servidor se você tiver acesso ao terminal.
 

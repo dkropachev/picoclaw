@@ -594,23 +594,10 @@ Mỗi thông điệp SSE (`data: {...}`) được bao bọc trong trường `res
 
 ### Lưu trữ hồ sơ xác thực
 
-Hồ sơ xác thực được lưu trữ trong `~/.picoclaw/auth.json`:
-
-```json
-{
-  "credentials": {
-    "google-antigravity": {
-      "access_token": "ya29...",
-      "refresh_token": "1//...",
-      "expires_at": "2026-01-01T00:00:00Z",
-      "provider": "google-antigravity",
-      "auth_method": "oauth",
-      "email": "user@example.com",
-      "project_id": "my-project-id"
-    }
-  }
-}
-```
+Hồ sơ xác thực được lưu dưới dạng các hàng có kiểu trong cơ sở dữ liệu SQLite
+riêng tư dùng WAL tại `~/.picoclaw/auth.db`. Hãy dùng các lệnh `picoclaw auth`
+thay vì sửa trực tiếp cơ sở dữ liệu. Khi mở lần đầu, `auth.json` cũ được nhập
+trong một giao dịch và lưu giữ tại `~/.picoclaw/legacy-json/auth-v1/`.
 
 ---
 
@@ -735,7 +722,7 @@ export PICOCLAW_MODEL_LIST='[{"model_name":"your-model","model":"your-provider/m
 - **File nguồn:**
   - `pkg/providers/antigravity_provider.go` - Triển khai nhà cung cấp Antigravity
   - `pkg/auth/oauth.go` - Triển khai luồng OAuth
-  - `pkg/auth/store.go` - Lưu trữ thông tin xác thực (`~/.picoclaw/auth.json`)
+  - `pkg/auth/store.go` - Lưu trữ thông tin xác thực (`~/.picoclaw/auth.db`)
   - `pkg/providers/factory.go` - Factory nhà cung cấp và định tuyến giao thức
   - `pkg/providers/types.go` - Định nghĩa interface nhà cung cấp
   - `cmd/picoclaw/internal/auth/helpers.go` - Lệnh CLI xác thực
@@ -803,5 +790,5 @@ Một số mô hình có thể xuất hiện trong danh sách mô hình khả d�
 
 ### Mô hình không xuất hiện trong danh sách
 - Xác minh xác thực OAuth đã hoàn tất thành công
-- Kiểm tra lưu trữ hồ sơ xác thực: `~/.picoclaw/auth.json`
+- Kiểm tra cơ sở dữ liệu xác thực riêng tư: `~/.picoclaw/auth.db`
 - Chạy lại `picoclaw auth login --provider antigravity`

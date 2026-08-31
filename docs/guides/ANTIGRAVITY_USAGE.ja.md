@@ -54,7 +54,8 @@ Coolify または Docker でデプロイしている場合、以下の手順で�
 2.  **認証の永続化**：
     ローカルでログイン済みの場合、認証情報をサーバーにコピーできます：
     ```bash
-    scp ~/.picoclaw/auth.json user@your-server:~/.picoclaw/
+    # SQLite の WAL を確定するため、先にローカルの PicoClaw を停止します。
+    scp ~/.picoclaw/auth.db user@your-server:~/.picoclaw/
     ```
     *または*、ターミナルアクセスがある場合、サーバー上で `auth login` コマンドを一度実行してください。
 

@@ -594,23 +594,10 @@ export function sanitizeAntigravityThinkingBlocks(
 
 ### 認証プロファイルの保存
 
-認証プロファイルは `~/.picoclaw/auth.json` に保存されます：
-
-```json
-{
-  "credentials": {
-    "google-antigravity": {
-      "access_token": "ya29...",
-      "refresh_token": "1//...",
-      "expires_at": "2026-01-01T00:00:00Z",
-      "provider": "google-antigravity",
-      "auth_method": "oauth",
-      "email": "user@example.com",
-      "project_id": "my-project-id"
-    }
-  }
-}
-```
+認証プロファイルは、WAL を使用する非公開 SQLite データベース
+`~/.picoclaw/auth.db` の型付き行として保存されます。データベースを直接編集せず、
+`picoclaw auth` コマンドを使用してください。初回起動時に従来の `auth.json` は
+トランザクション内でインポートされ、`~/.picoclaw/legacy-json/auth-v1/` に保管されます。
 
 ---
 
@@ -735,7 +722,7 @@ export PICOCLAW_MODEL_LIST='[{"model_name":"your-model","model":"your-provider/m
 - **ソースファイル：**
   - `pkg/providers/antigravity_provider.go` - Antigravity プロバイダー実装
   - `pkg/auth/oauth.go` - OAuth フロー実装
-  - `pkg/auth/store.go` - 認証情報ストレージ（`~/.picoclaw/auth.json`）
+  - `pkg/auth/store.go` - 認証情報ストレージ（`~/.picoclaw/auth.db`）
   - `pkg/providers/factory.go` - プロバイダーファクトリーとプロトコルルーティング
   - `pkg/providers/types.go` - プロバイダーインターフェース定義
   - `cmd/picoclaw/internal/auth/helpers.go` - 認証 CLI コマンド
@@ -805,5 +792,5 @@ export PICOCLAW_MODEL_LIST='[{"model_name":"your-model","model":"your-provider/m
 
 ### モデルがリストに表示されない
 - OAuth 認証が正常に完了したことを確認してください
-- 認証プロファイルストレージを確認：`~/.picoclaw/auth.json`
+- 非公開の認証データベースが存在することを確認：`~/.picoclaw/auth.db`
 - `picoclaw auth login --provider antigravity` を再実行してください

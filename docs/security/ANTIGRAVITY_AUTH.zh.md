@@ -594,23 +594,10 @@ export function sanitizeAntigravityThinkingBlocks(
 
 ### 认证配置文件存储
 
-认证配置文件存储在 `~/.picoclaw/auth.json` 中：
-
-```json
-{
-  "credentials": {
-    "google-antigravity": {
-      "access_token": "ya29...",
-      "refresh_token": "1//...",
-      "expires_at": "2026-01-01T00:00:00Z",
-      "provider": "google-antigravity",
-      "auth_method": "oauth",
-      "email": "user@example.com",
-      "project_id": "my-project-id"
-    }
-  }
-}
-```
+认证配置文件以类型化行的形式存储在启用 WAL 的私有 SQLite 数据库
+`~/.picoclaw/auth.db` 中。请使用 `picoclaw auth` 命令，不要直接编辑数据库。
+首次打开时，旧版 `auth.json` 会在事务中导入并保留在
+`~/.picoclaw/legacy-json/auth-v1/` 中。
 
 ---
 
@@ -735,7 +722,7 @@ export PICOCLAW_MODEL_LIST='[{"model_name":"your-model","model":"your-provider/m
 - **源文件：**
   - `pkg/providers/antigravity_provider.go` - Antigravity 提供商实现
   - `pkg/auth/oauth.go` - OAuth 流程实现
-  - `pkg/auth/store.go` - 认证凭据存储（`~/.picoclaw/auth.json`）
+  - `pkg/auth/store.go` - 认证凭据存储（`~/.picoclaw/auth.db`）
   - `pkg/providers/factory.go` - 提供商工厂和协议路由
   - `pkg/providers/types.go` - 提供商接口定义
   - `cmd/picoclaw/internal/auth/helpers.go` - 认证 CLI 命令
@@ -805,5 +792,5 @@ export PICOCLAW_MODEL_LIST='[{"model_name":"your-model","model":"your-provider/m
 
 ### 模型未出现在列表中
 - 验证 OAuth 认证是否成功完成
-- 检查认证配置文件存储：`~/.picoclaw/auth.json`
+- 检查私有认证数据库是否存在：`~/.picoclaw/auth.db`
 - 重新运行 `picoclaw auth login --provider antigravity`

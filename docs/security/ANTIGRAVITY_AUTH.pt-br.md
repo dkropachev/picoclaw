@@ -594,23 +594,11 @@ Cada mensagem SSE (`data: {...}`) é encapsulada em um campo `response`:
 
 ### Armazenamento do Perfil de Autenticação
 
-Os perfis de autenticação são armazenados em `~/.picoclaw/auth.json`:
-
-```json
-{
-  "credentials": {
-    "google-antigravity": {
-      "access_token": "ya29...",
-      "refresh_token": "1//...",
-      "expires_at": "2026-01-01T00:00:00Z",
-      "provider": "google-antigravity",
-      "auth_method": "oauth",
-      "email": "user@example.com",
-      "project_id": "my-project-id"
-    }
-  }
-}
-```
+Os perfis de autenticação são armazenados como linhas tipadas no banco SQLite
+privado com WAL `~/.picoclaw/auth.db`. Use os comandos `picoclaw auth` em vez de
+editar o banco diretamente. Na primeira abertura, o `auth.json` legado é
+importado em uma transação e preservado em
+`~/.picoclaw/legacy-json/auth-v1/`.
 
 ---
 
@@ -735,7 +723,7 @@ export PICOCLAW_MODEL_LIST='[{"model_name":"your-model","model":"your-provider/m
 - **Arquivos Fonte:**
   - `pkg/providers/antigravity_provider.go` - Implementação do provedor Antigravity
   - `pkg/auth/oauth.go` - Implementação do fluxo OAuth
-  - `pkg/auth/store.go` - Armazenamento de credenciais de autenticação (`~/.picoclaw/auth.json`)
+  - `pkg/auth/store.go` - Armazenamento de credenciais de autenticação (`~/.picoclaw/auth.db`)
   - `pkg/providers/factory.go` - Factory de provedores e roteamento de protocolo
   - `pkg/providers/types.go` - Definições da interface do provedor
   - `cmd/picoclaw/internal/auth/helpers.go` - Comandos CLI de autenticação
@@ -805,5 +793,5 @@ Alguns modelos podem aparecer na lista de modelos disponíveis, mas retornar uma
 
 ### Modelos não aparecem na lista
 - Verificar se a autenticação OAuth foi concluída com sucesso
-- Verificar o armazenamento do perfil de autenticação: `~/.picoclaw/auth.json`
+- Verificar se o banco de autenticação privado existe: `~/.picoclaw/auth.db`
 - Executar novamente `picoclaw auth login --provider antigravity`

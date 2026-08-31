@@ -636,7 +636,7 @@ Telegram auto-registers supported top-level commands like `/start`, `/help`, `/s
 ```text
 ~/.picoclaw/config.json          Main config
 ~/.picoclaw/.security.yml       Sensitive values stored outside config.json
-~/.picoclaw/auth.json           OAuth/token store
+~/.picoclaw/auth.db             OAuth/token store (private SQLite)
 ~/.picoclaw/workspace/          Default workspace
 ~/.picoclaw/workspace/skills/   Workspace skills
 ~/.picoclaw/workspace/sessions/ Session history
