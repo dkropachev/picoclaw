@@ -83,6 +83,207 @@ func TestMappingWorkerAIOutcomesAndOpaqueCandidates(t *testing.T) {
 	}
 }
 
+func TestMappingWorkerNonBlockingConflictClassificationsAutoAssociate(t *testing.T) {
+	for _, field := range []string{
+		RepositoryMappingConflictFieldSeverity,
+		RepositoryMappingConflictFieldTitleWording,
+		RepositoryMappingConflictFieldFixEffort,
+		RepositoryMappingConflictFieldLifecycleStatus,
+	} {
+		t.Run(field, func(t *testing.T) {
+			store := newRepositoryAuditTestStore(t)
+			base := recordMappingWorkerFinding(
+				t, store, "base-run", "base-commit", "old/wait.go", "awaiter.signal",
+			)
+			if _, err := store.ProcessPendingMappingJobs(
+				t.Context(), base.Repository, RepositoryMappingProcessOptions{
+					DefaultBranchVerified: func(context.Context, Finding) (bool, error) { return true, nil },
+				},
+			); err != nil {
+				t.Fatal(err)
+			}
+			pending := recordMappingWorkerFinding(
+				t, store, "next-run", "next-commit", "new/predicate.go", "predicate.wake",
+			)
+			result, err := store.ProcessPendingMappingJobs(
+				t.Context(), pending.Repository, RepositoryMappingProcessOptions{
+					DefaultBranchVerified: func(context.Context, Finding) (bool, error) { return true, nil },
+					Adjudicate: func(
+						_ context.Context,
+						_ RepositoryMappingModelSnapshot,
+						request RepositoryMappingAIRequest,
+					) (RepositoryMappingAdjudication, error) {
+						return RepositoryMappingAdjudication{
+							Decision: "same", CandidateID: request.Candidates[0].ID,
+							Confidence:         .96,
+							ConflictingAnchors: []string{"presentation metadata differs"},
+							ConflictFields:     []string{field},
+							Explanation:        "The causal identity agrees.",
+						}, nil
+					},
+				},
+			)
+			if err != nil || result.Completed != 1 || result.Associated != 1 ||
+				result.Created != 0 || result.Provisional != 0 {
+				t.Fatalf("mapping result=%#v err=%v", result, err)
+			}
+			state, found, getErr := store.Get(pending.Repository)
+			if getErr != nil || !found || len(state.RepositoryFindings) != 1 {
+				t.Fatalf("repository findings=%#v found=%v err=%v", state.RepositoryFindings, found, getErr)
+			}
+			findingID := pending.Findings[len(pending.Findings)-1].ID
+			job := lifecycleJobForFinding(t, state, findingID)
+			if job.Adjudication.Decision != "same" ||
+				!stringSlicesEqual(job.Adjudication.ConflictFields, []string{field}) {
+				t.Fatalf("saved adjudication=%#v", job.Adjudication)
+			}
+		})
+	}
+}
+
+func TestMappingWorkerBlockingConflictPolicyRetainsEveryConflict(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		confidence float64
+		conflicts  []string
+		fields     []string
+	}{
+		{
+			name:       "mixed non-blocking and causal",
+			confidence: .97,
+			conflicts:  []string{"severity differs", "writer ownership differs"},
+			fields: []string{
+				RepositoryMappingConflictFieldSeverity,
+				RepositoryMappingConflictFieldCausalIdentity,
+			},
+		},
+		{
+			name:       "fallback other",
+			confidence: .97,
+			conflicts:  []string{"unclassified factual disagreement"},
+			fields:     []string{RepositoryMappingConflictFieldOther},
+		},
+		{
+			name:       "legacy missing classifications",
+			confidence: .97,
+			conflicts:  []string{"legacy disagreement"},
+		},
+		{
+			name:       "low confidence non-blocking",
+			confidence: .89,
+			conflicts:  []string{"severity differs"},
+			fields:     []string{RepositoryMappingConflictFieldSeverity},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newRepositoryAuditTestStore(t)
+			base := recordMappingWorkerFinding(
+				t, store, "base-run", "base-commit", "old/wait.go", "awaiter.signal",
+			)
+			if _, err := store.ProcessPendingMappingJobs(
+				t.Context(), base.Repository, RepositoryMappingProcessOptions{
+					DefaultBranchVerified: func(context.Context, Finding) (bool, error) { return true, nil },
+				},
+			); err != nil {
+				t.Fatal(err)
+			}
+			pending := recordMappingWorkerFinding(
+				t, store, "next-run", "next-commit", "new/predicate.go", "predicate.wake",
+			)
+			result, err := store.ProcessPendingMappingJobs(
+				t.Context(), pending.Repository, RepositoryMappingProcessOptions{
+					DefaultBranchVerified: func(context.Context, Finding) (bool, error) { return true, nil },
+					Adjudicate: func(
+						_ context.Context,
+						_ RepositoryMappingModelSnapshot,
+						request RepositoryMappingAIRequest,
+					) (RepositoryMappingAdjudication, error) {
+						return RepositoryMappingAdjudication{
+							Decision: "same", CandidateID: request.Candidates[0].ID,
+							Confidence:         test.confidence,
+							ConflictingAnchors: append([]string(nil), test.conflicts...),
+							ConflictFields:     append([]string(nil), test.fields...),
+							Explanation:        "The match is not safe to associate automatically.",
+						}, nil
+					},
+				},
+			)
+			if err != nil || result.Completed != 1 || result.Created != 1 ||
+				result.Provisional != 1 || result.Associated != 0 {
+				t.Fatalf("mapping result=%#v err=%v", result, err)
+			}
+			state, found, getErr := store.Get(pending.Repository)
+			if getErr != nil || !found || len(state.RepositoryFindings) != 2 {
+				t.Fatalf("repository findings=%#v found=%v err=%v", state.RepositoryFindings, found, getErr)
+			}
+			provisional := state.RepositoryFindings[len(state.RepositoryFindings)-1]
+			if provisional.MatchState != RepositoryMatchProvisional ||
+				len(provisional.PossibleDuplicates) != 1 ||
+				!stringSlicesEqual(
+					provisional.PossibleDuplicates[0].ConflictingAnchors,
+					test.conflicts,
+				) {
+				t.Fatalf("provisional finding=%#v", provisional)
+			}
+		})
+	}
+}
+
+func TestMappingWorkerRejectsMalformedConflictClassifications(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		fields []string
+	}{
+		{name: "misaligned", fields: []string{}},
+		{name: "unknown", fields: []string{"future_field"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newRepositoryAuditTestStore(t)
+			base := recordMappingWorkerFinding(
+				t, store, "base-run", "base-commit", "old/wait.go", "awaiter.signal",
+			)
+			if _, err := store.ProcessPendingMappingJobs(
+				t.Context(), base.Repository, RepositoryMappingProcessOptions{
+					DefaultBranchVerified: func(context.Context, Finding) (bool, error) { return true, nil },
+				},
+			); err != nil {
+				t.Fatal(err)
+			}
+			pending := recordMappingWorkerFinding(
+				t, store, "next-run", "next-commit", "new/predicate.go", "predicate.wake",
+			)
+			result, err := store.ProcessPendingMappingJobs(
+				t.Context(), pending.Repository, RepositoryMappingProcessOptions{
+					DefaultBranchVerified: func(context.Context, Finding) (bool, error) { return true, nil },
+					Adjudicate: func(
+						_ context.Context,
+						_ RepositoryMappingModelSnapshot,
+						request RepositoryMappingAIRequest,
+					) (RepositoryMappingAdjudication, error) {
+						return RepositoryMappingAdjudication{
+							Decision: "same", CandidateID: request.Candidates[0].ID,
+							Confidence: .96, ConflictingAnchors: []string{"disagreement"},
+							ConflictFields: test.fields,
+						}, nil
+					},
+				},
+			)
+			if err == nil || result.PendingAI != 1 || result.Completed != 0 {
+				t.Fatalf("mapping result=%#v err=%v", result, err)
+			}
+			state, _, getErr := store.Get(pending.Repository)
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			findingID := pending.Findings[len(pending.Findings)-1].ID
+			job := lifecycleJobForFinding(t, state, findingID)
+			if job.State != RepositoryMappingPending || !mappingAdjudicationEmpty(job.Adjudication) {
+				t.Fatalf("failed job=%#v", job)
+			}
+		})
+	}
+}
+
 func TestMappingWorkerReleasesFailedAIAndContinuesLaterJobs(t *testing.T) {
 	for _, test := range []struct {
 		name  string

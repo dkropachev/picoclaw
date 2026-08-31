@@ -220,7 +220,7 @@ func (s Store) repositoryMappingCompletionForJob(
 		adjudication.CandidateID = opaqueToCanonical[adjudication.CandidateID]
 	}
 	if adjudication.Decision == "same" &&
-		(adjudication.Confidence < 0.90 || len(adjudication.ConflictingAnchors) > 0) {
+		!repositoryMappingAdjudicationAutoAssociates(adjudication) {
 		adjudication.Decision = "uncertain"
 	}
 	universe := repositoryMatchingUniverseFingerprint(state.RepositoryFindings)
@@ -335,7 +335,7 @@ func repositoryCompletionFromAdjudication(
 	}
 	switch adjudication.Decision {
 	case "same":
-		if adjudication.Confidence >= 0.90 && len(adjudication.ConflictingAnchors) == 0 {
+		if repositoryMappingAdjudicationAutoAssociates(adjudication) {
 			completion.RepositoryFindingID = adjudication.CandidateID
 			return completion
 		}

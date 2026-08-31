@@ -427,6 +427,9 @@ func TestRepositoryValidationCurrentSourceEnforcesAggregateBound(t *testing.T) {
 }
 
 func TestRepositoryMappingHelpersAndSnapshots(t *testing.T) {
+	if repositoryReviewMappingPromptRevision != "repository-finding-matcher-v2" {
+		t.Fatalf("mapping prompt revision=%q", repositoryReviewMappingPromptRevision)
+	}
 	if repositoryStateHasPendingMapping(repoaudit.RepositoryState{}) {
 		t.Fatal("empty state reported pending mapping")
 	}
@@ -755,12 +758,21 @@ func TestRepositoryMappingAdjudicationRunnerSuccessErrorsAndBounds(t *testing.T)
 	}
 	valid := newRepositoryReviewAIAdjudicationHandler(t, http.StatusOK,
 		`{"decision":"same","candidate_id":"opaque_1","confidence":0.96,`+
-			`"matching_anchors":["trigger","invariant"],"conflicting_anchors":[],`+
+			`"matching_anchors":["trigger","invariant"],"conflicting_anchors":`+
+			`[{"field":"severity","text":"The occurrence is high while the candidate is medium."},`+
+			`{"field":"causal_identity","text":"The trigger descriptions use different wake paths."}],`+
 			`"explanation":"The supplied causal identity is the same."}`,
 	)
 	result, err := runRepositoryMappingAdjudication(t.Context(), valid, snapshot, request)
 	if err != nil || result.Decision != "same" || result.CandidateID != "opaque_1" ||
-		result.Confidence != 0.96 {
+		result.Confidence != 0.96 ||
+		!slices.Equal(result.ConflictingAnchors, []string{
+			"The occurrence is high while the candidate is medium.",
+			"The trigger descriptions use different wake paths.",
+		}) || !slices.Equal(result.ConflictFields, []string{
+		repoaudit.RepositoryMappingConflictFieldSeverity,
+		repoaudit.RepositoryMappingConflictFieldCausalIdentity,
+	}) {
 		t.Fatalf("mapping result=%#v err=%v", result, err)
 	}
 
@@ -795,6 +807,79 @@ func TestRepositoryMappingAdjudicationRunnerSuccessErrorsAndBounds(t *testing.T)
 		t.Context(), valid, snapshot, oversized,
 	); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized mapping error=%v", err)
+	}
+
+	for _, test := range []struct {
+		name      string
+		conflicts string
+	}{
+		{name: "legacy string", conflicts: `["severity differs"]`},
+		{name: "missing field", conflicts: `[{"text":"severity differs"}]`},
+		{name: "missing text", conflicts: `[{"field":"severity"}]`},
+		{name: "extra property", conflicts: `[{"field":"severity","text":"severity differs","label":"severity"}]`},
+		{name: "unknown classification", conflicts: `[{"field":"priority","text":"severity differs"}]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := newRepositoryReviewAIAdjudicationHandler(t, http.StatusOK,
+				`{"decision":"same","candidate_id":"opaque_1","confidence":0.96,`+
+					`"matching_anchors":[],"conflicting_anchors":`+test.conflicts+`,`+
+					`"explanation":"The supplied records match."}`,
+			)
+			if _, err := runRepositoryMappingAdjudication(
+				t.Context(), invalid, snapshot, request,
+			); err == nil {
+				t.Fatalf("conflicts %s were accepted", test.conflicts)
+			}
+		})
+	}
+}
+
+func TestRepositoryMappingSchemaUsesStrictClassifiedConflictObjects(t *testing.T) {
+	schema := repositoryReviewMappingSchema()
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("mapping schema properties=%#v", schema["properties"])
+	}
+	conflicts, ok := properties["conflicting_anchors"].(map[string]any)
+	if !ok {
+		t.Fatalf("conflicting anchors schema=%#v", properties["conflicting_anchors"])
+	}
+	items, ok := conflicts["items"].(map[string]any)
+	if !ok || items["type"] != "object" || items["additionalProperties"] != false {
+		t.Fatalf("conflicting anchor items=%#v", conflicts["items"])
+	}
+	required, ok := items["required"].([]any)
+	if !ok || !slices.Equal(required, []any{"field", "text"}) {
+		t.Fatalf("conflicting anchor required=%#v", items["required"])
+	}
+	itemProperties, ok := items["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("conflicting anchor properties=%#v", items["properties"])
+	}
+	field, ok := itemProperties["field"].(map[string]any)
+	if !ok || field["type"] != "string" {
+		t.Fatalf("conflicting anchor field schema=%#v", itemProperties["field"])
+	}
+	fieldEnum, ok := field["enum"].([]any)
+	wantEnum := []any{
+		repoaudit.RepositoryMappingConflictFieldSeverity,
+		repoaudit.RepositoryMappingConflictFieldTitleWording,
+		repoaudit.RepositoryMappingConflictFieldFixEffort,
+		repoaudit.RepositoryMappingConflictFieldLifecycleStatus,
+		repoaudit.RepositoryMappingConflictFieldCausalIdentity,
+		repoaudit.RepositoryMappingConflictFieldLocation,
+		repoaudit.RepositoryMappingConflictFieldSymbol,
+		repoaudit.RepositoryMappingConflictFieldEvidence,
+		repoaudit.RepositoryMappingConflictFieldImpact,
+		repoaudit.RepositoryMappingConflictFieldValidationContent,
+		repoaudit.RepositoryMappingConflictFieldOther,
+	}
+	if !ok || !slices.Equal(fieldEnum, wantEnum) {
+		t.Fatalf("conflicting anchor field enum=%#v", field["enum"])
+	}
+	textSchema, ok := itemProperties["text"].(map[string]any)
+	if !ok || textSchema["type"] != "string" {
+		t.Fatalf("conflicting anchor text schema=%#v", itemProperties["text"])
 	}
 }
 

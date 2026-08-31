@@ -100,6 +100,75 @@ func TestRepositoryFindingBM25AndAdjudicationValidation(t *testing.T) {
 	}
 }
 
+func TestRepositoryMappingAdjudicationConflictFields(t *testing.T) {
+	const candidateID = "rrf_candidate"
+	allowedFields := []string{
+		RepositoryMappingConflictFieldSeverity,
+		RepositoryMappingConflictFieldTitleWording,
+		RepositoryMappingConflictFieldFixEffort,
+		RepositoryMappingConflictFieldLifecycleStatus,
+		RepositoryMappingConflictFieldCausalIdentity,
+		RepositoryMappingConflictFieldLocation,
+		RepositoryMappingConflictFieldSymbol,
+		RepositoryMappingConflictFieldEvidence,
+		RepositoryMappingConflictFieldImpact,
+		RepositoryMappingConflictFieldValidationContent,
+		RepositoryMappingConflictFieldOther,
+	}
+	conflicts := make([]string, len(allowedFields))
+	for index, field := range allowedFields {
+		conflicts[index] = "conflict for " + field
+	}
+
+	base := RepositoryMappingAdjudication{
+		Decision:           "same",
+		CandidateID:        candidateID,
+		Confidence:         0.95,
+		ConflictingAnchors: conflicts,
+	}
+
+	t.Run("all allowed classifications are accepted when aligned", func(t *testing.T) {
+		adjudication := base
+		adjudication.ConflictFields = allowedFields
+		if err := ValidateRepositoryMappingAdjudication(adjudication, []string{candidateID}); err != nil {
+			t.Fatalf("aligned conflict fields rejected: %v", err)
+		}
+	})
+
+	t.Run("legacy missing classifications are accepted", func(t *testing.T) {
+		adjudication := base
+		if adjudication.ConflictFields != nil {
+			t.Fatal("legacy fixture unexpectedly has conflict fields")
+		}
+		if err := ValidateRepositoryMappingAdjudication(adjudication, []string{candidateID}); err != nil {
+			t.Fatalf("legacy adjudication rejected: %v", err)
+		}
+	})
+
+	for name, fields := range map[string][]string{
+		"too few classifications":        allowedFields[:len(allowedFields)-1],
+		"too many classifications":       append(append([]string(nil), allowedFields...), RepositoryMappingConflictFieldOther),
+		"explicit empty classifications": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			adjudication := base
+			adjudication.ConflictFields = fields
+			if err := ValidateRepositoryMappingAdjudication(adjudication, []string{candidateID}); err == nil {
+				t.Fatalf("accepted misaligned conflict fields: conflicts=%d fields=%d", len(conflicts), len(fields))
+			}
+		})
+	}
+
+	t.Run("unknown classification is rejected", func(t *testing.T) {
+		adjudication := base
+		adjudication.ConflictFields = append([]string(nil), allowedFields...)
+		adjudication.ConflictFields[len(adjudication.ConflictFields)-1] = "future_unknown_field"
+		if err := ValidateRepositoryMappingAdjudication(adjudication, []string{candidateID}); err == nil {
+			t.Fatal("accepted unknown conflict field")
+		}
+	})
+}
+
 func repositoryMatchingFinding(id, pathValue, symbol string) Finding {
 	return Finding{
 		ID: id, Fingerprint: "sha256:" + id, Repository: "owner/repo",

@@ -564,6 +564,7 @@ export interface RepositoryMappingAdjudication {
   confidence: number
   matching_anchors?: string[]
   conflicting_anchors?: string[]
+  conflict_fields?: string[]
   explanation?: string
 }
 
