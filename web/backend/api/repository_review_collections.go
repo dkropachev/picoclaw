@@ -161,18 +161,19 @@ type repositoryReviewRepositoryFindingCollectionSummary struct {
 // repositoryReviewIssueCollectionSummary keeps issue bodies and generation
 // instructions on the issue detail route.
 type repositoryReviewIssueCollectionSummary struct {
-	ID           string                     `json:"id"`
-	Repository   string                     `json:"repository"`
-	FindingCount int                        `json:"finding_count"`
-	Origin       repoaudit.IssueDraftOrigin `json:"origin"`
-	GenerationID string                     `json:"generation_id,omitempty"`
-	Canonical    bool                       `json:"canonical"`
-	Publishable  bool                       `json:"publishable"`
-	Title        string                     `json:"title"`
-	State        repoaudit.IssueDraftState  `json:"state"`
-	Version      int64                      `json:"version"`
-	CreatedAt    time.Time                  `json:"created_at"`
-	UpdatedAt    time.Time                  `json:"updated_at"`
+	ID              string                              `json:"id"`
+	Repository      string                              `json:"repository"`
+	FindingCount    int                                 `json:"finding_count"`
+	Origin          repoaudit.IssueDraftOrigin          `json:"origin"`
+	GenerationID    string                              `json:"generation_id,omitempty"`
+	Canonical       bool                                `json:"canonical"`
+	Publishable     bool                                `json:"publishable"`
+	PublishBlockers []repoaudit.IssuePublicationBlocker `json:"publish_blockers"`
+	Title           string                              `json:"title"`
+	State           repoaudit.IssueDraftState           `json:"state"`
+	Version         int64                               `json:"version"`
+	CreatedAt       time.Time                           `json:"created_at"`
+	UpdatedAt       time.Time                           `json:"updated_at"`
 }
 
 func (h *Handler) handleListRepositoryReviewRunFindingsCollection(w http.ResponseWriter, r *http.Request) {
@@ -405,13 +406,15 @@ func projectRepositoryReviewIssueCollectionSummary(
 	if origin == "" {
 		origin = repoaudit.IssueDraftOriginLegacy
 	}
+	eligibility := repoaudit.EvaluateIssuePublication(state, draft)
 	return repositoryReviewIssueCollectionSummary{
 		ID: draft.ID, Repository: draft.Repository,
 		FindingCount: len(draft.FindingIDs),
 		Origin:       origin, GenerationID: draft.GenerationID,
-		Canonical:   draft.Canonical,
-		Publishable: repositoryReviewIssueCapabilities(state, draft).CanPublish,
-		Title:       draft.Title, State: draft.State,
+		Canonical:       draft.Canonical,
+		Publishable:     eligibility.CanPublish,
+		PublishBlockers: eligibility.PublishBlockers,
+		Title:           draft.Title, State: draft.State,
 		Version: draft.Version, CreatedAt: draft.CreatedAt, UpdatedAt: draft.UpdatedAt,
 	}
 }

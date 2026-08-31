@@ -446,6 +446,19 @@ func TestProgrammaticQueryValidationAndCanonicalFailurePaths(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidQuery)
 }
 
+func TestCollectionQueryCoverageCushionValidationEdges(t *testing.T) {
+	nodes := MaxQueryPredicates * (MaxQueryDepth + 2)
+	predicates := 0
+	err := validateExpression(testSchema(t), Predicate{}, 0, &predicates, &nodes)
+	assert.EqualError(t, err, "expression is too complex")
+
+	err = validateValue(
+		FieldSchema{Name: "opaque", Type: FieldType("opaque")},
+		Value{Kind: ValueString, Text: "value"},
+	)
+	assert.EqualError(t, err, "invalid field type")
+}
+
 func TestSchemaAdditionalBoundaries(t *testing.T) {
 	valid := FieldSchema{Name: "name", Type: TypeString, Sortable: true}
 	tests := []Schema{

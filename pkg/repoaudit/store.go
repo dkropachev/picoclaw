@@ -1416,9 +1416,7 @@ func (s Store) ClaimIssueDraftPublication(
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, false, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, IssueDraft{}, false, err
-	}
+	historicalMutationErr := HistoricalDeduplicationMutationAllowed(state)
 	index := -1
 	for candidate := range state.IssueDrafts {
 		if state.IssueDrafts[candidate].ID == strings.TrimSpace(draftID) {
@@ -1427,22 +1425,29 @@ func (s Store) ClaimIssueDraftPublication(
 		}
 	}
 	if index < 0 {
+		if historicalMutationErr != nil {
+			return RepositoryState{}, IssueDraft{}, false, historicalMutationErr
+		}
 		return RepositoryState{}, IssueDraft{}, false, os.ErrNotExist
 	}
 	draft := &state.IssueDrafts[index]
-	if !draft.Canonical {
-		return RepositoryState{}, IssueDraft{}, false, ErrConflict
-	}
-	for _, findingID := range draft.FindingIDs {
-		findingIndex := findingIndexByID(state.Findings, findingID)
-		if findingIndex < 0 ||
-			!repositoryFindingAllowsIssueActions(state, state.Findings[findingIndex]) ||
-			repositoryFindingHasIssueConflict(state, state.Findings[findingIndex]) {
+	eligibility := EvaluateIssuePublication(state, *draft)
+	if draft.State == IssueDraftPosted {
+		if !eligibility.AllowsPostedAcknowledgement() {
+			if eligibility.HasBlocker(IssuePublicationHistoricalMergeActive) {
+				return RepositoryState{}, IssueDraft{}, false, ErrHistoricalDeduplicationInProgress
+			}
 			return RepositoryState{}, IssueDraft{}, false, ErrConflict
 		}
+		return state, *draft, false, nil
 	}
-	if draft.State == IssueDraftPosted || draft.State == IssueDraftPublishing ||
-		draft.State == IssueDraftUnknown {
+	if !eligibility.CanPublish {
+		if eligibility.HasBlocker(IssuePublicationHistoricalMergeActive) {
+			return RepositoryState{}, IssueDraft{}, false, ErrHistoricalDeduplicationInProgress
+		}
+		return RepositoryState{}, IssueDraft{}, false, ErrConflict
+	}
+	if draft.State == IssueDraftPublishing || draft.State == IssueDraftUnknown {
 		return state, *draft, false, nil
 	}
 	if draft.State != IssueDraftEditing || expectedVersion < 1 || draft.Version != expectedVersion {

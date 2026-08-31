@@ -415,9 +415,22 @@ func TestRepositoryReviewPublicationHandlerRejectsNoncanonicalLegacyConflict(t *
 	if unmarshalErr := json.Unmarshal(raw, &persisted); unmarshalErr != nil {
 		t.Fatal(unmarshalErr)
 	}
+	draft.State = repoaudit.IssueDraftPosted
+	draft.ExternalID = "41"
+	draft.ExternalURL = "https://github.com/owner/repo/issues/41"
+	for index := range persisted.IssueDrafts {
+		if persisted.IssueDrafts[index].ID == draft.ID {
+			persisted.IssueDrafts[index] = draft
+		}
+	}
+	for index := range persisted.Findings {
+		persisted.Findings[index].Status = repoaudit.FindingPosted
+	}
 	newer := draft
 	newer.ID = "rid_newer_legacy_conflict"
 	newer.Canonical = false
+	newer.ExternalID = "42"
+	newer.ExternalURL = "https://github.com/owner/repo/issues/42"
 	newer.CreatedAt = draft.CreatedAt.Add(1)
 	newer.UpdatedAt = draft.UpdatedAt.Add(1)
 	persisted.IssueDrafts = append(persisted.IssueDrafts, newer)
@@ -437,7 +450,7 @@ func TestRepositoryReviewPublicationHandlerRejectsNoncanonicalLegacyConflict(t *
 	response := httptest.NewRecorder()
 	newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
 	if response.Code != http.StatusConflict ||
-		!strings.Contains(response.Body.String(), `"code":"noncanonical_issue_preview"`) {
+		!strings.Contains(response.Body.String(), `"code":"preview_not_canonical"`) {
 		t.Fatalf("response=%d %s", response.Code, response.Body.String())
 	}
 }
@@ -1818,6 +1831,10 @@ func TestRepositoryReviewPublicationHelpersCoverBoundaryResponses(t *testing.T) 
 		{err: nil, found: false, status: http.StatusNotFound},
 		{err: os.ErrNotExist, found: true, status: http.StatusNotFound},
 		{err: repoaudit.ErrConflict, found: true, status: http.StatusConflict},
+		{
+			err: repoaudit.ErrHistoricalDeduplicationInProgress, found: true,
+			status: http.StatusConflict,
+		},
 		{err: errors.New("disk unavailable"), found: true, status: http.StatusServiceUnavailable},
 	} {
 		response := httptest.NewRecorder()

@@ -18,6 +18,17 @@ export type RepositoryReviewIssueDraftOrigin =
   | "linked"
   | "discovered"
   | "legacy"
+export type RepositoryReviewPublishBlockerCode =
+  | "repository_not_github"
+  | "preview_not_canonical"
+  | "origin_not_publishable"
+  | "state_not_publishable"
+  | "finding_missing"
+  | "finding_status_unresolved"
+  | "duplicate_review_required"
+  | "issue_association_conflict"
+  | "historical_merge_in_progress"
+  | "finding_not_publishable"
 export type RepositoryReviewIssueInstructionsMode = "default" | "custom"
 export type RepositoryReviewFindingsScope = "current" | "all"
 /** @deprecated Use RepositoryReviewFindingsScope. */
@@ -362,6 +373,12 @@ export interface RepositoryReviewIssueDraft {
   updated_at: string
 }
 
+export interface RepositoryReviewPublishBlocker {
+  code: RepositoryReviewPublishBlockerCode
+  count: number
+  message: string
+}
+
 export interface RepositoryReviewCapabilities {
   github?: boolean
   can_generate?: boolean
@@ -374,6 +391,7 @@ export interface RepositoryReviewCapabilities {
   can_delete?: boolean
   can_regenerate?: boolean
   read_only_reason?: string
+  publish_blockers?: RepositoryReviewPublishBlocker[]
 }
 
 export interface RepositoryReviewFindingDetail {
@@ -583,6 +601,7 @@ export interface RepositoryReviewIssueSummary {
   generation_id?: string
   canonical: boolean
   publishable: boolean
+  publish_blockers: RepositoryReviewPublishBlocker[]
   title: string
   state: RepositoryReviewIssueDraftState
   version: number
@@ -1298,6 +1317,7 @@ export async function getRepositoryReviewAutomationFindings(
       value.repository_finding_total ?? value.repository_findings?.length ?? 0,
     repository_finding_offset: value.repository_finding_offset ?? 0,
     next_repository_finding_offset: value.next_repository_finding_offset,
+    capabilities: normalizeCapabilities(value.capabilities),
   }
 }
 
@@ -1336,7 +1356,7 @@ export async function listRepositoryReviewAutomationFindingsPage(
     historical_deduplication: page.historical_deduplication
       ? normalizeHistoricalDeduplication(page.historical_deduplication)
       : undefined,
-    capabilities: page.capabilities,
+    capabilities: normalizeCapabilities(page.capabilities),
   }
 }
 
@@ -1409,7 +1429,7 @@ export async function listRepositoryReviewAutomationRepositoryFindingsPage(
     next_cursor: page.next_cursor ?? "",
     canonical_query: page.canonical_query ?? "",
     query_schema: page.query_schema ?? { fields: [] },
-    capabilities: page.capabilities,
+    capabilities: normalizeCapabilities(page.capabilities),
   }
 }
 
@@ -1753,6 +1773,7 @@ export async function listRepositoryReviewAutomationIssues(
       0,
     next_offset: value.next_offset ?? value.next_issue_offset,
     generation_id: value.generation_id ?? input.generation_id,
+    capabilities: normalizeCapabilities(value.capabilities),
   }
 }
 
@@ -1786,7 +1807,7 @@ export async function listRepositoryReviewAutomationIssuesPage(
     canonical_query: page.canonical_query ?? "",
     query_schema: page.query_schema ?? { fields: [] },
     generation_id: page.generation_id ?? input.generation_id,
-    capabilities: page.capabilities,
+    capabilities: normalizeCapabilities(page.capabilities),
   }
 }
 
@@ -2254,6 +2275,7 @@ function normalizeIssueSummary(
     ...(issue.generation_id ? { generation_id: issue.generation_id } : {}),
     canonical: issue.canonical ?? false,
     publishable: issue.publishable ?? false,
+    publish_blockers: normalizePublishBlockers(issue.publish_blockers),
     title: issue.title,
     state: issue.state,
     version: issue.version,
@@ -2445,6 +2467,7 @@ function normalizeFindingDetail(
       : value.draft
         ? normalizeIssueDraft(value.draft)
         : undefined,
+    capabilities: normalizeCapabilities(value.capabilities),
   }
 }
 
@@ -2461,7 +2484,28 @@ function normalizeIssueDetail(
       : undefined,
     issue: normalizeIssueDraft(value.issue ?? value.draft!),
     finding: value.finding ? normalizeFinding(value.finding) : undefined,
+    capabilities: normalizeCapabilities(value.capabilities),
   }
+}
+
+function normalizeCapabilities(
+  capabilities: RepositoryReviewCapabilities | undefined,
+): RepositoryReviewCapabilities | undefined {
+  if (!capabilities) return undefined
+  return {
+    ...capabilities,
+    publish_blockers: normalizePublishBlockers(capabilities.publish_blockers),
+  }
+}
+
+function normalizePublishBlockers(
+  blockers: RepositoryReviewPublishBlocker[] | null | undefined,
+): RepositoryReviewPublishBlocker[] {
+  return (blockers ?? []).map((blocker) => ({
+    code: blocker.code,
+    count: blocker.count ?? 0,
+    message: blocker.message ?? "",
+  }))
 }
 
 function normalizeIssueMutationResponse(

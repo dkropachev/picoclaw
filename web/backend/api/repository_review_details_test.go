@@ -2097,10 +2097,13 @@ func TestRepositoryReviewGatewayProxyAndPublicationBoundaryCoverage(t *testing.T
 	unknown := handler.publishRepositoryReviewAutomationDraft(request, ledger, "draft", 1)
 	status, responseBody = http.StatusOK, `{"draft":{"id":"draft","state":"posted","external_url":"https://github.com/o/r/issues/1"}}`
 	posted := handler.publishRepositoryReviewAutomationDraft(request, ledger, "draft", 1)
-	status, responseBody = http.StatusServiceUnavailable, `{"code":"publication_failed","message":"safe"}`
+	status, responseBody = http.StatusServiceUnavailable, `{"code":"finding_status_unresolved","message":"safe","publish_blockers":[{"code":"finding_status_unresolved","count":2,"message":"safe"}]}`
 	failed := handler.publishRepositoryReviewAutomationDraft(request, ledger, "draft", 1)
+	failedBlockers, blockersOK := failed["publish_blockers"].([]repoaudit.IssuePublicationBlocker)
 	if unknown["outcome"] != "unknown" || posted["outcome"] != "posted" ||
-		posted["success"] != true || failed["outcome"] != "failed" || failed["code"] != "publication_failed" {
+		posted["success"] != true || failed["outcome"] != "failed" ||
+		failed["code"] != "finding_status_unresolved" || !blockersOK ||
+		len(failedBlockers) != 1 || failedBlockers[0].Count != 2 {
 		t.Fatalf("publication outcomes unknown=%#v posted=%#v failed=%#v", unknown, posted, failed)
 	}
 }
@@ -3014,7 +3017,7 @@ func TestRepositoryReviewRemainingGatewayPublicationBranches(t *testing.T) {
 			},
 		)
 		if response.Code != http.StatusOK ||
-			!strings.Contains(response.Body.String(), `"code":"noncanonical_issue_preview"`) {
+			!strings.Contains(response.Body.String(), `"code":"preview_not_canonical"`) {
 			t.Fatalf("noncanonical batch=%d %s", response.Code, response.Body.String())
 		}
 	})

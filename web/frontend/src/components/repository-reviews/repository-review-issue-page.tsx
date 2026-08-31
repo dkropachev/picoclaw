@@ -1,7 +1,6 @@
 import {
   IconBrandGithub,
   IconEdit,
-  IconExternalLink,
   IconRefresh,
   IconSparkles,
   IconTrash,
@@ -22,6 +21,7 @@ import {
 } from "@/api/repository-reviews"
 import { CollectionDetailShell } from "@/components/collection"
 import { githubRepositoryPath } from "@/components/repository-reviews/repository-review-actions"
+import { repositoryReviewIssueStateLabel } from "@/components/repository-reviews/repository-review-issue-state"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -132,16 +132,20 @@ export function RepositoryReviewIssuePage({
   const github =
     detail?.capabilities?.github ??
     Boolean(detail && githubRepositoryPath(detail.automation.repository))
-  const canonical = issue?.canonical !== false && !issue?.read_only
+  const canonical = issue?.canonical !== false
   const editable =
-    canonical && (detail?.capabilities?.can_edit ?? issue?.state === "editing")
+    canonical &&
+    !issue?.read_only &&
+    (detail?.capabilities?.can_edit ?? issue?.state === "editing")
   const deletable =
     canonical &&
+    !issue?.read_only &&
     (detail?.capabilities?.can_delete ??
       issue?.deletable ??
       (issue?.state === "editing" || issue?.state === "failed"))
   const regeneratable =
     canonical &&
+    !issue?.read_only &&
     (detail?.capabilities?.can_regenerate ??
       issue?.regeneratable ??
       (issue?.origin === "ai_generated" &&
@@ -149,10 +153,18 @@ export function RepositoryReviewIssuePage({
   const publishable =
     github &&
     canonical &&
-    (detail?.capabilities?.can_publish ??
-      issue?.publishable ??
-      new Set(["editing", "publishing", "unknown"]).has(issue?.state ?? ""))
-  const externalURL = safeHTTPSURL(issue?.external_url)
+    !issue?.read_only &&
+    detail?.capabilities?.can_publish === true
+  const publishBlockers = detail?.capabilities?.publish_blockers ?? []
+  const externalURL = safeGitHubIssueURL(
+    issue?.external_url,
+    detail?.automation.repository,
+  )
+  const showOpenAction =
+    github && canonical && issue?.state === "posted" && Boolean(externalURL)
+  const showPostAction =
+    github && canonical && !issue?.read_only && !showOpenAction
+  const publicationNoticeID = "issue-publication-notice"
 
   return (
     <>
@@ -169,9 +181,13 @@ export function RepositoryReviewIssuePage({
         status={
           issue ? (
             <div className="flex items-center gap-2">
-              <Badge variant="outline">{issue.state}</Badge>
+              <Badge variant="outline">
+                {repositoryReviewIssueStateLabel(issue.state)}
+              </Badge>
               <Badge variant="secondary">{issue.origin || "legacy"}</Badge>
-              {!canonical && <Badge variant="destructive">read only</Badge>}
+              {(issue.read_only || !canonical) && (
+                <Badge variant="destructive">read only</Badge>
+              )}
             </div>
           ) : undefined
         }
@@ -195,6 +211,35 @@ export function RepositoryReviewIssuePage({
                   onClick={onEdit}
                 >
                   <IconEdit /> Edit
+                </Button>
+              )}
+              {showOpenAction && externalURL && (
+                <Button asChild type="button" size="sm">
+                  <a
+                    href={externalURL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <IconBrandGithub /> Open GitHub issue
+                  </a>
+                </Button>
+              )}
+              {showPostAction && (
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={publish.isPending || !publishable}
+                  aria-describedby={
+                    publishable ? undefined : publicationNoticeID
+                  }
+                  onClick={() => publish.mutate()}
+                >
+                  <IconBrandGithub />
+                  {publish.isPending
+                    ? "Working…"
+                    : issue.state === "unknown" || issue.state === "publishing"
+                      ? "Reconcile publication"
+                      : "Post to GitHub"}
                 </Button>
               )}
             </div>
@@ -225,12 +270,48 @@ export function RepositoryReviewIssuePage({
             )}
             {!canonical && (
               <div
+                id={publicationNoticeID}
                 role="status"
                 className="border-border rounded-lg border p-3 text-sm"
               >
                 This preserved legacy record is not the finding’s canonical
                 association and cannot be edited or posted.
                 {issue.conflict_reason ? ` ${issue.conflict_reason}` : ""}
+              </div>
+            )}
+            {canonical && !github && (
+              <div
+                id={publicationNoticeID}
+                role="status"
+                className="border-border rounded-lg border p-3 text-sm"
+              >
+                This preview is saved locally. Posting is unavailable because
+                this review is not bound to a canonical GitHub repository.
+              </div>
+            )}
+            {canonical && github && !showOpenAction && !publishable && (
+              <div
+                id={publicationNoticeID}
+                role="status"
+                className="border-border bg-muted/20 rounded-lg border p-3 text-sm"
+              >
+                <p className="font-medium">
+                  This preview cannot be posted to GitHub yet.
+                </p>
+                {publishBlockers.length > 0 ? (
+                  <ul className="text-muted-foreground mt-2 list-inside list-disc space-y-1">
+                    {publishBlockers.map((blocker) => (
+                      <li key={blocker.code}>
+                        {blocker.message}
+                        {blocker.count > 1 ? ` (${blocker.count})` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-muted-foreground mt-1">
+                    Publication eligibility needs to be refreshed.
+                  </p>
+                )}
               </div>
             )}
 
@@ -395,60 +476,36 @@ export function RepositoryReviewIssuePage({
               )}
             </section>
 
-            <div className="border-border flex flex-wrap items-center justify-end gap-2 border-t pt-4">
-              {externalURL && (
-                <Button asChild type="button" size="sm" variant="outline">
-                  <a
-                    href={externalURL}
-                    target="_blank"
-                    rel="noopener noreferrer"
+            {(regeneratable || deletable) && (
+              <div className="border-border flex flex-wrap items-center justify-end gap-2 border-t pt-4">
+                {regeneratable && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={regenerate.isPending}
+                    onClick={() => regenerate.mutate()}
                   >
-                    <IconExternalLink /> Open GitHub issue
-                  </a>
-                </Button>
-              )}
-              {regeneratable && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={regenerate.isPending}
-                  onClick={() => regenerate.mutate()}
-                >
-                  <IconSparkles />{" "}
-                  {regenerate.isPending
-                    ? "Regenerating…"
-                    : issue.state === "generating"
-                      ? "Retry generation"
-                      : "Regenerate with AI"}
-                </Button>
-              )}
-              {deletable && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setDeleteOpen(true)}
-                >
-                  <IconTrash /> Delete preview
-                </Button>
-              )}
-              {publishable && (
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={publish.isPending}
-                  onClick={() => publish.mutate()}
-                >
-                  <IconBrandGithub />
-                  {publish.isPending
-                    ? "Working…"
-                    : issue.state === "unknown" || issue.state === "publishing"
-                      ? "Reconcile publication"
-                      : "Post issue"}
-                </Button>
-              )}
-            </div>
+                    <IconSparkles />{" "}
+                    {regenerate.isPending
+                      ? "Regenerating…"
+                      : issue.state === "generating"
+                        ? "Retry generation"
+                        : "Regenerate with AI"}
+                  </Button>
+                )}
+                {deletable && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setDeleteOpen(true)}
+                  >
+                    <IconTrash /> Delete preview
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
         )}
       </CollectionDetailShell>
@@ -526,4 +583,30 @@ function safeHTTPSURL(value: string | undefined): string | undefined {
   } catch {
     return undefined
   }
+}
+
+function safeGitHubIssueURL(
+  value: string | undefined,
+  repository: string | undefined,
+): string | undefined {
+  const safeURL = safeHTTPSURL(value)
+  const repositoryPath = repository
+    ? githubRepositoryPath(repository)?.toLowerCase()
+    : undefined
+  if (!safeURL || !repositoryPath) return undefined
+  const url = new URL(safeURL)
+  const segments = url.pathname.split("/").filter(Boolean)
+  if (
+    url.hostname.toLowerCase() !== "github.com" ||
+    url.port ||
+    url.search ||
+    url.hash ||
+    segments.length !== 4 ||
+    `${segments[0]}/${segments[1]}`.toLowerCase() !== repositoryPath ||
+    segments[2]?.toLowerCase() !== "issues" ||
+    !/^[1-9][0-9]*$/u.test(segments[3] ?? "")
+  ) {
+    return undefined
+  }
+  return safeURL
 }
