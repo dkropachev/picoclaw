@@ -177,10 +177,6 @@ func (s *FileRunStore) UpdateRun(ctx context.Context, run *Run) error {
 			if err := preserveFrozenRunPrivateContext(existing, run); err != nil {
 				return struct{}{}, err
 			}
-			if isTerminalRunStatus(existing.Status) {
-				*run = *cloneRun(existing)
-				return struct{}{}, nil
-			}
 			now := time.Now().UTC()
 			resumeOwnsCurrentVersion := false
 			if existing.execution != nil && existing.execution.Resume != nil &&
@@ -189,8 +185,17 @@ func (s *FileRunStore) UpdateRun(ctx context.Context, run *Run) error {
 				if run.execution != nil && run.execution.Resume != nil {
 					incomingToken = run.execution.Resume.Token
 				}
-				if incomingToken != existing.execution.Resume.Token ||
-					!now.Before(existing.execution.Resume.ExpiresAt) {
+				if incomingToken != existing.execution.Resume.Token {
+					return struct{}{}, ErrHumanTaskConflict
+				}
+			}
+			if isTerminalRunStatus(existing.Status) {
+				*run = *cloneRun(existing)
+				return struct{}{}, nil
+			}
+			if existing.execution != nil && existing.execution.Resume != nil &&
+				existing.execution.Resume.Token != "" {
+				if !now.Before(existing.execution.Resume.ExpiresAt) {
 					return struct{}{}, ErrHumanTaskConflict
 				}
 				resumeOwnsCurrentVersion = true

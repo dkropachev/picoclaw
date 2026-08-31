@@ -1315,6 +1315,136 @@ jobs:
 	}
 }
 
+func TestNativeWorkflowStateRejectsSymlinkedNamespaceEscape(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	namespace := "escape"
+	stateRoot := filepath.Join(workspace, workflowStateDir)
+	if err := os.MkdirAll(stateRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(stateRoot, safeStorageSegment(namespace))); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := RunNativeFunction(
+		context.Background(),
+		"workflow.state",
+		map[string]any{
+			"action":    "set",
+			"namespace": namespace,
+			"key":       "secret",
+			"value":     "outside",
+		},
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("RunNativeFunction() error = %v, want symlink escape rejection", err)
+	}
+	if entries, err := os.ReadDir(outside); err != nil {
+		t.Fatal(err)
+	} else if len(entries) != 0 {
+		t.Fatalf("outside entries = %#v, want none", entries)
+	}
+}
+
+func TestNativeWorkflowStateRejectsSymlinkedNamespaceInsideWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "unrelated")
+	namespace := "escape"
+	stateRoot := filepath.Join(workspace, workflowStateDir)
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stateRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(stateRoot, safeStorageSegment(namespace))); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := RunNativeFunction(
+		context.Background(),
+		"workflow.state",
+		map[string]any{
+			"action":    "set",
+			"namespace": namespace,
+			"key":       "secret",
+			"value":     "inside-workspace",
+		},
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("RunNativeFunction() error = %v, want storage root symlink rejection", err)
+	}
+	if entries, err := os.ReadDir(target); err != nil {
+		t.Fatal(err)
+	} else if len(entries) != 0 {
+		t.Fatalf("target entries = %#v, want none", entries)
+	}
+}
+
+func TestNativeWorkflowStateSetDoesNotFollowTempSymlink(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	namespace := "safe"
+	key := "plan"
+	stateDir := filepath.Join(workspace, workflowStateDir, safeStorageSegment(namespace))
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(stateDir, safeStorageSegment(key)+".json.tmp")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := RunNativeFunction(
+		context.Background(),
+		"workflow.state",
+		map[string]any{
+			"action":    "set",
+			"namespace": namespace,
+			"key":       key,
+			"value":     "inside",
+		},
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("RunNativeFunction() error = %v, want unsafe legacy symlink rejection", err)
+	}
+	if _, err := os.Stat(outside); !os.IsNotExist(err) {
+		t.Fatalf("outside stat error = %v, want not exist", err)
+	}
+}
+
+func TestNativeWorkflowStateListRejectsSymlinkedStateFile(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	namespace := "safe"
+	stateDir := filepath.Join(workspace, workflowStateDir, safeStorageSegment(namespace))
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte(`{"key":"outside","value":"leaked"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(stateDir, "outside.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := RunNativeFunction(
+		context.Background(),
+		"workflow.state",
+		map[string]any{
+			"action":    "list",
+			"namespace": namespace,
+		},
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("RunNativeFunction() error = %v, want symlink rejection", err)
+	}
+}
+
 func TestNativeWorkflowArtifactRejectsSymlinkedNamespaceEscape(t *testing.T) {
 	workspace := t.TempDir()
 	outside := t.TempDir()
