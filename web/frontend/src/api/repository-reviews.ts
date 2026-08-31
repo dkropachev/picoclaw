@@ -130,6 +130,8 @@ export interface RepositoryReviewFindingContext {
   profile_hash?: string
   run_id: string
   model: string
+  model_alias?: string
+  account?: string
   reviewer?: string
   files: RepositoryReviewFileRef[]
   raw_digest?: string
@@ -194,6 +196,8 @@ export interface RepositoryReviewRawFinding {
   impact?: string
   validation?: RepositoryReviewValidation
   model: string
+  model_alias?: string
+  account?: string
   reviewer?: string
   deduplication_state: RepositoryReviewDeduplicationState
   disposition: RepositoryReviewRawFindingDisposition
@@ -238,6 +242,8 @@ export interface RepositoryReviewRawFindingDetail {
 export interface RepositoryReviewFindingObservation {
   context_id: string
   model: string
+  model_alias?: string
+  account?: string
   reviewer?: string
   severity: string
   title: string

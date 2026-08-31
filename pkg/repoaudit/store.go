@@ -576,8 +576,15 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 	models := make([]string, 0)
 	for observationIndex, observation := range request.Observations {
 		observation.Model = strings.TrimSpace(observation.Model)
-		if !validBoundedText(observation.Model, 256) || len(observation.Findings) > maxFindingsPerObservation {
-			return RecordResult{}, fmt.Errorf("observation %d has no model", observationIndex)
+		observation.ModelAlias = strings.TrimSpace(observation.ModelAlias)
+		observation.Account = strings.TrimSpace(observation.Account)
+		missingExactProvenance := request.Plan.CampaignID != "" &&
+			(observation.ModelAlias == "" || observation.Account == "")
+		if !validFindingSourceProvenance(
+			observation.Model, observation.ModelAlias, observation.Account,
+		) || missingExactProvenance ||
+			len(observation.Findings) > maxFindingsPerObservation {
+			return RecordResult{}, fmt.Errorf("observation %d has invalid model provenance", observationIndex)
 		}
 		var scope []FileRef
 		var scopeErr error
@@ -594,8 +601,9 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 			Repository: request.Plan.Repository, CommitSHA: request.Plan.CommitSHA,
 			InventoryHash: request.Plan.InventoryHash, ProfileHash: request.Plan.ProfileHash,
 			RunID: request.RunID,
-			Model: observation.Model, Reviewer: strings.TrimSpace(observation.Reviewer),
-			Files: scope, RawDigest: strings.TrimSpace(observation.RawDigest), CreatedAt: completedAt,
+			Model: observation.Model, ModelAlias: observation.ModelAlias, Account: observation.Account,
+			Reviewer: strings.TrimSpace(observation.Reviewer),
+			Files:    scope, RawDigest: strings.TrimSpace(observation.RawDigest), CreatedAt: completedAt,
 		}
 		contextRecord.ID = stableID("rctx_", contextBindingDigest(contextRecord))
 		contextUsed := false
@@ -604,7 +612,11 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 				covered[file.Path] = file
 			}
 		}
-		models = appendUnique(models, observation.Model)
+		contributorModel := observation.Model
+		if observation.ModelAlias != "" {
+			contributorModel = observation.ModelAlias
+		}
+		models = appendUnique(models, contributorModel)
 		for findingIndex, candidate := range observation.Findings {
 			candidate = normalizeCandidate(candidate)
 			if candidate.Validation.Status != "confirmed" {
@@ -630,6 +642,16 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 			if persistErr != nil {
 				return RecordResult{}, persistErr
 			}
+			projectionIndex := findingIndexByID(state.Findings, deduplicatedID)
+			if projectionIndex < 0 {
+				return RecordResult{}, ErrConflict
+			}
+			finding := &state.Findings[projectionIndex]
+			finding.Models = []string{contributorModel}
+			finding.Observations = []FindingObservation{findingObservationFrom(
+				candidate, contextRecord.ID, observation.Model, observation.ModelAlias,
+				observation.Account, observation.Reviewer,
+			)}
 			acceptedIDs = appendUnique(acceptedIDs, deduplicatedID)
 			contextUsed = true
 			continue
@@ -1829,8 +1851,14 @@ func deriveRepositoryReviewCampaignEvidence(
 			continue
 		}
 		if child.Observation == nil ||
-			!validBoundedText(strings.TrimSpace(child.Observation.Model), 256) ||
-			child.Observation.Model != strings.TrimSpace(child.Observation.Model) {
+			!validFindingSourceProvenance(
+				strings.TrimSpace(child.Observation.Model),
+				strings.TrimSpace(child.Observation.ModelAlias),
+				strings.TrimSpace(child.Observation.Account),
+			) ||
+			child.Observation.Model != strings.TrimSpace(child.Observation.Model) ||
+			child.Observation.ModelAlias != strings.TrimSpace(child.Observation.ModelAlias) ||
+			child.Observation.Account != strings.TrimSpace(child.Observation.Account) {
 			return nil, nil, nil, fmt.Errorf(
 				"%w: successful campaign evidence %d has no valid observation",
 				ErrInvalidPlan, index,
@@ -2409,10 +2437,19 @@ func moreSevere(left, right string) string {
 
 func findingObservationFrom(
 	candidate FindingCandidate,
-	contextID, model, reviewer string,
+	contextID, model string,
+	provenance ...string,
 ) FindingObservation {
+	var modelAlias, account, reviewer string
+	if len(provenance) >= 3 {
+		modelAlias, account, reviewer = provenance[0], provenance[1], provenance[2]
+	} else if len(provenance) > 0 {
+		reviewer = provenance[0]
+	}
 	return FindingObservation{
-		ContextID: contextID, Model: strings.TrimSpace(model), Reviewer: strings.TrimSpace(reviewer),
+		ContextID: contextID, Model: strings.TrimSpace(model),
+		ModelAlias: strings.TrimSpace(modelAlias), Account: strings.TrimSpace(account),
+		Reviewer: strings.TrimSpace(reviewer),
 		Severity: candidate.Severity, Title: candidate.Title, Symbol: candidate.Symbol,
 		Line: candidate.Line, Message: candidate.Message, Evidence: candidate.Evidence,
 		Impact: candidate.Impact, Validation: candidate.Validation,
@@ -2682,6 +2719,18 @@ func validateState(state RepositoryState) error {
 
 func validBoundedText(value string, maximum int) bool {
 	return value != "" && utf8.ValidString(value) && len(value) <= maximum && !strings.ContainsRune(value, 0)
+}
+
+func validFindingSourceProvenance(model, modelAlias, account string) bool {
+	if !validBoundedText(model, 256) {
+		return false
+	}
+	// Legacy observations predate exact alias/account capture. New provenance is
+	// atomic so a partial source identity can never be mistaken for exact data.
+	if modelAlias == "" && account == "" {
+		return true
+	}
+	return validBoundedText(modelAlias, 256) && validBoundedText(account, 256)
 }
 
 func RepositoryID(repository string) string {

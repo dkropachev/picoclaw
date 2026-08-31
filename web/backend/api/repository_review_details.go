@@ -1112,6 +1112,9 @@ func repositoryReviewIssueWriterAgentRequest(
 	for index := range contexts {
 		contexts[index].CampaignID = ""
 		contexts[index].RawDigest = ""
+		contexts[index].Model = ""
+		contexts[index].ModelAlias = ""
+		contexts[index].Account = ""
 	}
 	promptPayload, _ := json.Marshal(map[string]any{
 		"finding": finding, "contexts": contexts, "presentation_instructions": instructions,

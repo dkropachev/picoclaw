@@ -1186,6 +1186,16 @@ export function RepositoryReviewFindingPage({
                     <div className="flex flex-wrap gap-2">
                       <strong>{observation.model}</strong>
                       <Badge variant="outline">{observation.severity}</Badge>
+                      {observation.model_alias && (
+                        <span className="text-muted-foreground text-xs">
+                          alias {observation.model_alias}
+                        </span>
+                      )}
+                      {observation.account && (
+                        <span className="text-muted-foreground text-xs">
+                          account {observation.account}
+                        </span>
+                      )}
                       {observation.reviewer && (
                         <span className="text-muted-foreground text-xs">
                           reviewer {observation.reviewer}
@@ -1339,6 +1349,8 @@ function FindingContextCard({
         <div className="mt-3 space-y-3">
           <div className="grid gap-1 text-xs sm:grid-cols-2">
             <span>Model: {context.model}</span>
+            <span>Model alias: {context.model_alias || "Not reported"}</span>
+            <span>Account: {context.account || "Not reported"}</span>
             <span>Reviewer: {context.reviewer || "Not reported"}</span>
             <span>Run: {context.run_id}</span>
             <span>Recorded: {formatTimestamp(context.created_at)}</span>

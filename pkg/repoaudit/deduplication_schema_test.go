@@ -163,7 +163,8 @@ func TestAssignmentCheckpointAtomicallyAdmitsRawFindingAndJob(t *testing.T) {
 	}
 	assignment := plan.AssignmentPlans[0]
 	observation := Observation{
-		Model: "review-a", Reviewer: fixture.catalog[0].FocusID,
+		Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+		Reviewer:   fixture.catalog[0].FocusID,
 		ScopeFiles: assignment.Files, RawDigest: "sha256:" + strings.Repeat("c", 64),
 		Findings: []FindingCandidate{
 			repositoryReviewCampaignFinding(assignment.Files[0], "raw diagnosis"),
@@ -186,6 +187,8 @@ func TestAssignmentCheckpointAtomicallyAdmitsRawFindingAndJob(t *testing.T) {
 	raw := result.State.RawFindings[0]
 	job := result.State.DeduplicationJobs[0]
 	if result.AcceptedFindingIDs[0] != raw.ID || job.RawFindingID != raw.ID ||
+		raw.Model != "provider/review-a" || raw.ModelAlias != "review-a" ||
+		raw.Account != "review-account" ||
 		job.InsertionOrdinal != raw.InsertionOrdinal || job.AdmissionBucket != raw.AdmissionBucket ||
 		job.ModelSnapshot.DeduplicationModel != "dedup-a" ||
 		result.State.FindingsProcessing.Pending != 1 ||

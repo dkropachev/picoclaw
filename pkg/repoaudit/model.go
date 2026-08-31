@@ -103,6 +103,8 @@ type FindingCandidate struct {
 
 type Observation struct {
 	Model      string             `json:"model"`
+	ModelAlias string             `json:"model_alias,omitempty"`
+	Account    string             `json:"account,omitempty"`
 	Reviewer   string             `json:"reviewer,omitempty"`
 	ScopeFiles []FileRef          `json:"scope_files"`
 	Findings   []FindingCandidate `json:"findings"`
@@ -135,6 +137,8 @@ type FindingContext struct {
 	ProfileHash   string    `json:"profile_hash"`
 	RunID         string    `json:"run_id"`
 	Model         string    `json:"model"`
+	ModelAlias    string    `json:"model_alias,omitempty"`
+	Account       string    `json:"account,omitempty"`
 	Reviewer      string    `json:"reviewer,omitempty"`
 	Files         []FileRef `json:"files"`
 	RawDigest     string    `json:"raw_digest,omitempty"`
@@ -254,6 +258,8 @@ type Finding struct {
 type FindingObservation struct {
 	ContextID  string     `json:"context_id"`
 	Model      string     `json:"model"`
+	ModelAlias string     `json:"model_alias,omitempty"`
+	Account    string     `json:"account,omitempty"`
 	Reviewer   string     `json:"reviewer,omitempty"`
 	Severity   string     `json:"severity"`
 	Title      string     `json:"title"`

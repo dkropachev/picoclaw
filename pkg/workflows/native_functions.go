@@ -1341,15 +1341,14 @@ func nativeRepositoryReviewLegacyObservations(
 				successfulCoverage[file.Path]++
 			}
 		}
-		modelMeta := nativeMapValue(child["model"])
-		model := strings.TrimSpace(nativeAnyString(modelMeta["selected"]))
-		if model == "" {
-			model = strings.TrimSpace(nativeAnyString(modelMeta["default"]))
+		provenance, provenanceErr := nativeRepositoryReviewManagedChildProvenance(child, true)
+		if provenanceErr != nil {
+			return nil, nil, fmt.Errorf("managed child %d: %w", index, provenanceErr)
 		}
-		observation, parseErr := nativeRepositoryReviewObservation(
+		observation, parseErr := nativeRepositoryReviewObservationWithProvenance(
 			structured,
 			child["scope"],
-			model,
+			provenance,
 			strings.TrimSpace(nativeAnyString(child["label"])),
 			strings.TrimSpace(nativeAnyString(child["text"])),
 		)
@@ -1453,6 +1452,56 @@ func nativeRepositoryReviewObservation(
 	reviewer string,
 	raw string,
 ) (repoaudit.Observation, error) {
+	return nativeRepositoryReviewObservationWithProvenance(
+		structured,
+		scopeValue,
+		nativeRepositoryReviewProvenance{Model: model},
+		reviewer,
+		raw,
+	)
+}
+
+type nativeRepositoryReviewProvenance struct {
+	Model      string
+	ModelAlias string
+	Account    string
+}
+
+func nativeRepositoryReviewManagedChildProvenance(
+	child map[string]any,
+	allowLegacy bool,
+) (nativeRepositoryReviewProvenance, error) {
+	modelMeta := nativeMapValue(child["model"])
+	modelAlias := strings.TrimSpace(nativeAnyString(modelMeta["selected"]))
+	if modelAlias == "" {
+		modelAlias = strings.TrimSpace(nativeAnyString(modelMeta["default"]))
+	}
+	actualValue, actualDeclared := modelMeta["actual"]
+	accountValue, accountDeclared := modelMeta["account"]
+	model := strings.TrimSpace(nativeAnyString(actualValue))
+	account := strings.TrimSpace(nativeAnyString(accountValue))
+	if !actualDeclared && !accountDeclared && allowLegacy {
+		// Managed outputs written before exact source capture contain one
+		// ambiguous model value. Preserve it without claiming exact provenance.
+		return nativeRepositoryReviewProvenance{Model: modelAlias}, nil
+	}
+	if !actualDeclared || !accountDeclared || model == "" || modelAlias == "" || account == "" {
+		return nativeRepositoryReviewProvenance{}, errors.New(
+			"managed child has incomplete model provenance",
+		)
+	}
+	return nativeRepositoryReviewProvenance{
+		Model: model, ModelAlias: modelAlias, Account: account,
+	}, nil
+}
+
+func nativeRepositoryReviewObservationWithProvenance(
+	structured map[string]any,
+	scopeValue any,
+	provenance nativeRepositoryReviewProvenance,
+	reviewer string,
+	raw string,
+) (repoaudit.Observation, error) {
 	if err := nativeValidateRepositoryReviewOutputFields(structured); err != nil {
 		return repoaudit.Observation{}, err
 	}
@@ -1485,7 +1534,8 @@ func nativeRepositoryReviewObservation(
 	}
 	digest := sha256.Sum256([]byte(raw))
 	return repoaudit.Observation{
-		Model: model, Reviewer: reviewer, ScopeFiles: scope, Findings: findings,
+		Model: provenance.Model, ModelAlias: provenance.ModelAlias, Account: provenance.Account,
+		Reviewer: reviewer, ScopeFiles: scope, Findings: findings,
 		Summary:   strings.TrimSpace(nativeAnyString(structured["summary"])),
 		RawDigest: "sha256:" + hex.EncodeToString(digest[:]),
 	}, nil

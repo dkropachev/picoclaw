@@ -179,7 +179,10 @@ func TestNativeRepositoryReviewCampaignEvidenceIncludesEveryChild(t *testing.T) 
 		"managed_children": []map[string]any{
 			{
 				"index": 1, "required": true, "valid": true, "scope": scope,
-				"model": map[string]any{"selected": "review-a"}, "structured": structured,
+				"model": map[string]any{
+					"selected": "review-a", "actual": "openai/gpt-5.4", "account": "openai-work",
+				},
+				"structured": structured,
 			},
 			{
 				"index": 2, "required": true, "valid": false, "scope": scope,
@@ -191,6 +194,10 @@ func TestNativeRepositoryReviewCampaignEvidenceIncludesEveryChild(t *testing.T) 
 		!evidence.ReviewEvidence[0].Successful || evidence.ReviewEvidence[1].Successful ||
 		evidence.ReviewEvidence[0].AssignmentID != "legacy-managed-child-000001" ||
 		evidence.ReviewEvidence[1].AssignmentID != "legacy-managed-child-000002" ||
+		evidence.ReviewEvidence[0].Observation == nil ||
+		evidence.ReviewEvidence[0].Observation.Model != "openai/gpt-5.4" ||
+		evidence.ReviewEvidence[0].Observation.ModelAlias != "review-a" ||
+		evidence.ReviewEvidence[0].Observation.Account != "openai-work" ||
 		!reflect.DeepEqual(evidence.InspectedFiles, []repoaudit.FileRef{first, second}) ||
 		len(evidence.CompletedFiles) != 0 {
 		t.Fatalf("campaign evidence=%#v err=%v", evidence, err)
@@ -263,7 +270,9 @@ func TestNativeRepositoryReviewCampaignEvidenceSortsMultiFileResults(t *testing.
 	evidence, err := nativeRepositoryReviewRecordEvidence(map[string]any{
 		"managed_children": []map[string]any{{
 			"index": 1, "required": true, "valid": true, "scope": scope,
-			"model": map[string]any{"selected": "review-a"},
+			"model": map[string]any{
+				"selected": "review-a", "actual": "provider/review-a", "account": "review-account",
+			},
 			"structured": map[string]any{
 				"summary": "reviewed", "reviewedFiles": []any{"b.go", "a.go"},
 				"findings": []any{}, "residualRisks": []any{},
@@ -368,6 +377,10 @@ func TestNativeRepositoryReviewCampaignEvidenceHandlesPartialAndMalformedChildre
 			"index": 1, "required": true, "valid": true, "scope": completeScope,
 			"structured": validOutput,
 		},
+		"missing exact provenance": {
+			"index": 1, "required": true, "valid": true, "scope": completeScope,
+			"model": map[string]any{"selected": "review-a"}, "structured": validOutput,
+		},
 		"invalid observation": {
 			"index": 1, "required": true, "valid": true, "scope": completeScope,
 			"model": map[string]any{"selected": "review-a"},
@@ -389,11 +402,17 @@ func TestNativeRepositoryReviewCampaignEvidenceHandlesPartialAndMalformedChildre
 	evidence, err = nativeRepositoryReviewRecordEvidence(map[string]any{
 		"managed_children": []map[string]any{{
 			"index": 1, "required": true, "valid": true, "scope": completeScope,
-			"model": map[string]any{"default": "default-reviewer"}, "structured": validOutput,
+			"model": map[string]any{
+				"default": "default-reviewer", "actual": "provider/default-reviewer",
+				"account": "review-account",
+			},
+			"structured": validOutput,
 		}},
 	}, plan)
 	if err != nil || len(evidence.Observations) != 1 ||
-		evidence.Observations[0].Model != "default-reviewer" ||
+		evidence.Observations[0].Model != "provider/default-reviewer" ||
+		evidence.Observations[0].ModelAlias != "default-reviewer" ||
+		evidence.Observations[0].Account != "review-account" ||
 		!reflect.DeepEqual(evidence.InspectedFiles, []repoaudit.FileRef{first}) ||
 		!reflect.DeepEqual(evidence.CompletedFiles, []repoaudit.FileRef{first}) {
 		t.Fatalf("partial successful evidence=%#v err=%v", evidence, err)

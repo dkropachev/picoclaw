@@ -500,6 +500,14 @@ func TestTrackedSubagentResultLateFallbackRejectsNonDetachableRootPolicy(t *test
 			model := ""
 			opts.resultModelName = &model
 		}},
+		{name: "result actual model", apply: func(opts *processOptions) {
+			model := ""
+			opts.resultActualModel = &model
+		}},
+		{name: "result account", apply: func(opts *processOptions) {
+			account := ""
+			opts.resultAccountRef = &account
+		}},
 		{name: "forced skills", apply: func(opts *processOptions) {
 			opts.ForcedSkills = []string{"request-only-skill"}
 		}},

@@ -370,8 +370,18 @@ func repositoryReviewAssignmentCheckpointEventForTest(
 ) ManagedAssignmentCheckpointEvent {
 	dispatch.Model = model
 	dispatch.ReviewerModel = reviewerModel
+	modelAlias := strings.TrimSpace(model)
+	if modelAlias == "" {
+		modelAlias = strings.TrimSpace(reviewerModel)
+	}
+	if modelAlias == "" {
+		modelAlias = "default"
+	}
 	return ManagedAssignmentCheckpointEvent{
 		ManagedAssignmentDispatchEvent: dispatch,
+		ConcreteModel:                  "provider/" + modelAlias,
+		ModelAlias:                     modelAlias,
+		Account:                        "review-account",
 		Output:                         output,
 		OutputDigest:                   repositoryReviewAssignmentDigestForTest("a"),
 		CheckpointDigest:               repositoryReviewAssignmentDigestForTest(digestCharacter),
@@ -465,7 +475,9 @@ func TestRepositoryReviewManagedEvidenceDefaultReviewerIdentity(t *testing.T) {
 	result, err := DecodeRepositoryReviewManagedEvidence(
 		[]any{map[string]any{
 			"scope": scope, "required": true, "valid": true,
-			"label": "Default fallback chain", "model": map[string]any{"selected": "review-a"},
+			"label": "Default fallback chain", "model": map[string]any{
+				"selected": "review-a", "actual": "provider/review-a", "account": "review-account",
+			},
 			"structured": map[string]any{
 				"summary": "reviewed", "reviewedFiles": []any{file.Path},
 				"findings": []any{}, "residualRisks": []any{},

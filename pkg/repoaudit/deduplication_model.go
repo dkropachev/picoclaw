@@ -89,6 +89,8 @@ type RawReviewFinding struct {
 	RunID                 string                       `json:"run_id"`
 	AssignmentID          string                       `json:"assignment_id"`
 	Model                 string                       `json:"model"`
+	ModelAlias            string                       `json:"model_alias,omitempty"`
+	Account               string                       `json:"account,omitempty"`
 	Reviewer              string                       `json:"reviewer,omitempty"`
 	State                 RawFindingDeduplicationState `json:"deduplication_state"`
 	Disposition           RawFindingDisposition        `json:"disposition"`
@@ -384,7 +386,8 @@ func validateDeduplicationState(state RepositoryState) error {
 			!validRepositoryReviewPath(raw.File.Path) || !validBlobSHA(raw.File.BlobSHA) ||
 			raw.File.SizeBytes < 0 ||
 			!validBoundedText(raw.ContextID, 256) || !validBoundedText(raw.RunID, 1024) ||
-			!validBoundedText(raw.AssignmentID, 128) || !validBoundedText(raw.Model, 256) ||
+			!validBoundedText(raw.AssignmentID, 128) ||
+			!validFindingSourceProvenance(raw.Model, raw.ModelAlias, raw.Account) ||
 			!validOptionalAutomationText(raw.Reviewer, 256) ||
 			len(raw.History) > DeduplicationHistoryLimit || raw.CreatedAt.IsZero() ||
 			raw.UpdatedAt.Before(raw.CreatedAt) || !validRawFindingState(raw) ||
@@ -583,6 +586,8 @@ func RawReviewFindingDiagnosisDigest(raw RawReviewFinding) string {
 		RunID            string                 `json:"run_id"`
 		AssignmentID     string                 `json:"assignment_id"`
 		Model            string                 `json:"model"`
+		ModelAlias       string                 `json:"model_alias,omitempty"`
+		Account          string                 `json:"account,omitempty"`
 		Reviewer         string                 `json:"reviewer,omitempty"`
 		Diagnosis        DeduplicationDiagnosis `json:"diagnosis"`
 	}{
@@ -590,7 +595,8 @@ func RawReviewFindingDiagnosisDigest(raw RawReviewFinding) string {
 		InsertionOrdinal: raw.InsertionOrdinal, LegacyFindingID: raw.LegacyFindingID,
 		Repository: raw.Repository, CommitSHA: raw.CommitSHA,
 		File: raw.File, Line: raw.Line, ContextID: raw.ContextID, RunID: raw.RunID,
-		AssignmentID: raw.AssignmentID, Model: raw.Model, Reviewer: raw.Reviewer,
+		AssignmentID: raw.AssignmentID, Model: raw.Model, ModelAlias: raw.ModelAlias,
+		Account: raw.Account, Reviewer: raw.Reviewer,
 		Diagnosis: DeduplicationDiagnosis{
 			Severity: raw.Severity, Title: raw.Title, Symbol: raw.Symbol,
 			Message: raw.Message, Evidence: raw.Evidence, Impact: raw.Impact,

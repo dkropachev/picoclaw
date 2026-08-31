@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -184,6 +185,33 @@ type sequenceProvider struct {
 	errors    []error
 	callCount int
 	mu        sync.Mutex
+}
+
+type provenanceFallbackProvider struct {
+	mu     sync.Mutex
+	models []string
+}
+
+func (p *provenanceFallbackProvider) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	model string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	p.models = append(p.models, model)
+	p.mu.Unlock()
+	if model == "primary-concrete" {
+		return nil, fmt.Errorf("status: 429 - rate limit exceeded")
+	}
+	return &providers.LLMResponse{Content: "fallback answer", FinishReason: "stop"}, nil
+}
+
+func (p *provenanceFallbackProvider) calledModels() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.models...)
 }
 
 func (p *sequenceProvider) Chat(
@@ -458,6 +486,136 @@ func makeTestProcessOpts(sessionKey string) processOptions {
 		EnableSummary:   false,
 		SendResponse:    false,
 		NoHistory:       false,
+	}
+}
+
+func newProvenanceFallbackTestLoop(
+	t *testing.T,
+) (*AgentLoop, *AgentInstance, *provenanceFallbackProvider) {
+	t.Helper()
+	cfg := strictAliasTestConfig(t)
+	cfg.Agents.Defaults.ModelName = "primary-alias"
+	cfg.Agents.Defaults.ModelFallbacks = []string{"fallback-alias"}
+	cfg.ModelAliases = []config.ModelAliasConfig{
+		{Name: "primary-alias", Model: "primary-concrete"},
+		{
+			Name:  "fallback-alias",
+			Model: "fallback-account-a",
+			AccountOverrides: map[string]string{
+				"account-b": "fallback-concrete",
+			},
+		},
+	}
+	provider := &provenanceFallbackProvider{}
+	loop := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
+	t.Cleanup(loop.Close)
+	agent := loop.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is nil")
+	}
+	primary := providers.FallbackCandidate{
+		Provider:    "openai",
+		Model:       "primary-concrete",
+		DisplayName: "primary-alias",
+		IdentityKey: accountAliasIdentityKey("account-a", "primary-alias"),
+	}
+	fallback := providers.FallbackCandidate{
+		Provider:    "anthropic",
+		Model:       "fallback-concrete",
+		DisplayName: "fallback-alias",
+		IdentityKey: accountAliasIdentityKey("account-b", "fallback-alias"),
+	}
+	agent.Candidates = []providers.FallbackCandidate{primary, fallback}
+	bindBootstrapProvider(agent.CandidateProviders, primary, provider)
+	bindBootstrapProvider(agent.CandidateProviders, fallback, provider)
+	loop.providerFactory = func(modelCfg *config.ModelConfig) (providers.LLMProvider, string, error) {
+		return provider, strings.TrimSpace(modelCfg.Model), nil
+	}
+	return loop, agent, provider
+}
+
+func TestSuccessfulFallbackReportsExactModelAliasAndAccountProvenance(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*AgentLoop, *AgentInstance, *string, *string, *string) (string, error)
+	}{
+		{
+			name: "normal turn",
+			run: func(
+				loop *AgentLoop,
+				agent *AgentInstance,
+				selected *string,
+				actual *string,
+				account *string,
+			) (string, error) {
+				return loop.runAgentLoop(context.Background(), agent, processOptions{
+					Dispatch: DispatchRequest{
+						SessionKey:  "provenance-normal",
+						UserMessage: "review the issue",
+					},
+					DefaultResponse:   "empty",
+					NoHistory:         true,
+					DisableTools:      true,
+					resultModelName:   selected,
+					resultActualModel: actual,
+					resultAccountRef:  account,
+				})
+			},
+		},
+		{
+			name: "isolated side question",
+			run: func(
+				loop *AgentLoop,
+				agent *AgentInstance,
+				selected *string,
+				actual *string,
+				account *string,
+			) (string, error) {
+				return loop.askSideQuestionWithOptions(
+					context.Background(),
+					agent,
+					&processOptions{
+						Dispatch:  DispatchRequest{SessionKey: "provenance-side"},
+						NoHistory: true,
+					},
+					"review the issue",
+					sideQuestionExecutionOptions{
+						disablePromptCache: true,
+						skipHooks:          true,
+						resultModelName:    selected,
+						resultActualModel:  actual,
+						resultAccountRef:   account,
+					},
+				)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			loop, agent, provider := newProvenanceFallbackTestLoop(t)
+			selected, actual, account := "", "", ""
+			response, err := test.run(loop, agent, &selected, &actual, &account)
+			if err != nil {
+				t.Fatalf("fallback run error = %v", err)
+			}
+			if response != "fallback answer" {
+				t.Fatalf("response = %q, want fallback answer", response)
+			}
+			if selected != "fallback-alias" || actual != "fallback-concrete" || account != "account-b" {
+				t.Fatalf(
+					"provenance = selected:%q actual:%q account:%q",
+					selected,
+					actual,
+					account,
+				)
+			}
+			if models := provider.calledModels(); !reflect.DeepEqual(
+				models,
+				[]string{"primary-concrete", "fallback-concrete"},
+			) {
+				t.Fatalf("provider models = %#v, want primary then fallback", models)
+			}
+		})
 	}
 }
 

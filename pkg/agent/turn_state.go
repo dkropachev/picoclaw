@@ -90,6 +90,8 @@ const (
 type turnResult struct {
 	finalContent string
 	modelName    string
+	actualModel  string
+	accountRef   string
 	usage        []workflows.AgentUsage
 	status       TurnEndStatus
 	followUps    []bus.InboundMessage
@@ -156,6 +158,7 @@ type turnExecution struct {
 	visibleToolSurface   string
 	llmModel             string
 	llmModelName         string
+	successfulModel      successfulModelProvenance
 	llmOpts              map[string]any
 	gracefulTerminal     bool
 	useNativeSearch      bool
@@ -167,6 +170,32 @@ type turnExecution struct {
 	// Abort signaling for coordinator (set by Pipeline methods)
 	abortedByHardAbort bool // true when hard abort triggered during LLM/tools
 	abortedByHook      bool // true when HookActionAbortTurn triggered
+}
+
+func (e *turnExecution) recordSuccessfulModelCall(
+	candidate providers.FallbackCandidate,
+	selectedAlias string,
+	actualModel string,
+) {
+	if e == nil {
+		return
+	}
+	e.successfulModel = successfulModelProvenanceForCandidate(
+		candidate,
+		selectedAlias,
+		actualModel,
+	)
+}
+
+func (e *turnExecution) resultModelProvenance() successfulModelProvenance {
+	if e == nil {
+		return successfulModelProvenance{}
+	}
+	result := e.successfulModel
+	if strings.TrimSpace(result.selected) == "" {
+		result.selected = strings.TrimSpace(e.llmModelName)
+	}
+	return result
 }
 
 // newTurnExecution creates a turnExecution initialized from turnState and options.

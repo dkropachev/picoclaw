@@ -281,7 +281,8 @@ func (s Store) AdmitNextHistoricalDeduplicationBatch(
 				contextRecord := FindingContext{
 					ID: raw.ContextID, Repository: raw.Repository, CommitSHA: raw.CommitSHA,
 					InventoryHash: "historical-replay", ProfileHash: "historical-replay",
-					RunID: raw.RunID, Model: raw.Model, Reviewer: raw.Reviewer,
+					RunID: raw.RunID, Model: raw.Model, ModelAlias: raw.ModelAlias,
+					Account: raw.Account, Reviewer: raw.Reviewer,
 					Files: []FileRef{raw.File}, CreatedAt: raw.CreatedAt,
 				}
 				state.Contexts = append(state.Contexts, contextRecord)
@@ -340,20 +341,23 @@ func historicalRawFindingAndJob(
 	contextID := ""
 	reviewer := ""
 	model := ""
+	modelAlias := ""
+	account := ""
 	for _, id := range finding.ContextIDs {
 		contextRecord, exists := contexts[id]
 		if !exists {
 			continue
 		}
-		if contextID == "" {
-			contextID = contextRecord.ID
+		contextID = contextRecord.ID
+		model = strings.TrimSpace(contextRecord.Model)
+		candidateAlias := strings.TrimSpace(contextRecord.ModelAlias)
+		candidateAccount := strings.TrimSpace(contextRecord.Account)
+		if candidateAlias != "" && candidateAccount != "" {
+			modelAlias = candidateAlias
+			account = candidateAccount
 		}
-		if model == "" {
-			model = strings.TrimSpace(contextRecord.Model)
-		}
-		if reviewer == "" {
-			reviewer = strings.TrimSpace(contextRecord.Reviewer)
-		}
+		reviewer = strings.TrimSpace(contextRecord.Reviewer)
+		break
 	}
 	if contextID == "" {
 		contextID = stableID("legacy-context_", finding.ID)
@@ -376,7 +380,8 @@ func historicalRawFindingAndJob(
 		Message: finding.Message, Evidence: finding.Evidence, Impact: finding.Impact,
 		Validation: finding.Validation, MatchHints: finding.MatchHints, FixEffort: finding.FixEffort,
 		ContextID: contextID, RunID: batch.BoundaryID, AssignmentID: "historical-replay",
-		Model: model, Reviewer: reviewer, State: RawFindingDeduplicationPending,
+		Model: model, ModelAlias: modelAlias, Account: account, Reviewer: reviewer,
+		State:       RawFindingDeduplicationPending,
 		Disposition: RawFindingDispositionUndecided, CreatedAt: finding.CreatedAt, UpdatedAt: now,
 	}
 	if raw.CreatedAt.IsZero() {

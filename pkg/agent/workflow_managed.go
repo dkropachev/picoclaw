@@ -1656,6 +1656,13 @@ func workflowRunManagedChildren(
 					modelFallbacks = []string{}
 				}
 				actualModelName := choice.modelName
+				actualModel := ""
+				actualAccountRef := ""
+				var actualModelOut, actualAccountRefOut *string
+				if req.CaptureFindingSourceProvenance {
+					actualModelOut = &actualModel
+					actualAccountRefOut = &actualAccountRef
+				}
 				reviewerIdentity := strings.TrimSpace(plan.modelName)
 				if reviewerIdentity == "" {
 					reviewerIdentity = strings.TrimSpace(choice.modelName)
@@ -1686,15 +1693,17 @@ func workflowRunManagedChildren(
 					childContract,
 					runOnce,
 					workflowAgentRunOptions{
-						Context:         assignmentCtx,
-						ModelName:       modelOverride,
-						ModelFallbacks:  modelFallbacks,
-						AccountRef:      req.AccountRef,
-						ReasoningEffort: choice.reasoningEffort,
-						NoTools:         true,
-						ActualModelName: &actualModelName,
-						UsageObserver:   childUsageObserver,
-						CallAdmission:   callAdmission,
+						Context:          assignmentCtx,
+						ModelName:        modelOverride,
+						ModelFallbacks:   modelFallbacks,
+						AccountRef:       req.AccountRef,
+						ReasoningEffort:  choice.reasoningEffort,
+						NoTools:          true,
+						ActualModelName:  &actualModelName,
+						ActualModel:      actualModelOut,
+						ActualAccountRef: actualAccountRefOut,
+						UsageObserver:    childUsageObserver,
+						CallAdmission:    callAdmission,
 					},
 				)
 				for usageIndex := range usage {
@@ -1705,6 +1714,10 @@ func workflowRunManagedChildren(
 					choice.modelMeta["selected"] = actualModelName
 					choice.modelMeta["fallback_used"] = true
 					choice.modelName = actualModelName
+				}
+				if req.CaptureFindingSourceProvenance {
+					choice.modelMeta["actual"] = strings.TrimSpace(actualModel)
+					choice.modelMeta["account"] = strings.TrimSpace(actualAccountRef)
 				}
 				if err == nil {
 					if deadlineErr := assignmentCtx.Err(); deadlineErr != nil {
@@ -1722,8 +1735,12 @@ func workflowRunManagedChildren(
 						dispatchEvent := workflowManagedAssignmentDispatchEvent(
 							plan, choice.modelName, len(plans),
 						)
-						checkpointDigest, digestErr := workflowManagedAssignmentCheckpointDigest(
-							dispatchEvent, checkpointOutput,
+						checkpointDigest, digestErr := workflowManagedAssignmentCheckpointDigestWithProvenance(
+							dispatchEvent,
+							strings.TrimSpace(actualModel),
+							strings.TrimSpace(actualModelName),
+							strings.TrimSpace(actualAccountRef),
+							checkpointOutput,
 						)
 						if digestErr != nil {
 							err = errors.Join(
@@ -1733,6 +1750,9 @@ func workflowRunManagedChildren(
 						}
 						checkpointEvent := workflows.ManagedAssignmentCheckpointEvent{
 							ManagedAssignmentDispatchEvent: dispatchEvent,
+							ConcreteModel:                  strings.TrimSpace(actualModel),
+							ModelAlias:                     strings.TrimSpace(actualModelName),
+							Account:                        strings.TrimSpace(actualAccountRef),
 							Output:                         checkpointOutput,
 							OutputDigest:                   "sha256:" + workflowManagedHashString(text),
 							CheckpointDigest:               checkpointDigest,
@@ -1884,17 +1904,33 @@ func workflowManagedAssignmentCheckpointDigest(
 	dispatch workflows.ManagedAssignmentDispatchEvent,
 	output any,
 ) (string, error) {
+	return workflowManagedAssignmentCheckpointDigestWithProvenance(
+		dispatch, "", "", "", output,
+	)
+}
+
+func workflowManagedAssignmentCheckpointDigestWithProvenance(
+	dispatch workflows.ManagedAssignmentDispatchEvent,
+	concreteModel string,
+	modelAlias string,
+	account string,
+	output any,
+) (string, error) {
 	payload := struct {
 		AssignmentID  string `json:"assignment_id"`
 		FocusID       string `json:"focus_id"`
 		ReviewerModel string `json:"reviewer_model,omitempty"`
 		Model         string `json:"model,omitempty"`
+		ConcreteModel string `json:"concrete_model,omitempty"`
+		ModelAlias    string `json:"model_alias,omitempty"`
+		Account       string `json:"account,omitempty"`
 		Required      bool   `json:"required"`
 		Scope         []any  `json:"scope"`
 		Output        any    `json:"output"`
 	}{
 		AssignmentID: dispatch.AssignmentID, FocusID: dispatch.FocusID,
 		ReviewerModel: dispatch.ReviewerModel, Model: dispatch.Model,
+		ConcreteModel: concreteModel, ModelAlias: modelAlias, Account: account,
 		Required: dispatch.Required, Scope: dispatch.Scope, Output: output,
 	}
 	encoded, err := json.Marshal(payload)

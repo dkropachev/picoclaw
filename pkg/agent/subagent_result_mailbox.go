@@ -284,6 +284,8 @@ func snapshotTrackedSubagentResultRoute(
 			current.opts.usageObserver == nil &&
 			current.opts.resultUsage == nil &&
 			current.opts.resultModelName == nil &&
+			current.opts.resultActualModel == nil &&
+			current.opts.resultAccountRef == nil &&
 			len(current.opts.ForcedSkills) == 0 &&
 			strings.TrimSpace(current.opts.SystemPromptOverride) == "" &&
 			(strings.TrimSpace(current.opts.PromptCacheKey) == "" ||

@@ -3584,18 +3584,29 @@ func TestRepositoryReviewCampaignOutcomeUsesTaggedCoverageAndModelContexts(t *te
 			},
 		},
 		Contexts: []repoaudit.FindingContext{
-			{ID: "ctx-a", CampaignID: campaignID, Reviewer: "review-a", Files: []repoaudit.FileRef{files[0]}},
-			{ID: "ctx-b", CampaignID: campaignID, Model: "review-b", Files: []repoaudit.FileRef{files[1]}},
+			{
+				ID: "ctx-a", CampaignID: campaignID, Model: "review-b", ModelAlias: "review-a",
+				Account: "account-a", Reviewer: "review-b", Files: []repoaudit.FileRef{files[0]},
+			},
+			{
+				ID: "ctx-b", CampaignID: campaignID, Model: "provider/model-b", ModelAlias: "review-b",
+				Account: "account-b", Files: []repoaudit.FileRef{files[1]},
+			},
 			{ID: "ctx-old", CampaignID: repoaudit.NewRepositoryReviewCampaignID(), Reviewer: "review-a"},
 		},
 		Findings: []repoaudit.Finding{
 			{
 				ID: "finding-a", CampaignID: campaignID, RepositoryFindingID: "aggregate-a",
-				Observations: []repoaudit.FindingObservation{{ContextID: "ctx-a", Model: "review-a"}},
+				Observations: []repoaudit.FindingObservation{{
+					ContextID: "ctx-a", Model: "review-b", ModelAlias: "review-a",
+					Account: "account-a", Reviewer: "review-b",
+				}},
 			},
 			{
 				ID: "finding-b", CampaignID: campaignID,
-				Observations: []repoaudit.FindingObservation{{ContextID: "ctx-b", Reviewer: "review-b"}},
+				Observations: []repoaudit.FindingObservation{{
+					ContextID: "ctx-b", Model: "provider/model-b", ModelAlias: "review-b", Account: "account-b",
+				}},
 			},
 			{ID: "finding-old", CampaignID: repoaudit.NewRepositoryReviewCampaignID()},
 		},

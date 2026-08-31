@@ -180,14 +180,16 @@ type processOptions struct {
 	requireExistingSession   bool                              // strict continuation must not create/admit a missing key
 	retainSessionUntilOutput bool                              // exact result continuation keeps ownership through output
 
-	InboundContext  *bus.InboundContext     // Normalized inbound facts for events/hooks
-	RouteResult     *routing.ResolvedRoute  // Route decision snapshot for events/hooks
-	SessionScope    *session.SessionScope   // Session scope snapshot for events/hooks
-	turnReservation *turnState              // exact root/continuation placeholder, process-local only
-	resultModelName *string                 // private caller-owned successful model provenance
-	resultUsage     *[]workflows.AgentUsage // private caller-owned detached per-model usage
-	usageObserver   workflows.AgentUsageObserver
-	callAdmission   workflows.AgentCallAdmission
+	InboundContext    *bus.InboundContext     // Normalized inbound facts for events/hooks
+	RouteResult       *routing.ResolvedRoute  // Route decision snapshot for events/hooks
+	SessionScope      *session.SessionScope   // Session scope snapshot for events/hooks
+	turnReservation   *turnState              // exact root/continuation placeholder, process-local only
+	resultModelName   *string                 // private caller-owned successful model alias
+	resultActualModel *string                 // private caller-owned successful concrete provider model
+	resultAccountRef  *string                 // private caller-owned successful concrete account
+	resultUsage       *[]workflows.AgentUsage // private caller-owned detached per-model usage
+	usageObserver     workflows.AgentUsageObserver
+	callAdmission     workflows.AgentCallAdmission
 }
 
 type continuationTarget struct {
@@ -1580,6 +1582,12 @@ func (al *AgentLoop) runAgentLoop(
 	}
 	if opts.resultModelName != nil {
 		*opts.resultModelName = strings.TrimSpace(result.modelName)
+	}
+	if opts.resultActualModel != nil {
+		*opts.resultActualModel = strings.TrimSpace(result.actualModel)
+	}
+	if opts.resultAccountRef != nil {
+		*opts.resultAccountRef = strings.TrimSpace(result.accountRef)
 	}
 	if opts.resultUsage != nil {
 		*opts.resultUsage = cloneWorkflowAgentUsage(result.usage)

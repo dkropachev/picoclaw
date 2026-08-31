@@ -864,6 +864,8 @@ type sideQuestionExecutionOptions struct {
 	requireResponseContent bool
 	privateExecution       bool
 	resultModelName        *string
+	resultActualModel      *string
+	resultAccountRef       *string
 	resultUsage            *[]workflows.AgentUsage
 	usageObserver          workflows.AgentUsageObserver
 	callAdmission          workflows.AgentCallAdmission
@@ -1130,6 +1132,14 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 				response, candidate.Provider, model,
 			)
 		}
+		if callErr == nil {
+			writeSuccessfulModelProvenance(
+				execution.resultModelName,
+				execution.resultActualModel,
+				execution.resultAccountRef,
+				successfulModelProvenanceForCandidate(candidate, baseModelName, model),
+			)
+		}
 		return response, callErr
 	}
 
@@ -1249,16 +1259,6 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 					activeAccountRouter.RecordFallbackResult(routerSelection, fbResult, nil)
 				}
 			}
-			if execution.resultModelName != nil {
-				actual := selectedModelName
-				for _, candidate := range activeCandidates {
-					if candidate.StableKey() == fbResult.IdentityKey {
-						actual = resolvedCandidateModelName([]providers.FallbackCandidate{candidate}, actual)
-						break
-					}
-				}
-				*execution.resultModelName = strings.TrimSpace(actual)
-			}
 			return fbResult.Response, nil
 		}
 
@@ -1269,11 +1269,6 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 		resp, err := callProvider(ctx, candidate, llmModel, hookModelChanged, callMessages)
 		if usageErr := usage.Err(); usageErr != nil {
 			return resp, usageErr
-		}
-		if err == nil && execution.resultModelName != nil {
-			*execution.resultModelName = resolvedCandidateModelName(
-				[]providers.FallbackCandidate{candidate}, selectedModelName,
-			)
 		}
 		if activeAccountRouter != nil {
 			result := fallbackResultFromSingleCandidate(candidate, resp, err)

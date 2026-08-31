@@ -466,7 +466,8 @@ func TestLoadRepositoryReviewOutcomeUsesAssignmentCampaign(t *testing.T) {
 				Digest:            "sha256:" + strings.Repeat(string(rune('1'+index)), 64),
 				AcknowledgedFiles: []repoaudit.FileRef{code},
 				Observation: repoaudit.Observation{
-					Model: "review-a", Reviewer: assignmentPlan.FocusID,
+					Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+					Reviewer:   assignmentPlan.FocusID,
 					ScopeFiles: []repoaudit.FileRef{code}, Findings: findings,
 					RawDigest: "sha256:" + strings.Repeat("9", 64),
 				},

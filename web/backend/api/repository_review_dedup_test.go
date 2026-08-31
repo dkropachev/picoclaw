@@ -112,6 +112,7 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 	))
 	if findings.Code != http.StatusOK ||
 		!strings.Contains(findings.Body.String(), `"raw_source_count":1`) ||
+		!strings.Contains(findings.Body.String(), `"contributors":["review-model"]`) ||
 		!strings.Contains(findings.Body.String(), state.DeduplicatedFindings[0].ID) ||
 		strings.Contains(findings.Body.String(), state.RawFindings[1].ID) {
 		t.Fatalf("deduplicated findings status=%d body=%s", findings.Code, findings.Body.String())
@@ -144,6 +145,9 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 	))
 	if sources.Code != http.StatusOK ||
 		!strings.Contains(sources.Body.String(), state.RawFindings[0].ID) ||
+		!strings.Contains(sources.Body.String(), `"model":"provider/review-model"`) ||
+		!strings.Contains(sources.Body.String(), `"model_alias":"review-model"`) ||
+		!strings.Contains(sources.Body.String(), `"account":"api"`) ||
 		strings.Contains(sources.Body.String(), state.RawFindings[0].Evidence) {
 		t.Fatalf("raw sources status=%d body=%s", sources.Code, sources.Body.String())
 	}
@@ -171,6 +175,9 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 	))
 	if failedDetail.Code != http.StatusOK ||
 		!strings.Contains(failedDetail.Body.String(), state.RawFindings[2].Evidence) ||
+		!strings.Contains(failedDetail.Body.String(), `"model":"provider/review-model"`) ||
+		!strings.Contains(failedDetail.Body.String(), `"model_alias":"review-model"`) ||
+		!strings.Contains(failedDetail.Body.String(), `"account":"api"`) ||
 		!strings.Contains(failedDetail.Body.String(), `"retryable":true`) {
 		t.Fatalf("failed raw detail status=%d body=%s", failedDetail.Code, failedDetail.Body.String())
 	}
@@ -265,7 +272,8 @@ func seedRepositoryReviewDeduplicationAPIState(
 			Validation: finding.Validation, MatchHints: finding.MatchHints,
 			FixEffort: finding.FixEffort, ContextID: contextRecord.ID,
 			RunID: state.Runs[0].ID, AssignmentID: "assignment-api",
-			Model: "review-model", Reviewer: "review-model", State: stateValue,
+			Model: "provider/review-model", ModelAlias: "review-model", Account: "api",
+			Reviewer: "review-model", State: stateValue,
 			Disposition: repoaudit.RawFindingDispositionUndecided,
 			CreatedAt:   created, UpdatedAt: created,
 		}

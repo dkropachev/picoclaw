@@ -246,9 +246,28 @@ const finding: RepositoryReviewFinding = {
     checks: ["race trace"],
   },
   context_ids: ["context_1"],
-  models: ["reviewer"],
+  models: ["openai/gpt-5.4"],
   observation_count: 1,
-  observations: [],
+  observations: [
+    {
+      context_id: "context_1",
+      model: "openai/gpt-5.4",
+      model_alias: "reviewer",
+      account: "openai-work",
+      reviewer: "correctness",
+      severity: "high",
+      title: "Lost update",
+      line: 42,
+      message: "Concurrent writes overwrite state.",
+      evidence: "The write has no version fence.",
+      impact: "A stored finding can disappear.",
+      validation: {
+        status: "confirmed",
+        summary: "Traced both writers.",
+        checks: ["race trace"],
+      },
+    },
+  ],
   repository_finding_id: "rrf_1",
   repository_match_state: "known",
   run_finding_status: "associated_existing",
@@ -402,7 +421,10 @@ describe("routed repository review pages", () => {
           inventory_hash: "inventory",
           profile_hash: "profile",
           run_id: "run_1",
-          model: "reviewer",
+          model: "openai/gpt-5.4",
+          model_alias: "reviewer",
+          account: "openai-work",
+          reviewer: "correctness",
           files: [finding.file],
           created_at: "2026-08-26T00:00:00Z",
         },
@@ -1395,7 +1417,13 @@ describe("routed repository review pages", () => {
 
     expect(await screen.findByText(finding.commit_sha)).toBeVisible()
     expect(screen.getAllByText(finding.file.blob_sha).length).toBeGreaterThan(0)
-    expect(screen.getByText("Traced both writers.")).toBeVisible()
+    expect(screen.getAllByText("Traced both writers.").length).toBeGreaterThan(
+      0,
+    )
+    expect(screen.getByText("alias reviewer")).toBeVisible()
+    expect(screen.getByText("account openai-work")).toBeVisible()
+    expect(screen.getByText("Model alias: reviewer")).toBeVisible()
+    expect(screen.getByText("Account: openai-work")).toBeVisible()
     expect(
       screen.queryByRole("button", { name: /Mark posted/i }),
     ).not.toBeInTheDocument()

@@ -43,8 +43,12 @@ func persistLegacyRecordFinding(
 	if rawFindingIndexByID(state.RawFindings, rawID) >= 0 {
 		return "", ErrConflict
 	}
+	reviewerModel := observation.ModelAlias
+	if reviewerModel == "" {
+		reviewerModel = observation.Model
+	}
 	snapshot := RepositoryReviewDeduplicationSnapshot{
-		ReviewerModel: observation.Model, DeduplicationModel: observation.Model,
+		ReviewerModel: reviewerModel, DeduplicationModel: reviewerModel,
 		SimilarityThreshold: DeduplicationDefaultThreshold, CandidateLimit: 0,
 	}
 	if state.CurrentCampaign != nil && state.CurrentCampaign.ID == plan.CampaignID &&
@@ -66,8 +70,9 @@ func persistLegacyRecordFinding(
 		MatchHints: candidate.MatchHints, FixEffort: candidate.FixEffort,
 		ContextID: contextRecord.ID, RunID: runID,
 		AssignmentID: fmt.Sprintf("record-%03d-%03d", observationIndex, findingIndex),
-		Model:        observation.Model, Reviewer: observation.Reviewer,
-		State: RawFindingDeduplicationCompleted, Disposition: RawFindingDispositionNew,
+		Model:        observation.Model, ModelAlias: observation.ModelAlias, Account: observation.Account,
+		Reviewer: observation.Reviewer,
+		State:    RawFindingDeduplicationCompleted, Disposition: RawFindingDispositionNew,
 		CreatedAt: completedAt, UpdatedAt: completedAt,
 	}
 	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(raw)

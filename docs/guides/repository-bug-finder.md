@@ -91,6 +91,9 @@ checkpoints while the review remains active.
 The Findings page shows compact finding summaries. Open a finding for its complete
 evidence, validation, model observations, commit and primary blob provenance,
 opaque contexts, and every context path/blob/size reference. Each occurrence
+keeps each raw source diagnosis separate and attributes new diagnoses to the
+successful concrete model, configured model alias, and concrete routed account;
+older records leave unavailable alias/account fields unreported. Each occurrence
 shows **Run finding status** as Pending, Processing, Failed, Created repository
 finding, Added to existing repository finding, or Needs review. Associated
 occurrences link directly to their canonical repository finding. Failed status

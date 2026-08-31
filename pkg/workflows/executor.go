@@ -2415,6 +2415,8 @@ func (e *Executor) runStepTarget(
 			AssignmentTimeoutSeconds: int(nativeInt64Any(
 				with, "assignment_timeout_seconds", "assignmentTimeoutSeconds",
 			)),
+			CaptureFindingSourceProvenance: strings.TrimSpace(execCtx.WorkflowRef) ==
+				RepositoryBugFinderWorkflowRef && step.ID == "review" && scopeContent == "frozen_git",
 			CallAdmission: callAdmission,
 		})
 		if frozenSession != nil && outputs != nil {
@@ -2513,17 +2515,14 @@ func repositoryReviewManagedAssignmentCallbacks(
 		if err != nil {
 			return err
 		}
-		model := strings.TrimSpace(event.Model)
-		if model == "" {
-			model = strings.TrimSpace(event.ReviewerModel)
-		}
-		if model == "" {
-			model = "default"
-		}
-		observation, err := nativeRepositoryReviewObservation(
+		observation, err := nativeRepositoryReviewObservationWithProvenance(
 			structured,
 			event.Scope,
-			model,
+			nativeRepositoryReviewProvenance{
+				Model:      strings.TrimSpace(event.ConcreteModel),
+				ModelAlias: strings.TrimSpace(event.ModelAlias),
+				Account:    strings.TrimSpace(event.Account),
+			},
 			strings.TrimSpace(event.FocusID),
 			"",
 		)

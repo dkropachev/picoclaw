@@ -477,6 +477,10 @@ func deduplicatedFindingProjection(
 	legacyProjections []Finding,
 ) Finding {
 	candidate := rawFindingCandidate(raw)
+	contributorModel := raw.ModelAlias
+	if contributorModel == "" {
+		contributorModel = raw.Model
+	}
 	projection := Finding{
 		ID: finding.ID, CampaignID: finding.CampaignID,
 		Fingerprint: findingFingerprint(finding.File, candidate),
@@ -485,10 +489,10 @@ func deduplicatedFindingProjection(
 		Title: finding.Title, Symbol: finding.Symbol, Message: finding.Message,
 		Evidence: finding.Evidence, Impact: finding.Impact, Validation: finding.Validation,
 		MatchHints: finding.MatchHints, FixEffort: finding.FixEffort,
-		ContextIDs: []string{raw.ContextID}, Models: []string{raw.Model},
+		ContextIDs: []string{raw.ContextID}, Models: []string{contributorModel},
 		ObservationCount: 1,
 		Observations: []FindingObservation{findingObservationFrom(
-			candidate, raw.ContextID, raw.Model, raw.Reviewer,
+			candidate, raw.ContextID, raw.Model, raw.ModelAlias, raw.Account, raw.Reviewer,
 		)},
 		Status: finding.Status, TargetBranch: finding.TargetBranch,
 		AdvertisedDefaultBranch: finding.AdvertisedDefaultBranch,

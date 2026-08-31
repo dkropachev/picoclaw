@@ -284,21 +284,26 @@ func DecodeRepositoryReviewManagedEvidence(
 		if reviewerIdentity == "" {
 			reviewerIdentity = strings.TrimSpace(nativeAnyString(modelMeta["selected"]))
 		}
-		model := strings.TrimSpace(nativeAnyString(modelMeta["selected"]))
-		if model == "" {
-			model = strings.TrimSpace(nativeAnyString(modelMeta["default"]))
+		allowLegacyProvenance := len(options) == 1 && options[0].AllowLegacyCoreFindings
+		provenance, provenanceErr := nativeRepositoryReviewManagedChildProvenance(
+			child, allowLegacyProvenance,
+		)
+		if provenanceErr != nil {
+			return RepositoryReviewManagedEvidence{}, fmt.Errorf(
+				"managed child %d: %w", index, provenanceErr,
+			)
 		}
 		reviewer := strings.TrimSpace(nativeAnyString(child["label"]))
 		if strings.Contains(strings.ToLower(reviewer), "default fallback chain") {
 			reviewerIdentity = "default"
 		}
 		raw := strings.TrimSpace(nativeAnyString(child["text"]))
-		observation, parseErr := nativeRepositoryReviewObservation(
-			structured, child["scope"], model, reviewer, raw,
+		observation, parseErr := nativeRepositoryReviewObservationWithProvenance(
+			structured, child["scope"], provenance, reviewer, raw,
 		)
 		if parseErr != nil && len(options) == 1 && options[0].AllowLegacyCoreFindings {
-			observation, parseErr = nativeLegacyRepositoryReviewObservation(
-				structured, child["scope"], model, reviewer, raw,
+			observation, parseErr = nativeLegacyRepositoryReviewObservationWithProvenance(
+				structured, child["scope"], provenance, reviewer, raw,
 			)
 		}
 		if parseErr != nil {
@@ -401,6 +406,22 @@ func nativeLegacyRepositoryReviewObservation(
 	reviewer string,
 	raw string,
 ) (repoaudit.Observation, error) {
+	return nativeLegacyRepositoryReviewObservationWithProvenance(
+		structured,
+		scopeValue,
+		nativeRepositoryReviewProvenance{Model: model},
+		reviewer,
+		raw,
+	)
+}
+
+func nativeLegacyRepositoryReviewObservationWithProvenance(
+	structured map[string]any,
+	scopeValue any,
+	provenance nativeRepositoryReviewProvenance,
+	reviewer string,
+	raw string,
+) (repoaudit.Observation, error) {
 	if err := nativeValidateLegacyRepositoryReviewOutput(structured); err != nil {
 		return repoaudit.Observation{}, err
 	}
@@ -425,7 +446,8 @@ func nativeLegacyRepositoryReviewObservation(
 	}
 	digest := sha256.Sum256([]byte(raw))
 	return repoaudit.Observation{
-		Model: model, Reviewer: reviewer, ScopeFiles: scope, Findings: findings,
+		Model: provenance.Model, ModelAlias: provenance.ModelAlias, Account: provenance.Account,
+		Reviewer: reviewer, ScopeFiles: scope, Findings: findings,
 		Summary:   strings.TrimSpace(nativeAnyString(structured["summary"])),
 		RawDigest: "sha256:" + hex.EncodeToString(digest[:]),
 	}, nil

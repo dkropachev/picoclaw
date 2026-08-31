@@ -542,16 +542,18 @@ func removeRepositoryReviewModelDependency(models []string, model string) []stri
 }
 
 type workflowAgentRunOptions struct {
-	Context         context.Context
-	ModelName       string
-	ModelFallbacks  []string
-	AccountRef      string
-	ReasoningEffort string
-	NoTools         bool
-	ActualModelName *string
-	ActualUsage     *[]workflows.AgentUsage
-	UsageObserver   workflows.AgentUsageObserver
-	CallAdmission   workflows.AgentCallAdmission
+	Context          context.Context
+	ModelName        string
+	ModelFallbacks   []string
+	AccountRef       string
+	ReasoningEffort  string
+	NoTools          bool
+	ActualModelName  *string
+	ActualModel      *string
+	ActualAccountRef *string
+	ActualUsage      *[]workflows.AgentUsage
+	UsageObserver    workflows.AgentUsageObserver
+	CallAdmission    workflows.AgentCallAdmission
 }
 
 const maxWorkflowIsolatedSystemPromptBytes = 64 << 10
@@ -978,6 +980,8 @@ func (r *workflowAgentRunner) RunAgent(
 					rejectToolCalls:        true,
 					privateExecution:       privateExecution,
 					resultModelName:        runOptions.ActualModelName,
+					resultActualModel:      runOptions.ActualModel,
+					resultAccountRef:       runOptions.ActualAccountRef,
 					resultUsage:            runOptions.ActualUsage,
 					usageObserver:          usageObserver,
 					callAdmission:          callAdmission,
@@ -1021,6 +1025,8 @@ func (r *workflowAgentRunner) RunAgent(
 					rejectToolCalls:    true,
 					privateExecution:   privateExecution,
 					resultModelName:    runOptions.ActualModelName,
+					resultActualModel:  runOptions.ActualModel,
+					resultAccountRef:   runOptions.ActualAccountRef,
 					resultUsage:        runOptions.ActualUsage,
 					usageObserver:      usageObserver,
 					callAdmission:      callAdmission,
@@ -1048,6 +1054,8 @@ func (r *workflowAgentRunner) RunAgent(
 			DisableTools:            workflowAgentToolsDisabled(req.Tools) || runOptions.NoTools,
 			DisablePromptCache:      disablePromptCache,
 			resultModelName:         runOptions.ActualModelName,
+			resultActualModel:       runOptions.ActualModel,
+			resultAccountRef:        runOptions.ActualAccountRef,
 			resultUsage:             runOptions.ActualUsage,
 			usageObserver:           usageObserver,
 			callAdmission:           callAdmission,

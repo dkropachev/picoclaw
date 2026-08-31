@@ -550,9 +550,13 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 		expectedModels := make([]string, 0, len(evidence.Observations))
 		modelSeen := make(map[string]struct{}, len(evidence.Observations))
 		for _, observation := range evidence.Observations {
-			if _, exists := modelSeen[observation.Model]; !exists {
-				modelSeen[observation.Model] = struct{}{}
-				expectedModels = append(expectedModels, observation.Model)
+			contributorModel := observation.Model
+			if observation.ModelAlias != "" {
+				contributorModel = observation.ModelAlias
+			}
+			if _, exists := modelSeen[contributorModel]; !exists {
+				modelSeen[contributorModel] = struct{}{}
+				expectedModels = append(expectedModels, contributorModel)
 			}
 		}
 		runValid := ledgerRun.UnsupportedCount == len(unsupportedSeen) &&
@@ -1191,14 +1195,19 @@ func repositoryReviewLegacyFindingProjectionValid(finding repoaudit.Finding) boo
 	observationContexts := make(map[string]struct{}, len(finding.Observations))
 	modelSet := make(map[string]struct{})
 	for _, observation := range finding.Observations {
-		if _, exists := contextSet[observation.ContextID]; !exists || observation.Model == "" {
+		if _, exists := contextSet[observation.ContextID]; !exists || observation.Model == "" ||
+			(observation.ModelAlias == "") != (observation.Account == "") {
 			return false
 		}
 		if _, duplicate := observationContexts[observation.ContextID]; duplicate {
 			return false
 		}
 		observationContexts[observation.ContextID] = struct{}{}
-		modelSet[observation.Model] = struct{}{}
+		contributorModel := observation.Model
+		if observation.ModelAlias != "" {
+			contributorModel = observation.ModelAlias
+		}
+		modelSet[contributorModel] = struct{}{}
 	}
 	if len(observationContexts) != len(contextSet) {
 		return false
@@ -1247,7 +1256,10 @@ func repositoryReviewLegacyContextHasEvidence(
 		observationFiles, canonicalErr := repoaudit.CanonicalRepositoryReviewCampaignScope(
 			observation.ScopeFiles,
 		)
-		if observation.Model == contextRecord.Model && observation.Reviewer == contextRecord.Reviewer &&
+		if observation.Model == contextRecord.Model &&
+			observation.ModelAlias == contextRecord.ModelAlias &&
+			observation.Account == contextRecord.Account &&
+			observation.Reviewer == contextRecord.Reviewer &&
 			observation.RawDigest == contextRecord.RawDigest &&
 			canonicalErr == nil && reflect.DeepEqual(observationFiles, contextFiles) {
 			return true
@@ -1269,7 +1281,10 @@ func repositoryReviewLegacyFindingEvidence(
 		observationFiles, canonicalErr := repoaudit.CanonicalRepositoryReviewCampaignScope(
 			observation.ScopeFiles,
 		)
-		if observation.Model != contextRecord.Model || observation.Reviewer != contextRecord.Reviewer ||
+		if observation.Model != contextRecord.Model ||
+			observation.ModelAlias != contextRecord.ModelAlias ||
+			observation.Account != contextRecord.Account ||
+			observation.Reviewer != contextRecord.Reviewer ||
 			observation.RawDigest != contextRecord.RawDigest ||
 			canonicalErr != nil || !reflect.DeepEqual(observationFiles, contextFiles) {
 			continue
@@ -1282,6 +1297,8 @@ func repositoryReviewLegacyFindingEvidence(
 			for _, occurrence := range finding.Observations {
 				if occurrence.ContextID == contextRecord.ID &&
 					occurrence.Model == contextRecord.Model &&
+					occurrence.ModelAlias == contextRecord.ModelAlias &&
+					occurrence.Account == contextRecord.Account &&
 					occurrence.Reviewer == contextRecord.Reviewer &&
 					repositoryReviewLegacyOccurrenceMatchesCandidate(occurrence, candidate) {
 					return candidate, true

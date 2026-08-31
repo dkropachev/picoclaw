@@ -238,9 +238,10 @@ func TestWorkflowManagedExplicitAssignmentsOverrideCartesianPlansAndCheckpoint(t
 				},
 			},
 		},
-		Scope:                    []any{scopeA, scopeB},
-		Output:                   workflowManagedTestOutputContract(),
-		AssignmentTimeoutSeconds: 60,
+		Scope:                          []any{scopeA, scopeB},
+		Output:                         workflowManagedTestOutputContract(),
+		AssignmentTimeoutSeconds:       60,
+		CaptureFindingSourceProvenance: true,
 	}
 
 	var mu sync.Mutex
@@ -285,6 +286,12 @@ func TestWorkflowManagedExplicitAssignmentsOverrideCartesianPlansAndCheckpoint(t
 			if admissionErr := options.CallAdmission(); admissionErr != nil {
 				return "", errors.Join(workflows.ErrAgentCallNotAdmitted, admissionErr)
 			}
+			if options.ActualModelName == nil || options.ActualModel == nil ||
+				options.ActualAccountRef == nil {
+				return "", errors.New("finding provenance capture is missing")
+			}
+			*options.ActualModel = "provider/" + *options.ActualModelName
+			*options.ActualAccountRef = "review-account"
 			mu.Lock()
 			messages = append(messages, message)
 			mu.Unlock()
@@ -328,6 +335,10 @@ func TestWorkflowManagedExplicitAssignmentsOverrideCartesianPlansAndCheckpoint(t
 		t.Fatalf("explicit dispatch projections = %#v", dispatches)
 	}
 	for _, checkpoint := range checkpoints {
+		if checkpoint.ConcreteModel != "provider/"+checkpoint.ModelAlias ||
+			checkpoint.Account != "review-account" {
+			t.Fatalf("checkpoint provenance = %#v", checkpoint)
+		}
 		if !strings.HasPrefix(checkpoint.OutputDigest, "sha256:") || len(checkpoint.OutputDigest) != 71 {
 			t.Fatalf("checkpoint digest = %q", checkpoint.OutputDigest)
 		}
@@ -1329,6 +1340,36 @@ func TestWorkflowManagedEnsembleReviewerUsesExactAliasWithoutInheritedFallbacks(
 
 func TestWorkflowManagedChildReportsActuallySuccessfulFallbackAlias(t *testing.T) {
 	results := workflowRunManagedChildren(
+		workflows.AgentRequest{
+			Output: workflowManagedTestOutputContract(), CaptureFindingSourceProvenance: true,
+		},
+		&AgentInstance{Model: "review-primary"},
+		nil,
+		workflowManagedExecutionOptions{maxParallelChildren: 1},
+		"scope_split",
+		[]workflowManagedChildPlan{{index: 1}},
+		func(_ string, _ bool, runOptions workflowAgentRunOptions) (string, error) {
+			if runOptions.ActualModelName == nil || runOptions.ActualModel == nil ||
+				runOptions.ActualAccountRef == nil {
+				t.Fatal("managed child did not request complete successful model provenance")
+			}
+			*runOptions.ActualModelName = "review-fallback"
+			*runOptions.ActualModel = "claude-review-concrete"
+			*runOptions.ActualAccountRef = "review-account-b"
+			return `{"summary":"reviewed","findings":[]}`, nil
+		},
+	)
+	if len(results) != 1 || results[0].err != nil || results[0].choice.modelName != "review-fallback" ||
+		results[0].choice.modelMeta["selected"] != "review-fallback" ||
+		results[0].choice.modelMeta["actual"] != "claude-review-concrete" ||
+		results[0].choice.modelMeta["account"] != "review-account-b" ||
+		results[0].choice.modelMeta["requested"] != "review-primary" {
+		t.Fatalf("actual model provenance=%#v", results)
+	}
+}
+
+func TestWorkflowManagedChildKeepsFindingSourceProvenancePrivateByDefault(t *testing.T) {
+	results := workflowRunManagedChildren(
 		workflows.AgentRequest{Output: workflowManagedTestOutputContract()},
 		&AgentInstance{Model: "review-primary"},
 		nil,
@@ -1336,17 +1377,28 @@ func TestWorkflowManagedChildReportsActuallySuccessfulFallbackAlias(t *testing.T
 		"scope_split",
 		[]workflowManagedChildPlan{{index: 1}},
 		func(_ string, _ bool, runOptions workflowAgentRunOptions) (string, error) {
+			if runOptions.ActualModel != nil || runOptions.ActualAccountRef != nil {
+				t.Fatal("generic managed child requested private finding provenance")
+			}
 			if runOptions.ActualModelName == nil {
-				t.Fatal("managed child did not request successful model provenance")
+				t.Fatal("generic managed child did not request fallback alias provenance")
 			}
 			*runOptions.ActualModelName = "review-fallback"
 			return `{"summary":"reviewed","findings":[]}`, nil
 		},
 	)
-	if len(results) != 1 || results[0].err != nil || results[0].choice.modelName != "review-fallback" ||
-		results[0].choice.modelMeta["selected"] != "review-fallback" ||
-		results[0].choice.modelMeta["requested"] != "review-primary" {
-		t.Fatalf("actual model provenance=%#v", results)
+	if len(results) != 1 || results[0].err != nil {
+		t.Fatalf("generic managed child results=%#v", results)
+	}
+	model := workflowManagedChildOutput(results[0])["model"].(map[string]any)
+	if _, exposed := model["actual"]; exposed {
+		t.Fatalf("generic managed child exposed concrete model: %#v", model)
+	}
+	if _, exposed := model["account"]; exposed {
+		t.Fatalf("generic managed child exposed account: %#v", model)
+	}
+	if model["selected"] != "review-fallback" || model["requested"] != "review-primary" {
+		t.Fatalf("generic managed child lost fallback alias: %#v", model)
 	}
 }
 

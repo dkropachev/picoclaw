@@ -380,6 +380,26 @@ func TestWorkflowManagedAssignmentJSONAndScalarHelperCoverage(t *testing.T) {
 	if _, err := workflowManagedAssignmentCheckpointDigest(dispatch, make(chan int)); err == nil {
 		t.Fatal("non-JSON checkpoint output produced a digest")
 	}
+	provenance := workflows.ManagedAssignmentCheckpointEvent{
+		ManagedAssignmentDispatchEvent: dispatch,
+		ConcreteModel:                  "provider/model", ModelAlias: "review-a", Account: "account-a",
+		Output: original,
+	}
+	withProvenance, err := workflowManagedAssignmentCheckpointDigestWithProvenance(
+		provenance.ManagedAssignmentDispatchEvent,
+		provenance.ConcreteModel, provenance.ModelAlias, provenance.Account, provenance.Output,
+	)
+	if err != nil || withProvenance == first {
+		t.Fatalf("checkpoint provenance digest = %q, %v", withProvenance, err)
+	}
+	provenance.Account = "account-b"
+	changedProvenance, err := workflowManagedAssignmentCheckpointDigestWithProvenance(
+		provenance.ManagedAssignmentDispatchEvent,
+		provenance.ConcreteModel, provenance.ModelAlias, provenance.Account, provenance.Output,
+	)
+	if err != nil || changedProvenance == withProvenance {
+		t.Fatalf("checkpoint account was not bound: first=%q changed=%q err=%v", withProvenance, changedProvenance, err)
+	}
 
 	allowedScalars := []any{
 		nil, true, "text", int(1), int8(1), int16(1), int32(1), int64(1),

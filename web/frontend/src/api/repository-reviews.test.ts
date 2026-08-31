@@ -859,7 +859,14 @@ describe("repository review API", () => {
       .mockResolvedValueOnce(
         jsonResponse({
           automation,
-          sources: [{ id: "source/slash" }],
+          sources: [
+            {
+              id: "source/slash",
+              model: "provider/review",
+              model_alias: "review",
+              account: "review-account",
+            },
+          ],
           offset: 25,
           total: 26,
         }),
@@ -902,7 +909,14 @@ describe("repository review API", () => {
         { offset: 25, limit: 25 },
       ),
     ).resolves.toMatchObject({
-      sources: [{ id: "source/slash" }],
+      sources: [
+        {
+          id: "source/slash",
+          model: "provider/review",
+          model_alias: "review",
+          account: "review-account",
+        },
+      ],
       offset: 25,
       total: 26,
     })

@@ -127,32 +127,36 @@ func TestStoreMergesCorroboratingModelParaphrasesInSameBlobContext(t *testing.T)
 	result, err := store.Record(context.Background(), RecordRequest{
 		Plan: plan, RunID: "ensemble-run",
 		Observations: []Observation{
-			{Model: "review-a", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{
-				{
-					Severity:   "high",
-					Title:      "Concurrent writers lose updates",
-					Symbol:     "Save",
-					File:       file.Path,
-					Line:       &line,
-					Message:    "A stale writer overwrites a newer value.",
-					Evidence:   "Both writers save without a version fence.",
-					Impact:     "A successful update disappears.",
-					Validation: validation,
-				},
-			}},
-			{Model: "review-b", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{
-				{
-					Severity:   "high",
-					Title:      "Concurrent write loses an update",
-					Symbol:     "Save",
-					File:       file.Path,
-					Line:       &nearby,
-					Message:    "The stale writer can overwrite the newer stored value.",
-					Evidence:   "The two writers save with no version fence.",
-					Impact:     "A completed update is lost.",
-					Validation: validation,
-				},
-			}},
+			{
+				Model: "openai/gpt-5.4", ModelAlias: "review-a", Account: "openai-work",
+				ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{
+					{
+						Severity:   "high",
+						Title:      "Concurrent writers lose updates",
+						Symbol:     "Save",
+						File:       file.Path,
+						Line:       &line,
+						Message:    "A stale writer overwrites a newer value.",
+						Evidence:   "Both writers save without a version fence.",
+						Impact:     "A successful update disappears.",
+						Validation: validation,
+					},
+				}},
+			{
+				Model: "anthropic/claude-4.6", ModelAlias: "review-b", Account: "anthropic-work",
+				ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{
+					{
+						Severity:   "high",
+						Title:      "Concurrent write loses an update",
+						Symbol:     "Save",
+						File:       file.Path,
+						Line:       &nearby,
+						Message:    "The stale writer can overwrite the newer stored value.",
+						Evidence:   "The two writers save with no version fence.",
+						Impact:     "A completed update is lost.",
+						Validation: validation,
+					},
+				}},
 		},
 	})
 	if err != nil {
@@ -162,10 +166,21 @@ func TestStoreMergesCorroboratingModelParaphrasesInSameBlobContext(t *testing.T)
 		len(result.State.DeduplicatedFindings) != 2 {
 		t.Fatalf("candidate-limit-zero compatibility findings=%#v", result.State.Findings)
 	}
-	if result.State.Findings[0].Models[0] != "review-a" ||
-		result.State.Findings[1].Models[0] != "review-b" ||
-		result.State.Findings[0].Evidence == result.State.Findings[1].Evidence {
+	first, second := result.State.Findings[0], result.State.Findings[1]
+	if !reflect.DeepEqual(first.Models, []string{"review-a"}) ||
+		!reflect.DeepEqual(second.Models, []string{"review-b"}) ||
+		first.Evidence == second.Evidence ||
+		len(first.Observations) != 1 || len(second.Observations) != 1 {
 		t.Fatalf("independent raw diagnoses were not retained: %#v", result.State.Findings)
+	}
+	firstObservation, secondObservation := first.Observations[0], second.Observations[0]
+	if firstObservation.Model != "openai/gpt-5.4" ||
+		firstObservation.ModelAlias != "review-a" ||
+		firstObservation.Account != "openai-work" ||
+		secondObservation.Model != "anthropic/claude-4.6" ||
+		secondObservation.ModelAlias != "review-b" ||
+		secondObservation.Account != "anthropic-work" {
+		t.Fatalf("raw finding provenance was not retained: %#v", result.State.Findings)
 	}
 	if result.State.Contexts[0].ProfileHash != plan.ProfileHash {
 		t.Fatalf("context profile=%q want=%q", result.State.Contexts[0].ProfileHash, plan.ProfileHash)
