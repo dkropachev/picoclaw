@@ -103,6 +103,10 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 	t.Cleanup(handler.Shutdown)
 	state := seedRepositoryReviewAPIState(t, workspace)
 	campaignID := "rrc_api_dedup"
+	state.HistoricalDeduplication = repoaudit.HistoricalDeduplicationReplay{
+		Required: true, Status: repoaudit.HistoricalDeduplicationFailed,
+		Attempts: 2, Error: "historical replay failed", UpdatedAt: time.Now().UTC(),
+	}
 	state = seedRepositoryReviewDeduplicationAPIState(t, workspace, state, campaignID)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 	base := "/api/repository-reviews/automations/" + automation.ID
@@ -238,10 +242,18 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 	mux.ServeHTTP(canonicalDetail, httptest.NewRequest(
 		http.MethodGet, base+"/raw-findings/"+state.RawFindings[0].ID, nil,
 	))
+	var canonicalPayload struct {
+		HistoricalDeduplication repoaudit.HistoricalDeduplicationReplay `json:"historical_deduplication"`
+	}
+	if err := json.Unmarshal(canonicalDetail.Body.Bytes(), &canonicalPayload); err != nil {
+		t.Fatal(err)
+	}
 	if canonicalDetail.Code != http.StatusOK ||
 		!strings.Contains(canonicalDetail.Body.String(), state.RawFindings[0].Evidence) ||
 		!strings.Contains(canonicalDetail.Body.String(), `"context"`) ||
-		!strings.Contains(canonicalDetail.Body.String(), `"finding"`) {
+		!strings.Contains(canonicalDetail.Body.String(), `"finding"`) ||
+		canonicalPayload.HistoricalDeduplication.Status != repoaudit.HistoricalDeduplicationFailed ||
+		canonicalPayload.HistoricalDeduplication.Error != "historical replay failed" {
 		t.Fatalf("canonical raw detail status=%d body=%s", canonicalDetail.Code, canonicalDetail.Body.String())
 	}
 	aliasDetail := httptest.NewRecorder()

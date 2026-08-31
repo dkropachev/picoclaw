@@ -455,9 +455,10 @@ func (h *Handler) handleGetRepositoryReviewRawSource(w http.ResponseWriter, r *h
 		return
 	}
 	response := map[string]any{
-		"automation": projectRepositoryReviewAutomation(ledger.Automation),
-		"repository": repoaudit.Summarize(ledger.State),
-		"source":     projectRepositoryReviewRawFindingDetail(raw),
+		"automation":               projectRepositoryReviewAutomation(ledger.Automation),
+		"repository":               repoaudit.Summarize(ledger.State),
+		"source":                   projectRepositoryReviewRawFindingDetail(raw),
+		"historical_deduplication": ledger.State.HistoricalDeduplication,
 	}
 	if contextRecord, found := repositoryReviewContextByID(ledger.State, raw.ContextID); found {
 		response["context"] = contextRecord

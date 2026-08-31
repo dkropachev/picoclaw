@@ -1361,6 +1361,40 @@ describe("routed repository review pages", () => {
     ).toBeVisible()
   })
 
+  it("stops polling a pending raw source after historical replay fails", async () => {
+    vi.mocked(getRepositoryReviewRawSource).mockResolvedValue({
+      automation,
+      repository: repositorySummary,
+      source: {
+        ...rawFinding,
+        deduplication_state: "pending",
+        disposition: "undecided",
+        deduplicated_finding_id: undefined,
+      },
+      historical_deduplication: {
+        required: true,
+        status: "failed",
+        error: "Campaign recovery failed.",
+      },
+    })
+    const view = renderPage(
+      <RepositoryReviewRawFindingPage
+        automationID={automation.id}
+        sourceID={rawFinding.id}
+        onBack={vi.fn()}
+        onCanonicalSource={vi.fn()}
+        onOpenFinding={vi.fn()}
+      />,
+    )
+
+    await waitFor(() =>
+      expect(getRepositoryReviewRawSource).toHaveBeenCalledTimes(1),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 2_200))
+    expect(getRepositoryReviewRawSource).toHaveBeenCalledTimes(1)
+    view.unmount()
+  })
+
   it("opens an associated repository finding from a single run selection", async () => {
     const onOpenRepositoryFinding = vi.fn()
     const user = userEvent.setup()

@@ -35,6 +35,9 @@ export function RepositoryReviewRawFindingPage({
       getRepositoryReviewRawSource(automationID, sourceID, signal),
     retry: false,
     refetchInterval: (current) => {
+      if (current.state.data?.historical_deduplication?.status === "failed") {
+        return false
+      }
       const state = current.state.data?.source.deduplication_state
       return state === "pending" || state === "running" ? 2_000 : false
     },
