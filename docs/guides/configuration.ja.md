@@ -55,7 +55,7 @@ PicoClaw は設定されたワークスペース（デフォルト: `~/.picoclaw
 ~/.picoclaw/workspace/
 ├── sessions/          # 会話セッションと履歴
 ├── memory/           # 長期記憶 (MEMORY.md)
-├── state/            # 永続化状態 (最後のチャネルなど)
+├── state/            # ランタイム SQLite 状態 (runtime.db、直近のチャネル/チャット)
 ├── cron/             # スケジュールジョブデータベース
 ├── skills/           # カスタムスキル
 ├── AGENT.md          # Agent 動作ガイド

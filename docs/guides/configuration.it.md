@@ -88,7 +88,7 @@ PicoClaw salva i dati nel workspace configurato (predefinito: `~/.picoclaw/works
 ~/.picoclaw/workspace/
 ├── sessions/          # Sessioni di conversazione e cronologia
 ├── memory/           # Memoria a lungo termine (MEMORY.md)
-├── state/            # Stato persistente (ultimo canale, ecc.)
+├── state/            # Stato SQLite di runtime (runtime.db, ultimo canale/chat)
 ├── cron/             # Database dei job pianificati
 ├── skills/           # Skill personalizzate
 ├── AGENT.md          # Guida al comportamento dell'agent

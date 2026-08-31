@@ -55,7 +55,7 @@ PicoClaw lưu trữ dữ liệu trong workspace đã cấu hình (mặc định:
 ~/.picoclaw/workspace/
 ├── sessions/          # Phiên hội thoại và lịch sử
 ├── memory/           # Bộ nhớ dài hạn (MEMORY.md)
-├── state/            # Trạng thái bền vững (kênh cuối, v.v.)
+├── state/            # Trạng thái SQLite lúc chạy (runtime.db, kênh/cuộc trò chuyện gần nhất)
 ├── cron/             # Cơ sở dữ liệu tác vụ lên lịch
 ├── skills/           # Skill tùy chỉnh
 ├── AGENT.md          # Hướng dẫn hành vi agent
