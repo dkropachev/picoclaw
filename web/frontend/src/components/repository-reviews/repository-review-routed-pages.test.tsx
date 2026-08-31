@@ -1425,9 +1425,9 @@ describe("routed repository review pages", () => {
 
     await waitFor(
       () =>
-        expect(getRepositoryReviewRawSource.mock.calls.length).toBeGreaterThan(
-          1,
-        ),
+        expect(
+          vi.mocked(getRepositoryReviewRawSource).mock.calls.length,
+        ).toBeGreaterThan(1),
       { timeout: 3_000 },
     )
     view.unmount()
