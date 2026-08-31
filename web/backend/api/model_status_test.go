@@ -441,6 +441,66 @@ func TestProbeLocalModelAvailability_DeduplicatesInflightProbe(t *testing.T) {
 	}
 }
 
+func TestModelProbeCacheRechecksAfterEnteringSingleflight(t *testing.T) {
+	resetModelProbeHooks(t)
+
+	now := time.Unix(1700000350, 0)
+	state := newModelProbeCacheState()
+	const cacheKey = "model"
+	nowCalls := 0
+	modelProbeNowFunc = func() time.Time {
+		nowCalls++
+		if nowCalls == 2 {
+			state.setCachedResult(cacheKey, true, now)
+		}
+		return now
+	}
+	probeCalled := false
+
+	result := state.probe(cacheKey, func() bool {
+		probeCalled = true
+		return false
+	})
+
+	if !result || probeCalled || nowCalls != 2 {
+		t.Fatalf(
+			"probe result=%v called=%v clock calls=%d, want true/false/2",
+			result,
+			probeCalled,
+			nowCalls,
+		)
+	}
+}
+
+func TestModelProbeCacheSizeGCDeterministicallyEvictsOldestEntries(t *testing.T) {
+	now := time.Unix(1700000400, 0)
+	state := newModelProbeCacheState()
+	for index := range modelProbeCacheMaxEntries + 1 {
+		key := fmt.Sprintf("model-%04d", index)
+		state.cache[key] = &modelProbeCacheEntry{
+			hasResult: true,
+			updatedAt: now.Add(time.Duration(index) * time.Second),
+		}
+	}
+
+	state.gc(now, false)
+
+	if len(state.cache) != modelProbeCacheTrimToEntries {
+		t.Fatalf(
+			"cache entries after size GC = %d, want %d",
+			len(state.cache),
+			modelProbeCacheTrimToEntries,
+		)
+	}
+	if _, exists := state.cache["model-0000"]; exists {
+		t.Fatal("size GC retained the oldest cache entry")
+	}
+	newestKey := fmt.Sprintf("model-%04d", modelProbeCacheMaxEntries)
+	if _, exists := state.cache[newestKey]; !exists {
+		t.Fatal("size GC removed the newest cache entry")
+	}
+}
+
 func TestOllamaModelMatches_WithTagRequiresExactTag(t *testing.T) {
 	if ollamaModelMatches("llama3:8b", "llama3:7b") {
 		t.Fatal("ollamaModelMatches() = true, want false for mismatched tags")

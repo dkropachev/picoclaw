@@ -2859,7 +2859,10 @@ describe("routed repository review pages", () => {
           relation: "uncertain",
           confidence: 0.87,
           matching_anchors: ["version", "atomic rename"],
-          conflicting_anchors: ["writer ownership"],
+          conflicting_anchors: [
+            "severity differs: high vs medium",
+            "writer ownership",
+          ],
           explanation:
             "Both diagnoses lose a committed update, but writer ownership differs.",
           created_at: "2026-08-27T00:01:00Z",
@@ -2923,9 +2926,15 @@ describe("routed repository review pages", () => {
     expect(
       screen.getByText(/Matching anchors: version, atomic rename/u),
     ).toBeVisible()
-    expect(
-      screen.getByText(/Conflicting anchors: writer ownership/u),
-    ).toBeVisible()
+    const conflictingAnchors = screen.getByText(
+      /Conflicting anchors: severity differs: high vs medium, writer ownership/u,
+    )
+    expect(conflictingAnchors).toBeVisible()
+    expect(conflictingAnchors).toHaveClass(
+      "text-destructive",
+      "mt-1",
+      "break-words",
+    )
 
     const duplicateHeading = screen.getByRole("heading", {
       name: "Duplicate review",

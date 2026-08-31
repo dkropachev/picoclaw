@@ -428,12 +428,27 @@ type RepositoryMappingModelSnapshot struct {
 	Account        string `json:"account,omitempty"`
 }
 
+const (
+	RepositoryMappingConflictFieldSeverity          = "severity"
+	RepositoryMappingConflictFieldTitleWording      = "title_wording"
+	RepositoryMappingConflictFieldFixEffort         = "fix_effort"
+	RepositoryMappingConflictFieldLifecycleStatus   = "lifecycle_status"
+	RepositoryMappingConflictFieldCausalIdentity    = "causal_identity"
+	RepositoryMappingConflictFieldLocation          = "location"
+	RepositoryMappingConflictFieldSymbol            = "symbol"
+	RepositoryMappingConflictFieldEvidence          = "evidence"
+	RepositoryMappingConflictFieldImpact            = "impact"
+	RepositoryMappingConflictFieldValidationContent = "validation_content"
+	RepositoryMappingConflictFieldOther             = "other"
+)
+
 type RepositoryMappingAdjudication struct {
 	Decision           string   `json:"decision"`
 	CandidateID        string   `json:"candidate_id,omitempty"`
 	Confidence         float64  `json:"confidence"`
 	MatchingAnchors    []string `json:"matching_anchors,omitempty"`
 	ConflictingAnchors []string `json:"conflicting_anchors,omitempty"`
+	ConflictFields     []string `json:"conflict_fields,omitempty"`
 	Explanation        string   `json:"explanation,omitempty"`
 }
 

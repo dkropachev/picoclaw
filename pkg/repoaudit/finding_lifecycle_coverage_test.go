@@ -490,6 +490,125 @@ func TestRepositoryLifecyclePureHelperCoverage(t *testing.T) {
 	}
 }
 
+func TestRepositoryMappingConflictFieldPersistenceHelperCoverage(t *testing.T) {
+	legacy := RepositoryMappingAdjudication{
+		Decision: "same", CandidateID: "candidate", Confidence: .95,
+		ConflictingAnchors: []string{"severity differs"},
+	}
+	if legacy.ConflictFields != nil {
+		t.Fatal("legacy adjudication unexpectedly has conflict classifications")
+	}
+	if err := ValidateRepositoryMappingAdjudication(legacy, []string{"candidate"}); err != nil {
+		t.Fatalf("matcher rejected legacy conflict representation: %v", err)
+	}
+	if err := validateMappingAdjudication(legacy); err != nil {
+		t.Fatalf("ledger rejected legacy conflict representation: %v", err)
+	}
+	if normalized := normalizeMappingAdjudication(legacy); normalized.ConflictFields != nil {
+		t.Fatalf("legacy normalization synthesized classifications: %#v", normalized.ConflictFields)
+	}
+
+	for _, test := range []struct {
+		name   string
+		fields []string
+	}{
+		{name: "explicit misalignment", fields: []string{}},
+		{name: "unknown classification", fields: []string{"future_conflict_kind"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adjudication := legacy
+			adjudication.ConflictFields = test.fields
+			if err := ValidateRepositoryMappingAdjudication(
+				adjudication,
+				[]string{"candidate"},
+			); err == nil {
+				t.Fatal("matcher accepted invalid conflict classifications")
+			}
+			if err := validateMappingAdjudication(adjudication); err == nil {
+				t.Fatal("ledger accepted invalid conflict classifications")
+			}
+		})
+	}
+
+	raw := RepositoryMappingAdjudication{
+		Decision: " SAME ", CandidateID: " candidate ", Confidence: .95,
+		ConflictingAnchors: []string{" severity differs ", " effort differs "},
+		ConflictFields:     []string{" SEVERITY ", " FIX_EFFORT "},
+	}
+	normalized := normalizeMappingAdjudication(raw)
+	if !slices.Equal(normalized.ConflictingAnchors, []string{"severity differs", "effort differs"}) ||
+		!slices.Equal(normalized.ConflictFields, []string{
+			RepositoryMappingConflictFieldSeverity,
+			RepositoryMappingConflictFieldFixEffort,
+		}) {
+		t.Fatalf("ordered conflict normalization = %#v", normalized)
+	}
+	equivalent := normalized
+	equivalent.ConflictingAnchors = append([]string(nil), normalized.ConflictingAnchors...)
+	equivalent.ConflictFields = append([]string(nil), normalized.ConflictFields...)
+	if !mappingAdjudicationsEqual(normalized, equivalent) {
+		t.Fatal("equal ordered conflict classifications were not equal")
+	}
+	reordered := equivalent
+	reordered.ConflictFields = []string{
+		RepositoryMappingConflictFieldFixEffort,
+		RepositoryMappingConflictFieldSeverity,
+	}
+	if mappingAdjudicationsEqual(normalized, reordered) {
+		t.Fatal("conflict classification order was ignored by adjudication equality")
+	}
+
+	nonBlocking := RepositoryMappingAdjudication{
+		Decision: "same", CandidateID: "candidate", Confidence: .95,
+		ConflictingAnchors: []string{"severity differs"},
+		ConflictFields:     []string{RepositoryMappingConflictFieldSeverity},
+	}
+	if repositoryMappingAdjudicationHasBlockingConflicts(nonBlocking) ||
+		!repositoryMappingAdjudicationAutoAssociates(nonBlocking) {
+		t.Fatal("valid non-blocking conflict did not permit auto-association")
+	}
+	completion := repositoryCompletionFromAdjudication("job", nonBlocking, nil, true)
+	if completion.RepositoryFindingID != "candidate" ||
+		completion.CreateMatchState != "" || len(completion.PossibleDuplicates) != 0 {
+		t.Fatalf("non-blocking completion = %#v", completion)
+	}
+
+	for _, test := range []struct {
+		name   string
+		fields []string
+	}{
+		{name: "legacy missing classifications", fields: nil},
+		{name: "misaligned classifications", fields: []string{}},
+		{name: "unknown classification", fields: []string{"future_conflict_kind"}},
+		{name: "closed fallback classification", fields: []string{RepositoryMappingConflictFieldOther}},
+	} {
+		t.Run("policy fails closed for "+test.name, func(t *testing.T) {
+			adjudication := nonBlocking
+			adjudication.ConflictFields = test.fields
+			if !repositoryMappingAdjudicationHasBlockingConflicts(adjudication) ||
+				repositoryMappingAdjudicationAutoAssociates(adjudication) {
+				t.Fatal("malformed or blocking classifications permitted auto-association")
+			}
+			completion := repositoryCompletionFromAdjudication("job", adjudication, nil, true)
+			if completion.RepositoryFindingID != "" ||
+				completion.CreateMatchState != RepositoryMatchProvisional ||
+				len(completion.PossibleDuplicates) != 1 ||
+				!slices.Equal(
+					completion.PossibleDuplicates[0].ConflictingAnchors,
+					adjudication.ConflictingAnchors,
+				) {
+				t.Fatalf("fail-closed completion = %#v", completion)
+			}
+			if err := mappingCompletionMatchesAdjudication(
+				RepositoryMappingJob{Adjudication: adjudication},
+				RepositoryMappingCompletion{RepositoryFindingID: "candidate"},
+			); err == nil {
+				t.Fatal("store invariant accepted fail-closed association")
+			}
+		})
+	}
+}
+
 //nolint:govet // Boundary probes intentionally reuse short-lived result names across sequential checks.
 func TestRepositoryLifecycleQueueMutationBoundaryCoverage(t *testing.T) {
 	store := NewStore(t.TempDir())
@@ -1234,6 +1353,101 @@ func TestMappingWorkerSavedAdjudicationAndUniverseRestartCoverage(t *testing.T) 
 		); err != nil ||
 			empty != (RepositoryMappingProcessResult{}) {
 			t.Fatalf("empty mapping pass=%#v err=%v", empty, err)
+		}
+	})
+
+	t.Run("saved nonblocking conflict association survives restart", func(t *testing.T) {
+		workspace := t.TempDir()
+		store := NewStore(workspace)
+		store.now = func() time.Time { return repositoryAuditTestNow }
+		base := recordMappingWorkerFinding(
+			t,
+			store,
+			"saved-nonblocking-base",
+			strings.Repeat("9", 40),
+			"old/wait.go",
+			"awaiter.signal",
+		)
+		if _, err := store.ProcessPendingMappingJobs(t.Context(), base.Repository, RepositoryMappingProcessOptions{
+			DefaultBranchVerified: func(context.Context, Finding) (bool, error) { return true, nil },
+		}); err != nil {
+			t.Fatal(err)
+		}
+		state, found, err := store.Get(base.Repository)
+		if err != nil || !found || len(state.RepositoryFindings) != 1 {
+			t.Fatalf("base state found=%v findings=%d err=%v", found, len(state.RepositoryFindings), err)
+		}
+		target := state.RepositoryFindings[0]
+		later := recordMappingWorkerFinding(
+			t,
+			store,
+			"saved-nonblocking-later",
+			strings.Repeat("a", 40),
+			"new/wait.go",
+			"predicate.resume",
+		)
+		occurrenceID := later.Findings[len(later.Findings)-1].ID
+		job := lifecycleJobForFinding(t, later, occurrenceID)
+		_, job, _, claimed, err := store.ClaimMappingJob(
+			later.Repository,
+			job.ID,
+			RepositoryMappingModelSnapshot{
+				ProfileID: "rrpf_saved_nonblocking", ProfileVersion: 1,
+				Model: "reviewer", Account: "account",
+			},
+		)
+		if err != nil || !claimed {
+			t.Fatalf("nonblocking claim=%v err=%v", claimed, err)
+		}
+		adjudication := RepositoryMappingAdjudication{
+			Decision: "same", CandidateID: target.ID, Confidence: .95,
+			ConflictingAnchors: []string{"severity differs"},
+			ConflictFields:     []string{RepositoryMappingConflictFieldSeverity},
+			Explanation:        "same defect with revised severity",
+		}
+		_, saved, err := store.SaveMappingAdjudication(later.Repository, job.ID, adjudication)
+		if err != nil || !slices.Equal(saved.Adjudication.ConflictFields, adjudication.ConflictFields) {
+			t.Fatalf("saved nonblocking adjudication=%#v err=%v", saved.Adjudication, err)
+		}
+
+		restarted := NewStore(workspace)
+		restarted.now = store.now
+		reconciliation, err := restarted.ReconcileJobs(context.Background())
+		if err != nil || reconciliation.MappingJobsReset != 1 {
+			t.Fatalf("nonblocking reconciliation=%#v err=%v", reconciliation, err)
+		}
+		adjudicatorCalled := false
+		result, err := restarted.ProcessPendingMappingJobs(
+			t.Context(),
+			later.Repository,
+			RepositoryMappingProcessOptions{
+				ModelSnapshot:         RepositoryMappingModelSnapshot{Model: "different"},
+				DefaultBranchVerified: func(context.Context, Finding) (bool, error) { return true, nil },
+				Adjudicate: func(context.Context, RepositoryMappingModelSnapshot, RepositoryMappingAIRequest) (RepositoryMappingAdjudication, error) {
+					adjudicatorCalled = true
+					return RepositoryMappingAdjudication{}, errors.New("must not rerun")
+				},
+			},
+		)
+		if err != nil || adjudicatorCalled || result.Completed != 1 || result.Associated != 1 ||
+			result.Created != 0 || result.Provisional != 0 {
+			t.Fatalf("nonblocking restart result=%#v called=%v err=%v", result, adjudicatorCalled, err)
+		}
+		completed, found, err := restarted.Get(later.Repository)
+		if err != nil || !found || len(completed.RepositoryFindings) != 1 {
+			t.Fatalf("completed state found=%v findings=%d err=%v", found, len(completed.RepositoryFindings), err)
+		}
+		occurrence := completed.Findings[findingIndexByID(completed.Findings, occurrenceID)]
+		completedJob := lifecycleJobForFinding(t, completed, occurrenceID)
+		if occurrence.RepositoryFindingID != target.ID ||
+			completedJob.State != RepositoryMappingCompleted ||
+			completedJob.RepositoryFindingID != target.ID ||
+			completedJob.Adjudication.Decision != adjudication.Decision ||
+			!slices.Equal(completedJob.Adjudication.ConflictingAnchors, adjudication.ConflictingAnchors) ||
+			!slices.Equal(completedJob.Adjudication.ConflictFields, adjudication.ConflictFields) ||
+			!slices.Contains(completed.RepositoryFindings[0].ReviewFindingIDs, occurrenceID) {
+			t.Fatalf("persisted nonblocking association occurrence=%#v job=%#v aggregate=%#v",
+				occurrence, completedJob, completed.RepositoryFindings[0])
 		}
 	})
 

@@ -1907,6 +1907,7 @@ func normalizeMappingAdjudication(value RepositoryMappingAdjudication) Repositor
 	value.Explanation = strings.TrimSpace(value.Explanation)
 	value.MatchingAnchors = normalizeFindingIdentityHints(value.MatchingAnchors)
 	value.ConflictingAnchors = normalizeFindingIdentityHints(value.ConflictingAnchors)
+	value.ConflictFields = normalizeRepositoryMappingConflictFields(value.ConflictFields)
 	return value
 }
 
@@ -1939,12 +1940,19 @@ func validateMappingAdjudication(value RepositoryMappingAdjudication) error {
 			seen[key] = struct{}{}
 		}
 	}
+	if err := validateRepositoryMappingConflictFields(
+		value.ConflictingAnchors,
+		value.ConflictFields,
+	); err != nil {
+		return err
+	}
 	return nil
 }
 
 func mappingAdjudicationEmpty(value RepositoryMappingAdjudication) bool {
 	return value.Decision == "" && value.CandidateID == "" && value.Confidence == 0 &&
 		len(value.MatchingAnchors) == 0 && len(value.ConflictingAnchors) == 0 &&
+		len(value.ConflictFields) == 0 &&
 		value.Explanation == ""
 }
 
@@ -1952,7 +1960,8 @@ func mappingAdjudicationsEqual(left, right RepositoryMappingAdjudication) bool {
 	return left.Decision == right.Decision && left.CandidateID == right.CandidateID &&
 		left.Confidence == right.Confidence && left.Explanation == right.Explanation &&
 		stringSlicesEqual(left.MatchingAnchors, right.MatchingAnchors) &&
-		stringSlicesEqual(left.ConflictingAnchors, right.ConflictingAnchors)
+		stringSlicesEqual(left.ConflictingAnchors, right.ConflictingAnchors) &&
+		stringSlicesEqual(left.ConflictFields, right.ConflictFields)
 }
 
 func normalizePossibleDuplicates(
@@ -1997,8 +2006,7 @@ func mappingCompletionMatchesAdjudication(
 	}
 	switch decision {
 	case "same":
-		eligible := job.Adjudication.Confidence >= 0.90 &&
-			len(job.Adjudication.ConflictingAnchors) == 0
+		eligible := repositoryMappingAdjudicationAutoAssociates(job.Adjudication)
 		if eligible {
 			if completion.RepositoryFindingID != job.Adjudication.CandidateID {
 				return errors.New("same adjudication target does not match the selected candidate")
