@@ -577,62 +577,25 @@ func main() {
 		logger.Fatalf("Dashboard auth setup failed: %v", dashErr)
 	}
 
-	// Open the bcrypt password store (creates the DB file on first run).
-	authStore, authStoreErr := dashboardauth.New(picoHome)
-	var passwordStore api.PasswordStore
-	if authStoreErr == nil {
-		passwordStore = authStore
-		defer authStore.Close()
-	} else if errors.Is(authStoreErr, dashboardauth.ErrUnsupportedPlatform) {
-		logger.InfoC(
-			"web",
-			fmt.Sprintf(
-				"Dashboard SQLite password store unavailable on this platform; using launcher-config password storage: %v",
-				authStoreErr,
-			),
-		)
-		passwordStore = launcherconfig.NewPasswordStore(launcherPath, launcherCfg)
-		authStoreErr = nil
-	} else {
-		logger.ErrorC("web", fmt.Sprintf("Warning: could not open auth store: %v", authStoreErr))
+	// Open the bcrypt password store (creates the DB file on first run and
+	// imports removed auth fields from launcher-config.json when present).
+	authStore, authStoreErr := dashboardauth.NewWithLauncherConfig(picoHome, launcherPath)
+	if authStoreErr != nil {
+		logger.Fatalf("Failed to open dashboard auth store: %v", authStoreErr)
 	}
-
-	migrationResult, migrationErr := launcherconfig.MigrateLegacyLauncherToken(
-		context.Background(),
-		passwordStore,
-		launcherPath,
-		launcherCfg,
-	)
-	if migrationErr != nil {
-		logger.Fatalf("Failed to migrate legacy launcher token to password login: %v", migrationErr)
-	}
-	if migrationResult.Migrated {
-		logger.InfoC("web", "Migrated legacy launcher token to dashboard password login")
-	}
-	if migrationResult.CleanupErr != nil {
-		logger.WarnC(
-			"web",
-			fmt.Sprintf(
-				"Legacy launcher token password migration succeeded, but failed to remove launcher_token from %s: %v",
-				launcherPath,
-				migrationResult.CleanupErr,
-			),
-		)
-	}
+	defer authStore.Close()
 
 	var localAutoLogin *middleware.LauncherDashboardLocalAutoLogin
 	needsInitialSetup := false
-	if passwordStore != nil {
-		initialized, initErr := passwordStore.IsInitialized(context.Background())
-		if initErr != nil {
-			logger.ErrorC("web", fmt.Sprintf("Warning: could not check dashboard password state: %v", initErr))
-		} else if !initialized {
-			needsInitialSetup = true
-		} else if shouldEnableLocalAutoLogin(*noBrowser, openResult.ProbeHost) {
-			localAutoLogin, err = middleware.NewLauncherDashboardLocalAutoLogin(5 * time.Minute)
-			if err != nil {
-				logger.Fatalf("Failed to create local auto-login grant: %v", err)
-			}
+	initialized, initErr := authStore.IsInitialized(context.Background())
+	if initErr != nil {
+		logger.Fatalf("Failed to check dashboard password state: %v", initErr)
+	} else if !initialized {
+		needsInitialSetup = true
+	} else if shouldEnableLocalAutoLogin(*noBrowser, openResult.ProbeHost) {
+		localAutoLogin, err = middleware.NewLauncherDashboardLocalAutoLogin(5 * time.Minute)
+		if err != nil {
+			logger.Fatalf("Failed to create local auto-login grant: %v", err)
 		}
 	}
 
@@ -641,8 +604,7 @@ func main() {
 
 	api.RegisterLauncherAuthRoutes(mux, api.LauncherAuthRouteOpts{
 		SessionCookie: dashboardSessionCookie,
-		PasswordStore: passwordStore,
-		StoreError:    authStoreErr,
+		PasswordStore: authStore,
 	})
 
 	// API Routes (e.g. /api/status)

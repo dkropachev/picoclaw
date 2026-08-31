@@ -41,12 +41,6 @@ O PicoClaw roda em praticamente qualquer dispositivo Linux. Esta página registr
 | [Zhihe (知合)](https://www.zhihe-tech.com/) | A210 | High-perf RISC-V | 8 núcleos, 16MB cache L3, classe desktop |
 | [Canaan (嘉楠)](https://www.canaan-creative.com/) | K230 | Dual C908 @ 1.6GHz | 6 TOPS KPU, usado no CanMV-K230 |
 
-### MIPS
-
-| Fabricante | Chip | Notas |
-|------------|------|-------|
-| MediaTek | [MT7620](https://www.mediatek.com/products/home-networking/mt7620) | MIPS24KEc @ 580MHz, usado em muitos roteadores OpenWrt (ex. Xiaomi Router 3G) |
-
 ### LoongArch (loong64)
 
 | Fabricante | Chip | Notas |
@@ -65,7 +59,6 @@ Produtos de consumo, roteadores e dispositivos industriais testados com o PicoCl
 |-----|---------|-----|-----|-----|-----------|
 | 2009 | Nokia N900 | ARM (A8) | OMAP3430 | 256MB | Smartphone |
 | 2012 | Samsung Galaxy Note 10.1 (N8000) | ARM (A9) | Exynos 4412 | 2GB | Tablet |
-| 2016 | Xiaomi Router 3G (小米路由器3G) | MIPS | MT7620 | 256MB | Roteador (OpenWrt) |
 | 2018 | Phicomm N1 (斐讯N1) | ARM64 (A53) | S905D | 2GB | TV Box / Servidor doméstico |
 | 2019 | Xiaomi AI Speaker (小爱音箱) | ARM64 (A53) | — | 256MB | Alto-falante inteligente |
 | 2024 | [NanoKVM](https://wiki.sipeed.com/hardware/en/kvm/NanoKVM/introduction.html) | RISC-V | SG2002 | 256MB | IP-KVM |
@@ -109,8 +102,8 @@ Qualquer celular Android ARM64 (2015+) com 1GB+ de RAM. Instale o [Termux](https
 | x86_64 Windows | Binário nativo |
 | macOS (Intel / Apple Silicon) | Binário nativo |
 | Docker (any platform) | `docker compose` em uma linha, veja [Guia Docker](docker.md) |
-| OpenWrt routers | Builds MIPS/ARM, requer >32MB de RAM livre |
-| FreeBSD / NetBSD | Builds x86_64 e arm64 disponíveis |
+| OpenWrt routers | Apenas builds ARM; MIPS não é compatível |
+| FreeBSD | Builds x86_64 e arm64 disponíveis |
 
 ---
 
@@ -140,7 +133,7 @@ tar xzf picoclaw_Linux_arm64.tar.gz
 ./picoclaw agent -m "Hello, what board am I running on?"
 ```
 
-Builds disponíveis: `linux-amd64`, `linux-arm64`, `linux-arm`, `linux-riscv64`, `linux-loong64`, `linux-mipsle`
+Builds disponíveis: `linux-amd64`, `linux-arm64`, `linux-arm`, `linux-riscv64`, `linux-loong64`
 
 ### Adicionar seu hardware
 

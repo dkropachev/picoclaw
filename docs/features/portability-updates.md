@@ -28,7 +28,7 @@ compatible with low-cost hardware.
 
 | ID | Level | Requirement | Rationale |
 | --- | --- | --- | --- |
-| `FR-PORT-001` | MUST | Makefile builds produce core binaries for supported Linux, Darwin, Windows, ARM, MIPS, RISC-V, and LoongArch targets, and pull-request CI executes the complete `make build-all` matrix before merge. | Portability is a project-level promise, and architecture-specific type errors must fail before reaching `main`. |
+| `FR-PORT-001` | MUST | Makefile and release builds produce core binaries for supported Linux, Darwin, Windows, FreeBSD, Android ARM64, ARM, RISC-V, and LoongArch targets, and pull-request CI executes the complete Makefile `build-all` matrix before merge. Linux/MIPSLE, every NetBSD target, FreeBSD/ARM (32-bit), and FreeBSD/RISC-V are unsupported and absent from applicable build and release matrices; FreeBSD AMD64 and ARM64 remain supported release targets. | Portability is a project-level promise, architecture-specific type errors must fail before reaching `main`, and SQLite-backed runtime storage must not silently fall back to legacy persistence on targets unsupported by its dependency stack. |
 | `FR-PORT-002` | MUST | Launcher builds include frontend assets and backend binary packaging for supported desktop targets. | Web UI distribution must be reproducible. |
 | `FR-PORT-003` | MUST | Updater downloads release assets, validates target platform naming, retries transient HTTP failures, and reports clear status. | Updates must be safe and diagnosable. |
 | `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. Coverage-delta execution strips inherited product, credential, home, XDG/AppData, Git, temporary-directory, and user-bus authority; gives each compared Git ref a distinct `HOME`, PicoClaw home, workspace, SQLite database, and freshly built core binary throughout; withholds the default-path config while historical unit coverage preserves fallback-`HOME` semantics; publishes a valid loopback config before integration suites; and compares uncovered-statement debt rather than percentage or covered-statement count. Global debt cannot increase, impacted feature debt retains a ten-statement tolerance, and deletion is not a regression when it adds no uncovered debt. A base coverage command may retry exactly once only when its output proves one known cleanup-only TempDir race: the agent panic worker's `sessions` cleanup or the asynchronous workflow handler's `workflow_runs/wr_` cleanup. The classifier rejects assertions, panics, build failures, another failing test, or the wrong package; every head failure and every repeated or unrecognized base failure is final. | CI/release builds must be repeatable, state created by one ref must not alter or deadlock another ref's tests or reach an operator installation, tests that intentionally override `HOME` must retain fallback-home semantics, structural removals must not be mistaken for lost test coverage, and a synchronization fix in the PR cannot repair an asynchronous cleanup race in the immutable historical base. |
@@ -102,6 +102,8 @@ credentialed release publishing.
 - Missing release assets return clear errors.
 - HTTP 5xx or timeout paths retry before failure.
 - Unsupported platform/arch does not select a wrong binary.
+- Linux/MIPSLE, NetBSD, FreeBSD/ARM, and FreeBSD/RISC-V builds are not produced; FreeBSD
+  AMD64/ARM64 and Android ARM64 remain supported.
 - Android and WhatsApp-native variants remain build-tag controlled.
 - Coverage comparison does not reuse launcher or test state across refs, even
   when the two revisions use incompatible lock-file or state formats.
@@ -125,6 +127,7 @@ credentialed release publishing.
 ## Implementation Anchors
 
 - [Makefile](../../Makefile)
+- [.goreleaser.yaml](../../.goreleaser.yaml)
 - [scripts/coverage_delta.go](../../scripts/coverage_delta.go)
 - [pkg/updater/updater.go](../../pkg/updater/updater.go)
 - [.github/workflows/release.yml](../../.github/workflows/release.yml)

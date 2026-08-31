@@ -539,7 +539,93 @@ func ValidateRepositoryMappingAdjudication(
 			seen[key] = struct{}{}
 		}
 	}
+	if err := validateRepositoryMappingConflictFields(
+		result.ConflictingAnchors,
+		result.ConflictFields,
+	); err != nil {
+		return err
+	}
 	return nil
+}
+
+func normalizeRepositoryMappingConflictFields(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	normalized := make([]string, len(values))
+	for index, value := range values {
+		normalized[index] = strings.ToLower(strings.TrimSpace(value))
+	}
+	return normalized
+}
+
+func validRepositoryMappingConflictField(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case RepositoryMappingConflictFieldSeverity,
+		RepositoryMappingConflictFieldTitleWording,
+		RepositoryMappingConflictFieldFixEffort,
+		RepositoryMappingConflictFieldLifecycleStatus,
+		RepositoryMappingConflictFieldCausalIdentity,
+		RepositoryMappingConflictFieldLocation,
+		RepositoryMappingConflictFieldSymbol,
+		RepositoryMappingConflictFieldEvidence,
+		RepositoryMappingConflictFieldImpact,
+		RepositoryMappingConflictFieldValidationContent,
+		RepositoryMappingConflictFieldOther:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateRepositoryMappingConflictFields(conflicts, fields []string) error {
+	// A missing field array is the legacy representation. It remains readable,
+	// but the policy below treats every retained legacy conflict as blocking.
+	if fields == nil {
+		return nil
+	}
+	if len(fields) != len(conflicts) {
+		return errors.New("repository mapping conflict fields are not aligned")
+	}
+	for _, field := range fields {
+		if !validRepositoryMappingConflictField(field) {
+			return fmt.Errorf("invalid repository mapping conflict field %q", field)
+		}
+	}
+	return nil
+}
+
+func repositoryMappingAdjudicationHasBlockingConflicts(
+	adjudication RepositoryMappingAdjudication,
+) bool {
+	if adjudication.ConflictFields == nil {
+		return len(adjudication.ConflictingAnchors) > 0
+	}
+	if len(adjudication.ConflictFields) != len(adjudication.ConflictingAnchors) {
+		return true
+	}
+	for _, field := range adjudication.ConflictFields {
+		switch strings.ToLower(strings.TrimSpace(field)) {
+		case RepositoryMappingConflictFieldSeverity,
+			RepositoryMappingConflictFieldTitleWording,
+			RepositoryMappingConflictFieldFixEffort,
+			RepositoryMappingConflictFieldLifecycleStatus:
+			continue
+		default:
+			// Closed blocking classifications and unknown future values both
+			// fail closed here, even if validation was accidentally bypassed.
+			return true
+		}
+	}
+	return false
+}
+
+func repositoryMappingAdjudicationAutoAssociates(
+	adjudication RepositoryMappingAdjudication,
+) bool {
+	return strings.EqualFold(strings.TrimSpace(adjudication.Decision), "same") &&
+		adjudication.Confidence >= 0.90 &&
+		!repositoryMappingAdjudicationHasBlockingConflicts(adjudication)
 }
 
 func validOptionalMappingText(value string, maximum int) bool {

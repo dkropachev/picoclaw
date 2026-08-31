@@ -32,7 +32,6 @@ builds:
       - windows
       - darwin
       - freebsd
-      - netbsd
     goarch:
       - amd64
       - arm64
@@ -40,22 +39,17 @@ builds:
       - loong64
       - arm
       - s390x
-      - mipsle
     goarm:
       - "6"
       - "7"
-    gomips:
-      - softfloat
     main: ./cmd/picoclaw
     ignore:
       - goos: windows
         goarch: arm
-      - goos: netbsd
-        goarch: s390x
-      - goos: netbsd
-        goarch: mips64
-      - goos: netbsd
+      - goos: freebsd
         goarch: arm
+      - goos: freebsd
+        goarch: riscv64
 
   - id: picoclaw-launcher
     binary: picoclaw-launcher
@@ -75,7 +69,6 @@ builds:
       - windows
       - darwin
       - freebsd
-      - netbsd
     goarch:
       - amd64
       - arm64
@@ -83,22 +76,17 @@ builds:
       - loong64
       - arm
       - s390x
-      - mipsle
     goarm:
       - "6"
       - "7"
-    gomips:
-      - softfloat
     main: ./web/backend
     ignore:
       - goos: windows
         goarch: arm
-      - goos: netbsd
-        goarch: s390x
-      - goos: netbsd
-        goarch: mips64
-      - goos: netbsd
+      - goos: freebsd
         goarch: arm
+      - goos: freebsd
+        goarch: riscv64
 
 dockers_v2:
   - id: picoclaw

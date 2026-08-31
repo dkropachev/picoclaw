@@ -14,7 +14,6 @@ import (
 )
 
 // PasswordStore is the interface for dashboard password persistence.
-// Implemented by dashboardauth.Store and launcherconfig.PasswordStore.
 type PasswordStore interface {
 	IsInitialized(ctx context.Context) (bool, error)
 	SetPassword(ctx context.Context, plain string) error

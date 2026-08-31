@@ -41,12 +41,6 @@ PicoClaw はほぼすべての Linux デバイスで動作します。このペ�
 | [Zhihe (知合)](https://www.zhihe-tech.com/) | A210 | High-perf RISC-V | 8 コア、16MB L3 キャッシュ、デスクトップクラス |
 | [Canaan (嘉楠)](https://www.canaan-creative.com/) | K230 | Dual C908 @ 1.6GHz | 6 TOPS KPU、CanMV-K230 で使用 |
 
-### MIPS
-
-| ベンダー | チップ | 備考 |
-|----------|--------|------|
-| MediaTek | [MT7620](https://www.mediatek.com/products/home-networking/mt7620) | MIPS24KEc @ 580MHz、多くの OpenWrt ルーターで使用（例：Xiaomi Router 3G） |
-
 ### LoongArch (loong64)
 
 | ベンダー | チップ | 備考 |
@@ -65,7 +59,6 @@ PicoClaw でテスト済みのコンシューマー製品、ルーター、産�
 |----|------|----------------|-----|-----|----------|
 | 2009 | Nokia N900 | ARM (A8) | OMAP3430 | 256MB | スマートフォン |
 | 2012 | Samsung Galaxy Note 10.1 (N8000) | ARM (A9) | Exynos 4412 | 2GB | タブレット |
-| 2016 | Xiaomi Router 3G (小米路由器3G) | MIPS | MT7620 | 256MB | ルーター (OpenWrt) |
 | 2018 | Phicomm N1 (斐讯N1) | ARM64 (A53) | S905D | 2GB | TV ボックス / ホームサーバー |
 | 2019 | Xiaomi AI Speaker (小爱音箱) | ARM64 (A53) | — | 256MB | スマートスピーカー |
 | 2024 | [NanoKVM](https://wiki.sipeed.com/hardware/en/kvm/NanoKVM/introduction.html) | RISC-V | SG2002 | 256MB | IP-KVM |
@@ -109,8 +102,8 @@ PicoClaw でテスト済みのコンシューマー製品、ルーター、産�
 | x86_64 Windows | ネイティブバイナリ |
 | macOS (Intel / Apple Silicon) | ネイティブバイナリ |
 | Docker (any platform) | `docker compose` ワンライナー、[Docker ガイド](docker.md) を参照 |
-| OpenWrt routers | MIPS/ARM ビルド、32MB 以上の空きメモリが必要 |
-| FreeBSD / NetBSD | x86_64 および arm64 ビルドが利用可能 |
+| OpenWrt routers | ARM ビルドのみ。MIPS はサポート対象外 |
+| FreeBSD | x86_64 および arm64 ビルドが利用可能 |
 
 ---
 
@@ -140,7 +133,7 @@ tar xzf picoclaw_Linux_arm64.tar.gz
 ./picoclaw agent -m "Hello, what board am I running on?"
 ```
 
-利用可能なビルド：`linux-amd64`, `linux-arm64`, `linux-arm`, `linux-riscv64`, `linux-loong64`, `linux-mipsle`
+利用可能なビルド：`linux-amd64`, `linux-arm64`, `linux-arm`, `linux-riscv64`, `linux-loong64`
 
 ### ハードウェアを追加する
 
