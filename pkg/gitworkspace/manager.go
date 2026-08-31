@@ -1,7 +1,6 @@
 package gitworkspace
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -209,6 +208,7 @@ type storeState struct {
 	PinnedReservationRotations map[string][]pinnedReservationRotationRecord `json:"pinned_reservation_rotations,omitempty"`
 	History                    []HistoryEntry                               `json:"history,omitempty"`
 	DevelopmentLineHistory     []HistoryEntry                               `json:"development_line_history,omitempty"`
+	generation                 int64                                        `json:"-"`
 }
 
 // Version 2 and later use a string discriminator on disk. Older binaries
@@ -335,14 +335,22 @@ func NewManager(opts Options) (*Manager, error) {
 	if err != nil || rootIdentity.Mode()&os.ModeSymlink != 0 || !rootIdentity.IsDir() {
 		return nil, errors.New("git workspace root is not a real directory")
 	}
-	return &Manager{
+	manager := &Manager{
 		rootDir:          root,
 		checkoutRoot:     filepath.Clean(canonicalCheckoutRoot),
 		rootIdentity:     rootIdentity,
 		checkoutIdentity: checkoutRootIdentity,
 		opts:             opts,
 		now:              now,
-	}, nil
+	}
+	database, openErr := manager.openInventoryDatabase(context.Background())
+	if openErr != nil {
+		return nil, openErr
+	}
+	if closeErr := database.Close(); closeErr != nil {
+		return nil, fmt.Errorf("close git workspace inventory: %w", closeErr)
+	}
+	return manager, nil
 }
 
 func (m *Manager) RootDir() string {
@@ -1012,6 +1020,10 @@ func (m *Manager) statePath() string {
 	return filepath.Join(m.rootDir, "inventory.json")
 }
 
+func (m *Manager) databasePath() string {
+	return filepath.Join(m.rootDir, "inventory.db")
+}
+
 func (m *Manager) lockInventory(ctx context.Context) (func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1027,78 +1039,12 @@ func (m *Manager) lockInventory(ctx context.Context) (func(), error) {
 }
 
 func (m *Manager) loadLocked() (*storeState, error) {
-	st := &storeState{
-		Version:                    stateVersion,
-		Repositories:               map[string]*RepositoryRecord{},
-		Workspaces:                 map[string]*WorkspaceRecord{},
-		DevelopmentLines:           map[string]*developmentLineRecord{},
-		PinnedReservationRotations: map[string][]pinnedReservationRotationRecord{},
-	}
-	data, err := os.ReadFile(m.statePath())
+	database, err := m.openInventoryDatabase(context.Background())
 	if err != nil {
-		if os.IsNotExist(err) {
-			return st, nil
-		}
-		return nil, fmt.Errorf("read git workspace inventory: %w", err)
-	}
-	if len(bytes.TrimSpace(data)) == 0 {
-		return st, nil
-	}
-	if err := json.Unmarshal(data, st); err != nil {
-		return nil, fmt.Errorf("parse git workspace inventory: %w", err)
-	}
-	if st.Repositories == nil {
-		st.Repositories = map[string]*RepositoryRecord{}
-	}
-	if st.Workspaces == nil {
-		st.Workspaces = map[string]*WorkspaceRecord{}
-	}
-	if st.DevelopmentLines == nil {
-		st.DevelopmentLines = map[string]*developmentLineRecord{}
-	}
-	if st.PinnedReservationRotations == nil {
-		st.PinnedReservationRotations = map[string][]pinnedReservationRotationRecord{}
-	}
-	if versionErr := validateGitWorkspaceInventoryVersion(st.Version, stateVersion); versionErr != nil {
-		return nil, versionErr
-	}
-	if st.Version < 3 && len(st.PinnedReservationRotations) != 0 {
-		return nil, errors.New(
-			"pre-version-3 inventory contains rollback-fenced reservation rotations",
-		)
-	}
-	if st.Version < 3 && hasPinnedReservationRotationAnchors(st) {
-		return nil, errors.New(
-			"pre-version-3 inventory contains rollback-fenced reservation rotation anchors",
-		)
-	}
-	if st.Version < 4 && hasDevelopmentLineSuspensionEvidence(st) {
-		return nil, errors.New(
-			"pre-version-4 inventory contains rollback-fenced development line suspension evidence",
-		)
-	}
-	if st.Version == 0 || st.Version == 1 {
-		if len(st.DevelopmentLines) != 0 || len(st.DevelopmentLineHistory) != 0 {
-			return nil, errors.New(
-				"legacy numeric inventory contains rollback-fenced controller state",
-			)
-		}
-		if migrationErr := m.migrateLegacyPinnedWorkspaces(st); migrationErr != nil {
-			return nil, migrationErr
-		}
-	}
-	if st.Version < 3 {
-		initializePinnedReservationRotationAnchors(st)
-	}
-	if st.Version < 4 {
-		initializeDevelopmentLineSuspensionAnchors(st)
-	}
-	st.Version = stateVersion
-	partitionDevelopmentLineHistory(st)
-	if err := validateDevelopmentLineInventory(st); err != nil {
 		return nil, err
 	}
-	return st, nil
+	defer database.Close()
+	return loadInventoryState(context.Background(), database)
 }
 
 func validateGitWorkspaceInventoryVersion(version, maximum int) error {
@@ -1209,14 +1155,12 @@ func (m *Manager) saveLocked(st *storeState) error {
 	if len(st.DevelopmentLineHistory) > historyLimit {
 		st.DevelopmentLineHistory = st.DevelopmentLineHistory[len(st.DevelopmentLineHistory)-historyLimit:]
 	}
-	data, err := json.MarshalIndent(st, "", "  ")
+	database, err := m.openInventoryDatabase(context.Background())
 	if err != nil {
-		return fmt.Errorf("encode git workspace inventory: %w", err)
+		return err
 	}
-	if err := os.MkdirAll(m.rootDir, 0o755); err != nil {
-		return fmt.Errorf("create git workspace root: %w", err)
-	}
-	return fileutil.WriteFileAtomic(m.statePath(), data, 0o600)
+	defer database.Close()
+	return saveInventoryState(context.Background(), database, st)
 }
 
 func (m *Manager) findSessionWorkspaceLocked(

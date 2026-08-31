@@ -108,7 +108,7 @@ func newAgentLoop(
 			opt(al)
 		}
 	}
-	al.fileMutationProtectedRoots = mustAgentRuntimeFileMutationProtectedRoots(al.configPath)
+	al.fileMutationProtectedRoots = mustAgentRuntimeFileMutationProtectedRoots(al.configPath, cfg)
 	var protectedRootErr error
 	al.fileMutationProtectedRoots, protectedRootErr = appendAgentWorkspaceSQLiteProtectedRoots(
 		al.fileMutationProtectedRoots,

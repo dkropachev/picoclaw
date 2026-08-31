@@ -432,7 +432,7 @@ func TestAgentApplyPatchInvalidProtectedRootFailsConstruction(t *testing.T) {
 	}
 	defer func() {
 		message, ok := recover().(string)
-		if !ok || !strings.Contains(message, "build apply_patch policy") {
+		if !ok || !strings.Contains(message, "build write_file policy") {
 			t.Fatalf("construction panic = %#v", message)
 		}
 	}()

@@ -2,6 +2,7 @@ package gitworkspace
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const adversarialSecondLineID = "pdln_fedcba9876543210fedcba9876543210"
@@ -454,13 +457,7 @@ func TestDevelopmentLineInventoryRejectsCorruptRelationsAndReservationReuse(t *t
 
 	corruptOnDisk := adversarialCloneState(t, valid)
 	corruptOnDisk.DevelopmentLines[pinnedLineTestID].MutationEpoch++
-	data, err := json.MarshalIndent(corruptOnDisk, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(fixture.manager.statePath(), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	adversarialForceInventory(t, fixture.manager, corruptOnDisk)
 	if err := adversarialLoadInventory(fixture.manager); err == nil {
 		t.Fatal("loadLocked() corrupt inventory error = nil")
 	}
@@ -578,8 +575,7 @@ func TestManagerLegacyPinnedWorkspaceUpgradeFailsClosedOrPurgesDroppedState(t *t
 		)
 		state := adversarialCloneInventory(t, fixture.manager)
 		oldID := adversarialMakePinnedWorkspaceLegacy(t, state, fixture.workspace.ID)
-		adversarialWriteLegacyInventory(t, fixture.manager, state)
-		_, loadErr := fixture.manager.Stats(context.Background())
+		_, loadErr := adversarialDecodeLegacyInventory(t, fixture.manager, state)
 		if !errors.Is(loadErr, errLegacyPinnedWorkspaceMigration) ||
 			loadErr.Error() != errLegacyPinnedWorkspaceMigration.Error() {
 			t.Fatalf("Stats() legacy live error = %v", loadErr)
@@ -591,7 +587,6 @@ func TestManagerLegacyPinnedWorkspaceUpgradeFailsClosedOrPurgesDroppedState(t *t
 	})
 
 	t.Run("dropped tombstone is purged", func(t *testing.T) {
-		ctx := context.Background()
 		fixture := newPinnedCommitTestFixture(
 			t,
 			"pr-development/adversarial-legacy-dropped",
@@ -613,20 +608,14 @@ func TestManagerLegacyPinnedWorkspaceUpgradeFailsClosedOrPurgesDroppedState(t *t
 		if removeErr := os.RemoveAll(workspace.Path); removeErr != nil {
 			t.Fatal(removeErr)
 		}
-		adversarialWriteLegacyInventory(t, fixture.manager, state)
-		result, reconcileErr := fixture.manager.Reconcile(ctx)
-		if reconcileErr != nil {
-			t.Fatalf("Reconcile() dropped legacy state error = %v", reconcileErr)
+		migrated, migrateErr := adversarialDecodeLegacyInventory(t, fixture.manager, state)
+		if migrateErr != nil {
+			t.Fatalf("decode dropped legacy state error = %v", migrateErr)
 		}
-		if result.Stats.WorkspaceCount != 0 || len(result.Stats.History) != 0 {
-			t.Fatalf("Reconcile() exposed dropped legacy state: %#v", result.Stats)
+		if migrated.Version != stateVersion || len(migrated.Workspaces) != 0 ||
+			len(migrated.History) != 0 || len(migrated.DevelopmentLineHistory) == 0 {
+			t.Fatalf("migrated dropped legacy state = %#v", migrated)
 		}
-		adversarialInspectInventory(t, fixture.manager, func(migrated *storeState) {
-			if migrated.Version != stateVersion || len(migrated.Workspaces) != 0 ||
-				len(migrated.History) != 0 || len(migrated.DevelopmentLineHistory) == 0 {
-				t.Fatalf("migrated dropped legacy state = %#v", migrated)
-			}
-		})
 	})
 
 	t.Run("corrupt dropped state is not laundered", func(t *testing.T) {
@@ -645,8 +634,7 @@ func TestManagerLegacyPinnedWorkspaceUpgradeFailsClosedOrPurgesDroppedState(t *t
 		}
 		workspace.PinnedCommit = ""
 		workspace.Path = filepath.Join(t.TempDir(), "unrelated-private-path")
-		adversarialWriteLegacyInventory(t, fixture.manager, state)
-		_, loadErr := fixture.manager.Stats(context.Background())
+		_, loadErr := adversarialDecodeLegacyInventory(t, fixture.manager, state)
 		if !errors.Is(loadErr, errLegacyPinnedWorkspaceMigration) ||
 			loadErr.Error() != errLegacyPinnedWorkspaceMigration.Error() {
 			t.Fatalf("Stats() corrupt legacy error = %v", loadErr)
@@ -838,7 +826,34 @@ func adversarialCloneState(t *testing.T, state *storeState) *storeState {
 	if err := json.Unmarshal(data, &cloned); err != nil {
 		t.Fatal(err)
 	}
+	cloned.generation = state.generation
 	return &cloned
+}
+
+func adversarialInventorySnapshot(t *testing.T, manager *Manager) []byte {
+	t.Helper()
+	state := adversarialCloneInventory(t, manager)
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func adversarialForceInventory(t *testing.T, manager *Manager, state *storeState) {
+	t.Helper()
+	database, err := manager.openInventoryDatabase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	state.Version = stateVersion
+	if err := sqlitestore.Immediate(context.Background(), database, func(conn *sql.Conn) error {
+		return rewriteInventoryState(context.Background(), conn, state, state.generation)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state.generation++
 }
 
 func adversarialSaveInventory(manager *Manager, state *storeState) error {
@@ -908,7 +923,11 @@ func adversarialMakePinnedWorkspaceLegacy(
 	return oldID
 }
 
-func adversarialWriteLegacyInventory(t *testing.T, manager *Manager, state *storeState) {
+func adversarialDecodeLegacyInventory(
+	t *testing.T,
+	manager *Manager,
+	state *storeState,
+) (*storeState, error) {
 	t.Helper()
 	type legacyStoreState storeState
 	legacy := legacyStoreState(*state)
@@ -917,9 +936,7 @@ func adversarialWriteLegacyInventory(t *testing.T, manager *Manager, state *stor
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(manager.statePath(), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	return manager.decodeLegacyInventory(data)
 }
 
 func adversarialDevelopmentLineMetadataLeaf(

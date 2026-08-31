@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/sipeed/picoclaw/pkg/prworkspace"
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 func TestPRWorkspaceCandidateCheckpointStoreRoundTripAndRemove(t *testing.T) {
@@ -22,7 +25,7 @@ func TestPRWorkspaceCandidateCheckpointStoreRoundTripAndRemove(t *testing.T) {
 	if err = store.Save(checkpoint); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
-	info, err := os.Lstat(store.path(checkpoint.WorkspaceID))
+	info, err := os.Lstat(store.databasePath())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,8 +50,8 @@ func TestPRWorkspaceCandidateCheckpointStoreRoundTripAndRemove(t *testing.T) {
 func TestPRWorkspaceCandidateCheckpointStoreRejectsUnsafeOrMalformedFiles(t *testing.T) {
 	checkpoint := prWorkspaceCandidateCheckpointFixture()
 	t.Run("unknown field", func(t *testing.T) {
-		store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
-		if err != nil {
+		root := filepath.Join(t.TempDir(), "active")
+		if err := os.MkdirAll(root, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		encoded, err := json.Marshal(checkpoint)
@@ -56,45 +59,151 @@ func TestPRWorkspaceCandidateCheckpointStoreRejectsUnsafeOrMalformedFiles(t *tes
 			t.Fatal(err)
 		}
 		encoded = append(encoded[:len(encoded)-1], []byte(`,"unexpected":true}`)...)
-		if err = os.WriteFile(store.path(checkpoint.WorkspaceID), encoded, 0o600); err != nil {
+		legacyPath := filepath.Join(root, legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID))
+		if err = os.WriteFile(legacyPath, encoded, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err = store.Load(checkpoint.WorkspaceID); err == nil {
-			t.Fatal("Load() accepted an unknown field")
+		store, err := newPRWorkspaceCandidateCheckpointStore(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, found, loadErr := store.Load(checkpoint.WorkspaceID); loadErr != nil || found {
+			t.Fatalf("malformed legacy checkpoint = found %v, error %v", found, loadErr)
+		}
+		archive := filepath.Join(root, "legacy-json", prWorkspaceCheckpointArchiveLabel, filepath.Base(legacyPath))
+		if _, err := os.Stat(archive); err != nil {
+			t.Fatalf("malformed examined source was not archived: %v", err)
 		}
 	})
 
 	t.Run("public mode", func(t *testing.T) {
-		store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
-		if err != nil {
+		root := filepath.Join(t.TempDir(), "active")
+		if err := os.MkdirAll(root, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		encoded, _ := json.Marshal(checkpoint)
-		if err = os.WriteFile(store.path(checkpoint.WorkspaceID), encoded, 0o644); err != nil {
+		path := filepath.Join(root, legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID))
+		if err := os.WriteFile(path, encoded, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err = store.Load(checkpoint.WorkspaceID); err == nil {
-			t.Fatal("Load() accepted a group/world-readable checkpoint")
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newPRWorkspaceCandidateCheckpointStore(root); err == nil {
+			t.Fatal("constructor accepted a group/world-readable checkpoint")
 		}
 	})
 
 	t.Run("symlink", func(t *testing.T) {
-		store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
-		if err != nil {
+		root := filepath.Join(t.TempDir(), "active")
+		if err := os.MkdirAll(root, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		target := filepath.Join(t.TempDir(), "target.json")
 		encoded, _ := json.Marshal(checkpoint)
-		if err = os.WriteFile(target, encoded, 0o600); err != nil {
+		if err := os.WriteFile(target, encoded, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err = os.Symlink(target, store.path(checkpoint.WorkspaceID)); err != nil {
+		if err := os.Symlink(
+			target,
+			filepath.Join(root, legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID)),
+		); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		if _, _, err = store.Load(checkpoint.WorkspaceID); err == nil {
-			t.Fatal("Load() accepted a symlink checkpoint")
+		if _, err := newPRWorkspaceCandidateCheckpointStore(root); err == nil {
+			t.Fatal("constructor accepted a symlink checkpoint")
 		}
 	})
+}
+
+func TestPRWorkspaceCandidateCheckpointSQLiteMigratesArchivesAndReopens(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "active")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	encoded, err := json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(root, legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID))
+	if writeErr := os.WriteFile(legacy, encoded, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	store, err := newPRWorkspaceCandidateCheckpointStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := store.Load(checkpoint.WorkspaceID)
+	if err != nil || !found || !equivalentPRWorkspaceCheckpoint(loaded, checkpoint) {
+		t.Fatalf("migrated checkpoint = %#v, found=%v err=%v", loaded, found, err)
+	}
+	archive := filepath.Join(root, "legacy-json", prWorkspaceCheckpointArchiveLabel, filepath.Base(legacy))
+	if _, statErr := os.Stat(legacy); !os.IsNotExist(statErr) {
+		t.Fatalf("legacy checkpoint remains: %v", statErr)
+	}
+	if info, statErr := os.Stat(archive); statErr != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("legacy checkpoint archive = %#v, %v", info, statErr)
+	}
+	database, err := store.open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var imported, skipped int
+	var status string
+	if err := database.QueryRow(`SELECT imported_count, skipped_count, archive_status
+        FROM storage_imports WHERE component = ?`, prWorkspaceCheckpointComponent).Scan(
+		&imported, &skipped, &status,
+	); err != nil {
+		t.Fatal(err)
+	}
+	_ = database.Close()
+	if imported != 1 || skipped != 0 || status != "complete" {
+		t.Fatalf("checkpoint import ledger = %d/%d/%q", imported, skipped, status)
+	}
+	if _, err := newPRWorkspaceCandidateCheckpointStore(root); err != nil {
+		t.Fatalf("idempotent checkpoint reopen: %v", err)
+	}
+}
+
+func TestPRWorkspaceCandidateCheckpointSQLiteCASAndSchemaFences(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "active")
+	store, err := newPRWorkspaceCandidateCheckpointStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	if saveErr := store.Save(checkpoint); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	parked := checkpoint
+	parked.State = prWorkspaceCandidateCheckpointParked
+	parked.Fence = &prworkspace.ImplementationPublicationFence{
+		GitWorkspaceID: checkpoint.GitWorkspaceID, LineID: checkpoint.LineID,
+		LineVersion: checkpoint.Lease.Version + 1, MutationEpoch: checkpoint.Lease.MutationEpoch,
+		ParkIntentID: "park-checkpoint", BaseCommit: checkpoint.HeadSHA,
+		Tip: "5555555555555555555555555555555555555555", Tree: checkpoint.Candidate.Tree,
+	}
+	if saveErr := store.Save(parked); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	conflict := parked
+	conflict.Candidate.CandidateDigest = strings.Repeat("6", 64)
+	if saveErr := store.Save(conflict); saveErr == nil || !strings.Contains(saveErr.Error(), "conflict") {
+		t.Fatalf("parked checkpoint overwrite = %v", saveErr)
+	}
+
+	raw, err := sql.Open("sqlite", store.databasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+	if _, err := newPRWorkspaceCandidateCheckpointStore(root); !errors.Is(err, sqlitestore.ErrTooNew) {
+		t.Fatalf("too-new checkpoint schema = %v", err)
+	}
 }
 
 func TestPRWorkspaceCandidateCheckpointRestoresExactCandidateAfterManagerRestart(t *testing.T) {

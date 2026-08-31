@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -640,31 +639,21 @@ func TestManagerPinnedDevelopmentLineParkIsTerminalOutsideOuterOperation(t *test
 
 func TestManagerInventoryVersionFourFencesOlderDecoders(t *testing.T) {
 	fixture := newPinnedCommitTestFixture(t, "pr-development/version-fence")
-	data, err := os.ReadFile(filepath.Join(fixture.manager.RootDir(), "inventory.json"))
+	if _, err := os.Stat(filepath.Join(fixture.manager.RootDir(), "inventory.json")); !os.IsNotExist(err) {
+		t.Fatalf("mutable inventory JSON remains after SQLite open: %v", err)
+	}
+	database, err := fixture.manager.openInventoryDatabase(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"version": "4"`) {
-		t.Fatalf("inventory lacks tagged version-4 fence: %s", data)
+	defer database.Close()
+	var schemaVersion int
+	if err := database.QueryRow(`PRAGMA user_version`).Scan(&schemaVersion); err != nil || schemaVersion != 1 {
+		t.Fatalf("inventory schema version = %d, %v", schemaVersion, err)
 	}
-	var legacy struct {
-		Version int `json:"version"`
-	}
-	if decodeErr := json.Unmarshal(data, &legacy); decodeErr == nil {
-		t.Fatal("version-1 numeric decoder accepted version-4 inventory")
-	}
-	var versionTwo struct {
-		Version string `json:"version"`
-	}
-	if decodeErr := json.Unmarshal(data, &versionTwo); decodeErr != nil {
-		t.Fatal(decodeErr)
-	}
-	parsed, err := strconv.Atoi(versionTwo.Version)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateGitWorkspaceInventoryVersion(parsed, 3); err == nil {
-		t.Fatal("version-3 decoder accepted version-4 inventory")
+	state := adversarialCloneInventory(t, fixture.manager)
+	if state.Version != stateVersion {
+		t.Fatalf("domain inventory version = %d", state.Version)
 	}
 	if _, err := fixture.manager.Stats(context.Background()); err != nil {
 		t.Fatalf("version-4 manager failed to reload tagged inventory: %v", err)

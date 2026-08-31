@@ -20,6 +20,8 @@ const (
 	agentLocalCICacheDatabaseName = "cache.db"
 	agentRepositoryReviewStateDir = "repository_reviews"
 	agentRepositoryEvalStateDir   = "repository_evaluations"
+	agentGitInventoryDatabase     = "inventory.db"
+	agentCheckpointDatabase       = "checkpoints.db"
 )
 
 const (
@@ -49,7 +51,10 @@ func agentWorkflowRuntimeFileMutationProtectedRoots(workspace string) ([]string,
 // exclusions for mutable runtime state. Keep this component-oriented so later
 // SQLite stores can extend the same policy without making active configuration
 // or repository source trees read-only.
-func agentRuntimeFileMutationProtectedRoots(configPath string) ([]string, error) {
+func agentRuntimeFileMutationProtectedRoots(
+	configPath string,
+	activeConfigs ...*config.Config,
+) ([]string, error) {
 	home, err := filepath.Abs(filepath.Clean(config.GetHome()))
 	if err != nil {
 		return nil, fmt.Errorf("resolve PicoClaw home: %w", err)
@@ -66,7 +71,7 @@ func agentRuntimeFileMutationProtectedRoots(configPath string) ([]string, error)
 		return nil, fmt.Errorf("resolve active config path: %w", err)
 	}
 
-	protected := make([]string, 0, 40)
+	protected := make([]string, 0, 64)
 	for _, databaseName := range []string{
 		agentLauncherAuthDatabaseName,
 		agentAuthDatabaseName,
@@ -132,7 +137,40 @@ func agentRuntimeFileMutationProtectedRoots(configPath string) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
-	return append(protected, weixinFiles...), nil
+	protected = append(protected, weixinFiles...)
+
+	var activeConfig *config.Config
+	if len(activeConfigs) > 0 {
+		activeConfig = activeConfigs[0]
+	}
+	gitWorkspaceRoot := activeConfig.GitWorkspaceRootPath()
+	gitWorkspaceRoot, err = filepath.Abs(filepath.Clean(gitWorkspaceRoot))
+	if err != nil {
+		return nil, fmt.Errorf("resolve Git workspace runtime root: %w", err)
+	}
+	gitInventory := filepath.Join(gitWorkspaceRoot, agentGitInventoryDatabase)
+	checkpointRoot := filepath.Join(
+		gitWorkspaceRoot,
+		".pr-workspace-implementation",
+		"active",
+	)
+	checkpointDatabase := filepath.Join(checkpointRoot, agentCheckpointDatabase)
+	for _, database := range []string{gitInventory, checkpointDatabase} {
+		protected = append(protected, database, database+"-wal", database+"-shm")
+	}
+	protected = append(protected,
+		filepath.Join(gitWorkspaceRoot, "inventory.lock"),
+		filepath.Join(gitWorkspaceRoot, ".locks"),
+		filepath.Join(gitWorkspaceRoot, "legacy-json"),
+		filepath.Join(
+			gitWorkspaceRoot,
+			"legacy-json",
+			"git-workspaces-v1",
+			"inventory.json",
+		),
+		filepath.Join(checkpointRoot, "legacy-json"),
+	)
+	return protected, nil
 }
 
 func agentWorkspaceFileMutationProtectedRoots(workspace string) ([]string, error) {
@@ -202,7 +240,7 @@ func agentWeixinRetainedStateFiles(weixinRoot, archiveRoot string) ([]string, er
 			files[filepath.Join(archiveRoot, directory, entry.Name())] = struct{}{}
 		}
 	}
-	err := filepath.WalkDir(archiveRoot, func(path string, entry os.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(archiveRoot, func(path string, entry os.DirEntry, walkErr error) error {
 		if os.IsNotExist(walkErr) {
 			return nil
 		}
@@ -251,8 +289,11 @@ func agentEvolutionFileMutationProtectedRoots(workspace, stateDir string) ([]str
 	}, nil
 }
 
-func mustAgentRuntimeFileMutationProtectedRoots(configPath string) []string {
-	roots, err := agentRuntimeFileMutationProtectedRoots(configPath)
+func mustAgentRuntimeFileMutationProtectedRoots(
+	configPath string,
+	activeConfigs ...*config.Config,
+) []string {
+	roots, err := agentRuntimeFileMutationProtectedRoots(configPath, activeConfigs...)
 	if err != nil {
 		panic(fmt.Sprintf("build file-mutation policy: %v", err))
 	}

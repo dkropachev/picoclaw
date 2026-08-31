@@ -32,7 +32,8 @@ const (
 	pinnedCommitPostflightTimeout     = 30 * time.Second
 	pinnedCommitIntentPrefix          = "pdcmt_"
 	pinnedCommitIntentHexBytes        = 16
-	pinnedOperationLockFilenamePrefix = ".pinned-operation-"
+	pinnedOperationLockDirectory      = ".locks"
+	pinnedOperationLockFilenamePrefix = "pinned-operation-"
 )
 
 var (
@@ -217,6 +218,7 @@ func (m *Manager) acquirePinnedOperation(
 	}
 	path := filepath.Join(
 		m.rootDir,
+		pinnedOperationLockDirectory,
 		pinnedOperationLockFilenamePrefix+hex.EncodeToString(digest[:])+".lock",
 	)
 	unlock, err := lockInventoryFile(ctx, path)

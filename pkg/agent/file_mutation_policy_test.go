@@ -1013,6 +1013,20 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 		filepath.Join(home, "channels", "weixin", "context-tokens"),
 		weixinArchiveRoot,
 	)
+	var defaultConfig *config.Config
+	gitRoot := defaultConfig.GitWorkspaceRootPath()
+	gitInventory := filepath.Join(gitRoot, "inventory.db")
+	checkpointRoot := filepath.Join(gitRoot, ".pr-workspace-implementation", "active")
+	checkpointDatabase := filepath.Join(checkpointRoot, "checkpoints.db")
+	want = append(want,
+		gitInventory, gitInventory+"-wal", gitInventory+"-shm",
+		checkpointDatabase, checkpointDatabase+"-wal", checkpointDatabase+"-shm",
+		filepath.Join(gitRoot, "inventory.lock"),
+		filepath.Join(gitRoot, ".locks"),
+		filepath.Join(gitRoot, "legacy-json"),
+		filepath.Join(gitRoot, "legacy-json", "git-workspaces-v1", "inventory.json"),
+		filepath.Join(checkpointRoot, "legacy-json"),
+	)
 	if len(roots) != len(want) {
 		t.Fatalf("protected roots = %#v, want %#v", roots, want)
 	}
@@ -1100,6 +1114,58 @@ func TestAgentFileMutationPolicyProtectsConfiguredEvolutionDatabase(t *testing.T
 	content, err := os.ReadFile(database)
 	if err != nil || string(content) != "before" {
 		t.Fatalf("protected evolution database = %q, %v", content, err)
+	}
+}
+
+func TestAgentFileMutationPolicyProtectsGitInventoryAndCandidateCheckpoints(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	gitRoot := filepath.Join(workspace, "custom-git-state")
+	t.Setenv(config.EnvHome, home)
+	cfg := agentFileMutationTestConfig(workspace)
+	cfg.GitWorkspaces.RootDir = gitRoot
+	messageBus := bus.NewMessageBus()
+	loop := NewAgentLoop(cfg, messageBus, &mockProvider{})
+	t.Cleanup(func() {
+		loop.Close()
+		messageBus.Close()
+	})
+	agent := loop.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is missing")
+	}
+
+	inventory := filepath.Join(gitRoot, "inventory.db")
+	checkpointRoot := filepath.Join(gitRoot, ".pr-workspace-implementation", "active")
+	checkpoint := filepath.Join(checkpointRoot, "checkpoints.db")
+	archive := filepath.Join(gitRoot, "legacy-json", "git-workspaces-v1", "inventory.json")
+	if err := os.MkdirAll(filepath.Dir(archive), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archive, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []struct {
+		path   string
+		exists bool
+	}{
+		{inventory, true},
+		{inventory + "-wal", false},
+		{inventory + "-shm", false},
+		{checkpoint, false},
+		{checkpoint + "-wal", false},
+		{checkpoint + "-shm", false},
+		{filepath.Join(gitRoot, "inventory.lock"), false},
+		{filepath.Join(gitRoot, ".locks", "pinned-operation-example.lock"), false},
+		{archive, true},
+		{filepath.Join(checkpointRoot, "legacy-json", "pr-workspace-checkpoints-v1", "record.json"), false},
+	} {
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			requireAgentFileMutationDenied(t, agent.Tools, toolName, workspace, target.path, target.exists)
+		}
+	}
+	if content, err := os.ReadFile(archive); err != nil || string(content) != "before" {
+		t.Fatalf("inventory archive = %q, %v", content, err)
 	}
 }
 
