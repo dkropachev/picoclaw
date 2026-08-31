@@ -359,6 +359,7 @@ selects the single execution account required by the new contract.
 Owns: CODE pkg/repoaudit/**
 Owns: TEST pkg/repoaudit/**
 Owns: CODE cmd/repository-review-attribution-backfill/**
+Owns: TEST cmd/repository-review-attribution-backfill/**
 Owns: CODE pkg/gateway/repository_review_*.go
 Owns: TEST pkg/gateway/repository_review_*
 Owns: CODE web/backend/api/repository_review*.go
