@@ -3,7 +3,9 @@ package api
 import (
 	"net/url"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestPreexistingWeComURLBuildersCoverageCloseout(t *testing.T) {
@@ -71,5 +73,58 @@ func TestPreexistingWorkflowTriggerMapCloneCoverageCloseout(t *testing.T) {
 	source["one"] = "changed"
 	if cloned["one"] != "first" || cloned["two"] != "second" {
 		t.Fatalf("cloned map=%v", cloned)
+	}
+}
+
+func TestPreexistingWeixinFlowLifecycleCoverageCloseout(t *testing.T) {
+	handler := &Handler{weixinFlows: make(map[string]*weixinFlow)}
+	now := time.Now()
+	flow := &weixinFlow{
+		ID: "wx-flow", Status: weixinStatusWait,
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Minute),
+	}
+	handler.storeWeixinFlow(flow)
+	stored, found := handler.getWeixinFlow(flow.ID)
+	if !found || stored.Status != weixinStatusWait {
+		t.Fatalf("stored flow=%#v found=%v", stored, found)
+	}
+	stored.Status = "detached-copy"
+	if current, _ := handler.getWeixinFlow(flow.ID); current.Status != weixinStatusWait {
+		t.Fatalf("stored flow was mutated through its projection: %#v", current)
+	}
+
+	handler.updateWeixinFlowStatus(flow.ID, weixinStatusScanned)
+	handler.setWeixinFlowConfirmed(flow.ID, "account-id")
+	handler.setWeixinFlowError(flow.ID, "safe error")
+	terminal, found := handler.getWeixinFlow(flow.ID)
+	if !found || terminal.Status != weixinStatusError || terminal.AccountID != "account-id" ||
+		terminal.Error != "safe error" {
+		t.Fatalf("terminal flow=%#v found=%v", terminal, found)
+	}
+
+	expired := &weixinFlow{
+		ID: "wx-expired", Status: weixinStatusWait,
+		UpdatedAt: now, ExpiresAt: now.Add(-time.Minute),
+	}
+	stale := &weixinFlow{
+		ID: "wx-stale", Status: weixinStatusError,
+		UpdatedAt: now.Add(-weixinFlowGCAge - time.Minute),
+	}
+	handler.weixinFlows[expired.ID] = expired
+	handler.weixinFlows[stale.ID] = stale
+	handler.weixinMu.Lock()
+	handler.gcWeixinFlowsLocked(now)
+	handler.weixinMu.Unlock()
+	if expired.Status != weixinStatusExpired {
+		t.Fatalf("expired flow=%#v", expired)
+	}
+	if _, found := handler.weixinFlows[stale.ID]; found {
+		t.Fatal("stale terminal flow was not collected")
+	}
+	if _, found := handler.getWeixinFlow("missing"); found {
+		t.Fatal("missing flow was returned")
+	}
+	if id := newWeixinFlowID(); !strings.HasPrefix(id, "wx_") {
+		t.Fatalf("flow ID=%q", id)
 	}
 }

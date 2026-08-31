@@ -489,11 +489,17 @@ func runRepositoryValidationAdjudication(
 	evidence []repoaudit.RepositoryValidationEvidence,
 ) (repoaudit.RepositoryValidationDecision, error) {
 	if h == nil {
-		return repoaudit.RepositoryValidationDecision{}, errors.New("validation adjudicator unavailable")
+		return repoaudit.RepositoryValidationDecision{}, repoaudit.WrapRepositoryValidationFailure(
+			repoaudit.RepositoryValidationFailureCodeModelUnavailable,
+			errors.New("validation adjudicator unavailable"),
+		)
 	}
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
-		return repoaudit.RepositoryValidationDecision{}, err
+		return repoaudit.RepositoryValidationDecision{}, repoaudit.WrapRepositoryValidationFailure(
+			repoaudit.RepositoryValidationFailureCodeModelUnavailable,
+			err,
+		)
 	}
 	runner := &webWorkflowRuntimeRunner{configPath: h.configPath, config: cfg}
 	defer runner.Close()
@@ -502,7 +508,14 @@ func runRepositoryValidationAdjudication(
 	if _, resolveErr := runner.ResolveRepositoryReviewProfile(
 		callCtx, "main", snapshot.Account, []string{snapshot.Model},
 	); resolveErr != nil {
-		return repoaudit.RepositoryValidationDecision{}, resolveErr
+		code := repoaudit.RepositoryValidationFailureCodeModelUnavailable
+		if errors.Is(resolveErr, context.DeadlineExceeded) {
+			code = repoaudit.RepositoryValidationFailureCodeModelTimeout
+		}
+		return repoaudit.RepositoryValidationDecision{}, repoaudit.WrapRepositoryValidationFailure(
+			code,
+			resolveErr,
+		)
 	}
 	finding, evidence, currentSource := repositoryValidationAdjudicationProjection(
 		finding, evidence,
@@ -513,7 +526,10 @@ func runRepositoryValidationAdjudication(
 		"current_source": currentSource,
 	})
 	if err != nil || len(payload) > 2<<20 {
-		return repoaudit.RepositoryValidationDecision{}, errors.New("validation input exceeds its bound")
+		return repoaudit.RepositoryValidationDecision{}, repoaudit.WrapRepositoryValidationFailure(
+			repoaudit.RepositoryValidationFailureCodeEvidenceInvalid,
+			errors.New("validation input exceeds its bound"),
+		)
 	}
 	outputs, err := runRepositoryValidationAgent(callCtx, runner, workflows.AgentRequest{
 		AccountRef: snapshot.Account,
@@ -533,22 +549,42 @@ func runRepositoryValidationAdjudication(
 		},
 	})
 	if err != nil {
-		return repoaudit.RepositoryValidationDecision{}, err
+		code := repoaudit.RepositoryValidationFailureCodeModelRequest
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			code = repoaudit.RepositoryValidationFailureCodeModelTimeout
+		} else if outputs != nil {
+			if valid, present := outputs["structured_valid"].(bool); present && !valid {
+				code = repoaudit.RepositoryValidationFailureCodeModelOutputInvalid
+			}
+		}
+		return repoaudit.RepositoryValidationDecision{}, repoaudit.WrapRepositoryValidationFailure(
+			code,
+			err,
+		)
 	}
 	if valid, _ := outputs["structured_valid"].(bool); !valid {
-		return repoaudit.RepositoryValidationDecision{}, errors.New("validator returned invalid output")
+		return repoaudit.RepositoryValidationDecision{}, repoaudit.WrapRepositoryValidationFailure(
+			repoaudit.RepositoryValidationFailureCodeModelOutputInvalid,
+			errors.New("validator returned invalid output"),
+		)
 	}
 	encoded, _ := json.Marshal(outputs["structured"])
 	var decision repoaudit.RepositoryValidationDecision
 	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decision); err != nil {
-		return repoaudit.RepositoryValidationDecision{}, err
+		return repoaudit.RepositoryValidationDecision{}, repoaudit.WrapRepositoryValidationFailure(
+			repoaudit.RepositoryValidationFailureCodeModelOutputInvalid,
+			err,
+		)
 	}
 	if decision.Outcome != repoaudit.RepositoryValidationConfirmed &&
 		decision.Outcome != repoaudit.RepositoryValidationNotFixed &&
 		decision.Outcome != repoaudit.RepositoryValidationInconclusive {
-		return repoaudit.RepositoryValidationDecision{}, errors.New("validator returned an invalid outcome")
+		return repoaudit.RepositoryValidationDecision{}, repoaudit.WrapRepositoryValidationFailure(
+			repoaudit.RepositoryValidationFailureCodeModelOutputInvalid,
+			errors.New("validator returned an invalid outcome"),
+		)
 	}
 	return decision, nil
 }

@@ -15,6 +15,7 @@ import { toast } from "sonner"
 
 import {
   type RepositoryFinding,
+  type RepositoryFindingResolution,
   RepositoryReviewAPIError,
   type RepositoryReviewFinding,
   type RepositoryReviewFindingContext,
@@ -150,6 +151,20 @@ export function RepositoryReviewFindingPage({
         : undefined
   const finding = detail?.finding
   const repositoryFinding = detail?.repository_finding
+  const latestFixCheckResolution =
+    repositoryFinding?.validation_state === "failed"
+      ? repositoryFinding.resolution_history?.reduce<
+          RepositoryFindingResolution | undefined
+        >((latest, resolution) => {
+          if (resolution.outcome !== "failed") return latest
+          return !latest ||
+            new Date(resolution.validated_at).getTime() >
+              new Date(latest.validated_at).getTime()
+            ? resolution
+            : latest
+        }, undefined)
+      : undefined
+  const latestFixCheckFailure = latestFixCheckResolution?.failure
   const isRepositoryResource = resourceKind === "repository"
   const actionFinding = detail?.action_finding ?? finding
   const actionFindingID = repositoryFinding ? actionFinding?.id : findingID
@@ -899,6 +914,46 @@ export function RepositoryReviewFindingPage({
                     }
                   />
                 </dl>
+                {repositoryFinding.validation_state === "failed" && (
+                  <div
+                    role="alert"
+                    aria-labelledby="repository-fix-check-failure"
+                    className="border-destructive/50 bg-destructive/5 rounded-lg border p-4 text-sm"
+                  >
+                    <h3
+                      id="repository-fix-check-failure"
+                      className="font-medium"
+                    >
+                      Fix check failed
+                    </h3>
+                    {latestFixCheckFailure ? (
+                      <>
+                        <p className="text-muted-foreground mt-1 break-words whitespace-pre-wrap">
+                          {latestFixCheckFailure.message}
+                        </p>
+                        <p className="text-muted-foreground mt-1 text-xs break-all">
+                          {latestFixCheckFailure.code} ·{" "}
+                          {formatTimestamp(latestFixCheckFailure.at)}
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-muted-foreground mt-1">
+                          No failure details were recorded for this attempt. It
+                          may predate fix-check failure diagnostics.
+                        </p>
+                        {latestFixCheckResolution && (
+                          <p className="text-muted-foreground mt-1 text-xs">
+                            details_unavailable ·{" "}
+                            {formatTimestamp(
+                              latestFixCheckResolution.validated_at,
+                            )}
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
                 {repositoryFinding.issue.conflict && (
                   <div
                     role="alert"

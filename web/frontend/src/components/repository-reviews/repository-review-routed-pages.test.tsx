@@ -3052,6 +3052,193 @@ describe("routed repository review pages", () => {
     },
   )
 
+  it("shows the latest failed fix-check diagnostics with the retry action", async () => {
+    const failureAt = "2026-08-26T03:04:05Z"
+    const aggregate: RepositoryFinding = {
+      ...repositoryFinding,
+      validation_state: "failed",
+      resolution_history: [
+        {
+          outcome: "failed",
+          validated_at: failureAt,
+          failure: {
+            code: "model_unavailable",
+            message: "The fix-check model is unavailable.",
+            retryable: true,
+            at: failureAt,
+          },
+        },
+        {
+          outcome: "failed",
+          validated_at: "2026-08-26T01:00:00Z",
+          failure: {
+            code: "processing",
+            message: "This older processing failure must not be shown.",
+            retryable: true,
+            at: "2026-08-26T01:00:00Z",
+          },
+        },
+      ],
+    }
+    vi.mocked(getRepositoryReviewAutomationRepositoryFinding).mockResolvedValue(
+      {
+        automation,
+        repository: repositorySummary,
+        finding,
+        repository_finding: aggregate,
+        occurrences: [finding],
+        contexts: [],
+        capabilities: { github: true },
+      },
+    )
+
+    renderPage(
+      <RepositoryReviewFindingPage
+        automationID={automation.id}
+        findingID={aggregate.id}
+        resourceKind="repository"
+        onBack={vi.fn()}
+        onOpenRepositoryFinding={vi.fn()}
+        onOpenIssue={vi.fn()}
+        onLinkIssue={vi.fn()}
+        onGenerated={vi.fn()}
+        onOpenThread={vi.fn()}
+      />,
+    )
+
+    const alert = await screen.findByRole("alert", {
+      name: "Fix check failed",
+    })
+    expect(
+      within(alert).getByText("The fix-check model is unavailable."),
+    ).toBeVisible()
+    expect(
+      within(alert).getByText(
+        `model_unavailable · ${new Date(failureAt).toLocaleString()}`,
+      ),
+    ).toBeVisible()
+    expect(
+      screen.queryByText("This older processing failure must not be shown."),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: "Retry fix check" }),
+    ).toBeEnabled()
+  })
+
+  it("explains failed legacy fix checks without recorded diagnostics", async () => {
+    const validatedAt = "2026-08-26T03:04:05Z"
+    const aggregate: RepositoryFinding = {
+      ...repositoryFinding,
+      validation_state: "failed",
+      resolution_history: [
+        {
+          outcome: "failed",
+          validated_at: validatedAt,
+        },
+      ],
+    }
+    vi.mocked(getRepositoryReviewAutomationRepositoryFinding).mockResolvedValue(
+      {
+        automation,
+        repository: repositorySummary,
+        finding,
+        repository_finding: aggregate,
+        occurrences: [finding],
+        contexts: [],
+        capabilities: { github: true },
+      },
+    )
+
+    renderPage(
+      <RepositoryReviewFindingPage
+        automationID={automation.id}
+        findingID={aggregate.id}
+        resourceKind="repository"
+        onBack={vi.fn()}
+        onOpenRepositoryFinding={vi.fn()}
+        onOpenIssue={vi.fn()}
+        onLinkIssue={vi.fn()}
+        onGenerated={vi.fn()}
+        onOpenThread={vi.fn()}
+      />,
+    )
+
+    const alert = await screen.findByRole("alert", {
+      name: "Fix check failed",
+    })
+    expect(
+      within(alert).getByText(
+        "No failure details were recorded for this attempt. It may predate fix-check failure diagnostics.",
+      ),
+    ).toBeVisible()
+    expect(
+      within(alert).getByText(
+        `details_unavailable · ${new Date(validatedAt).toLocaleString()}`,
+      ),
+    ).toBeVisible()
+    expect(
+      screen.getByRole("button", { name: "Retry fix check" }),
+    ).toBeEnabled()
+  })
+
+  it("does not show historical fix-check failures for a current non-failed state", async () => {
+    const aggregate: RepositoryFinding = {
+      ...repositoryFinding,
+      validation_state: "confirmed",
+      resolution_history: [
+        {
+          outcome: "failed",
+          validated_at: "2026-08-26T01:00:00Z",
+          failure: {
+            code: "historical_failure",
+            message: "This failure is no longer current.",
+            retryable: true,
+            at: "2026-08-26T01:00:00Z",
+          },
+        },
+        {
+          outcome: "confirmed",
+          validated_at: "2026-08-26T03:04:05Z",
+        },
+      ],
+    }
+    vi.mocked(getRepositoryReviewAutomationRepositoryFinding).mockResolvedValue(
+      {
+        automation,
+        repository: repositorySummary,
+        finding,
+        repository_finding: aggregate,
+        occurrences: [finding],
+        contexts: [],
+        capabilities: { github: true },
+      },
+    )
+
+    renderPage(
+      <RepositoryReviewFindingPage
+        automationID={automation.id}
+        findingID={aggregate.id}
+        resourceKind="repository"
+        onBack={vi.fn()}
+        onOpenRepositoryFinding={vi.fn()}
+        onOpenIssue={vi.fn()}
+        onLinkIssue={vi.fn()}
+        onGenerated={vi.fn()}
+        onOpenThread={vi.fn()}
+      />,
+    )
+
+    expect(
+      await screen.findByRole("heading", { name: "Repository lifecycle" }),
+    ).toBeVisible()
+    expect(
+      screen.queryByRole("alert", { name: "Fix check failed" }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText("This failure is no longer current."),
+    ).not.toBeInTheDocument()
+  })
+
   it("renders repository finding causal, effort, occurrence, and resolution projections", async () => {
     const aggregate: RepositoryFinding = {
       ...repositoryFinding,

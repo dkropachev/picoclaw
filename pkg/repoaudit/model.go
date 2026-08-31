@@ -377,6 +377,7 @@ type RepositoryFindingResolution struct {
 	ValidatedAt        time.Time                        `json:"validated_at"`
 	FirstContainingTag string                           `json:"first_containing_tag,omitempty"`
 	Summary            string                           `json:"summary,omitempty"`
+	Failure            *RepositoryValidationFailure     `json:"failure,omitempty"`
 }
 
 // RepositoryFinding is the stable cross-commit aggregate. Review findings are
@@ -476,6 +477,7 @@ type RepositoryValidationJob struct {
 	FindingVersion      int64                            `json:"finding_version"`
 	Attempts            int                              `json:"attempts"`
 	Error               string                           `json:"error,omitempty"`
+	Failure             *RepositoryValidationFailure     `json:"failure,omitempty"`
 	ReservedAt          time.Time                        `json:"reserved_at,omitempty"`
 	CreatedAt           time.Time                        `json:"created_at"`
 	UpdatedAt           time.Time                        `json:"updated_at"`

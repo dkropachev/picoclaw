@@ -78,6 +78,7 @@ type RepositoryValidationCompletion struct {
 	FirstContainingTag string                           `json:"first_containing_tag,omitempty"`
 	Summary            string                           `json:"summary,omitempty"`
 	Error              string                           `json:"error,omitempty"`
+	FailureCode        RepositoryValidationFailureCode  `json:"failure_code,omitempty"`
 }
 
 type RepositoryIssueSnapshotUpdate struct {
@@ -734,6 +735,7 @@ func (s Store) reconcileRepositoryJobs(repository string) (int, int, int, error)
 			continue
 		}
 		job.State = RepositoryValidationPending
+		job.Failure = nil
 		job.ReservedAt = time.Time{}
 		job.UpdatedAt = now
 		if findingIndex := repositoryFindingIndexByID(
@@ -1486,6 +1488,7 @@ func (s Store) ClaimValidationJob(
 	job.State = RepositoryValidationRunning
 	job.Attempts++
 	job.Error = ""
+	job.Failure = nil
 	job.ReservedAt = now
 	job.UpdatedAt = now
 	finding.ValidationState = RepositoryValidationRunning
@@ -1556,6 +1559,9 @@ func (s Store) CompleteValidationJob(
 	completion.FirstContainingTag = strings.TrimSpace(completion.FirstContainingTag)
 	completion.Summary = strings.TrimSpace(completion.Summary)
 	completion.Error = safeLifecycleError(completion.Error)
+	completion.FailureCode = RepositoryValidationFailureCode(
+		strings.TrimSpace(string(completion.FailureCode)),
+	)
 	if completion.JobID == "" || !repositoryValidationTerminal(completion.Outcome) ||
 		!validOptionalLifecycleText(completion.Summary, maxRepositoryLifecycleTextBytes) ||
 		!validOptionalLifecycleText(completion.Error, 1024) ||
@@ -1577,6 +1583,10 @@ func (s Store) CompleteValidationJob(
 		completion.FirstContainingTag != "" {
 		return RepositoryState{}, RepositoryFinding{}, RepositoryValidationJob{},
 			errors.New("non-confirmed validation cannot record a fix commit")
+	}
+	if completion.Outcome != RepositoryValidationFailed && completion.FailureCode != "" {
+		return RepositoryState{}, RepositoryFinding{}, RepositoryValidationJob{},
+			errors.New("non-failed validation cannot record a failure code")
 	}
 	unlock, err := s.lock(repository)
 	if err != nil {
@@ -1616,6 +1626,7 @@ func (s Store) CompleteValidationJob(
 		job.State = RepositoryValidationPending
 		job.CandidateCommits = nil
 		job.Error = "Repository finding changed; validation will restart."
+		job.Failure = nil
 		job.ReservedAt = time.Time{}
 		job.UpdatedAt = now
 		finding.ValidationState = RepositoryValidationPending
@@ -1637,11 +1648,16 @@ func (s Store) CompleteValidationJob(
 	now := s.clock()
 	job.State = completion.Outcome
 	job.Error = completion.Error
+	job.Failure = nil
+	if completion.Outcome == RepositoryValidationFailed {
+		job.Failure = safeRepositoryValidationFailure(completion.FailureCode, now)
+	}
 	job.ReservedAt = time.Time{}
 	job.UpdatedAt = now
 	finding.ValidationState = completion.Outcome
 	resolution := RepositoryFindingResolution{
 		Outcome: completion.Outcome, ValidatedAt: now, Summary: completion.Summary,
+		Failure: job.Failure,
 	}
 	if completion.Outcome == RepositoryValidationConfirmed {
 		resolution.FixCommitSHA = completion.SelectedCommitSHA
@@ -2353,9 +2369,10 @@ func mergeRepositoryFindingRecords(
 	if merged.FixEffort == (FixEffort{}) && source.FixEffort != (FixEffort{}) {
 		merged.FixEffort = source.FixEffort
 	}
-	for _, resolution := range source.ResolutionHistory {
-		merged.ResolutionHistory = appendBoundedResolution(merged.ResolutionHistory, resolution)
-	}
+	merged.ResolutionHistory = mergeRepositoryResolutionHistories(
+		merged.ResolutionHistory,
+		source.ResolutionHistory,
+	)
 	for _, duplicate := range source.PossibleDuplicates {
 		if duplicate.CandidateID != merged.ID && duplicate.CandidateID != source.ID &&
 			!repositoryFindingHasPossibleDuplicate(merged, duplicate.CandidateID) {
@@ -2447,6 +2464,27 @@ func appendBoundedResolution(
 		values = append([]RepositoryFindingResolution(nil), values[len(values)-maxRepositoryResolutionHistory+1:]...)
 	}
 	return append(values, value)
+}
+
+func mergeRepositoryResolutionHistories(
+	left, right []RepositoryFindingResolution,
+) []RepositoryFindingResolution {
+	if len(left) == 0 && len(right) == 0 {
+		return nil
+	}
+	merged := make([]RepositoryFindingResolution, 0, len(left)+len(right))
+	merged = append(merged, left...)
+	merged = append(merged, right...)
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].ValidatedAt.Before(merged[j].ValidatedAt)
+	})
+	if len(merged) > maxRepositoryResolutionHistory {
+		merged = append(
+			[]RepositoryFindingResolution(nil),
+			merged[len(merged)-maxRepositoryResolutionHistory:]...,
+		)
+	}
+	return merged
 }
 
 func safeLifecycleError(value string) string {
@@ -2663,7 +2701,11 @@ func validateRepositoryLifecycleState(state RepositoryState) error {
 		}
 		for _, resolution := range finding.ResolutionHistory {
 			if !repositoryValidationTerminal(resolution.Outcome) || resolution.ValidatedAt.IsZero() ||
-				!validOptionalLifecycleText(resolution.Summary, maxRepositoryLifecycleTextBytes) {
+				!validOptionalLifecycleText(resolution.Summary, maxRepositoryLifecycleTextBytes) ||
+				!validRepositoryValidationFailure(resolution.Failure) ||
+				(resolution.Failure != nil &&
+					(resolution.Outcome != RepositoryValidationFailed ||
+						!resolution.Failure.At.Equal(resolution.ValidatedAt))) {
 				return errors.New("invalid repository finding resolution history")
 			}
 			if resolution.Outcome == RepositoryValidationConfirmed {
@@ -2782,6 +2824,12 @@ func validateRepositoryLifecycleState(state RepositoryState) error {
 		}
 		if (job.State == RepositoryValidationRunning) == job.ReservedAt.IsZero() {
 			return errors.New("invalid repository validation job reservation")
+		}
+		if !validRepositoryValidationFailure(job.Failure) ||
+			(job.Failure != nil &&
+				(job.State != RepositoryValidationFailed ||
+					job.Failure.At.Before(job.CreatedAt) || job.Failure.At.After(job.UpdatedAt))) {
+			return errors.New("invalid repository validation job failure")
 		}
 		if err := validateMappingModelSnapshot(job.ModelSnapshot); err != nil {
 			return err

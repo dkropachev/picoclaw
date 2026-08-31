@@ -159,7 +159,9 @@ func (s Store) processValidationJob(
 	}
 	evidence, err := options.Evidence(ctx, finding, frozenCommits)
 	if err != nil {
-		return s.failValidationJob(ctx, repository, job.ID, err)
+		return s.failValidationJob(
+			ctx, repository, job.ID, RepositoryValidationFailureCodeEvidenceUnavailable, err,
+		)
 	}
 	if len(evidence) > maxValidationCandidateCommits {
 		evidence = evidence[:maxValidationCandidateCommits]
@@ -173,7 +175,10 @@ func (s Store) processValidationJob(
 			continue
 		}
 		if !validRepositoryReviewCommitSHA(candidate.CommitSHA) {
-			return s.failValidationJob(ctx, repository, job.ID, errors.New("validation evidence has an invalid commit"))
+			return s.failValidationJob(
+				ctx, repository, job.ID, RepositoryValidationFailureCodeEvidenceInvalid,
+				errors.New("validation evidence has an invalid commit"),
+			)
 		}
 		if _, duplicate := byCommit[candidate.CommitSHA]; duplicate {
 			continue
@@ -184,47 +189,84 @@ func (s Store) processValidationJob(
 	}
 	if job.CandidateCommits == nil {
 		if _, _, setErr := s.SetValidationJobCandidates(repository, job.ID, commits); setErr != nil {
-			return s.failValidationJob(ctx, repository, job.ID, setErr)
+			return s.failValidationJob(
+				ctx, repository, job.ID, RepositoryValidationFailureCodeProcessing, setErr,
+			)
 		}
 	} else if !stringSlicesEqual(job.CandidateCommits, commits) {
 		return s.failValidationJob(
-			ctx,
-			repository, job.ID, errors.New("frozen validation evidence could not be reproduced"),
+			ctx, repository, job.ID, RepositoryValidationFailureCodeEvidenceChanged,
+			errors.New("frozen validation evidence could not be reproduced"),
 		)
 	}
 	decision, err := options.Adjudicate(ctx, job.ModelSnapshot, finding, evidence)
 	if err != nil {
-		return s.failValidationJob(ctx, repository, job.ID, err)
+		code := RepositoryValidationFailureCodeModelRequest
+		if wrappedCode, ok := RepositoryValidationFailureCodeFromError(err); ok {
+			code = wrappedCode
+		}
+		return s.failValidationJob(ctx, repository, job.ID, code, err)
 	}
 	decision.SelectedCommitSHA = strings.ToLower(strings.TrimSpace(decision.SelectedCommitSHA))
 	decision.Summary = strings.TrimSpace(decision.Summary)
+	if decision.Outcome != RepositoryValidationConfirmed &&
+		decision.Outcome != RepositoryValidationNotFixed &&
+		decision.Outcome != RepositoryValidationInconclusive ||
+		!validOptionalLifecycleText(decision.Summary, maxRepositoryLifecycleTextBytes) {
+		return s.failValidationJob(
+			ctx, repository, job.ID, RepositoryValidationFailureCodeResultInvalid,
+			errors.New("validator returned an invalid result"),
+		)
+	}
 	completion := RepositoryValidationCompletion{
 		JobID: job.ID, Outcome: decision.Outcome, Summary: decision.Summary,
 	}
 	if decision.Outcome != RepositoryValidationConfirmed && decision.SelectedCommitSHA != "" {
 		return s.failValidationJob(
-			ctx, repository, job.ID,
+			ctx, repository, job.ID, RepositoryValidationFailureCodeResultInvalid,
 			errors.New("non-confirmed validation selected a commit"),
 		)
 	}
 	if decision.Outcome == RepositoryValidationConfirmed {
 		candidate, supplied := byCommit[decision.SelectedCommitSHA]
 		if !supplied {
-			return s.failValidationJob(ctx, repository, job.ID, errors.New("validator selected an unsupplied commit"))
+			return s.failValidationJob(
+				ctx, repository, job.ID, RepositoryValidationFailureCodeResultInvalid,
+				errors.New("validator selected an unsupplied commit"),
+			)
+		}
+		if candidate.CommitTime.IsZero() {
+			return s.failValidationJob(
+				ctx, repository, job.ID, RepositoryValidationFailureCodeEvidenceInvalid,
+				errors.New("selected validation evidence has no commit time"),
+			)
 		}
 		reachable, verifyErr := options.VerifyAncestry(ctx, decision.SelectedCommitSHA)
 		if verifyErr != nil || !reachable {
 			if verifyErr == nil {
 				verifyErr = errors.New("selected fix commit is not on the default branch")
 			}
-			return s.failValidationJob(ctx, repository, job.ID, verifyErr)
+			return s.failValidationJob(
+				ctx, repository, job.ID,
+				RepositoryValidationFailureCodeDefaultBranchVerification, verifyErr,
+			)
 		}
 		completion.SelectedCommitSHA = decision.SelectedCommitSHA
 		completion.FixCommitTime = candidate.CommitTime
 		if options.FirstSemanticTag != nil {
 			completion.FirstContainingTag, err = options.FirstSemanticTag(ctx, decision.SelectedCommitSHA)
 			if err != nil {
-				return s.failValidationJob(ctx, repository, job.ID, err)
+				return s.failValidationJob(
+					ctx, repository, job.ID, RepositoryValidationFailureCodeReleaseTag, err,
+				)
+			}
+			completion.FirstContainingTag = strings.TrimSpace(completion.FirstContainingTag)
+			if completion.FirstContainingTag != "" &&
+				!ValidSemanticVersionTag(completion.FirstContainingTag) {
+				return s.failValidationJob(
+					ctx, repository, job.ID, RepositoryValidationFailureCodeReleaseTag,
+					errors.New("release tag is not semantic versioning"),
+				)
 			}
 		}
 	}
@@ -233,7 +275,9 @@ func (s Store) processValidationJob(
 		if errors.Is(err, errRepositoryValidationEvidenceChanged) {
 			return RepositoryValidationPending, nil
 		}
-		return s.failValidationJob(ctx, repository, job.ID, err)
+		return s.failValidationJob(
+			ctx, repository, job.ID, RepositoryValidationFailureCodeProcessing, err,
+		)
 	}
 	return completed.State, nil
 }
@@ -241,6 +285,7 @@ func (s Store) processValidationJob(
 func (s Store) failValidationJob(
 	ctx context.Context,
 	repository, jobID string,
+	code RepositoryValidationFailureCode,
 	cause error,
 ) (RepositoryFindingValidationState, error) {
 	if ctx != nil && ctx.Err() != nil {
@@ -249,7 +294,7 @@ func (s Store) failValidationJob(
 	}
 	_, _, completed, err := s.CompleteValidationJob(repository, RepositoryValidationCompletion{
 		JobID: jobID, Outcome: RepositoryValidationFailed,
-		Error: "Validation failed.", Summary: "Validation could not reach a conclusive result.",
+		FailureCode: code, Summary: "The fix check could not reach a conclusive result.",
 	})
 	if err != nil {
 		if errors.Is(err, errRepositoryValidationEvidenceChanged) {
@@ -289,6 +334,7 @@ func (s Store) releaseValidationJob(repository, jobID string) error {
 	now := s.clock()
 	job.State = RepositoryValidationPending
 	job.Error = ""
+	job.Failure = nil
 	job.ReservedAt = time.Time{}
 	job.UpdatedAt = now
 	finding.ValidationState = RepositoryValidationPending
