@@ -9,14 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 const (
-	workflowDevelopmentPublishJournalVersion = 2
-	workflowDevelopmentPublishJournalFile    = "publish-transaction.json"
+	workflowDevelopmentPublishJournalVersion       = 3
+	workflowDevelopmentPublishLegacyJournalVersion = 2
+	workflowDevelopmentPublishJournalFile          = "publish-transaction.json"
 
 	workflowDevelopmentPublishPhasePrepared  = "prepared"
 	workflowDevelopmentPublishPhaseCommitted = "committed"
@@ -109,388 +109,6 @@ func PublishWorkflowDevelopmentFenced(
 	)
 }
 
-func publishWorkflowDevelopmentTransaction(
-	ctx context.Context,
-	workspace string,
-	request *WorkflowDevelopmentPublishRequest,
-	runtime RuntimeCompatibility,
-	gate WorkflowDevelopmentPublishGate,
-	hooks *workflowDevelopmentPublishHooks,
-	opts ...LocalOption,
-) (*WorkflowDevelopmentPublishResult, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	unlock, lockErr := lockWorkflowMutation(workspace)
-	if lockErr != nil {
-		return nil, lockErr
-	}
-	defer unlock()
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	session, sessionErr := requireActiveDevelopment(workspace)
-	if sessionErr != nil {
-		return nil, sessionErr
-	}
-	currentTargetRevision, revisionErr := captureWorkflowDevelopmentTargetRevision(
-		workspace,
-		session.TargetWorkflowRef,
-		opts...,
-	)
-	if revisionErr != nil {
-		return nil, revisionErr
-	}
-	if request == nil {
-		if session.BaseTargetRevision == WorkflowTargetRevisionUnknown {
-			session.BaseTargetRevision = currentTargetRevision
-			session.UpdatedAt = time.Now().UTC()
-			if err := writeActiveDevelopment(workspace, session); err != nil {
-				return nil, err
-			}
-		}
-		request = &WorkflowDevelopmentPublishRequest{
-			SessionID:                  session.ID,
-			ExpectedSessionRevision:    session.SessionRevision,
-			ExpectedDraftRevision:      session.DraftRevision,
-			ExpectedBaseTargetRevision: session.BaseTargetRevision,
-		}
-	}
-	if err := checkWorkflowDevelopmentPublishRevisions(
-		session,
-		*request,
-		currentTargetRevision,
-	); err != nil {
-		return nil, err
-	}
-
-	draftBytes := []byte(session.YAML)
-	workflow, parseErr := Parse(draftBytes)
-	if parseErr != nil {
-		return nil, fmt.Errorf(
-			"%w: parse exact workflow draft: %v",
-			ErrWorkflowDevelopmentDraftNotReady,
-			parseErr,
-		)
-	}
-	if err := Validate(workflow); err != nil {
-		return nil, fmt.Errorf(
-			"%w: validate exact workflow draft: %v",
-			ErrWorkflowDevelopmentDraftNotReady,
-			err,
-		)
-	}
-	if err := requireCurrentSuccessfulDevelopmentTest(session); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrWorkflowDevelopmentDraftNotReady, err)
-	}
-	if err := checkWorkflowDevelopmentPublishGate(
-		ctx,
-		*request,
-		session,
-		workflow,
-		gate,
-	); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	local := collectLocalOptions(opts...)
-	definitionsDir, definitionsErr := cleanDefinitionsDir(local.DefinitionsDir)
-	if definitionsErr != nil {
-		return nil, definitionsErr
-	}
-	resolved, resolveErr := local.resolver(workspace).ResolveLocal(session.TargetWorkflowRef)
-	if resolveErr != nil {
-		return nil, resolveErr
-	}
-	manifest, manifestErr := buildCompatibilityManifestLocked(
-		ctx,
-		workspace,
-		runtime,
-		&workflowCompatibilityOverlay{
-			ref:  resolved.Canonical,
-			data: draftBytes,
-		},
-		opts...,
-	)
-	if manifestErr != nil {
-		return nil, manifestErr
-	}
-	if !templateHasValidCompatibilityStamp(manifest, resolved.Canonical) {
-		return nil, fmt.Errorf("published workflow did not receive a valid compatibility stamp")
-	}
-	// Dependency checks and manifest preparation may be comparatively slow.
-	// Re-read every authoring fence before taking transaction snapshots so an
-	// out-of-band editor cannot win that window.
-	latestSession, latestSessionErr := requireActiveDevelopment(workspace)
-	if latestSessionErr != nil {
-		return nil, latestSessionErr
-	}
-	latestTargetRevision, latestRevisionErr := captureWorkflowDevelopmentTargetRevision(
-		workspace,
-		latestSession.TargetWorkflowRef,
-		opts...,
-	)
-	if latestRevisionErr != nil {
-		return nil, latestRevisionErr
-	}
-	if err := checkWorkflowDevelopmentPublishRevisions(
-		latestSession,
-		*request,
-		latestTargetRevision,
-	); err != nil {
-		return nil, err
-	}
-	// Manifest construction loads the reusable closure and can take long
-	// enough for a non-cooperating editor to change a child definition. Fence
-	// the exact dependency graph again immediately before snapshots and the
-	// durable transaction begin.
-	if err := checkWorkflowDevelopmentPublishGate(
-		ctx,
-		*request,
-		latestSession,
-		workflow,
-		gate,
-	); err != nil {
-		return nil, err
-	}
-	manifestData, manifestMarshalErr := json.MarshalIndent(manifest, "", "  ")
-	if manifestMarshalErr != nil {
-		return nil, manifestMarshalErr
-	}
-	archiveData, archiveMarshalErr := marshalWorkflowDevelopmentArchive(session, "published")
-	if archiveMarshalErr != nil {
-		return nil, archiveMarshalErr
-	}
-
-	archivePath, archivePathErr := checkedWorkflowDevelopmentArchivePath(
-		workspace,
-		session.ID,
-	)
-	if archivePathErr != nil {
-		return nil, archivePathErr
-	}
-	manifestPath, manifestPathErr := checkedCompatibilityManifestPath(workspace)
-	if manifestPathErr != nil {
-		return nil, manifestPathErr
-	}
-	activePath, activePathErr := checkedActiveDevelopmentPath(workspace)
-	if activePathErr != nil {
-		return nil, activePathErr
-	}
-	targetSnapshot, targetSnapshotErr := captureWorkflowTemplateFile(resolved.Path)
-	if targetSnapshotErr != nil {
-		return nil, targetSnapshotErr
-	}
-	if workflowDevelopmentPublishSnapshotRevision(targetSnapshot) !=
-		session.BaseTargetRevision {
-		return nil, ErrWorkflowTargetRevisionMismatch
-	}
-	manifestSnapshot, manifestSnapshotErr := captureWorkflowTemplateFile(manifestPath)
-	if manifestSnapshotErr != nil {
-		return nil, manifestSnapshotErr
-	}
-	activeSnapshot, activeSnapshotErr := captureWorkflowTemplateFile(activePath)
-	if activeSnapshotErr != nil {
-		return nil, activeSnapshotErr
-	}
-	if !activeSnapshot.exists {
-		return nil, ErrNoActiveDevelopment
-	}
-	var snapshotSession WorkflowDevelopmentSession
-	if err := json.Unmarshal(activeSnapshot.data, &snapshotSession); err != nil {
-		return nil, err
-	}
-	if err := checkWorkflowDevelopmentPublishRevisions(
-		&snapshotSession,
-		*request,
-		workflowDevelopmentPublishSnapshotRevision(targetSnapshot),
-	); err != nil {
-		return nil, err
-	}
-	archiveSnapshot, archiveSnapshotErr := captureWorkflowTemplateFile(archivePath)
-	if archiveSnapshotErr != nil {
-		return nil, archiveSnapshotErr
-	}
-	targetMode := fs.FileMode(0o644)
-	if targetSnapshot.exists {
-		targetMode = targetSnapshot.mode
-	}
-	targetPostimage := workflowTemplateFileSnapshot{
-		path:   resolved.Path,
-		exists: true,
-		data:   draftBytes,
-		mode:   targetMode,
-	}
-	manifestPostimage := workflowTemplateFileSnapshot{
-		path:   manifestPath,
-		exists: true,
-		data:   manifestData,
-		mode:   0o600,
-	}
-	archivePostimage := workflowTemplateFileSnapshot{
-		path:   archivePath,
-		exists: true,
-		data:   archiveData,
-		mode:   0o600,
-	}
-	activePostimage := workflowTemplateFileSnapshot{path: activePath}
-
-	journal := &workflowDevelopmentPublishJournal{
-		Version:        workflowDevelopmentPublishJournalVersion,
-		Phase:          workflowDevelopmentPublishPhasePrepared,
-		Stage:          workflowDevelopmentPublishStagePrepared,
-		DefinitionsDir: filepath.ToSlash(definitionsDir),
-		TargetRef:      resolved.Canonical,
-		SessionID:      session.ID,
-		Target: workflowDevelopmentPublishTransition(
-			targetSnapshot,
-			targetPostimage,
-		),
-		Manifest: workflowDevelopmentPublishTransition(
-			manifestSnapshot,
-			manifestPostimage,
-		),
-		Active: workflowDevelopmentPublishTransition(
-			activeSnapshot,
-			activePostimage,
-		),
-		Archive: workflowDevelopmentPublishTransition(
-			archiveSnapshot,
-			archivePostimage,
-		),
-	}
-	writeJournal := workflowDevelopmentPublishJournalWriter(
-		writeWorkflowDevelopmentPublishJournal,
-	)
-	if hooks != nil && hooks.writeJournal != nil {
-		writeJournal = hooks.writeJournal
-	}
-	if err := writeJournal(workspace, journal); err != nil {
-		if recoveryErr := recoverWorkflowDevelopmentPublishTransaction(workspace); recoveryErr != nil {
-			return nil, errors.Join(err, recoveryErr)
-		}
-		return nil, err
-	}
-	fail := func(publishErr error) (*WorkflowDevelopmentPublishResult, error) {
-		if hooks != nil && hooks.leaveJournalOnError {
-			return nil, publishErr
-		}
-		if rollbackErr := recoverWorkflowDevelopmentPublishTransaction(workspace); rollbackErr != nil {
-			return nil, errors.Join(
-				publishErr,
-				ErrWorkflowDevelopmentPublishRollbackFailed,
-				rollbackErr,
-			)
-		}
-		return nil, publishErr
-	}
-	checkBoundary := func(boundary workflowDevelopmentPublishBoundary) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if hooks != nil && hooks.afterBoundary != nil {
-			return hooks.afterBoundary(boundary)
-		}
-		return nil
-	}
-	if err := checkBoundary(workflowDevelopmentPublishBoundaryPrepared); err != nil {
-		return fail(err)
-	}
-
-	journal.Stage = workflowDevelopmentPublishStageTargetWriteStarted
-	if err := writeJournal(workspace, journal); err != nil {
-		return fail(err)
-	}
-	if err := fileutil.MkdirAllDurable(filepath.Dir(resolved.Path), 0o755); err != nil {
-		return fail(err)
-	}
-	if err := writeWorkflowTemplateAtomic(resolved.Path, draftBytes, targetMode); err != nil {
-		return fail(err)
-	}
-	if err := checkBoundary(workflowDevelopmentPublishBoundaryTargetWritten); err != nil {
-		return fail(err)
-	}
-
-	journal.Stage = workflowDevelopmentPublishStageManifestWriteStarted
-	if err := writeJournal(workspace, journal); err != nil {
-		return fail(err)
-	}
-	if err := fileutil.MkdirAllDurable(filepath.Dir(manifestPath), 0o755); err != nil {
-		return fail(err)
-	}
-	if err := writeWorkflowTemplateAtomic(
-		manifestPath,
-		manifestData,
-		0o600,
-	); err != nil {
-		return fail(err)
-	}
-	if err := checkBoundary(workflowDevelopmentPublishBoundaryManifestActivated); err != nil {
-		return fail(err)
-	}
-
-	journal.Stage = workflowDevelopmentPublishStageArchiveWriteStarted
-	if err := writeJournal(workspace, journal); err != nil {
-		return fail(err)
-	}
-	if err := fileutil.MkdirAllDurable(filepath.Dir(archivePath), 0o755); err != nil {
-		return fail(err)
-	}
-	if err := writeWorkflowTemplateAtomic(archivePath, archiveData, 0o600); err != nil {
-		return fail(err)
-	}
-	if err := checkBoundary(workflowDevelopmentPublishBoundarySessionArchived); err != nil {
-		return fail(err)
-	}
-
-	journal.Stage = workflowDevelopmentPublishStageActiveRemoveStarted
-	if err := writeJournal(workspace, journal); err != nil {
-		return fail(err)
-	}
-	if err := removeWorkflowDevelopmentPublishFile(activePath); err != nil {
-		return fail(err)
-	}
-	if err := checkBoundary(workflowDevelopmentPublishBoundaryActiveRemoved); err != nil {
-		return fail(err)
-	}
-
-	journal.Phase = workflowDevelopmentPublishPhaseCommitted
-	journal.Stage = workflowDevelopmentPublishStageCommitted
-	if err := writeWorkflowDevelopmentPublishCommitWithRetry(
-		workspace,
-		journal,
-		writeJournal,
-	); err != nil {
-		// A visible marker is not durability proof after a failed sync. Leave
-		// the ambiguous journal untouched and return an error. Recovery under
-		// the next mutation lock will either finalize a durable committed marker
-		// or roll back the durable prepared marker.
-		return nil, err
-	}
-	if err := checkBoundary(workflowDevelopmentPublishBoundaryCommitted); err != nil {
-		if hooks != nil && hooks.leaveJournalOnError {
-			return nil, err
-		}
-		_ = removeWorkflowDevelopmentPublishJournal(workspace)
-		return &WorkflowDevelopmentPublishResult{
-			WorkflowRef: session.TargetWorkflowRef,
-			Session:     session,
-		}, nil
-	}
-
-	// Once the committed marker is durable, cleanup is retryable housekeeping:
-	// a leftover committed journal is finalized by the next mutation.
-	_ = removeWorkflowDevelopmentPublishJournal(workspace)
-	return &WorkflowDevelopmentPublishResult{
-		WorkflowRef: session.TargetWorkflowRef,
-		Session:     session,
-	}, nil
-}
-
 func checkWorkflowDevelopmentPublishGate(
 	ctx context.Context,
 	request WorkflowDevelopmentPublishRequest,
@@ -522,19 +140,6 @@ func checkWorkflowDevelopmentPublishGate(
 		return ErrWorkflowDevelopmentPublishNotReady
 	}
 	return nil
-}
-
-func marshalWorkflowDevelopmentArchive(
-	session *WorkflowDevelopmentSession,
-	state string,
-) ([]byte, error) {
-	if session == nil {
-		return nil, ErrNoActiveDevelopment
-	}
-	copySession := *session
-	copySession.Status = strings.TrimSpace(state)
-	copySession.UpdatedAt = time.Now().UTC()
-	return json.MarshalIndent(copySession, "", "  ")
 }
 
 func workflowDevelopmentArchivePath(workspace, sessionID string) string {
@@ -664,7 +269,8 @@ func validateWorkflowDevelopmentPublishJournal(
 	if journal == nil {
 		return fmt.Errorf("workflow publish journal is required")
 	}
-	if journal.Version != workflowDevelopmentPublishJournalVersion {
+	if journal.Version != workflowDevelopmentPublishJournalVersion &&
+		journal.Version != workflowDevelopmentPublishLegacyJournalVersion {
 		return fmt.Errorf("unsupported workflow publish journal version")
 	}
 	switch journal.Phase {
@@ -732,7 +338,7 @@ func validateWorkflowDevelopmentPublishFileSnapshot(
 // recoverWorkflowDevelopmentPublishTransaction runs only while the caller owns
 // the workspace mutation lock. Prepared transactions roll back to every
 // captured pre-image; committed transactions only need journal cleanup.
-func recoverWorkflowDevelopmentPublishTransaction(workspace string) error {
+func recoverWorkflowDevelopmentPublishFileTransactionLegacy(workspace string) error {
 	journal, missing, readErr := readWorkflowDevelopmentPublishJournal(workspace)
 	if readErr != nil {
 		return errors.Join(ErrWorkflowDevelopmentPublishRecoveryFailed, readErr)

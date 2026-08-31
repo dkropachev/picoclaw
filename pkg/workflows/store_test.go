@@ -5,10 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	osexec "os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +28,6 @@ func TestFileRunStoreUpdatesRemainReadableDuringAtomicReplacement(t *testing.T) 
 		t.Fatalf("CreateRun() error = %v", err)
 	}
 
-	runPath := filepath.Join(workspace, "workflow_runs", run.ID, "run.json")
 	stopReaders := make(chan struct{})
 	readerErr := make(chan error, 1)
 	var readers sync.WaitGroup
@@ -45,18 +40,10 @@ func TestFileRunStoreUpdatesRemainReadableDuringAtomicReplacement(t *testing.T) 
 				case <-stopReaders:
 					return
 				default:
-					data, err := os.ReadFile(runPath)
+					observed, err := store.GetRun(ctx, run.ID)
 					if err != nil {
 						select {
 						case readerErr <- fmt.Errorf("read run during update: %w", err):
-						default:
-						}
-						return
-					}
-					var observed Run
-					if err := json.Unmarshal(data, &observed); err != nil {
-						select {
-						case readerErr <- fmt.Errorf("decode run during update: %w", err):
 						default:
 						}
 						return
@@ -298,36 +285,6 @@ func TestFileRunStoreCreateRunIsAtomicWithoutAdvisoryLock(t *testing.T) {
 	}
 }
 
-func TestFileRunStoreCreateRunDoesNotClobberExistingFile(t *testing.T) {
-	workspace := t.TempDir()
-	store := NewFileRunStore(workspace)
-	runPath := filepath.Join(workspace, "workflow_runs", "wr_existing", "run.json")
-	if err := os.MkdirAll(filepath.Dir(runPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	original := []byte("existing bytes must survive")
-	if err := os.WriteFile(runPath, original, 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	err := store.CreateRun(context.Background(), &Run{
-		ID:          "wr_existing",
-		WorkflowRef: "workflows/replacement.yml",
-		Status:      RunStatusRunning,
-		CreatedAt:   time.Now().UTC(),
-	})
-	if !errors.Is(err, ErrRunAlreadyExists) {
-		t.Fatalf("CreateRun() error = %v, want ErrRunAlreadyExists", err)
-	}
-	got, err := os.ReadFile(runPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-	if string(got) != string(original) {
-		t.Fatalf("run file = %q, want original %q", got, original)
-	}
-}
-
 func TestFileRunStoreCreateRunMarshalFailureLeavesNoPartialFile(t *testing.T) {
 	workspace := t.TempDir()
 	store := NewFileRunStore(workspace)
@@ -341,21 +298,16 @@ func TestFileRunStoreCreateRunMarshalFailureLeavesNoPartialFile(t *testing.T) {
 	if err := store.CreateRun(context.Background(), run); err == nil {
 		t.Fatal("CreateRun() error = nil, want JSON marshal error")
 	}
-	runPath := filepath.Join(workspace, "workflow_runs", "wr_bad_json", "run.json")
-	if _, err := os.Stat(runPath); !os.IsNotExist(err) {
-		t.Fatalf("Stat(run file) error = %v, want not exist", err)
+	if runs, err := store.ListRuns(context.Background()); err != nil || len(runs) != 0 {
+		t.Fatalf("runs after failed create = %#v, %v", runs, err)
 	}
 
 	run.Event = nil
 	if err := store.CreateRun(context.Background(), run); err != nil {
 		t.Fatalf("CreateRun() retry error = %v", err)
 	}
-	info, err := os.Stat(runPath)
-	if err != nil {
-		t.Fatalf("Stat(run file) error = %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("run file permissions = %#o, want 0600", got)
+	if persisted, err := store.GetRun(context.Background(), run.ID); err != nil || persisted.ID != run.ID {
+		t.Fatalf("persisted run = %#v, %v", persisted, err)
 	}
 }
 
@@ -530,70 +482,6 @@ func TestFileRunStoreCreateRunIfUnderLimitIsAtomicAcrossInstances(t *testing.T) 
 	}
 	if len(runs) != 1 || runs[0].Status != RunStatusRunning {
 		t.Fatalf("runs = %#v, want one running run", runs)
-	}
-}
-
-func TestFileRunStoreLockBlocksOtherProcesses(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("workflow run store advisory file lock is not implemented on windows")
-	}
-	workspace := t.TempDir()
-	store := NewFileRunStore(workspace)
-	unlock, err := store.lockRoot()
-	if err != nil {
-		t.Fatalf("lockRoot() error = %v", err)
-	}
-	released := false
-	defer func() {
-		if !released {
-			unlock()
-		}
-	}()
-
-	cmd := osexec.Command(os.Args[0], "-test.run=TestFileRunStoreLockHelper", "--", workspace)
-	cmd.Env = append(os.Environ(), "PICOCLAW_WORKFLOW_LOCK_HELPER=1")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start helper: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-	select {
-	case err := <-done:
-		t.Fatalf("helper exited before lock release: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	unlock()
-	released = true
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("helper error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
-		t.Fatal("helper did not finish after lock release")
-	}
-	if _, err := store.GetRun(context.Background(), "wr_cross_process"); err != nil {
-		t.Fatalf("GetRun(helper run) error = %v", err)
-	}
-}
-
-func TestFileRunStoreLockHelper(t *testing.T) {
-	if os.Getenv("PICOCLAW_WORKFLOW_LOCK_HELPER") != "1" {
-		return
-	}
-	args := os.Args
-	workspace := args[len(args)-1]
-	err := NewFileRunStore(workspace).CreateRunIfUnderLimit(context.Background(), &Run{
-		ID:          "wr_cross_process",
-		WorkflowRef: "workflows/test.yml",
-		Status:      RunStatusRunning,
-		CreatedAt:   time.Now().UTC(),
-	}, 10)
-	if err != nil {
-		t.Fatal(err)
 	}
 }
 

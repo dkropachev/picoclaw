@@ -986,7 +986,7 @@ func (e *Executor) persistWorkflowWait(
 	}
 
 	// Publish the task, cursor, waiting step/job, and claimable run status in
-	// one run.json replacement. Until this write completes, a concurrent task
+	// one immediate SQLite transaction. Until this write completes, a concurrent task
 	// API call can observe only the preceding running checkpoint.
 	run.Status = RunStatusWaiting
 	run.Error = ""

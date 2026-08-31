@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,11 +77,23 @@ func TestWorkflowHumanTaskHandlersResumeAndCancelDurably(t *testing.T) {
 	if !ok || answer["approved"] != true {
 		t.Fatalf("answer output = %#v, want approved response", persisted.Steps["main/approval"].Outputs["response"])
 	}
-	persistedJSON, err := os.ReadFile(filepath.Join(workspace, "workflow_runs", waiting.RunID, "run.json"))
+	db, err := sql.Open("sqlite", filepath.Join(workspace, "state", "workflows.db"))
 	if err != nil {
-		t.Fatalf("ReadFile(run.json) error = %v", err)
+		t.Fatal(err)
 	}
-	if strings.Contains(string(persistedJSON), secret) || strings.Contains(resume.Body.String(), secret) {
+	var persistedPayload string
+	if queryErr := db.QueryRow(`SELECT COALESCE(CAST(event_json AS TEXT),'') ||
+		COALESCE(CAST(inputs_json AS TEXT),'') || COALESCE(CAST(outputs_json AS TEXT),'') ||
+		COALESCE(CAST(delivery_handles_json AS TEXT),'') || COALESCE(CAST(execution_json AS TEXT),'') ||
+		COALESCE(CAST(private_context_json AS TEXT),'') FROM workflow_run_payloads WHERE run_id=?`,
+		waiting.RunID).Scan(&persistedPayload); queryErr != nil {
+		db.Close()
+		t.Fatal(queryErr)
+	}
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if strings.Contains(persistedPayload, secret) || strings.Contains(resume.Body.String(), secret) {
 		t.Fatal("the direct resume secrets map was persisted or returned")
 	}
 	projected, err := json.Marshal(workflows.ProjectWorkflowRunForBrowser(persisted, false))

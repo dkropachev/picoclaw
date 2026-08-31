@@ -997,3 +997,54 @@ func TestAgentInstanceRejectsUnavailableApplyPatchTransactionRoot(t *testing.T) 
 		instance.Close()
 	}
 }
+
+func TestWorkflowRuntimeMutationRootsProtectDatabaseAndRecoveryState(t *testing.T) {
+	workspace := t.TempDir()
+	roots, err := agentWorkflowRuntimeFileMutationProtectedRoots(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := filepath.Join(workspace, "state", "workflows.db")
+	want := []string{
+		filepath.Join(workspace, "state"),
+		database,
+		database + "-wal",
+		database + "-shm",
+		filepath.Join(workspace, "legacy-json"),
+		filepath.Join(workspace, "workflow_state", "mutation.lock"),
+		filepath.Join(workspace, "workflow_state", "workflow_state", "publish-transaction.json"),
+		filepath.Join(workspace, "workflow_state", "workflow_state", "template-transaction.json"),
+	}
+	if len(roots) != len(want) {
+		t.Fatalf("roots = %#v", roots)
+	}
+	for index := range want {
+		if roots[index] != want[index] {
+			t.Fatalf("root %d = %q, want %q", index, roots[index], want[index])
+		}
+	}
+}
+
+func TestAgentFileToolsDenyWorkflowSQLiteRuntimeState(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+	database := filepath.Join(workspace, "state", "workflows.db")
+	if err := os.MkdirAll(filepath.Dir(database), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(database, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := agentFileMutationTestConfig(workspace)
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+	for _, toolName := range []string{"write_file", "edit_file", "append_file"} {
+		requireAgentFileMutationDenied(t, agent.Tools, toolName, workspace, database, true)
+	}
+	data, err := os.ReadFile(database)
+	if err != nil || string(data) != "before" {
+		t.Fatalf("workflow database changed = %q, %v", data, err)
+	}
+}

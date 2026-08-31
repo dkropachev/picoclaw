@@ -63,6 +63,15 @@ their original relative paths, and removing or restoring each database with its
 matching WAL, SHM, and lock directory as one generation. Mixed old/new binaries
 against one storage root are unsupported.
 
+The workflow subsystem uses `workspace/state/workflows.db`. It normalizes runs,
+ordered events, ancestry links, job/step executions, human tasks, native state,
+compatibility stamps/issues, and active or archived development sessions.
+Canonical number-aware JSON BLOBs carry only nested payloads and private
+continuations. Legacy runs/events import before dependent records; native
+state, validation manifests, and development snapshots follow. Filesystem
+publish/template journals remain allowed because they recover workflow
+definition replacement when database state is unavailable.
+
 ## Surface Ownership
 
 Owns: CODE pkg/sqlitestore/**

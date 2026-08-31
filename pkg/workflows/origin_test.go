@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -128,8 +126,9 @@ jobs:
 	}
 
 	t.Run("manual lookalike remains untrusted", func(t *testing.T) {
-		store := NewFileRunStore(t.TempDir())
-		result, err := (&Executor{Store: store}).Run(context.Background(), RunRequest{
+		workspace := t.TempDir()
+		store := NewFileRunStore(workspace)
+		result, err := (&Executor{Store: store, WorkspaceDir: workspace}).Run(context.Background(), RunRequest{
 			RunID:       "wr_manual_lookalike",
 			Workflow:    workflow,
 			WorkflowRef: "inline",
@@ -195,8 +194,9 @@ jobs:
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			store := NewFileRunStore(t.TempDir())
-			_, err := (&Executor{Store: store}).Run(context.Background(), RunRequest{
+			workspace := t.TempDir()
+			store := NewFileRunStore(workspace)
+			_, err := (&Executor{Store: store, WorkspaceDir: workspace}).Run(context.Background(), RunRequest{
 				RunID:       "wr_origin_invalid",
 				Workflow:    workflow,
 				WorkflowRef: "inline",
@@ -240,8 +240,9 @@ jobs:
 	}
 	for _, test := range linkTests {
 		t.Run(test.name, func(t *testing.T) {
-			store := NewFileRunStore(t.TempDir())
-			_, err := (&Executor{Store: store}).Run(context.Background(), RunRequest{
+			workspace := t.TempDir()
+			store := NewFileRunStore(workspace)
+			_, err := (&Executor{Store: store, WorkspaceDir: workspace}).Run(context.Background(), RunRequest{
 				RunID:       "wr_origin_descendant",
 				Workflow:    workflow,
 				WorkflowRef: "inline",
@@ -449,7 +450,7 @@ func TestWorkflowRunBrowserProjectionVerifiesPersistedOriginLineage(t *testing.T
 		}
 	})
 
-	t.Run("retained unreadable ancestor is untrusted in list projection", func(t *testing.T) {
+	t.Run("corrupt retained ancestor fails the SQLite subsystem", func(t *testing.T) {
 		workspace := t.TempDir()
 		store := NewFileRunStore(workspace)
 		if err := store.CreateRun(ctx, root); err != nil {
@@ -458,35 +459,20 @@ func TestWorkflowRunBrowserProjectionVerifiesPersistedOriginLineage(t *testing.T
 		if err := store.CreateRun(ctx, child); err != nil {
 			t.Fatalf("CreateRun(child) error = %v", err)
 		}
-		if err := os.WriteFile(
-			filepath.Join(
-				workspace,
-				"workflow_runs",
-				root.ID,
-				"run.json",
-			),
-			[]byte(`{"id":`),
-			0o600,
-		); err != nil {
-			t.Fatalf("corrupt ancestor run: %v", err)
-		}
-		runs, err := store.ListRuns(ctx)
+		db, err := openWorkflowDatabase(ctx, workspace)
 		if err != nil {
-			t.Fatalf("ListRuns() error = %v", err)
+			t.Fatal(err)
 		}
-		if len(runs) != 1 || runs[0].ID != child.ID {
-			t.Fatalf("readable runs = %#v, want only child", runs)
+		if _, err := db.ExecContext(ctx, `UPDATE workflow_run_payloads SET event_json=?
+			WHERE run_id=?`, []byte(`{"id":`), root.ID); err != nil {
+			db.Close()
+			t.Fatal(err)
 		}
-		listed := ProjectEventBackedDraftRunsForBrowserWithStore(
-			ctx,
-			store,
-			runs,
-		)
-		if listed[0].Origin != nil {
-			t.Fatalf(
-				"origin with unreadable retained ancestor = %#v, want nil",
-				listed[0].Origin,
-			)
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if runs, err := store.ListRuns(ctx); err == nil || runs != nil {
+			t.Fatalf("ListRuns() = %#v, %v; want fail closed", runs, err)
 		}
 	})
 

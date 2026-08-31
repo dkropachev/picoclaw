@@ -3,7 +3,6 @@ package workflows
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 )
 
@@ -23,14 +22,7 @@ func TestReviseWorkflowDevelopmentFencedRejectsMismatchWithoutWrite(t *testing.T
 	if err != nil {
 		t.Fatalf("StartWorkflowDevelopment() error = %v", err)
 	}
-	activePath, err := checkedActiveDevelopmentPath(workspace)
-	if err != nil {
-		t.Fatalf("checkedActiveDevelopmentPath() error = %v", err)
-	}
-	before, err := os.ReadFile(activePath)
-	if err != nil {
-		t.Fatalf("os.ReadFile(active) error = %v", err)
-	}
+	before := readDevelopmentAdmissionSnapshot(t, workspace)
 	exact := WorkflowDevelopmentTestDraftFence{
 		SessionID:               session.ID,
 		ExpectedSessionRevision: session.SessionRevision,
@@ -100,10 +92,7 @@ func TestReviseWorkflowDevelopmentFencedRejectsMismatchWithoutWrite(t *testing.T
 					reviseErr,
 				)
 			}
-			after, readErr := os.ReadFile(activePath)
-			if readErr != nil {
-				t.Fatalf("os.ReadFile(active) error = %v", readErr)
-			}
+			after := readDevelopmentAdmissionSnapshot(t, workspace)
 			if string(after) != string(before) {
 				t.Fatalf("active session changed after fence mismatch")
 			}
@@ -134,14 +123,7 @@ func TestReviseWorkflowDevelopmentFencedChecksFenceBeforeBusyState(t *testing.T)
 	if err != nil {
 		t.Fatalf("RecordWorkflowDevelopmentTest() error = %v", err)
 	}
-	activePath, err := checkedActiveDevelopmentPath(workspace)
-	if err != nil {
-		t.Fatalf("checkedActiveDevelopmentPath() error = %v", err)
-	}
-	before, err := os.ReadFile(activePath)
-	if err != nil {
-		t.Fatalf("os.ReadFile(active) error = %v", err)
-	}
+	before := readDevelopmentAdmissionSnapshot(t, workspace)
 	exact := WorkflowDevelopmentTestDraftFence{
 		SessionID:               active.ID,
 		ExpectedSessionRevision: active.SessionRevision,
@@ -166,10 +148,7 @@ func TestReviseWorkflowDevelopmentFencedChecksFenceBeforeBusyState(t *testing.T)
 			reviseErr,
 		)
 	}
-	after, err := os.ReadFile(activePath)
-	if err != nil {
-		t.Fatalf("os.ReadFile(active) error = %v", err)
-	}
+	after := readDevelopmentAdmissionSnapshot(t, workspace)
 	if string(after) != string(before) {
 		t.Fatal("busy or stale fenced revision changed active bytes")
 	}
@@ -247,14 +226,7 @@ func TestValidateWorkflowDevelopmentFencedRejectsReplacedSessionWithoutWrite(t *
 	if err != nil {
 		t.Fatalf("StartWorkflowDevelopment(second) error = %v", err)
 	}
-	activePath, err := checkedActiveDevelopmentPath(workspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(activePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := readDevelopmentAdmissionSnapshot(t, workspace)
 
 	validated, validateErr := ValidateWorkflowDevelopmentFenced(
 		workspace,
@@ -272,10 +244,7 @@ func TestValidateWorkflowDevelopmentFencedRejectsReplacedSessionWithoutWrite(t *
 			validateErr,
 		)
 	}
-	after, err := os.ReadFile(activePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	after := readDevelopmentAdmissionSnapshot(t, workspace)
 	if string(after) != string(before) {
 		t.Fatal("stale validation changed replacement session")
 	}

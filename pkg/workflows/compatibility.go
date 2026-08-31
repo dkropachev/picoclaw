@@ -3,6 +3,7 @@ package workflows
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
@@ -750,44 +751,141 @@ func stampMatchesRuntime(stamp WorkflowValidationStamp, runtime RuntimeCompatibi
 		(hash == "" || stamp.WorkflowHash == hash)
 }
 
+//nolint:govet // Short-lived row errors stay scoped to their exact read boundary.
 func readCompatibilityManifest(workspace string) (*WorkflowCompatibilityManifest, bool, error) {
-	path, err := checkedCompatibilityManifestPath(workspace)
+	ctx := context.Background()
+	db, release, err := borrowWorkflowDatabase(ctx, workspace)
 	if err != nil {
 		return nil, false, err
 	}
-	data, err := os.ReadFile(path)
+	defer release()
+	manifest := &WorkflowCompatibilityManifest{Workflows: map[string]WorkflowValidationStamp{}}
+	var seconds, nanos int64
+	err = db.QueryRowContext(ctx, `SELECT picoclaw_version,git_commit,workflow_engine,
+		workflow_schema,validator_fingerprint,updated_at_seconds,updated_at_nanosecond
+		FROM workflow_compatibility_runtime WHERE singleton=1`).Scan(&manifest.PicoclawVersion,
+		&manifest.GitCommit, &manifest.WorkflowEngine, &manifest.WorkflowSchema,
+		&manifest.ValidatorFingerprint, &seconds, &nanos)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, true, nil
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, true, nil
+		return nil, false, err
+	}
+	manifest.UpdatedAt = workflowTime(seconds, nanos)
+	if err := func() error {
+		rows, queryErr := db.QueryContext(ctx, `SELECT workflow_ref,workflow_hash,picoclaw_version,
+			git_commit,workflow_engine,workflow_schema,validator_fingerprint,status,
+			validated_at_seconds,validated_at_nanosecond FROM workflow_validation_stamps
+			ORDER BY workflow_ref`)
+		if queryErr != nil {
+			return queryErr
 		}
+		defer rows.Close()
+		for rows.Next() {
+			var stamp WorkflowValidationStamp
+			if scanErr := rows.Scan(&stamp.WorkflowRef, &stamp.WorkflowHash, &stamp.PicoclawVersion,
+				&stamp.GitCommit, &stamp.WorkflowEngine, &stamp.WorkflowSchema,
+				&stamp.ValidatorFingerprint, &stamp.Status, &seconds, &nanos); scanErr != nil {
+				return scanErr
+			}
+			stamp.ValidatedAt = workflowTime(seconds, nanos)
+			manifest.Workflows[stamp.WorkflowRef] = stamp
+		}
+		return rows.Err()
+	}(); err != nil {
 		return nil, false, err
 	}
-	var manifest WorkflowCompatibilityManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
+	issueRows, err := db.QueryContext(ctx, `SELECT workflow_ref,issue_kind,path_text,message
+		FROM workflow_validation_issues ORDER BY workflow_ref,issue_kind,position`)
+	if err != nil {
 		return nil, false, err
 	}
-	if manifest.Workflows == nil {
-		manifest.Workflows = map[string]WorkflowValidationStamp{}
+	defer issueRows.Close()
+	for issueRows.Next() {
+		var ref, kind string
+		var issue WorkflowValidationIssue
+		if err := issueRows.Scan(&ref, &kind, &issue.Path, &issue.Message); err != nil {
+			return nil, false, err
+		}
+		stamp, exists := manifest.Workflows[ref]
+		if !exists {
+			return nil, false, fmt.Errorf("workflow validation issue has no stamp")
+		}
+		if kind == "error" {
+			stamp.Errors = append(stamp.Errors, issue)
+		} else {
+			stamp.Warnings = append(stamp.Warnings, issue)
+		}
+		manifest.Workflows[ref] = stamp
 	}
-	return &manifest, false, nil
+	if err := issueRows.Err(); err != nil {
+		return nil, false, err
+	}
+	return manifest, false, nil
 }
 
 func writeCompatibilityManifest(workspace string, manifest *WorkflowCompatibilityManifest) error {
 	if manifest == nil {
 		return fmt.Errorf("compatibility manifest is required")
 	}
-	path, err := checkedCompatibilityManifestPath(workspace)
+	ctx := context.Background()
+	db, release, err := borrowWorkflowDatabase(ctx, workspace)
 	if err != nil {
 		return err
 	}
-	if mkdirErr := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); mkdirErr != nil {
-		return mkdirErr
+	defer release()
+	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		return writeCompatibilityManifestConn(ctx, conn, manifest)
+	})
+}
+
+func writeCompatibilityManifestConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	manifest *WorkflowCompatibilityManifest,
+) error {
+	if manifest == nil {
+		return fmt.Errorf("compatibility manifest is required")
 	}
-	data, err := json.MarshalIndent(manifest, "", "  ")
+	encoded, err := json.Marshal(manifest)
+	if err != nil || int64(len(encoded)) > maximumWorkflowManifestBytes {
+		return fmt.Errorf("compatibility manifest exceeds its storage limit")
+	}
+	seconds, nanos, err := workflowTimestamp(manifest.UpdatedAt)
 	if err != nil {
 		return err
 	}
-	return writeWorkflowTemplateAtomic(path, data, 0o600)
+	if _, err := conn.ExecContext(ctx, `INSERT INTO workflow_compatibility_runtime
+			(singleton,picoclaw_version,git_commit,workflow_engine,workflow_schema,
+			validator_fingerprint,updated_at_seconds,updated_at_nanosecond,version)
+			VALUES(1,?,?,?,?,?,?,?,1) ON CONFLICT(singleton) DO UPDATE SET
+			picoclaw_version=excluded.picoclaw_version,git_commit=excluded.git_commit,
+			workflow_engine=excluded.workflow_engine,workflow_schema=excluded.workflow_schema,
+			validator_fingerprint=excluded.validator_fingerprint,
+			updated_at_seconds=excluded.updated_at_seconds,
+			updated_at_nanosecond=excluded.updated_at_nanosecond,
+			version=workflow_compatibility_runtime.version+1`, manifest.PicoclawVersion,
+		manifest.GitCommit, manifest.WorkflowEngine, manifest.WorkflowSchema,
+		manifest.ValidatorFingerprint, seconds, nanos); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `DELETE FROM workflow_validation_stamps`); err != nil {
+		return err
+	}
+	for _, ref := range sortedStringKeys(manifest.Workflows) {
+		stamp := manifest.Workflows[ref]
+		if stamp.WorkflowRef == "" {
+			stamp.WorkflowRef = ref
+		}
+		if stamp.WorkflowRef != ref {
+			return fmt.Errorf("workflow validation identity mismatch")
+		}
+		if err := insertWorkflowValidationStamp(ctx, conn, stamp); err != nil {
+			return err
+		}
+	}
+	return validateWorkflowChildAggregateLimitsConn(ctx, conn)
 }
 
 func compatibilityManifestPath(workspace string) string {

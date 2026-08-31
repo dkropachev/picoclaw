@@ -24,6 +24,24 @@ const (
 	agentWeixinStateDatabaseName = "state.db"
 )
 
+func agentWorkflowRuntimeFileMutationProtectedRoots(workspace string) ([]string, error) {
+	workspace, err := filepath.Abs(filepath.Clean(workspace))
+	if err != nil {
+		return nil, fmt.Errorf("resolve workflow workspace: %w", err)
+	}
+	database := filepath.Join(workspace, "state", "workflows.db")
+	return []string{
+		filepath.Join(workspace, "state"),
+		database,
+		database + "-wal",
+		database + "-shm",
+		filepath.Join(workspace, "legacy-json"),
+		filepath.Join(workspace, "workflow_state", "mutation.lock"),
+		filepath.Join(workspace, "workflow_state", "workflow_state", "publish-transaction.json"),
+		filepath.Join(workspace, "workflow_state", "workflow_state", "template-transaction.json"),
+	}, nil
+}
+
 // agentRuntimeFileMutationProtectedRoots freezes model-facing filesystem
 // exclusions for mutable runtime state. Keep this component-oriented so later
 // SQLite stores can extend the same policy without making active configuration

@@ -209,13 +209,18 @@ func installWorkflowTemplateTransaction(
 	if err != nil {
 		return nil, ErrWorkflowTemplateTargetBlocked
 	}
-	manifestPath, err := checkedCompatibilityManifestPath(workspace)
+	previousManifest, manifestMissing, err := readCompatibilityManifest(workspace)
 	if err != nil {
 		return nil, ErrWorkflowTemplateRevalidationFailed
 	}
-	manifestSnapshot, err := captureWorkflowTemplateFile(manifestPath)
-	if err != nil {
-		return nil, ErrWorkflowTemplateRevalidationFailed
+	manifestSnapshot := workflowTemplateFileSnapshot{}
+	if !manifestMissing {
+		manifestSnapshot.exists = true
+		manifestSnapshot.mode = 0o600
+		manifestSnapshot.data, err = json.Marshal(previousManifest)
+		if err != nil {
+			return nil, ErrWorkflowTemplateRevalidationFailed
+		}
 	}
 	local := collectLocalOptions(opts...)
 	definitionsDir, err := cleanDefinitionsDir(local.DefinitionsDir)
@@ -259,7 +264,6 @@ func installWorkflowTemplateTransaction(
 		targetPostimage.mode = targetSnapshot.mode
 	}
 	manifestPostimage := workflowTemplateFileSnapshot{
-		path:   manifestPath,
 		exists: true,
 		data:   manifestData,
 		mode:   0o600,
@@ -361,14 +365,7 @@ func installWorkflowTemplateTransaction(
 		}
 		return nil, ErrWorkflowTemplateRevalidationFailed
 	}
-	if err := fileutil.MkdirAllDurable(filepath.Dir(manifestPath), 0o755); err != nil {
-		err = fail(err)
-		if errors.Is(err, ErrWorkflowTemplateRollbackFailed) {
-			return nil, err
-		}
-		return nil, ErrWorkflowTemplateRevalidationFailed
-	}
-	if err := writeWorkflowTemplateAtomic(manifestPath, manifestData, 0o600); err != nil {
+	if err := writeCompatibilityManifest(workspace, manifest); err != nil {
 		err = fail(err)
 		if errors.Is(err, ErrWorkflowTemplateRollbackFailed) {
 			return nil, err

@@ -1,6 +1,8 @@
 package workflows
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,11 +11,13 @@ import (
 	"path/filepath"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
-	workflowTemplateInstallJournalVersion = 2
-	workflowTemplateInstallJournalFile    = "template-transaction.json"
+	workflowTemplateInstallJournalVersion       = 3
+	workflowTemplateInstallLegacyJournalVersion = 2
+	workflowTemplateInstallJournalFile          = "template-transaction.json"
 
 	workflowTemplateInstallPhasePrepared  = "prepared"
 	workflowTemplateInstallPhaseCommitted = "committed"
@@ -181,7 +185,8 @@ func validateWorkflowTemplateInstallJournal(
 	if journal == nil {
 		return fmt.Errorf("workflow template install journal is required")
 	}
-	if journal.Version != workflowTemplateInstallJournalVersion {
+	if journal.Version != workflowTemplateInstallJournalVersion &&
+		journal.Version != workflowTemplateInstallLegacyJournalVersion {
 		return fmt.Errorf("unsupported workflow template install journal version")
 	}
 	switch journal.Phase {
@@ -240,10 +245,124 @@ func validateWorkflowTemplateInstallFileSnapshot(
 	return nil
 }
 
+//nolint:govet // Recovery boundary errors remain locally scoped.
+func recoverWorkflowTemplateInstallTransaction(workspace string) error {
+	journal, missing, err := readWorkflowTemplateInstallJournal(workspace)
+	if err != nil {
+		return errors.Join(ErrWorkflowTemplateRecoveryFailed, err)
+	}
+	if missing {
+		return nil
+	}
+	if journal.Version == workflowTemplateInstallLegacyJournalVersion {
+		return recoverWorkflowTemplateInstallFileTransactionLegacy(workspace)
+	}
+	if journal.Phase == workflowTemplateInstallPhaseCommitted {
+		if err := removeWorkflowTemplateInstallJournal(workspace); err != nil {
+			return errors.Join(ErrWorkflowTemplateRecoveryFailed, err)
+		}
+		return nil
+	}
+	resolved, err := (Resolver{
+		WorkspaceDir: workspace, DefinitionsDir: journal.DefinitionsDir,
+	}).ResolveLocal(journal.TargetRef)
+	if err != nil {
+		return errors.Join(ErrWorkflowTemplateRecoveryFailed, err)
+	}
+	if err := recoverWorkflowTemplateManifestPreimage(workspace, journal); err != nil {
+		return errors.Join(ErrWorkflowTemplateRecoveryFailed, err)
+	}
+	if err := recoverWorkflowFileTransitions(workflowFileRecoveryTransition{
+		label: "workflow template target", path: resolved.Path,
+		preimage:  journal.Target.Preimage.fileSnapshot(resolved.Path),
+		postimage: journal.Target.Postimage.fileSnapshot(resolved.Path),
+	}); err != nil {
+		return errors.Join(ErrWorkflowTemplateRecoveryFailed, err)
+	}
+	if err := removeWorkflowTemplateInstallJournal(workspace); err != nil {
+		return errors.Join(ErrWorkflowTemplateRecoveryFailed, err)
+	}
+	return nil
+}
+
+func recoverWorkflowTemplateManifestPreimage(
+	workspace string,
+	journal *workflowTemplateInstallJournal,
+) error {
+	current, currentMissing, err := readCompatibilityManifest(workspace)
+	if err != nil {
+		return err
+	}
+	currentMatches, err := workflowManifestMatchesInstallSnapshot(
+		current, !currentMissing, journal.Manifest.Preimage,
+	)
+	if err != nil {
+		return err
+	}
+	postMatches, err := workflowManifestMatchesInstallSnapshot(
+		current, !currentMissing, journal.Manifest.Postimage,
+	)
+	if err != nil {
+		return err
+	}
+	if !currentMatches && !postMatches {
+		return fmt.Errorf("compatibility database changed after interrupted template install")
+	}
+	if currentMatches {
+		return nil
+	}
+	ctx := context.Background()
+	db, release, err := borrowWorkflowDatabase(ctx, workspace)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		if !journal.Manifest.Preimage.Exists {
+			if _, err := conn.ExecContext(ctx, `DELETE FROM workflow_compatibility_runtime`); err != nil {
+				return err
+			}
+			_, err := conn.ExecContext(ctx, `DELETE FROM workflow_validation_stamps`)
+			return err
+		}
+		var manifest WorkflowCompatibilityManifest
+		if err := json.Unmarshal(journal.Manifest.Preimage.Data, &manifest); err != nil {
+			return err
+		}
+		return writeCompatibilityManifestConn(ctx, conn, &manifest)
+	})
+}
+
+func workflowManifestMatchesInstallSnapshot(
+	manifest *WorkflowCompatibilityManifest,
+	exists bool,
+	snapshot workflowTemplateInstallFileSnapshot,
+) (bool, error) {
+	if exists != snapshot.Exists {
+		return false, nil
+	}
+	if !exists {
+		return true, nil
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return false, err
+	}
+	currentCanonical, err := canonicalWorkflowJSON(data)
+	if err != nil {
+		return false, err
+	}
+	snapshotCanonical, err := canonicalWorkflowJSON(snapshot.Data)
+	if err != nil {
+		return false, err
+	}
+	return string(currentCanonical) == string(snapshotCanonical), nil
+}
+
 // recoverWorkflowTemplateInstallTransaction runs only while the caller owns
 // the workspace mutation lock. Prepared installs restore exact preimages;
 // committed installs only need their journal finalized.
-func recoverWorkflowTemplateInstallTransaction(workspace string) error {
+func recoverWorkflowTemplateInstallFileTransactionLegacy(workspace string) error {
 	journal, missing, err := readWorkflowTemplateInstallJournal(workspace)
 	if err != nil {
 		return errors.Join(ErrWorkflowTemplateRecoveryFailed, err)

@@ -2,7 +2,6 @@ package workflows
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -15,8 +14,6 @@ import (
 	"unicode"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 var (
@@ -132,40 +129,7 @@ func GetWorkflowDevelopmentSession(workspace string) (*WorkflowDevelopmentSessio
 	return getWorkflowDevelopmentSessionLocked(workspace)
 }
 
-// getWorkflowDevelopmentSessionLocked reads the active development snapshot
-// after the caller has acquired the workspace mutation lock. Keeping the
-// unlocked read private ensures public status requests first finish or reject
-// any prepared template/publish transaction without making already-locked
-// mutation paths recursively acquire the non-reentrant lock.
-func getWorkflowDevelopmentSessionLocked(
-	workspace string,
-) (*WorkflowDevelopmentSession, error) {
-	activePath, err := checkedActiveDevelopmentPath(workspace)
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(activePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var session WorkflowDevelopmentSession
-	if err := json.Unmarshal(data, &session); err != nil {
-		return nil, err
-	}
-	if session.BaseTargetRevision == "" {
-		session.BaseTargetRevision = WorkflowTargetRevisionUnknown
-	}
-	if session.DraftRevision == "" || session.SessionRevision == "" {
-		if err := refreshWorkflowDevelopmentRevisions(&session); err != nil {
-			return nil, err
-		}
-	}
-	return &session, nil
-}
-
+// StartWorkflowDevelopment creates the single active development session.
 func StartWorkflowDevelopment(
 	ctx context.Context,
 	workspace string,
@@ -1244,15 +1208,8 @@ func discardWorkflowDevelopmentLocked(
 	workspace string,
 	session *WorkflowDevelopmentSession,
 ) (*WorkflowDevelopmentSession, error) {
-	activePath, err := checkedActiveDevelopmentPath(workspace)
-	if err != nil {
-		return nil, err
-	}
 	if archiveErr := archiveDevelopmentSession(workspace, session, "discarded"); archiveErr != nil {
 		return nil, archiveErr
-	}
-	if err := fileutil.RemoveDurable(activePath); err != nil && !os.IsNotExist(err) {
-		return nil, err
 	}
 	return session, nil
 }
@@ -1693,88 +1650,6 @@ func requireActiveDevelopment(workspace string) (*WorkflowDevelopmentSession, er
 		return nil, ErrNoActiveDevelopment
 	}
 	return session, nil
-}
-
-func writeNewActiveDevelopment(workspace string, session *WorkflowDevelopmentSession) error {
-	path, err := checkedActiveDevelopmentPath(workspace)
-	if err != nil {
-		return err
-	}
-	if mkdirErr := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); mkdirErr != nil {
-		return mkdirErr
-	}
-	if revisionErr := refreshWorkflowDevelopmentRevisions(session); revisionErr != nil {
-		return revisionErr
-	}
-	data, err := json.MarshalIndent(session, "", "  ")
-	if err != nil {
-		return err
-	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		if os.IsExist(err) {
-			return ErrActiveDevelopmentExists
-		}
-		return err
-	}
-	closed := false
-	defer func() {
-		if !closed {
-			_ = file.Close()
-		}
-	}()
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		closed = true
-		_ = fileutil.RemoveDurable(path)
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		closed = true
-		_ = fileutil.RemoveDurable(path)
-		return err
-	}
-	if err := file.Close(); err != nil {
-		closed = true
-		_ = fileutil.RemoveDurable(path)
-		return err
-	}
-	closed = true
-	return syncWorkflowRunDirectory(filepath.Dir(path))
-}
-
-func writeActiveDevelopment(workspace string, session *WorkflowDevelopmentSession) error {
-	path, err := checkedActiveDevelopmentPath(workspace)
-	if err != nil {
-		return err
-	}
-	if mkdirErr := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); mkdirErr != nil {
-		return mkdirErr
-	}
-	if revisionErr := refreshWorkflowDevelopmentRevisions(session); revisionErr != nil {
-		return revisionErr
-	}
-	data, err := json.MarshalIndent(session, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeWorkflowTemplateAtomic(path, data, 0o600)
-}
-
-func archiveDevelopmentSession(workspace string, session *WorkflowDevelopmentSession, state string) error {
-	archivePath, err := checkedWorkflowDevelopmentArchivePath(workspace, session.ID)
-	if err != nil {
-		return err
-	}
-	if mkdirErr := fileutil.MkdirAllDurable(filepath.Dir(archivePath), 0o755); mkdirErr != nil {
-		return mkdirErr
-	}
-	data, err := marshalWorkflowDevelopmentArchive(session, state)
-	if err != nil {
-		return err
-	}
-	return writeWorkflowTemplateAtomic(archivePath, data, 0o600)
 }
 
 func activeDevelopmentPath(workspace string) string {

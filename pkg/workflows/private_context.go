@@ -46,7 +46,7 @@ type frozenWorkflowRootPayload struct {
 
 // persistedRunJSON bypasses Run.MarshalJSON only inside the trusted local
 // store. Every ordinary JSON encoding of a private Run is redacted by default;
-// the executor still retains its exact continuation state in run.json.
+// the executor retains its exact continuation in the private SQLite payload.
 type persistedRunJSON Run
 
 func (run Run) MarshalJSON() ([]byte, error) {

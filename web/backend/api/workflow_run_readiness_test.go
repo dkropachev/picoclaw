@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -571,15 +572,16 @@ func TestHandleRetryPrivateAdmissionInfrastructureFailureReturnsUnavailable(t *t
 
 func TestHandleRunAndRetryFenceAdmissionAtDurableCreate(t *testing.T) {
 	tests := []struct {
-		name       string
-		retry      bool
-		mutate     func(string, string) error
-		revalidate bool
-		wantStatus int
-		wantCode   string
-		wantRuns   int
-		previousID string
-		parentID   string
+		name             string
+		retry            bool
+		mutate           func(string, string) error
+		revalidate       bool
+		wantStatus       int
+		wantCode         string
+		wantRuns         int
+		previousID       string
+		parentID         string
+		storeUnavailable bool
 	}{
 		{
 			name: "run rejects config mutation",
@@ -630,18 +632,18 @@ func TestHandleRunAndRetryFenceAdmissionAtDurableCreate(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				return os.WriteFile(
-					filepath.Join(
-						cfg.WorkspacePath(),
-						"workflow_validations",
-						"manifest.json",
-					),
-					[]byte("{"),
-					0o600,
-				)
+				db, err := sql.Open("sqlite", filepath.Join(cfg.WorkspacePath(), "state", "workflows.db"))
+				if err != nil {
+					return err
+				}
+				defer db.Close()
+				_, err = db.Exec(`ALTER TABLE workflow_compatibility_runtime
+					RENAME TO corrupt_workflow_compatibility_runtime`)
+				return err
 			},
-			wantStatus: http.StatusServiceUnavailable,
-			wantCode:   "dependency_check_unavailable",
+			wantStatus:       http.StatusServiceUnavailable,
+			wantCode:         "dependency_check_unavailable",
+			storeUnavailable: true,
 		},
 		{
 			name: "run reports missing compatibility stamp as not ready",
@@ -650,11 +652,13 @@ func TestHandleRunAndRetryFenceAdmissionAtDurableCreate(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				return os.Remove(filepath.Join(
-					cfg.WorkspacePath(),
-					"workflow_validations",
-					"manifest.json",
-				))
+				db, err := sql.Open("sqlite", filepath.Join(cfg.WorkspacePath(), "state", "workflows.db"))
+				if err != nil {
+					return err
+				}
+				defer db.Close()
+				_, err = db.Exec(`DELETE FROM workflow_validation_stamps`)
+				return err
 			},
 			wantStatus: http.StatusConflict,
 			wantCode:   "workflow_dependencies_not_ready",
@@ -814,7 +818,9 @@ func TestHandleRunAndRetryFenceAdmissionAtDurableCreate(t *testing.T) {
 				wantStatus,
 				wantCode,
 			)
-			assertWorkflowRunCount(t, workspace, test.wantRuns)
+			if !test.storeUnavailable {
+				assertWorkflowRunCount(t, workspace, test.wantRuns)
+			}
 		})
 	}
 }

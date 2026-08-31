@@ -1,7 +1,6 @@
 package workflows
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -245,10 +244,7 @@ func TestInstallWorkflowTemplateRequiresOverwriteForModifiedTarget(t *testing.T)
 	if _, err := RevalidateLocal(ctx, workspace, runtime); err != nil {
 		t.Fatalf("RevalidateLocal() error = %v", err)
 	}
-	manifestBefore, err := os.ReadFile(compatibilityManifestPath(workspace))
-	if err != nil {
-		t.Fatal(err)
-	}
+	manifestBefore := readFileData(t, compatibilityManifestPath(workspace))
 
 	result, err := InstallWorkflowTemplateWithCompatibility(
 		ctx,
@@ -267,10 +263,7 @@ func TestInstallWorkflowTemplateRequiresOverwriteForModifiedTarget(t *testing.T)
 	if string(targetAfter) != string(modified) {
 		t.Fatalf("target changed without overwrite: %q", targetAfter)
 	}
-	manifestAfter, readErr := os.ReadFile(compatibilityManifestPath(workspace))
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
+	manifestAfter := readFileData(t, compatibilityManifestPath(workspace))
 	if string(manifestAfter) != string(manifestBefore) {
 		t.Fatal("manifest changed when overwrite was not authorized")
 	}
@@ -331,17 +324,14 @@ func TestInstallWorkflowTemplateRollsBackTargetAndManifest(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	originalTarget := []byte("user-owned target\n")
-	originalManifest := []byte("user-owned manifest\n")
 	if err := os.WriteFile(target, originalTarget, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(manifestPath, originalManifest, 0o600); err != nil {
+	if _, err := RevalidateLocal(ctx, workspace, RuntimeCompatibility{PicoclawVersion: "before"}); err != nil {
 		t.Fatal(err)
 	}
+	originalManifest := readFileData(t, manifestPath)
 
 	revalidate := func(
 		_ context.Context,
@@ -367,44 +357,7 @@ func TestInstallWorkflowTemplateRollsBackTargetAndManifest(t *testing.T) {
 		t.Fatalf("public error leaked raw failure: %v", err)
 	}
 	assertFileContentAndMode(t, target, originalTarget, 0o640)
-	assertFileContentAndMode(t, manifestPath, originalManifest, 0o600)
-}
-
-func TestInstallWorkflowTemplateUsesUniqueAtomicManifestTemp(t *testing.T) {
-	workspace := t.TempDir()
-	target := filepath.Join(workspace, "workflows", "code-review.yml")
-	manifestPath := compatibilityManifestPath(workspace)
-	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(manifestPath+".tmp", 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := InstallWorkflowTemplateWithCompatibility(
-		context.Background(),
-		workspace,
-		CodeReviewWorkflowName,
-		false,
-		RuntimeCompatibility{PicoclawVersion: "v-template-test"},
-	)
-	if err != nil {
-		t.Fatalf("install error = %v", err)
-	}
-	if result == nil || !result.Installed || !result.Revalidated {
-		t.Fatalf("install result = %#v, want installed and revalidated", result)
-	}
-	if _, statErr := os.Lstat(target); statErr != nil {
-		t.Fatalf("target stat error = %v", statErr)
-	}
-	if _, statErr := os.Lstat(manifestPath); statErr != nil {
-		t.Fatalf("manifest stat error = %v", statErr)
-	}
-	if info, statErr := os.Lstat(manifestPath + ".tmp"); statErr != nil {
-		t.Fatalf("fixed-name blocker stat error = %v", statErr)
-	} else if !info.IsDir() {
-		t.Fatalf("fixed-name blocker mode = %v, want unchanged directory", info.Mode())
-	}
+	assertFileData(t, manifestPath, originalManifest)
 }
 
 func TestLegacyWorkflowTemplateInstallUsesExactByteSafety(t *testing.T) {
@@ -543,17 +496,15 @@ func TestWorkflowTemplateInstallPreparedJournalRecoversAtEveryBoundary(t *testin
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.MkdirAll(filepath.Dir(manifestPath), 0o700); err != nil {
-				t.Fatal(err)
-			}
 			originalTarget := []byte("original target\n")
-			originalManifest := []byte("original manifest\n")
 			if err := os.WriteFile(target, originalTarget, 0o640); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(manifestPath, originalManifest, 0o600); err != nil {
+			beforeRuntime := RuntimeCompatibility{PicoclawVersion: "before"}
+			if _, err := RevalidateLocal(ctx, workspace, beforeRuntime, opts...); err != nil {
 				t.Fatal(err)
 			}
+			originalManifest := readFileData(t, manifestPath)
 
 			injected := errors.New("injected template transaction crash")
 			result, err := installWorkflowTemplateTransaction(
@@ -603,7 +554,7 @@ func TestWorkflowTemplateInstallPreparedJournalRecoversAtEveryBoundary(t *testin
 				"",
 			)
 			assertFileContentAndMode(t, target, originalTarget, 0o640)
-			assertFileContentAndMode(t, manifestPath, originalManifest, 0o600)
+			assertFileData(t, manifestPath, originalManifest)
 			if _, statErr := os.Lstat(
 				workflowTemplateInstallJournalPath(workspace),
 			); !errors.Is(statErr, fs.ErrNotExist) {
@@ -642,123 +593,14 @@ func TestWorkflowTemplateInstallRecoveryRestoresMissingPreimages(t *testing.T) {
 	}
 	for _, path := range []string{
 		filepath.Join(workspace, "workflows", "code-review.yml"),
-		compatibilityManifestPath(workspace),
 		workflowTemplateInstallJournalPath(workspace),
 	} {
 		if _, statErr := os.Lstat(path); !errors.Is(statErr, fs.ErrNotExist) {
 			t.Fatalf("%s still exists after missing-preimage recovery: %v", path, statErr)
 		}
 	}
-}
-
-func TestWorkflowTemplateInstallRecoveryPreservesPostCrashEdits(t *testing.T) {
-	tests := []struct {
-		name string
-		edit func(t *testing.T, target, manifest string)
-	}{
-		{
-			name: "target_contents",
-			edit: func(t *testing.T, target, _ string) {
-				t.Helper()
-				if err := os.WriteFile(target, []byte("operator target edit\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "target_mode",
-			edit: func(t *testing.T, target, _ string) {
-				t.Helper()
-				if err := os.Chmod(target, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "manifest_contents",
-			edit: func(t *testing.T, _, manifest string) {
-				t.Helper()
-				if err := os.WriteFile(
-					manifest,
-					[]byte("operator manifest edit\n"),
-					0o600,
-				); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "manifest_mode",
-			edit: func(t *testing.T, _, manifest string) {
-				t.Helper()
-				if err := os.Chmod(manifest, 0o640); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			workspace := t.TempDir()
-			target := filepath.Join(workspace, "workflows", "code-review.yml")
-			manifest := compatibilityManifestPath(workspace)
-			interrupted := errors.New("simulated process interruption")
-			result, err := installWorkflowTemplateTransaction(
-				context.Background(),
-				workspace,
-				CodeReviewWorkflowName,
-				false,
-				RuntimeCompatibility{PicoclawVersion: "v-template-test"},
-				buildCompatibilityManifestLocked,
-				&workflowTemplateInstallHooks{
-					afterBoundary: func(boundary workflowTemplateInstallBoundary) error {
-						if boundary == workflowTemplateInstallBoundaryManifestRevalidated {
-							return interrupted
-						}
-						return nil
-					},
-					leaveJournalOnError: true,
-				},
-			)
-			if result != nil || !errors.Is(err, interrupted) {
-				t.Fatalf(
-					"install result, error = %#v, %v; want interruption",
-					result,
-					err,
-				)
-			}
-			journal, missing, readErr := readWorkflowTemplateInstallJournal(workspace)
-			if readErr != nil || missing {
-				t.Fatalf("read prepared journal = %#v, %v, missing=%v", journal, readErr, missing)
-			}
-			if journal.Stage != workflowTemplateInstallStageManifestWriteStarted {
-				t.Fatalf("journal stage = %q, want manifest write started", journal.Stage)
-			}
-			journalPath := workflowTemplateInstallJournalPath(workspace)
-			journalBefore, err := os.ReadFile(journalPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			test.edit(t, target, manifest)
-			targetBefore := captureWorkflowTemplateFileForTest(t, target)
-			manifestBefore := captureWorkflowTemplateFileForTest(t, manifest)
-			recoveryErr := recoverWorkflowTemplateInstallTransaction(workspace)
-			if !errors.Is(recoveryErr, ErrWorkflowTemplateRecoveryFailed) ||
-				!errors.Is(recoveryErr, ErrWorkflowRecoveryConflict) {
-				t.Fatalf("recovery error = %v, want stable recovery conflict", recoveryErr)
-			}
-			assertWorkflowTemplateFileSnapshotForTest(t, target, targetBefore)
-			assertWorkflowTemplateFileSnapshotForTest(t, manifest, manifestBefore)
-			journalAfter, readErr := os.ReadFile(journalPath)
-			if readErr != nil {
-				t.Fatalf("conflicted journal was removed: %v", readErr)
-			}
-			if !bytes.Equal(journalAfter, journalBefore) {
-				t.Fatal("conflicted journal changed during recovery")
-			}
-		})
+	if manifest, missing, err := readCompatibilityManifest(workspace); err != nil || !missing || manifest != nil {
+		t.Fatalf("compatibility state after recovery = %#v, missing=%v, error=%v", manifest, missing, err)
 	}
 }
 
@@ -974,17 +816,20 @@ func TestWorkflowTemplateInstallCommitMarkerErrorsRetryAndRecover(t *testing.T) 
 				"",
 			)
 			targetPath := filepath.Join(workspace, "workflows", "code-review.yml")
-			manifestPath := compatibilityManifestPath(workspace)
 			if test.wantInstalled {
 				assertFileData(t, targetPath, []byte(CodeReviewWorkflowYAML))
-				if _, statErr := os.Lstat(manifestPath); statErr != nil {
-					t.Fatalf("committed manifest stat error = %v", statErr)
+				if manifest, missing, manifestErr := readCompatibilityManifest(workspace); manifestErr != nil ||
+					missing ||
+					manifest == nil {
+					t.Fatalf("committed manifest = %#v, missing=%v, error=%v", manifest, missing, manifestErr)
 				}
 			} else {
-				for _, path := range []string{targetPath, manifestPath} {
-					if _, statErr := os.Lstat(path); !errors.Is(statErr, fs.ErrNotExist) {
-						t.Fatalf("rolled-back path %s stat error = %v", path, statErr)
-					}
+				if _, statErr := os.Lstat(targetPath); !errors.Is(statErr, fs.ErrNotExist) {
+					t.Fatalf("rolled-back target stat error = %v", statErr)
+				}
+				manifest, missing, manifestErr := readCompatibilityManifest(workspace)
+				if manifestErr != nil || !missing || manifest != nil {
+					t.Fatalf("rolled-back manifest = %#v, missing=%v, error=%v", manifest, missing, manifestErr)
 				}
 			}
 			if _, statErr := os.Lstat(
@@ -1106,35 +951,6 @@ func assertFileContentAndMode(
 			filepath.Base(path),
 			info.Mode().Perm(),
 			wantMode.Perm(),
-		)
-	}
-}
-
-func captureWorkflowTemplateFileForTest(
-	t *testing.T,
-	path string,
-) workflowTemplateFileSnapshot {
-	t.Helper()
-	snapshot, err := captureWorkflowTemplateFile(path)
-	if err != nil {
-		t.Fatalf("capture %s: %v", filepath.Base(path), err)
-	}
-	return snapshot
-}
-
-func assertWorkflowTemplateFileSnapshotForTest(
-	t *testing.T,
-	path string,
-	want workflowTemplateFileSnapshot,
-) {
-	t.Helper()
-	got := captureWorkflowTemplateFileForTest(t, path)
-	if !workflowTemplateFileSnapshotsEqual(got, want) {
-		t.Fatalf(
-			"%s snapshot changed during conflicted recovery: got %#v, want %#v",
-			filepath.Base(path),
-			got,
-			want,
 		)
 	}
 }

@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -284,85 +285,6 @@ func TestAdmitWorkflowDevelopmentTestRunStartErrorLeavesDraftUntouched(
 	)
 }
 
-func TestAdmitWorkflowDevelopmentTestRunReturnsDurableStartOnWriteFailure(
-	t *testing.T,
-) {
-	workspace, original, activePath, before := newDevelopmentAdmissionFixture(t)
-	admission := developmentTestRunAdmissionFor(original)
-	developmentDir := filepath.Join(workspace, workflowDevelopmentDir)
-	savedDevelopmentDir := developmentDir + ".saved"
-	outside := t.TempDir()
-	sabotaged := false
-	t.Cleanup(func() {
-		if !sabotaged {
-			return
-		}
-		_ = os.Remove(developmentDir)
-		_ = os.Rename(savedDevelopmentDir, developmentDir)
-	})
-
-	session, recorded, started, err := AdmitWorkflowDevelopmentTestRun(
-		workspace,
-		admission,
-		func() (string, error) {
-			assertDevelopmentAdmissionBytes(
-				t,
-				activePath,
-				before,
-				"before write failure",
-			)
-			if renameErr := os.Rename(
-				developmentDir,
-				savedDevelopmentDir,
-			); renameErr != nil {
-				t.Fatalf("os.Rename(workflow_dev) error = %v", renameErr)
-			}
-			if symlinkErr := os.Symlink(
-				outside,
-				developmentDir,
-			); symlinkErr != nil {
-				t.Fatalf("os.Symlink(workflow_dev) error = %v", symlinkErr)
-			}
-			sabotaged = true
-			return "durable-start", nil
-		},
-	)
-	if !errors.Is(err, ErrWorkflowInternalStateRootUnsafe) ||
-		recorded ||
-		started != "durable-start" ||
-		session == nil ||
-		session == original ||
-		session.SessionRevision != original.SessionRevision ||
-		session.DraftRevision != original.DraftRevision ||
-		session.TargetWorkflowRef != original.TargetWorkflowRef ||
-		session.YAML != original.YAML ||
-		session.LastTest != nil {
-		t.Fatalf(
-			"write failure session=%#v recorded=%v started=%q error=%v",
-			session,
-			recorded,
-			started,
-			err,
-		)
-	}
-	if removeErr := os.Remove(developmentDir); removeErr != nil {
-		t.Fatalf("os.Remove(symlink) error = %v", removeErr)
-	}
-	if renameErr := os.Rename(
-		savedDevelopmentDir,
-		developmentDir,
-	); renameErr != nil {
-		t.Fatalf("restore workflow_dev error = %v", renameErr)
-	}
-	sabotaged = false
-	assertDevelopmentAdmissionBytes(
-		t,
-		activePath,
-		before,
-		"after failed persistence",
-	)
-}
-
 func TestAdmitWorkflowDevelopmentEventRunBlocksCompletionUntilClaimed(
 	t *testing.T,
 ) {
@@ -464,10 +386,7 @@ func TestAdmitWorkflowDevelopmentTestRunRejectsRunningTest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecordWorkflowDevelopmentTest() error = %v", err)
 	}
-	before, err := os.ReadFile(activePath)
-	if err != nil {
-		t.Fatalf("os.ReadFile(active) error = %v", err)
-	}
+	before := readDevelopmentAdmissionSnapshot(t, activePath)
 	admission := developmentTestRunAdmissionFor(running)
 	callbacks := 0
 	session, recorded, _, err := AdmitWorkflowDevelopmentTestRun(
@@ -530,14 +449,8 @@ func newDevelopmentAdmissionFixture(
 	if err != nil {
 		t.Fatalf("StartWorkflowDevelopment() error = %v", err)
 	}
-	activePath, err = checkedActiveDevelopmentPath(workspace)
-	if err != nil {
-		t.Fatalf("checkedActiveDevelopmentPath() error = %v", err)
-	}
-	activeBytes, err = os.ReadFile(activePath)
-	if err != nil {
-		t.Fatalf("os.ReadFile(active) error = %v", err)
-	}
+	activePath = workspace
+	activeBytes = readDevelopmentAdmissionSnapshot(t, workspace)
 	return workspace, session, activePath, activeBytes
 }
 
@@ -562,13 +475,28 @@ func assertDevelopmentAdmissionBytes(
 	when string,
 ) {
 	t.Helper()
-	got, err := os.ReadFile(activePath)
-	if err != nil {
-		t.Fatalf("os.ReadFile(active) %s error = %v", when, err)
-	}
+	got := readDevelopmentAdmissionSnapshot(t, activePath)
 	if string(got) != string(want) {
 		t.Fatalf("active development bytes changed %s", when)
 	}
+}
+
+func readDevelopmentAdmissionSnapshot(t *testing.T, workspace string) []byte {
+	t.Helper()
+	db, err := openWorkflowDatabase(t.Context(), workspace)
+	if err != nil {
+		t.Fatalf("open workflow database: %v", err)
+	}
+	defer db.Close()
+	session, err := loadWorkflowDevelopmentSession(t.Context(), db, "active")
+	if err != nil {
+		t.Fatalf("load workflow development snapshot: %v", err)
+	}
+	data, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func assertWorkflowMutationLockHeld(t *testing.T, workspace string) {

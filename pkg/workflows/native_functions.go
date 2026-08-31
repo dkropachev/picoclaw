@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,8 +26,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
@@ -1802,7 +1803,7 @@ func nativeWorkflowState(ctx context.Context, args map[string]any, exec Executio
 		if key == "" {
 			return nil, fmt.Errorf("key is required")
 		}
-		value, exists, err := readNativeStateValue(exec, namespace, key)
+		value, exists, err := readNativeStateValueContext(ctx, exec, namespace, key)
 		if err != nil {
 			return nil, err
 		}
@@ -1820,7 +1821,7 @@ func nativeWorkflowState(ctx context.Context, args map[string]any, exec Executio
 		if !ok {
 			return nil, fmt.Errorf("value is required")
 		}
-		if err := writeNativeStateValue(exec, namespace, key, value); err != nil {
+		if err := writeNativeStateValue(ctx, exec, namespace, key, value); err != nil {
 			return nil, err
 		}
 		return map[string]any{
@@ -1833,7 +1834,7 @@ func nativeWorkflowState(ctx context.Context, args map[string]any, exec Executio
 		if key == "" {
 			return nil, fmt.Errorf("key is required")
 		}
-		deleted, err := deleteNativeStateValue(exec, namespace, key)
+		deleted, err := deleteNativeStateValue(ctx, exec, namespace, key)
 		if err != nil {
 			return nil, err
 		}
@@ -1844,7 +1845,7 @@ func nativeWorkflowState(ctx context.Context, args map[string]any, exec Executio
 		}, nil
 	case "list":
 		includeValues := nativeBoolAny(args, "include_values", "includeValues")
-		keys, values, err := listNativeStateValues(exec, namespace, includeValues)
+		keys, values, err := listNativeStateValuesContext(ctx, exec, namespace, includeValues)
 		if err != nil {
 			return nil, err
 		}
@@ -3389,53 +3390,96 @@ func nativeNormalizeRepoPath(value string) string {
 }
 
 func readNativeStateValue(exec ExecutionContext, namespace, key string) (any, bool, error) {
-	statePath, err := nativeStatePath(exec, namespace, key)
-	if err != nil {
-		return nil, false, err
-	}
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	var env nativeStateEnvelope
-	if err := json.Unmarshal(data, &env); err != nil {
-		return nil, false, err
-	}
-	return env.Value, true, nil
+	return readNativeStateValueContext(context.Background(), exec, namespace, key)
 }
 
-func writeNativeStateValue(exec ExecutionContext, namespace, key string, value any) error {
-	statePath, err := nativeStatePath(exec, namespace, key)
+func readNativeStateValueContext(ctx context.Context, exec ExecutionContext, namespace, key string) (any, bool, error) {
+	db, release, err := borrowWorkflowDatabase(ctx, nativeWorkspace(exec))
+	if err != nil {
+		return nil, false, err
+	}
+	defer release()
+	var data []byte
+	err = db.QueryRowContext(ctx, `SELECT value_json FROM workflow_native_state
+		WHERE namespace_id=? AND key_id=? AND key_text=?`, safeStorageSegment(namespace),
+		safeStorageSegment(key), strings.TrimSpace(key)).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	var value any
+	if err := decodeWorkflowJSON(data, &value); err != nil {
+		return nil, false, err
+	}
+	return value, true, nil
+}
+
+//nolint:govet // Transaction-local errors stay scoped to their exact statement.
+func writeNativeStateValue(ctx context.Context, exec ExecutionContext, namespace, key string, value any) error {
+	key = strings.TrimSpace(key)
+	data, err := encodeWorkflowJSON(value, maximumWorkflowNativeValueBytes)
 	if err != nil {
 		return err
 	}
-	stateDir := filepath.Dir(statePath)
-	if mkdirErr := fileutil.MkdirAllDurable(stateDir, 0o755); mkdirErr != nil {
-		return mkdirErr
+	if data == nil {
+		data = []byte("null")
 	}
-	env := nativeStateEnvelope{Key: key, Value: value, UpdatedAt: time.Now().UTC()}
-	data, err := json.MarshalIndent(env, "", "  ")
+	db, release, err := borrowWorkflowDatabase(ctx, nativeWorkspace(exec))
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFileAtomic(statePath, data, 0o600)
+	defer release()
+	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		now := time.Now().UTC()
+		seconds, nanos, err := workflowTimestamp(now)
+		if err != nil {
+			return err
+		}
+		var totalBytes, previousBytes int64
+		if err := conn.QueryRowContext(ctx, `SELECT
+			(SELECT COALESCE(SUM(length(value_json)),0) FROM workflow_native_state),
+			COALESCE((SELECT length(value_json) FROM workflow_native_state
+			 WHERE namespace_id=? AND key_id=?),0)`, safeStorageSegment(namespace),
+			safeStorageSegment(key)).Scan(&totalBytes, &previousBytes); err != nil {
+			return err
+		}
+		if int64(len(data)) > maximumWorkflowNativeTotalBytes-(totalBytes-previousBytes) {
+			return fmt.Errorf("workflow native state exceeds its aggregate limit")
+		}
+		_, err = conn.ExecContext(ctx, `INSERT INTO workflow_native_state
+			(namespace_id,key_id,key_text,value_json,updated_at_seconds,updated_at_nanosecond,version)
+			VALUES(?,?,?,?,?,?,1) ON CONFLICT(namespace_id,key_id) DO UPDATE SET
+			key_text=excluded.key_text,value_json=excluded.value_json,
+			updated_at_seconds=excluded.updated_at_seconds,
+			updated_at_nanosecond=excluded.updated_at_nanosecond,
+			version=workflow_native_state.version+1`, safeStorageSegment(namespace),
+			safeStorageSegment(key), key, data, seconds, nanos)
+		return err
+	})
 }
 
-func deleteNativeStateValue(exec ExecutionContext, namespace, key string) (bool, error) {
-	statePath, err := nativeStatePath(exec, namespace, key)
+//nolint:govet // Transaction-local errors stay scoped to their exact statement.
+func deleteNativeStateValue(ctx context.Context, exec ExecutionContext, namespace, key string) (bool, error) {
+	db, release, err := borrowWorkflowDatabase(ctx, nativeWorkspace(exec))
 	if err != nil {
 		return false, err
 	}
-	if err := fileutil.RemoveDurable(statePath); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
+	defer release()
+	var deleted bool
+	err = sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		result, err := conn.ExecContext(ctx, `DELETE FROM workflow_native_state
+			WHERE namespace_id=? AND key_id=? AND key_text=?`, safeStorageSegment(namespace),
+			safeStorageSegment(key), strings.TrimSpace(key))
+		if err != nil {
+			return err
 		}
-		return false, err
-	}
-	return true, nil
+		count, err := result.RowsAffected()
+		deleted = count != 0
+		return err
+	})
+	return deleted, err
 }
 
 func listNativeStateValues(
@@ -3443,44 +3487,47 @@ func listNativeStateValues(
 	namespace string,
 	includeValues bool,
 ) ([]string, map[string]any, error) {
-	root, err := nativeConfinedPath(exec, workflowStateDir, safeStorageSegment(namespace))
+	return listNativeStateValuesContext(context.Background(), exec, namespace, includeValues)
+}
+
+func listNativeStateValuesContext(
+	ctx context.Context,
+	exec ExecutionContext,
+	namespace string,
+	includeValues bool,
+) ([]string, map[string]any, error) {
+	db, release, err := borrowWorkflowDatabase(ctx, nativeWorkspace(exec))
 	if err != nil {
 		return nil, nil, err
 	}
-	entries, err := os.ReadDir(root)
+	defer release()
+	rows, err := db.QueryContext(ctx, `SELECT key_text,value_json FROM workflow_native_state
+		WHERE namespace_id=? ORDER BY key_text,key_id`, safeStorageSegment(namespace))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil, nil
-		}
 		return nil, nil, err
 	}
-	keys := make([]string, 0, len(entries))
+	defer rows.Close()
+	keys := make([]string, 0)
 	values := map[string]any(nil)
 	if includeValues {
 		values = make(map[string]any)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || path.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		if entry.Type()&fs.ModeSymlink != 0 {
-			return nil, nil, fmt.Errorf("state file %q must not be a symlink", entry.Name())
-		}
-		data, err := os.ReadFile(filepath.Join(root, entry.Name()))
-		if err != nil {
+	for rows.Next() {
+		var key string
+		var data []byte
+		if err := rows.Scan(&key, &data); err != nil {
 			return nil, nil, err
 		}
-		var env nativeStateEnvelope
-		if err := json.Unmarshal(data, &env); err != nil {
-			return nil, nil, err
-		}
-		keys = append(keys, env.Key)
+		keys = append(keys, key)
 		if includeValues {
-			values[env.Key] = env.Value
+			var value any
+			if err := decodeWorkflowJSON(data, &value); err != nil {
+				return nil, nil, err
+			}
+			values[key] = value
 		}
 	}
-	sort.Strings(keys)
-	return keys, values, nil
+	return keys, values, rows.Err()
 }
 
 func nativeStatePath(exec ExecutionContext, namespace, key string) (string, error) {

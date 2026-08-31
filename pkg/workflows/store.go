@@ -3,20 +3,18 @@ package workflows
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 const (
@@ -33,10 +31,12 @@ const (
 )
 
 var (
-	ErrRunCanceled         = errors.New("workflow run canceled")
-	ErrRunAlreadyExists    = errors.New("workflow run already exists")
-	ErrRunConcurrencyLimit = errors.New("workflow concurrency limit reached")
-	ErrInvalidCancelReason = errors.New("invalid workflow cancellation reason")
+	ErrRunCanceled                = errors.New("workflow run canceled")
+	ErrRunAlreadyExists           = errors.New("workflow run already exists")
+	ErrRunConcurrencyLimit        = errors.New("workflow concurrency limit reached")
+	ErrRunVersionConflict         = errors.New("workflow run version conflict")
+	ErrWorkflowStorageUnavailable = errors.New("workflow storage unavailable")
+	ErrInvalidCancelReason        = errors.New("invalid workflow cancellation reason")
 )
 
 type Run struct {
@@ -63,9 +63,10 @@ type Run struct {
 	CompletedAt       *time.Time               `json:"completed_at,omitempty"`
 	CancelRequestedAt *time.Time               `json:"cancel_requested_at,omitempty"`
 
-	execution   *workflowExecutionState
-	humanTasks  map[string]WorkflowHumanTask
-	privateRoot *frozenWorkflowRootContext
+	execution    *workflowExecutionState
+	humanTasks   map[string]WorkflowHumanTask
+	privateRoot  *frozenWorkflowRootContext
+	storeVersion int64
 }
 
 type RunEvent struct {
@@ -91,8 +92,12 @@ type RunStore interface {
 }
 
 type FileRunStore struct {
-	root string
-	mu   sync.Mutex
+	// root remains only so source-compatible tests and legacy discovery can
+	// locate the former workflow_runs directory. New writes never use it.
+	root      string
+	workspace string
+	database  *workflowDatabasePool
+	poolOnce  sync.Once
 }
 
 const (
@@ -100,299 +105,108 @@ const (
 	privateRunMarkerContents = "picoclaw-private-workflow-context-v1\n"
 )
 
-var fileRunStoreLocks sync.Map
-
 func NewFileRunStore(workspace string) *FileRunStore {
-	return &FileRunStore{root: filepath.Join(workspace, "workflow_runs")}
+	return &FileRunStore{
+		root:      filepath.Join(workspace, "workflow_runs"),
+		workspace: workspace,
+		database:  workflowDatabasePoolFor(workspace),
+	}
 }
 
 func (s *FileRunStore) CreateRun(ctx context.Context, run *Run) error {
-	_ = ctx
-	unlock, err := s.lockRoot()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	return s.createRunLocked(run)
+	persistenceCtx := context.Background()
+	_, err := withWorkflowDB(persistenceCtx, s, "create run", func(db *sql.DB) (struct{}, error) {
+		_, err := workflowImmediate(persistenceCtx, db, func(conn *sql.Conn) (struct{}, error) {
+			if run == nil {
+				return struct{}{}, fmt.Errorf("run is required")
+			}
+			run.UpdatedAt = time.Now().UTC()
+			return struct{}{}, insertWorkflowRunConn(persistenceCtx, conn, run)
+		})
+		return struct{}{}, err
+	})
+	return err
 }
 
 func (s *FileRunStore) CreateRunIfUnderLimit(ctx context.Context, run *Run, maxConcurrent int) error {
-	_ = ctx
-	unlock, err := s.lockRoot()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	if maxConcurrent > 0 {
-		runs, err := s.listRunsLocked(ctx)
-		if err != nil {
-			return err
-		}
-		running := 0
-		for _, run := range runs {
-			if run.Status == RunStatusRunning && run.ParentRunID == "" {
-				running++
+	persistenceCtx := context.Background()
+	_, err := withWorkflowDB(persistenceCtx, s, "create run under limit", func(db *sql.DB) (struct{}, error) {
+		return workflowImmediate(persistenceCtx, db, func(conn *sql.Conn) (struct{}, error) {
+			if run == nil {
+				return struct{}{}, fmt.Errorf("run is required")
 			}
-		}
-		if running >= maxConcurrent {
-			return fmt.Errorf(
-				"%w: %d running, max %d",
-				ErrRunConcurrencyLimit,
-				running,
-				maxConcurrent,
-			)
-		}
-	}
-	return s.createRunLocked(run)
+			if maxConcurrent > 0 {
+				var running int
+				if err := conn.QueryRowContext(persistenceCtx, `SELECT COUNT(*) FROM workflow_runs
+					WHERE status=? AND parent_run_id IS NULL`, RunStatusRunning).Scan(&running); err != nil {
+					return struct{}{}, err
+				}
+				if running >= maxConcurrent {
+					return struct{}{}, fmt.Errorf("%w: %d running, max %d",
+						ErrRunConcurrencyLimit, running, maxConcurrent)
+				}
+			}
+			run.UpdatedAt = time.Now().UTC()
+			return struct{}{}, insertWorkflowRunConn(persistenceCtx, conn, run)
+		})
+	})
+	return err
 }
 
+// createRunLocked is retained only for one-package compatibility tests that
+// exercised the old file helper directly. SQLite still supplies the sole
+// create-only boundary.
 func (s *FileRunStore) createRunLocked(run *Run) error {
-	if run == nil {
-		return fmt.Errorf("run is required")
-	}
-	if strings.TrimSpace(run.ID) == "" {
-		return fmt.Errorf("run id is required")
-	}
-	if err := validateRunPrivateContext(run); err != nil {
-		return err
-	}
-	dir := filepath.Join(s.root, safeID(run.ID))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	markerPath := filepath.Join(dir, privateRunMarkerFilename)
-	if markerPrivate, markerErr := readPrivateRunMarker(markerPath); markerErr != nil || markerPrivate {
-		return ErrPrivateWorkflowContext
-	}
-	run.UpdatedAt = time.Now().UTC()
-	data, err := marshalPersistedRun(run)
-	if err != nil {
-		return err
-	}
-	runPath := filepath.Join(dir, "run.json")
-	if err := writeNewRunFile(runPath, data); err != nil {
-		if os.IsExist(err) {
-			return fmt.Errorf("%w: %s", ErrRunAlreadyExists, run.ID)
-		}
-		// Some platforms report an existing directory or another unusual
-		// filesystem entry with an error other than fs.ErrExist. Preserve the
-		// store's existing duplicate semantics without using this check as the
-		// creation boundary.
-		if _, statErr := os.Lstat(runPath); statErr == nil {
-			return fmt.Errorf("%w: %s", ErrRunAlreadyExists, run.ID)
-		}
-		return err
-	}
-	if IsPrivateWorkflowRun(run) {
-		if markerErr := writeNewRunFile(markerPath, []byte(privateRunMarkerContents)); markerErr != nil {
-			// The JSON markers classify the short publication window safely.
-			// Creation succeeds only after the independent marker is durable.
-			if removeErr := os.Remove(runPath); removeErr != nil && !os.IsNotExist(removeErr) {
-				_ = syncWorkflowRunDirectory(dir)
-				return ErrPrivateWorkflowContext
-			}
-			_ = syncWorkflowRunDirectory(dir)
-			return ErrPrivateWorkflowContext
-		}
-	}
-	return nil
-}
-
-// writeNewRunFile publishes a run with a filesystem-enforced create-only
-// boundary. O_EXCL is required even while the store lock is held: the advisory
-// lock is intentionally a no-op on some platforms and cannot coordinate
-// separate processes there.
-func writeNewRunFile(path string, data []byte) (err error) {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	closed := false
-	defer func() {
-		if !closed {
-			if closeErr := file.Close(); err == nil && closeErr != nil {
-				err = closeErr
-			}
-		}
-		if err == nil {
-			return
-		}
-		// Close first so cleanup also works on Windows. A failed create must
-		// not leave an empty or partial run that makes every retry a duplicate.
-		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
-			err = errors.Join(err, fmt.Errorf("remove incomplete workflow run: %w", removeErr))
-		}
-		if syncErr := syncWorkflowRunDirectory(filepath.Dir(path)); syncErr != nil {
-			err = errors.Join(err, fmt.Errorf("sync workflow run cleanup: %w", syncErr))
-		}
-	}()
-	if _, err = file.Write(data); err != nil {
-		return err
-	}
-	if err = file.Sync(); err != nil {
-		return err
-	}
-	if err = file.Close(); err != nil {
-		return err
-	}
-	closed = true
-
-	// The dispatcher persists its linked run ID immediately after CreateRun
-	// succeeds. Make every directory entry needed to find that run durable
-	// before returning: run.json, the run directory, and a newly created store
-	// root beneath the workspace.
-	runDir := filepath.Dir(path)
-	for _, dir := range []string{runDir, filepath.Dir(runDir), filepath.Dir(filepath.Dir(runDir))} {
-		if err = syncWorkflowRunDirectory(dir); err != nil {
-			return fmt.Errorf("sync workflow run directory %s: %w", dir, err)
-		}
-	}
-	return nil
+	return s.CreateRun(context.Background(), run)
 }
 
 func (s *FileRunStore) UpdateRun(ctx context.Context, run *Run) error {
-	_ = ctx
-	if run == nil {
+	if run == nil || strings.TrimSpace(run.ID) == "" {
 		return fmt.Errorf("run is required")
 	}
-	if strings.TrimSpace(run.ID) == "" {
-		return fmt.Errorf("run id is required")
-	}
-	unlock, err := s.lockRoot()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	dir := filepath.Join(s.root, safeID(run.ID))
-	if mkdirErr := os.MkdirAll(dir, 0o755); mkdirErr != nil {
-		return mkdirErr
-	}
-	now := time.Now().UTC()
-	existing, readErr := readRunFile(filepath.Join(dir, "run.json"))
-	if readErr != nil {
-		if run.privateRoot != nil || !os.IsNotExist(readErr) {
-			// An unclassifiable existing record may be private. Never replace it
-			// with caller-supplied state, recreate a missing private capability,
-			// or expose parser/path diagnostics.
-			return ErrPrivateWorkflowContext
-		}
-	}
-	if readErr == nil {
-		if privateErr := preserveFrozenRunPrivateContext(existing, run); privateErr != nil {
-			return privateErr
-		}
-		if existing.execution != nil && existing.execution.Resume != nil &&
-			existing.execution.Resume.Token != "" {
-			incomingToken := ""
-			if run.execution != nil && run.execution.Resume != nil {
-				incomingToken = run.execution.Resume.Token
+	persistenceCtx := context.Background()
+	_, err := withWorkflowDB(persistenceCtx, s, "update run", func(db *sql.DB) (struct{}, error) {
+		return workflowImmediate(persistenceCtx, db, func(conn *sql.Conn) (struct{}, error) {
+			existing, version, err := getWorkflowRunConn(persistenceCtx, conn, strings.TrimSpace(run.ID))
+			if err != nil {
+				if run.privateRoot != nil || !os.IsNotExist(err) {
+					return struct{}{}, ErrPrivateWorkflowContext
+				}
+				return struct{}{}, err
 			}
-			if incomingToken != existing.execution.Resume.Token {
-				return ErrHumanTaskConflict
+			if err := preserveFrozenRunPrivateContext(existing, run); err != nil {
+				return struct{}{}, err
 			}
-		}
-		if isTerminalRunStatus(existing.Status) {
-			*run = *cloneRun(existing)
-			return nil
-		}
-		if existing.execution != nil && existing.execution.Resume != nil &&
-			existing.execution.Resume.Token != "" {
-			if !now.Before(existing.execution.Resume.ExpiresAt) {
-				return ErrHumanTaskConflict
+			if isTerminalRunStatus(existing.Status) {
+				*run = *cloneRun(existing)
+				return struct{}{}, nil
 			}
-			if run.execution != nil && run.execution.Resume != nil &&
-				run.execution.Resume.ExpiresAt.Before(existing.execution.Resume.ExpiresAt) {
-				run.execution.Resume.ExpiresAt = existing.execution.Resume.ExpiresAt
+			now := time.Now().UTC()
+			resumeOwnsCurrentVersion := false
+			if existing.execution != nil && existing.execution.Resume != nil &&
+				existing.execution.Resume.Token != "" {
+				incomingToken := ""
+				if run.execution != nil && run.execution.Resume != nil {
+					incomingToken = run.execution.Resume.Token
+				}
+				if incomingToken != existing.execution.Resume.Token ||
+					!now.Before(existing.execution.Resume.ExpiresAt) {
+					return struct{}{}, ErrHumanTaskConflict
+				}
+				resumeOwnsCurrentVersion = true
+				if run.execution != nil && run.execution.Resume != nil &&
+					run.execution.Resume.ExpiresAt.Before(existing.execution.Resume.ExpiresAt) {
+					run.execution.Resume.ExpiresAt = existing.execution.Resume.ExpiresAt
+				}
 			}
-		}
-	}
-	run.UpdatedAt = now
-	data, err := marshalPersistedRun(run)
-	if err != nil {
-		return err
-	}
-	return fileutil.WriteFileAtomic(filepath.Join(dir, "run.json"), data, 0o600)
-}
-
-func persistedRunDataMayBePrivate(data []byte) bool {
-	return bytes.Contains(data, []byte(`"private_context"`)) ||
-		bytes.Contains(data, []byte(`"context_visibility": "private"`)) ||
-		bytes.Contains(data, []byte(`"context_visibility":"private"`))
-}
-
-func readRunFile(path string) (*Run, error) {
-	markerPrivate, markerErr := readPrivateRunMarker(
-		filepath.Join(filepath.Dir(path), privateRunMarkerFilename),
-	)
-	if markerErr != nil {
-		return nil, ErrPrivateWorkflowContext
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if markerPrivate {
-			return nil, ErrPrivateWorkflowContext
-		}
-		return nil, err
-	}
-	run, raw, err := decodeRunWithExactEventFields(data)
-	if err != nil {
-		if markerPrivate || persistedRunDataMayBePrivate(data) {
-			return nil, ErrPrivateWorkflowContext
-		}
-		return nil, err
-	}
-	if markerPrivate != IsPrivateWorkflowRun(run) {
-		return nil, ErrPrivateWorkflowContext
-	}
-	if safeID(run.ID) != filepath.Base(filepath.Dir(path)) {
-		if !markerPrivate && !IsPrivateWorkflowRun(run) {
-			return nil, os.ErrNotExist
-		}
-		return nil, ErrPrivateWorkflowContext
-	}
-	trustedEventID, trusted := trustedExternalEventRunFamily(path, run)
-	if !trusted {
-		if run.execution != nil && run.execution.Checkpoint != nil {
-			if err := validateRunPrivateContext(run); err != nil {
-				return nil, err
+			if run.storeVersion != 0 && run.storeVersion != version && !resumeOwnsCurrentVersion {
+				return struct{}{}, ErrRunVersionConflict
 			}
-			return run, nil
-		}
-		if err := restoreOrdinaryRunEventFields(run, raw); err != nil {
-			return nil, err
-		}
-		if err := validateRunPrivateContext(run); err != nil {
-			return nil, err
-		}
-		return run, nil
-	}
-	inputEvent, ok := run.Inputs["event"].(map[string]any)
-	if raw.hasInputEvent &&
-		(!ok ||
-			!isExternalEventContext(inputEvent) ||
-			inputEvent["id"] != trustedEventID) {
-		if err := restoreOrdinaryRunInputEvent(run, raw); err != nil {
-			return nil, err
-		}
-	}
-	if err := validateRunPrivateContext(run); err != nil {
-		return nil, err
-	}
-	return run, nil
-}
-
-func readPrivateRunMarker(path string) (bool, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if string(data) != privateRunMarkerContents {
-		return false, ErrPrivateWorkflowContext
-	}
-	return true, nil
+			run.UpdatedAt = now
+			return struct{}{}, updateWorkflowRunConn(persistenceCtx, conn, run, version)
+		})
+	})
+	return err
 }
 
 func marshalPersistedRun(run *Run) ([]byte, error) {
@@ -537,41 +351,6 @@ func decodeRunWithExactEventFields(
 		return nil, runEventJSONFields{}, err
 	}
 	return &run, raw, nil
-}
-
-func restoreOrdinaryRunEventFields(
-	run *Run,
-	raw runEventJSONFields,
-) error {
-	if run == nil {
-		return nil
-	}
-	if raw.hasEvent {
-		var event map[string]any
-		if err := json.Unmarshal(raw.event, &event); err != nil {
-			return err
-		}
-		run.Event = event
-	}
-	return restoreOrdinaryRunInputEvent(run, raw)
-}
-
-func restoreOrdinaryRunInputEvent(
-	run *Run,
-	raw runEventJSONFields,
-) error {
-	if run == nil || !raw.hasInputEvent {
-		return nil
-	}
-	var inputEvent any
-	if err := json.Unmarshal(raw.inputEvent, &inputEvent); err != nil {
-		return err
-	}
-	if run.Inputs == nil {
-		run.Inputs = make(map[string]any)
-	}
-	run.Inputs["event"] = inputEvent
-	return nil
 }
 
 func decodeJSONWithNumbers(data []byte, value any) error {
@@ -726,63 +505,6 @@ func isEventBackedDraftTopLevelRun(run *Run) bool {
 		run.Session == EventWorkflowSession(targetRef, eventID)
 }
 
-func trustedExternalEventRunFamily(path string, run *Run) (string, bool) {
-	if run == nil {
-		return "", false
-	}
-	if origin, trusted := trustedRunOrigin(run); trusted {
-		return origin.EventID, true
-	}
-	eventID, eventIDOK := run.Event["id"].(string)
-	if !eventIDOK || !isExternalEventContext(run.Event) {
-		return "", false
-	}
-	if isExternalEventRun(run) || isEventBackedDraftTopLevelRun(run) {
-		return eventID, true
-	}
-	if strings.TrimSpace(run.ParentRunID) == "" ||
-		!isExternalEventContext(run.Event) {
-		return "", false
-	}
-	storeRoot := filepath.Dir(filepath.Dir(path))
-	parentID := strings.TrimSpace(run.ParentRunID)
-	seen := map[string]struct{}{run.ID: {}}
-	for depth := 0; depth < eventBackedDraftAncestryMaximumDepth; depth++ {
-		if _, exists := seen[parentID]; exists {
-			return "", false
-		}
-		seen[parentID] = struct{}{}
-		parentData, err := os.ReadFile(filepath.Join(
-			storeRoot,
-			safeID(parentID),
-			"run.json",
-		))
-		if err != nil {
-			return "", false
-		}
-		parent, _, decodeErr := decodeRunWithExactEventFields(parentData)
-		if decodeErr != nil ||
-			parent == nil ||
-			parent.ID != parentID {
-			return "", false
-		}
-		parentEventID, parentEventOK := parent.Event["id"].(string)
-		if !parentEventOK ||
-			parentEventID != eventID ||
-			!isExternalEventContext(parent.Event) {
-			return "", false
-		}
-		if isExternalEventRun(parent) || isEventBackedDraftTopLevelRun(parent) {
-			return eventID, true
-		}
-		parentID = strings.TrimSpace(parent.ParentRunID)
-		if parentID == "" {
-			return "", false
-		}
-	}
-	return "", false
-}
-
 func isExternalEventContext(event map[string]any) bool {
 	if len(event) == 0 {
 		return false
@@ -821,67 +543,53 @@ func isExternalDispatchID(id string) bool {
 	return true
 }
 
+//nolint:govet // Transaction callback errors stay scoped to the exact mutation.
 func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Run, error) {
 	runID = strings.TrimSpace(runID)
 	reason, err := NormalizeWorkflowCancelReason(reason)
 	if err != nil {
 		return nil, err
 	}
-	runPath := filepath.Join(s.root, safeID(runID), "run.json")
-	unlock, err := s.lockRoot()
+	run, err := withWorkflowDB(ctx, s, "cancel run", func(db *sql.DB) (*Run, error) {
+		return workflowImmediate(ctx, db, func(conn *sql.Conn) (*Run, error) {
+			run, version, err := getWorkflowRunConn(ctx, conn, runID)
+			if err != nil {
+				return nil, err
+			}
+			if isTerminalRunStatus(run.Status) {
+				return run, nil
+			}
+			now := time.Now().UTC()
+			run.Status = RunStatusCanceled
+			run.CancelReason = reason
+			run.CancelRequestedAt = &now
+			if run.CompletedAt == nil {
+				run.CompletedAt = &now
+			}
+			run.UpdatedAt = now
+			for id, task := range run.humanTasks {
+				if task.Status != HumanTaskStatusWaiting {
+					continue
+				}
+				task.Status = HumanTaskStatusCanceled
+				task.Revision++
+				task.UpdatedAt = now
+				task.CanceledAt = &now
+				run.humanTasks[id] = task
+			}
+			if err := updateWorkflowRunConn(ctx, conn, run, version); err != nil {
+				return nil, err
+			}
+			event := RunEvent{Kind: "workflow.run.canceled", RunID: run.ID, Message: run.CancelReason}
+			if err := appendWorkflowEventConn(ctx, conn, event); err != nil {
+				return nil, err
+			}
+			return run, nil
+		})
+	})
 	if err != nil {
 		return nil, err
 	}
-	run, err := readRunFile(runPath)
-	if err != nil {
-		unlock()
-		return nil, err
-	}
-	if identityErr := exactStoredRunID(run, runID); identityErr != nil {
-		unlock()
-		return nil, identityErr
-	}
-	if isTerminalRunStatus(run.Status) {
-		unlock()
-		return run, nil
-	}
-	now := time.Now().UTC()
-	run.Status = RunStatusCanceled
-	run.CancelReason = strings.TrimSpace(reason)
-	run.CancelRequestedAt = &now
-	if run.CompletedAt == nil {
-		run.CompletedAt = &now
-	}
-	run.UpdatedAt = now
-	for id, task := range run.humanTasks {
-		if task.Status != HumanTaskStatusWaiting {
-			continue
-		}
-		task.Status = HumanTaskStatusCanceled
-		task.Revision++
-		task.UpdatedAt = now
-		task.CanceledAt = &now
-		run.humanTasks[id] = task
-	}
-	data, err := marshalPersistedRun(run)
-	if err != nil {
-		unlock()
-		return nil, err
-	}
-	if err := fileutil.WriteFileAtomic(runPath, data, 0o600); err != nil {
-		unlock()
-		return nil, err
-	}
-	unlock()
-	event := RunEvent{
-		Kind:    "workflow.run.canceled",
-		RunID:   run.ID,
-		Message: run.CancelReason,
-	}
-	if IsPrivateWorkflowRun(run) {
-		event = sanitizePrivateWorkflowEvent(event)
-	}
-	_ = s.AppendEvent(ctx, event)
 	s.cancelChildRuns(ctx, run.ID, run.CancelReason)
 	return run, nil
 }
@@ -919,24 +627,20 @@ func (s *FileRunStore) cancelChildRuns(ctx context.Context, parentRunID, reason 
 }
 
 func (s *FileRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
-	_ = ctx
 	runID = strings.TrimSpace(runID)
-	unlock, err := s.lockRoot()
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-	run, err := readRunFile(filepath.Join(s.root, safeID(runID), "run.json"))
-	if err != nil {
-		return nil, err
-	}
-	if run == nil || run.ID != runID {
-		if run != nil && !IsPrivateWorkflowRun(run) {
-			return nil, os.ErrNotExist
+	run, err := withWorkflowDB(ctx, s, "get run", func(db *sql.DB) (*Run, error) {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return nil, err
 		}
-		return nil, ErrPrivateWorkflowContext
+		defer conn.Close()
+		run, _, err := getWorkflowRunConn(ctx, conn, runID)
+		return run, err
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, os.ErrNotExist
 	}
-	return run, nil
+	return run, err
 }
 
 // GetRunBounded rejects an oversized persisted run before decoding it. It is
@@ -953,43 +657,56 @@ func (s *FileRunStore) GetRunBounded(
 	if runID == "" || maximumBytes < 1 {
 		return nil, os.ErrInvalid
 	}
-	unlock, err := s.lockRoot()
+	run, err := s.GetRun(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
-	defer unlock()
-	if contextErr := ctx.Err(); contextErr != nil {
-		return nil, contextErr
-	}
-	runPath := filepath.Join(s.root, safeID(runID), "run.json")
-	info, err := os.Lstat(runPath)
+	data, err := marshalPersistedRun(run)
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > maximumBytes {
+	if int64(len(data)) > maximumBytes {
 		return nil, fmt.Errorf("workflow run exceeds its recovery read limit")
-	}
-	run, err := readRunFile(runPath)
-	if err != nil {
-		return nil, err
-	}
-	if run == nil || run.ID != runID {
-		if run != nil && !IsPrivateWorkflowRun(run) {
-			return nil, os.ErrNotExist
-		}
-		return nil, ErrPrivateWorkflowContext
 	}
 	return run, nil
 }
 
 func (s *FileRunStore) ListRuns(ctx context.Context) ([]Run, error) {
-	_ = ctx
-	unlock, err := s.lockRoot()
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-	return s.listRunsLocked(ctx)
+	return withWorkflowDB(ctx, s, "list runs", func(db *sql.DB) ([]Run, error) {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer conn.Close()
+		var ids []string
+		if err := func() error {
+			rows, queryErr := conn.QueryContext(ctx, `SELECT run_id FROM workflow_runs
+				ORDER BY created_at_seconds DESC,created_at_nanosecond DESC,run_id`)
+			if queryErr != nil {
+				return queryErr
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var id string
+				if scanErr := rows.Scan(&id); scanErr != nil {
+					return scanErr
+				}
+				ids = append(ids, id)
+			}
+			return rows.Err()
+		}(); err != nil {
+			return nil, err
+		}
+		runs := make([]Run, 0, len(ids))
+		for _, id := range ids {
+			run, _, err := getWorkflowRunConn(ctx, conn, id)
+			if err != nil {
+				return nil, err
+			}
+			runs = append(runs, *run)
+		}
+		return runs, nil
+	})
 }
 
 func (s *FileRunStore) ListHumanTasks(
@@ -1028,531 +745,6 @@ func (s *FileRunStore) ListHumanTasks(
 
 // ClaimHumanTask atomically validates and records one human response. The
 // returned duplicate flag is true only for an exact idempotent replay.
-func (s *FileRunStore) ClaimHumanTask(
-	ctx context.Context,
-	runID string,
-	taskID string,
-	req HumanTaskResumeRequest,
-) (*Run, WorkflowHumanTask, bool, error) {
-	_ = ctx
-	runID = strings.TrimSpace(runID)
-	taskID = strings.TrimSpace(taskID)
-	if runID == "" || taskID == "" {
-		return nil, WorkflowHumanTask{}, false, ErrHumanTaskNotFound
-	}
-	unlock, lockErr := s.lockRoot()
-	if lockErr != nil {
-		return nil, WorkflowHumanTask{}, false, lockErr
-	}
-	defer unlock()
-	runPath := filepath.Join(s.root, safeID(runID), "run.json")
-	run, readErr := readRunFile(runPath)
-	if readErr != nil {
-		if os.IsNotExist(readErr) {
-			return nil, WorkflowHumanTask{}, false, fmt.Errorf("%w: %s", ErrHumanTaskNotFound, runID)
-		}
-		return nil, WorkflowHumanTask{}, false, readErr
-	}
-	if run.ID != runID {
-		return nil, WorkflowHumanTask{}, false, ErrHumanTaskNotFound
-	}
-	if IsPrivateWorkflowRun(run) && len(req.Secrets) != 0 {
-		return nil, WorkflowHumanTask{}, false, ErrPrivateWorkflowContext
-	}
-	task, exists := run.humanTasks[taskID]
-	if !exists || task.ID != taskID || task.RunID != run.ID {
-		return nil, WorkflowHumanTask{}, false, ErrHumanTaskNotFound
-	}
-	if task.Status == HumanTaskStatusAnswered {
-		if strings.TrimSpace(req.ResponseID) == task.ResponseID &&
-			req.InputHash == task.InputHash &&
-			canonicalJSON(req.Response) == canonicalJSON(task.Response) {
-			now := time.Now().UTC()
-			if run.Status != RunStatusRunning || run.execution == nil ||
-				run.execution.Resume == nil || run.execution.Resume.TaskID != task.ID ||
-				now.Before(run.execution.Resume.ExpiresAt) {
-				return cloneRun(run), cloneWorkflowHumanTask(task), true, nil
-			}
-			if validationErr := validateAnsweredHumanTaskCheckpoint(run, task); validationErr != nil {
-				return nil, WorkflowHumanTask{}, false, validationErr
-			}
-			if concurrencyErr := s.checkHumanTaskResumeConcurrencyLocked(
-				ctx,
-				run,
-				req.maxConcurrent,
-			); concurrencyErr != nil {
-				return nil, WorkflowHumanTask{}, false, concurrencyErr
-			}
-			lease := req.resumeLease
-			if lease <= 0 {
-				lease = humanTaskResumeLease(0)
-			}
-			run.execution.Resume = &workflowResumeClaim{
-				TaskID:     task.ID,
-				ResponseID: task.ResponseID,
-				Token:      NewRunID(),
-				ClaimedAt:  now,
-				ExpiresAt:  now.Add(lease),
-				Lease:      lease,
-			}
-			run.UpdatedAt = now
-			data, marshalErr := marshalPersistedRun(run)
-			if marshalErr != nil {
-				return nil, WorkflowHumanTask{}, false, marshalErr
-			}
-			if writeErr := fileutil.WriteFileAtomic(runPath, data, 0o600); writeErr != nil {
-				return nil, WorkflowHumanTask{}, false, writeErr
-			}
-			return cloneRun(run), cloneWorkflowHumanTask(task), false, nil
-		}
-		return nil, WorkflowHumanTask{}, false, ErrHumanTaskConflict
-	}
-	if task.Status != HumanTaskStatusWaiting || run.Status != RunStatusWaiting {
-		return nil, WorkflowHumanTask{}, false, ErrHumanTaskConflict
-	}
-	if validationErr := validateWaitingHumanTaskCheckpoint(run, task); validationErr != nil {
-		return nil, WorkflowHumanTask{}, false, validationErr
-	}
-	if concurrencyErr := s.checkHumanTaskResumeConcurrencyLocked(
-		ctx,
-		run,
-		req.maxConcurrent,
-	); concurrencyErr != nil {
-		return nil, WorkflowHumanTask{}, false, concurrencyErr
-	}
-	if validationErr := validateHumanTaskResume(task, req); validationErr != nil {
-		return nil, WorkflowHumanTask{}, false, validationErr
-	}
-	stepKey := task.JobID + "/" + task.StepID
-	step := run.Steps[stepKey]
-	now := time.Now().UTC()
-	task.Status = HumanTaskStatusAnswered
-	task.Revision++
-	task.ResponseID = strings.TrimSpace(req.ResponseID)
-	task.Response = cloneJSONValue(req.Response)
-	task.UpdatedAt = now
-	task.AnsweredAt = &now
-	run.humanTasks[task.ID] = task
-	step.Status = RunStatusSucceeded
-	step.Outputs = humanTaskStepOutputs(task)
-	step.Error = ""
-	run.Steps[stepKey] = step
-	run.execution.Cursor.StepIndex++
-	lease := req.resumeLease
-	if lease <= 0 {
-		lease = humanTaskResumeLease(0)
-	}
-	run.execution.Resume = &workflowResumeClaim{
-		TaskID:     task.ID,
-		ResponseID: task.ResponseID,
-		Token:      NewRunID(),
-		ClaimedAt:  now,
-		ExpiresAt:  now.Add(lease),
-		Lease:      lease,
-	}
-	run.Status = RunStatusRunning
-	run.Error = ""
-	run.UpdatedAt = now
-	data, marshalErr := marshalPersistedRun(run)
-	if marshalErr != nil {
-		return nil, WorkflowHumanTask{}, false, marshalErr
-	}
-	if writeErr := fileutil.WriteFileAtomic(runPath, data, 0o600); writeErr != nil {
-		return nil, WorkflowHumanTask{}, false, writeErr
-	}
-	return cloneRun(run), cloneWorkflowHumanTask(task), false, nil
-}
-
-func (s *FileRunStore) checkHumanTaskResumeConcurrencyLocked(
-	ctx context.Context,
-	run *Run,
-	maxConcurrent int,
-) error {
-	if maxConcurrent <= 0 || run.ParentRunID != "" {
-		return nil
-	}
-	runs, err := s.listRunsLocked(ctx)
-	if err != nil {
-		return err
-	}
-	running := 0
-	for _, candidate := range runs {
-		if candidate.ID != run.ID && candidate.ParentRunID == "" &&
-			candidate.Status == RunStatusRunning {
-			running++
-		}
-	}
-	if running >= maxConcurrent {
-		return fmt.Errorf(
-			"%w: %d running, max %d",
-			ErrRunConcurrencyLimit,
-			running,
-			maxConcurrent,
-		)
-	}
-	return nil
-}
-
-func (s *FileRunStore) RenewHumanTaskClaim(
-	ctx context.Context,
-	runID string,
-	taskID string,
-	token string,
-	lease time.Duration,
-) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	runID = strings.TrimSpace(runID)
-	taskID = strings.TrimSpace(taskID)
-	token = strings.TrimSpace(token)
-	if runID == "" || taskID == "" || token == "" || lease <= 0 {
-		return ErrHumanTaskConflict
-	}
-	unlock, err := s.lockRoot()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	runPath := filepath.Join(s.root, safeID(runID), "run.json")
-	run, err := readRunFile(runPath)
-	if err != nil {
-		return err
-	}
-	if run.ID != runID {
-		return ErrHumanTaskNotFound
-	}
-	task, exists := run.humanTasks[taskID]
-	if !exists || task.Status != HumanTaskStatusAnswered ||
-		run.Status != RunStatusRunning || run.execution == nil ||
-		run.execution.Resume == nil || run.execution.Resume.TaskID != taskID ||
-		run.execution.Resume.Token != token {
-		return ErrHumanTaskConflict
-	}
-	now := time.Now().UTC()
-	if !now.Before(run.execution.Resume.ExpiresAt) {
-		return ErrHumanTaskConflict
-	}
-	nextExpiry := now.Add(lease)
-	if !nextExpiry.After(run.execution.Resume.ExpiresAt) {
-		return nil
-	}
-	run.execution.Resume.ExpiresAt = nextExpiry
-	data, err := marshalPersistedRun(run)
-	if err != nil {
-		return err
-	}
-	return fileutil.WriteFileAtomic(runPath, data, 0o600)
-}
-
-func (s *FileRunStore) CancelHumanTask(
-	ctx context.Context,
-	runID string,
-	taskID string,
-	reason string,
-) (*Run, error) {
-	reason, err := NormalizeWorkflowCancelReason(reason)
-	if err != nil {
-		return nil, err
-	}
-	runID = strings.TrimSpace(runID)
-	taskID = strings.TrimSpace(taskID)
-	if runID == "" || taskID == "" {
-		return nil, ErrHumanTaskNotFound
-	}
-	unlock, err := s.lockRoot()
-	if err != nil {
-		return nil, err
-	}
-	runPath := filepath.Join(s.root, safeID(runID), "run.json")
-	run, err := readRunFile(runPath)
-	if err != nil {
-		unlock()
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("%w: %s", ErrHumanTaskNotFound, runID)
-		}
-		return nil, err
-	}
-	if run.ID != runID {
-		unlock()
-		return nil, ErrHumanTaskNotFound
-	}
-	task, exists := run.humanTasks[taskID]
-	if !exists || task.ID != taskID || task.RunID != run.ID {
-		unlock()
-		return nil, ErrHumanTaskNotFound
-	}
-	if task.Status != HumanTaskStatusWaiting || run.Status != RunStatusWaiting {
-		unlock()
-		return nil, ErrHumanTaskConflict
-	}
-	now := time.Now().UTC()
-	run.Status = RunStatusCanceled
-	run.CancelReason = reason
-	run.CancelRequestedAt = &now
-	run.CompletedAt = &now
-	run.UpdatedAt = now
-	task.Status = HumanTaskStatusCanceled
-	task.Revision++
-	task.UpdatedAt = now
-	task.CanceledAt = &now
-	run.humanTasks[task.ID] = task
-	data, err := marshalPersistedRun(run)
-	if err != nil {
-		unlock()
-		return nil, err
-	}
-	if err := fileutil.WriteFileAtomic(runPath, data, 0o600); err != nil {
-		unlock()
-		return nil, err
-	}
-	unlock()
-	event := RunEvent{
-		Kind:    "workflow.run.canceled",
-		RunID:   run.ID,
-		Message: run.CancelReason,
-	}
-	if IsPrivateWorkflowRun(run) {
-		event = sanitizePrivateWorkflowEvent(event)
-	}
-	_ = s.AppendEvent(ctx, event)
-	s.cancelChildRuns(ctx, run.ID, run.CancelReason)
-	return run, nil
-}
-
-func (s *FileRunStore) listRunsLocked(ctx context.Context) ([]Run, error) {
-	_ = ctx
-	entries, err := os.ReadDir(s.root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	runs := make([]Run, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		run, err := readRunFile(filepath.Join(s.root, entry.Name(), "run.json"))
-		if err == nil {
-			runs = append(runs, *run)
-		}
-	}
-	sort.Slice(runs, func(i, j int) bool {
-		return runs[i].CreatedAt.After(runs[j].CreatedAt)
-	})
-	return runs, nil
-}
-
-func (s *FileRunStore) AppendEvent(ctx context.Context, event RunEvent) error {
-	_ = ctx
-	event.RunID = strings.TrimSpace(event.RunID)
-	if event.RunID == "" {
-		return fmt.Errorf("event run id is required")
-	}
-	unlock, err := s.lockRoot()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	dir := filepath.Join(s.root, safeID(event.RunID))
-	run, readErr := readRunFile(filepath.Join(dir, "run.json"))
-	if readErr != nil {
-		// Events are subordinate to an existing run record. Missing and
-		// unclassifiable records may be deleted/corrupt private runs, so there
-		// is no safe public fallback classification.
-		return ErrPrivateWorkflowContext
-	}
-	if identityErr := exactStoredRunID(run, event.RunID); identityErr != nil {
-		return identityErr
-	}
-	private := IsPrivateWorkflowRun(run)
-	if private {
-		event = sanitizePrivateWorkflowEvent(event)
-	}
-	if mkdirErr := os.MkdirAll(dir, 0o755); mkdirErr != nil {
-		if private {
-			return ErrPrivateWorkflowContext
-		}
-		return mkdirErr
-	}
-	if event.Time.IsZero() {
-		event.Time = time.Now().UTC()
-	}
-	data, err := json.Marshal(event)
-	if err != nil {
-		if private {
-			return ErrPrivateWorkflowContext
-		}
-		return err
-	}
-	f, err := os.OpenFile(filepath.Join(dir, "events.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		if private {
-			return ErrPrivateWorkflowContext
-		}
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		if private {
-			return ErrPrivateWorkflowContext
-		}
-		return err
-	}
-	if err := f.Sync(); err != nil && private {
-		return ErrPrivateWorkflowContext
-	} else {
-		return err
-	}
-}
-
-func (s *FileRunStore) Events(ctx context.Context, runID string) ([]RunEvent, error) {
-	_ = ctx
-	runID = strings.TrimSpace(runID)
-	unlock, err := s.lockRoot()
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-	dir := filepath.Join(s.root, safeID(runID))
-	run, readErr := readRunFile(filepath.Join(dir, "run.json"))
-	if readErr != nil {
-		if os.IsNotExist(readErr) {
-			if _, eventErr := os.Stat(filepath.Join(dir, "events.jsonl")); os.IsNotExist(eventErr) {
-				return nil, nil
-			}
-		}
-		return nil, ErrPrivateWorkflowContext
-	}
-	if identityErr := exactStoredRunID(run, runID); identityErr != nil {
-		return nil, identityErr
-	}
-	private := IsPrivateWorkflowRun(run)
-	data, err := os.ReadFile(filepath.Join(dir, "events.jsonl"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		if private {
-			return nil, ErrPrivateWorkflowContext
-		}
-		return nil, err
-	}
-	var events []RunEvent
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var event RunEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			var fallback RunEvent
-			if fallbackErr := decodeJSONWithNumbers(
-				[]byte(line),
-				&fallback,
-			); fallbackErr != nil {
-				continue
-			}
-			retainedOverflow, fallbackErr := normalizeOverflowJSONMap(
-				fallback.Payload,
-			)
-			if fallbackErr != nil || !retainedOverflow {
-				continue
-			}
-			event = fallback
-		}
-		if private {
-			event = sanitizePrivateWorkflowEvent(event)
-		}
-		events = append(events, event)
-	}
-	return events, nil
-}
-
-func (s *FileRunStore) DeleteRun(ctx context.Context, runID string) error {
-	_ = ctx
-	runID = strings.TrimSpace(runID)
-	key := safeID(runID)
-	if runID == "" || key == "unknown" {
-		return fmt.Errorf("run id is required")
-	}
-	unlock, err := s.lockRoot()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	dir := filepath.Join(s.root, key)
-	run, readErr := readRunFile(filepath.Join(dir, "run.json"))
-	if readErr != nil {
-		if os.IsNotExist(readErr) {
-			return nil
-		}
-		return readErr
-	}
-	if identityErr := exactStoredRunID(run, runID); identityErr != nil {
-		return identityErr
-	}
-	return os.RemoveAll(dir)
-}
-
-func exactStoredRunID(run *Run, requested string) error {
-	if run != nil && run.ID == strings.TrimSpace(requested) {
-		return nil
-	}
-	if IsPrivateWorkflowRun(run) {
-		return ErrPrivateWorkflowContext
-	}
-	return os.ErrNotExist
-}
-
-func (s *FileRunStore) lockRoot() (func(), error) {
-	root := filepath.Clean(s.root)
-	if abs, err := filepath.Abs(root); err == nil {
-		root = abs
-	}
-	actual, _ := fileRunStoreLocks.LoadOrStore(root, &sync.Mutex{})
-	rootMu := actual.(*sync.Mutex)
-	rootMu.Lock()
-	unlockFile, err := lockWorkflowRunStore(root)
-	if err != nil {
-		rootMu.Unlock()
-		return nil, err
-	}
-	s.mu.Lock()
-	return func() {
-		s.mu.Unlock()
-		unlockFile()
-		rootMu.Unlock()
-	}, nil
-}
-
-func (s *FileRunStore) PruneTerminalRuns(ctx context.Context, olderThan time.Time) (int, error) {
-	runs, err := s.ListRuns(ctx)
-	if err != nil {
-		return 0, err
-	}
-	deleted := 0
-	for _, run := range runs {
-		if !isTerminalRunStatus(run.Status) {
-			continue
-		}
-		completeAt := run.UpdatedAt
-		if run.CompletedAt != nil && !run.CompletedAt.IsZero() {
-			completeAt = *run.CompletedAt
-		}
-		if !completeAt.Before(olderThan) {
-			continue
-		}
-		if err := s.DeleteRun(ctx, run.ID); err != nil {
-			return deleted, err
-		}
-		deleted++
-	}
-	return deleted, nil
-}
-
 func isTerminalRunStatus(status string) bool {
 	switch status {
 	case RunStatusSucceeded, RunStatusFailed, RunStatusCanceled, RunStatusSkipped:
