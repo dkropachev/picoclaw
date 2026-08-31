@@ -18,6 +18,21 @@
   "collectionRules": {
     "manifest": "collection-surfaces.json",
     "sharedShellImportPrefixes": ["@/components/collection"],
+    "sharedEditor": {
+      "standardPage": {
+        "file": "src/components/collection/standard-collection-page.tsx",
+        "component": "StandardCollectionPage"
+      },
+      "toolbar": {
+        "file": "src/components/collection/collection-toolbar.tsx",
+        "component": "CollectionToolbar"
+      },
+      "queryInput": {
+        "file": "src/components/collection/collection-query-input.tsx",
+        "component": "CollectionQueryInput",
+        "slot": "collection-query-input"
+      }
+    },
     "oneOffInfrastructureImports": [
       "@/components/models/model-card",
       "@/components/agent/agents/agent-card",

@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url"
 
 import ts from "typescript"
 
+import { validateCollectionEditorGovernance } from "./collection-ui-governance.mjs"
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const frontendRoot = path.resolve(scriptDir, "..")
 const srcRoot = path.join(frontendRoot, "src")
@@ -597,6 +599,19 @@ for (const filePath of walk(srcRoot)) {
 }
 
 lintCollectionManifest(sourceFiles)
+
+for (const failure of validateCollectionEditorGovernance(
+  sourceFiles,
+  config.collectionRules?.sharedEditor,
+  srcRoot,
+)) {
+  addFailure(
+    failure.relPath,
+    failure.line,
+    "collection-editor-chain",
+    failure.message,
+  )
+}
 
 if (failures.length > 0) {
   console.error("frontend UI rule lint failed:")

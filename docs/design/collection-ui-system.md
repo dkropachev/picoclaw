@@ -61,6 +61,12 @@ state, next-page state, refresh, and applicable mutations to
 adapters, resource metadata, navigation, and specialized detail/editor content;
 they do not recreate collection infrastructure.
 
+The query control has one enforced production ownership chain:
+`StandardCollectionPage` renders `CollectionToolbar`, which renders the sole
+`CollectionQueryInput`. Standard surfaces do not inject, wrap, or directly
+render a query editor, and no other component may claim the
+`collection-query-input` slot.
+
 Nested collections use the same production controller. They may add the shared
 context bar for Back navigation and parent identity, leading status/filter
 content, and metadata-driven selection actions, but they do not replace the
@@ -86,17 +92,45 @@ publish use the same explicit selected-ID state as bulk deletion.
 
 ## Query State And Autocomplete
 
-- The active query is URL parameter `q`. Clear restores the collection default.
+- The active query is URL parameter `q`. The draft follows external canonical
+  query updates. Clear restores the latest
+  collection default, while Escape restores the active query without applying
+  the draft.
 - The input is one single-line, server-authoritative JQL-like field. Enter
-  applies. Escape restores the active query without applying draft text.
+  applies when no autocomplete option is active. Enter or Tab accepts the
+  active option; Up and Down wrap through options and keep the active option in
+  view; Control/Command+Space opens suggestions; Escape closes suggestions and
+  restores the active query. Mouse selection has the same insertion behavior.
+  Autocomplete and application shortcuts are ignored during IME composition.
 - Store at most eight successful recent queries per collection in browser-local
   state. Provide Clear history. Durable saved views are not part of this version.
-- Caret-aware autocomplete uses the existing accessible listbox behavior and the
-  response `query_schema`. It suggests fields, valid operators, enum/dynamic
-  values, logical keywords, and `ORDER BY` clauses appropriate to the caret.
+- Selection-aware autocomplete is a tolerant client-side editing aid; the
+  backend parser remains authoritative. It tracks quoted and escaped text,
+  logical state, grouping versus `IN` parentheses, top-level `ORDER BY`, used
+  sort fields, and the complete selection range. Keywords inside quoted values
+  do not alter editing context.
+- Suggestions come only from the response `query_schema` and grammar. They
+  include fields; standalone `ALL`; `NOT` and grouping; schema-allowed single-
+  and multi-word operators; logical operators; typed boolean, enum, string,
+  ISO timestamp, and valid `-Nm`/`-Nh`/`-Nd`/`-Nw` relative timestamp values;
+  subsequent `IN` values, commas, and closing parentheses; and top-level
+  `ORDER BY` with unique sortable fields, directions, and the three-field limit.
+- Applying a suggestion replaces the complete selected/token range atomically,
+  preserves surrounding punctuation and suffix text, and restores focus and
+  the resulting caret. String-like values are quoted and escaped when needed,
+  including enum values containing whitespace or syntax characters; replacing
+  an already quoted token does not add a second quote pair. An insertion that
+  would exceed 4096 UTF-8 bytes is rejected in full. Paste and truncation retain
+  complete Unicode scalar boundaries.
 - Invalid-query responses contain a safe code, bounded message, and zero-based
-  UTF-8 byte position. The UI converts the byte position before caret/error
-  highlighting. It does not implement a competing parser.
+  UTF-8 byte position. An error is visible only while the draft still equals
+  the rejected active query. The UI validates and safely converts that byte
+  position to a DOM selection, highlights the affected Unicode scalar on
+  focus, and never splits a multibyte character. Help, error, and byte-count
+  text remain associated with the input; listbox options expose active-
+  descendant state. Disabled and blurred editors cannot accept a suggestion,
+  and accepting an unchanged value still restores the intended caret and
+  advances the completion context.
 
 The reusable backend grammar supports typed string/enum, boolean, number, and
 timestamp fields; `=`, `!=`, `~`, `!~`, comparisons, `IN`, `NOT IN`, `AND`,
@@ -268,6 +302,12 @@ capability, view, owning-spec, and implementation-glob metadata. A base/head
 delta guard rejects new `legacy` entries and requires a modified legacy
 implementation to migrate to `standard`. `exempt` entries require a specific
 rationale and are not an escape hatch for ordinary administrative collections.
+The UI source gate also verifies the direct
+`StandardCollectionPage` → `CollectionToolbar` → `CollectionQueryInput`
+chain, forbids production peers from rendering the reserved toolbar or query
+input, and reserves `data-slot="collection-query-input"` for the shared editor.
+Focused source-contract cases live in
+[`collection-ui-governance.test.mjs`](../../web/frontend/scripts/collection-ui-governance.test.mjs).
 Workflow runs and Git workspace history are operational exemptions: they are
 not administrative inventories, but still render with the shared page and
 collection primitives and support List and Table. Their exemption covers only

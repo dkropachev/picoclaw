@@ -8234,6 +8234,151 @@ test("findings processing Updated header stays inside the desktop table viewport
   expect(errors).toEqual([])
 })
 
+test("standard collection query completes, synchronizes, and recovers from errors", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const collectionPath = `/api/repository-reviews/automations/${repositoryReviewAutomationID}/findings`
+  const collectionQueries: string[] = []
+  page.on("request", (request) => {
+    const url = new URL(request.url())
+    if (request.method() === "GET" && url.pathname === collectionPath) {
+      const query = url.searchParams.get("query")
+      if (query) collectionQueries.push(query)
+    }
+  })
+
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/${repositoryReviewAutomationID}/findings`,
+  )
+  const editor = page.locator('[data-slot="collection-query-input"]')
+  const input = editor.getByRole("combobox", {
+    name: "Collection query",
+  })
+
+  await input.fill("sev")
+  await expect(input).toHaveAttribute("aria-autocomplete", "list")
+  await expect(input).toHaveAttribute("aria-expanded", "true")
+  const listbox = page.getByRole("listbox", {
+    name: "Collection query suggestions",
+  })
+  await expect(listbox).toBeVisible()
+  const listboxID = await listbox.getAttribute("id")
+  expect(listboxID).toBeTruthy()
+  await expect(input).toHaveAttribute("aria-controls", listboxID!)
+
+  const describedBy = (await input.getAttribute("aria-describedby"))
+    ?.split(/\s+/)
+    .filter(Boolean)
+  expect(describedBy).toHaveLength(2)
+  for (const descriptionID of describedBy ?? []) {
+    await expect(page.locator(`[id="${descriptionID}"]`)).toBeVisible()
+  }
+
+  await input.press("ArrowDown")
+  const severityOption = listbox.getByRole("option", {
+    name: "severity, enum field",
+    exact: true,
+  })
+  await expect(severityOption).toHaveAttribute("aria-selected", "true")
+  const severityOptionID = await severityOption.getAttribute("id")
+  expect(severityOptionID).toBeTruthy()
+  await expect(input).toHaveAttribute(
+    "aria-activedescendant",
+    severityOptionID!,
+  )
+  await expectNoHorizontalOverflow(page)
+  await expectElementFitsViewport(
+    page,
+    `[id="${listboxID}"]`,
+    "Collection query suggestions",
+  )
+
+  await input.press("Enter")
+  await expect(input).toHaveValue("severity ")
+  await input.pressSequentially("= hi")
+  await expect(
+    page.getByRole("option", {
+      name: "high, enum value",
+      exact: true,
+    }),
+  ).toBeVisible()
+  await input.press("ArrowDown")
+  await input.press("Enter")
+  await expect(input).toHaveValue("severity = high ")
+
+  const completedQuery = "severity = high"
+  await input.press("Enter")
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe(completedQuery)
+  await expect.poll(() => collectionQueries.includes(completedQuery)).toBe(true)
+
+  const rejectedQuery = 'severity = "🔥"'
+  await page.route(`**${collectionPath}?*`, async (route) => {
+    const url = new URL(route.request().url())
+    if (url.searchParams.get("query") === rejectedQuery) {
+      return json(
+        route,
+        {
+          code: "invalid_query",
+          message: "Expected a configured severity value.",
+          position: 12,
+        },
+        400,
+      )
+    }
+    return route.fallback()
+  })
+
+  await input.fill(rejectedQuery)
+  await input.press("Enter")
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe(rejectedQuery)
+  const queryAlert = editor.getByRole("alert")
+  await expect(queryAlert).toHaveText(
+    "Character 13: Expected a configured severity value.",
+  )
+  await expect(input).toHaveAttribute("aria-invalid", "true")
+  const queryAlertID = await queryAlert.getAttribute("id")
+  expect(queryAlertID).toBeTruthy()
+  await expect(input).toHaveAttribute("aria-errormessage", queryAlertID!)
+  await expect
+    .poll(() =>
+      input.evaluate((element: HTMLInputElement) => ({
+        start: element.selectionStart,
+        end: element.selectionEnd,
+      })),
+    )
+    .toEqual({ start: 12, end: 14 })
+
+  const recoveredQuery = "severity = low"
+  await input.fill(recoveredQuery)
+  await expect(queryAlert).toHaveCount(0)
+  await expect(input).toHaveAttribute("aria-invalid", "false")
+  await input.press("Enter")
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe(recoveredQuery)
+  await expect.poll(() => collectionQueries.includes(recoveredQuery)).toBe(true)
+  await expect(
+    page.locator('[data-slot="collection-results"] [data-item-id]').first(),
+  ).toBeVisible()
+
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(
+    errors.filter(
+      (message) =>
+        !message.includes(
+          "Failed to load resource: the server responded with a status of 400",
+        ),
+    ),
+  ).toEqual([])
+})
+
 test("repository findings Updated header stays inside the canonical desktop table viewport", async ({
   page,
 }, testInfo) => {
