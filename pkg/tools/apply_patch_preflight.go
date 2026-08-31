@@ -21,11 +21,13 @@ type applyPatchPathFence struct {
 }
 
 type applyPatchProtectedRoot struct {
-	lexical           string
-	canonical         string
-	containsWorkspace bool
-	constructionLeaf  applyPatchPathFence
-	fences            []applyPatchPathFence
+	lexical                 string
+	canonical               string
+	containsWorkspace       bool
+	allowWorkspaceException bool
+	trackConstructionLeaf   bool
+	constructionLeaf        applyPatchPathFence
+	fences                  []applyPatchPathFence
 }
 
 type applyPatchWorkspace struct {
@@ -169,6 +171,15 @@ func prepareApplyPatchProtectedRoots(
 	workspace string,
 	roots []string,
 ) ([]applyPatchProtectedRoot, error) {
+	return prepareApplyPatchProtectedRootsWithMode(workspace, roots, true, true)
+}
+
+func prepareApplyPatchProtectedRootsWithMode(
+	workspace string,
+	roots []string,
+	allowWorkspaceException bool,
+	trackConstructionLeaf bool,
+) ([]applyPatchProtectedRoot, error) {
 	if len(roots) == 0 {
 		return nil, nil
 	}
@@ -203,7 +214,10 @@ func prepareApplyPatchProtectedRoots(
 			return nil, fmt.Errorf("apply-patch protected root %d cannot be inspected", index)
 		}
 		prepared = append(prepared, applyPatchProtectedRoot{
-			lexical: lexical, canonical: canonical, constructionLeaf: fences[0],
+			lexical: lexical, canonical: canonical,
+			allowWorkspaceException: allowWorkspaceException,
+			trackConstructionLeaf:   trackConstructionLeaf,
+			constructionLeaf:        fences[0],
 		})
 	}
 	return prepared, nil
@@ -281,7 +295,7 @@ func snapshotApplyPatchProtectedRoots(
 		if err != nil || canonical != root.canonical {
 			return nil, fmt.Errorf("apply-patch protected root %d cannot be resolved", index)
 		}
-		if root.constructionLeaf.exists {
+		if root.trackConstructionLeaf && root.constructionLeaf.exists {
 			if fenceErr := revalidateApplyPatchFence(root.constructionLeaf); fenceErr != nil {
 				return nil, fmt.Errorf("apply-patch protected root %d changed", index)
 			}
@@ -298,8 +312,12 @@ func snapshotApplyPatchProtectedRoots(
 			lexical: root.lexical, canonical: canonical,
 			containsWorkspace: canonical != workspace.canonical &&
 				applyPatchExistingAncestorContains(canonical, workspace.canonical),
-			constructionLeaf: root.constructionLeaf,
-			fences:           dedupeApplyPatchFences(append(lexicalFences, canonicalFences...)),
+			allowWorkspaceException: root.allowWorkspaceException,
+			trackConstructionLeaf:   root.trackConstructionLeaf,
+			constructionLeaf:        root.constructionLeaf,
+			fences: dedupeApplyPatchFences(
+				append(lexicalFences, canonicalFences...),
+			),
 		})
 	}
 	return snapshots, nil
@@ -571,7 +589,8 @@ func (t *ApplyPatchTool) authorizeApplyPatchCanonical(
 		return fmt.Errorf("access denied: path is outside the workspace")
 	}
 	for _, root := range plan.protectedRoots {
-		workspaceException := root.containsWorkspace && insideWorkspace
+		workspaceException := root.allowWorkspaceException &&
+			root.containsWorkspace && insideWorkspace
 		if applyPatchPathWithinIdentity(canonical, root.canonical) && !workspaceException {
 			return fmt.Errorf("patch path is protected")
 		}

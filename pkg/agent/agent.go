@@ -55,6 +55,9 @@ type AgentLoop struct {
 	executionPolicy     isolation.ExecutionPolicy
 	diagnosticPolicy    logger.DiagnosticPolicy
 	runtimeGenerationID uint64
+	// fileMutationProtectedRoots is frozen once from the process home and the
+	// active config path, then detached into every registry generation.
+	fileMutationProtectedRoots []string
 
 	// Runtime state
 	running         atomic.Bool
@@ -1063,6 +1066,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 				executionPolicy,
 				diagnosticPolicy,
 				providerGeneration,
+				cloneAgentRuntimeFileMutationProtectedRoots(al.fileMutationProtectedRoots),
 			)
 		} else if al.runtimePolicyRegistryFactory != nil {
 			registry = al.runtimePolicyRegistryFactory(
@@ -1076,11 +1080,13 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		} else if al.registryFactory != nil {
 			registry = al.registryFactory(cfg, provider)
 		} else {
-			registry = NewAgentRegistryWithRuntimePolicies(
+			registry = newAgentRegistryWithRuntimePolicies(
 				cfg,
 				provider,
 				executionPolicy,
 				diagnosticPolicy,
+				nil,
+				cloneAgentRuntimeFileMutationProtectedRoots(al.fileMutationProtectedRoots),
 			)
 		}
 	}()

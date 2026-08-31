@@ -83,6 +83,7 @@ func NewAgentRegistryWithRuntimePolicies(
 		executionPolicy,
 		diagnosticPolicy,
 		nil,
+		mustAgentRuntimeFileMutationProtectedRoots(""),
 	)
 }
 
@@ -92,7 +93,9 @@ func newAgentRegistryWithRuntimePolicies(
 	executionPolicy isolation.ExecutionPolicy,
 	diagnosticPolicy logger.DiagnosticPolicy,
 	providerGeneration *agentRegistryProviderGeneration,
+	fileMutationProtectedRoots []string,
 ) *AgentRegistry {
+	fileMutationProtectedRoots = cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots)
 	registry := &AgentRegistry{
 		cfg:               cfg,
 		agents:            make(map[string]*AgentInstance),
@@ -120,6 +123,7 @@ func newAgentRegistryWithRuntimePolicies(
 			executionPolicy,
 			diagnosticPolicy,
 			providerGeneration.bindingsForAgent("main"),
+			cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots),
 		)
 		if providerGeneration != nil {
 			direct := providerGeneration.directForAgent("main")
@@ -144,6 +148,7 @@ func newAgentRegistryWithRuntimePolicies(
 				executionPolicy,
 				diagnosticPolicy,
 				providerGeneration.bindingsForAgent(id),
+				cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots),
 			)
 			if providerGeneration != nil {
 				direct := providerGeneration.directForAgent(id)

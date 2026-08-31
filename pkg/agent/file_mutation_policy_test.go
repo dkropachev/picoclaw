@@ -1,0 +1,516 @@
+package agent
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/tools"
+)
+
+func agentFileMutationTestConfig(workspace string) *config.Config {
+	return &config.Config{
+		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+			Workspace: workspace, ModelName: "gpt-5", Provider: "openai",
+			RestrictToWorkspace: true,
+		}},
+		Tools: config.ToolsConfig{
+			Adaptation: config.DefaultToolAdaptationConfig(),
+			WriteFile:  config.ToolConfig{Enabled: true},
+			EditFile:   config.ToolConfig{Enabled: true},
+			AppendFile: config.ToolConfig{Enabled: true},
+		},
+	}
+}
+
+func executeAgentFileMutation(
+	t *testing.T,
+	tool tools.Tool,
+	toolName string,
+	workspace string,
+	path string,
+	exists bool,
+) *tools.ToolResult {
+	t.Helper()
+	if toolName == "apply_patch" {
+		patchPath, err := filepath.Rel(workspace, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !filepath.IsLocal(patchPath) {
+			patchPath = path
+		}
+		var patch string
+		if exists {
+			patch = "*** Begin Patch\n*** Update File: " + patchPath +
+				"\n@@\n-before\n+changed\n*** End Patch"
+		} else {
+			patch = "*** Begin Patch\n*** Add File: " + patchPath +
+				"\n+changed\n*** End Patch"
+		}
+		return tool.Execute(context.Background(), map[string]any{"patch": patch})
+	}
+
+	args := map[string]any{"path": path}
+	switch toolName {
+	case "write_file":
+		args["content"] = "changed"
+		args["overwrite"] = true
+	case "edit_file":
+		args["old_text"] = "before"
+		args["new_text"] = "changed"
+	case "append_file":
+		args["content"] = "changed"
+	}
+	return tool.Execute(context.Background(), args)
+}
+
+func requireAgentFileMutationDenied(
+	t *testing.T,
+	registry *tools.ToolRegistry,
+	toolName string,
+	workspace string,
+	path string,
+	exists bool,
+) {
+	t.Helper()
+	tool, ok := registry.Get(toolName)
+	if !ok {
+		t.Fatalf("%s is not registered", toolName)
+	}
+	result := executeAgentFileMutation(t, tool, toolName, workspace, path, exists)
+	if result == nil || !result.IsError {
+		t.Fatalf("%s protected mutation result = %#v", toolName, result)
+	}
+	if toolName == "apply_patch" {
+		if !strings.Contains(result.ForLLM, "protected") {
+			t.Fatalf("apply_patch denial = %q", result.ForLLM)
+		}
+	} else if !strings.Contains(result.ForLLM, "protected runtime state") {
+		t.Fatalf("%s denial = %q", toolName, result.ForLLM)
+	}
+}
+
+func TestAgentFileMutationPolicyProtectsLauncherRuntimeAndFactories(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	customConfigDir := filepath.Join(workspace, "custom-config")
+	customConfig := filepath.Join(customConfigDir, "config.json")
+	launcherConfig := filepath.Join(customConfigDir, "launcher-config.json")
+	database := filepath.Join(home, "launcher-auth.db")
+	wal := database + "-wal"
+	shm := database + "-shm"
+	archive := filepath.Join(
+		customConfigDir,
+		"legacy-json",
+		"launcher-auth-v1",
+		"launcher-config.json",
+	)
+	for _, path := range []string{customConfig, launcherConfig, database, shm, archive} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archiveHardlink := filepath.Join(workspace, "archived-credentials-hardlink.json")
+	archiveHardlinkAvailable := os.Link(archive, archiveHardlink) == nil
+	t.Setenv(config.EnvHome, home)
+	// Prove WithConfigPath, rather than the environment fallback, owns the
+	// archive location used by this runtime.
+	t.Setenv(config.EnvConfig, filepath.Join(workspace, "environment-config", "config.json"))
+
+	cfg := agentFileMutationTestConfig(workspace)
+	cfg.Tools.AllowWritePaths = []string{
+		"^" + regexp.QuoteMeta(database) + "$",
+		"^" + regexp.QuoteMeta(wal) + "$",
+		"^" + regexp.QuoteMeta(shm) + "$",
+	}
+	messageBus := bus.NewMessageBus()
+	loop := NewAgentLoop(
+		cfg,
+		messageBus,
+		&mockProvider{},
+		WithConfigPath(customConfig),
+	)
+	t.Cleanup(func() {
+		loop.Close()
+		messageBus.Close()
+	})
+	agent := loop.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is missing")
+	}
+
+	registries := map[string]*tools.ToolRegistry{"root": agent.Tools}
+	// Owner factories must retain the construction-time paths even if the
+	// process environment changes before a child is instantiated.
+	newHome := filepath.Join(workspace, "later-home")
+	t.Setenv(config.EnvHome, newHome)
+	t.Setenv(config.EnvConfig, filepath.Join(workspace, "later-config", "config.json"))
+	owned, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "runtime-protection-owner",
+	}, []string{"write_file", "edit_file", "append_file", "apply_patch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owned.Close()
+	registries["owner"] = owned
+
+	for registryName, registry := range registries {
+		for _, target := range []struct {
+			path   string
+			exists bool
+		}{
+			{path: database, exists: true},
+			{path: wal, exists: false},
+			{path: shm, exists: true},
+			{path: archive, exists: true},
+		} {
+			for _, toolName := range []string{
+				"write_file", "edit_file", "append_file", "apply_patch",
+			} {
+				t.Run(registryName+"_"+toolName+"_"+filepath.Base(target.path), func(t *testing.T) {
+					requireAgentFileMutationDenied(
+						t,
+						registry,
+						toolName,
+						workspace,
+						target.path,
+						target.exists,
+					)
+				})
+			}
+		}
+		if archiveHardlinkAvailable {
+			for _, toolName := range []string{"write_file", "edit_file", "append_file"} {
+				requireAgentFileMutationDenied(
+					t, registry, toolName, workspace, archiveHardlink, true,
+				)
+			}
+			patchTool, _ := registry.Get("apply_patch")
+			result := executeAgentFileMutation(
+				t,
+				patchTool,
+				"apply_patch",
+				workspace,
+				archiveHardlink,
+				true,
+			)
+			if result == nil || !result.IsError {
+				t.Fatalf("%s apply_patch accepted archive hardlink: %#v", registryName, result)
+			}
+		}
+	}
+
+	for _, path := range []string{database, shm, archive} {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil || string(content) != "before" {
+			t.Fatalf("protected content %q = %q, %v", path, content, readErr)
+		}
+	}
+	if _, statErr := os.Stat(wal); !os.IsNotExist(statErr) {
+		t.Fatalf("absent WAL was created: %v", statErr)
+	}
+
+	// Neither the application config nor its settings-only launcher sibling is
+	// runtime state. Both remain legitimate source/config mutation targets.
+	for _, path := range []string{customConfig, launcherConfig} {
+		editTool, _ := agent.Tools.Get("edit_file")
+		result := executeAgentFileMutation(
+			t, editTool, "edit_file", workspace, path, true,
+		)
+		if result == nil || result.IsError {
+			t.Fatalf("active config edit %q = %#v", path, result)
+		}
+	}
+
+	ordinary := filepath.Join(workspace, "ordinary.go")
+	if err := os.WriteFile(ordinary, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	patchTool, _ := agent.Tools.Get("apply_patch")
+	result := executeAgentFileMutation(
+		t, patchTool, "apply_patch", workspace, ordinary, true,
+	)
+	if result == nil || result.IsError {
+		t.Fatalf("ordinary apply_patch = %#v", result)
+	}
+
+	// SQLite may delete and recreate WAL files. Volatility must not stale the
+	// apply-patch policy, while the recreated sidecar remains protected.
+	if err := os.WriteFile(wal, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireAgentFileMutationDenied(
+		t, agent.Tools, "apply_patch", workspace, wal, true,
+	)
+	ordinaryTwo := filepath.Join(workspace, "ordinary-two.go")
+	if err := os.WriteFile(ordinaryTwo, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result = executeAgentFileMutation(
+		t, patchTool, "apply_patch", workspace, ordinaryTwo, true,
+	)
+	if result == nil || result.IsError {
+		t.Fatalf("ordinary patch after WAL creation = %#v", result)
+	}
+
+	// A successful registry reload must reuse the loop-frozen roots rather than
+	// adopting the config-path environment value changed above. Restore home so
+	// apply_patch's separately owned authenticated transaction root remains in
+	// its admitted construction namespace for this generation.
+	t.Setenv(config.EnvHome, home)
+	reloadedConfig := agentFileMutationTestConfig(workspace)
+	reloadedConfig.Tools.AllowWritePaths = append(
+		[]string(nil), cfg.Tools.AllowWritePaths...,
+	)
+	if err := loop.ReloadProviderAndConfig(
+		context.Background(), &mockProvider{}, reloadedConfig,
+	); err != nil {
+		t.Fatal(err)
+	}
+	reloadedAgent := loop.registry.GetDefaultAgent()
+	if reloadedAgent == nil {
+		t.Fatal("reloaded default agent is missing")
+	}
+	for _, toolName := range []string{
+		"write_file", "edit_file", "append_file", "apply_patch",
+	} {
+		requireAgentFileMutationDenied(
+			t,
+			reloadedAgent.Tools,
+			toolName,
+			workspace,
+			database,
+			true,
+		)
+	}
+
+	newEnvironmentDatabase := filepath.Join(newHome, "launcher-auth.db")
+	if err := os.MkdirAll(filepath.Dir(newEnvironmentDatabase), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTool, _ := reloadedAgent.Tools.Get("write_file")
+	result = executeAgentFileMutation(
+		t,
+		writeTool,
+		"write_file",
+		workspace,
+		newEnvironmentDatabase,
+		false,
+	)
+	if result == nil || result.IsError {
+		t.Fatalf("reload rebound frozen roots to changed environment: %#v", result)
+	}
+}
+
+func TestAgentFileMutationPolicyHomeInsideWorkspaceOmitsUnsafeApplyPatch(t *testing.T) {
+	workspace := t.TempDir()
+	home := filepath.Join(workspace, ".picoclaw")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	database := filepath.Join(home, "launcher-auth.db")
+	if err := os.WriteFile(database, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(workspace, "config.json"))
+	cfg := agentFileMutationTestConfig(workspace)
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+
+	if _, ok := agent.Tools.Get("apply_patch"); ok {
+		t.Fatal("apply_patch retained an authenticated state root inside workspace authority")
+	}
+	for _, toolName := range []string{"write_file", "edit_file", "append_file"} {
+		requireAgentFileMutationDenied(
+			t, agent.Tools, toolName, workspace, database, true,
+		)
+	}
+	content, err := os.ReadFile(database)
+	if err != nil || string(content) != "before" {
+		t.Fatalf("home-inside-workspace database = %q, %v", content, err)
+	}
+}
+
+func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	configPath := filepath.Join(root, "custom", "config.json")
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, configPath)
+	roots, err := agentRuntimeFileMutationProtectedRoots("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := filepath.Join(home, "launcher-auth.db")
+	want := []string{
+		database,
+		database + "-wal",
+		database + "-shm",
+		filepath.Join(filepath.Dir(configPath), "legacy-json"),
+		filepath.Join(
+			filepath.Dir(configPath),
+			"legacy-json",
+			"launcher-auth-v1",
+			"launcher-config.json",
+		),
+	}
+	if len(roots) != len(want) {
+		t.Fatalf("protected roots = %#v, want %#v", roots, want)
+	}
+	for index := range want {
+		if roots[index] != want[index] {
+			t.Fatalf("protected root %d = %q, want %q", index, roots[index], want[index])
+		}
+	}
+	roots[0] = "mutated"
+	again, err := agentRuntimeFileMutationProtectedRoots("")
+	if err != nil || again[0] != database {
+		t.Fatalf("protected roots retained caller mutation: %#v, %v", again, err)
+	}
+}
+
+func TestAgentFileMutationPolicyFailureBoundaries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not permit removing the process working directory")
+	}
+	originalWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unavailableWorkingDirectory := t.TempDir()
+	if err = os.Chdir(unavailableWorkingDirectory); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if restoreErr := os.Chdir(originalWorkingDirectory); restoreErr != nil {
+			t.Errorf("restore working directory: %v", restoreErr)
+		}
+	}()
+	if err = os.Remove(unavailableWorkingDirectory); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv(config.EnvHome, "relative-home")
+	t.Setenv(config.EnvConfig, "")
+	if roots, rootErr := agentRuntimeFileMutationProtectedRoots(""); rootErr == nil || roots != nil {
+		t.Fatalf("relative home roots = %#v, %v", roots, rootErr)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("mustAgentRuntimeFileMutationProtectedRoots did not panic")
+			}
+		}()
+		_ = mustAgentRuntimeFileMutationProtectedRoots("")
+	}()
+
+	t.Setenv(config.EnvHome, filepath.Join(originalWorkingDirectory, "absolute-home"))
+	if roots, rootErr := agentRuntimeFileMutationProtectedRoots(
+		"relative-config.json",
+	); rootErr == nil ||
+		roots != nil {
+		t.Fatalf("relative config roots = %#v, %v", roots, rootErr)
+	}
+	if resolved, resolveErr := agentApplyPatchResolveAgainstExistingAncestor(
+		"relative-root",
+	); resolveErr == nil ||
+		resolved != "" {
+		t.Fatalf("relative apply-patch root = %q, %v", resolved, resolveErr)
+	}
+	if !agentApplyPatchTransactionRootOverlapsWorkspace(
+		"relative-root",
+		originalWorkingDirectory,
+	) {
+		t.Fatal("invalid transaction root did not fail closed")
+	}
+	if roots, rootErr := prepareLocalRepairProtectedRoots([]string{"relative-root"}); rootErr == nil || roots != nil {
+		t.Fatalf("relative local-repair roots = %#v, %v", roots, rootErr)
+	}
+}
+
+func TestAgentInstanceRejectsInvalidMutationPolicyForEveryFileTool(t *testing.T) {
+	for _, toolName := range []string{"edit_file", "append_file", "write_file"} {
+		t.Run(toolName, func(t *testing.T) {
+			workspace := t.TempDir()
+			cfg := agentFileMutationTestConfig(workspace)
+			cfg.Tools.EditFile.Enabled = toolName == "edit_file"
+			cfg.Tools.AppendFile.Enabled = toolName == "append_file"
+			cfg.Tools.WriteFile.Enabled = toolName == "write_file"
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("%s accepted an invalid mutation policy", toolName)
+				}
+			}()
+			instance := newAgentInstanceWithRuntimePolicies(
+				nil,
+				&cfg.Agents.Defaults,
+				cfg,
+				&mockProvider{},
+				isolation.NewExecutionPolicy(config.IsolationConfig{}),
+				logger.DiagnosticPolicy{},
+				nil,
+				[]string{"invalid\x00root"},
+			)
+			if instance != nil {
+				instance.Close()
+			}
+		})
+	}
+}
+
+func TestAgentInstanceRejectsUnavailableApplyPatchTransactionRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot remove the process working directory")
+	}
+	originalWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	unavailableWorkingDirectory := t.TempDir()
+	if err = os.Chdir(unavailableWorkingDirectory); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if restoreErr := os.Chdir(originalWorkingDirectory); restoreErr != nil {
+			t.Errorf("restore working directory: %v", restoreErr)
+		}
+	}()
+	if err = os.Remove(unavailableWorkingDirectory); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvHome, "relative-home")
+
+	cfg := agentFileMutationTestConfig(workspace)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("agent instance accepted an unavailable apply-patch transaction root")
+		}
+	}()
+	instance := newAgentInstanceWithRuntimePolicies(
+		nil,
+		&cfg.Agents.Defaults,
+		cfg,
+		&mockProvider{},
+		isolation.NewExecutionPolicy(config.IsolationConfig{}),
+		logger.DiagnosticPolicy{},
+		nil,
+		[]string{filepath.Join(originalWorkingDirectory, "launcher-auth.db")},
+	)
+	if instance != nil {
+		instance.Close()
+	}
+}

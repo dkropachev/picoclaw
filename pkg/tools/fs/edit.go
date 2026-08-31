@@ -24,6 +24,24 @@ func NewEditFileTool(workspace string, restrict bool, allowPaths ...[]*regexp.Re
 	return &EditFileTool{fs: buildFs(workspace, restrict, patterns)}
 }
 
+// NewEditFileToolWithPolicy creates an edit tool with protected runtime roots.
+func NewEditFileToolWithPolicy(
+	workspace string,
+	restrict bool,
+	policy FileMutationPolicy,
+	allowPaths ...[]*regexp.Regexp,
+) (*EditFileTool, error) {
+	var patterns []*regexp.Regexp
+	if len(allowPaths) > 0 {
+		patterns = allowPaths[0]
+	}
+	policyFS, err := buildMutationFS(workspace, restrict, patterns, policy)
+	if err != nil {
+		return nil, err
+	}
+	return &EditFileTool{fs: policyFS}, nil
+}
+
 func (t *EditFileTool) Name() string {
 	return "edit_file"
 }
@@ -86,6 +104,24 @@ func NewAppendFileTool(workspace string, restrict bool, allowPaths ...[]*regexp.
 		patterns = allowPaths[0]
 	}
 	return &AppendFileTool{fs: buildFs(workspace, restrict, patterns)}
+}
+
+// NewAppendFileToolWithPolicy creates an append tool with protected runtime roots.
+func NewAppendFileToolWithPolicy(
+	workspace string,
+	restrict bool,
+	policy FileMutationPolicy,
+	allowPaths ...[]*regexp.Regexp,
+) (*AppendFileTool, error) {
+	var patterns []*regexp.Regexp
+	if len(allowPaths) > 0 {
+		patterns = allowPaths[0]
+	}
+	policyFS, err := buildMutationFS(workspace, restrict, patterns, policy)
+	if err != nil {
+		return nil, err
+	}
+	return &AppendFileTool{fs: policyFS}, nil
 }
 
 func (t *AppendFileTool) Name() string {

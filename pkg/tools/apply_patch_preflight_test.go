@@ -942,6 +942,92 @@ func TestApplyPatchPreflightProtectedAncestorDoesNotBlanketWorkspace(t *testing.
 	}
 }
 
+func TestApplyPatchPreflightVolatileProtectedAncestorBlocksNestedWorkspace(t *testing.T) {
+	archiveRoot := t.TempDir()
+	workspace := filepath.Join(archiveRoot, "agent-workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tool := newApplyPatchPreflightTestTool(t, workspace, true, true, ApplyPatchPreflightPolicy{
+		VolatileProtectedRoots: []string{archiveRoot},
+	})
+	result := executeApplyPatch(t, tool, context.Background(),
+		"*** Begin Patch\n*** Add File: ordinary.txt\n+denied\n*** End Patch",
+	)
+	requireApplyPatchError(t, result, "protected")
+	if _, err := os.Stat(filepath.Join(workspace, "ordinary.txt")); !os.IsNotExist(err) {
+		t.Fatalf("volatile protected ancestor allowed nested workspace mutation: %v", err)
+	}
+}
+
+func TestApplyPatchPreflightVolatileProtectedRootAllowsRuntimeReplacement(t *testing.T) {
+	workspace := t.TempDir()
+	protected := writeApplyPatchFixture(
+		t, workspace, "launcher-auth.db-wal", "before\n", 0o600,
+	)
+	tool := newApplyPatchPreflightTestTool(t, workspace, true, true, ApplyPatchPreflightPolicy{
+		VolatileProtectedRoots: []string{protected},
+	})
+	if err := os.Remove(protected); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(protected, []byte("replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := executeApplyPatch(t, tool, context.Background(),
+		"*** Begin Patch\n*** Add File: ordinary.txt\n+allowed\n*** End Patch",
+	)
+	if result.IsError {
+		t.Fatalf("runtime root replacement stale-blocked ordinary patch: %s", result.ForLLM)
+	}
+	result = executeApplyPatch(t, tool, context.Background(),
+		"*** Begin Patch\n*** Update File: launcher-auth.db-wal\n"+
+			"@@\n-replacement\n+mutated\n*** End Patch",
+	)
+	requireApplyPatchError(t, result, "protected")
+	content, err := os.ReadFile(protected)
+	if err != nil || string(content) != "replacement\n" {
+		t.Fatalf("volatile protected content = %q, %v", content, err)
+	}
+}
+
+func TestApplyPatchPreflightPolicyRejectsInvalidRuntimeRoots(t *testing.T) {
+	workspace := t.TempDir()
+	transactionRoot := filepath.Join(t.TempDir(), "apply-patch-transactions")
+	for _, test := range []struct {
+		name   string
+		policy ApplyPatchPreflightPolicy
+	}{
+		{
+			name: "transaction state",
+			policy: ApplyPatchPreflightPolicy{
+				TransactionStateRoot: "invalid\x00root",
+			},
+		},
+		{
+			name: "volatile protected root",
+			policy: ApplyPatchPreflightPolicy{
+				TransactionStateRoot:   transactionRoot,
+				VolatileProtectedRoots: []string{"invalid\x00root"},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tool, err := NewApplyPatchToolWithPermissionsAndPolicy(
+				workspace,
+				true,
+				true,
+				true,
+				test.policy,
+			)
+			if err == nil || tool != nil {
+				t.Fatalf("invalid runtime roots returned %#v, %v", tool, err)
+			}
+		})
+	}
+}
+
 func TestApplyPatchPreflightProtectedAncestorStillBlocksAllowedSibling(t *testing.T) {
 	home := t.TempDir()
 	workspace := filepath.Join(home, "editable-workspace")

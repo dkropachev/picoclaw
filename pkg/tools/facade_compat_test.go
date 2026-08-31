@@ -28,3 +28,17 @@ func TestFacadeConstructorsRemainAvailable(t *testing.T) {
 		t.Fatal("NewInstallSkillToolWithLock should return a tool")
 	}
 }
+
+func TestFileMutationPolicyFacadeConstructorsRemainAvailable(t *testing.T) {
+	workspace := t.TempDir()
+	policy := FileMutationPolicy{ProtectedRoots: []string{"runtime-state"}}
+	if tool, err := NewWriteFileToolWithPolicy(workspace, true, policy); err != nil || tool == nil {
+		t.Fatalf("NewWriteFileToolWithPolicy() = %#v, %v", tool, err)
+	}
+	if tool, err := NewEditFileToolWithPolicy(workspace, true, policy); err != nil || tool == nil {
+		t.Fatalf("NewEditFileToolWithPolicy() = %#v, %v", tool, err)
+	}
+	if tool, err := NewAppendFileToolWithPolicy(workspace, true, policy); err != nil || tool == nil {
+		t.Fatalf("NewAppendFileToolWithPolicy() = %#v, %v", tool, err)
+	}
+}

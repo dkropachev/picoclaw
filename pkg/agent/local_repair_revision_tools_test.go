@@ -72,6 +72,190 @@ func TestLocalRepairRevisionReadAndRangeEditPreserveUntouchedBytes(t *testing.T)
 	}
 }
 
+func TestLocalRepairFileToolsDenyRuntimeProtectedRoots(t *testing.T) {
+	pin, workspace, root := newLocalRepairTestWorkspace(t)
+	database := filepath.Join(root, ".picoclaw", "launcher-auth.db")
+	archiveRoot := filepath.Join(root, "legacy-json")
+	archive := filepath.Join(archiveRoot, "launcher-auth-v1", "launcher-config.json")
+	for _, path := range []string{database, archive} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("before\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if guard, guardErr := newLocalRepairPathGuard(
+		workspace,
+		pin,
+		[]string{database, archiveRoot},
+	); guardErr == nil || guard != nil {
+		t.Fatalf("overlapping local-repair guard = %#v, %v", guard, guardErr)
+	}
+	for _, path := range []string{database, archive} {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil || string(content) != "before\n" {
+			t.Fatalf("protected local-repair content %q = %q, %v", path, content, readErr)
+		}
+	}
+
+	disjointProtected := filepath.Join(t.TempDir(), "launcher-auth.db")
+	if err := os.WriteFile(disjointProtected, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := newLocalRepairPathGuard(workspace, pin, []string{disjointProtected})
+	if err != nil {
+		t.Fatalf("disjoint local-repair guard: %v", err)
+	}
+	ordinary := filepath.Join(root, "ordinary.txt")
+	if writeErr := os.WriteFile(ordinary, []byte("ordinary\n"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if _, err = guard.validate(filepath.Base(ordinary), true); err != nil {
+		t.Fatalf("disjoint protected root denied ordinary checkout file: %v", err)
+	}
+
+	hardlink := filepath.Join(root, "auth-hardlink.db")
+	if err := os.Link(disjointProtected, hardlink); err == nil {
+		if _, err = guard.validate(filepath.Base(hardlink), true); err == nil {
+			t.Fatal("local repair accepted a hardlink alias of protected database")
+		}
+	}
+}
+
+func TestLocalRepairProtectedRootValidationAndDrift(t *testing.T) {
+	for _, configured := range [][]string{
+		{""},
+		{" protected "},
+		{"invalid\x00root"},
+	} {
+		if roots, err := prepareLocalRepairProtectedRoots(configured); err == nil || roots != nil {
+			t.Fatalf("invalid protected roots %q = %#v, %v", configured, roots, err)
+		}
+	}
+	directory := t.TempDir()
+	blocker := filepath.Join(directory, "blocker")
+	if err := os.WriteFile(blocker, []byte("blocker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if roots, err := prepareLocalRepairProtectedRoots(
+		[]string{filepath.Join(blocker, "child")},
+	); err == nil || roots != nil {
+		t.Fatalf("unresolvable protected roots = %#v, %v", roots, err)
+	}
+
+	pin, workspace, root := newLocalRepairTestWorkspace(t)
+	protectedParent := t.TempDir()
+	first := filepath.Join(protectedParent, "first")
+	second := filepath.Join(protectedParent, "second")
+	if err := os.Mkdir(first, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	protectedAlias := filepath.Join(protectedParent, "alias")
+	if err := os.Symlink(first, protectedAlias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	guard, err := newLocalRepairPathGuard(workspace, pin, []string{protectedAlias})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary := filepath.Join(root, "ordinary.txt")
+	if writeErr := os.WriteFile(ordinary, []byte("ordinary\n"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if removeErr := os.Remove(protectedAlias); removeErr != nil {
+		t.Fatal(removeErr)
+	}
+	if linkErr := os.Symlink(second, protectedAlias); linkErr != nil {
+		t.Fatal(linkErr)
+	}
+	if _, validateErr := guard.validate(filepath.Base(ordinary), true); validateErr == nil {
+		t.Fatal("local repair accepted protected-root drift")
+	}
+
+	missingProtected := filepath.Join(protectedParent, "future.db")
+	guard, err = newLocalRepairPathGuard(workspace, pin, []string{missingProtected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied, protectedErr := guard.protected(ordinary, ordinary); protectedErr != nil || denied {
+		t.Fatalf("missing disjoint protected root denied ordinary = %t, %v", denied, protectedErr)
+	}
+}
+
+func TestLocalRepairProtectedPathGuardCoverageMargin(t *testing.T) {
+	pin, workspace, root := newLocalRepairTestWorkspace(t)
+	if guard, err := newLocalRepairPathGuard(
+		workspace,
+		pin,
+		[]string{"invalid\x00root"},
+	); err == nil || guard != nil {
+		t.Fatalf("invalid protected guard = %#v, %v", guard, err)
+	}
+
+	guard, err := newLocalRepairPathGuard(workspace, pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, validateErr := (*localRepairPathGuard)(nil).validate("ordinary", true); validateErr == nil {
+		t.Fatal("nil local-repair guard was accepted")
+	}
+	if _, validateErr := guard.validate("", true); validateErr == nil {
+		t.Fatal("empty local-repair path was accepted")
+	}
+
+	blocker := filepath.Join(root, "blocker")
+	if writeErr := os.WriteFile(blocker, []byte("blocker"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if _, validateErr := guard.validate(
+		filepath.Join("blocker", "child"),
+		true,
+	); validateErr == nil {
+		t.Fatal("local-repair path below a file was accepted")
+	}
+	directory := filepath.Join(root, "directory")
+	if mkdirErr := os.Mkdir(directory, 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	if _, validateErr := guard.validate(filepath.Base(directory), true); validateErr == nil {
+		t.Fatal("local-repair directory was accepted as an editable file")
+	}
+	oversized := filepath.Join(root, "oversized")
+	oversizedFile, err := os.OpenFile(oversized, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = oversizedFile.Truncate(maxLocalRepairEditableFile + 1); err != nil {
+		_ = oversizedFile.Close()
+		t.Fatal(err)
+	}
+	if err = oversizedFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guard.validate(filepath.Base(oversized), true); err == nil {
+		t.Fatal("oversized local-repair file was accepted")
+	}
+
+	protected := filepath.Join(t.TempDir(), "launcher-auth.db")
+	if err := os.WriteFile(protected, []byte("protected"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	direct := &localRepairPathGuard{protectedRoots: []localRepairProtectedRoot{{
+		lexical: protected, canonical: protected,
+	}}}
+	if denied, err := direct.protected(protected, protected); err != nil || !denied {
+		t.Fatalf("direct protected path = %t, %v", denied, err)
+	}
+	badCandidate := filepath.Join(blocker, "child")
+	if denied, err := direct.protected(badCandidate, badCandidate); err == nil || denied {
+		t.Fatalf("invalid protected candidate = %t, %v", denied, err)
+	}
+}
+
 func TestWriteLocalRepairEditableFileRejectsChangedTargetAndCleansTemporary(t *testing.T) {
 	t.Parallel()
 

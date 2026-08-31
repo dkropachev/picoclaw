@@ -887,6 +887,27 @@ func NewWriteFileTool(
 	}
 }
 
+// NewWriteFileToolWithPolicy creates a write tool with protected runtime roots.
+func NewWriteFileToolWithPolicy(
+	workspace string,
+	restrict bool,
+	policy FileMutationPolicy,
+	allowPaths ...[]*regexp.Regexp,
+) (*WriteFileTool, error) {
+	var patterns []*regexp.Regexp
+	if len(allowPaths) > 0 {
+		patterns = allowPaths[0]
+	}
+	policyFS, err := buildMutationFS(workspace, restrict, patterns, policy)
+	if err != nil {
+		return nil, err
+	}
+	return &WriteFileTool{
+		fs:       policyFS,
+		altTools: []string{"append_file", "edit_file"},
+	}, nil
+}
+
 // SetAlternativeTools limits which alternatives the copy names, so it never
 // directs the model to tools that are not available.
 func (t *WriteFileTool) SetAlternativeTools(names []string) {
