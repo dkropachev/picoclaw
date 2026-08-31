@@ -221,12 +221,14 @@ exact `(workflow-ref, gate-ref)` binding.
 | `FR-WORKFLOW-053` | MUST | Managed agent execution accepts a trusted explicit assignment plan whose entries contain a stable assignment ID, focus ID, one exact task, logical reviewer, required/optional flag, and exact file references. When present, this plan replaces Cartesian scope/task/reviewer generation; every entry is rebound to the frozen scope, scope-empty entries cause no provider call, and assignment/focus identity is retained in child activity and output. The runner calls an assignment verifier immediately before every real provider request, including structured repairs, and synchronously calls an output-bearing durable checkpoint after schema validation but before reporting child completion. A verifier or checkpoint failure makes that child unsuccessful and cannot be hidden by `continue_on_child_error`. Each assignment receives one fixed wall-clock context shared by its initial request and every repair; values are restricted to minute-aligned 60–86,400 seconds. The checkpoint event separately binds the raw output digest and a canonical digest covering assignment/focus, required/reviewer/model identity, exact scope, and detached structured output. Existing managed workflows with no explicit plan retain their prior Cartesian behavior, and a nil interpolated plan remains undeclared while an explicit empty plan performs zero calls. | Domain-owned durable children need exact dispatch and commit boundaries without changing generic managed execution for existing workflows or letting repairs reset deadlines. |
 
 For `FR-WORKFLOW-049` and `FR-WORKFLOW-053`, the trusted repository-review
-assignment checkpoint additionally binds the successful concrete model,
-configured alias, and concrete routed account into its digest and durable raw
-finding. Missing or partial live provenance fails the checkpoint. Legacy
-recovery may retain its one ambiguous model value but never invents an alias or
-account, and generic managed workflow output does not expose concrete-account
-identity.
+assignment checkpoint additionally binds its controller-owned automation, the
+resolved workflow-step agent, runtime child ordinal, successful concrete model,
+configured alias, and concrete routed account into its digest. The same atomic
+checkpoint writes the durable raw finding and exact acknowledged-file
+attribution before reporting child completion. Missing or partial live
+provenance fails the checkpoint. Legacy recovery may retain its one ambiguous
+model value but never invents an alias or account, and generic managed workflow
+output does not expose concrete-account identity.
 
 For `FR-WORKFLOW-046`, an infrastructure failure while rechecking the private
 durable-create fence is canonicalized separately from revision drift. The HTTP
