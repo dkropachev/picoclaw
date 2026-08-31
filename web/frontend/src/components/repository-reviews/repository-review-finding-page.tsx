@@ -3,6 +3,7 @@ import {
   IconChecks,
   IconExternalLink,
   IconFileCode,
+  IconFileDescription,
   IconMessageCircle,
   IconRefresh,
   IconSparkles,
@@ -13,6 +14,7 @@ import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 
 import {
+  type RepositoryFinding,
   RepositoryReviewAPIError,
   type RepositoryReviewFinding,
   type RepositoryReviewFindingContext,
@@ -41,6 +43,16 @@ import {
   runFindingStatusIsInProgress,
   runFindingStatusLabel,
 } from "@/components/repository-reviews/repository-review-run-finding-status"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -56,7 +68,16 @@ import { switchChatSessionAndSend } from "@/features/chat/controller"
 import { removeItemFromCollectionSelectionMemory } from "@/hooks/use-collection-route-state"
 import { threadOpenSessionIdAtom } from "@/store/threads"
 
+import {
+  repositoryFindingAttentionLabel,
+  repositoryFindingIssueLabel,
+  repositoryFindingLifecycleLabel,
+  repositoryFindingMatchLabel,
+  repositoryFindingResolutionActionLabel,
+  repositoryFindingResolutionLabel,
+} from "./repository-review-finding-labels"
 import { createRepositoryReviewGenerationID } from "./repository-review-generation"
+import { safeRepositoryReviewGitHubIssueURL } from "./repository-review-issue-state"
 
 export function RepositoryReviewFindingPage({
   automationID,
@@ -86,6 +107,11 @@ export function RepositoryReviewFindingPage({
   const setThreadOpenSessionID = useSetAtom(threadOpenSessionIdAtom)
   const [instructionsOpen, setInstructionsOpen] = useState(false)
   const [customInstructions, setCustomInstructions] = useState("")
+  const [mergeCandidate, setMergeCandidate] = useState<{
+    id: string
+    title: string
+    version?: number
+  } | null>(null)
   const query = useQuery({
     queryKey: ["repository-review-finding", automationID, findingID],
     queryFn: ({ signal }) =>
@@ -159,7 +185,10 @@ export function RepositoryReviewFindingPage({
     detail?.occurrences?.find((occurrence) => occurrence.issue_draft_id)
       ?.issue_draft_id ||
     detail?.issue?.id
-  const repositoryIssueURL = repositoryFinding?.issue.url
+  const repositoryIssueURL = safeRepositoryReviewGitHubIssueURL(
+    repositoryFinding?.issue.url,
+    detail?.automation.repository,
+  )
   const notFound =
     (query.error instanceof RepositoryReviewAPIError &&
       query.error.status === 404) ||
@@ -253,13 +282,13 @@ export function RepositoryReviewFindingPage({
     },
     onSuccess: async () => {
       await query.refetch()
-      toast.success("Resolution validation queued.")
+      toast.success("Fix check queued.")
     },
     onError: (error) => {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Validation could not be queued.",
+          : "Fix check could not be queued.",
       )
       void query.refetch()
     },
@@ -287,6 +316,7 @@ export function RepositoryReviewFindingPage({
         },
       ),
     onSuccess: async (response) => {
+      setMergeCandidate(null)
       if (
         response.repository_finding?.id &&
         response.repository_finding.id !== repositoryFinding?.id
@@ -450,6 +480,227 @@ export function RepositoryReviewFindingPage({
     }
   }
 
+  const duplicateReviewSection =
+    isRepositoryResource &&
+    repositoryFinding &&
+    (repositoryFinding.possible_duplicates?.length ?? 0) > 0 ? (
+      <section aria-labelledby="repository-duplicates" className="space-y-3">
+        <div>
+          <h2 id="repository-duplicates" className="font-semibold">
+            Duplicate review
+          </h2>
+          <p className="text-muted-foreground mt-1 text-sm">
+            Compare the candidate evidence, then merge or keep this finding
+            separate.
+          </p>
+        </div>
+        {repositoryFinding.possible_duplicates?.map((duplicate) => {
+          const candidate = detail?.possible_duplicate_findings?.find(
+            (finding) => finding.id === duplicate.candidate_id,
+          )
+          const candidateTitle =
+            candidate?.canonical_title || duplicate.candidate_id
+          return (
+            <article
+              key={duplicate.candidate_id}
+              className="border-border space-y-3 rounded-lg border p-4 text-sm"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h3 className="font-medium break-words">{candidateTitle}</h3>
+                  <p className="text-muted-foreground mt-1 font-mono text-xs break-all">
+                    {duplicate.candidate_id}
+                  </p>
+                </div>
+                {candidate?.canonical_severity && (
+                  <Badge
+                    variant={severityVariant(candidate.canonical_severity)}
+                    className={severityContrastClass(
+                      candidate.canonical_severity,
+                    )}
+                  >
+                    {candidate.canonical_severity}
+                  </Badge>
+                )}
+              </div>
+
+              <p className="text-muted-foreground break-words">
+                {candidate ? repositoryFindingLatestLocation(candidate) : ""}
+              </p>
+
+              <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <CandidateFact
+                  label="Occurrences"
+                  value={candidateOccurrenceCount(candidate)}
+                />
+                <CandidateFact
+                  label="Commits"
+                  value={candidateCommitCount(candidate)}
+                />
+                <CandidateFact
+                  label="Relation"
+                  value={humanizeToken(duplicate.relation)}
+                />
+                <CandidateFact
+                  label="Confidence"
+                  value={`${(duplicate.confidence * 100).toFixed(0)}%`}
+                />
+              </dl>
+
+              <div className="border-border bg-muted/20 rounded-md border p-3">
+                <h4 className="font-medium">Judgment evidence</h4>
+                <p className="mt-1 whitespace-pre-wrap">
+                  {duplicate.explanation ||
+                    "No additional model explanation was retained."}
+                </p>
+                {(duplicate.matching_anchors?.length ?? 0) > 0 && (
+                  <p className="text-muted-foreground mt-2 break-words">
+                    Matching anchors: {duplicate.matching_anchors?.join(", ")}
+                  </p>
+                )}
+                {(duplicate.conflicting_anchors?.length ?? 0) > 0 && (
+                  <p className="text-destructive mt-1 break-words">
+                    Conflicting anchors:{" "}
+                    {duplicate.conflicting_anchors?.join(", ")}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    onOpenRepositoryFinding(duplicate.candidate_id)
+                  }
+                >
+                  <IconExternalLink /> View candidate
+                </Button>
+                {repositoryFinding.match_state === "provisional" && (
+                  <>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={duplicateMutation.isPending || !candidate}
+                      onClick={() =>
+                        setMergeCandidate({
+                          id: duplicate.candidate_id,
+                          title: candidateTitle,
+                          version: candidate?.version,
+                        })
+                      }
+                    >
+                      Merge with candidate
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={duplicateMutation.isPending}
+                      onClick={() =>
+                        duplicateMutation.mutate({
+                          candidateID: duplicate.candidate_id,
+                          decision: "distinct",
+                        })
+                      }
+                    >
+                      Keep separate
+                    </Button>
+                  </>
+                )}
+              </div>
+            </article>
+          )
+        })}
+      </section>
+    ) : null
+
+  const issueAssociationSection = isRepositoryResource ? (
+    <section className="border-border space-y-3 rounded-lg border p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="font-semibold">Issue</h2>
+          <p className="text-muted-foreground mt-1 text-sm">
+            {repositoryFinding
+              ? repositoryFindingIssueLabel(repositoryFinding.issue.state)
+              : "No issue or preview"}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {repositoryIssueURL ? (
+            <>
+              <Button type="button" size="sm" asChild>
+                <a href={repositoryIssueURL} target="_blank" rel="noreferrer">
+                  <IconBrandGithub /> Open GitHub issue
+                </a>
+              </Button>
+              {issueID && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onOpenIssue(issueID)}
+                >
+                  <IconFileDescription /> Review preview
+                </Button>
+              )}
+            </>
+          ) : issueID ? (
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => onOpenIssue(issueID)}
+            >
+              <IconFileDescription /> Review preview
+            </Button>
+          ) : (
+            <>
+              {canGenerate && (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={
+                      generateMutation.isPending || postMutation.isPending
+                    }
+                    onClick={() => setInstructionsOpen(true)}
+                  >
+                    <IconSparkles />
+                    {generateMutation.isPending ? "Drafting…" : "Draft issue"}
+                  </Button>
+                  {github && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={
+                        postMutation.isPending || generateMutation.isPending
+                      }
+                      onClick={() => postMutation.mutate()}
+                    >
+                      <IconExternalLink />
+                      {postMutation.isPending ? "Posting…" : "Post issue"}
+                    </Button>
+                  )}
+                </>
+              )}
+              {canLink && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onLinkIssue(actionFindingID)}
+                >
+                  <IconExternalLink /> Link existing issue
+                </Button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </section>
+  ) : null
+
   return (
     <CollectionDetailShell
       title={
@@ -469,24 +720,48 @@ export function RepositoryReviewFindingPage({
       }
       status={
         isRepositoryResource && repositoryFinding ? (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <Badge
               variant={severityVariant(repositoryFinding.canonical_severity)}
+              className={severityContrastClass(
+                repositoryFinding.canonical_severity,
+              )}
             >
               {repositoryFinding.canonical_severity}
             </Badge>
-            <Badge variant="outline">{repositoryFinding.lifecycle}</Badge>
-            <Badge variant="secondary">{repositoryFinding.match_state}</Badge>
+            <Badge variant="outline">
+              {repositoryFindingLifecycleLabel(repositoryFinding.lifecycle)}
+            </Badge>
+            {repositoryFinding.match_state === "provisional" && (
+              <Badge
+                variant="destructive"
+                className="bg-destructive text-destructive-foreground dark:bg-destructive dark:text-destructive-foreground"
+              >
+                {repositoryFindingAttentionLabel("duplicate_review")}
+              </Badge>
+            )}
+            {repositoryFinding.issue.conflict && (
+              <Badge
+                variant="destructive"
+                className="bg-destructive text-destructive-foreground dark:bg-destructive dark:text-destructive-foreground"
+              >
+                {repositoryFindingAttentionLabel("issue_conflict")}
+              </Badge>
+            )}
+            {repositoryFinding.validation_state === "failed" && (
+              <Badge
+                variant="destructive"
+                className="bg-destructive text-destructive-foreground dark:bg-destructive dark:text-destructive-foreground"
+              >
+                {repositoryFindingAttentionLabel("fix_check_failed")}
+              </Badge>
+            )}
           </div>
         ) : finding ? (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <Badge
               variant={severityVariant(finding.severity)}
-              className={
-                isHighSeverity(finding.severity)
-                  ? "bg-destructive text-destructive-foreground dark:bg-destructive dark:text-destructive-foreground"
-                  : undefined
-              }
+              className={severityContrastClass(finding.severity)}
             >
               {finding.severity}
             </Badge>
@@ -576,20 +851,28 @@ export function RepositoryReviewFindingPage({
                 </h2>
                 <dl className="border-border grid gap-3 rounded-lg border p-4 text-sm sm:grid-cols-2">
                   <ObservationRow
-                    label="Match"
-                    value={repositoryFinding.match_state}
+                    label="Occurrence grouping"
+                    value={repositoryFindingMatchLabel(
+                      repositoryFinding.match_state,
+                    )}
                   />
                   <ObservationRow
                     label="Lifecycle"
-                    value={repositoryFinding.lifecycle}
+                    value={repositoryFindingLifecycleLabel(
+                      repositoryFinding.lifecycle,
+                    )}
                   />
                   <ObservationRow
-                    label="GitHub issue"
-                    value={repositoryFinding.issue.state}
+                    label="Issue"
+                    value={repositoryFindingIssueLabel(
+                      repositoryFinding.issue.state,
+                    )}
                   />
                   <ObservationRow
-                    label="Validation"
-                    value={repositoryFinding.validation_state}
+                    label="Resolution check"
+                    value={repositoryFindingResolutionLabel(
+                      repositoryFinding.validation_state,
+                    )}
                   />
                   <ObservationRow
                     label="Found commits"
@@ -652,10 +935,10 @@ export function RepositoryReviewFindingPage({
                           onClick={() =>
                             onOpenIssue(occurrence.issue_draft_id!)
                           }
-                          aria-label={`Manage issue record for ${occurrence.id}`}
+                          aria-label={`Review preview for ${occurrence.id}`}
                           title={occurrence.id}
                         >
-                          Manage issue {index + 1}
+                          <IconFileDescription /> Review preview {index + 1}
                         </Button>
                       ))}
                     </div>
@@ -683,18 +966,28 @@ export function RepositoryReviewFindingPage({
                         size="sm"
                         variant="outline"
                         disabled={
-                          validationMutation.isPending || syncMutation.isPending
+                          validationMutation.isPending ||
+                          syncMutation.isPending ||
+                          new Set(["pending", "running"]).has(
+                            repositoryFinding.validation_state,
+                          )
                         }
                         onClick={() => validationMutation.mutate()}
                       >
                         <IconChecks />
                         {validationMutation.isPending
-                          ? "Queueing…"
-                          : "Validate resolution"}
+                          ? "Fix check queued"
+                          : repositoryFindingResolutionActionLabel(
+                              repositoryFinding.validation_state,
+                            )}
                       </Button>
                     )}
                 </div>
               </section>
+
+              {duplicateReviewSection}
+
+              {issueAssociationSection}
 
               {repositoryFinding.match_hints && (
                 <section
@@ -818,88 +1111,6 @@ export function RepositoryReviewFindingPage({
                 </div>
               </section>
 
-              {(repositoryFinding.possible_duplicates?.length ?? 0) > 0 && (
-                <section
-                  aria-labelledby="repository-duplicates"
-                  className="space-y-3"
-                >
-                  <h2 id="repository-duplicates" className="font-semibold">
-                    Possible duplicates
-                  </h2>
-                  {repositoryFinding.possible_duplicates?.map((duplicate) => (
-                    <article
-                      key={duplicate.candidate_id}
-                      className="border-border rounded-lg border p-3 text-sm"
-                    >
-                      <strong className="font-mono">
-                        {duplicate.candidate_id}
-                      </strong>
-                      <span className="text-muted-foreground ml-2">
-                        {duplicate.relation} ·{" "}
-                        {(duplicate.confidence * 100).toFixed(0)}%
-                      </span>
-                      {duplicate.explanation && (
-                        <p className="mt-2">{duplicate.explanation}</p>
-                      )}
-                      {(duplicate.matching_anchors?.length ?? 0) > 0 && (
-                        <p className="text-muted-foreground mt-2 break-words">
-                          Matching anchors:{" "}
-                          {duplicate.matching_anchors?.join(", ")}
-                        </p>
-                      )}
-                      {(duplicate.conflicting_anchors?.length ?? 0) > 0 && (
-                        <p className="text-destructive mt-1 break-words">
-                          Conflicting anchors:{" "}
-                          {duplicate.conflicting_anchors?.join(", ")}
-                        </p>
-                      )}
-                      {repositoryFinding.match_state === "provisional" && (
-                        <div className="mt-3 flex gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            disabled={
-                              duplicateMutation.isPending ||
-                              !detail.possible_duplicate_findings?.some(
-                                (candidate) =>
-                                  candidate.id === duplicate.candidate_id,
-                              )
-                            }
-                            onClick={() => {
-                              const candidate =
-                                detail.possible_duplicate_findings?.find(
-                                  (item) => item.id === duplicate.candidate_id,
-                                )
-                              duplicateMutation.mutate({
-                                candidateID: duplicate.candidate_id,
-                                candidateVersion: candidate?.version,
-                                decision: "merge",
-                              })
-                            }}
-                          >
-                            Merge
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            disabled={duplicateMutation.isPending}
-                            onClick={() =>
-                              duplicateMutation.mutate({
-                                candidateID: duplicate.candidate_id,
-                                decision: "distinct",
-                              })
-                            }
-                          >
-                            Distinct
-                          </Button>
-                        </div>
-                      )}
-                    </article>
-                  ))}
-                </section>
-              )}
-
               {(repositoryFinding.resolution_history?.length ?? 0) > 0 && (
                 <section
                   aria-labelledby="repository-resolution-history"
@@ -917,7 +1128,9 @@ export function RepositoryReviewFindingPage({
                         key={`${resolution.validated_at}:${index}`}
                         className="border-border rounded-lg border p-3 text-sm"
                       >
-                        <strong>{resolution.outcome}</strong>
+                        <strong>
+                          {repositoryFindingResolutionLabel(resolution.outcome)}
+                        </strong>
                         <span className="text-muted-foreground ml-2">
                           {formatTimestamp(resolution.validated_at)}
                         </span>
@@ -966,103 +1179,6 @@ export function RepositoryReviewFindingPage({
                   </div>
                 )}
             </>
-          )}
-
-          {isRepositoryResource && (
-            <section className="border-border space-y-3 rounded-lg border p-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h2 className="font-semibold">Canonical issue association</h2>
-                  <p className="text-muted-foreground mt-1 text-sm">
-                    {repositoryIssueURL
-                      ? `This repository finding is associated with a ${repositoryFinding?.issue.origin || "verified"} GitHub issue.`
-                      : issueID
-                        ? "This finding has one saved preview or linked GitHub issue."
-                        : "No issue preview or existing issue is associated yet."}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {repositoryIssueURL ? (
-                    <>
-                      <Button type="button" size="sm" asChild>
-                        <a
-                          href={repositoryIssueURL}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          <IconBrandGithub /> Open GitHub issue
-                        </a>
-                      </Button>
-                      {issueID && (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => onOpenIssue(issueID)}
-                        >
-                          Manage association
-                        </Button>
-                      )}
-                    </>
-                  ) : issueID ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={() => onOpenIssue(issueID)}
-                    >
-                      <IconBrandGithub /> Open issue record
-                    </Button>
-                  ) : (
-                    <>
-                      {canGenerate && (
-                        <>
-                          <Button
-                            type="button"
-                            size="sm"
-                            disabled={
-                              generateMutation.isPending ||
-                              postMutation.isPending
-                            }
-                            onClick={() => setInstructionsOpen(true)}
-                          >
-                            <IconSparkles />
-                            {generateMutation.isPending
-                              ? "Drafting…"
-                              : "Draft issue"}
-                          </Button>
-                          {github && (
-                            <Button
-                              type="button"
-                              size="sm"
-                              disabled={
-                                postMutation.isPending ||
-                                generateMutation.isPending
-                              }
-                              onClick={() => postMutation.mutate()}
-                            >
-                              <IconBrandGithub />
-                              {postMutation.isPending
-                                ? "Posting…"
-                                : "Post issue"}
-                            </Button>
-                          )}
-                        </>
-                      )}
-                      {canLink && (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => onLinkIssue(actionFindingID)}
-                        >
-                          <IconBrandGithub /> Link existing issue
-                        </Button>
-                      )}
-                    </>
-                  )}
-                </div>
-              </div>
-            </section>
           )}
 
           <section aria-labelledby="finding-location" className="space-y-3">
@@ -1461,12 +1577,92 @@ export function RepositoryReviewFindingPage({
           </DialogContent>
         </Dialog>
       )}
+      <AlertDialog
+        open={mergeCandidate !== null}
+        onOpenChange={(open) => {
+          if (!open && !duplicateMutation.isPending) setMergeCandidate(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Merge this finding with the candidate?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              All occurrences and history will move into{" "}
+              <strong>
+                {mergeCandidate?.title || "the selected candidate"}
+              </strong>
+              . Review the judgment evidence before confirming.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={duplicateMutation.isPending}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={duplicateMutation.isPending || !mergeCandidate}
+              onClick={(event) => {
+                event.preventDefault()
+                if (!mergeCandidate) return
+                duplicateMutation.mutate({
+                  candidateID: mergeCandidate.id,
+                  candidateVersion: mergeCandidate.version,
+                  decision: "merge",
+                })
+              }}
+            >
+              {duplicateMutation.isPending
+                ? "Merging…"
+                : "Merge with candidate"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </CollectionDetailShell>
   )
 }
 
 function repositoryFindingSelectionKey(automationID: string): string {
   return `repository-review-repository-findings:${automationID}`
+}
+
+function CandidateFact({
+  label,
+  value,
+}: {
+  label: string
+  value: string | number
+}) {
+  return (
+    <div>
+      <dt className="text-muted-foreground text-xs">{label}</dt>
+      <dd className="mt-0.5 font-medium tabular-nums">{value}</dd>
+    </div>
+  )
+}
+
+function candidateOccurrenceCount(candidate?: RepositoryFinding): number {
+  return (
+    candidate?.occurrence_count ?? candidate?.review_finding_ids.length ?? 0
+  )
+}
+
+function candidateCommitCount(candidate?: RepositoryFinding): number {
+  return candidate?.found_commit_count ?? candidate?.found_commits.length ?? 0
+}
+
+function repositoryFindingLatestLocation(candidate: RepositoryFinding): string {
+  const latest = candidate.path_symbol_history.at(-1)
+  if (!latest?.path) return "Cross-commit diagnosis"
+  return `${latest.path}${latest.symbol ? ` · ${latest.symbol}` : ""}`
+}
+
+function humanizeToken(value: string): string {
+  const normalized = value.trim().replaceAll("_", " ")
+  return normalized
+    ? `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`
+    : "Unknown"
 }
 
 function FindingContextCard({
@@ -1599,6 +1795,12 @@ function HashLine({
 
 function severityVariant(severity: string): "destructive" | "outline" {
   return isHighSeverity(severity) ? "destructive" : "outline"
+}
+
+function severityContrastClass(severity: string): string | undefined {
+  return isHighSeverity(severity)
+    ? "bg-destructive text-destructive-foreground dark:bg-destructive dark:text-destructive-foreground"
+    : undefined
 }
 
 function isHighSeverity(severity: string): boolean {

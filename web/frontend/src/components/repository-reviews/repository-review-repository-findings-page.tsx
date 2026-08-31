@@ -32,6 +32,13 @@ import {
   normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
 
+import {
+  repositoryFindingAttentionLabel,
+  repositoryFindingIssueLabel,
+  repositoryFindingLifecycleLabel,
+  repositoryFindingResolutionActionLabel,
+  repositoryFindingResolutionLabel,
+} from "./repository-review-finding-labels"
 import { createRepositoryReviewGenerationID } from "./repository-review-generation"
 import {
   type RepositoryReviewCollectionSearch,
@@ -96,6 +103,10 @@ export function RepositoryReviewRepositoryFindingsPage({
   const findings = useMemo(
     () => pages?.flatMap((page) => page.repository_findings) ?? [],
     [pages],
+  )
+  const findingsByID = useMemo(
+    () => new Map(findings.map((finding) => [finding.id, finding])),
+    [findings],
   )
   const issueSyncs = useRef(new Map<string, Promise<void>>())
   const synchronizeIssue = useCallback(
@@ -270,7 +281,7 @@ export function RepositoryReviewRepositoryFindingsPage({
       }
       if (selected.some((finding) => finding.issue.conflict)) {
         throw new Error(
-          "Resolve manual GitHub association conflicts before validation.",
+          "Resolve manual GitHub association conflicts before checking for a fix.",
         )
       }
       await Promise.all(
@@ -289,11 +300,13 @@ export function RepositoryReviewRepositoryFindingsPage({
     onSuccess: async (_response, variables) => {
       variables.clearSelection()
       await query.refetch()
-      toast.success("Selected resolution validations queued.")
+      toast.success("Selected fix checks queued.")
     },
     onError: (error) => {
       toast.error(
-        error instanceof Error ? error.message : "Validation batch failed.",
+        error instanceof Error
+          ? error.message
+          : "Fix checks could not be queued.",
       )
       void query.refetch()
     },
@@ -310,81 +323,155 @@ export function RepositoryReviewRepositoryFindingsPage({
       getItemID: (finding) => finding.id,
       getItemLabel: (finding) => finding.canonical_title,
       getItemIdentity: (finding) => {
-        const latest = latestLocation(finding)
+        const metadata = `${latestLocation(finding) || "Cross-commit diagnosis"} · ${finding.canonical_severity} · ${repositoryFindingLifecycleLabel(finding.lifecycle)} · Updated ${formatCompactDate(finding.updated_at)}`
         return {
-          title: finding.canonical_title,
-          description: latest || "Cross-commit diagnosis",
-          metadata: `${finding.found_commit_count} observed commit${finding.found_commit_count === 1 ? "" : "s"} · ${finding.lifecycle} · issue ${finding.issue.state} · validation ${finding.validation_state}`,
+          title: (
+            <span
+              className="block max-w-48 truncate"
+              title={finding.canonical_title}
+            >
+              {finding.canonical_title}
+            </span>
+          ),
+          description: occurrenceIdentity(finding),
+          metadata: (
+            <span className="block max-w-48 truncate" title={metadata}>
+              {metadata}
+            </span>
+          ),
         }
       },
       columns: [
         {
-          id: "repository",
-          header: "Repository",
-          cell: (finding) => finding.repository,
-        },
-        {
-          id: "location",
-          header: "Latest location",
-          cell: (finding) => latestLocation(finding) || "Cross-commit",
-        },
-        {
           id: "severity",
           header: "Severity",
           cell: (finding) => finding.canonical_severity,
-          className: "w-28",
+          className: "w-20 max-w-20 px-2 text-xs",
+          headerClassName: "w-20 max-w-20 px-2",
         },
         {
-          id: "lifecycle",
-          header: "Lifecycle",
-          cell: (finding) => finding.lifecycle,
-          className: "w-36",
+          id: "occurrences",
+          header: "Occurrences",
+          cell: (finding) => (
+            <span title={occurrenceIdentity(finding)}>
+              {finding.occurrence_count} / {finding.found_commit_count} commit
+              {finding.found_commit_count === 1 ? "" : "s"}
+            </span>
+          ),
+          className: "w-28 max-w-28 px-2 text-xs",
+          headerClassName: "w-28 max-w-28 px-2",
+        },
+        {
+          id: "finding-state",
+          header: "Finding state",
+          cell: (finding) => (
+            <StateWithAttention
+              label={repositoryFindingLifecycleLabel(finding.lifecycle)}
+              attention={
+                finding.match_state === "provisional"
+                  ? repositoryFindingAttentionLabel("duplicate_review")
+                  : undefined
+              }
+            />
+          ),
+          className: "w-28 max-w-28 px-2 text-xs",
+          headerClassName: "w-28 max-w-28 px-2",
         },
         {
           id: "issue",
           header: "Issue",
-          cell: (finding) => finding.issue.state,
-          className: "w-28",
+          cell: (finding) => (
+            <StateWithAttention
+              label={repositoryFindingIssueLabel(finding.issue.state)}
+              attention={
+                finding.issue.conflict
+                  ? repositoryFindingAttentionLabel("issue_conflict")
+                  : undefined
+              }
+            />
+          ),
+          className: "w-36 max-w-36 px-2 text-xs",
+          headerClassName: "w-36 max-w-36 px-2",
         },
         {
-          id: "validation",
-          header: "Validation",
-          cell: (finding) => finding.validation_state,
-          className: "w-36",
+          id: "resolution-check",
+          header: "Resolution check",
+          cell: (finding) => (
+            <StateWithAttention
+              label={repositoryFindingResolutionLabel(finding.validation_state)}
+              attention={
+                finding.validation_state === "failed"
+                  ? repositoryFindingAttentionLabel("fix_check_failed")
+                  : undefined
+              }
+            />
+          ),
+          className: "w-32 max-w-32 px-2 text-xs",
+          headerClassName: "w-32 max-w-32 px-2",
+        },
+        {
+          id: "updated",
+          header: "Updated",
+          cell: (finding) => (
+            <time
+              dateTime={finding.updated_at}
+              title={formatTimestamp(finding.updated_at)}
+            >
+              {formatCompactDate(finding.updated_at)}
+            </time>
+          ),
+          className: "w-28 max-w-28 px-2 text-xs",
+          headerClassName: "w-28 max-w-28 px-2",
         },
       ],
       gridFacts: [
-        {
-          id: "repository",
-          label: "Repository",
-          value: (finding) => finding.repository,
-        },
         {
           id: "severity",
           label: "Severity",
           value: (finding) => finding.canonical_severity,
         },
         {
-          id: "issue",
-          label: "Issue",
-          value: (finding) => finding.issue.state,
+          id: "finding-state",
+          label: "Finding state",
+          value: (finding) =>
+            repositoryFindingLifecycleLabel(finding.lifecycle),
         },
         {
-          id: "validation",
-          label: "Validation",
-          value: (finding) => finding.validation_state,
+          id: "issue",
+          label: "Issue",
+          value: (finding) => repositoryFindingIssueLabel(finding.issue.state),
+        },
+        {
+          id: "resolution-check",
+          label: "Resolution check",
+          value: (finding) =>
+            repositoryFindingResolutionLabel(finding.validation_state),
         },
       ],
       badges: [
         {
-          id: "severity",
-          label: (finding) => finding.canonical_severity,
+          id: "duplicate-review",
+          label: (finding) =>
+            finding.match_state === "provisional"
+              ? repositoryFindingAttentionLabel("duplicate_review")
+              : null,
           variant: "outline",
         },
         {
-          id: "status",
-          label: (finding) => finding.match_state,
-          variant: "secondary",
+          id: "issue-conflict",
+          label: (finding) =>
+            finding.issue.conflict
+              ? repositoryFindingAttentionLabel("issue_conflict")
+              : null,
+          variant: "outline",
+        },
+        {
+          id: "fix-check-failed",
+          label: (finding) =>
+            finding.validation_state === "failed"
+              ? repositoryFindingAttentionLabel("fix_check_failed")
+              : null,
+          variant: "outline",
         },
       ],
     }),
@@ -393,6 +480,7 @@ export function RepositoryReviewRepositoryFindingsPage({
 
   const selectionActions = (state: StandardCollectionSelectionState) => {
     const selectedIDs = [...state.selectedIDs]
+    const selectedFindings = selectedIDs.map((id) => findingsByID.get(id))
     const selectionBusy = generation.isPending || validation.isPending
     const canDraft =
       state.selectedCount > 0 &&
@@ -401,7 +489,14 @@ export function RepositoryReviewRepositoryFindingsPage({
           (loadedDraftEligibility.get(findingID) ??
             rememberedDraftEligibility.get(findingID)) === true,
       )
-    const canValidate = state.selectedCount > 0 && state.selectedCount <= 50
+    const selectedFixCheckState = batchFixCheckState(selectedFindings)
+    const fixCheckInProgress =
+      selectedFixCheckState === "pending" || selectedFixCheckState === "running"
+    const canValidate =
+      state.selectedCount > 0 &&
+      state.selectedCount <= 50 &&
+      selectedFindings.every(Boolean) &&
+      !fixCheckInProgress
     return (
       <>
         <Button
@@ -427,7 +522,9 @@ export function RepositoryReviewRepositoryFindingsPage({
           title={
             canValidate
               ? undefined
-              : "Validate at most 50 repository findings at once."
+              : fixCheckInProgress
+                ? "Wait for the selected fix checks to finish."
+                : "Check at most 50 repository findings at once."
           }
           onClick={() =>
             validation.mutate({
@@ -437,7 +534,9 @@ export function RepositoryReviewRepositoryFindingsPage({
           }
         >
           <IconChecks />
-          {validation.isPending ? "Queueing…" : "Validate resolutions"}
+          {validation.isPending
+            ? "Fix check queued"
+            : repositoryFindingResolutionActionLabel(selectedFixCheckState)}
         </Button>
       </>
     )
@@ -543,12 +642,69 @@ export function RepositoryReviewRepositoryFindingsPage({
   )
 }
 
+function occurrenceIdentity(
+  finding: RepositoryReviewRepositoryFindingSummary,
+): string {
+  return `${finding.occurrence_count} occurrence${finding.occurrence_count === 1 ? "" : "s"} across ${finding.found_commit_count} commit${finding.found_commit_count === 1 ? "" : "s"}`
+}
+
 function latestLocation(
   finding: RepositoryReviewRepositoryFindingSummary,
 ): string {
   return finding.path
     ? `${finding.path}${finding.symbol ? ` · ${finding.symbol}` : ""}`
     : ""
+}
+
+function StateWithAttention({
+  label,
+  attention,
+}: {
+  label: string
+  attention?: string
+}) {
+  return (
+    <span className="flex min-w-0 flex-col items-start gap-1 leading-tight">
+      <span className="min-w-0 break-words">{label}</span>
+      {attention && (
+        <Badge variant="outline" className="max-w-full px-1.5 text-[11px]">
+          {attention}
+        </Badge>
+      )}
+    </span>
+  )
+}
+
+function batchFixCheckState(
+  findings: Array<RepositoryReviewRepositoryFindingSummary | undefined>,
+): RepositoryReviewRepositoryFindingSummary["validation_state"] {
+  const states = findings.flatMap((finding) =>
+    finding ? [finding.validation_state] : [],
+  )
+  if (states.includes("running")) return "running"
+  if (states.includes("pending")) return "pending"
+  if (states.length > 0 && states.every((state) => state === "failed")) {
+    return "failed"
+  }
+  return "not_requested"
+}
+
+function formatTimestamp(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.valueOf())
+    ? value || "Not reported"
+    : date.toLocaleString()
+}
+
+function formatCompactDate(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.valueOf())
+    ? value || "Not reported"
+    : date.toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      })
 }
 
 function isActive(review: {

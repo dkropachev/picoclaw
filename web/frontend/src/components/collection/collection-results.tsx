@@ -203,7 +203,11 @@ function CollectionListResults<T>({
                 failure={failure}
                 className="flex-1"
               />
-              <CollectionBadges definition={definition} item={item} />
+              <CollectionBadges
+                definition={definition}
+                item={item}
+                constrainWidth
+              />
             </li>,
           )
         })}
@@ -609,10 +613,12 @@ function CollectionBadges<T>({
   definition,
   item,
   className,
+  constrainWidth = false,
 }: {
   definition: CollectionDefinition<T>
   item: T
   className?: string
+  constrainWidth?: boolean
 }) {
   const badges = (definition.badges ?? []).flatMap((badge) => {
     const label = badge.label(item)
@@ -625,7 +631,13 @@ function CollectionBadges<T>({
         ]
   })
   return badges.length > 0 ? (
-    <div className={cn("flex shrink-0 flex-wrap gap-1", className)}>
+    <div
+      className={cn(
+        "flex shrink-0 flex-wrap gap-1",
+        constrainWidth && badges.length > 1 && "max-w-1/2 justify-end",
+        className,
+      )}
+    >
       {badges}
     </div>
   ) : null
