@@ -110,6 +110,7 @@ Tous les champs peuvent être remplacés par des variables d'environnement avec 
 - Les médias entrants sont téléchargés dans le stockage média local avant d'être transmis à l'agent.
 - Les médias sortants sont uploadés vers WeCom en tant que fichier temporaire, puis envoyés comme message média.
 - Les messages en double sont détectés et supprimés (tampon circulaire des 1000 derniers identifiants de messages).
+- L’état des routes de requête est une base SQLite typée dans `$PICOCLAW_HOME/channels/wecom/reqid-store.db`. La première ouverture importe une fois l’ancien fichier borné `wecom/reqid-store.json` et conserve ses octets exacts sous `$PICOCLAW_HOME/legacy-json/wecom-reqid-v1/` ; PicoClaw n’écrit plus de JSON de routes.
 
 ---
 

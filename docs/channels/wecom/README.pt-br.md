@@ -110,6 +110,7 @@ Todos os campos podem ser substituídos via variáveis de ambiente com o prefixo
 - A mídia recebida é baixada para o armazenamento de mídia local antes de ser passada ao agente.
 - A mídia enviada é carregada para o WeCom como um arquivo temporário e então enviada como uma mensagem de mídia.
 - Mensagens duplicadas são detectadas e suprimidas (buffer circular dos últimos 1000 IDs de mensagens).
+- O estado das rotas de requisição usa SQLite tipado em `$PICOCLAW_HOME/channels/wecom/reqid-store.db`. Na primeira abertura, o antigo `wecom/reqid-store.json` limitado é importado uma vez e seus bytes exatos ficam em `$PICOCLAW_HOME/legacy-json/wecom-reqid-v1/`; o PicoClaw não grava mais JSON de rotas.
 
 ---
 

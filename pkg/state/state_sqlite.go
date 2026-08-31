@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -99,8 +100,8 @@ func resolveRuntimeDatabasePath(workspace string) (string, error) {
 	return filepath.Join(workspacePath, "state", runtimeDatabaseFilename), nil
 }
 
-func runtimeStoreOptions(workspace string) sqlitestore.Options {
-	return sqlitestore.Options{
+func runtimeStoreOptions(workspace string) (sqlitestore.Options, error) {
+	options := sqlitestore.Options{
 		Component: runtimeDatabaseComponent,
 		Migrations: []sqlitestore.Migration{{
 			Version: 1,
@@ -110,7 +111,13 @@ func runtimeStoreOptions(workspace string) sqlitestore.Options {
 			},
 		}},
 		Validate: validateRuntimeSchema,
-		Legacy: &sqlitestore.LegacyOptions{
+	}
+	hasLegacy, err := runtimeLegacyStatePresent(workspace)
+	if err != nil {
+		return sqlitestore.Options{}, err
+	}
+	if hasLegacy {
+		options.Legacy = &sqlitestore.LegacyOptions{
 			SourceRoot: workspace,
 			ArchiveRoot: filepath.Join(
 				workspace,
@@ -136,8 +143,27 @@ func runtimeStoreOptions(workspace string) sqlitestore.Options {
 			MaxBytes:      runtimeLegacyMaxBytes,
 			MaxSources:    2,
 			MaxTotalBytes: runtimeLegacyMaxBytes * 2,
-		},
+		}
 	}
+	return options, nil
+}
+
+func runtimeLegacyStatePresent(workspace string) (bool, error) {
+	for _, relative := range []string{
+		"state.json",
+		"state/state.json",
+		"state/legacy-json/runtime-state-v1/state.json",
+		"state/legacy-json/runtime-state-v1/state/state.json",
+	} {
+		_, err := os.Lstat(filepath.Join(workspace, filepath.FromSlash(relative)))
+		if err == nil {
+			return true, nil
+		}
+		if !os.IsNotExist(err) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func validateRuntimeSchema(ctx context.Context, conn *sql.Conn) error {

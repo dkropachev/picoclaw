@@ -98,6 +98,13 @@ PicoClaw menyimpan data dalam workspace yang dikonfigurasikan (lalai: `~/.picocl
 └── USER.md            # Keutamaan pengguna
 ```
 
+Keadaan penghantaran boleh ubah milik saluran disimpan di luar workspace di
+`~/.picoclaw/channels/`: laluan permintaan WeCom menggunakan
+`wecom/reqid-store.db`, manakala kursor dan token konteks Weixin menggunakan
+`weixin/state.db`. Pembukaan pertama mengimport dan mengarkib JSON lama yang
+dibataskan sekali sahaja; jangan ubah pangkalan data, fail WAL/SHM atau kunci,
+mahupun arkib `legacy-json/` semasa PicoClaw berjalan.
+
 ### Sumber Skill
 
 Secara lalai, skill dimuatkan daripada:

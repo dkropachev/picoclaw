@@ -57,6 +57,12 @@ URIs. The database directory is owner-only. SQLite `-wal` and `-shm` companions
 share the database's private mode. Archives remain indefinitely and are not a
 second write target.
 
+All PicoClaw processes sharing a home or workspace must stop and upgrade
+together. Rollback requires stopping them again, restoring retained archives to
+their original relative paths, and removing or restoring each database with its
+matching WAL, SHM, and lock directory as one generation. Mixed old/new binaries
+against one storage root are unsupported.
+
 ## Surface Ownership
 
 Owns: CODE pkg/sqlitestore/**
@@ -73,6 +79,9 @@ Owns: TEST pkg/sqlitestore/*
 | File | `<PICOCLAW_HOME>/auth.db`, `auth.db.locks/`; `legacy-json/auth-v1/auth.json` | Typed, version-fenced credential authority, protected cross-process refresh locks, and retained legacy source. | `FR-SQLITE-001` through `FR-SQLITE-005` |
 | File | `<PICOCLAW_HOME>/model-catalogs.db`; `legacy-json/model-catalogs-v1/model_catalogs.json` | Typed catalogs and ordered model children with bounded canonical JSON metadata BLOBs. | `FR-SQLITE-001` through `FR-SQLITE-005` |
 | File | `<PICOCLAW_HOME>/tool-adaptation.db`; `legacy-json/tool-adaptation-v1/tool_adaptation_state.json` | Typed observations and outcome counters with timestamp/version fences and retained legacy source. | `FR-SQLITE-001` through `FR-SQLITE-005` |
+| File | `$PICOCLAW_HOME/channels/wecom/reqid-store.db` | Typed WeCom request-route identities, chat types, expiry timestamps, and row versions. | `FR-SQLITE-001` through `FR-SQLITE-005` |
+| File | `$PICOCLAW_HOME/channels/weixin/state.db` | Typed Weixin account, cursor, and ordered context-token relationships with timestamps and row versions. | `FR-SQLITE-001` through `FR-SQLITE-005` |
+| File | `<workspace>/state/runtime.db` | Typed singleton last-channel/chat state with field-specific version-fenced updates. | `FR-SQLITE-001` through `FR-SQLITE-005` |
 
 ## Algorithms And Ordering
 
@@ -123,9 +132,13 @@ selecting a mutable JSON fallback.
 | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-005` | [pkg/sqlitestore/open_test.go](../../pkg/sqlitestore/open_test.go) |
 | `FR-SQLITE-003`, `FR-SQLITE-004` | [pkg/sqlitestore/open_test.go](../../pkg/sqlitestore/open_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/auth/store_sqlite_test.go](../../pkg/auth/store_sqlite_test.go), [web/backend/api/model_catalog_sqlite_test.go](../../web/backend/api/model_catalog_sqlite_test.go), [pkg/tools/adaptation_state_sqlite_test.go](../../pkg/tools/adaptation_state_sqlite_test.go) |
+| `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/state/state_test.go](../../pkg/state/state_test.go), [pkg/channels/wecom/reqid_store_test.go](../../pkg/channels/wecom/reqid_store_test.go), [pkg/channels/weixin/state_sqlite_test.go](../../pkg/channels/weixin/state_sqlite_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/sqlitestore/open.go](../../pkg/sqlitestore/open.go)
 - [pkg/sqlitestore/legacy.go](../../pkg/sqlitestore/legacy.go)
 - [pkg/sqlitestore/open_test.go](../../pkg/sqlitestore/open_test.go)
+- [pkg/state/state_sqlite.go](../../pkg/state/state_sqlite.go)
+- [pkg/channels/wecom/reqid_store.go](../../pkg/channels/wecom/reqid_store.go)
+- [pkg/channels/weixin/state_sqlite.go](../../pkg/channels/weixin/state_sqlite.go)

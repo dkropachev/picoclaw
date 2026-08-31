@@ -93,26 +93,28 @@ func NewWeixinChannel(
 
 func (c *WeixinChannel) Start(ctx context.Context) error {
 	logger.InfoC("weixin", "Starting Weixin channel")
+	getUpdatesBuf, err := loadGetUpdatesBuf(c.syncBufPath)
+	if err != nil {
+		return fmt.Errorf("weixin: load cursor state: %w", err)
+	}
+	if err := c.restoreContextTokens(); err != nil {
+		return fmt.Errorf("weixin: load context-token state: %w", err)
+	}
 	c.ctx, c.cancel = context.WithCancel(ctx)
 	c.SetRunning(true)
-	c.restoreContextTokens()
-	go c.pollLoop(c.ctx)
+	go c.pollLoop(c.ctx, getUpdatesBuf)
 	logger.InfoC("weixin", "Weixin channel started")
 	return nil
 }
 
 // restoreContextTokens loads persisted context tokens from disk into memory.
-func (c *WeixinChannel) restoreContextTokens() {
+func (c *WeixinChannel) restoreContextTokens() error {
 	tokens, err := loadContextTokens(c.contextTokensPath)
 	if err != nil {
-		logger.WarnCF("weixin", "Failed to load persisted context tokens", map[string]any{
-			"path":  c.contextTokensPath,
-			"error": err.Error(),
-		})
-		return
+		return err
 	}
 	if len(tokens) == 0 {
-		return
+		return nil
 	}
 	for userID, token := range tokens {
 		c.contextTokens.Store(userID, token)
@@ -121,20 +123,13 @@ func (c *WeixinChannel) restoreContextTokens() {
 		"path":  c.contextTokensPath,
 		"count": len(tokens),
 	})
+	return nil
 }
 
-// persistContextTokens saves all in-memory context tokens to disk.
-func (c *WeixinChannel) persistContextTokens() {
-	tokens := make(map[string]string)
-	c.contextTokens.Range(func(k, v any) bool {
-		if userID, ok := k.(string); ok {
-			if token, ok := v.(string); ok {
-				tokens[userID] = token
-			}
-		}
-		return true
-	})
-	if err := saveContextTokens(c.contextTokensPath, tokens); err != nil {
+// persistContextToken updates one user atomically so another process serving
+// the same Weixin account cannot lose unrelated token rows from a stale map.
+func (c *WeixinChannel) persistContextToken(userID, token string) {
+	if err := saveContextToken(c.contextTokensPath, userID, token); err != nil {
 		logger.WarnCF("weixin", "Failed to persist context tokens", map[string]any{
 			"path":  c.contextTokensPath,
 			"error": err.Error(),
@@ -152,7 +147,7 @@ func (c *WeixinChannel) Stop(ctx context.Context) error {
 }
 
 // pollLoop is the long-poll receive loop. It runs until ctx is canceled.
-func (c *WeixinChannel) pollLoop(ctx context.Context) {
+func (c *WeixinChannel) pollLoop(ctx context.Context, getUpdatesBuf string) {
 	const (
 		defaultPollTimeoutMs = 35_000
 		retryDelay           = 2 * time.Second
@@ -161,14 +156,7 @@ func (c *WeixinChannel) pollLoop(ctx context.Context) {
 	)
 
 	consecutiveFails := 0
-	getUpdatesBuf, err := loadGetUpdatesBuf(c.syncBufPath)
-	if err != nil {
-		logger.WarnCF("weixin", "Failed to load persisted get_updates_buf", map[string]any{
-			"path":  c.syncBufPath,
-			"error": err.Error(),
-		})
-		getUpdatesBuf = ""
-	} else if getUpdatesBuf != "" {
+	if getUpdatesBuf != "" {
 		logger.InfoCF("weixin", "Resuming persisted get_updates_buf", map[string]any{
 			"path":   c.syncBufPath,
 			"bytes":  len(getUpdatesBuf),
@@ -372,7 +360,7 @@ func (c *WeixinChannel) handleInboundMessage(ctx context.Context, msg WeixinMess
 	// Store context_token for outbound reply association
 	if msg.ContextToken != "" {
 		c.contextTokens.Store(fromUserID, msg.ContextToken)
-		c.persistContextTokens()
+		c.persistContextToken(fromUserID, msg.ContextToken)
 	}
 
 	inboundCtx := bus.InboundContext{

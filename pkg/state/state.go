@@ -219,7 +219,12 @@ func (sm *Manager) openDatabase(ctx context.Context) (*sql.DB, func(), error) {
 		unlockFile()
 		localLock.Unlock()
 	}
-	db, err := sqlitestore.Open(ctx, sm.databasePath, runtimeStoreOptions(sm.workspace))
+	options, err := runtimeStoreOptions(sm.workspace)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	db, err := sqlitestore.Open(ctx, sm.databasePath, options)
 	if err != nil {
 		unlock()
 		return nil, nil, err

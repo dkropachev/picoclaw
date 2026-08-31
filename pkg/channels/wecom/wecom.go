@@ -133,13 +133,17 @@ func newChannelWithRouteStore(
 		channels.WithReasoningChannelID(bc.ReasoningChannelID),
 	)
 
+	routeStore := newReqIDStore(routeStorePath)
+	if err := routeStore.initializationError(); err != nil {
+		return nil, fmt.Errorf("wecom: open request-route store: %w", err)
+	}
 	ch := &WeComChannel{
 		BaseChannel: base,
 		config:      cfg,
 		pending:     make(map[string]chan wecomEnvelope),
 		turns:       make(map[string][]wecomTurn),
 		recent:      newRecentMessageSet(wecomRecentMessageMax),
-		routes:      newReqIDStore(routeStorePath),
+		routes:      routeStore,
 		mediaClient: &http.Client{Timeout: wecomMediaTimeout},
 	}
 	ch.SetOwner(ch)

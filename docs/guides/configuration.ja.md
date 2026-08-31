@@ -65,6 +65,13 @@ PicoClaw は設定されたワークスペース（デフォルト: `~/.picoclaw
 └── USER.md           # ユーザー設定
 ```
 
+チャネル固有の可変配信状態はワークスペース外の
+`~/.picoclaw/channels/` に保存されます。WeCom のリクエストルートは
+`wecom/reqid-store.db`、Weixin のカーソルとコンテキストトークンは
+`weixin/state.db` を使用します。初回オープン時に、制限付きの旧 JSON
+ファイルを一度だけインポートしてアーカイブします。PicoClaw 実行中は、
+これらの DB、WAL/SHM・ロックファイル、`legacy-json/` アーカイブを編集しないでください。
+
 > **注意：** `AGENT.md`、`SOUL.md`、`USER.md` および `memory/MEMORY.md` への変更は、ファイル更新時刻（mtime）の追跡により実行時に自動検出されます。これらのファイルを編集した後に **gateway を再起動する必要はありません** — Agent は次のリクエスト時に最新の内容を自動的に読み込みます。
 
 ### リクエストコンテキストポリシー

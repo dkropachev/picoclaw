@@ -4,16 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	basechannels "github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
@@ -34,10 +31,6 @@ type typingTicketCacheEntry struct {
 
 type syncCursorFile struct {
 	GetUpdatesBuf string `json:"get_updates_buf"`
-}
-
-type contextTokensFile struct {
-	Tokens map[string]string `json:"tokens"`
 }
 
 func picoclawHomeDir() string {
@@ -62,51 +55,43 @@ func buildWeixinContextTokensPath(cfg *config.WeixinSettings) string {
 }
 
 func loadGetUpdatesBuf(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	store, err := newWeixinStateStore(path, weixinStateKindCursor)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
 		return "", err
 	}
-
-	var decoded syncCursorFile
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return "", err
-	}
-
-	return decoded.GetUpdatesBuf, nil
+	return store.loadCursor(context.Background())
 }
 
 func saveGetUpdatesBuf(path, cursor string) error {
-	data, err := json.Marshal(syncCursorFile{GetUpdatesBuf: cursor})
+	store, err := newWeixinStateStore(path, weixinStateKindCursor)
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFileAtomic(path, data, 0o600)
+	return store.saveCursor(context.Background(), cursor)
 }
 
 func loadContextTokens(path string) (map[string]string, error) {
-	data, err := os.ReadFile(path)
+	store, err := newWeixinStateStore(path, weixinStateKindTokens)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
 	}
-	var decoded contextTokensFile
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return nil, err
-	}
-	return decoded.Tokens, nil
+	return store.loadTokens(context.Background())
 }
 
 func saveContextTokens(path string, tokens map[string]string) error {
-	data, err := json.Marshal(contextTokensFile{Tokens: tokens})
+	store, err := newWeixinStateStore(path, weixinStateKindTokens)
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFileAtomic(path, data, 0o600)
+	return store.saveTokens(context.Background(), tokens)
+}
+
+func saveContextToken(path, userID, token string) error {
+	store, err := newWeixinStateStore(path, weixinStateKindTokens)
+	if err != nil {
+		return err
+	}
+	return store.saveToken(context.Background(), userID, token)
 }
 
 func (c *WeixinChannel) cdnBaseURL() string {

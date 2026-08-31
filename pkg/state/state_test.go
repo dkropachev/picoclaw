@@ -1034,7 +1034,10 @@ func preparePendingRuntimeArchive(
 	if err != nil {
 		t.Fatal(err)
 	}
-	options := runtimeStoreOptions(workspace)
+	options, optionsErr := runtimeStoreOptions(workspace)
+	if optionsErr != nil {
+		t.Fatal(optionsErr)
+	}
 	options.Legacy = nil
 	db, err := sqlitestore.Open(t.Context(), databasePath, options)
 	if err != nil {

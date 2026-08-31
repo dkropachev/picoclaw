@@ -603,6 +603,7 @@ func TestAgentApplyPatchOwnerFactoryUsesFrozenProtectedRoots(t *testing.T) {
 }
 
 func TestAgentApplyPatchSnapshotsProtectedRootsAtExecution(t *testing.T) {
+	t.Setenv(config.EnvHome, t.TempDir())
 	workspace := t.TempDir()
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{

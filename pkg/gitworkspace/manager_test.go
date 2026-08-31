@@ -2028,6 +2028,16 @@ func initSourceRepo(t *testing.T) string {
 	if _, err := runGit(context.Background(), dir, "init", "-b", "main"); err != nil {
 		t.Fatalf("git init error = %v", err)
 	}
+	// New Git versions may launch automatic maintenance after a test commit,
+	// briefly creating objects/maintenance.lock while pinned-layout assertions
+	// inspect the repository. These fixtures test PicoClaw maintenance directly;
+	// ambient Git auto-maintenance would add an unrelated concurrent actor.
+	if _, err := runGit(context.Background(), dir, "config", "maintenance.auto", "false"); err != nil {
+		t.Fatalf("disable test repository maintenance: %v", err)
+	}
+	if _, err := runGit(context.Background(), dir, "config", "gc.auto", "0"); err != nil {
+		t.Fatalf("disable test repository auto-gc: %v", err)
+	}
 	seedSourceRepo(t, dir)
 	return dir
 }

@@ -53,6 +53,15 @@ picoclaw gateway
 | `allow_from` | (可选) 允许与机器人交互的微信 User ID 列表。如果为空，任何能给此微信号发消息的人都可以触发机器人。 |
 | `proxy` | (可选) HTTP 代理地址（例如 `http://localhost:7890`），适合网络访问受限环境。 |
 
+## 运行时状态存储
+
+Weixin 游标和每用户上下文令牌以类型化记录存放在
+`$PICOCLAW_HOME/channels/weixin/state.db`。首次使用时，会按确定顺序导入
+`channels/weixin/sync/*.json` 和
+`channels/weixin/context-tokens/*.json` 下的受限旧文件，并保留到
+`channels/weixin/legacy-json/weixin-state-v1/`。PicoClaw 不会双写或新建可变
+Weixin 状态 JSON。
+
 ## ⚠️ 注意事项
 
 - **单端绑定**: iLink 令牌通常与单个会话绑定。在其他地方重新扫码激活可能会导致旧令牌失效。

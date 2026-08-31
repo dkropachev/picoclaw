@@ -314,6 +314,161 @@ func TestAgentFileMutationPolicyProtectsLauncherRuntimeAndFactories(t *testing.T
 	}
 }
 
+func TestAgentFileMutationPolicyProtectsChannelAndWorkspaceSQLiteAliases(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+
+	wecomDatabase := filepath.Join(home, "channels", "wecom", "reqid-store.db")
+	wecomLock := filepath.Join(wecomDatabase+".locks", "store.lock")
+	wecomSource := filepath.Join(home, "wecom", "reqid-store.json")
+	wecomArchive := filepath.Join(
+		home,
+		"legacy-json",
+		"wecom-reqid-v1",
+		"wecom",
+		"reqid-store.json",
+	)
+	weixinRoot := filepath.Join(home, "channels", "weixin")
+	weixinDatabase := filepath.Join(weixinRoot, "state.db")
+	weixinLock := filepath.Join(weixinDatabase+".locks", "store.lock")
+	weixinSource := filepath.Join(weixinRoot, "sync", "0123456789abcdef.json")
+	weixinArchive := filepath.Join(
+		weixinRoot,
+		"legacy-json",
+		"weixin-state-v1",
+		"sync",
+		"0123456789abcdef.json",
+	)
+	runtimeDatabase := filepath.Join(workspace, "state", "runtime.db")
+	runtimeLock := filepath.Join(runtimeDatabase+".locks", "store.lock")
+	runtimeSource := filepath.Join(workspace, "state.json")
+	runtimeArchive := filepath.Join(
+		workspace,
+		"state",
+		"legacy-json",
+		"runtime-state-v1",
+		"state.json",
+	)
+
+	directTargets := []string{
+		wecomDatabase,
+		wecomDatabase + "-wal",
+		wecomDatabase + "-shm",
+		wecomLock,
+		wecomSource,
+		wecomArchive,
+		weixinDatabase,
+		weixinDatabase + "-wal",
+		weixinDatabase + "-shm",
+		weixinLock,
+		weixinSource,
+		weixinArchive,
+		runtimeDatabase,
+		runtimeDatabase + "-wal",
+		runtimeDatabase + "-shm",
+		runtimeLock,
+		runtimeSource,
+		runtimeArchive,
+	}
+	for _, path := range directTargets {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := agentFileMutationTestConfig(workspace)
+	// Exact outside-workspace authority makes each denial prove runtime-state
+	// protection without admitting apply_patch's authenticated journal root.
+	for _, target := range directTargets {
+		if !strings.HasPrefix(target, workspace+string(filepath.Separator)) {
+			cfg.Tools.AllowWritePaths = append(
+				cfg.Tools.AllowWritePaths,
+				"^"+regexp.QuoteMeta(target)+"$",
+			)
+		}
+	}
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+
+	for _, target := range directTargets {
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			t.Run(toolName+"_"+strings.ReplaceAll(target, string(filepath.Separator), "_"), func(t *testing.T) {
+				requireAgentFileMutationDenied(
+					t,
+					agent.Tools,
+					toolName,
+					workspace,
+					target,
+					true,
+				)
+			})
+		}
+	}
+
+	aliasSources := map[string]string{
+		"wecom-database":   wecomDatabase,
+		"wecom-lock":       wecomLock,
+		"wecom-archive":    wecomArchive,
+		"weixin-database":  weixinDatabase,
+		"weixin-lock":      weixinLock,
+		"weixin-archive":   weixinArchive,
+		"runtime-database": runtimeDatabase,
+		"runtime-lock":     runtimeLock,
+		"runtime-source":   runtimeSource,
+		"runtime-archive":  runtimeArchive,
+	}
+	for label, source := range aliasSources {
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			alias := filepath.Join(workspace, label+"-"+toolName+".alias")
+			if err := os.Link(source, alias); err != nil {
+				t.Logf("hardlink aliases unavailable for %s: %v", label, err)
+				break
+			}
+			if toolName == "apply_patch" {
+				tool, _ := agent.Tools.Get(toolName)
+				result := executeAgentFileMutation(
+					t,
+					tool,
+					toolName,
+					workspace,
+					alias,
+					true,
+				)
+				if result == nil || !result.IsError {
+					t.Fatalf("%s accepted hardlink alias %q: %#v", toolName, alias, result)
+				}
+				continue
+			}
+			requireAgentFileMutationDenied(
+				t,
+				agent.Tools,
+				toolName,
+				workspace,
+				alias,
+				true,
+			)
+		}
+	}
+
+	for _, path := range directTargets {
+		content, err := os.ReadFile(path)
+		if err != nil || string(content) != "before" {
+			t.Fatalf("protected state %q = %q, %v", path, content, err)
+		}
+	}
+}
+
 func TestAgentFileMutationPolicyProtectsIdentitySQLiteStores(t *testing.T) {
 	workspace := t.TempDir()
 	home := t.TempDir()
@@ -448,15 +603,27 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := make([]string, 0, 19)
+	database := filepath.Join(home, "launcher-auth.db")
+	wecomDatabase := filepath.Join(home, "channels", "wecom", "reqid-store.db")
+	weixinDatabase := filepath.Join(home, "channels", "weixin", "state.db")
+	wecomArchiveRoot := filepath.Join(home, "legacy-json", "wecom-reqid-v1")
+	weixinArchiveRoot := filepath.Join(home, "channels", "weixin", "legacy-json", "weixin-state-v1")
+	want := make([]string, 0, 40)
 	for _, databaseName := range []string{
 		"launcher-auth.db", "auth.db", "model-catalogs.db", "tool-adaptation.db",
 	} {
-		database := filepath.Join(home, databaseName)
-		want = append(want, database, database+"-wal", database+"-shm")
+		identityDatabase := filepath.Join(home, databaseName)
+		want = append(
+			want,
+			identityDatabase,
+			identityDatabase+"-wal",
+			identityDatabase+"-shm",
+		)
 	}
+	authLockDirectory := filepath.Join(home, "auth.db.locks")
 	want = append(want,
-		filepath.Join(home, "auth.db.locks"),
+		authLockDirectory,
+		filepath.Join(authLockDirectory, "store.lock"),
 		filepath.Join(filepath.Dir(configPath), "legacy-json"),
 		filepath.Join(
 			filepath.Dir(configPath),
@@ -473,6 +640,22 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 			"tool-adaptation-v1",
 			"tool_adaptation_state.json",
 		),
+		wecomDatabase,
+		wecomDatabase+"-wal",
+		wecomDatabase+"-shm",
+		wecomDatabase+".locks",
+		filepath.Join(wecomDatabase+".locks", "store.lock"),
+		filepath.Join(home, "wecom", "reqid-store.json"),
+		wecomArchiveRoot,
+		filepath.Join(wecomArchiveRoot, "wecom", "reqid-store.json"),
+		weixinDatabase,
+		weixinDatabase+"-wal",
+		weixinDatabase+"-shm",
+		weixinDatabase+".locks",
+		filepath.Join(weixinDatabase+".locks", "store.lock"),
+		filepath.Join(home, "channels", "weixin", "sync"),
+		filepath.Join(home, "channels", "weixin", "context-tokens"),
+		weixinArchiveRoot,
 	)
 	if len(roots) != len(want) {
 		t.Fatalf("protected roots = %#v, want %#v", roots, want)
@@ -484,8 +667,24 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 	}
 	roots[0] = "mutated"
 	again, err := agentRuntimeFileMutationProtectedRoots("")
-	if err != nil || again[0] != filepath.Join(home, "launcher-auth.db") {
+	if err != nil || again[0] != database {
 		t.Fatalf("protected roots retained caller mutation: %#v, %v", again, err)
+	}
+}
+
+func TestAgentRuntimeFileMutationProtectedRootsRejectWeixinDirectorySymlink(t *testing.T) {
+	home := t.TempDir()
+	weixinRoot := filepath.Join(home, "channels", "weixin")
+	if err := os.MkdirAll(weixinRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(weixinRoot, "sync")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	t.Setenv(config.EnvHome, home)
+	roots, err := agentRuntimeFileMutationProtectedRoots(filepath.Join(home, "config.json"))
+	if err == nil || roots != nil || !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("symlinked Weixin roots = %#v, %v", roots, err)
 	}
 }
 

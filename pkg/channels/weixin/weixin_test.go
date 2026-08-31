@@ -8,10 +8,13 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/bus"
 	basechannels "github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
 )
@@ -241,6 +244,7 @@ func TestUploadBufferToCDN(t *testing.T) {
 }
 
 func TestLoadSaveGetUpdatesBuf(t *testing.T) {
+	setWeixinPersistenceHome(t)
 	path := filepath.Join(t.TempDir(), "sync.json")
 
 	if err := saveGetUpdatesBuf(path, "cursor-123"); err != nil {
@@ -256,6 +260,40 @@ func TestLoadSaveGetUpdatesBuf(t *testing.T) {
 	}
 }
 
+func TestWeixinStartFailsClosedOnInvalidSQLiteState(t *testing.T) {
+	home := setWeixinPersistenceHome(t)
+	stateRoot := filepath.Join(home, "channels", "weixin")
+	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(stateRoot, weixinStateDatabaseFilename),
+		[]byte("not SQLite"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.WeixinSettings{BaseURL: "https://ilink.example/"}
+	cfg.SetToken("token")
+	messageBus := bus.NewMessageBus()
+	defer messageBus.Close()
+	channel, err := NewWeixinChannel(
+		&config.Channel{Type: config.ChannelWeixin, Enabled: true},
+		cfg,
+		messageBus,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := channel.Start(t.Context()); err == nil ||
+		!strings.Contains(err.Error(), "cursor state") {
+		t.Fatalf("invalid-state startup error = %v", err)
+	}
+	if channel.IsRunning() {
+		t.Fatal("Weixin channel marked running after state initialization failure")
+	}
+}
+
 func TestBuildWeixinSyncBufPathUsesPicoclawHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv(config.EnvHome, home)
@@ -267,6 +305,99 @@ func TestBuildWeixinSyncBufPathUsesPicoclawHome(t *testing.T) {
 	got := buildWeixinSyncBufPath(wxCfg)
 	if filepath.Dir(got) != filepath.Join(home, "channels", "weixin", "sync") {
 		t.Fatalf("sync path dir = %q", filepath.Dir(got))
+	}
+}
+
+func TestWeixinStateRuntimeCoverageBoundaries(t *testing.T) {
+	if !isSessionExpiredStatus(weixinSessionExpiredCode, 0) ||
+		!isSessionExpiredStatus(0, weixinSessionExpiredCode) ||
+		isSessionExpiredStatus(0, 0) {
+		t.Fatal("isSessionExpiredStatus() classification is wrong")
+	}
+	defaultCfg := &config.WeixinSettings{}
+	if got := genWeixinAccountKey(defaultCfg); got != "default" {
+		t.Fatalf("default account key = %q", got)
+	}
+	channel := &WeixinChannel{
+		config:      defaultCfg,
+		typingCache: make(map[string]typingTicketCacheEntry),
+	}
+	if got := channel.cdnBaseURL(); got != weixinDefaultCDNBaseURL {
+		t.Fatalf("default CDN URL = %q", got)
+	}
+	channel.config.CDNBaseURL = " https://cdn.example.test/// "
+	if got := channel.cdnBaseURL(); got != "https://cdn.example.test" {
+		t.Fatalf("custom CDN URL = %q", got)
+	}
+	if err := channel.waitWhileSessionPaused(context.Background()); err != nil {
+		t.Fatalf("unpaused wait error = %v", err)
+	}
+	channel.pauseUntil = time.Now().Add(time.Millisecond)
+	if err := channel.waitWhileSessionPaused(context.Background()); err != nil {
+		t.Fatalf("short paused wait error = %v", err)
+	}
+	channel.pauseUntil = time.Now().Add(time.Hour)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := channel.waitWhileSessionPaused(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled paused wait = %v", err)
+	}
+
+	requests := 0
+	channel.api = &ApiClient{
+		BaseURL: "https://api.example.test/",
+		Token:   "token",
+		HttpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requests++
+			if request.URL.Path != "/ilink/bot/getconfig" {
+				t.Fatalf("GetConfig path = %q", request.URL.Path)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"ret":0,"errcode":0,"typing_ticket":" ticket "}`,
+				)),
+			}, nil
+		})},
+	}
+	channel.contextTokens.Store("user", "context-token")
+	ticket, err := channel.getTypingTicket(context.Background(), "user")
+	if err != nil || ticket != "ticket" {
+		t.Fatalf("getTypingTicket(success) = %q, %v", ticket, err)
+	}
+	ticket, err = channel.getTypingTicket(context.Background(), "user")
+	if err != nil || ticket != "ticket" || requests != 1 {
+		t.Fatalf("getTypingTicket(cache) = %q, %v, requests=%d", ticket, err, requests)
+	}
+
+	transportFailure := errors.New("transport failed")
+	channel.typingCache["failure"] = typingTicketCacheEntry{ticket: "cached"}
+	channel.api.HttpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportFailure
+	})}
+	ticket, err = channel.getTypingTicket(context.Background(), "failure")
+	if ticket != "cached" || !errors.Is(err, transportFailure) {
+		t.Fatalf("getTypingTicket(transport) = %q, %v", ticket, err)
+	}
+
+	channel.typingCache["expired"] = typingTicketCacheEntry{
+		ticket: "old", retryDelay: weixinConfigRetryInitial,
+	}
+	channel.api.HttpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"ret":-14,"errcode":0,"errmsg":"expired"}`,
+			)),
+		}, nil
+	})}
+	ticket, err = channel.getTypingTicket(context.Background(), "expired")
+	if ticket != "old" || err == nil || channel.remainingPause() <= 0 {
+		t.Fatalf("getTypingTicket(expired) = %q, %v", ticket, err)
 	}
 }
 
