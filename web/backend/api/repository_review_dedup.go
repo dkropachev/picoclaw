@@ -618,10 +618,6 @@ func (h *Handler) repositoryReviewRawSource(
 		writeRepositoryReviewAutomationError(w, os.ErrNotExist)
 		return repositoryReviewAutomationLedger{}, repoaudit.RawReviewFinding{}, false
 	}
-	if campaignID != "" && raw.CampaignID != campaignID {
-		writeRepositoryReviewAutomationError(w, os.ErrNotExist)
-		return repositoryReviewAutomationLedger{}, repoaudit.RawReviewFinding{}, false
-	}
 	if findingID := strings.TrimSpace(r.PathValue("finding_id")); findingID != "" {
 		var finding repoaudit.DeduplicatedReviewFinding
 		exists := false

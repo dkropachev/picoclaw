@@ -785,7 +785,8 @@ func TestHistoricalReplayAdditionalAdmissionAndRawBuilderBranches(t *testing.T) 
 		HistoricalDeduplicationReplayBatch{BoundaryID: " batch "}, contexts,
 		snapshot, 0, now,
 	)
-	if err != nil || raw.ContextID != "ctx" || raw.Model != "provider/context-model" ||
+	if err != nil || raw.ContextID == "" || raw.ContextID == "ctx" ||
+		raw.Model != "provider/context-model" ||
 		!ValidRepositoryReviewCampaignID(raw.CampaignID) ||
 		raw.ModelAlias != "context-model" || raw.Account != "context-account" ||
 		raw.Reviewer != "context-reviewer" || raw.InsertionOrdinal != 1 || job.InsertionOrdinal != 1 {
@@ -799,7 +800,10 @@ func TestHistoricalReplayAdditionalAdmissionAndRawBuilderBranches(t *testing.T) 
 	}
 	raw, _, err = historicalRawFindingAndJob(
 		RepositoryState{Repository: "owner/repo"}, mixedContext,
-		HistoricalDeduplicationReplayBatch{BoundaryID: "batch"}, mixedContexts,
+		HistoricalDeduplicationReplayBatch{
+			BoundaryID: "batch",
+			CampaignID: stableID("rrc_", "owner/repo", "mixed-provenance"),
+		}, mixedContexts,
 		snapshot, 2, now,
 	)
 	if err != nil || raw.ContextID != "legacy" || raw.Model != "legacy-model" ||

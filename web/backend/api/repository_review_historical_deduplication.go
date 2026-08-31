@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -17,6 +16,29 @@ import (
 var errRepositoryReviewHistoricalCampaignRecovery = errors.New(
 	"exact historical campaign recovery is unavailable",
 )
+
+var recoverRepositoryReviewHistoricalCampaignForRetry = recoverRepositoryReviewHistoricalCampaign
+
+var resolveRepositoryReviewHistoricalCampaignProfile = resolveRepositoryReviewCampaignProfile
+
+var prepareRepositoryReviewHistoricalCampaignBackfill = prepareRepositoryReviewLegacyCampaignBackfill
+
+var updateRepositoryReviewHistoricalAutomation = func(
+	ctx context.Context,
+	store repoaudit.Store,
+	installed repoaudit.RepositoryReviewAutomation,
+	prepared repositoryReviewLegacyCampaignBackfill,
+	reconciled repoaudit.RepositoryState,
+) (repoaudit.RepositoryReviewAutomation, error) {
+	return store.UpdateAutomation(
+		ctx, installed.ID, installed.Version,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			return finalizeRepositoryReviewLegacyCampaign(
+				candidate, prepared.Request.Coverage.ID, reconciled,
+			)
+		},
+	)
+}
 
 var admitNextHistoricalDeduplicationBatch = func(
 	store repoaudit.Store,
@@ -112,12 +134,6 @@ func (h *Handler) handleRetryRepositoryReviewHistoricalDeduplication(
 		return
 	}
 	controller := h.repositoryReviewControllerInstance()
-	if controller == nil {
-		writeRepositoryReviewAutomationError(
-			w, errors.New("historical deduplication controller is unavailable"),
-		)
-		return
-	}
 	if ledger.State.HistoricalDeduplication.Required &&
 		ledger.State.HistoricalDeduplication.Status != repoaudit.HistoricalDeduplicationCompleted &&
 		!repositoryReviewHistoricalCampaignRecovered(ledger.Automation, ledger.State) {
@@ -126,14 +142,14 @@ func (h *Handler) handleRetryRepositoryReviewHistoricalDeduplication(
 			writeRepositoryReviewAutomationError(w, configErr)
 			return
 		}
-		resolvedProfile, profileErr := resolveRepositoryReviewCampaignProfile(
+		resolvedProfile, profileErr := resolveRepositoryReviewHistoricalCampaignProfile(
 			r.Context(), h.configPath, cfg, ledger.Automation,
 		)
 		if profileErr != nil {
 			writeRepositoryReviewAutomationError(w, profileErr)
 			return
 		}
-		ledger.Automation, ledger.State, err = recoverRepositoryReviewHistoricalCampaign(
+		ledger.Automation, ledger.State, err = recoverRepositoryReviewHistoricalCampaignForRetry(
 			r.Context(), ledger.Store, cfg.WorkspacePath(), ledger.Automation,
 			ledger.State, resolvedProfile,
 		)
@@ -232,17 +248,13 @@ func recoverRepositoryReviewHistoricalCampaign(
 		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
 			errRepositoryReviewHistoricalCampaignRecovery
 	}
-	prepared, err := prepareRepositoryReviewLegacyCampaignBackfill(
+	prepared, err := prepareRepositoryReviewHistoricalCampaignBackfill(
 		ctx, automation, repositoryReviewHistoricalRecoveryProjection(state), campaignID,
 		workflows.NewFileRunStore(workspace), resolvedProfile,
 	)
 	if err != nil {
-		if errors.Is(err, repoaudit.ErrInvalidAutomation) ||
-			errors.Is(err, repoaudit.ErrInvalidPlan) || errors.Is(err, os.ErrNotExist) {
-			return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
-				errRepositoryReviewHistoricalCampaignRecovery
-		}
-		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
+			errRepositoryReviewHistoricalCampaignRecovery
 	}
 	if !prepared.Available || !prepared.Exact || !prepared.Request.Coverage.Exact ||
 		prepared.Request.Coverage.CommitSHA == "" {
@@ -259,13 +271,8 @@ func recoverRepositoryReviewHistoricalCampaign(
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
 	}
-	final, err := store.UpdateAutomation(
-		ctx, installed.ID, installed.Version,
-		func(candidate *repoaudit.RepositoryReviewAutomation) error {
-			return finalizeRepositoryReviewLegacyCampaign(
-				candidate, prepared.Request.Coverage.ID, reconciled,
-			)
-		},
+	final, err := updateRepositoryReviewHistoricalAutomation(
+		ctx, store, installed, prepared, reconciled,
 	)
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err

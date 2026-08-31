@@ -3111,6 +3111,13 @@ func loadRepositoryReviewOutcome(
 	if err != nil || !found {
 		return repositoryReviewOutcome{}
 	}
+	return loadRepositoryReviewOutcomeFromResolvedState(state, automation)
+}
+
+func loadRepositoryReviewOutcomeFromResolvedState(
+	state repoaudit.RepositoryState,
+	automation repoaudit.RepositoryReviewAutomation,
+) repositoryReviewOutcome {
 	if automation.CampaignID != "" {
 		metrics := repoaudit.CurrentCampaignMetrics(
 			state, automation.CampaignID, automation.RunIDs, automation.StartedAt,
