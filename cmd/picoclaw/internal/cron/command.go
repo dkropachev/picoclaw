@@ -27,7 +27,7 @@ func NewCronCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("error loading config: %w", err)
 			}
-			storePath = filepath.Join(cfg.WorkspacePath(), "cron", "jobs.json")
+			storePath = filepath.Join(cfg.WorkspacePath(), "cron", "jobs.db")
 			return nil
 		},
 	}

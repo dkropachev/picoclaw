@@ -22,7 +22,7 @@ through channels or run gated shell commands.
 | ID | Level | Requirement | Rationale |
 | --- | --- | --- | --- |
 | `FR-SCHED-001` | MUST | Cron jobs support one-shot times, durations, and cron expressions as documented schedule types. | Users need flexible reminders. |
-| `FR-SCHED-002` | MUST | Jobs persist under the workspace and survive process restart. | Schedules are durable user state. |
+| `FR-SCHED-002` | MUST | Jobs persist as typed, ordered, versioned rows in the private WAL-backed `<workspace>/cron/jobs.db` and survive process restart. Every mutation loads and commits one authoritative snapshot inside `BEGIN IMMEDIATE`, so concurrent gateway and CLI writers preserve unrelated jobs. On first open, bounded valid `jobs.json` records import deterministically, selected invalid/duplicate jobs leave payload-free issue codes and digests, and the exact source is retained without overwrite under `cron/legacy-json/cron-jobs-v1/`; SQLite is immediately authoritative and no JSON dual write exists. | Schedules are durable user state shared by concurrent operators and gateway execution. |
 | `FR-SCHED-003` | MUST | `deliver: true` jobs route results to the configured channel/chat, while non-delivery jobs only update runtime state/logs. | Scheduling must distinguish notification from background work. |
 | `FR-SCHED-004` | MUST | Command jobs require cron command enablement and exec remote permission gates before shell execution. | Scheduled shell execution is high risk. |
 | `FR-SCHED-005` | MUST | CLI cron add/list/enable/disable/remove reflects persisted job state. | Operators need direct schedule management. |
@@ -57,6 +57,7 @@ Owns: TOOL cron
 | CLI | `picoclaw cron add/list/enable/disable/remove` | Persistent job management. | `FR-SCHED-005` |
 | Tool | `cron` | Agent-callable scheduling actions. | `FR-SCHED-001` through `FR-SCHED-004` |
 | Config | `tools.cron.*`, `heartbeat.*` | Command gates, timeout, allowed remotes, and heartbeat interval. | `FR-SCHED-004`, `FR-SCHED-006` |
+| Storage | `<workspace>/cron/jobs.db`; `cron/legacy-json/cron-jobs-v1/jobs.json` | Typed job definitions, ordering and execution state plus the immutable verified legacy source. | `FR-SCHED-002`, `FR-SCHED-005` |
 | Runtime | `AgentLoop.AcquireRuntimeGeneration`, gateway reload lifecycle | Fence due work to its originating config/provider generation and activate replacement cron only after fallible service setup. | `FR-SCHED-007` |
 | Runtime | optional direct-publishing job executor | Keep a scheduled root response inside the agent turn's tracked-result output boundary, with compatibility fallback for alternate executors. | `FR-SCHED-007` |
 
@@ -103,7 +104,7 @@ tool execution and security gates. Agent conversations process scheduled prompts
 
 | Requirement IDs | Evidence |
 | --- | --- |
-| `FR-SCHED-001`, `FR-SCHED-002`, `FR-SCHED-003`, `FR-SCHED-004` | [pkg/tools/cron_test.go](../../pkg/tools/cron_test.go), [docs/reference/cron.md](../reference/cron.md) |
+| `FR-SCHED-001`, `FR-SCHED-002`, `FR-SCHED-003`, `FR-SCHED-004` | [pkg/cron/sqlite_test.go](../../pkg/cron/sqlite_test.go), [pkg/tools/cron_test.go](../../pkg/tools/cron_test.go), [docs/reference/cron.md](../reference/cron.md) |
 | `FR-SCHED-005` | [cmd/picoclaw/internal/cron/add_test.go](../../cmd/picoclaw/internal/cron/add_test.go), [cmd/picoclaw/internal/cron/list_test.go](../../cmd/picoclaw/internal/cron/list_test.go), [cmd/picoclaw/internal/cron/enable_test.go](../../cmd/picoclaw/internal/cron/enable_test.go), [cmd/picoclaw/internal/cron/disable_test.go](../../cmd/picoclaw/internal/cron/disable_test.go), [cmd/picoclaw/internal/cron/remove_test.go](../../cmd/picoclaw/internal/cron/remove_test.go) |
 | `FR-SCHED-006` | [pkg/heartbeat/service_test.go](../../pkg/heartbeat/service_test.go) |
 | `FR-SCHED-007` | [pkg/tools/cron_test.go](../../pkg/tools/cron_test.go), [pkg/agent/workflow_automations_test.go](../../pkg/agent/workflow_automations_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [pkg/agent/runtime_gate_test.go](../../pkg/agent/runtime_gate_test.go), [pkg/agent/runtime_policy_late_work_test.go](../../pkg/agent/runtime_policy_late_work_test.go) |
@@ -111,6 +112,7 @@ tool execution and security gates. Agent conversations process scheduled prompts
 ## Implementation Anchors
 
 - [pkg/tools/cron.go](../../pkg/tools/cron.go)
+- [pkg/cron/sqlite.go](../../pkg/cron/sqlite.go)
 - [pkg/agent/workflow_automations.go](../../pkg/agent/workflow_automations.go)
 - [pkg/gateway/gateway.go](../../pkg/gateway/gateway.go)
 - [pkg/heartbeat/service.go](../../pkg/heartbeat/service.go)

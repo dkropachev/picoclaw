@@ -156,7 +156,7 @@ Example:
 Cron jobs are stored in:
 
 ```text
-<workspace>/cron/jobs.json
+<workspace>/cron/jobs.db
 ```
 
 By default, the workspace is:
@@ -171,7 +171,15 @@ If `PICOCLAW_HOME` is set, the default workspace becomes:
 $PICOCLAW_HOME/workspace
 ```
 
-Both the gateway and `picoclaw cron` CLI subcommands use the same `cron/jobs.json` file.
+Both the gateway and `picoclaw cron` CLI subcommands use the same private,
+WAL-backed `cron/jobs.db` database. Stop all PicoClaw processes before upgrade
+or restore. The first upgraded open imports a bounded legacy `jobs.json` once
+and retains its exact bytes under `cron/legacy-json/cron-jobs-v1/jobs.json`.
+SQLite becomes authoritative immediately; new and old binaries must not share
+one workspace.
+
+For rollback, stop PicoClaw, restore the archived `jobs.json`, and remove or
+restore `jobs.db` together with matching `jobs.db-wal` and `jobs.db-shm` files.
 
 Notes:
 

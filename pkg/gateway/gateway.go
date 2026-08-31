@@ -1852,7 +1852,7 @@ func setupCronTool(
 	cfg *config.Config,
 	executionPolicy isolation.ExecutionPolicy,
 ) (*cron.CronService, error) {
-	cronStorePath := filepath.Join(workspace, "cron", "jobs.json")
+	cronStorePath := filepath.Join(workspace, "cron", "jobs.db")
 
 	cronService := cron.NewCronService(cronStorePath, nil)
 	cronService.SetJobAdmission(func(
