@@ -314,6 +314,100 @@ func TestAgentFileMutationPolicyProtectsLauncherRuntimeAndFactories(t *testing.T
 	}
 }
 
+func TestAgentFileMutationPolicyProtectsIdentitySQLiteStores(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.json")
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, configPath)
+
+	targets := make([]string, 0, 13)
+	for _, databaseName := range []string{
+		"auth.db", "model-catalogs.db", "tool-adaptation.db",
+	} {
+		database := filepath.Join(home, databaseName)
+		targets = append(targets, database, database+"-wal", database+"-shm")
+	}
+	targets = append(targets,
+		filepath.Join(home, "auth.db.locks", "store.lock"),
+		filepath.Join(home, "legacy-json", "auth-v1", "auth.json"),
+		filepath.Join(home, "legacy-json", "model-catalogs-v1", "model_catalogs.json"),
+		filepath.Join(
+			home,
+			"legacy-json",
+			"tool-adaptation-v1",
+			"tool_adaptation_state.json",
+		),
+	)
+	cfg := agentFileMutationTestConfig(workspace)
+	for _, target := range targets {
+		cfg.Tools.AllowWritePaths = append(
+			cfg.Tools.AllowWritePaths,
+			"^"+regexp.QuoteMeta(target)+"$",
+		)
+	}
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+	// Construct before installing fixture bytes because agent initialization
+	// performs a best-effort read of the real tool-adaptation database.
+	for _, target := range targets {
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, target := range targets {
+		for _, toolName := range []string{
+			"write_file", "edit_file", "append_file", "apply_patch",
+		} {
+			requireAgentFileMutationDenied(
+				t,
+				agent.Tools,
+				toolName,
+				workspace,
+				target,
+				true,
+			)
+		}
+		content, err := os.ReadFile(target)
+		if err != nil || string(content) != "before" {
+			t.Fatalf("protected identity state %q = %q, %v", target, content, err)
+		}
+	}
+
+	archive := filepath.Join(home, "legacy-json", "auth-v1", "auth.json")
+	hardlink := filepath.Join(workspace, "auth-archive-hardlink.json")
+	if err := os.Link(archive, hardlink); err == nil {
+		for _, toolName := range []string{
+			"write_file", "edit_file", "append_file",
+		} {
+			requireAgentFileMutationDenied(
+				t,
+				agent.Tools,
+				toolName,
+				workspace,
+				hardlink,
+				true,
+			)
+		}
+		patchTool, _ := agent.Tools.Get("apply_patch")
+		result := executeAgentFileMutation(
+			t,
+			patchTool,
+			"apply_patch",
+			workspace,
+			hardlink,
+			true,
+		)
+		if result == nil || !result.IsError {
+			t.Fatalf("apply_patch accepted auth archive hardlink: %#v", result)
+		}
+	}
+}
+
 func TestAgentFileMutationPolicyHomeInsideWorkspaceOmitsUnsafeApplyPatch(t *testing.T) {
 	workspace := t.TempDir()
 	home := filepath.Join(workspace, ".picoclaw")
@@ -354,11 +448,15 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := filepath.Join(home, "launcher-auth.db")
-	want := []string{
-		database,
-		database + "-wal",
-		database + "-shm",
+	want := make([]string, 0, 19)
+	for _, databaseName := range []string{
+		"launcher-auth.db", "auth.db", "model-catalogs.db", "tool-adaptation.db",
+	} {
+		database := filepath.Join(home, databaseName)
+		want = append(want, database, database+"-wal", database+"-shm")
+	}
+	want = append(want,
+		filepath.Join(home, "auth.db.locks"),
 		filepath.Join(filepath.Dir(configPath), "legacy-json"),
 		filepath.Join(
 			filepath.Dir(configPath),
@@ -366,7 +464,16 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 			"launcher-auth-v1",
 			"launcher-config.json",
 		),
-	}
+		filepath.Join(home, "legacy-json"),
+		filepath.Join(home, "legacy-json", "auth-v1", "auth.json"),
+		filepath.Join(home, "legacy-json", "model-catalogs-v1", "model_catalogs.json"),
+		filepath.Join(
+			home,
+			"legacy-json",
+			"tool-adaptation-v1",
+			"tool_adaptation_state.json",
+		),
+	)
 	if len(roots) != len(want) {
 		t.Fatalf("protected roots = %#v, want %#v", roots, want)
 	}
@@ -377,7 +484,7 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 	}
 	roots[0] = "mutated"
 	again, err := agentRuntimeFileMutationProtectedRoots("")
-	if err != nil || again[0] != database {
+	if err != nil || again[0] != filepath.Join(home, "launcher-auth.db") {
 		t.Fatalf("protected roots retained caller mutation: %#v, %v", again, err)
 	}
 }

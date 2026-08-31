@@ -54,7 +54,8 @@ Nếu bạn đang triển khai qua Coolify hoặc Docker, hãy làm theo các b�
 2.  **Lưu trữ xác thực**:
     Nếu bạn đã đăng nhập cục bộ, bạn có thể sao chép thông tin xác thực lên máy chủ:
     ```bash
-    scp ~/.picoclaw/auth.json user@your-server:~/.picoclaw/
+    # Dừng PicoClaw cục bộ trước để SQLite hoàn tất WAL.
+    scp ~/.picoclaw/auth.db user@your-server:~/.picoclaw/
     ```
     *Hoặc*, chạy lệnh `auth login` một lần trên máy chủ nếu bạn có quyền truy cập terminal.
 

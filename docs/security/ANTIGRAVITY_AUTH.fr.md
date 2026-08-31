@@ -594,23 +594,11 @@ Chaque message SSE (`data: {...}`) est encapsulé dans un champ `response` :
 
 ### Stockage du profil d'authentification
 
-Les profils d'authentification sont stockés dans `~/.picoclaw/auth.json` :
-
-```json
-{
-  "credentials": {
-    "google-antigravity": {
-      "access_token": "ya29...",
-      "refresh_token": "1//...",
-      "expires_at": "2026-01-01T00:00:00Z",
-      "provider": "google-antigravity",
-      "auth_method": "oauth",
-      "email": "user@example.com",
-      "project_id": "my-project-id"
-    }
-  }
-}
-```
+Les profils d'authentification sont stockés sous forme de lignes typées dans la
+base SQLite privée avec WAL `~/.picoclaw/auth.db`. Utilisez les commandes
+`picoclaw auth` au lieu de modifier directement la base. À la première
+ouverture, l'ancien `auth.json` est importé transactionnellement et conservé
+dans `~/.picoclaw/legacy-json/auth-v1/`.
 
 ---
 
@@ -735,7 +723,7 @@ export PICOCLAW_MODEL_LIST='[{"model_name":"your-model","model":"your-provider/m
 - **Fichiers source :**
   - `pkg/providers/antigravity_provider.go` - Implémentation du fournisseur Antigravity
   - `pkg/auth/oauth.go` - Implémentation du flux OAuth
-  - `pkg/auth/store.go` - Stockage des identifiants d'authentification (`~/.picoclaw/auth.json`)
+  - `pkg/auth/store.go` - Stockage des identifiants d'authentification (`~/.picoclaw/auth.db`)
   - `pkg/providers/factory.go` - Factory des fournisseurs et routage de protocole
   - `pkg/providers/types.go` - Définitions de l'interface fournisseur
   - `cmd/picoclaw/internal/auth/helpers.go` - Commandes CLI d'authentification
@@ -805,5 +793,5 @@ Certains modèles peuvent apparaître dans la liste des modèles disponibles mai
 
 ### Les modèles n'apparaissent pas dans la liste
 - Vérifier que l'authentification OAuth s'est terminée avec succès
-- Vérifier le stockage du profil d'authentification : `~/.picoclaw/auth.json`
+- Vérifier que la base d'authentification privée existe : `~/.picoclaw/auth.db`
 - Relancer `picoclaw auth login --provider antigravity`

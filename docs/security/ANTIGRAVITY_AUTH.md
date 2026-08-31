@@ -601,23 +601,10 @@ Each SSE message (`data: {...}`) is wrapped in a `response` field:
 
 ### Auth Profile Storage
 
-Auth profiles are stored in `~/.picoclaw/auth.json`:
-
-```json
-{
-  "credentials": {
-    "google-antigravity": {
-      "access_token": "ya29...",
-      "refresh_token": "1//...",
-      "expires_at": "2026-01-01T00:00:00Z",
-      "provider": "google-antigravity",
-      "auth_method": "oauth",
-      "email": "user@example.com",
-      "project_id": "my-project-id"
-    }
-  }
-}
-```
+Auth profiles are stored as typed rows in the private, WAL-backed SQLite
+database `~/.picoclaw/auth.db`. Use `picoclaw auth` commands instead of editing
+the database directly. On first open, a legacy `auth.json` is imported
+transactionally and retained under `~/.picoclaw/legacy-json/auth-v1/`.
 
 ---
 
@@ -751,7 +738,7 @@ export PICOCLAW_MODEL_LIST='[{"model_name":"your-account","provider":"your-provi
 - **Source Files:**
   - `pkg/providers/antigravity_provider.go` - Antigravity provider implementation
   - `pkg/auth/oauth.go` - OAuth flow implementation
-  - `pkg/auth/store.go` - Auth credential storage (`~/.picoclaw/auth.json`)
+  - `pkg/auth/store.go` - Auth credential storage (`~/.picoclaw/auth.db`)
   - `pkg/providers/factory.go` - Provider factory and protocol routing
   - `pkg/providers/types.go` - Provider interface definitions
   - `cmd/picoclaw/internal/auth/helpers.go` - Auth CLI commands
@@ -821,5 +808,5 @@ Some models might show up in the available models list but return an empty respo
 
 ### Models not appearing in list
 - Verify OAuth authentication completed successfully
-- Check auth profile storage: `~/.picoclaw/auth.json`
+- Check that the private auth database exists: `~/.picoclaw/auth.db`
 - Re-run `picoclaw auth login --provider antigravity`

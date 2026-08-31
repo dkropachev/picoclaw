@@ -138,7 +138,7 @@ func TestStoreFilePermissions(t *testing.T) {
 		t.Fatalf("SetCredential() error: %v", err)
 	}
 
-	path := filepath.Join(tmpDir, ".picoclaw", "auth.json")
+	path := filepath.Join(tmpDir, ".picoclaw", authDatabaseFilename)
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("Stat() error: %v", err)
@@ -149,6 +149,16 @@ func TestStoreFilePermissions(t *testing.T) {
 	}
 	if perm != 0o600 {
 		t.Errorf("file permissions = %o, want 0600", perm)
+	}
+	directoryInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("Stat(database directory) error: %v", err)
+	}
+	if directoryInfo.Mode().Perm() != 0o700 {
+		t.Errorf("database directory permissions = %o, want 0700", directoryInfo.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(path), legacyAuthFilename)); !os.IsNotExist(err) {
+		t.Fatalf("mutable legacy auth JSON exists after SQLite write: %v", err)
 	}
 }
 
@@ -916,7 +926,7 @@ func TestCredentialRenewalPropagatesStoreAndLockFailures(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed store", func(t *testing.T) {
+	t.Run("malformed legacy store fails closed", func(t *testing.T) {
 		testRoot := setTestAuthHome(t)
 		home := filepath.Join(testRoot, ".picoclaw")
 		if err := os.MkdirAll(home, 0o700); err != nil {
@@ -945,12 +955,9 @@ func TestCredentialRenewalPropagatesStoreAndLockFailures(t *testing.T) {
 	})
 }
 
-func TestPersistCredentialIfCurrentPropagatesAtomicWriteFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory write permissions are Unix-specific")
-	}
-	testRoot := setTestAuthHome(t)
-	home := filepath.Join(testRoot, ".picoclaw")
+//nolint:govet // Narrow test assertions intentionally use independent error scopes.
+func TestPersistCredentialIfCurrentPropagatesDatabaseFailure(t *testing.T) {
+	setTestAuthHome(t)
 	credentialID := "openai:work"
 	if err := SetCredential(credentialID, &AuthCredential{
 		AccessToken: "old-token",
@@ -962,17 +969,46 @@ func TestPersistCredentialIfCurrentPropagatesAtomicWriteFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCredential() error = %v", err)
 	}
-	if chmodErr := os.Chmod(home, 0o500); chmodErr != nil {
-		t.Fatalf("Chmod(read-only) error = %v", chmodErr)
+	path := authDatabasePath()
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove(auth database) error = %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("Mkdir(auth database endpoint) error = %v", err)
+	}
 
 	_, err = PersistCredentialIfCurrent(credentialID, source, &AuthCredential{
 		AccessToken: "new-token",
 		Provider:    "openai",
 	})
 	if err == nil {
-		t.Fatal("PersistCredentialIfCurrent() write error = nil")
+		t.Fatal("PersistCredentialIfCurrent() database error = nil")
+	}
+	operations := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "load", run: func() error { _, err := LoadStore(); return err }},
+		{name: "save", run: func() error {
+			return SaveStore(&AuthStore{Credentials: map[string]*AuthCredential{}})
+		}},
+		{name: "get", run: func() error { _, err := GetCredential(credentialID); return err }},
+		{name: "set", run: func() error {
+			return SetCredential(credentialID, &AuthCredential{Provider: "openai"})
+		}},
+		{name: "update", run: func() error {
+			_, err := UpdateCredential(credentialID, func(current *AuthCredential) (*AuthCredential, error) {
+				return current, nil
+			})
+			return err
+		}},
+		{name: "delete", run: func() error { return DeleteCredential(credentialID) }},
+		{name: "delete all", run: DeleteAllCredentials},
+	}
+	for _, operation := range operations {
+		if operationErr := operation.run(); operationErr == nil {
+			t.Errorf("%s database error = nil", operation.name)
+		}
 	}
 }
 
