@@ -375,18 +375,39 @@ func TestRepositoryReviewCampaignReconcilePreservesMultiProfileLegacyProvenance(
 		InventoryHash: firstPlan.InventoryHash, ProfileHash: "sha256:canonical-union",
 		ScopeDigest:         repositoryReviewCampaignTestScopeDigest(t, first, second),
 		RequiredAssignments: 4, SelectedFiles: 2, Exact: true,
-		Paths: map[string]RepositoryReviewCampaignPathCoverage{first.Path: {Inspected: true}},
+		Paths: map[string]RepositoryReviewCampaignPathCoverage{},
 	}
-	reconciled, err := store.ReconcileCampaign(context.Background(), ReconcileCampaignRequest{
+	request := ReconcileCampaignRequest{
 		Repository: state.Repository, ExpectedReviewVersion: begun.ReviewVersion,
 		Coverage: coverage, SelectedScope: []FileRef{first, second},
 		Runs: []RepositoryReviewCampaignRunRecovery{
-			{ID: "run-first", Plan: firstPlan, InspectedFiles: 1, LegacyRecovered: true},
-			{ID: "run-second", Plan: secondPlan, InspectedFiles: 1, LegacyRecovered: true},
+			{
+				ID: "run-first", Plan: firstPlan, InspectedFiles: 1,
+				InspectedFileRefs: []FileRef{first}, LegacyRecovered: true,
+			},
+			{ID: "run-second", Plan: secondPlan, LegacyRecovered: true},
 		},
 		ContextIDs: []string{"context-first", "context-second"}, FindingIDs: []string{"finding"},
-	})
+	}
+	if _, err := store.ReconcileCampaign(context.Background(), request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cross-run inspection proof error = %v", err)
+	}
+	request.Runs[1].InspectedFiles = 1
+	request.Runs[1].InspectedFileRefs = []FileRef{first}
+	legacyRequest := request
+	legacyRequest.Runs = append([]RepositoryReviewCampaignRunRecovery(nil), request.Runs...)
+	for index := range legacyRequest.Runs {
+		legacyRequest.Runs[index].InspectedFileRefs = nil
+	}
+	legacyDigest, legacyDigestErr := repositoryReviewCampaignRecoveryDigest(legacyRequest)
+	proofDigest, proofDigestErr := repositoryReviewCampaignRecoveryDigest(request)
+	if legacyDigestErr != nil || proofDigestErr != nil || legacyDigest != proofDigest {
+		t.Fatalf("inspection proof changed recovery digest legacy=%q proof=%q errors=(%v, %v)",
+			legacyDigest, proofDigest, legacyDigestErr, proofDigestErr)
+	}
+	reconciled, err := store.ReconcileCampaign(context.Background(), request)
 	if err != nil || !reconciled.CurrentCampaign.Exact ||
+		len(reconciled.CurrentCampaign.Paths) != 0 ||
 		!reconciled.Runs[0].LegacyRecovered || !reconciled.Runs[1].LegacyRecovered ||
 		reconciled.Runs[0].ProfileHash != firstPlan.ProfileHash ||
 		reconciled.Runs[1].ProfileHash != secondPlan.ProfileHash ||
@@ -406,7 +427,8 @@ func TestRepositoryReviewCampaignLegacyPlanDigestCompatibilityIsNarrow(t *testin
 	}
 	plan.ID = legacyRepositoryReviewPlanDigest(plan)
 	valid := RepositoryReviewCampaignRunRecovery{
-		ID: "legacy-run", Plan: plan, LegacyRecovered: true,
+		ID: "legacy-run", Plan: plan, InspectedFiles: 1,
+		InspectedFileRefs: []FileRef{file}, LegacyRecovered: true,
 	}
 	if err := ValidateRepositoryReviewCampaignRunRecovery(valid); err != nil {
 		t.Fatalf("historical legacy plan rejected: %v", err)
@@ -424,10 +446,17 @@ func TestRepositoryReviewCampaignLegacyPlanDigestCompatibilityIsNarrow(t *testin
 		"assignment": func(value *RepositoryReviewCampaignRunRecovery) {
 			value.Plan.RequiredAssignments = 4
 		},
+		"inspection count": func(value *RepositoryReviewCampaignRunRecovery) {
+			value.InspectedFiles++
+		},
+		"inspection file": func(value *RepositoryReviewCampaignRunRecovery) {
+			value.InspectedFileRefs[0].BlobSHA = strings.Repeat("a", 40)
+		},
 		"tamper": func(value *RepositoryReviewCampaignRunRecovery) { value.Plan.ProfileHash += "x" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := valid
+			candidate.InspectedFileRefs = append([]FileRef(nil), valid.InspectedFileRefs...)
 			mutate(&candidate)
 			if err := ValidateRepositoryReviewCampaignRunRecovery(candidate); err == nil {
 				t.Fatal("mutated historical plan was accepted")

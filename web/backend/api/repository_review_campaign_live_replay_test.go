@@ -52,7 +52,7 @@ func TestRepositoryReviewCampaignLiveCopyReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !prepared.Available || !prepared.Exact ||
-		prepared.Request.Coverage.SelectedFiles != 367 || prepared.InspectedFiles != 27 ||
+		prepared.Request.Coverage.SelectedFiles != 367 || prepared.InspectedFiles != 0 ||
 		prepared.CompletedFiles != 0 || prepared.FindingOccurrences != 87 ||
 		len(prepared.Request.Runs) != 19 || len(prepared.Request.ContextIDs) != 21 ||
 		len(prepared.Request.FindingIDs) != 87 || len(prepared.ScopeSelection.CandidateIDs) != 367 {
@@ -113,10 +113,17 @@ func TestRepositoryReviewCampaignLiveCopyReplay(t *testing.T) {
 	}
 	metrics := repoaudit.CurrentCampaignMetrics(applied, campaignID, nil, automation.StartedAt)
 	assignmentProgress := repoaudit.CurrentCampaignAssignmentProgress(applied, campaignID)
-	if !metrics.CoverageExact || metrics.SelectedFiles != 367 || metrics.InspectedFiles != 27 ||
-		metrics.CompletedFiles != 0 || metrics.FindingOccurrences != 87 ||
-		assignmentProgress.Completed != 53 {
-		t.Fatalf("live-copy metrics = %#v assignments=%#v", metrics, assignmentProgress)
+	taggedFindings := repoaudit.CurrentCampaignFindingsByID(
+		applied, campaignID, automation.RunIDs, automation.StartedAt,
+	)
+	rawSources := repoaudit.CurrentCampaignRawFindings(
+		applied, campaignID, automation.RunIDs, automation.StartedAt,
+	)
+	if !metrics.CoverageExact || metrics.SelectedFiles != 367 || metrics.InspectedFiles != 0 ||
+		metrics.CompletedFiles != 0 || assignmentProgress.Completed != 0 ||
+		len(taggedFindings) != 87 || len(rawSources) != 87 {
+		t.Fatalf("live-copy metrics = %#v assignments=%#v tagged=%d raw=%d",
+			metrics, assignmentProgress, len(taggedFindings), len(rawSources))
 	}
 	rescanned, err := prepareRepositoryReviewLegacyCampaignBackfill(
 		t.Context(), func() repoaudit.RepositoryReviewAutomation {

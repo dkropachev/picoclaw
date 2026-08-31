@@ -714,7 +714,7 @@ func TestRepositoryReviewLegacyCampaignBackfillUsesResolvedProfileClamp(t *testi
 
 func TestRepositoryReviewLegacyCampaignBackfillGatesCompletionOnResolvedRevision(t *testing.T) {
 	fixture := newRepositoryReviewBackfillFixture(t, 2, repositoryReviewBackfillRunSpec{
-		inspected: []int{0, 1}, complete: true,
+		inspected: []int{0, 1}, complete: true, occurrences: 1,
 	})
 	campaignID := repoaudit.NewRepositoryReviewCampaignID()
 	compatible, err := prepareRepositoryReviewLegacyCampaignBackfill(
@@ -736,7 +736,8 @@ func TestRepositoryReviewLegacyCampaignBackfillGatesCompletionOnResolvedRevision
 		},
 	)
 	if err != nil || !drifted.Available || !drifted.Exact || drifted.InspectedFiles != 0 ||
-		drifted.CompletedFiles != 0 {
+		drifted.CompletedFiles != 0 || drifted.FindingOccurrences != 1 ||
+		len(drifted.Request.FindingIDs) != 1 || len(drifted.Request.ContextIDs) != 1 {
 		t.Fatalf("revision-drift completion = %#v err=%v", drifted, err)
 	}
 }

@@ -429,6 +429,13 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 	result.ScopeSelection = scopeSelection
 	result.ScopePlan = scopePlan
 	coveragePaths := make(map[string]repoaudit.RepositoryReviewCampaignPathCoverage)
+	// Historical finding provenance and reusable campaign coverage have
+	// different profile-drift semantics. A current model-graph change must
+	// withhold old assignment credit, but it does not invalidate an immutable
+	// finding that still matches its retained workflow observation and context.
+	// Keep the independently validated historical inspection proof separate so
+	// exact replay recovery does not depend on reusing the old completion.
+	historicalInspectionPaths := make(map[string]repoaudit.RepositoryReviewCampaignPathCoverage)
 	requiredAssignments := requiredAssignmentHint
 	recoverableRunIDs := make(map[string]struct{}, len(evidenceRecords))
 	for _, record := range evidenceRecords {
@@ -571,9 +578,19 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 			result.Exact = false
 			continue
 		}
+		for _, file := range evidence.InspectedFiles {
+			if selectedByPath[file.Path] != file {
+				result.Exact = false
+				continue
+			}
+			historicalInspectionPaths[file.Path] = repoaudit.RepositoryReviewCampaignPathCoverage{
+				Inspected: true,
+			}
+		}
 		recovery := repoaudit.RepositoryReviewCampaignRunRecovery{
 			ID: ledgerRun.ID, Plan: plan, InspectedFiles: len(evidence.InspectedFiles),
-			LegacyRecovered: true,
+			InspectedFileRefs: append([]repoaudit.FileRef(nil), evidence.InspectedFiles...),
+			LegacyRecovered:   true,
 		}
 		// repositoryReviewLegacyRunEvidence validated this same immutable plan;
 		// inspected evidence is a subset of its bounded manifest.
@@ -590,7 +607,7 @@ func prepareRepositoryReviewLegacyCampaignBackfill(
 	}
 	contextIDs, findingIDs, unrecoveredFindingIDs, tagsExact := repositoryReviewLegacyGlobalTags(
 		campaignID, state.Repository, commitSHA, inventoryHash,
-		currentRuns, recoveredPlans, recoveredManifests, selectedByPath, coveragePaths,
+		currentRuns, recoveredPlans, recoveredManifests, selectedByPath, historicalInspectionPaths,
 		recoveredEvidence, contextsByID, contextsByRun, findingsByID,
 	)
 	if !tagsExact || len(recoveredRuns) == 0 {

@@ -69,13 +69,18 @@ type ReconcileCampaignRequest struct {
 	FindingIDs            []string                              `json:"finding_ids,omitempty"`
 }
 
-// RepositoryReviewCampaignRunRecovery tags one retained legacy run and
-// installs its exact successful-child inspection count during backfill.
+// RepositoryReviewCampaignRunRecovery tags one retained legacy run, installs
+// its exact successful-child inspection count, and may carry the corresponding
+// file proof for legacy record binding during backfill.
 type RepositoryReviewCampaignRunRecovery struct {
-	ID              string `json:"id"`
-	Plan            Plan   `json:"plan"`
-	InspectedFiles  int    `json:"inspected_files"`
-	LegacyRecovered bool   `json:"legacy_recovered,omitempty"`
+	ID             string `json:"id"`
+	Plan           Plan   `json:"plan"`
+	InspectedFiles int    `json:"inspected_files"`
+	// InspectedFileRefs carries exact legacy provenance for record tagging only.
+	// It does not grant reusable assignment or completion credit to the current
+	// campaign profile.
+	InspectedFileRefs []FileRef `json:"inspected_file_refs,omitempty"`
+	LegacyRecovered   bool      `json:"legacy_recovered,omitempty"`
 }
 
 // BeginCampaign installs controller-owned campaign authority without accepting
@@ -282,8 +287,17 @@ func (s Store) ReconcileCampaign(
 	// repository lock, so index construction cannot conflict here.
 	indexes, _ := newRepositoryReviewCampaignIndexes(state)
 	recoveredRuns := make(map[string]RepositoryReviewCampaignRunRecovery, len(request.Runs))
+	historicalInspectedFiles := make(map[string]map[string]FileRef, len(request.Runs))
 	for _, recoveredRun := range request.Runs {
 		recoveredRuns[recoveredRun.ID] = recoveredRun
+		if len(recoveredRun.InspectedFileRefs) == 0 {
+			continue
+		}
+		runInspectedFiles := make(map[string]FileRef, len(recoveredRun.InspectedFileRefs))
+		for _, file := range recoveredRun.InspectedFileRefs {
+			runInspectedFiles[file.Path] = file
+		}
+		historicalInspectedFiles[recoveredRun.ID] = runInspectedFiles
 	}
 	if state.ReviewVersion != request.ExpectedReviewVersion {
 		if current.RecoveryDigest == recoveryDigest {
@@ -398,8 +412,9 @@ func (s Store) ReconcileCampaign(
 			return RepositoryState{}, ErrConflict
 		}
 		finding := &state.Findings[index]
-		if !repositoryReviewCampaignFindingMatchesCoverage(
+		if !repositoryReviewCampaignFindingMatchesRecovery(
 			state, *finding, request.Coverage, selectedScope, indexes, recoveredRuns,
+			historicalInspectedFiles,
 		) {
 			return RepositoryState{}, ErrConflict
 		}
@@ -1176,8 +1191,29 @@ func normalizeRepositoryReviewCampaignRuns(
 		if _, err := repositoryReviewCampaignScopeDigestForPlan(run.Plan); err != nil {
 			return nil, ErrInvalidPlan
 		}
+		if run.InspectedFileRefs != nil {
+			if !run.LegacyRecovered {
+				return nil, ErrInvalidPlan
+			}
+			canonical, canonicalErr := canonicalRepositoryReviewCampaignFiles(run.InspectedFileRefs)
+			if canonicalErr != nil || len(canonical) != run.InspectedFiles {
+				return nil, ErrInvalidPlan
+			}
+			manifest, _ := repositoryReviewCampaignFilesForPlan(run.Plan)
+			manifestByPath := make(map[string]FileRef, len(manifest))
+			for _, file := range manifest {
+				manifestByPath[file.Path] = file
+			}
+			for _, file := range canonical {
+				if manifestByPath[file.Path] != file {
+					return nil, ErrInvalidPlan
+				}
+			}
+			run.InspectedFileRefs = canonical
+		}
 		encodedPlan, _ := json.Marshal(run.Plan)
-		envelopeBytes += len(encodedPlan) + len(id) + 32
+		encodedInspection, _ := json.Marshal(run.InspectedFileRefs)
+		envelopeBytes += len(encodedPlan) + len(encodedInspection) + len(id) + 32
 		if id != run.ID || !validBoundedText(id, 1024) ||
 			envelopeBytes > maxRepositoryReviewCampaignRecoveryBytes ||
 			run.Plan.ID == "" || run.Plan.ID != planDigest(run.Plan) &&
@@ -1239,8 +1275,20 @@ func ValidateRepositoryReviewCampaignRunRecovery(
 }
 
 func repositoryReviewCampaignRecoveryDigest(request ReconcileCampaignRequest) (string, error) {
+	fullData, _ := json.Marshal(request)
+	if len(fullData) > maxRepositoryReviewCampaignRecoveryBytes {
+		return "", ErrInvalidPlan
+	}
 	request.ExpectedReviewVersion = 0
 	request.Coverage.RecoveryDigest = ""
+	// Exact file refs are transient proof for validating legacy record binding.
+	// The durable mutation is already bound by the normalized run, context, and
+	// finding identities, so excluding refs preserves lost-response idempotency
+	// for recoveries committed by versions that did not carry this proof.
+	request.Runs = append([]RepositoryReviewCampaignRunRecovery(nil), request.Runs...)
+	for index := range request.Runs {
+		request.Runs[index].InspectedFileRefs = nil
+	}
 	data, _ := json.Marshal(request)
 	if len(data) > maxRepositoryReviewCampaignRecoveryBytes {
 		return "", ErrInvalidPlan
@@ -1372,13 +1420,32 @@ func repositoryReviewCampaignFindingMatchesCoverage(
 	indexes repositoryReviewCampaignIndexes,
 	recoveredRuns map[string]RepositoryReviewCampaignRunRecovery,
 ) bool {
+	return repositoryReviewCampaignFindingMatchesRecovery(
+		state, finding, coverage, selectedScope, indexes, recoveredRuns, nil,
+	)
+}
+
+func repositoryReviewCampaignFindingMatchesRecovery(
+	state RepositoryState,
+	finding Finding,
+	coverage RepositoryReviewCampaignCoverage,
+	selectedScope map[string]FileRef,
+	indexes repositoryReviewCampaignIndexes,
+	recoveredRuns map[string]RepositoryReviewCampaignRunRecovery,
+	historicalInspectedFiles map[string]map[string]FileRef,
+) bool {
+	coverageInspected := coverage.Paths[finding.File.Path].Inspected
 	if finding.Repository != state.Repository || finding.CommitSHA != coverage.CommitSHA ||
 		len(finding.ContextIDs) == 0 ||
-		!coverage.Paths[finding.File.Path].Inspected || selectedScope[finding.File.Path] != finding.File {
+		selectedScope[finding.File.Path] != finding.File {
 		return false
 	}
 	for _, contextID := range finding.ContextIDs {
 		index, found := indexes.contexts[contextID]
+		if found && !coverageInspected &&
+			historicalInspectedFiles[state.Contexts[index].RunID][finding.File.Path] != finding.File {
+			return false
+		}
 		if !found || !repositoryReviewCampaignContextMatchesCoverage(
 			state, state.Contexts[index], coverage, selectedScope, indexes, recoveredRuns,
 		) || (state.Contexts[index].CampaignID != "" &&

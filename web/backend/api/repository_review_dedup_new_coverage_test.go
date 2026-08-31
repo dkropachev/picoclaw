@@ -338,7 +338,7 @@ func TestRepositoryReviewHistoricalRetryNewProfileAndStoreErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("runtime profile cannot prove retained envelope", func(t *testing.T) {
+	t.Run("runtime profile drift withholds coverage but retains findings", func(t *testing.T) {
 		fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
 			inspected: []int{0}, occurrences: 1,
 		})
@@ -380,10 +380,27 @@ func TestRepositoryReviewHistoricalRetryNewProfileAndStoreErrors(t *testing.T) {
 		setRepositoryReviewMutationHeaders(request)
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, request)
-		if response.Code != http.StatusConflict || !strings.Contains(
-			response.Body.String(), "historical_deduplication_campaign_recovery_required",
+		if response.Code != http.StatusAccepted || !strings.Contains(
+			response.Body.String(), `"status":"pending"`,
 		) {
-			t.Fatalf("unproven recovery status=%d body=%s", response.Code, response.Body.String())
+			t.Fatalf("drifted recovery status=%d body=%s", response.Code, response.Body.String())
+		}
+		recoveredAutomation, found, err := fixture.store.GetAutomation(
+			t.Context(), fixture.automation.ID,
+		)
+		if err != nil || !found || recoveredAutomation.CampaignID == "" ||
+			recoveredAutomation.CampaignRecoveryPending {
+			t.Fatalf("drifted recovery automation=%#v found=%v err=%v",
+				recoveredAutomation, found, err)
+		}
+		recoveredState, found, err := fixture.store.Get(state.Repository)
+		if err != nil || !found || recoveredState.CurrentCampaign == nil ||
+			!recoveredState.CurrentCampaign.Exact ||
+			len(recoveredState.CurrentCampaign.Paths) != 0 ||
+			len(recoveredState.Findings) != 1 ||
+			recoveredState.Findings[0].CampaignID != recoveredAutomation.CampaignID {
+			t.Fatalf("drifted recovery campaign=%#v findings=%#v found=%v err=%v",
+				recoveredState.CurrentCampaign, recoveredState.Findings, found, err)
 		}
 	})
 
