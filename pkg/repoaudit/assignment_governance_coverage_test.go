@@ -261,7 +261,8 @@ func TestRepositoryReviewAssignmentGovernanceSemanticMerge(t *testing.T) {
 	accepted, err := persistRepositoryReviewCheckpointObservation(
 		&state, fixture.plan, "run", fixture.catalog[0].ID,
 		Observation{
-			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account", Reviewer: fixture.catalog[0].FocusID,
+			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
+			Reviewer:   fixture.catalog[0].FocusID,
 			ScopeFiles: fixture.files, RawDigest: "sha256:" + strings.Repeat("a", 64),
 			Findings: []FindingCandidate{first, second},
 		},

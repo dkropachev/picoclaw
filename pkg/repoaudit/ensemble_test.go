@@ -129,34 +129,32 @@ func TestStoreMergesCorroboratingModelParaphrasesInSameBlobContext(t *testing.T)
 		Observations: []Observation{
 			{
 				Model: "openai/gpt-5.4", ModelAlias: "review-a", Account: "openai-work",
-				ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{
-					{
-						Severity:   "high",
-						Title:      "Concurrent writers lose updates",
-						Symbol:     "Save",
-						File:       file.Path,
-						Line:       &line,
-						Message:    "A stale writer overwrites a newer value.",
-						Evidence:   "Both writers save without a version fence.",
-						Impact:     "A successful update disappears.",
-						Validation: validation,
-					},
+				ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{{
+					Severity:   "high",
+					Title:      "Concurrent writers lose updates",
+					Symbol:     "Save",
+					File:       file.Path,
+					Line:       &line,
+					Message:    "A stale writer overwrites a newer value.",
+					Evidence:   "Both writers save without a version fence.",
+					Impact:     "A successful update disappears.",
+					Validation: validation,
 				}},
+			},
 			{
 				Model: "anthropic/claude-4.6", ModelAlias: "review-b", Account: "anthropic-work",
-				ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{
-					{
-						Severity:   "high",
-						Title:      "Concurrent write loses an update",
-						Symbol:     "Save",
-						File:       file.Path,
-						Line:       &nearby,
-						Message:    "The stale writer can overwrite the newer stored value.",
-						Evidence:   "The two writers save with no version fence.",
-						Impact:     "A completed update is lost.",
-						Validation: validation,
-					},
+				ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{{
+					Severity:   "high",
+					Title:      "Concurrent write loses an update",
+					Symbol:     "Save",
+					File:       file.Path,
+					Line:       &nearby,
+					Message:    "The stale writer can overwrite the newer stored value.",
+					Evidence:   "The two writers save with no version fence.",
+					Impact:     "A completed update is lost.",
+					Validation: validation,
 				}},
+			},
 		},
 	})
 	if err != nil {
