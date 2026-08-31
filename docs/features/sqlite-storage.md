@@ -93,7 +93,10 @@ Owns: TEST pkg/sqlitestore/*
 
 Each owning subsystem defines its own relational schema, normalization rules,
 version fences, and compatibility constructors. Workspace protection treats
-database directories and legacy archives as runtime-owned. Portability excludes
+database directories, database/WAL/SHM files, and legacy archives as
+runtime-owned; model-facing mutation tools must enforce frozen lexical,
+resolved, and exact-file-alias exclusions even when those paths fall inside a
+workspace or an outside-write allowlist. Portability excludes
 targets on which the required SQLite implementation is unsupported instead of
 selecting a mutable JSON fallback.
 

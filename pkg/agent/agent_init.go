@@ -108,16 +108,19 @@ func newAgentLoop(
 			opt(al)
 		}
 	}
+	al.fileMutationProtectedRoots = mustAgentRuntimeFileMutationProtectedRoots(al.configPath)
 	if al.runtimeEvents == nil {
 		al.runtimeEvents = runtimeevents.NewBus()
 		al.ownsRuntimeEvents = true
 	}
 
-	registry := NewAgentRegistryWithRuntimePolicies(
+	registry := newAgentRegistryWithRuntimePolicies(
 		cfg,
 		provider,
 		al.executionPolicy,
 		al.diagnosticPolicy,
+		nil,
+		cloneAgentRuntimeFileMutationProtectedRoots(al.fileMutationProtectedRoots),
 	)
 	al.registry = registry
 

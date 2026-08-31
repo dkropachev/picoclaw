@@ -71,6 +71,8 @@ func TestP015B3ALocalRepairControllerLeaseBoundary(t *testing.T) {
 		Temperature:   0.4,
 	}
 	loop := newControllerRepairFactoryLoop(t, &config.Config{}, agent)
+	protectedRoot := filepath.Join(t.TempDir(), "launcher-auth.db")
+	loop.fileMutationProtectedRoots = []string{protectedRoot}
 	positive := logger.NewDiagnosticPolicy(true, logger.DEBUG)
 	loop.mu.Lock()
 	loop.diagnosticPolicy = positive
@@ -96,6 +98,11 @@ func TestP015B3ALocalRepairControllerLeaseBoundary(t *testing.T) {
 		runner.runtimeLoop != loop {
 		release()
 		t.Fatal("strict repair runner did not retain opaque generation identity")
+	}
+	loop.fileMutationProtectedRoots[0] = "mutated-after-runner-construction"
+	if len(runner.protectedRoots) != 1 || runner.protectedRoots[0] != protectedRoot {
+		release()
+		t.Fatalf("strict repair protected roots = %#v", runner.protectedRoots)
 	}
 	runner.workspaces = workspaces
 	request := localRepairTestRunRequest(pin)

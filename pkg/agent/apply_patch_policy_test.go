@@ -75,6 +75,33 @@ func TestAgentApplyPatchTransactionStateRootRejectsAbsFailure(t *testing.T) {
 	}
 }
 
+func TestAgentApplyPatchTransactionRootOverlapFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !agentApplyPatchTransactionRootOverlapsWorkspace(root, workspace) {
+		t.Fatal("ancestor transaction root was not classified as overlapping")
+	}
+	if !agentApplyPatchTransactionRootOverlapsWorkspace("invalid\x00root", workspace) {
+		t.Fatal("invalid transaction root did not fail closed")
+	}
+	if !agentApplyPatchTransactionRootOverlapsWorkspace(root, filepath.Join(root, "missing")) {
+		t.Fatal("missing workspace did not fail closed")
+	}
+	resolved, err := agentApplyPatchResolveAgainstExistingAncestor(root)
+	if err != nil || resolved != filepath.Clean(root) {
+		t.Fatalf("resolved existing root = %q, %v", resolved, err)
+	}
+	resolved, err = agentApplyPatchResolveAgainstExistingAncestor(
+		filepath.Join(root, "future", "child"),
+	)
+	if err != nil || resolved != filepath.Join(root, "future", "child") {
+		t.Fatalf("resolved future root = %q, %v", resolved, err)
+	}
+}
+
 func TestAgentApplyPatchAdmissionRejectsEverySiblingAuthority(t *testing.T) {
 	transactionRoot := filepath.Join(t.TempDir(), "apply_patch_transactions")
 	safeRoot := t.TempDir()

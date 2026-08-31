@@ -20,10 +20,14 @@ const (
 // caller guard to the built-in workspace and Git-control policy. Inputs are
 // detached by NewApplyPatchToolWithPermissionsAndPolicy.
 type ApplyPatchPreflightPolicy struct {
-	ProtectedRoots       []string
-	PathGuard            func(string) error
-	TransactionStateRoot string
-	WriteAllowRoots      []string
+	ProtectedRoots []string
+	// VolatileProtectedRoots are strict runtime-owned namespaces. Unlike
+	// ProtectedRoots, they never exempt a workspace nested beneath the root,
+	// and their leaf inode may be created or replaced between executions.
+	VolatileProtectedRoots []string
+	PathGuard              func(string) error
+	TransactionStateRoot   string
+	WriteAllowRoots        []string
 }
 
 type ApplyPatchTool struct {
@@ -113,6 +117,16 @@ func NewApplyPatchToolWithPermissionsAndPolicy(
 	if err != nil {
 		return nil, err
 	}
+	volatileProtected, err := prepareApplyPatchProtectedRootsWithMode(
+		workspace,
+		append([]string(nil), policy.VolatileProtectedRoots...),
+		false,
+		false,
+	)
+	if err != nil {
+		return nil, err
+	}
+	protected = append(protected, volatileProtected...)
 	return &ApplyPatchTool{
 		workspace:            workspace,
 		restrict:             restrict,

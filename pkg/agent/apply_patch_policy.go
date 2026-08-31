@@ -139,12 +139,61 @@ func agentApplyPatchLiteralPrefixesMayOverlap(root, prefix string) bool {
 	return os.IsPathSeparator(prefix[len(root)])
 }
 
+// agentApplyPatchTransactionRootOverlapsWorkspace fails closed when the
+// authenticated apply-patch journal would share model-writable workspace
+// authority. The apply-patch engine intentionally rejects this layout; agent
+// construction must omit the tool rather than panic after admission.
+func agentApplyPatchTransactionRootOverlapsWorkspace(root, workspace string) bool {
+	root, rootErr := agentApplyPatchResolveAgainstExistingAncestor(root)
+	workspace, workspaceErr := filepath.Abs(filepath.Clean(workspace))
+	if rootErr != nil || workspaceErr != nil {
+		return true
+	}
+	workspace, workspaceErr = filepath.EvalSymlinks(workspace)
+	if workspaceErr != nil {
+		return true
+	}
+	return agentApplyPatchLiteralPrefixesMayOverlap(
+		agentApplyPatchAuthorityPathKey(root),
+		agentApplyPatchAuthorityPathKey(workspace),
+	)
+}
+
+func agentApplyPatchResolveAgainstExistingAncestor(path string) (string, error) {
+	path, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	for current := path; ; current = filepath.Dir(current) {
+		resolved, resolveErr := filepath.EvalSymlinks(current)
+		if resolveErr == nil {
+			suffix, relErr := filepath.Rel(current, path)
+			if relErr != nil {
+				return "", relErr
+			}
+			if suffix == "." {
+				return filepath.Clean(resolved), nil
+			}
+			return filepath.Clean(filepath.Join(resolved, suffix)), nil
+		}
+		if !os.IsNotExist(resolveErr) {
+			return "", resolveErr
+		}
+		if filepath.Dir(current) == current {
+			return "", os.ErrNotExist
+		}
+	}
+}
+
 // agentApplyPatchProtectedRoots returns only control paths whose locations are
 // authoritative at AgentInstance construction. The transaction state root is
 // supplied separately through ApplyPatchPreflightPolicy.TransactionStateRoot,
 // whose constructor adds it to the exact protected roots. Other runtime owners
 // inject their own exact roots when they construct a tool.
-func agentApplyPatchProtectedRoots(workspace string, cfg *config.Config) []string {
+func agentApplyPatchProtectedRoots(
+	workspace string,
+	cfg *config.Config,
+) []string {
 	roots := []string{
 		filepath.Join(workspace, "sessions"),
 		filepath.Join(workspace, "account_router_state.json"),

@@ -143,6 +143,9 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 		MaxTokens:       agent.MaxTokens,
 		Temperature:     agent.Temperature,
 		ReasoningEffort: reasoningEffort,
+		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
+			al.fileMutationProtectedRoots,
+		),
 	})
 	if err != nil {
 		return nil, errors.New("controller local repair agent configuration is invalid")

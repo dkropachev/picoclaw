@@ -386,7 +386,7 @@ func TestP015B3ARuntimePolicyGateRejectsSyntheticMutations(t *testing.T) {
 		{
 			name:        "strict registry construction",
 			path:        "pkg/agent/agent_init.go",
-			old:         "NewAgentRegistryWithRuntimePolicies(\n",
+			old:         "newAgentRegistryWithRuntimePolicies(\n",
 			replacement: "NewAgentRegistryWithExecutionPolicy(\n",
 			issues:      p015B3StrictConstructorIssues,
 		},
@@ -2277,24 +2277,30 @@ func p015B3StrictConstructorIssues(files map[string]*p015B3ParsedFile) []string 
 			callee: "newAgentRegistryWithRuntimePolicies",
 			arguments: [][]string{{
 				"cfg", "provider", "executionPolicy", "diagnosticPolicy", "nil",
+				"mustAgentRuntimeFileMutationProtectedRoots(\"\")",
 			}},
 		},
 		{
 			path: "pkg/agent/agent_init.go", function: "newAgentLoop",
-			callee:    "NewAgentRegistryWithRuntimePolicies",
-			arguments: [][]string{{"cfg", "provider", "al.executionPolicy", "al.diagnosticPolicy"}},
-		},
-		{
-			path: "pkg/agent/agent.go", function: "(*AgentLoop).reloadProviderAndConfig",
 			callee: "newAgentRegistryWithRuntimePolicies",
 			arguments: [][]string{{
-				"cfg", "provider", "executionPolicy", "diagnosticPolicy", "providerGeneration",
+				"cfg", "provider", "al.executionPolicy", "al.diagnosticPolicy", "nil",
+				"cloneAgentRuntimeFileMutationProtectedRoots(al.fileMutationProtectedRoots)",
 			}},
 		},
 		{
 			path: "pkg/agent/agent.go", function: "(*AgentLoop).reloadProviderAndConfig",
-			callee:    "NewAgentRegistryWithRuntimePolicies",
-			arguments: [][]string{{"cfg", "provider", "executionPolicy", "diagnosticPolicy"}},
+			callee: "newAgentRegistryWithRuntimePolicies",
+			arguments: [][]string{
+				{
+					"cfg", "provider", "executionPolicy", "diagnosticPolicy", "providerGeneration",
+					"cloneAgentRuntimeFileMutationProtectedRoots(al.fileMutationProtectedRoots)",
+				},
+				{
+					"cfg", "provider", "executionPolicy", "diagnosticPolicy", "nil",
+					"cloneAgentRuntimeFileMutationProtectedRoots(al.fileMutationProtectedRoots)",
+				},
+			},
 		},
 		{
 			path: "pkg/agent/registry.go", function: "newAgentRegistryWithRuntimePolicies",
@@ -2308,6 +2314,7 @@ func p015B3StrictConstructorIssues(files map[string]*p015B3ParsedFile) []string 
 					"executionPolicy",
 					"diagnosticPolicy",
 					"providerGeneration.bindingsForAgent(\"main\")",
+					"cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots)",
 				},
 				{
 					"ac",
@@ -2317,6 +2324,7 @@ func p015B3StrictConstructorIssues(files map[string]*p015B3ParsedFile) []string 
 					"executionPolicy",
 					"diagnosticPolicy",
 					"providerGeneration.bindingsForAgent(id)",
+					"cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots)",
 				},
 			},
 		},
@@ -2325,7 +2333,7 @@ func p015B3StrictConstructorIssues(files map[string]*p015B3ParsedFile) []string 
 			callee: "newAgentInstanceWithRuntimePolicies",
 			arguments: [][]string{{
 				"agentCfg", "defaults", "cfg", "provider", "executionPolicy",
-				"diagnosticPolicy", "nil",
+				"diagnosticPolicy", "nil", "mustAgentRuntimeFileMutationProtectedRoots(\"\")",
 			}},
 		},
 		{
@@ -2405,8 +2413,8 @@ func p015B3StrictConstructorIssues(files map[string]*p015B3ParsedFile) []string 
 		}
 	}
 	wantConstructorCounts := map[string]int{
-		"NewAgentRegistryWithRuntimePolicies": 4,
-		"newAgentRegistryWithRuntimePolicies": 2,
+		"NewAgentRegistryWithRuntimePolicies": 2,
+		"newAgentRegistryWithRuntimePolicies": 4,
 		"NewAgentInstanceWithRuntimePolicies": 2,
 		"newAgentInstanceWithRuntimePolicies": 3,
 		"NewToolRegistryWithDiagnosticPolicy": 2,

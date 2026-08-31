@@ -285,6 +285,7 @@ func NewAgentInstanceWithRuntimePolicies(
 		executionPolicy,
 		diagnosticPolicy,
 		nil,
+		mustAgentRuntimeFileMutationProtectedRoots(""),
 	)
 }
 
@@ -296,6 +297,7 @@ func newAgentInstanceWithRuntimePolicies(
 	executionPolicy isolation.ExecutionPolicy,
 	diagnosticPolicy logger.DiagnosticPolicy,
 	initialCandidateProviders map[string]providers.LLMProvider,
+	fileMutationProtectedRoots []string,
 ) *AgentInstance {
 	construction := &agentInstanceConstructionGuard{}
 	defer construction.cleanupPanic()
@@ -351,6 +353,12 @@ func newAgentInstanceWithRuntimePolicies(
 	toolsRegistry.SetAllowlist(agentToolAllowlist)
 	readPathPatterns := cloneToolPathPatterns(allowReadPaths)
 	writePathPatterns := cloneToolPathPatterns(allowWritePaths)
+	fileMutationProtectedRoots = cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots)
+	fileMutationPolicy := tools.FileMutationPolicy{
+		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
+			fileMutationProtectedRoots,
+		),
+	}
 	applyPatchCandidate := mayUseCodexCompatibleTools &&
 		(cfg.Tools.IsToolEnabled("edit_file") || cfg.Tools.IsToolEnabled("write_file"))
 	applyPatchTransactionRoot := ""
@@ -368,6 +376,12 @@ func newAgentInstanceWithRuntimePolicies(
 			readPathPatterns,
 			writePathPatterns,
 		)
+		if agentApplyPatchTransactionRootOverlapsWorkspace(
+			applyPatchTransactionRoot,
+			workspace,
+		) {
+			applyPatchAdmission = false
+		}
 	}
 
 	if cfg.Tools.IsToolEnabled("read_file") {
@@ -401,33 +415,49 @@ func newAgentInstanceWithRuntimePolicies(
 		))
 	}
 	if cfg.Tools.IsToolEnabled("edit_file") {
-		buildEditFile := func() tools.Tool {
-			return tools.NewEditFileTool(
+		buildEditFile := func() (*tools.EditFileTool, error) {
+			return tools.NewEditFileToolWithPolicy(
 				workspace,
 				restrict,
+				tools.FileMutationPolicy{ProtectedRoots: append(
+					[]string(nil), fileMutationPolicy.ProtectedRoots...,
+				)},
 				cloneToolPathPatterns(writePathPatterns),
 			)
 		}
-		live := buildEditFile()
+		live, err := buildEditFile()
+		if err != nil {
+			panic(fmt.Sprintf("build edit_file policy: %v", err))
+		}
 		mustRegisterFactoryBackedTool(toolsRegistry, live, mustToolFactoryFromPrototype(
 			live,
 			mustBaseToolFactoryTraits("edit_file"),
-			func(tools.ToolBuildContext) (tools.Tool, error) { return buildEditFile(), nil },
+			func(tools.ToolBuildContext) (tools.Tool, error) {
+				return buildEditFile()
+			},
 		))
 	}
 	if cfg.Tools.IsToolEnabled("append_file") {
-		buildAppendFile := func() tools.Tool {
-			return tools.NewAppendFileTool(
+		buildAppendFile := func() (*tools.AppendFileTool, error) {
+			return tools.NewAppendFileToolWithPolicy(
 				workspace,
 				restrict,
+				tools.FileMutationPolicy{ProtectedRoots: append(
+					[]string(nil), fileMutationPolicy.ProtectedRoots...,
+				)},
 				cloneToolPathPatterns(writePathPatterns),
 			)
 		}
-		live := buildAppendFile()
+		live, err := buildAppendFile()
+		if err != nil {
+			panic(fmt.Sprintf("build append_file policy: %v", err))
+		}
 		mustRegisterFactoryBackedTool(toolsRegistry, live, mustToolFactoryFromPrototype(
 			live,
 			mustBaseToolFactoryTraits("append_file"),
-			func(tools.ToolBuildContext) (tools.Tool, error) { return buildAppendFile(), nil },
+			func(tools.ToolBuildContext) (tools.Tool, error) {
+				return buildAppendFile()
+			},
 		))
 	}
 	// Build write_file's copy from the registered editors so it steers the agent
@@ -440,26 +470,40 @@ func newAgentInstanceWithRuntimePolicies(
 		if toolsRegistry.HasRegistered("edit_file") {
 			altTools = append(altTools, "edit_file")
 		}
-		buildWriteFile := func() tools.Tool {
-			writeTool := tools.NewWriteFileTool(
+		buildWriteFile := func() (*tools.WriteFileTool, error) {
+			writeTool, err := tools.NewWriteFileToolWithPolicy(
 				workspace,
 				restrict,
+				tools.FileMutationPolicy{ProtectedRoots: append(
+					[]string(nil), fileMutationPolicy.ProtectedRoots...,
+				)},
 				cloneToolPathPatterns(writePathPatterns),
 			)
+			if err != nil {
+				return nil, err
+			}
 			writeTool.SetAlternativeTools(append([]string(nil), altTools...))
-			return writeTool
+			return writeTool, nil
 		}
-		live := buildWriteFile()
+		live, err := buildWriteFile()
+		if err != nil {
+			panic(fmt.Sprintf("build write_file policy: %v", err))
+		}
 		mustRegisterFactoryBackedTool(toolsRegistry, live, mustToolFactoryFromPrototype(
 			live,
 			mustBaseToolFactoryTraits("write_file"),
-			func(tools.ToolBuildContext) (tools.Tool, error) { return buildWriteFile(), nil },
+			func(tools.ToolBuildContext) (tools.Tool, error) {
+				return buildWriteFile()
+			},
 		))
 	}
 	if applyPatchCandidate && applyPatchAdmission {
 		allowCreate := cfg.Tools.IsToolEnabled("write_file")
 		allowUpdate := cfg.Tools.IsToolEnabled("edit_file")
-		applyPatchProtectedRoots := agentApplyPatchProtectedRoots(workspace, cfg)
+		applyPatchProtectedRoots := agentApplyPatchProtectedRoots(
+			workspace,
+			cfg,
+		)
 		buildApplyPatch := func() tools.Tool {
 			tool, err := tools.NewApplyPatchToolWithPermissionsAndPolicy(
 				workspace,
@@ -467,7 +511,12 @@ func newAgentInstanceWithRuntimePolicies(
 				allowCreate,
 				allowUpdate,
 				tools.ApplyPatchPreflightPolicy{
-					ProtectedRoots:       append([]string(nil), applyPatchProtectedRoots...),
+					ProtectedRoots: append(
+						[]string(nil), applyPatchProtectedRoots...,
+					),
+					VolatileProtectedRoots: append(
+						[]string(nil), fileMutationProtectedRoots...,
+					),
 					TransactionStateRoot: applyPatchTransactionRoot,
 				},
 				cloneToolPathPatterns(writePathPatterns),
