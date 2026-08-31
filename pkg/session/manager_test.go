@@ -206,3 +206,47 @@ func TestSessionManagerReadSessionSnapshot_MissingBlankAndCanceled(t *testing.T)
 		t.Fatalf("canceled read = (found=%v, err=%v), want context.Canceled", found, err)
 	}
 }
+
+func TestSessionManagerCompatibilitySummaryAndHistoryMutators(t *testing.T) {
+	sm := NewSessionManager("")
+	if got := sm.GetSummary("missing"); got != "" {
+		t.Fatalf("GetSummary(missing) = %q", got)
+	}
+	sm.SetSummary("missing", "ignored")
+	sm.SetHistory("missing", []providers.Message{{Role: "user", Content: "ignored"}})
+	sm.TruncateHistory("missing", 1)
+
+	const key = "compatibility"
+	sm.GetOrCreate(key)
+	sm.SetSummary(key, "summary")
+	if got := sm.GetSummary(key); got != "summary" {
+		t.Fatalf("GetSummary() = %q", got)
+	}
+
+	history := []providers.Message{
+		{Role: "user", Content: "one"},
+		{Role: "assistant", Content: "two"},
+		{Role: "user", Content: "three"},
+	}
+	sm.SetHistory(key, history)
+	history[0].Content = "caller mutation"
+	if got := sm.GetHistory(key); len(got) != 3 || got[0].Content != "one" {
+		t.Fatalf("SetHistory() stored history = %#v", got)
+	}
+
+	sm.TruncateHistory(key, 3)
+	if got := sm.GetHistory(key); len(got) != 3 {
+		t.Fatalf("no-op TruncateHistory() length = %d", len(got))
+	}
+	sm.TruncateHistory(key, 2)
+	if got := sm.GetHistory(key); len(got) != 2 || got[0].Content != "two" {
+		t.Fatalf("TruncateHistory(2) = %#v", got)
+	}
+	sm.TruncateHistory(key, 0)
+	if got := sm.GetHistory(key); len(got) != 0 {
+		t.Fatalf("TruncateHistory(0) = %#v", got)
+	}
+	if err := sm.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
