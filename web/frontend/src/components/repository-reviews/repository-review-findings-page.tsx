@@ -12,6 +12,7 @@ import {
   type RepositoryReviewRunFindingSummary,
   getRepositoryReviewAutomationFinding,
   listRepositoryReviewAutomationFindingsPage,
+  retryRepositoryReviewHistoricalDeduplication,
   retryRepositoryReviewRunFindingStatuses,
 } from "@/api/repository-reviews"
 import { createThread, dropThread } from "@/api/threads"
@@ -21,6 +22,7 @@ import {
   type StandardCollectionSelectionState,
 } from "@/components/collection"
 import { discussionPrompt } from "@/components/repository-reviews/repository-review-actions"
+import { RepositoryReviewFindingsProcessing } from "@/components/repository-reviews/repository-review-findings-processing"
 import {
   runFindingRepositoryFindingID,
   runFindingStatusCanRetry,
@@ -56,6 +58,7 @@ export function RepositoryReviewFindingsPage({
   onSearchChange,
   onBack,
   onOpenFinding,
+  onOpenRawFindings,
   onOpenRepositoryFindings,
   onOpenRepositoryFinding,
   onOpenThread,
@@ -65,6 +68,7 @@ export function RepositoryReviewFindingsPage({
   onSearchChange: (next: CollectionRouteSearch, replace?: boolean) => void
   onBack: () => void
   onOpenFinding: (findingID: string) => void
+  onOpenRawFindings?: () => void
   onOpenRepositoryFindings: () => void
   onOpenRepositoryFinding: (findingID: string) => void
   onOpenThread: (threadID: string) => void
@@ -90,11 +94,24 @@ export function RepositoryReviewFindingsPage({
     getNextPageParam: (page) => page.next_cursor || undefined,
     retry: false,
     refetchInterval: (current) =>
-      current.state.data?.pages.some(
-        (page) =>
-          isActive(page.automation) ||
-          page.findings.some(runFindingStatusIsInProgress),
-      )
+      current.state.data?.pages.some((page) => {
+        if (isActive(page.automation)) return true
+        if (
+          page.historical_deduplication?.required &&
+          page.historical_deduplication.status === "failed"
+        ) {
+          return false
+        }
+        return (
+          page.findings.some(runFindingStatusIsInProgress) ||
+          Boolean(
+            page.findings_processing &&
+            (page.findings_processing.pending > 0 ||
+              page.findings_processing.processing > 0),
+          ) ||
+          historicalReplayIsActive(page.historical_deduplication)
+        )
+      })
         ? 2_000
         : false,
   })
@@ -135,13 +152,29 @@ export function RepositoryReviewFindingsPage({
       retryRepositoryReviewRunFindingStatuses(automationID, findingIDs),
     onSuccess: async () => {
       await query.refetch()
-      toast.success("Selected run finding statuses queued.")
+      toast.success("Selected finding statuses queued.")
     },
     onError: (error) => {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Run finding status could not be retried.",
+          : "Finding status could not be retried.",
+      )
+      void query.refetch()
+    },
+  })
+  const retryHistorical = useMutation({
+    mutationFn: () =>
+      retryRepositoryReviewHistoricalDeduplication(automationID),
+    onSuccess: async () => {
+      await query.refetch()
+      toast.success("Historical deduplication queued.")
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Historical deduplication could not be retried.",
       )
       void query.refetch()
     },
@@ -151,7 +184,7 @@ export function RepositoryReviewFindingsPage({
   >(
     () => ({
       key: `repository-review-findings:${automationID}`,
-      title: "Run findings",
+      title: "Findings",
       defaultQuery: repositoryReviewRunFindingsDefaultQuery,
       supportedViews: repositoryReviewViews,
       defaultView: "list",
@@ -160,7 +193,7 @@ export function RepositoryReviewFindingsPage({
       getItemIdentity: (finding) => ({
         title: finding.title,
         description: findingLocation(finding),
-        metadata: `${finding.contributors.length} contributor${finding.contributors.length === 1 ? "" : "s"} · ${finding.status}${finding.association !== "unassociated" ? " · repository finding associated" : ""}`,
+        metadata: `Contributors: ${finding.contributors.join(", ") || "none"} · ${finding.raw_source_count ?? 0} raw source${finding.raw_source_count === 1 ? "" : "s"} · ${associationLabel(finding)} · Updated ${formatTimestamp(finding.updated_at)}`,
       }),
       columns: [
         {
@@ -180,10 +213,21 @@ export function RepositoryReviewFindingsPage({
           className: "w-28",
         },
         {
-          id: "status",
-          header: "Status",
-          cell: runFindingStatusLabel,
-          className: "w-36",
+          id: "association",
+          header: "Repository association",
+          cell: associationLabel,
+          className: "w-40",
+        },
+        {
+          id: "contributors",
+          header: "Contributors",
+          cell: (finding) => finding.contributors.join(", ") || "—",
+        },
+        {
+          id: "sources",
+          header: "Raw sources",
+          cell: (finding) => finding.raw_source_count ?? 0,
+          className: "w-24 tabular-nums",
         },
         {
           id: "updated",
@@ -204,9 +248,14 @@ export function RepositoryReviewFindingsPage({
           value: (finding) => finding.severity,
         },
         {
-          id: "status",
-          label: "Status",
-          value: runFindingStatusLabel,
+          id: "association",
+          label: "Repository association",
+          value: associationLabel,
+        },
+        {
+          id: "sources",
+          label: "Raw sources",
+          value: (finding) => finding.raw_source_count ?? 0,
         },
         {
           id: "updated",
@@ -260,7 +309,10 @@ export function RepositoryReviewFindingsPage({
           getRepositoryReviewAutomationFinding(automationID, findingID),
         ),
       )
-      const selectedFindings = details.map((detail) => detail.finding)
+      const selectedFindings = details.map((detail) => ({
+        ...detail.finding,
+        raw_source_total: detail.raw_source_total,
+      }))
       const contextIDs = [
         ...new Set(selectedFindings.flatMap((finding) => finding.context_ids)),
       ]
@@ -297,7 +349,12 @@ export function RepositoryReviewFindingsPage({
               last_commit_sha: firstPage.repository?.last_commit_sha,
               contexts: detail.contexts,
             },
-            [detail.finding],
+            [
+              {
+                ...detail.finding,
+                raw_source_total: detail.raw_source_total,
+              },
+            ],
           ),
         })
         if (!sent) {
@@ -391,29 +448,61 @@ export function RepositoryReviewFindingsPage({
       }}
       beforeResults={
         firstPage ? (
-          <div className="flex justify-end">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={onOpenRepositoryFindings}
-            >
-              <IconExternalLink /> View repository findings
-            </Button>
-          </div>
+          <>
+            <RepositoryReviewFindingsProcessing
+              counters={firstPage.findings_processing}
+              historical={firstPage.historical_deduplication}
+              retryingHistorical={retryHistorical.isPending}
+              onRetryHistorical={() => retryHistorical.mutate()}
+              onOpenRawFindings={onOpenRawFindings}
+            />
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={onOpenRepositoryFindings}
+              >
+                <IconExternalLink /> View repository findings
+              </Button>
+            </div>
+          </>
         ) : undefined
       }
       emptyTitle={
         firstPage && isActive(firstPage.automation)
           ? "Review in progress"
-          : "No run findings"
+          : "No findings"
       }
       emptyDescription={
         firstPage && isActive(firstPage.automation)
           ? "Findings will appear after the first validated checkpoint."
-          : "This review has not stored a validated finding."
+          : "This review has not completed a deduplicated finding. Raw findings remain available separately."
       }
     />
+  )
+}
+
+function associationLabel(finding: RepositoryReviewRunFindingSummary): string {
+  switch (finding.association) {
+    case "new":
+      return "New repository finding"
+    case "existing":
+      return "Existing repository finding"
+    case "needs_review":
+      return "Needs review"
+    default:
+      return runFindingStatusLabel(finding)
+  }
+}
+
+function historicalReplayIsActive(historical?: {
+  required: boolean
+  status?: string
+}): boolean {
+  return Boolean(
+    historical?.required &&
+    new Set(["pending", "replaying", "merging"]).has(historical.status ?? ""),
   )
 }
 

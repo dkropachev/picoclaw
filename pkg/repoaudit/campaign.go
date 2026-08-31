@@ -464,6 +464,235 @@ func CurrentCampaignFindingsByID(
 	return out
 }
 
+// CurrentCampaignDeduplicatedFindings selects only deduplicated occurrences
+// owned by one automation campaign. Legacy automations without a recovered
+// campaign ID are scoped through their retained run and context membership;
+// they must never inherit every deduplicated occurrence in the repository.
+func CurrentCampaignDeduplicatedFindings(
+	state RepositoryState,
+	campaignID string,
+	legacyRunIDs []string,
+	legacyStartedAt time.Time,
+) []DeduplicatedReviewFinding {
+	campaignID = strings.TrimSpace(campaignID)
+	if campaignID != "" {
+		out := make([]DeduplicatedReviewFinding, 0, len(state.DeduplicatedFindings))
+		for _, finding := range state.DeduplicatedFindings {
+			if DeduplicatedFindingBelongsToCampaign(state, finding, campaignID) {
+				out = append(out, finding)
+			}
+		}
+		return out
+	}
+
+	selectedFindings := CurrentCampaignFindings(state, legacyRunIDs, legacyStartedAt)
+	selectedFindingIDs := make(map[string]struct{}, len(selectedFindings))
+	for _, finding := range selectedFindings {
+		selectedFindingIDs[finding.ID] = struct{}{}
+	}
+	wantedRuns := make(map[string]struct{}, len(legacyRunIDs))
+	for _, runID := range legacyRunIDs {
+		if runID = strings.TrimSpace(runID); runID != "" {
+			wantedRuns[runID] = struct{}{}
+		}
+	}
+	selectedRawIDs := make(map[string]struct{})
+	for _, raw := range state.RawFindings {
+		_, selectedLegacy := selectedFindingIDs[raw.LegacyFindingID]
+		_, selectedRun := wantedRuns[raw.RunID]
+		if selectedLegacy || selectedRun &&
+			(legacyStartedAt.IsZero() || raw.CreatedAt.IsZero() || !raw.CreatedAt.Before(legacyStartedAt)) {
+			selectedRawIDs[raw.ID] = struct{}{}
+		}
+	}
+	out := make([]DeduplicatedReviewFinding, 0, len(state.DeduplicatedFindings))
+	for _, finding := range state.DeduplicatedFindings {
+		_, selected := selectedFindingIDs[finding.ID]
+		if !selected {
+			for _, rawID := range finding.RawSourceIDs {
+				if _, selected = selectedRawIDs[rawID]; selected {
+					break
+				}
+			}
+		}
+		if selected {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
+// CurrentCampaignRawFindings returns the stable pre-deduplication source
+// collection for one automation campaign. A pre-v4 legacy occurrence is
+// projected as its deterministic future rrw_* source until replay admits the
+// durable RawReviewFinding. LegacyFindingID then suppresses only that virtual
+// row, leaving multiple independently admitted native sources intact.
+func CurrentCampaignRawFindings(
+	state RepositoryState,
+	campaignID string,
+	legacyRunIDs []string,
+	legacyStartedAt time.Time,
+) []RawReviewFinding {
+	campaignID = strings.TrimSpace(campaignID)
+	selectedFindings := CurrentCampaignFindingsByID(
+		state, campaignID, legacyRunIDs, legacyStartedAt,
+	)
+	deduplicatedIDs := make(map[string]struct{}, len(state.DeduplicatedFindings))
+	for _, finding := range state.DeduplicatedFindings {
+		deduplicatedIDs[finding.ID] = struct{}{}
+	}
+	legacyFindings := make([]Finding, 0, len(selectedFindings))
+	legacyFindingIDs := make(map[string]struct{}, len(selectedFindings))
+	for _, finding := range selectedFindings {
+		if _, deduplicated := deduplicatedIDs[finding.ID]; deduplicated ||
+			strings.HasPrefix(finding.ID, "rdf_") {
+			continue
+		}
+		legacyFindings = append(legacyFindings, finding)
+		legacyFindingIDs[finding.ID] = struct{}{}
+	}
+	currentDeduplicated := CurrentCampaignDeduplicatedFindings(
+		state, campaignID, legacyRunIDs, legacyStartedAt,
+	)
+	currentDeduplicatedIDs := make(map[string]struct{}, len(currentDeduplicated))
+	for _, finding := range currentDeduplicated {
+		currentDeduplicatedIDs[finding.ID] = struct{}{}
+	}
+	wantedRuns := make(map[string]struct{}, len(legacyRunIDs))
+	for _, runID := range legacyRunIDs {
+		if runID = strings.TrimSpace(runID); runID != "" {
+			wantedRuns[runID] = struct{}{}
+		}
+	}
+
+	result := make([]RawReviewFinding, 0, len(state.RawFindings)+len(legacyFindings))
+	representedLegacyIDs := make(map[string]struct{})
+	for _, raw := range state.RawFindings {
+		_, selectedLegacy := legacyFindingIDs[raw.LegacyFindingID]
+		_, selectedDeduplicated := currentDeduplicatedIDs[raw.DeduplicatedFindingID]
+		selected := selectedLegacy || selectedDeduplicated
+		if campaignID != "" {
+			selected = selected || raw.CampaignID == campaignID
+		} else {
+			_, selectedRun := wantedRuns[raw.RunID]
+			selected = selected || selectedRun &&
+				(legacyStartedAt.IsZero() || raw.CreatedAt.IsZero() || !raw.CreatedAt.Before(legacyStartedAt))
+		}
+		if !selected {
+			continue
+		}
+		result = append(result, raw)
+		if selectedLegacy {
+			representedLegacyIDs[raw.LegacyFindingID] = struct{}{}
+		}
+	}
+	for index, finding := range legacyFindings {
+		if _, represented := representedLegacyIDs[finding.ID]; represented {
+			continue
+		}
+		result = append(result, projectLegacyRawReviewFinding(state, finding, uint64(index+1)))
+	}
+	return result
+}
+
+func projectLegacyRawReviewFinding(
+	state RepositoryState,
+	finding Finding,
+	ordinal uint64,
+) RawReviewFinding {
+	contexts := make(map[string]FindingContext, len(state.Contexts))
+	for _, contextRecord := range state.Contexts {
+		contexts[contextRecord.ID] = contextRecord
+	}
+	contextID, runID, model, reviewer := "", "", "", ""
+	for _, id := range finding.ContextIDs {
+		contextRecord, found := contexts[id]
+		if !found {
+			continue
+		}
+		if contextID == "" {
+			contextID = contextRecord.ID
+			runID = contextRecord.RunID
+		}
+		if model == "" {
+			model = strings.TrimSpace(contextRecord.Model)
+		}
+		if reviewer == "" {
+			reviewer = strings.TrimSpace(contextRecord.Reviewer)
+		}
+	}
+	if contextID == "" {
+		contextID = stableID("legacy-context_", finding.ID)
+	}
+	if runID == "" {
+		for _, run := range state.Runs {
+			if containsExactString(run.FindingIDs, finding.ID) {
+				runID = run.ID
+				break
+			}
+		}
+	}
+	if runID == "" {
+		runID = "legacy:" + finding.ID
+	}
+	if model == "" && len(finding.Models) > 0 {
+		model = strings.TrimSpace(finding.Models[0])
+	}
+	if model == "" && len(finding.Observations) > 0 {
+		model = strings.TrimSpace(finding.Observations[0].Model)
+	}
+	if reviewer == "" && len(finding.Observations) > 0 {
+		reviewer = strings.TrimSpace(finding.Observations[0].Reviewer)
+	}
+	if model == "" {
+		model = "historical-review"
+	}
+	if reviewer == "" {
+		reviewer = model
+	}
+	processingCampaignID := strings.TrimSpace(finding.CampaignID)
+	if !ValidRepositoryReviewCampaignID(processingCampaignID) {
+		processingCampaignID = stableID(
+			"rrc_", state.Repository, "historical-projection", runID, finding.CommitSHA,
+		)
+	}
+	bucket, err := DeduplicationAdmissionBucket(
+		processingCampaignID, finding.File, finding.Symbol,
+	)
+	if err != nil {
+		bucket = stableID("rdb_", processingCampaignID, finding.ID)
+	}
+	createdAt := finding.CreatedAt.UTC()
+	if createdAt.IsZero() {
+		createdAt = state.UpdatedAt.UTC()
+	}
+	if createdAt.IsZero() {
+		createdAt = time.Unix(0, 0).UTC()
+	}
+	updatedAt := finding.UpdatedAt.UTC()
+	if updatedAt.IsZero() || updatedAt.Before(createdAt) {
+		updatedAt = createdAt
+	}
+	raw := RawReviewFinding{
+		ID: stableID("rrw_", state.Repository, "historical", finding.ID), Version: 1,
+		CampaignID: processingCampaignID, AdmissionBucket: bucket,
+		InsertionOrdinal: ordinal, LegacyFindingID: finding.ID,
+		Repository: finding.Repository, CommitSHA: finding.CommitSHA,
+		File: finding.File, Line: finding.Line, Severity: finding.Severity,
+		Title: finding.Title, Symbol: finding.Symbol, Message: finding.Message,
+		Evidence: finding.Evidence, Impact: finding.Impact, Validation: finding.Validation,
+		MatchHints: finding.MatchHints, FixEffort: finding.FixEffort,
+		ContextID: contextID, RunID: runID, AssignmentID: "historical-replay",
+		Model: model, Reviewer: reviewer, State: RawFindingDeduplicationPending,
+		Disposition: RawFindingDispositionUndecided, CreatedAt: createdAt, UpdatedAt: updatedAt,
+	}
+	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(raw)
+	raw.History = []RawFindingHistoryEntry{{
+		State: raw.State, Disposition: raw.Disposition, At: updatedAt,
+	}}
+	return raw
+}
+
 // CurrentCampaignMetrics derives unique path and finding counts from durable
 // campaign authority. Repository-level aggregate mappings remain live, so the
 // distinct aggregate count may decrease when provisional duplicates merge.

@@ -373,7 +373,7 @@ func validateDeduplicationState(state RepositoryState) error {
 	maximumOrdinal := uint64(0)
 	for _, raw := range state.RawFindings {
 		validCommit := validRepositoryReviewCommitSHA(raw.CommitSHA)
-		if strings.HasPrefix(raw.ID, "rrl_") {
+		if strings.HasPrefix(raw.AssignmentID, "record-") {
 			validCommit = validBoundedText(raw.CommitSHA, 256)
 		}
 		if _, duplicate := rawByID[raw.ID]; duplicate ||
@@ -436,7 +436,7 @@ func validateDeduplicationState(state RepositoryState) error {
 		validCommit := validRepositoryReviewCommitSHA(finding.CommitSHA)
 		if len(finding.RawSourceIDs) > 0 {
 			if first, found := rawByID[finding.RawSourceIDs[0]]; found &&
-				strings.HasPrefix(first.ID, "rrl_") {
+				strings.HasPrefix(first.AssignmentID, "record-") {
 				validCommit = validBoundedText(finding.CommitSHA, 256)
 			}
 		}

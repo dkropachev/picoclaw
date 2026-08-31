@@ -164,6 +164,13 @@ func migrateRepositoryState(state *RepositoryState) (bool, error) {
 		state.DeduplicationJobs = []DeduplicationJob{}
 		migrated = true
 	}
+	rawIDsMigrated, rawIDsErr := migrateRepositoryReviewRawFindingIDs(state)
+	if rawIDsErr != nil {
+		return false, rawIDsErr
+	}
+	if rawIDsMigrated {
+		migrated = true
+	}
 	if reconcileFindingsProcessingCounters(state) {
 		migrated = true
 	}
@@ -253,6 +260,226 @@ func migrateRepositoryState(state *RepositoryState) (bool, error) {
 		}
 	}
 	return migrated, nil
+}
+
+// migrateRepositoryReviewRawFindingIDs repairs both pre-canonical identity
+// shapes. Native raw findings used rrf_* while the compatibility Record path
+// used rrl_* and promoted an rfn_* parent. Raw suffixes remain stable. An old
+// compatibility parent is rewritten to the rdf_* identity derived from its
+// migrated rrw_* source, while its rfn_* identity is retained only as the raw
+// alias used by old bookmarks.
+func migrateRepositoryReviewRawFindingIDs(state *RepositoryState) (bool, error) {
+	if state == nil || len(state.RawFindings) == 0 {
+		return false, nil
+	}
+	rawReplacements := make(map[string]string)
+	parentReplacements := make(map[string]string)
+	compatibilityAliases := make(map[int]string)
+	seen := make(map[string]struct{}, len(state.RawFindings))
+	for index, raw := range state.RawFindings {
+		id := raw.ID
+		legacyCompatibilityRaw := strings.HasPrefix(id, "rrl_")
+		if strings.HasPrefix(id, "rrf_") || legacyCompatibilityRaw {
+			id = "rrw_" + id[len("rrf_"):]
+			rawReplacements[raw.ID] = id
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return false, errors.New("repository review raw finding ID migration conflicts")
+		}
+		seen[id] = struct{}{}
+		oldParentID := strings.TrimSpace(raw.DeduplicatedFindingID)
+		compatibilityRecord := legacyCompatibilityRaw ||
+			strings.HasPrefix(raw.AssignmentID, "record-")
+		if !compatibilityRecord || !strings.HasPrefix(oldParentID, "rfn_") {
+			continue
+		}
+		if raw.LegacyFindingID != "" && raw.LegacyFindingID != oldParentID {
+			return false, errors.New("repository review compatibility raw alias conflicts")
+		}
+		canonicalParentID := stableID("rdf_", id)
+		if existing := parentReplacements[oldParentID]; existing != "" &&
+			existing != canonicalParentID {
+			return false, errors.New("repository review compatibility parent migration is ambiguous")
+		}
+		parentReplacements[oldParentID] = canonicalParentID
+		compatibilityAliases[index] = oldParentID
+	}
+	if len(rawReplacements) == 0 && len(parentReplacements) == 0 {
+		return false, nil
+	}
+	replaceRaw := func(id string) string {
+		if replacement := rawReplacements[id]; replacement != "" {
+			return replacement
+		}
+		return id
+	}
+	replaceParent := func(id string) string {
+		if replacement := parentReplacements[id]; replacement != "" {
+			return replacement
+		}
+		return id
+	}
+	if err := validateRepositoryReviewParentIdentityMigration(state, parentReplacements); err != nil {
+		return false, err
+	}
+
+	rawDigests := make(map[string]string, len(state.RawFindings))
+	for index := range state.RawFindings {
+		raw := &state.RawFindings[index]
+		raw.ID = replaceRaw(raw.ID)
+		if alias := compatibilityAliases[index]; alias != "" {
+			raw.LegacyFindingID = alias
+		}
+		raw.DeduplicatedFindingID = replaceParent(raw.DeduplicatedFindingID)
+		for historyIndex := range raw.History {
+			raw.History[historyIndex].DeduplicatedFindingID = replaceParent(
+				raw.History[historyIndex].DeduplicatedFindingID,
+			)
+		}
+		if alias := compatibilityAliases[index]; alias != "" {
+			raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(*raw)
+		}
+		rawDigests[raw.ID] = raw.DiagnosisDigest
+	}
+	for index := range state.DeduplicationJobs {
+		job := &state.DeduplicationJobs[index]
+		job.RawFindingID = replaceRaw(
+			state.DeduplicationJobs[index].RawFindingID,
+		)
+		job.Decision.CandidateID = replaceParent(job.Decision.CandidateID)
+		for candidateIndex := range job.CandidateVersions {
+			job.CandidateVersions[candidateIndex].CandidateID = replaceParent(
+				job.CandidateVersions[candidateIndex].CandidateID,
+			)
+		}
+		for candidateIndex := range job.ShortlistedScores {
+			job.ShortlistedScores[candidateIndex].CandidateID = replaceParent(
+				job.ShortlistedScores[candidateIndex].CandidateID,
+			)
+		}
+	}
+	for index := range state.DeduplicatedFindings {
+		finding := &state.DeduplicatedFindings[index]
+		oldFindingID := finding.ID
+		finding.ID = replaceParent(oldFindingID)
+		for sourceIndex := range finding.RawSourceIDs {
+			finding.RawSourceIDs[sourceIndex] = replaceRaw(finding.RawSourceIDs[sourceIndex])
+		}
+		for historyIndex := range finding.History {
+			finding.History[historyIndex].RawFindingID = replaceRaw(
+				finding.History[historyIndex].RawFindingID,
+			)
+		}
+		if finding.ID != oldFindingID && len(finding.RawSourceIDs) > 0 {
+			finding.DiagnosisDigest = rawDigests[finding.RawSourceIDs[0]]
+		}
+	}
+	for index := range state.Findings {
+		state.Findings[index].ID = replaceParent(state.Findings[index].ID)
+		state.Findings[index].PostResolutionFindingID = replaceParent(
+			state.Findings[index].PostResolutionFindingID,
+		)
+		for rawIndex := range state.Findings[index].RawFindingIDs {
+			state.Findings[index].RawFindingIDs[rawIndex] = replaceRaw(
+				state.Findings[index].RawFindingIDs[rawIndex],
+			)
+		}
+	}
+	for index := range state.MappingJobs {
+		job := &state.MappingJobs[index]
+		oldFindingID := job.ReviewFindingID
+		job.ReviewFindingID = replaceParent(oldFindingID)
+		if job.ReviewFindingID != oldFindingID {
+			job.ID = mappingJobID(job.ReviewFindingID)
+		}
+	}
+	for index := range state.RepositoryFindings {
+		finding := &state.RepositoryFindings[index]
+		for occurrenceIndex := range finding.ReviewFindingIDs {
+			finding.ReviewFindingIDs[occurrenceIndex] = replaceParent(
+				finding.ReviewFindingIDs[occurrenceIndex],
+			)
+		}
+		for historyIndex := range finding.PathSymbolHistory {
+			finding.PathSymbolHistory[historyIndex].ReviewFindingID = replaceParent(
+				finding.PathSymbolHistory[historyIndex].ReviewFindingID,
+			)
+		}
+	}
+	for index := range state.IssueDrafts {
+		for findingIndex := range state.IssueDrafts[index].FindingIDs {
+			state.IssueDrafts[index].FindingIDs[findingIndex] = replaceParent(
+				state.IssueDrafts[index].FindingIDs[findingIndex],
+			)
+		}
+	}
+	for index := range state.Runs {
+		for findingIndex := range state.Runs[index].FindingIDs {
+			id := replaceRaw(state.Runs[index].FindingIDs[findingIndex])
+			state.Runs[index].FindingIDs[findingIndex] = replaceParent(id)
+		}
+	}
+	if state.ActiveReviewRun != nil {
+		for findingIndex := range state.ActiveReviewRun.FindingIDs {
+			id := replaceRaw(state.ActiveReviewRun.FindingIDs[findingIndex])
+			state.ActiveReviewRun.FindingIDs[findingIndex] = replaceParent(id)
+		}
+	}
+	return true, nil
+}
+
+func validateRepositoryReviewParentIdentityMigration(
+	state *RepositoryState,
+	replacements map[string]string,
+) error {
+	if len(replacements) == 0 {
+		return nil
+	}
+	validateUnique := func(ids []string, kind string) error {
+		seen := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			if replacement := replacements[id]; replacement != "" {
+				id = replacement
+			}
+			if _, duplicate := seen[id]; duplicate {
+				return fmt.Errorf("repository review %s identity migration conflicts", kind)
+			}
+			seen[id] = struct{}{}
+		}
+		return nil
+	}
+	deduplicatedIDs := make([]string, 0, len(state.DeduplicatedFindings))
+	for _, finding := range state.DeduplicatedFindings {
+		deduplicatedIDs = append(deduplicatedIDs, finding.ID)
+	}
+	if err := validateUnique(deduplicatedIDs, "deduplicated finding"); err != nil {
+		return err
+	}
+	projectionIDs := make([]string, 0, len(state.Findings))
+	for _, finding := range state.Findings {
+		projectionIDs = append(projectionIDs, finding.ID)
+	}
+	if err := validateUnique(projectionIDs, "finding projection"); err != nil {
+		return err
+	}
+	mappingIDs := make([]string, 0, len(state.MappingJobs))
+	for _, job := range state.MappingJobs {
+		findingID := job.ReviewFindingID
+		if replacement := replacements[findingID]; replacement != "" {
+			findingID = replacement
+		}
+		mappingIDs = append(mappingIDs, mappingJobID(findingID))
+	}
+	if err := validateUnique(mappingIDs, "mapping job"); err != nil {
+		return err
+	}
+	for oldID := range replacements {
+		if deduplicatedFindingIndexByID(state.DeduplicatedFindings, oldID) < 0 ||
+			findingIndexByID(state.Findings, oldID) < 0 {
+			return errors.New("repository review compatibility parent migration is incomplete")
+		}
+	}
+	return nil
 }
 
 func backfillRepositoryFindingEvidence(state *RepositoryState) bool {
@@ -683,8 +910,7 @@ func historicalReplayDeduplicatedFinding(state RepositoryState, findingID string
 		rawIDs[rawID] = struct{}{}
 	}
 	for _, raw := range state.RawFindings {
-		if _, selected := rawIDs[raw.ID]; selected && raw.LegacyFindingID != "" &&
-			strings.HasPrefix(raw.ID, "rrw_") {
+		if _, selected := rawIDs[raw.ID]; selected && HistoricalDeduplicationRawFinding(raw) {
 			return true
 		}
 	}

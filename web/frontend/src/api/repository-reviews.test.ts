@@ -19,9 +19,11 @@ import {
   getRepositoryReviewAutomationRepositoryFinding,
   getRepositoryReviewCommitOptions,
   getRepositoryReviewProfile,
+  getRepositoryReviewRawSource,
   listRepositoryReviewAutomationFindingsPage,
   listRepositoryReviewAutomationIssues,
   listRepositoryReviewAutomationIssuesPage,
+  listRepositoryReviewAutomationRawFindingsPage,
   listRepositoryReviewAutomationRepositoryFindingsPage,
   listRepositoryReviewAutomations,
   listRepositoryReviewAutomationsPage,
@@ -34,6 +36,8 @@ import {
   repositoryReviewDefaultIssuePrompt,
   restartRepositoryReviewAutomation,
   resumeRepositoryReviewAutomation,
+  retryRepositoryReviewHistoricalDeduplication,
+  retryRepositoryReviewRawSource,
   retryRepositoryReviewRunFindingStatuses,
   startRepositoryReviewAutomation,
   updateRepositoryReviewAutomation,
@@ -928,12 +932,12 @@ describe("repository review API", () => {
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       2,
-      "/api/repository-reviews/automations/auto%2Fslash/findings?scope=all&offset=50&limit=50",
+      "/api/repository-reviews/automations/auto%2Fslash/report?scope=all&offset=50&limit=50",
       { signal: undefined },
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       3,
-      "/api/repository-reviews/automations/auto%2Fslash/run-findings/finding%2Fslash",
+      "/api/repository-reviews/automations/auto%2Fslash/findings/finding%2Fslash",
       { signal: undefined },
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
@@ -1077,7 +1081,7 @@ describe("repository review API", () => {
 
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       1,
-      "/api/repository-reviews/automations/auto%2Fslash/run-findings?query=severity+%3D+high+ORDER+BY+updated+DESC&cursor=run-cursor&limit=25",
+      "/api/repository-reviews/automations/auto%2Fslash/findings?query=severity+%3D+high+ORDER+BY+updated+DESC&cursor=run-cursor&limit=25",
       undefined,
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
@@ -1119,6 +1123,119 @@ describe("repository review API", () => {
       code: "invalid_query",
       position: 18,
     })
+  })
+
+  it("uses canonical raw finding collection, detail, and retry endpoints", async () => {
+    const automation = { id: "auto/slash", repository: "owner/repo" }
+    const rawFinding = {
+      id: "rrw/slash",
+      path: "pkg/store.go",
+      severity: "high",
+      title: "Lost update",
+      model: "reviewer",
+      deduplication_state: "failed",
+      disposition: "undecided",
+      failure: {
+        code: "provider_failed",
+        message: "Provider failed",
+        retryable: true,
+        at: "2026-08-29T12:00:00Z",
+      },
+      created_at: "2026-08-29T11:00:00Z",
+      updated_at: "2026-08-29T12:00:00Z",
+    }
+    const findingsProcessing = {
+      raw_total: 1,
+      pending: 0,
+      processing: 0,
+      failed: 1,
+      completed: 0,
+      new: 0,
+      duplicates: 0,
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          raw_findings: [rawFinding],
+          total: 1,
+          next_cursor: "raw-next",
+          canonical_query: "ALL ORDER BY created DESC",
+          query_schema: { fields: [] },
+          findings_processing: findingsProcessing,
+          historical_deduplication: {
+            required: true,
+            status: "failed",
+            error: "Replay failed",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ automation, source: { ...rawFinding, id: "rrw_1" } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          source: {
+            ...rawFinding,
+            id: "rrw_1",
+            deduplication_state: "pending",
+          },
+          findings_processing: { ...findingsProcessing, failed: 0, pending: 1 },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          historical_deduplication: { required: true, status: "pending" },
+        }),
+      )
+
+    await expect(
+      listRepositoryReviewAutomationRawFindingsPage("auto/slash", {
+        cursor: "raw/cursor",
+        limit: 25,
+      }),
+    ).resolves.toMatchObject({
+      raw_findings: [{ id: "rrw/slash", path: "pkg/store.go" }],
+      next_cursor: "raw-next",
+      findings_processing: { raw_total: 1, failed: 1 },
+      historical_deduplication: { status: "failed" },
+    })
+    await expect(
+      getRepositoryReviewRawSource("auto/slash", "rfn/legacy"),
+    ).resolves.toMatchObject({ source: { id: "rrw_1" } })
+    await expect(
+      retryRepositoryReviewRawSource("auto/slash", "rrw_1"),
+    ).resolves.toMatchObject({
+      source: { id: "rrw_1", deduplication_state: "pending" },
+    })
+    await expect(
+      retryRepositoryReviewHistoricalDeduplication("auto/slash"),
+    ).resolves.toMatchObject({
+      historical_deduplication: { required: true, status: "pending" },
+    })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/repository-reviews/automations/auto%2Fslash/raw-findings?query=ALL+ORDER+BY+created+DESC&cursor=raw%2Fcursor&limit=25",
+      undefined,
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/repository-reviews/automations/auto%2Fslash/raw-findings/rfn%2Flegacy",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      3,
+      "/api/repository-reviews/automations/auto%2Fslash/raw-findings/rrw_1/retry",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      4,
+      "/api/repository-reviews/automations/auto%2Fslash/historical-deduplication/retry",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    )
   })
 
   it("normalizes public run finding status and retries explicit findings", async () => {

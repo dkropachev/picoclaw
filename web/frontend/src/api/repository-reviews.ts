@@ -60,6 +60,12 @@ export type RepositoryReviewRawFindingDisposition =
   | "undecided"
   | "new"
   | "duplicate"
+export type RepositoryReviewHistoricalDeduplicationStatus =
+  | "pending"
+  | "replaying"
+  | "merging"
+  | "failed"
+  | "completed"
 export type RepositoryReviewFixEffortClass =
   | "tiny"
   | "small"
@@ -173,6 +179,15 @@ export interface RepositoryReviewFinding {
   raw_source_total?: number
 }
 
+export interface RepositoryReviewRawFindingHistoryEntry {
+  state: RepositoryReviewDeduplicationState
+  disposition: RepositoryReviewRawFindingDisposition
+  deduplicated_finding_id?: string
+  attempt?: number
+  failure?: RepositoryReviewDeduplicationFailure
+  at: string
+}
+
 export interface RepositoryReviewDeduplicationFailure {
   code: string
   message: string
@@ -182,7 +197,12 @@ export interface RepositoryReviewDeduplicationFailure {
 
 export interface RepositoryReviewRawFinding {
   id: string
-  campaign_id: string
+  version?: number
+  campaign_id?: string
+  admission_bucket?: string
+  insertion_ordinal?: number
+  diagnosis_digest?: string
+  legacy_finding_id?: string
   repository?: string
   commit_sha?: string
   file?: RepositoryReviewFileRef
@@ -195,6 +215,11 @@ export interface RepositoryReviewRawFinding {
   evidence?: string
   impact?: string
   validation?: RepositoryReviewValidation
+  match_hints?: RepositoryReviewMatchHints
+  fix_effort?: RepositoryReviewFixEffort
+  context_id?: string
+  run_id?: string
+  assignment_id?: string
   model: string
   model_alias?: string
   account?: string
@@ -202,9 +227,18 @@ export interface RepositoryReviewRawFinding {
   deduplication_state: RepositoryReviewDeduplicationState
   disposition: RepositoryReviewRawFindingDisposition
   deduplicated_finding_id?: string
+  history?: RepositoryReviewRawFindingHistoryEntry[]
   failure?: RepositoryReviewDeduplicationFailure
   created_at: string
   updated_at: string
+}
+
+export interface RepositoryReviewHistoricalDeduplication {
+  required: boolean
+  status?: RepositoryReviewHistoricalDeduplicationStatus
+  attempts?: number
+  error?: string
+  updated_at?: string
 }
 
 export interface RepositoryReviewFindingsProcessingCounters {
@@ -237,6 +271,16 @@ export interface RepositoryReviewRawFindingDetail {
   source: RepositoryReviewRawFinding
   context?: RepositoryReviewFindingContext
   finding?: RepositoryReviewFinding
+  findings_processing?: RepositoryReviewFindingsProcessingCounters
+  historical_deduplication?: RepositoryReviewHistoricalDeduplication
+}
+
+export interface RepositoryReviewRawFindingsCollectionPage extends CollectionPageMetadata {
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  raw_findings: RepositoryReviewRawFinding[]
+  findings_processing?: RepositoryReviewFindingsProcessingCounters
+  historical_deduplication?: RepositoryReviewHistoricalDeduplication
 }
 
 export interface RepositoryReviewFindingObservation {
@@ -342,6 +386,7 @@ export interface RepositoryReviewFindingDetail {
   repository_finding?: RepositoryFinding
   occurrences?: RepositoryReviewFinding[]
   possible_duplicate_findings?: RepositoryFinding[]
+  raw_source_total?: number
   capabilities?: RepositoryReviewCapabilities
 }
 
@@ -549,6 +594,8 @@ export interface RepositoryReviewRunFindingsCollectionPage extends CollectionPag
   automation: RepositoryReviewAutomation
   repository?: RepositoryReviewSummary
   findings: RepositoryReviewRunFindingSummary[]
+  findings_processing?: RepositoryReviewFindingsProcessingCounters
+  historical_deduplication?: RepositoryReviewHistoricalDeduplication
   capabilities?: RepositoryReviewCapabilities
 }
 
@@ -788,6 +835,9 @@ export interface RepositoryReviewAutomationProgress {
   reviewed_files: number
   remaining_files: number
   unsupported_files: number
+  raw_findings?: number
+  deduplicated_findings?: number
+  /** @deprecated Use deduplicated_findings. */
   findings: number
   assignment_progress: RepositoryReviewAssignmentProgress
   scope_frozen?: boolean
@@ -1225,7 +1275,7 @@ export async function getRepositoryReviewAutomationFindings(
       next_finding_offset?: number
     }
   >(
-    `${automationPath(automationID)}/findings?${params.toString()}`,
+    `${automationPath(automationID)}/report?${params.toString()}`,
     undefined,
     signal,
   )
@@ -1264,7 +1314,7 @@ export async function listRepositoryReviewAutomationFindingsPage(
     Partial<RepositoryReviewRunFindingsCollectionPage>
   >(
     collectionListURL(
-      `${automationPath(automationID)}/run-findings`,
+      `${automationPath(automationID)}/findings`,
       collectionInput,
     ),
     undefined,
@@ -1280,7 +1330,51 @@ export async function listRepositoryReviewAutomationFindingsPage(
     next_cursor: page.next_cursor ?? "",
     canonical_query: page.canonical_query ?? "",
     query_schema: page.query_schema ?? { fields: [] },
+    findings_processing: page.findings_processing
+      ? normalizeFindingsProcessingCounters(page.findings_processing)
+      : undefined,
+    historical_deduplication: page.historical_deduplication
+      ? normalizeHistoricalDeduplication(page.historical_deduplication)
+      : undefined,
     capabilities: page.capabilities,
+  }
+}
+
+export async function listRepositoryReviewAutomationRawFindingsPage(
+  automationID: string,
+  input: CollectionListRequest = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewRawFindingsCollectionPage> {
+  const collectionInput = {
+    ...input,
+    query: input.query?.trim() || "ALL ORDER BY created DESC",
+  }
+  const page = await collectionRequest<
+    Partial<RepositoryReviewRawFindingsCollectionPage>
+  >(
+    collectionListURL(
+      `${automationPath(automationID)}/raw-findings`,
+      collectionInput,
+    ),
+    undefined,
+    signal,
+  )
+  return {
+    automation: normalizeAutomation(page.automation!),
+    repository: page.repository
+      ? normalizeRepositoryReviewSummary(page.repository)
+      : undefined,
+    raw_findings: (page.raw_findings ?? []).map(normalizeRawFinding),
+    total: page.total ?? 0,
+    next_cursor: page.next_cursor ?? "",
+    canonical_query: page.canonical_query ?? "",
+    query_schema: page.query_schema ?? { fields: [] },
+    findings_processing: page.findings_processing
+      ? normalizeFindingsProcessingCounters(page.findings_processing)
+      : undefined,
+    historical_deduplication: page.historical_deduplication
+      ? normalizeHistoricalDeduplication(page.historical_deduplication)
+      : undefined,
   }
 }
 
@@ -1358,7 +1452,7 @@ export async function getRepositoryReviewAutomationFinding(
     Partial<RepositoryReviewFindingDetail> & {
       draft?: RepositoryReviewIssueDraft
     }
-  >(automationRunFindingPath(automationID, findingID), undefined, signal)
+  >(automationFindingPath(automationID, findingID), undefined, signal)
   return normalizeFindingDetail(value)
 }
 
@@ -1382,7 +1476,7 @@ export async function listRepositoryReviewFindingRawSources(
     repository: value.repository
       ? normalizeRepositoryReviewSummary(value.repository)
       : undefined,
-    sources: value.sources ?? [],
+    sources: (value.sources ?? []).map(normalizeRawFinding),
     offset: value.offset ?? 0,
     total: value.total ?? value.sources?.length ?? 0,
   }
@@ -1394,7 +1488,7 @@ export async function getRepositoryReviewRawSource(
   signal?: AbortSignal,
 ): Promise<RepositoryReviewRawFindingDetail> {
   const value = await requestJSON<RepositoryReviewRawFindingDetail>(
-    `${automationPath(automationID)}/findings-processing/sources/${encodeURIComponent(sourceID)}`,
+    `${automationPath(automationID)}/raw-findings/${encodeURIComponent(sourceID)}`,
     undefined,
     signal,
   )
@@ -1404,8 +1498,15 @@ export async function getRepositoryReviewRawSource(
     repository: value.repository
       ? normalizeRepositoryReviewSummary(value.repository)
       : undefined,
+    source: normalizeRawFinding(value.source),
     finding: value.finding ? normalizeFinding(value.finding) : undefined,
     context: value.context ? normalizeFindingContext(value.context) : undefined,
+    findings_processing: value.findings_processing
+      ? normalizeFindingsProcessingCounters(value.findings_processing)
+      : undefined,
+    historical_deduplication: value.historical_deduplication
+      ? normalizeHistoricalDeduplication(value.historical_deduplication)
+      : undefined,
   }
 }
 
@@ -1433,7 +1534,10 @@ export async function getRepositoryReviewFindingsProcessing(
     repository: value.repository
       ? normalizeRepositoryReviewSummary(value.repository)
       : undefined,
-    raw_findings: value.raw_findings ?? [],
+    raw_findings: (value.raw_findings ?? []).map(normalizeRawFinding),
+    findings_processing: value.findings_processing
+      ? normalizeFindingsProcessingCounters(value.findings_processing)
+      : undefined,
     offset: value.offset ?? 0,
     total: value.total ?? value.raw_findings?.length ?? 0,
   }
@@ -1444,11 +1548,52 @@ export async function retryRepositoryReviewRawSource(
   sourceID: string,
   signal?: AbortSignal,
 ): Promise<RepositoryReviewRawFindingDetail> {
-  return requestJSON<RepositoryReviewRawFindingDetail>(
-    `${automationPath(automationID)}/findings-processing/sources/${encodeURIComponent(sourceID)}/retry`,
+  const value = await requestJSON<RepositoryReviewRawFindingDetail>(
+    `${automationPath(automationID)}/raw-findings/${encodeURIComponent(sourceID)}/retry`,
     jsonMutation("POST", {}),
     signal,
   )
+  return {
+    ...value,
+    automation: normalizeAutomation(value.automation),
+    repository: value.repository
+      ? normalizeRepositoryReviewSummary(value.repository)
+      : undefined,
+    source: normalizeRawFinding(value.source),
+    context: value.context ? normalizeFindingContext(value.context) : undefined,
+    finding: value.finding ? normalizeFinding(value.finding) : undefined,
+    findings_processing: value.findings_processing
+      ? normalizeFindingsProcessingCounters(value.findings_processing)
+      : undefined,
+  }
+}
+
+export async function retryRepositoryReviewHistoricalDeduplication(
+  automationID: string,
+  signal?: AbortSignal,
+): Promise<{
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  historical_deduplication: RepositoryReviewHistoricalDeduplication
+}> {
+  const value = await requestJSON<{
+    automation: RepositoryReviewAutomation
+    repository?: RepositoryReviewSummary
+    historical_deduplication: RepositoryReviewHistoricalDeduplication
+  }>(
+    `${automationPath(automationID)}/historical-deduplication/retry`,
+    jsonMutation("POST", {}),
+    signal,
+  )
+  return {
+    automation: normalizeAutomation(value.automation),
+    repository: value.repository
+      ? normalizeRepositoryReviewSummary(value.repository)
+      : undefined,
+    historical_deduplication: normalizeHistoricalDeduplication(
+      value.historical_deduplication,
+    ),
+  }
 }
 
 export async function retryRepositoryReviewRunFindingStatuses(
@@ -2012,6 +2157,64 @@ function normalizeRunFindingSummary(
   }
 }
 
+function normalizeRawFinding(
+  finding: RepositoryReviewRawFinding,
+): RepositoryReviewRawFinding {
+  return {
+    ...finding,
+    path: finding.path || finding.file?.path,
+    validation: finding.validation
+      ? {
+          ...finding.validation,
+          checks: finding.validation.checks ?? [],
+        }
+      : undefined,
+    match_hints: finding.match_hints
+      ? normalizeMatchHints(finding.match_hints)
+      : undefined,
+    fix_effort: finding.fix_effort
+      ? normalizeFixEffort(finding.fix_effort)
+      : undefined,
+    history: (finding.history ?? []).map((entry) => ({ ...entry })),
+  }
+}
+
+function normalizeFindingsProcessingCounters(
+  counters: RepositoryReviewFindingsProcessingCounters,
+): RepositoryReviewFindingsProcessingCounters {
+  return {
+    raw_total: counters.raw_total ?? 0,
+    pending: counters.pending ?? 0,
+    processing: counters.processing ?? 0,
+    failed: counters.failed ?? 0,
+    completed: counters.completed ?? 0,
+    new: counters.new ?? 0,
+    duplicates: counters.duplicates ?? 0,
+    ...(counters.updated_at ? { updated_at: counters.updated_at } : {}),
+  }
+}
+
+function normalizeHistoricalDeduplication(
+  replay: RepositoryReviewHistoricalDeduplication,
+): RepositoryReviewHistoricalDeduplication {
+  const validStatus = new Set<RepositoryReviewHistoricalDeduplicationStatus>([
+    "pending",
+    "replaying",
+    "merging",
+    "failed",
+    "completed",
+  ]).has(replay.status as RepositoryReviewHistoricalDeduplicationStatus)
+    ? replay.status
+    : undefined
+  return {
+    required: replay.required ?? false,
+    ...(validStatus ? { status: validStatus } : {}),
+    ...(replay.attempts == null ? {} : { attempts: replay.attempts }),
+    ...(replay.error ? { error: replay.error } : {}),
+    ...(replay.updated_at ? { updated_at: replay.updated_at } : {}),
+  }
+}
+
 function normalizeRepositoryFindingSummary(
   finding: RepositoryReviewRepositoryFindingSummary,
 ): RepositoryReviewRepositoryFindingSummary {
@@ -2235,6 +2438,8 @@ function normalizeFindingDetail(
     possible_duplicate_findings: value.possible_duplicate_findings?.map(
       normalizeRepositoryFinding,
     ),
+    raw_source_total:
+      value.raw_source_total ?? value.finding?.raw_source_total ?? 0,
     issue: value.issue
       ? normalizeIssueDraft(value.issue)
       : value.draft
@@ -2417,7 +2622,15 @@ function normalizeAutomation(
       reviewed_files: automation.progress?.reviewed_files ?? 0,
       remaining_files: automation.progress?.remaining_files ?? 0,
       unsupported_files: automation.progress?.unsupported_files ?? 0,
-      findings: automation.progress?.findings ?? 0,
+      raw_findings: automation.progress?.raw_findings ?? 0,
+      deduplicated_findings:
+        automation.progress?.deduplicated_findings ??
+        automation.progress?.findings ??
+        0,
+      findings:
+        automation.progress?.findings ??
+        automation.progress?.deduplicated_findings ??
+        0,
       assignment_progress: normalizeAssignmentProgress(
         automation.progress?.assignment_progress,
       ),
@@ -2644,13 +2857,6 @@ function automationFindingPath(
   findingID: string,
 ): string {
   return `${automationPath(automationID)}/findings/${encodeURIComponent(findingID)}`
-}
-
-function automationRunFindingPath(
-  automationID: string,
-  findingID: string,
-): string {
-  return `${automationPath(automationID)}/run-findings/${encodeURIComponent(findingID)}`
 }
 
 function automationIssuePath(automationID: string, draftID: string): string {

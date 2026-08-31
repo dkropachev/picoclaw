@@ -3,6 +3,7 @@ import { createFileRoute, redirect, useLocation } from "@tanstack/react-router"
 import { RepositoryReviewFindingsPage } from "@/components/repository-reviews/repository-review-findings-page"
 import { repositoryReviewRepositoryDefaultQuery } from "@/components/repository-reviews/repository-review-repositories-route-state"
 import {
+  normalizeRepositoryReviewRawFindingsSearch,
   normalizeRepositoryReviewRepositoryFindingsSearch,
   normalizeRepositoryReviewRunFindingsSearch,
   repositoryReviewDefaultQuery,
@@ -72,6 +73,17 @@ function RepositoryReviewFindingsRoute() {
           params: { id, findingId: findingID },
           search,
           state: true,
+        })
+      }
+      onOpenRawFindings={() =>
+        void navigate({
+          to: "/repository-reviews/$id/raw-findings",
+          params: { id },
+          search: normalizeRepositoryReviewRawFindingsSearch({}),
+          state: repositoryReviewParentNavigationState(
+            parentSearch,
+            repositoryReviewDefaultQuery,
+          ),
         })
       }
       onOpenRepositoryFindings={() =>

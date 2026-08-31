@@ -257,8 +257,23 @@ func (h *Handler) handleGetRepositoryReviewAutomation(w http.ResponseWriter, r *
 }
 
 func (h *Handler) handleGetRepositoryReviewAutomationReport(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasSuffix(r.URL.Path, "/report") &&
-		!r.URL.Query().Has("scope") && !r.URL.Query().Has("offset") {
+	if !strings.HasSuffix(r.URL.Path, "/report") {
+		if r.URL.Query().Has("scope") || r.URL.Query().Has("offset") {
+			scope, offset, limit, err := repositoryReviewReportPage(r)
+			if err != nil {
+				writeRepositoryReviewError(w, err)
+				return
+			}
+			ledger, err := h.repositoryReviewAutomationLedger(
+				r.Context(), r.PathValue("automation_id"),
+			)
+			if err != nil {
+				writeRepositoryReviewAutomationError(w, err)
+				return
+			}
+			h.writeRepositoryReviewDeduplicatedFindingsPage(w, ledger, scope, offset, limit)
+			return
+		}
 		h.handleListRepositoryReviewDeduplicatedFindingsCollection(w, r)
 		return
 	}
@@ -270,13 +285,6 @@ func (h *Handler) handleGetRepositoryReviewAutomationReport(w http.ResponseWrite
 	ledger, err := h.repositoryReviewAutomationLedger(r.Context(), r.PathValue("automation_id"))
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
-		return
-	}
-	if !strings.HasSuffix(r.URL.Path, "/report") &&
-		(len(ledger.State.RawFindings) > 0 || len(ledger.State.DeduplicationJobs) > 0 ||
-			len(ledger.State.DeduplicatedFindings) > 0 ||
-			ledger.State.HistoricalDeduplication.Required) {
-		h.writeRepositoryReviewDeduplicatedFindingsPage(w, ledger, scope, offset, limit)
 		return
 	}
 	findings := []repoaudit.Finding{}

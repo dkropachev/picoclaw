@@ -7,6 +7,7 @@ import {
 } from "@/api/repository-reviews"
 import { type CollectionDefinition } from "@/components/collection"
 import { StandardCollectionPage } from "@/components/collection/standard-collection-page"
+import { Button } from "@/components/ui/button"
 import {
   type CollectionRouteSearch,
   normalizeCollectionRouteSearch,
@@ -28,10 +29,12 @@ export function RepositoryReviewRunsPage({
   search,
   onSearchChange,
   onOpen,
+  onOpenRawFindings,
 }: {
   search: { q?: string; view?: "list" | "table" | "grid" }
   onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
   onOpen?: (review: RepositoryReviewAutomation) => void
+  onOpenRawFindings?: (review: RepositoryReviewAutomation) => void
 }) {
   const activeQuery = normalizeCollectionRouteSearch(search, {
     defaultQuery: repositoryReviewDefaultQuery,
@@ -82,7 +85,25 @@ export function RepositoryReviewRunsPage({
           review.branch || review.ref
             ? `Branch ${review.branch || review.ref}`
             : "Default repository branch",
-        metadata: `${review.name || "Review"} · ${formatTimestamp(review.updated_at)}`,
+        metadata: (
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span>
+              {review.name || "Review"} · {formatTimestamp(review.updated_at)}
+              {` · Findings: ${deduplicatedFindingCount(review)}`}
+            </span>
+            {onOpenRawFindings && (
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="h-auto p-0 text-xs"
+                onClick={() => onOpenRawFindings(review)}
+              >
+                Raw findings: {rawFindingCount(review)}
+              </Button>
+            )}
+          </span>
+        ),
       }),
       columns: [
         { id: "status", header: "Status", cell: (review) => review.status },
@@ -94,8 +115,14 @@ export function RepositoryReviewRunsPage({
         },
         {
           id: "findings",
-          header: "Finding occurrences",
-          cell: (review) => review.progress.findings,
+          header: "Findings",
+          cell: deduplicatedFindingCount,
+          className: "w-24 tabular-nums",
+        },
+        {
+          id: "raw-findings",
+          header: "Raw findings",
+          cell: rawFindingCount,
           className: "w-24 tabular-nums",
         },
         {
@@ -113,6 +140,16 @@ export function RepositoryReviewRunsPage({
           value: repositoryReviewFileProgressLabel,
         },
         {
+          id: "findings",
+          label: "Findings",
+          value: deduplicatedFindingCount,
+        },
+        {
+          id: "raw-findings",
+          label: "Raw findings",
+          value: rawFindingCount,
+        },
+        {
           id: "inspected",
           label: "Inspected files",
           value: repositoryReviewInspectedFilesLabel,
@@ -121,11 +158,6 @@ export function RepositoryReviewRunsPage({
           id: "reviewed",
           label: "Fully reviewed files",
           value: (review) => review.progress.reviewed_files,
-        },
-        {
-          id: "findings",
-          label: "Finding occurrences",
-          value: (review) => review.progress.findings,
         },
       ],
       badges: [
@@ -137,7 +169,7 @@ export function RepositoryReviewRunsPage({
         },
       ],
     }),
-    [],
+    [onOpenRawFindings],
   )
   return (
     <StandardCollectionPage
@@ -160,6 +192,14 @@ export function RepositoryReviewRunsPage({
       emptyDescription="Assign a review profile from Repositories first."
     />
   )
+}
+
+function rawFindingCount(review: RepositoryReviewAutomation): number {
+  return review.progress.raw_findings ?? 0
+}
+
+function deduplicatedFindingCount(review: RepositoryReviewAutomation): number {
+  return review.progress.deduplicated_findings ?? review.progress.findings ?? 0
 }
 
 function isQueuedHandoff(review: RepositoryReviewAutomation): boolean {

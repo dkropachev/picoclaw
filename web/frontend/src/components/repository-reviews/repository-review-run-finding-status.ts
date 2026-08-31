@@ -63,9 +63,9 @@ export function runFindingStatusDescription(
     case "failed":
       return "Repository status could not be determined. Retry when ready."
     case "associated_new":
-      return "A repository finding was created from this run finding."
+      return "A repository finding was created from this finding."
     case "associated_existing":
-      return "This run finding was added to an existing repository finding."
+      return "This finding was added to an existing repository finding."
     case "needs_review":
       return "Repository status needs a decision before issue actions are available."
     default:

@@ -61,6 +61,7 @@ import { Route as RepositoryReviewsRepositoriesIdRouteImport } from './routes/re
 import { Route as RepositoryReviewsProfilesNewRouteImport } from './routes/repository-reviews_.profiles_.new'
 import { Route as RepositoryReviewsProfilesProfileIDRouteImport } from './routes/repository-reviews_.profiles_.$profileID'
 import { Route as RepositoryReviewsIdReportRouteImport } from './routes/repository-reviews_.$id_.report'
+import { Route as RepositoryReviewsIdRawFindingsRouteImport } from './routes/repository-reviews_.$id_.raw-findings'
 import { Route as RepositoryReviewsIdIssuesRouteImport } from './routes/repository-reviews_.$id_.issues'
 import { Route as RepositoryReviewsIdFindingsRouteImport } from './routes/repository-reviews_.$id_.findings'
 import { Route as ModelsRoutersNewRouteImport } from './routes/models_.routers_.new'
@@ -96,6 +97,7 @@ import { Route as AccountsIdEditRouteImport } from './routes/accounts_.$id_.edit
 import { Route as RepositoryReviewsRepositoriesIdFindingsRouteImport } from './routes/repository-reviews_.repositories_.$id_.findings'
 import { Route as RepositoryReviewsRepositoriesIdEditRouteImport } from './routes/repository-reviews_.repositories_.$id_.edit'
 import { Route as RepositoryReviewsProfilesProfileIDEditRouteImport } from './routes/repository-reviews_.profiles_.$profileID_.edit'
+import { Route as RepositoryReviewsIdRawFindingsSourceIdRouteImport } from './routes/repository-reviews_.$id_.raw-findings_.$sourceId'
 import { Route as RepositoryReviewsIdIssuesDraftIdRouteImport } from './routes/repository-reviews_.$id_.issues_.$draftId'
 import { Route as RepositoryReviewsIdFindingsFindingIdRouteImport } from './routes/repository-reviews_.$id_.findings_.$findingId'
 import { Route as ModelsRoutersNameEditRouteImport } from './routes/models_.routers_.$name_.edit'
@@ -388,6 +390,12 @@ const RepositoryReviewsIdReportRoute =
     path: '/repository-reviews/$id/report',
     getParentRoute: () => rootRouteImport,
   } as any)
+const RepositoryReviewsIdRawFindingsRoute =
+  RepositoryReviewsIdRawFindingsRouteImport.update({
+    id: '/repository-reviews_/$id_/raw-findings',
+    path: '/repository-reviews/$id/raw-findings',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const RepositoryReviewsIdIssuesRoute =
   RepositoryReviewsIdIssuesRouteImport.update({
     id: '/repository-reviews_/$id_/issues',
@@ -575,6 +583,12 @@ const RepositoryReviewsProfilesProfileIDEditRoute =
   RepositoryReviewsProfilesProfileIDEditRouteImport.update({
     id: '/repository-reviews_/profiles_/$profileID_/edit',
     path: '/repository-reviews/profiles/$profileID/edit',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const RepositoryReviewsIdRawFindingsSourceIdRoute =
+  RepositoryReviewsIdRawFindingsSourceIdRouteImport.update({
+    id: '/repository-reviews_/$id_/raw-findings_/$sourceId',
+    path: '/repository-reviews/$id/raw-findings/$sourceId',
     getParentRoute: () => rootRouteImport,
   } as any)
 const RepositoryReviewsIdIssuesDraftIdRoute =
@@ -772,6 +786,7 @@ export interface FileRoutesByFullPath {
   '/models/routers/new': typeof ModelsRoutersNewRoute
   '/repository-reviews/$id/findings': typeof RepositoryReviewsIdFindingsRoute
   '/repository-reviews/$id/issues': typeof RepositoryReviewsIdIssuesRoute
+  '/repository-reviews/$id/raw-findings': typeof RepositoryReviewsIdRawFindingsRoute
   '/repository-reviews/$id/report': typeof RepositoryReviewsIdReportRoute
   '/repository-reviews/profiles/$profileID': typeof RepositoryReviewsProfilesProfileIDRoute
   '/repository-reviews/profiles/new': typeof RepositoryReviewsProfilesNewRoute
@@ -794,6 +809,7 @@ export interface FileRoutesByFullPath {
   '/models/routers/$name/edit': typeof ModelsRoutersNameEditRoute
   '/repository-reviews/$id/findings/$findingId': typeof RepositoryReviewsIdFindingsFindingIdRoute
   '/repository-reviews/$id/issues/$draftId': typeof RepositoryReviewsIdIssuesDraftIdRoute
+  '/repository-reviews/$id/raw-findings/$sourceId': typeof RepositoryReviewsIdRawFindingsSourceIdRoute
   '/repository-reviews/profiles/$profileID/edit': typeof RepositoryReviewsProfilesProfileIDEditRoute
   '/repository-reviews/repositories/$id/edit': typeof RepositoryReviewsRepositoriesIdEditRoute
   '/repository-reviews/repositories/$id/findings': typeof RepositoryReviewsRepositoriesIdFindingsRoute
@@ -882,6 +898,7 @@ export interface FileRoutesByTo {
   '/models/routers/new': typeof ModelsRoutersNewRoute
   '/repository-reviews/$id/findings': typeof RepositoryReviewsIdFindingsRoute
   '/repository-reviews/$id/issues': typeof RepositoryReviewsIdIssuesRoute
+  '/repository-reviews/$id/raw-findings': typeof RepositoryReviewsIdRawFindingsRoute
   '/repository-reviews/$id/report': typeof RepositoryReviewsIdReportRoute
   '/repository-reviews/profiles/$profileID': typeof RepositoryReviewsProfilesProfileIDRoute
   '/repository-reviews/profiles/new': typeof RepositoryReviewsProfilesNewRoute
@@ -904,6 +921,7 @@ export interface FileRoutesByTo {
   '/models/routers/$name/edit': typeof ModelsRoutersNameEditRoute
   '/repository-reviews/$id/findings/$findingId': typeof RepositoryReviewsIdFindingsFindingIdRoute
   '/repository-reviews/$id/issues/$draftId': typeof RepositoryReviewsIdIssuesDraftIdRoute
+  '/repository-reviews/$id/raw-findings/$sourceId': typeof RepositoryReviewsIdRawFindingsSourceIdRoute
   '/repository-reviews/profiles/$profileID/edit': typeof RepositoryReviewsProfilesProfileIDEditRoute
   '/repository-reviews/repositories/$id/edit': typeof RepositoryReviewsRepositoriesIdEditRoute
   '/repository-reviews/repositories/$id/findings': typeof RepositoryReviewsRepositoriesIdFindingsRoute
@@ -993,6 +1011,7 @@ export interface FileRoutesById {
   '/models_/routers_/new': typeof ModelsRoutersNewRoute
   '/repository-reviews_/$id_/findings': typeof RepositoryReviewsIdFindingsRoute
   '/repository-reviews_/$id_/issues': typeof RepositoryReviewsIdIssuesRoute
+  '/repository-reviews_/$id_/raw-findings': typeof RepositoryReviewsIdRawFindingsRoute
   '/repository-reviews_/$id_/report': typeof RepositoryReviewsIdReportRoute
   '/repository-reviews_/profiles_/$profileID': typeof RepositoryReviewsProfilesProfileIDRoute
   '/repository-reviews_/profiles_/new': typeof RepositoryReviewsProfilesNewRoute
@@ -1015,6 +1034,7 @@ export interface FileRoutesById {
   '/models_/routers_/$name_/edit': typeof ModelsRoutersNameEditRoute
   '/repository-reviews_/$id_/findings_/$findingId': typeof RepositoryReviewsIdFindingsFindingIdRoute
   '/repository-reviews_/$id_/issues_/$draftId': typeof RepositoryReviewsIdIssuesDraftIdRoute
+  '/repository-reviews_/$id_/raw-findings_/$sourceId': typeof RepositoryReviewsIdRawFindingsSourceIdRoute
   '/repository-reviews_/profiles_/$profileID_/edit': typeof RepositoryReviewsProfilesProfileIDEditRoute
   '/repository-reviews_/repositories_/$id_/edit': typeof RepositoryReviewsRepositoriesIdEditRoute
   '/repository-reviews_/repositories_/$id_/findings': typeof RepositoryReviewsRepositoriesIdFindingsRoute
@@ -1105,6 +1125,7 @@ export interface FileRouteTypes {
     | '/models/routers/new'
     | '/repository-reviews/$id/findings'
     | '/repository-reviews/$id/issues'
+    | '/repository-reviews/$id/raw-findings'
     | '/repository-reviews/$id/report'
     | '/repository-reviews/profiles/$profileID'
     | '/repository-reviews/profiles/new'
@@ -1127,6 +1148,7 @@ export interface FileRouteTypes {
     | '/models/routers/$name/edit'
     | '/repository-reviews/$id/findings/$findingId'
     | '/repository-reviews/$id/issues/$draftId'
+    | '/repository-reviews/$id/raw-findings/$sourceId'
     | '/repository-reviews/profiles/$profileID/edit'
     | '/repository-reviews/repositories/$id/edit'
     | '/repository-reviews/repositories/$id/findings'
@@ -1215,6 +1237,7 @@ export interface FileRouteTypes {
     | '/models/routers/new'
     | '/repository-reviews/$id/findings'
     | '/repository-reviews/$id/issues'
+    | '/repository-reviews/$id/raw-findings'
     | '/repository-reviews/$id/report'
     | '/repository-reviews/profiles/$profileID'
     | '/repository-reviews/profiles/new'
@@ -1237,6 +1260,7 @@ export interface FileRouteTypes {
     | '/models/routers/$name/edit'
     | '/repository-reviews/$id/findings/$findingId'
     | '/repository-reviews/$id/issues/$draftId'
+    | '/repository-reviews/$id/raw-findings/$sourceId'
     | '/repository-reviews/profiles/$profileID/edit'
     | '/repository-reviews/repositories/$id/edit'
     | '/repository-reviews/repositories/$id/findings'
@@ -1325,6 +1349,7 @@ export interface FileRouteTypes {
     | '/models_/routers_/new'
     | '/repository-reviews_/$id_/findings'
     | '/repository-reviews_/$id_/issues'
+    | '/repository-reviews_/$id_/raw-findings'
     | '/repository-reviews_/$id_/report'
     | '/repository-reviews_/profiles_/$profileID'
     | '/repository-reviews_/profiles_/new'
@@ -1347,6 +1372,7 @@ export interface FileRouteTypes {
     | '/models_/routers_/$name_/edit'
     | '/repository-reviews_/$id_/findings_/$findingId'
     | '/repository-reviews_/$id_/issues_/$draftId'
+    | '/repository-reviews_/$id_/raw-findings_/$sourceId'
     | '/repository-reviews_/profiles_/$profileID_/edit'
     | '/repository-reviews_/repositories_/$id_/edit'
     | '/repository-reviews_/repositories_/$id_/findings'
@@ -1411,6 +1437,7 @@ export interface RootRouteChildren {
   ModelsRoutersNewRoute: typeof ModelsRoutersNewRoute
   RepositoryReviewsIdFindingsRoute: typeof RepositoryReviewsIdFindingsRoute
   RepositoryReviewsIdIssuesRoute: typeof RepositoryReviewsIdIssuesRoute
+  RepositoryReviewsIdRawFindingsRoute: typeof RepositoryReviewsIdRawFindingsRoute
   RepositoryReviewsIdReportRoute: typeof RepositoryReviewsIdReportRoute
   RepositoryReviewsProfilesProfileIDRoute: typeof RepositoryReviewsProfilesProfileIDRoute
   RepositoryReviewsProfilesNewRoute: typeof RepositoryReviewsProfilesNewRoute
@@ -1423,6 +1450,7 @@ export interface RootRouteChildren {
   ModelsRoutersNameEditRoute: typeof ModelsRoutersNameEditRoute
   RepositoryReviewsIdFindingsFindingIdRoute: typeof RepositoryReviewsIdFindingsFindingIdRoute
   RepositoryReviewsIdIssuesDraftIdRoute: typeof RepositoryReviewsIdIssuesDraftIdRoute
+  RepositoryReviewsIdRawFindingsSourceIdRoute: typeof RepositoryReviewsIdRawFindingsSourceIdRoute
   RepositoryReviewsProfilesProfileIDEditRoute: typeof RepositoryReviewsProfilesProfileIDEditRoute
   RepositoryReviewsRepositoriesIdEditRoute: typeof RepositoryReviewsRepositoriesIdEditRoute
   RepositoryReviewsRepositoriesIdFindingsRoute: typeof RepositoryReviewsRepositoriesIdFindingsRoute
@@ -1798,6 +1826,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RepositoryReviewsIdReportRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/repository-reviews_/$id_/raw-findings': {
+      id: '/repository-reviews_/$id_/raw-findings'
+      path: '/repository-reviews/$id/raw-findings'
+      fullPath: '/repository-reviews/$id/raw-findings'
+      preLoaderRoute: typeof RepositoryReviewsIdRawFindingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/repository-reviews_/$id_/issues': {
       id: '/repository-reviews_/$id_/issues'
       path: '/repository-reviews/$id/issues'
@@ -2041,6 +2076,13 @@ declare module '@tanstack/react-router' {
       path: '/repository-reviews/profiles/$profileID/edit'
       fullPath: '/repository-reviews/profiles/$profileID/edit'
       preLoaderRoute: typeof RepositoryReviewsProfilesProfileIDEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/repository-reviews_/$id_/raw-findings_/$sourceId': {
+      id: '/repository-reviews_/$id_/raw-findings_/$sourceId'
+      path: '/repository-reviews/$id/raw-findings/$sourceId'
+      fullPath: '/repository-reviews/$id/raw-findings/$sourceId'
+      preLoaderRoute: typeof RepositoryReviewsIdRawFindingsSourceIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/repository-reviews_/$id_/issues_/$draftId': {
@@ -2369,6 +2411,7 @@ const rootRouteChildren: RootRouteChildren = {
   ModelsRoutersNewRoute: ModelsRoutersNewRoute,
   RepositoryReviewsIdFindingsRoute: RepositoryReviewsIdFindingsRoute,
   RepositoryReviewsIdIssuesRoute: RepositoryReviewsIdIssuesRoute,
+  RepositoryReviewsIdRawFindingsRoute: RepositoryReviewsIdRawFindingsRoute,
   RepositoryReviewsIdReportRoute: RepositoryReviewsIdReportRoute,
   RepositoryReviewsProfilesProfileIDRoute:
     RepositoryReviewsProfilesProfileIDRoute,
@@ -2384,6 +2427,8 @@ const rootRouteChildren: RootRouteChildren = {
   RepositoryReviewsIdFindingsFindingIdRoute:
     RepositoryReviewsIdFindingsFindingIdRoute,
   RepositoryReviewsIdIssuesDraftIdRoute: RepositoryReviewsIdIssuesDraftIdRoute,
+  RepositoryReviewsIdRawFindingsSourceIdRoute:
+    RepositoryReviewsIdRawFindingsSourceIdRoute,
   RepositoryReviewsProfilesProfileIDEditRoute:
     RepositoryReviewsProfilesProfileIDEditRoute,
   RepositoryReviewsRepositoriesIdEditRoute:

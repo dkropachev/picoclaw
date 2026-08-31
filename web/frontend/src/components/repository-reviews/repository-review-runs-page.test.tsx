@@ -78,6 +78,8 @@ const review: RepositoryReviewAutomation = {
     remaining_files: 36,
     unsupported_files: 1,
     findings: 3,
+    raw_findings: 7,
+    deduplicated_findings: 3,
     finding_aggregates: 3,
     unaggregated_findings: 0,
     assignment_progress: {
@@ -123,7 +125,8 @@ describe("RepositoryReviewRunsPage", () => {
   it("renders compact summaries and opens the dedicated detail", async () => {
     const user = userEvent.setup()
     const onOpen = vi.fn()
-    renderPage({ onOpen })
+    const onOpenRawFindings = vi.fn()
+    renderPage({ onOpen, onOpenRawFindings })
 
     const item = await screen.findByText("owner/repo")
     expect(screen.getByText("Branch main")).toBeVisible()
@@ -133,6 +136,10 @@ describe("RepositoryReviewRunsPage", () => {
       screen.queryByRole("button", { name: "Stop safely" }),
     ).not.toBeInTheDocument()
     expect(screen.queryByText("Run history (1)")).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Raw findings: 7" }))
+    expect(onOpenRawFindings).toHaveBeenCalledWith(review)
+    expect(onOpen).not.toHaveBeenCalled()
 
     await user.dblClick(item.closest("[data-item-id]")!)
     expect(onOpen).toHaveBeenCalledWith(review)
@@ -157,9 +164,9 @@ describe("RepositoryReviewRunsPage", () => {
       { q: "ORDER BY repository ASC", view: "grid" },
       true,
     )
-    expect(await screen.findByText("Fully reviewed files")).toBeVisible()
+    expect(await screen.findByText("Findings")).toBeVisible()
+    expect(screen.getByText("Raw findings")).toBeVisible()
     expect(screen.getByText("13 of 49 files (27%)")).toBeVisible()
-    expect(screen.getByText("Unknown")).toBeVisible()
   })
 
   it("renders a first-class empty collection", async () => {
@@ -178,9 +185,11 @@ describe("RepositoryReviewRunsPage", () => {
 function renderPage({
   onSearchChange = vi.fn(),
   onOpen = vi.fn(),
+  onOpenRawFindings = vi.fn(),
 }: {
   onSearchChange?: (search: CollectionRouteSearch, replace?: boolean) => void
   onOpen?: (review: RepositoryReviewAutomation) => void
+  onOpenRawFindings?: (review: RepositoryReviewAutomation) => void
 } = {}) {
   return render(
     <QueryClientProvider
@@ -194,6 +203,7 @@ function renderPage({
         search={{ q: "ORDER BY repository ASC" }}
         onSearchChange={onSearchChange}
         onOpen={onOpen}
+        onOpenRawFindings={onOpenRawFindings}
       />
     </QueryClientProvider>,
   )

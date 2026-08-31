@@ -7,7 +7,7 @@ import {
   IconRefresh,
   IconSparkles,
 } from "@tabler/icons-react"
-import { useMutation, useQuery } from "@tanstack/react-query"
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query"
 import { useSetAtom } from "jotai"
 import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
@@ -20,6 +20,7 @@ import {
   generateRepositoryReviewIssues,
   getRepositoryReviewAutomationFinding,
   getRepositoryReviewAutomationRepositoryFinding,
+  listRepositoryReviewFindingRawSources,
   postRepositoryReviewFinding,
   reserveRepositoryReviewValidations,
   resolveRepositoryReviewPossibleDuplicate,
@@ -63,6 +64,7 @@ export function RepositoryReviewFindingPage({
   resourceKind,
   onBack,
   onOpenRepositoryFinding,
+  onOpenRawFinding,
   onOpenIssue,
   onLinkIssue,
   onGenerated,
@@ -74,6 +76,7 @@ export function RepositoryReviewFindingPage({
   resourceKind: "run" | "repository"
   onBack: () => void
   onOpenRepositoryFinding: (findingID: string) => void
+  onOpenRawFinding?: (sourceID: string) => void
   onOpenIssue: (draftID: string) => void
   onLinkIssue: (findingID?: string) => void
   onGenerated: (generationID: string) => void
@@ -124,6 +127,33 @@ export function RepositoryReviewFindingPage({
   const isRepositoryResource = resourceKind === "repository"
   const actionFinding = detail?.action_finding ?? finding
   const actionFindingID = repositoryFinding ? actionFinding?.id : findingID
+  const rawSourcesQuery = useInfiniteQuery({
+    queryKey: ["repository-review-finding-sources", automationID, findingID],
+    initialPageParam: 0,
+    queryFn: ({ signal, pageParam }) =>
+      listRepositoryReviewFindingRawSources(
+        automationID,
+        findingID,
+        { offset: pageParam || undefined, limit: 25 },
+        signal,
+      ),
+    getNextPageParam: (page) => page.next_offset,
+    enabled: resourceKind === "run" && Boolean(detail),
+    retry: false,
+    refetchInterval: (current) =>
+      current.state.data?.pages.some(
+        (page) =>
+          page.automation.status === "running" ||
+          page.automation.status === "stopping",
+      )
+        ? 2_000
+        : false,
+  })
+  const rawSources = useMemo(
+    () =>
+      rawSourcesQuery.data?.pages.flatMap((page) => page.sources ?? []) ?? [],
+    [rawSourcesQuery.data?.pages],
+  )
   const issueID =
     finding?.issue_draft_id ||
     detail?.occurrences?.find((occurrence) => occurrence.issue_draft_id)
@@ -309,13 +339,13 @@ export function RepositoryReviewFindingPage({
       retryRepositoryReviewRunFindingStatuses(automationID, [findingID]),
     onSuccess: async () => {
       await query.refetch()
-      toast.success("Run finding status queued.")
+      toast.success("Finding status queued.")
     },
     onError: (error) => {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Run finding status could not be retried.",
+          : "Finding status could not be retried.",
       )
       void query.refetch()
     },
@@ -401,7 +431,12 @@ export function RepositoryReviewFindingPage({
             last_commit_sha: detail.repository?.last_commit_sha,
             contexts: detail.contexts,
           },
-          [finding],
+          [
+            {
+              ...finding,
+              raw_source_total: detail.raw_source_total,
+            },
+          ],
         ),
       })
       if (!sent) {
@@ -422,7 +457,7 @@ export function RepositoryReviewFindingPage({
           ? repositoryFinding?.canonical_title
           : undefined) ||
         finding?.title ||
-        (isRepositoryResource ? "Repository finding" : "Run finding")
+        (isRepositoryResource ? "Repository finding" : "Finding")
       }
       identity={
         <span
@@ -488,7 +523,7 @@ export function RepositoryReviewFindingPage({
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h2 id="run-finding-status" className="font-semibold">
-                    Run finding status
+                    Finding status
                   </h2>
                   <p className="text-muted-foreground mt-1 text-sm">
                     {runFindingStatusDescription(finding)}
@@ -1083,6 +1118,109 @@ export function RepositoryReviewFindingPage({
               </div>
             )}
           </section>
+
+          {!isRepositoryResource && (
+            <section
+              aria-labelledby="finding-raw-sources"
+              className="space-y-3"
+            >
+              <div className="flex flex-wrap items-end justify-between gap-2">
+                <div>
+                  <h2 id="finding-raw-sources" className="font-semibold">
+                    Raw run findings
+                  </h2>
+                  <p className="text-muted-foreground mt-1 text-sm">
+                    {detail.raw_source_total ??
+                      rawSourcesQuery.data?.pages[0]?.total ??
+                      0}{" "}
+                    raw source
+                    {(detail.raw_source_total ??
+                      rawSourcesQuery.data?.pages[0]?.total ??
+                      0) === 1
+                      ? ""
+                      : "s"}{" "}
+                    support this representative diagnosis.
+                  </p>
+                </div>
+              </div>
+              {rawSourcesQuery.isLoading ? (
+                <p className="text-muted-foreground text-sm" role="status">
+                  Loading raw findings…
+                </p>
+              ) : rawSourcesQuery.error ? (
+                <div
+                  className="border-destructive/50 rounded-lg border p-3 text-sm"
+                  role="alert"
+                >
+                  <p>
+                    {rawSourcesQuery.error instanceof Error
+                      ? rawSourcesQuery.error.message
+                      : "Raw findings could not be loaded."}
+                  </p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="mt-2"
+                    onClick={() => void rawSourcesQuery.refetch()}
+                  >
+                    <IconRefresh /> Retry
+                  </Button>
+                </div>
+              ) : rawSources.length > 0 ? (
+                <div className="space-y-2">
+                  {rawSources.map((source) => (
+                    <button
+                      key={source.id}
+                      type="button"
+                      className="border-border hover:bg-muted/30 focus-visible:ring-ring flex w-full items-start justify-between gap-3 rounded-lg border p-3 text-left outline-none focus-visible:ring-2"
+                      onClick={() => onOpenRawFinding?.(source.id)}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium">
+                          {source.title}
+                        </span>
+                        <span className="text-muted-foreground mt-1 block truncate text-xs">
+                          {source.path ||
+                            source.file?.path ||
+                            finding.file.path}
+                          {source.line == null ? "" : `:${source.line}`} ·{" "}
+                          {source.model}
+                          {source.reviewer
+                            ? ` · reviewer ${source.reviewer}`
+                            : ""}
+                        </span>
+                      </span>
+                      <span className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                        <Badge variant="outline">{source.severity}</Badge>
+                        <Badge variant="secondary">{source.disposition}</Badge>
+                        <IconExternalLink className="size-4" />
+                      </span>
+                    </button>
+                  ))}
+                  {rawSourcesQuery.hasNextPage && (
+                    <div className="flex justify-center pt-1">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={rawSourcesQuery.isFetchingNextPage}
+                        onClick={() => void rawSourcesQuery.fetchNextPage()}
+                      >
+                        {rawSourcesQuery.isFetchingNextPage
+                          ? "Loading…"
+                          : "Load more raw findings"}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-muted-foreground text-sm">
+                  No retained raw source is available for this finding.
+                </p>
+              )}
+            </section>
+          )}
 
           {!isRepositoryResource && finding.match_hints && (
             <section

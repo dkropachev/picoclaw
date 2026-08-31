@@ -537,7 +537,7 @@ func persistRepositoryReviewCheckpointObservation(
 		}
 		fingerprint := findingFingerprint(primary, candidate)
 		rawID := stableID(
-			"rrf_", plan.Repository, plan.CampaignID, plan.CommitSHA, runID,
+			"rrw_", plan.Repository, plan.CampaignID, plan.CommitSHA, runID,
 			assignmentID, fmt.Sprint(candidateIndex), fingerprint,
 		)
 		if err := persistRawRepositoryReviewCheckpointFinding(

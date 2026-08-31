@@ -514,8 +514,9 @@ func TestHistoricalReplayAdditionalStoreStateMachine(t *testing.T) {
 	if err != nil || pending.Status != HistoricalDeduplicationPending {
 		t.Fatalf("retry replay=%#v err=%v", pending, err)
 	}
-	if _, _, err := second.RetryHistoricalDeduplicationReplay(repository); !errors.Is(err, ErrConflict) {
-		t.Fatalf("retry pending replay error=%v", err)
+	if _, repeated, err := second.RetryHistoricalDeduplicationReplay(repository); err != nil ||
+		repeated.Status != HistoricalDeduplicationPending {
+		t.Fatalf("idempotent retry pending replay=%#v error=%v", repeated, err)
 	}
 }
 
@@ -526,18 +527,19 @@ func TestHistoricalReplayAdditionalResetErrors(t *testing.T) {
 		t.Fatal("nil reset state accepted")
 	}
 	raw := RawReviewFinding{ID: "rrw_raw", LegacyFindingID: "legacy"}
-	for name, state := range map[string]RepositoryState{
-		"missing job": {RawFindings: []RawReviewFinding{raw}},
-		"running job": {
-			RawFindings:       []RawReviewFinding{raw},
-			DeduplicationJobs: []DeduplicationJob{{RawFindingID: raw.ID, State: DeduplicationJobRunning}},
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := resetHistoricalDeduplicationModelWork(&state, snapshot, now); err == nil {
-				t.Fatal("invalid reset state accepted")
-			}
-		})
+	missingJob := RepositoryState{RawFindings: []RawReviewFinding{raw}}
+	if err := resetHistoricalDeduplicationModelWork(&missingJob, snapshot, now); err == nil {
+		t.Fatal("missing historical job accepted")
+	}
+	running := RepositoryState{
+		RawFindings:       []RawReviewFinding{raw},
+		DeduplicationJobs: []DeduplicationJob{{RawFindingID: raw.ID, State: DeduplicationJobRunning}},
+	}
+	if err := resetHistoricalDeduplicationModelWork(&running, snapshot, now); err != nil ||
+		running.RawFindings[0].State != RawFindingDeduplicationPending ||
+		running.DeduplicationJobs[0].State != DeduplicationJobPending ||
+		running.DeduplicationJobs[0].LeaseID != "" {
+		t.Fatalf("running historical work was not safely reset: state=%#v err=%v", running, err)
 	}
 
 	liveRaw := RawReviewFinding{
@@ -554,6 +556,7 @@ func TestHistoricalReplayAdditionalResetErrors(t *testing.T) {
 	historicalRaw := liveRaw
 	historicalRaw.ID = "rrw_historical"
 	historicalRaw.LegacyFindingID = "legacy"
+	historicalRaw.AssignmentID = historicalReplayAssignmentID
 	historicalRaw.InsertionOrdinal = 1
 	historicalRaw.Disposition = RawFindingDispositionNew
 	historicalRaw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(historicalRaw)
@@ -636,11 +639,84 @@ func TestHistoricalReplayAdditionalResetErrors(t *testing.T) {
 		DeduplicationJobs: []DeduplicationJob{completedJob(historicalRaw.ID, 1)},
 		DeduplicatedFindings: []DeduplicatedReviewFinding{{
 			ID: "historical-only", RawSourceIDs: []string{historicalRaw.ID},
+			Status: FindingDismissed, IssueDraftID: "draft",
+			RepositoryFindingID: "repository", RepositoryMatchState: RepositoryMatchKnown,
 		}},
-		RepositoryFindings: []RepositoryFinding{{ReviewFindingIDs: []string{"historical-only"}}},
+		Findings: []Finding{
+			{ID: "legacy", Status: FindingOpen, Version: 1},
+			{
+				ID: "historical-only", Status: FindingDismissed, IssueDraftID: "draft",
+				RepositoryFindingID: "repository", RepositoryMatchState: RepositoryMatchKnown,
+			},
+		},
+		IssueDrafts: []IssueDraft{{ID: "draft", FindingIDs: []string{"historical-only"}, Version: 1}},
+		RepositoryFindings: []RepositoryFinding{{
+			ID: "repository", Version: 1, ReviewFindingIDs: []string{"historical-only"},
+			PathSymbolHistory: []RepositoryFindingPathSymbol{{ReviewFindingID: "historical-only"}},
+		}},
+		Runs: []ReviewRun{{FindingIDs: []string{"historical-only"}}},
 	}
-	if err := resetHistoricalDeduplicationModelWork(&removedOccurrence, snapshot, now); !errors.Is(err, ErrConflict) {
+	if err := resetHistoricalDeduplicationModelWork(&removedOccurrence, snapshot, now); err != nil {
 		t.Fatalf("removed occurrence reset error=%v", err)
+	}
+	legacy := removedOccurrence.Findings[findingIndexByID(removedOccurrence.Findings, "legacy")]
+	if len(removedOccurrence.DeduplicatedFindings) != 0 || legacy.Status != FindingDismissed ||
+		legacy.IssueDraftID != "draft" || legacy.RepositoryFindingID != "repository" ||
+		removedOccurrence.IssueDrafts[0].FindingIDs[0] != "legacy" ||
+		removedOccurrence.RepositoryFindings[0].ReviewFindingIDs[0] != "legacy" ||
+		removedOccurrence.RepositoryFindings[0].PathSymbolHistory[0].ReviewFindingID != "legacy" ||
+		removedOccurrence.Runs[0].FindingIDs[0] != "legacy" {
+		t.Fatalf("historical-only lifecycle was not rehomed: %#v", removedOccurrence)
+	}
+	recreated := newDeduplicatedReviewFinding(
+		removedOccurrence.RawFindings[0], 1, removedOccurrence.Findings, now.Add(time.Minute),
+	)
+	removedOccurrence.DeduplicatedFindings = append(
+		removedOccurrence.DeduplicatedFindings, recreated,
+	)
+	removedOccurrence.Findings = append(
+		removedOccurrence.Findings,
+		deduplicatedFindingProjection(
+			recreated, removedOccurrence.RawFindings[0], removedOccurrence.Findings,
+		),
+	)
+	if err := restoreHistoricalDeduplicatedLifecycle(
+		&removedOccurrence, removedOccurrence.RawFindings[0], recreated.ID, now.Add(time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	restored := removedOccurrence.DeduplicatedFindings[0]
+	if restored.Status != FindingDismissed ||
+		removedOccurrence.IssueDrafts[0].FindingIDs[0] != recreated.ID ||
+		removedOccurrence.Findings[findingIndexByID(
+			removedOccurrence.Findings, "legacy",
+		)].IssueDraftID != "" ||
+		removedOccurrence.RepositoryFindings[0].ReviewFindingIDs[0] != "legacy" {
+		t.Fatalf("historical-only lifecycle was not restored: %#v", removedOccurrence)
+	}
+	conflictingDraft := RepositoryState{
+		RawFindings: []RawReviewFinding{historicalRaw},
+		Findings: []Finding{
+			{ID: "legacy", Status: FindingPosted, IssueDraftID: "legacy-draft"},
+			{ID: "target", Status: FindingPosted, IssueDraftID: "target-draft"},
+		},
+		DeduplicatedFindings: []DeduplicatedReviewFinding{{
+			ID: "target", Status: FindingPosted, IssueDraftID: "target-draft",
+		}},
+		IssueDrafts: []IssueDraft{
+			{ID: "legacy-draft", FindingIDs: []string{"legacy"}},
+			{ID: "target-draft", FindingIDs: []string{"target"}},
+		},
+	}
+	if err := restoreHistoricalDeduplicatedLifecycle(
+		&conflictingDraft, historicalRaw, "target", now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if conflictingDraft.Findings[0].IssueDraftID != "legacy-draft" ||
+		conflictingDraft.IssueDrafts[0].FindingIDs[0] != "legacy" ||
+		conflictingDraft.DeduplicatedFindings[0].IssueDraftID != "target-draft" {
+		t.Fatalf("conflicting historical draft provenance was collapsed: %#v", conflictingDraft)
 	}
 	runningMapping := pendingLive
 	runningMapping.DeduplicationJobs[1] = completedJob(liveRaw.ID, 2)
@@ -710,6 +786,7 @@ func TestHistoricalReplayAdditionalAdmissionAndRawBuilderBranches(t *testing.T) 
 		snapshot, 0, now,
 	)
 	if err != nil || raw.ContextID != "ctx" || raw.Model != "provider/context-model" ||
+		!ValidRepositoryReviewCampaignID(raw.CampaignID) ||
 		raw.ModelAlias != "context-model" || raw.Account != "context-account" ||
 		raw.Reviewer != "context-reviewer" || raw.InsertionOrdinal != 1 || job.InsertionOrdinal != 1 {
 		t.Fatalf("context raw=%#v job=%#v err=%v", raw, job, err)

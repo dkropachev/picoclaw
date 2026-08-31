@@ -164,6 +164,7 @@ const querySchemas = {
     ]),
     field("progress", "number"),
     field("reviewed", "number"),
+    field("raw_findings", "number"),
     field("findings", "number"),
     field("updated", "timestamp"),
   ]),
@@ -191,6 +192,7 @@ const querySchemas = {
         "needs_review",
       ]),
       field("contributors", "string"),
+      field("sources", "number"),
       field("created", "timestamp"),
       field("updated", "timestamp"),
     ],
@@ -198,6 +200,28 @@ const querySchemas = {
       { field: "severity", direction: "DESC" },
       { field: "updated", direction: "DESC" },
     ],
+  ),
+  reviewRawFindings: schema(
+    [
+      field("id", "string"),
+      field("path", "string"),
+      field("severity", "enum", ["critical", "high", "medium", "low"]),
+      field("title", "string"),
+      field("symbol", "string"),
+      field("model", "string"),
+      field("reviewer", "string"),
+      field("deduplication_state", "enum", [
+        "pending",
+        "running",
+        "failed",
+        "completed",
+      ]),
+      field("disposition", "enum", ["undecided", "new", "duplicate"]),
+      field("finding", "string"),
+      field("created", "timestamp"),
+      field("updated", "timestamp"),
+    ],
+    [{ field: "created", direction: "DESC" }],
   ),
   reviewRepositoryFindings: schema(
     [
@@ -1143,8 +1167,11 @@ const evaluation = {
 
 export const repositoryReviewVisualIDs = {
   automation: "rra_visual",
-  finding: "rfn_visual_1",
-  secondFinding: "rfn_visual_2",
+  finding: "rdf_visual_1",
+  secondFinding: "rdf_visual_2",
+  rawFinding: "rrw_visual_1",
+  secondRawFinding: "rrw_visual_2",
+  thirdRawFinding: "rrw_visual_3",
   repositoryFinding: "rrf_visual_1",
   issue: "rrid_visual_1",
   failedIssue: "rrid_visual_2",
@@ -1198,6 +1225,8 @@ const repositoryReviewAutomation = {
     reviewed_files: 39,
     remaining_files: 0,
     unsupported_files: 1,
+    raw_findings: 3,
+    deduplicated_findings: 2,
     findings: 2,
     scope_frozen: true,
   },
@@ -1319,6 +1348,7 @@ const repositoryReviewFindings = [
     version: 3,
     created_at: "2026-08-25T14:05:00Z",
     updated_at: "2026-08-25T14:10:00Z",
+    raw_source_total: 2,
   },
   {
     id: repositoryReviewVisualIDs.secondFinding,
@@ -1354,6 +1384,7 @@ const repositoryReviewFindings = [
     version: 2,
     created_at: "2026-08-25T14:12:00Z",
     updated_at: "2026-08-25T14:15:00Z",
+    raw_source_total: 1,
   },
 ]
 
@@ -1405,6 +1436,78 @@ const repositoryReviewContexts = repositoryReviewFindings.map(
     created_at: finding.created_at,
   }),
 )
+
+const repositoryReviewRawFindings = [
+  repositoryReviewRawFinding(
+    repositoryReviewVisualIDs.rawFinding,
+    repositoryReviewFindings[0],
+    "review",
+    "review-child-1",
+    "new",
+  ),
+  repositoryReviewRawFinding(
+    repositoryReviewVisualIDs.secondRawFinding,
+    repositoryReviewFindings[0],
+    "code",
+    "code-child-2",
+    "duplicate",
+  ),
+  repositoryReviewRawFinding(
+    repositoryReviewVisualIDs.thirdRawFinding,
+    repositoryReviewFindings[1],
+    "review",
+    "review-child-2",
+    "new",
+  ),
+]
+
+function repositoryReviewRawFinding(
+  id: string,
+  finding: (typeof repositoryReviewFindings)[number],
+  model: string,
+  reviewer: string,
+  disposition: "new" | "duplicate",
+) {
+  return {
+    id,
+    version: 1,
+    campaign_id: "rrc_visual",
+    admission_bucket: `rdb_visual_${finding.file.path}`,
+    insertion_ordinal: repositoryReviewVisualIDs.rawFinding === id ? 1 : 2,
+    diagnosis_digest: `sha256:${id}`,
+    repository: finding.repository,
+    commit_sha: finding.commit_sha,
+    file: finding.file,
+    path: finding.file.path,
+    line: finding.line,
+    severity: finding.severity,
+    title: finding.title,
+    symbol: finding.symbol,
+    message: finding.message,
+    evidence: finding.evidence,
+    impact: finding.impact,
+    validation: finding.validation,
+    context_id: finding.context_ids[0],
+    run_id: `rrun_visual_${finding === repositoryReviewFindings[0] ? 1 : 2}`,
+    assignment_id: `assignment-${id}`,
+    model,
+    reviewer,
+    deduplication_state: "completed" as const,
+    disposition,
+    deduplicated_finding_id: finding.id,
+    history: [
+      {
+        state: "completed" as const,
+        disposition,
+        deduplicated_finding_id: finding.id,
+        attempt: 1,
+        at: finding.updated_at,
+      },
+    ],
+    created_at: finding.created_at,
+    updated_at: finding.updated_at,
+  }
+}
 
 const repositoryReviewIssues = [
   {
@@ -1491,6 +1594,7 @@ const repositoryReviewRunFindingSummaries = repositoryReviewFindings.map(
     association: "existing",
     repository_finding_id: finding.repository_finding_id,
     contributors: finding.models,
+    raw_source_count: finding.raw_source_total,
     created_at: finding.created_at,
     updated_at: finding.updated_at,
   }),
@@ -1859,7 +1963,10 @@ export async function installCollectionVisualMocks(
       if (path === reviewRoot) {
         return json(route, repositoryReviewAutomation)
       }
-      if (path === `${reviewRoot}/run-findings`) {
+      if (
+        path === `${reviewRoot}/findings` ||
+        path === `${reviewRoot}/run-findings`
+      ) {
         return json(route, {
           automation: repositoryReviewAutomation,
           repository: repositoryReviewSummary,
@@ -1872,6 +1979,49 @@ export async function installCollectionVisualMocks(
             url.searchParams.get("query") ??
             "ALL ORDER BY severity DESC, updated DESC",
           query_schema: querySchemas.reviewRunFindings,
+          findings_processing: {
+            raw_total:
+              state === "empty" ? 0 : repositoryReviewRawFindings.length,
+            pending: 0,
+            processing: 0,
+            failed: 0,
+            completed:
+              state === "empty" ? 0 : repositoryReviewRawFindings.length,
+            new: state === "empty" ? 0 : 2,
+            duplicates: state === "empty" ? 0 : 1,
+          },
+          historical_deduplication: {
+            required: false,
+            status: "completed",
+          },
+          capabilities: repositoryReviewCapabilities,
+        })
+      }
+      if (path === `${reviewRoot}/raw-findings`) {
+        return json(route, {
+          automation: repositoryReviewAutomation,
+          repository: repositoryReviewSummary,
+          raw_findings: state === "empty" ? [] : repositoryReviewRawFindings,
+          total: state === "empty" ? 0 : repositoryReviewRawFindings.length,
+          next_cursor: "",
+          canonical_query:
+            url.searchParams.get("query") ?? "ALL ORDER BY created DESC",
+          query_schema: querySchemas.reviewRawFindings,
+          findings_processing: {
+            raw_total:
+              state === "empty" ? 0 : repositoryReviewRawFindings.length,
+            pending: 0,
+            processing: 0,
+            failed: 0,
+            completed:
+              state === "empty" ? 0 : repositoryReviewRawFindings.length,
+            new: state === "empty" ? 0 : 2,
+            duplicates: state === "empty" ? 0 : 1,
+          },
+          historical_deduplication: {
+            required: false,
+            status: "completed",
+          },
           capabilities: repositoryReviewCapabilities,
         })
       }
@@ -1949,7 +2099,49 @@ export async function installCollectionVisualMocks(
           capabilities: repositoryReviewCapabilities,
         })
       }
-      const reviewFindingPrefix = `${reviewRoot}/run-findings/`
+      const reviewFindingSourcesMatch = new RegExp(
+        `^${reviewRoot}/findings/([^/]+)/sources$`,
+      ).exec(path)
+      if (reviewFindingSourcesMatch) {
+        const findingID = decodeURIComponent(reviewFindingSourcesMatch[1])
+        const sources = repositoryReviewRawFindings.filter(
+          (source) => source.deduplicated_finding_id === findingID,
+        )
+        return json(route, {
+          automation: repositoryReviewAutomation,
+          repository: repositoryReviewSummary,
+          finding_id: findingID,
+          sources,
+          offset: 0,
+          total: sources.length,
+        })
+      }
+      const rawFindingPrefix = `${reviewRoot}/raw-findings/`
+      if (path.startsWith(rawFindingPrefix)) {
+        const sourceID = decodeURIComponent(path.slice(rawFindingPrefix.length))
+        const source = repositoryReviewRawFindings.find(
+          (candidate) => candidate.id === sourceID,
+        )
+        if (!source) {
+          return json(
+            route,
+            { code: "not_found", message: "Raw finding not found" },
+            404,
+          )
+        }
+        return json(route, {
+          automation: repositoryReviewAutomation,
+          repository: repositoryReviewSummary,
+          source,
+          context: repositoryReviewContexts.find(
+            (context) => context.id === source.context_id,
+          ),
+          finding: repositoryReviewFindings.find(
+            (finding) => finding.id === source.deduplicated_finding_id,
+          ),
+        })
+      }
+      const reviewFindingPrefix = `${reviewRoot}/findings/`
       if (path.startsWith(reviewFindingPrefix)) {
         const findingID = decodeURIComponent(
           path.slice(reviewFindingPrefix.length),
@@ -1974,6 +2166,7 @@ export async function installCollectionVisualMocks(
           issue: repositoryReviewIssues.find((issue) =>
             issue.finding_ids.includes(finding.id),
           ),
+          raw_source_total: finding.raw_source_total,
           capabilities: repositoryReviewCapabilities,
         })
       }

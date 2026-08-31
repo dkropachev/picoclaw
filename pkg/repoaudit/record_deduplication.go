@@ -37,7 +37,7 @@ func persistLegacyRecordFinding(
 	state.NextDeduplicationOrdinal = ordinal + 1
 	fingerprint := findingFingerprint(primary, candidate)
 	rawID := stableID(
-		"rrl_", plan.Repository, boundaryID, plan.CommitSHA, runID,
+		"rrw_", plan.Repository, boundaryID, plan.CommitSHA, runID,
 		fmt.Sprint(observationIndex), fmt.Sprint(findingIndex), fingerprint,
 	)
 	if rawFindingIndexByID(state.RawFindings, rawID) >= 0 {
@@ -77,15 +77,6 @@ func persistLegacyRecordFinding(
 	}
 	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(raw)
 	deduplicated := newDeduplicatedReviewFinding(raw, ordinal, state.Findings, completedAt)
-	// Preserve the legacy Record API's stable occurrence identity so retained
-	// workflow evidence remains recoverable, while the presence of the durable
-	// DeduplicatedReviewFinding is now the mapping admission authority.
-	legacyID := stableID(
-		"rfn_", plan.Repository, plan.CommitSHA, runID, fingerprint,
-	)
-	if findingIndexByID(state.Findings, legacyID) < 0 {
-		deduplicated.ID = legacyID
-	}
 	deduplicated.TargetBranch = plan.TargetBranch
 	deduplicated.AdvertisedDefaultBranch = plan.AdvertisedDefaultBranch
 	deduplicated.TargetIsDefault = plan.TargetIsDefault

@@ -283,6 +283,8 @@ func TestRepositoryReviewAutomationCollectionFields(t *testing.T) {
 	automation.Progress.TotalBatches = 4
 	automation.Progress.ReviewedFiles = 7
 	automation.Progress.RemainingFiles = 21
+	automation.Progress.RawFindings = 5
+	automation.Progress.DeduplicatedFindings = 2
 	automation.Progress.Findings = 2
 	// A scope plan written by an older launcher is not authoritative without
 	// the durable internal selection that freezes it.
@@ -291,7 +293,8 @@ func TestRepositoryReviewAutomationCollectionFields(t *testing.T) {
 	}
 	automation.UpdatedAt = time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 	for _, field := range []collectionquery.Field{
-		"id", "name", "repository", "branch", "status", "progress", "reviewed", "findings", "updated",
+		"id", "name", "repository", "branch", "status", "progress", "reviewed", "raw_findings",
+		"findings", "updated",
 	} {
 		if _, ok := repositoryReviewAutomationCollectionField(automation, field); !ok {
 			t.Fatalf("field %q was not resolved", field)
@@ -299,6 +302,10 @@ func TestRepositoryReviewAutomationCollectionFields(t *testing.T) {
 	}
 	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok || value.Number != 25 {
 		t.Fatalf("progress field=%#v ok=%v", value, ok)
+	}
+	if value, ok := repositoryReviewAutomationCollectionField(automation, "raw_findings"); !ok ||
+		value.Number != 5 {
+		t.Fatalf("raw findings field=%#v ok=%v", value, ok)
 	}
 	automation.Progress = repoaudit.RepositoryReviewProgress{}
 	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok || value.Number != 0 {
@@ -2168,8 +2175,16 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 	expectedRunIDs := append(append([]string(nil), previousRunIDs...), newRunID)
 	expectedQueuedProgress := progress
 	expectedQueuedProgress.Stage = "queued"
+	expectedQueuedProgress.RawFindings = 0
+	expectedQueuedProgress.DeduplicatedFindings = 0
+	expectedQueuedProgress.Findings = 0
+	expectedQueuedProgress.FindingAggregates = 0
+	expectedQueuedProgress.PendingFindingMappings = 0
 	expectedProjectedProgress := expectedQueuedProgress
 	expectedProjectedProgress.ScopeFrozen = true
+	expectedBatchProgress := expectedQueuedProgress
+	expectedBatchProgress.DeduplicatedFindings = progress.Findings
+	expectedBatchProgress.Findings = progress.Findings
 	if resumed.Automation.Status != repoaudit.RepositoryReviewAutomationRunning || newRunID == "" ||
 		!reflect.DeepEqual(resumed.Automation.RunIDs, expectedRunIDs) ||
 		resumed.Automation.Usage != usage ||
@@ -2182,7 +2197,7 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 	case observed := <-batchStarted:
 		if observed.runID != newRunID || observed.automation.Usage != usage ||
 			observed.automation.CampaignID != input.CampaignID ||
-			observed.automation.Progress != expectedQueuedProgress ||
+			observed.automation.Progress != expectedBatchProgress ||
 			!observed.automation.StartedAt.Equal(startedAt) ||
 			!reflect.DeepEqual(observed.automation.RunIDs, expectedRunIDs) ||
 			!reflect.DeepEqual(observed.automation.ScopeSelection, automation.ScopeSelection) ||
@@ -2206,6 +2221,8 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 		completed.Progress.ReviewedFiles != progress.ReviewedFiles ||
 		completed.Progress.RemainingFiles != 0 ||
 		completed.Progress.UnsupportedFiles != progress.UnsupportedFiles ||
+		completed.Progress.RawFindings != 0 ||
+		completed.Progress.DeduplicatedFindings != progress.Findings ||
 		completed.Progress.Findings != progress.Findings ||
 		!completed.StartedAt.Equal(startedAt) ||
 		!reflect.DeepEqual(completed.RunIDs, expectedRunIDs) ||

@@ -3621,8 +3621,9 @@ func TestRepositoryReviewCampaignOutcomeUsesTaggedCoverageAndModelContexts(t *te
 	outcome := loadRepositoryReviewCampaignOutcome(state, automation)
 	if !outcome.found || !outcome.coverageAvailable || !outcome.coverageExact ||
 		outcome.selectedFiles != 4 || outcome.inspectedFiles != 2 || outcome.reviewedFiles != 1 ||
-		outcome.remainingFiles != 2 || outcome.unsupportedFiles != 1 || outcome.findings != 2 ||
-		outcome.findingAggregates != 1 || outcome.pendingFindingMappings != 1 ||
+		outcome.remainingFiles != 2 || outcome.unsupportedFiles != 1 || outcome.rawFindings != 2 ||
+		outcome.deduplicatedFindings != 0 || outcome.findings != 0 ||
+		outcome.findingAggregates != 0 || outcome.pendingFindingMappings != 0 ||
 		outcome.modelFindings["review-a"] != 1 || outcome.modelFindings["review-b"] != 1 ||
 		outcome.modelFindings["review-none"] != 0 ||
 		!reflect.DeepEqual(outcome.modelPaths["review-a"], []string{"a.go"}) ||
@@ -3633,8 +3634,9 @@ func TestRepositoryReviewCampaignOutcomeUsesTaggedCoverageAndModelContexts(t *te
 	if !automation.Progress.CoverageExact || automation.Progress.SelectedFiles != 4 ||
 		automation.Progress.InspectedFiles != 2 || automation.Progress.ReviewedFiles != 1 ||
 		automation.Progress.RemainingFiles != 2 || automation.Progress.UnsupportedFiles != 1 ||
-		automation.Progress.Findings != 2 || automation.Progress.FindingAggregates != 1 ||
-		automation.Progress.PendingFindingMappings != 1 ||
+		automation.Progress.RawFindings != 2 || automation.Progress.DeduplicatedFindings != 0 ||
+		automation.Progress.Findings != 0 || automation.Progress.FindingAggregates != 0 ||
+		automation.Progress.PendingFindingMappings != 0 ||
 		automation.ModelStats["review-a"].Findings != 1 ||
 		automation.ModelStats["review-b"].ReviewedFiles != 1 ||
 		automation.ModelCoverageSketches["review-b"] == "" {
@@ -3681,7 +3683,8 @@ func TestRepositoryReviewPreparedCampaignUsesLegacyMembershipUntilCoverageBinds(
 		t.Fatalf("prepared campaign findings=%#v", findings)
 	}
 	applyRepositoryReviewLiveMetrics(&automation, state)
-	if automation.Progress.Findings != 1 || automation.Progress.CoverageAvailable {
+	if automation.Progress.RawFindings != 1 || automation.Progress.DeduplicatedFindings != 0 ||
+		automation.Progress.Findings != 0 || automation.Progress.CoverageAvailable {
 		t.Fatalf("prepared campaign progress=%#v", automation.Progress)
 	}
 	fresh := automation

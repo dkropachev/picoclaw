@@ -3094,6 +3094,8 @@ type repositoryReviewOutcome struct {
 	reviewedFiles          int
 	remainingFiles         int
 	unsupportedFiles       int
+	rawFindings            int
+	deduplicatedFindings   int
 	findings               int
 	findingAggregates      int
 	pendingFindingMappings int
@@ -3144,7 +3146,8 @@ func loadRepositoryReviewOutcome(
 		}
 	}
 	for _, finding := range repoaudit.CurrentCampaignFindingsByID(
-		state, automation.CampaignID, automation.RunIDs, automation.StartedAt,
+		state, repositoryReviewSelectionCampaignID(automation),
+		automation.RunIDs, automation.StartedAt,
 	) {
 		findingIDs[finding.ID] = struct{}{}
 	}
@@ -3177,16 +3180,19 @@ func loadRepositoryReviewOutcome(
 			selectedContexts[findingContext.ID] = findingContext
 		}
 	}
+	currentRaw := repoaudit.CurrentCampaignRawFindings(
+		state, repositoryReviewSelectionCampaignID(automation),
+		automation.RunIDs, automation.StartedAt,
+	)
+	currentDeduplicated := repositoryReviewCurrentDeduplicatedFindings(automation, state)
 	outcome := repositoryReviewOutcome{
 		found: true, reviewedFiles: len(reviewedPaths),
-		unsupportedFiles: len(unsupportedPaths), findings: len(findingIDs),
+		unsupportedFiles: len(unsupportedPaths), rawFindings: len(currentRaw),
+		deduplicatedFindings: len(currentDeduplicated), findings: len(currentDeduplicated),
 		modelFindings: make(map[string]int), modelPaths: make(map[string][]string),
 	}
 	aggregates := make(map[string]struct{})
-	for _, finding := range state.Findings {
-		if _, selected := findingIDs[finding.ID]; !selected {
-			continue
-		}
+	for _, finding := range currentDeduplicated {
 		if finding.RepositoryFindingID == "" {
 			outcome.pendingFindingMappings++
 			continue
@@ -3230,10 +3236,19 @@ func loadRepositoryReviewCampaignOutcome(
 	automation repoaudit.RepositoryReviewAutomation,
 ) repositoryReviewOutcome {
 	metrics := repoaudit.CurrentCampaignMetrics(
-		state, automation.CampaignID, automation.RunIDs, automation.StartedAt,
+		state, repositoryReviewSelectionCampaignID(automation),
+		automation.RunIDs, automation.StartedAt,
 	)
 	findings := repoaudit.CurrentCampaignFindingsByID(
 		state, automation.CampaignID, automation.RunIDs, automation.StartedAt,
+	)
+	currentRaw := repoaudit.CurrentCampaignRawFindings(
+		state, repositoryReviewSelectionCampaignID(automation),
+		automation.RunIDs, automation.StartedAt,
+	)
+	currentDeduplicated := repositoryReviewCurrentDeduplicatedFindings(automation, state)
+	findingAggregates, pendingFindingMappings := repositoryReviewDeduplicatedAssociationCounts(
+		currentDeduplicated,
 	)
 	outcome := repositoryReviewOutcome{
 		found:             metrics.CoverageAvailable || len(findings) > 0,
@@ -3241,8 +3256,9 @@ func loadRepositoryReviewCampaignOutcome(
 		coverageExact:     metrics.CoverageExact, selectedFiles: metrics.SelectedFiles,
 		inspectedFiles: metrics.InspectedFiles, reviewedFiles: metrics.CompletedFiles,
 		remainingFiles: metrics.RemainingFiles, unsupportedFiles: metrics.UnsupportedFiles,
-		findings: metrics.FindingOccurrences, findingAggregates: metrics.FindingAggregates,
-		pendingFindingMappings: metrics.PendingFindingMappings,
+		rawFindings: len(currentRaw), deduplicatedFindings: len(currentDeduplicated),
+		findings: len(currentDeduplicated), findingAggregates: findingAggregates,
+		pendingFindingMappings: pendingFindingMappings,
 		modelFindings:          make(map[string]int), modelPaths: make(map[string][]string),
 	}
 	selectedContexts := make(map[string]repoaudit.FindingContext)
@@ -3306,6 +3322,7 @@ func applyRepositoryReviewLiveMetrics(
 	if automation == nil {
 		return
 	}
+	defer applyRepositoryReviewCurrentFindingProgress(automation, state)
 	if automation.CampaignID != "" {
 		metrics := repoaudit.CurrentCampaignMetrics(
 			state, automation.CampaignID, automation.RunIDs, automation.StartedAt,
@@ -3321,6 +3338,8 @@ func applyRepositoryReviewLiveMetrics(
 			automation.Progress.CoverageExact = false
 			automation.Progress.SelectedFiles = 0
 			automation.Progress.InspectedFiles = 0
+			automation.Progress.RawFindings = 0
+			automation.Progress.DeduplicatedFindings = 0
 			automation.Progress.Findings = 0
 			automation.Progress.FindingAggregates = 0
 			automation.Progress.PendingFindingMappings = 0
@@ -3329,10 +3348,32 @@ func applyRepositoryReviewLiveMetrics(
 	}
 	automation.Progress.CoverageAvailable = false
 	automation.Progress.CoverageExact = false
-	findings := repoaudit.CurrentCampaignFindings(
-		state, automation.RunIDs, automation.StartedAt,
+	currentDeduplicated := repositoryReviewCurrentDeduplicatedFindings(*automation, state)
+	automation.Progress.FindingAggregates, automation.Progress.PendingFindingMappings = repositoryReviewDeduplicatedAssociationCounts(
+		currentDeduplicated,
 	)
-	automation.Progress.Findings = len(findings)
+}
+
+func applyRepositoryReviewCurrentFindingProgress(
+	automation *repoaudit.RepositoryReviewAutomation,
+	state repoaudit.RepositoryState,
+) {
+	if automation == nil {
+		return
+	}
+	rawFindings := repoaudit.CurrentCampaignRawFindings(
+		state, repositoryReviewSelectionCampaignID(*automation),
+		automation.RunIDs, automation.StartedAt,
+	)
+	deduplicatedFindings := repositoryReviewCurrentDeduplicatedFindings(*automation, state)
+	automation.Progress.RawFindings = len(rawFindings)
+	automation.Progress.DeduplicatedFindings = len(deduplicatedFindings)
+	automation.Progress.Findings = len(deduplicatedFindings)
+}
+
+func repositoryReviewDeduplicatedAssociationCounts(
+	findings []repoaudit.DeduplicatedReviewFinding,
+) (int, int) {
 	aggregates := make(map[string]struct{})
 	pending := 0
 	for _, finding := range findings {
@@ -3342,8 +3383,7 @@ func applyRepositoryReviewLiveMetrics(
 		}
 		aggregates[finding.RepositoryFindingID] = struct{}{}
 	}
-	automation.Progress.FindingAggregates = len(aggregates)
-	automation.Progress.PendingFindingMappings = pending
+	return len(aggregates), pending
 }
 
 func repositoryReviewCurrentFindings(
@@ -3382,7 +3422,13 @@ func applyRepositoryReviewOutcome(
 		automation.Progress.ReviewedFiles = max(automation.Progress.ReviewedFiles, outcome.reviewedFiles)
 		automation.Progress.UnsupportedFiles = max(automation.Progress.UnsupportedFiles, outcome.unsupportedFiles)
 	}
-	automation.Progress.Findings = outcome.findings
+	deduplicatedFindings := outcome.deduplicatedFindings
+	if deduplicatedFindings == 0 && outcome.findings > 0 {
+		deduplicatedFindings = outcome.findings
+	}
+	automation.Progress.RawFindings = outcome.rawFindings
+	automation.Progress.DeduplicatedFindings = deduplicatedFindings
+	automation.Progress.Findings = deduplicatedFindings
 	automation.Progress.FindingAggregates = outcome.findingAggregates
 	automation.Progress.PendingFindingMappings = outcome.pendingFindingMappings
 	for _, alias := range automation.ReviewerModels {

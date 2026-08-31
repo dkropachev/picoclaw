@@ -9,6 +9,8 @@ import {
 export const repositoryReviewDefaultQuery = "ORDER BY repository ASC"
 export const repositoryReviewRunFindingsDefaultQuery =
   "ALL ORDER BY severity DESC, updated DESC"
+export const repositoryReviewRawFindingsDefaultQuery =
+  "ALL ORDER BY created DESC"
 export const repositoryReviewRepositoryFindingsDefaultQuery =
   "ALL ORDER BY severity DESC, updated DESC"
 export const repositoryReviewIssuesDefaultQuery = "ALL ORDER BY updated DESC"
@@ -29,6 +31,15 @@ export function normalizeRepositoryReviewRunFindingsSearch(
 ): RepositoryReviewCollectionSearch {
   return normalizeCollectionRouteSearch(raw, {
     defaultQuery: repositoryReviewRunFindingsDefaultQuery,
+    supportedViews: repositoryReviewViews,
+  })
+}
+
+export function normalizeRepositoryReviewRawFindingsSearch(
+  raw: Record<string, unknown>,
+): RepositoryReviewCollectionSearch {
+  return normalizeCollectionRouteSearch(raw, {
+    defaultQuery: repositoryReviewRawFindingsDefaultQuery,
     supportedViews: repositoryReviewViews,
   })
 }

@@ -188,6 +188,17 @@ func newRepositoryReviewBackfillFixture(
 		if recordErr != nil {
 			t.Fatal(recordErr)
 		}
+		for findingIndex, findingID := range recorded.Run.FindingIDs {
+			for _, finding := range recorded.State.Findings {
+				if finding.ID != findingID {
+					continue
+				}
+				recorded.Run.FindingIDs[findingIndex] = repositoryReviewBackfillLegacyFindingID(
+					finding, runID,
+				)
+				break
+			}
+		}
 		structured := repositoryReviewBackfillStructured(t, inspected, findingCandidates)
 		scope := repositoryReviewBackfillFileMaps(reviewable)
 		managedChildren := []map[string]any(nil)
@@ -267,6 +278,36 @@ func newRepositoryReviewBackfillFixture(
 	if err != nil || !found {
 		t.Fatalf("load repository state found=%v err=%v", found, err)
 	}
+	legacyIDs := make(map[string]string)
+	for runIndex := range state.Runs {
+		for findingIndex, findingID := range state.Runs[runIndex].FindingIDs {
+			for _, finding := range state.Findings {
+				if finding.ID != findingID {
+					continue
+				}
+				legacyID := repositoryReviewBackfillLegacyFindingID(finding, state.Runs[runIndex].ID)
+				legacyIDs[findingID] = legacyID
+				state.Runs[runIndex].FindingIDs[findingIndex] = legacyID
+				break
+			}
+		}
+	}
+	for index := range state.Findings {
+		if legacyID := legacyIDs[state.Findings[index].ID]; legacyID != "" {
+			state.Findings[index].ID = legacyID
+		}
+	}
+	// This fixture exercises pre-v4 recovery. Explicitly discard the current
+	// Record gate so it cannot accidentally become a native rdf/rrw fixture as
+	// the production admission pipeline evolves.
+	state.RawFindings = nil
+	state.DeduplicatedFindings = nil
+	state.DeduplicationJobs = nil
+	state.MappingJobs = nil
+	state.NextDeduplicationOrdinal = 0
+	state.FindingsProcessing = repoaudit.FindingsProcessingCounters{}
+	state.FindingCount = len(state.Findings)
+	persistRepositoryReviewAdditionalCoverageState(t, workspace, state)
 	fixture.state = state
 	created, err := store.CreateAutomation(t.Context(), fixture.automation)
 	if err != nil {
@@ -274,6 +315,20 @@ func newRepositoryReviewBackfillFixture(
 	}
 	fixture.automation = created
 	return fixture
+}
+
+func repositoryReviewBackfillLegacyFindingID(
+	finding repoaudit.Finding,
+	runID string,
+) string {
+	hash := sha256.New()
+	for _, value := range []string{
+		finding.Repository, finding.CommitSHA, runID, finding.Fingerprint,
+	} {
+		_, _ = hash.Write([]byte(value))
+		_, _ = hash.Write([]byte{0})
+	}
+	return fmt.Sprintf("rfn_%x", hash.Sum(nil))
 }
 
 func authorizeRepositoryReviewBackfillCampaign(
@@ -922,8 +977,9 @@ func TestRepositoryReviewLegacyCampaignRecoveryAdapterClearsDurableMarker(t *tes
 	if !updated.Progress.CoverageAvailable || !updated.Progress.CoverageExact ||
 		updated.Progress.SelectedFiles != 1 || updated.Progress.InspectedFiles != 1 ||
 		updated.Progress.ReviewedFiles != 0 || updated.Progress.RemainingFiles != 1 ||
-		updated.Progress.UnsupportedFiles != 0 || updated.Progress.Findings != 1 ||
-		updated.Progress.FindingAggregates != 0 || updated.Progress.PendingFindingMappings != 1 {
+		updated.Progress.UnsupportedFiles != 0 || updated.Progress.RawFindings != 1 ||
+		updated.Progress.DeduplicatedFindings != 0 || updated.Progress.Findings != 0 ||
+		updated.Progress.FindingAggregates != 0 || updated.Progress.PendingFindingMappings != 0 {
 		t.Fatalf("recovered public metrics = %#v", updated.Progress)
 	}
 	state, found, err := fixture.store.ResolveRepositoryState(updated.Repository, updated.RunIDs)
