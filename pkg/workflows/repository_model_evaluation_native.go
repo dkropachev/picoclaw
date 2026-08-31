@@ -629,7 +629,7 @@ func nativeRepositoryEvaluationFilter(args map[string]any) (map[string]any, erro
 		false,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validate repository scope exact candidate IDs: %w", err)
 	}
 	exact := make(map[string]struct{}, len(exactIDs))
 	for _, id := range exactIDs {
@@ -642,7 +642,7 @@ func nativeRepositoryEvaluationFilter(args map[string]any) (map[string]any, erro
 		true,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validate repository scope hotpath candidate IDs: %w", err)
 	}
 	hotpaths := make(map[string]struct{}, len(hotpathIDs))
 	for _, id := range hotpathIDs {
@@ -955,11 +955,18 @@ func nativeRepositoryEvaluationResolveCandidateIDs(
 		seen[id] = struct{}{}
 		candidate, exists := byID[id]
 		if !exists {
-			if dropWellFormedUnknown && nativeRepositoryEvaluationWellFormedCandidateID(id) {
+			wellFormed := nativeRepositoryEvaluationWellFormedCandidateID(id)
+			if dropWellFormedUnknown && wellFormed {
 				dropped++
 				continue
 			}
-			return nil, 0, reposcope.ErrUnknownCandidate
+			if !wellFormed {
+				return nil, 0, nativeRepositoryEvaluationMalformedCandidateIDError(id)
+			}
+			return nil, 0, fmt.Errorf(
+				"%w: frozen repository scope references a candidate absent from the rebuilt commit-bound catalog",
+				reposcope.ErrUnknownCandidate,
+			)
 		}
 		if requireHotpathEligible && candidate.CodeType != reposcope.CodeTypeCode &&
 			candidate.CodeType != reposcope.CodeTypeHotpath {
@@ -968,6 +975,24 @@ func nativeRepositoryEvaluationResolveCandidateIDs(
 		resolved = append(resolved, id)
 	}
 	return resolved, dropped, nil
+}
+
+func nativeRepositoryEvaluationMalformedCandidateIDError(value string) error {
+	const prefix = "cand_"
+	suffix, prefixed := strings.CutPrefix(value, prefix)
+	if prefixed && nativeValidGitObjectID(suffix) {
+		return fmt.Errorf(
+			"%w: repository scope planner returned a value shaped like %q plus a %d-character Git object ID instead of a 64-character opaque candidate ID copied from the supplied catalog",
+			reposcope.ErrUnknownCandidate,
+			prefix,
+			len(suffix),
+		)
+	}
+	return fmt.Errorf(
+		"%w: repository scope planner returned a malformed opaque candidate ID; expected %q plus 64 lowercase hexadecimal characters copied from the supplied catalog",
+		reposcope.ErrUnknownCandidate,
+		prefix,
+	)
 }
 
 func nativeRepositoryEvaluationWellFormedCandidateID(value string) bool {

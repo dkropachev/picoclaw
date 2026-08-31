@@ -49,7 +49,10 @@ explicitly AI-judged comparison report that survives process restarts.
   strict and reject every unknown candidate ID. Only the repository review's
   separate initial `filter` operation may discard a well-formed unknown planner
   ID, record bounded counts, and fall back to its trusted prefixes and hard
-  scope; frozen review replay is strict again.
+  scope; frozen review replay is strict again. Strict filter failures use
+  bounded shape-only diagnostics that distinguish a prefixed Git-object-shaped
+  planner value from a well-formed frozen candidate absent from the rebuilt
+  commit-bound catalog without echoing the model-provided value.
 
 ## Requirements
 

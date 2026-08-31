@@ -50,6 +50,9 @@ import {
 import { useRepositoryReviewFindingHealth } from "./repository-review-finding-health"
 
 const fullCommitSHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu
+const legacyUnknownCandidateFailure = "AI selected an unknown candidate ID"
+const legacyUnknownCandidateExplanation =
+  "The scope planner returned a malformed or stale file candidate ID. Native validation stopped the run before applying that selection. Continue retries from the saved review state."
 const assignmentFocuses: Array<{
   id: RepositoryReviewFocusID
   label: string
@@ -68,6 +71,21 @@ interface ContinueDialogState {
   options: RepositoryReviewCommitOptions
   choice: CommitChoice
   customSHA: string
+}
+
+function repositoryReviewStatusDetail(
+  review: RepositoryReviewAutomation,
+): string {
+  const detail = review.pause_detail?.trim()
+  if (review.status === "failed" && detail === legacyUnknownCandidateFailure) {
+    return legacyUnknownCandidateExplanation
+  }
+  if (detail) {
+    return detail
+  }
+  return review.status === "failed"
+    ? "The review stopped before completion."
+    : "The review is paused and can be continued."
 }
 
 export function RepositoryReviewDetailPage({
@@ -246,10 +264,7 @@ export function RepositoryReviewDetailPage({
                 }
               >
                 {review.status === "failed" ? "Failed" : "Stopped"}:{" "}
-                {review.pause_detail ||
-                  (review.status === "failed"
-                    ? "The review stopped before completion."
-                    : "The review is paused and can be continued.")}
+                {repositoryReviewStatusDetail(review)}
               </p>
             )}
 

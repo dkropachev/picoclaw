@@ -1730,13 +1730,54 @@ func TestNativeRepositoryEvaluationFilterRecoversInitialPlannerUnknownCandidates
 		t.Fatalf("unknown hotpath warning=%#v", hotpathWarnings)
 	}
 
+	gitObjectShapedID := "cand_" + strings.Repeat("a", 40)
+	_, malformedErr := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{},
+		"commit": fixture.commit,
+		"planner": map[string]any{
+			"includePrefixes": []any{}, "excludePrefixes": []any{},
+			"candidateIds": []any{}, "hotpathCandidateIds": []any{gitObjectShapedID},
+		},
+	})
+	if !errors.Is(malformedErr, reposcope.ErrUnknownCandidate) ||
+		!strings.Contains(malformedErr.Error(), "hotpath candidate IDs") ||
+		!strings.Contains(malformedErr.Error(), "shaped like") ||
+		!strings.Contains(malformedErr.Error(), "40-character Git object ID") ||
+		!strings.Contains(malformedErr.Error(), "64-character opaque candidate ID") ||
+		strings.Contains(malformedErr.Error(), gitObjectShapedID) {
+		t.Fatalf("Git-object-shaped candidate diagnostic=%v", malformedErr)
+	}
+
+	untrustedMalformedID := "not-a-candidate\nmodel-controlled"
+	_, malformedErr = nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{},
+		"commit": fixture.commit,
+		"planner": map[string]any{
+			"includePrefixes": []any{}, "excludePrefixes": []any{},
+			"candidateIds": []any{untrustedMalformedID}, "hotpathCandidateIds": []any{},
+		},
+	})
+	if !errors.Is(malformedErr, reposcope.ErrUnknownCandidate) ||
+		!strings.Contains(malformedErr.Error(), "exact candidate IDs") ||
+		!strings.Contains(malformedErr.Error(), "malformed opaque candidate ID") ||
+		strings.Contains(malformedErr.Error(), untrustedMalformedID) {
+		t.Fatalf("untrusted malformed candidate diagnostic=%v", malformedErr)
+	}
+
 	for _, test := range []struct {
-		name  string
-		field string
-		value string
+		name        string
+		field       string
+		value       string
+		wantContext string
 	}{
-		{name: "exact", field: "candidate_ids", value: unknownExact},
-		{name: "hotpath", field: "hotpath_candidate_ids", value: unknownHotpath},
+		{
+			name: "exact", field: "candidate_ids", value: unknownExact,
+			wantContext: "exact candidate IDs",
+		},
+		{
+			name: "hotpath", field: "hotpath_candidate_ids", value: unknownHotpath,
+			wantContext: "hotpath candidate IDs",
+		},
 	} {
 		t.Run("frozen unknown "+test.name, func(t *testing.T) {
 			invalidFrozen := cloneMap(mixedSelection)
@@ -1746,7 +1787,11 @@ func TestNativeRepositoryEvaluationFilterRecoversInitialPlannerUnknownCandidates
 				"commit": fixture.commit, "scope_planned": true,
 				"frozen_selection": invalidFrozen, "frozen_plan": mixedPlan,
 			})
-			if !errors.Is(filterErr, reposcope.ErrUnknownCandidate) {
+			if !errors.Is(filterErr, reposcope.ErrUnknownCandidate) ||
+				!strings.Contains(filterErr.Error(), test.wantContext) ||
+				!strings.Contains(filterErr.Error(), "frozen repository scope") ||
+				!strings.Contains(filterErr.Error(), "absent from the rebuilt commit-bound catalog") ||
+				strings.Contains(filterErr.Error(), test.value) {
 				t.Fatalf("frozen unknown %s error=%v", test.name, filterErr)
 			}
 		})
