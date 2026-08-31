@@ -60,6 +60,7 @@ export interface CollectionDefinition<T> {
   actions?: readonly CollectionItemAction<T>[]
   supportedViews?: readonly CollectionView[]
   defaultView?: CollectionView
+  tableLayout?: "auto" | "fixed"
 }
 
 export interface CollectionSelection<T> {

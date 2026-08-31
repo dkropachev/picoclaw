@@ -303,7 +303,10 @@ check, and Updated. List, Table, and Grid suppress normal `new`/`known` badges
 and show only the attention badges Duplicate review, Issue conflict, and Fix
 check failed. The Occurrence grouping value remains Needs duplicate review,
 and the Resolution check value remains Check failed. Lifecycle is always
-rendered independently rather than folded into an attention badge.
+rendered independently rather than folded into an attention badge. Across
+List, Table, Grid, and the mobile Table fallback, repository-finding titles and
+metadata use the identity block's available width; responsive truncation or
+wrapping is not replaced by a fixed maximum text width.
 
 On detail, Occurrence grouping replaces a raw match-state heading. A
 provisional decision panel and the Issue section precede long provenance,
