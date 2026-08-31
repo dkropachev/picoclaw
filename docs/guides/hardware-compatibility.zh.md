@@ -41,12 +41,6 @@ PicoClaw 几乎可以在任何 Linux 设备上运行。本页面记录了已验�
 | [Zhihe (知合)](https://www.zhihe-tech.com/) | A210 | High-perf RISC-V | 8 核，16MB L3 缓存，桌面级 |
 | [Canaan (嘉楠)](https://www.canaan-creative.com/) | K230 | Dual C908 @ 1.6GHz | 6 TOPS KPU，用于 CanMV-K230 |
 
-### MIPS
-
-| 厂商 | 芯片 | 备注 |
-|------|------|------|
-| MediaTek | [MT7620](https://www.mediatek.com/products/home-networking/mt7620) | MIPS24KEc @ 580MHz，用于许多 OpenWrt 路由器（如小米路由器 3G） |
-
 ### LoongArch (loong64)
 
 | 厂商 | 芯片 | 备注 |
@@ -65,7 +59,6 @@ PicoClaw 几乎可以在任何 Linux 设备上运行。本页面记录了已验�
 |------|------|------|-----|------|------|
 | 2009 | Nokia N900 | ARM (A8) | OMAP3430 | 256MB | 智能手机 |
 | 2012 | Samsung Galaxy Note 10.1 (N8000) | ARM (A9) | Exynos 4412 | 2GB | 平板电脑 |
-| 2016 | Xiaomi Router 3G (小米路由器3G) | MIPS | MT7620 | 256MB | 路由器 (OpenWrt) |
 | 2018 | Phicomm N1 (斐讯N1) | ARM64 (A53) | S905D | 2GB | 电视盒子 / 家庭服务器 |
 | 2019 | Xiaomi AI Speaker (小爱音箱) | ARM64 (A53) | — | 256MB | 智能音箱 |
 | 2024 | [NanoKVM](https://wiki.sipeed.com/hardware/en/kvm/NanoKVM/introduction.html) | RISC-V | SG2002 | 256MB | IP-KVM |
@@ -109,8 +102,8 @@ PicoClaw 几乎可以在任何 Linux 设备上运行。本页面记录了已验�
 | x86_64 Windows | 原生二进制文件 |
 | macOS (Intel / Apple Silicon) | 原生二进制文件 |
 | Docker (any platform) | `docker compose` 一行命令，参见 [Docker 指南](docker.md) |
-| OpenWrt routers | MIPS/ARM 构建，需要 >32MB 可用内存 |
-| FreeBSD / NetBSD | 提供 x86_64 和 arm64 构建 |
+| OpenWrt routers | 仅提供 ARM 构建；不支持 MIPS |
+| FreeBSD | 提供 x86_64 和 arm64 构建 |
 
 ---
 
@@ -140,7 +133,7 @@ tar xzf picoclaw_Linux_arm64.tar.gz
 ./picoclaw agent -m "Hello, what board am I running on?"
 ```
 
-可用构建版本：`linux-amd64`, `linux-arm64`, `linux-arm`, `linux-riscv64`, `linux-loong64`, `linux-mipsle`
+可用构建版本：`linux-amd64`, `linux-arm64`, `linux-arm`, `linux-riscv64`, `linux-loong64`
 
 ### 添加你的硬件
 

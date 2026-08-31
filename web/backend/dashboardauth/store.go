@@ -1,5 +1,3 @@
-//go:build !mipsle && !netbsd && !(freebsd && arm)
-
 // Package dashboardauth provides a bcrypt-backed SQLite store for the
 // launcher dashboard password. The database contains a single row (id=1)
 // with the bcrypt hash; no plaintext is ever persisted.
@@ -13,7 +11,9 @@ import (
 	"path/filepath"
 
 	"golang.org/x/crypto/bcrypt"
-	_ "modernc.org/sqlite" // register "sqlite" driver
+
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/web/backend/launcherconfig"
 )
 
 // Store holds a handle to the SQLite database that stores the bcrypt hash.
@@ -26,8 +26,14 @@ type Store struct {
 // canonical filename. This is the preferred constructor for most callers.
 // Any error is wrapped with the resolved path so callers get actionable output.
 func New(dir string) (*Store, error) {
+	return NewWithLauncherConfig(dir, filepath.Join(dir, launcherconfig.FileName))
+}
+
+// NewWithLauncherConfig opens the canonical database in dir and imports any
+// removed authentication fields from launcherPath on the first schema open.
+func NewWithLauncherConfig(dir, launcherPath string) (*Store, error) {
 	path := filepath.Join(dir, DBFilename)
-	s, err := Open(path)
+	s, err := OpenWithLauncherConfig(path, launcherPath)
 	if err != nil {
 		return nil, fmt.Errorf("open %q: %w", path, err)
 	}
@@ -36,15 +42,35 @@ func New(dir string) (*Store, error) {
 
 // Open opens (or creates) the SQLite database at path and migrates the schema.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open(sqliteDriver, path)
+	return OpenWithLauncherConfig(path, filepath.Join(filepath.Dir(path), launcherconfig.FileName))
+}
+
+// OpenWithLauncherConfig opens path and performs the retained-source launcher
+// config migration. The source is snapshotted before its legacy fields are
+// removed; the database is authoritative as soon as its migration commits.
+func OpenWithLauncherConfig(path, launcherPath string) (*Store, error) {
+	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
-	if _, err = db.Exec(sqlCreateTable); err != nil {
+	absLauncherPath, err := filepath.Abs(launcherPath)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.Base(absLauncherPath) != launcherconfig.FileName {
+		return nil, fmt.Errorf("launcher config must be named %s", launcherconfig.FileName)
+	}
+
+	ctx := context.Background()
+	db, err := sqlitestore.Open(ctx, absPath, storeOptions(absLauncherPath))
+	if err != nil {
+		return nil, err
+	}
+	if err = finishLegacyLauncherConfigMigration(ctx, db, absLauncherPath); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db, path: path}, nil
+	return &Store{db: db, path: absPath}, nil
 }
 
 // Close releases the database handle.

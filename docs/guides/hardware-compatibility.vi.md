@@ -41,12 +41,6 @@ PicoClaw chạy được trên hầu hết mọi thiết bị Linux. Trang này 
 | [Zhihe (知合)](https://www.zhihe-tech.com/) | A210 | High-perf RISC-V | 8 lõi, 16MB cache L3, cấp desktop |
 | [Canaan (嘉楠)](https://www.canaan-creative.com/) | K230 | Dual C908 @ 1.6GHz | 6 TOPS KPU, dùng trong CanMV-K230 |
 
-### MIPS
-
-| Nhà sản xuất | Chip | Ghi chú |
-|--------------|------|---------|
-| MediaTek | [MT7620](https://www.mediatek.com/products/home-networking/mt7620) | MIPS24KEc @ 580MHz, dùng trong nhiều router OpenWrt (vd. Xiaomi Router 3G) |
-
 ### LoongArch (loong64)
 
 | Nhà sản xuất | Chip | Ghi chú |
@@ -65,7 +59,6 @@ Sản phẩm tiêu dùng, router và thiết bị công nghiệp đã được k
 |-----|----------|-----------|-----|-----|----------|
 | 2009 | Nokia N900 | ARM (A8) | OMAP3430 | 256MB | Điện thoại thông minh |
 | 2012 | Samsung Galaxy Note 10.1 (N8000) | ARM (A9) | Exynos 4412 | 2GB | Máy tính bảng |
-| 2016 | Xiaomi Router 3G (小米路由器3G) | MIPS | MT7620 | 256MB | Router (OpenWrt) |
 | 2018 | Phicomm N1 (斐讯N1) | ARM64 (A53) | S905D | 2GB | TV Box / Máy chủ gia đình |
 | 2019 | Xiaomi AI Speaker (小爱音箱) | ARM64 (A53) | — | 256MB | Loa thông minh |
 | 2024 | [NanoKVM](https://wiki.sipeed.com/hardware/en/kvm/NanoKVM/introduction.html) | RISC-V | SG2002 | 256MB | IP-KVM |
@@ -109,8 +102,8 @@ Bất kỳ điện thoại Android ARM64 nào (2015+) với 1GB+ RAM. Cài đặ
 | x86_64 Windows | Binary gốc |
 | macOS (Intel / Apple Silicon) | Binary gốc |
 | Docker (any platform) | `docker compose` một dòng lệnh, xem [Hướng dẫn Docker](docker.md) |
-| OpenWrt routers | Bản dựng MIPS/ARM, yêu cầu >32MB RAM trống |
-| FreeBSD / NetBSD | Có bản dựng x86_64 và arm64 |
+| OpenWrt routers | Chỉ có bản dựng ARM; không hỗ trợ MIPS |
+| FreeBSD | Có bản dựng x86_64 và arm64 |
 
 ---
 
@@ -140,7 +133,7 @@ tar xzf picoclaw_Linux_arm64.tar.gz
 ./picoclaw agent -m "Hello, what board am I running on?"
 ```
 
-Các bản dựng có sẵn: `linux-amd64`, `linux-arm64`, `linux-arm`, `linux-riscv64`, `linux-loong64`, `linux-mipsle`
+Các bản dựng có sẵn: `linux-amd64`, `linux-arm64`, `linux-arm`, `linux-riscv64`, `linux-loong64`
 
 ### Thêm phần cứng của bạn
 

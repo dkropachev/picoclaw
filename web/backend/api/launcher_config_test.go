@@ -84,8 +84,8 @@ func TestPutLauncherConfigPersists(t *testing.T) {
 	if cfg.Port != 18080 || !cfg.Public {
 		t.Fatalf("saved config = %+v, want port=18080 public=true", cfg)
 	}
-	if cfg.DashboardPasswordHash != "saved-hash" {
-		t.Fatalf("saved dashboard_password_hash = %q, want saved-hash", cfg.DashboardPasswordHash)
+	if cfg.DashboardPasswordHash != "" {
+		t.Fatalf("saved dashboard_password_hash = %q, want empty", cfg.DashboardPasswordHash)
 	}
 	if cfg.LegacyLauncherToken != "" {
 		t.Fatalf("saved legacy launcher_token = %q, want empty", cfg.LegacyLauncherToken)
