@@ -1083,6 +1083,13 @@ func TestWorkflowSQLitePublicOperationErrorBoundaries(t *testing.T) {
 	if _, err := store.GetRun(t.Context(), "wr_missing"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing get error = %v", err)
 	}
+	if result, err := (&Executor{Store: store}).Retry(
+		t.Context(),
+		"wr_missing",
+		nil,
+	); result != nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing retry = %#v, %v", result, err)
+	}
 	if err := store.AppendEvent(t.Context(), RunEvent{}); err == nil {
 		t.Fatal("empty event appended")
 	}
@@ -1200,6 +1207,7 @@ func TestWorkflowSQLitePrivateRunRejectsPublicContextInjection(t *testing.T) {
 		{"retry whitespace", func(run *Run) { run.RetryOfRunID = " " }},
 		{"retry provenance", func(run *Run) { run.RetryOfRunID = "wr_injected_source" }},
 		{"workflow ref", func(run *Run) { run.WorkflowRef = "inline/injected" }},
+		{"run binding", func(run *Run) { run.privateRoot.RunBinding = "tampered-binding" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

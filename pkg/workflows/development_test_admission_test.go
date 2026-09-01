@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -282,6 +283,93 @@ func TestAdmitWorkflowDevelopmentTestRunStartErrorLeavesDraftUntouched(
 		activePath,
 		before,
 		"after failed start",
+	)
+}
+
+func TestAdmitWorkflowDevelopmentTestRunReturnsDurableStartOnSQLiteWriteFailure(
+	t *testing.T,
+) {
+	workspace, original, activePath, before := newDevelopmentAdmissionFixture(t)
+	admission := developmentTestRunAdmissionFor(original)
+	var sabotageDB *sql.DB
+	var releaseSabotageDB func()
+	triggerCreated := false
+	t.Cleanup(func() {
+		if sabotageDB == nil {
+			return
+		}
+		if triggerCreated {
+			_, _ = sabotageDB.ExecContext(
+				context.Background(),
+				`DROP TRIGGER workflow_development_admission_write_failure`,
+			)
+		}
+		if releaseSabotageDB != nil {
+			releaseSabotageDB()
+		}
+	})
+
+	session, recorded, started, err := AdmitWorkflowDevelopmentTestRun(
+		workspace,
+		admission,
+		func() (string, error) {
+			assertDevelopmentAdmissionBytes(
+				t,
+				activePath,
+				before,
+				"before SQLite write failure",
+			)
+			var openErr error
+			sabotageDB, releaseSabotageDB, openErr = borrowWorkflowDatabase(
+				t.Context(),
+				workspace,
+			)
+			if openErr != nil {
+				t.Fatalf("borrow workflow database: %v", openErr)
+			}
+			if _, createErr := sabotageDB.ExecContext(
+				t.Context(),
+				`CREATE TRIGGER workflow_development_admission_write_failure
+				 BEFORE UPDATE ON workflow_development_sessions
+				 BEGIN SELECT RAISE(ABORT, 'injected development write failure'); END`,
+			); createErr != nil {
+				t.Fatalf("create development write-failure trigger: %v", createErr)
+			}
+			triggerCreated = true
+			return "durable-start", nil
+		},
+	)
+	if err == nil || recorded || started != "durable-start" ||
+		session == nil || session == original ||
+		session.SessionRevision != original.SessionRevision ||
+		session.DraftRevision != original.DraftRevision ||
+		session.TargetWorkflowRef != original.TargetWorkflowRef ||
+		session.YAML != original.YAML || session.LastTest != nil {
+		t.Fatalf(
+			"write failure session=%#v recorded=%v started=%q error=%v",
+			session,
+			recorded,
+			started,
+			err,
+		)
+	}
+	if _, restoreErr := sabotageDB.ExecContext(
+		t.Context(),
+		`DROP TRIGGER workflow_development_admission_write_failure`,
+	); restoreErr != nil {
+		t.Fatalf("drop development write-failure trigger: %v", restoreErr)
+	}
+	triggerCreated = false
+	if releaseSabotageDB != nil {
+		releaseSabotageDB()
+		releaseSabotageDB = nil
+	}
+	sabotageDB = nil
+	assertDevelopmentAdmissionBytes(
+		t,
+		activePath,
+		before,
+		"after failed SQLite persistence",
 	)
 }
 

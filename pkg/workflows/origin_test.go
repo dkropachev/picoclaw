@@ -651,6 +651,37 @@ func TestTrustedRunOriginsBatchSharesLineageAndHonorsCancellation(t *testing.T) 
 		)
 	}
 
+	fallbackOrigin, fallbackTrusted := trustedRunOriginWithStore(
+		context.Background(),
+		nil,
+		ascending[0],
+	)
+	if !fallbackTrusted || !reflect.DeepEqual(fallbackOrigin, origin) {
+		t.Fatalf(
+			"nil-store trusted origin = (%#v, %v), want (%#v, true)",
+			fallbackOrigin,
+			fallbackTrusted,
+			origin,
+		)
+	}
+
+	failedLookups := 0
+	failed := trustedRunOriginsWithLookup(
+		context.Background(),
+		[]*Run{ascending[1]},
+		func(context.Context, string) (*Run, error) {
+			failedLookups++
+			return nil, errors.New("store unavailable")
+		},
+	)
+	if len(failed) != 0 || failedLookups != 1 {
+		t.Fatalf(
+			"failed batch lookup = (%#v, %d lookups), want no trusted origins after one lookup",
+			failed,
+			failedLookups,
+		)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancelLookups := 0
 	canceled := trustedRunOriginsWithLookup(
