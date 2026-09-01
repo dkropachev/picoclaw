@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ type EvidenceStore interface {
 type FileEvidenceStore struct {
 	rootPath string
 	root     *os.Root
+	cacheDB  *sql.DB
 	mu       sync.Mutex
 	now      func() time.Time
 	cacheTTL time.Duration
@@ -96,18 +98,31 @@ func OpenFileEvidenceStore(root string) (*FileEvidenceStore, error) {
 			return nil, err
 		}
 	}
+	store.cacheDB, err = store.openCacheDatabase(context.Background())
+	if err != nil {
+		_ = rootHandle.Close()
+		store.root = nil
+		return nil, fmt.Errorf("open local CI passing cache: %w", err)
+	}
 	return store, nil
 }
 
 func (store *FileEvidenceStore) Close() error {
-	if store == nil || store.root == nil {
+	if store == nil {
 		return nil
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	err := store.root.Close()
+	var databaseErr, rootErr error
+	if store.cacheDB != nil {
+		databaseErr = store.cacheDB.Close()
+		store.cacheDB = nil
+	}
+	if store.root != nil {
+		rootErr = store.root.Close()
+	}
 	store.root = nil
-	return err
+	return errors.Join(databaseErr, rootErr)
 }
 
 func (store *FileEvidenceStore) PutPlan(ctx context.Context, plan Plan) error {
@@ -250,73 +265,14 @@ func (store *FileEvidenceStore) LookupPassing(
 	ctx context.Context,
 	resultKey string,
 ) (Execution, bool, error) {
-	if !validDigest(resultKey) {
-		return Execution{}, false, fmt.Errorf("%w: invalid result key", ErrInvalid)
-	}
-	var record cacheIndexRecord
-	found, err := store.readObject(ctx, "cache", resultKey, &record)
-	if err != nil || !found {
-		return Execution{}, found, err
-	}
-	normalized, err := finalizeCacheIndex(record)
-	if err != nil || normalized.Digest != record.Digest || normalized.ResultKey != resultKey {
-		return Execution{}, false, ErrEvidenceCorrupt
-	}
-	if !store.now().UTC().Before(normalized.ExpiresAt) {
-		return Execution{}, false, nil
-	}
-	execution, found, err := store.GetExecution(ctx, normalized.ExecutionDigest)
-	if err != nil || !found || execution.Status != StatusPassed || execution.ResultKey != resultKey {
-		if err != nil {
-			return Execution{}, false, err
-		}
-		return Execution{}, false, ErrEvidenceCorrupt
-	}
-	return execution, true, nil
+	return store.lookupPassingCache(ctx, resultKey)
 }
 
 func (store *FileEvidenceStore) PromotePassing(
 	ctx context.Context,
 	resultKey, executionDigest string,
 ) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	execution, found, err := store.GetExecution(ctx, executionDigest)
-	if err != nil {
-		return err
-	}
-	if !found || execution.Status != StatusPassed || execution.ResultKey != resultKey {
-		return fmt.Errorf("%w: cache promotion requires exact passing execution", ErrInvalid)
-	}
-	now := store.now().UTC()
-	record, err := finalizeCacheIndex(cacheIndexRecord{
-		Version:         EvidenceVersion,
-		ResultKey:       resultKey,
-		ExecutionDigest: executionDigest,
-		CreatedAt:       now,
-		ExpiresAt:       now.Add(store.cacheTTL),
-	})
-	if err != nil {
-		return err
-	}
-	encoded, err := encodeEvidence(record)
-	if err != nil {
-		return err
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	relative := store.objectRelative("cache", resultKey)
-	if err = store.root.MkdirAll(filepath.Dir(relative), 0o700); err != nil {
-		return err
-	}
-	if err = store.validateDirectory(filepath.Dir(relative)); err != nil {
-		return err
-	}
-	return store.writeAtomic(relative, encoded, 0o600)
+	return store.promotePassingCache(ctx, resultKey, executionDigest)
 }
 
 func (store *FileEvidenceStore) putImmutable(
@@ -463,42 +419,6 @@ func (store *FileEvidenceStore) validateDirectory(relative string) error {
 		}
 	}
 	return nil
-}
-
-func (store *FileEvidenceStore) writeAtomic(relative string, data []byte, mode os.FileMode) error {
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return err
-	}
-	directory := filepath.Dir(relative)
-	temporary := filepath.Join(directory, fmt.Sprintf(".%x.tmp", nonce[:]))
-	file, err := store.root.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
-	if err != nil {
-		return err
-	}
-	removeTemporary := true
-	defer func() {
-		if removeTemporary {
-			_ = store.root.Remove(temporary)
-		}
-	}()
-	_, writeErr := file.Write(data)
-	syncErr := file.Sync()
-	closeErr := file.Close()
-	if err = errors.Join(writeErr, syncErr, closeErr); err != nil {
-		return err
-	}
-	if err = store.root.Rename(temporary, relative); err != nil {
-		return err
-	}
-	removeTemporary = false
-	directoryFile, err := store.root.Open(directory)
-	if err != nil {
-		return err
-	}
-	directorySyncErr := directoryFile.Sync()
-	directoryCloseErr := directoryFile.Close()
-	return errors.Join(directorySyncErr, directoryCloseErr)
 }
 
 func (store *FileEvidenceStore) writeImmutable(relative string, data []byte) error {

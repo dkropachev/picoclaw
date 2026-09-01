@@ -2293,10 +2293,17 @@ jobs:
     steps:
       - uses: function/wait
 `)
+	workspace := t.TempDir()
+	store := NewFileRunStore(workspace)
+	// This contract targets execution timeout persistence, not first-open schema work.
+	if _, err := store.ListRuns(context.Background()); err != nil {
+		t.Fatalf("warm run store: %v", err)
+	}
 	result, err := (&Executor{
-		WorkspaceDir:   t.TempDir(),
+		WorkspaceDir:   workspace,
+		Store:          store,
 		Functions:      registry,
-		DefaultTimeout: time.Millisecond,
+		DefaultTimeout: 250 * time.Millisecond,
 	}).Run(context.Background(), RunRequest{Workflow: workflow, WorkflowRef: "inline"})
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Run error = %v, want deadline exceeded", err)

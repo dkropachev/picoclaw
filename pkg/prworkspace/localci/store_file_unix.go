@@ -9,7 +9,8 @@ import (
 )
 
 func privateEvidenceMode(info fs.FileInfo) bool {
-	return info != nil && info.Mode().Perm()&0o077 == 0
+	return info != nil && info.Mode().Perm()&0o077 == 0 &&
+		info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) == 0
 }
 
 func privateEvidenceFile(info fs.FileInfo) bool {
