@@ -726,7 +726,8 @@ func agentWorkspaceAccountRouterProtectedRoots(workspace string) ([]string, erro
 		archiveRoot,
 		filepath.Join(archiveRoot, "account_router_state.json"),
 	}
-	return roots, nil
+	slices.Sort(roots)
+	return slices.Compact(roots), nil
 }
 
 func agentAccountRouterLegacySidecarName(name string) bool {
