@@ -791,6 +791,19 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 	}
 	commitChanged := repositoryReviewRememberedCommit(automation) != "" &&
 		repositoryReviewRememberedCommit(automation) != resolvedCommit
+	runtimeProfileChanged := false
+	profileFencedContinuation := action == "resume" ||
+		action == "start" && strings.EqualFold(
+			strings.TrimSpace(automation.Progress.Stage), "next batch queued",
+		)
+	if profileFencedContinuation {
+		runtimeProfileChanged, err = c.repositoryReviewRuntimeProfileChanged(
+			ctx, store, cfg, automation,
+		)
+		if err != nil {
+			return repoaudit.RepositoryReviewAutomation{}, err
+		}
+	}
 	legacyContinuation := automation.CampaignID == "" &&
 		(action == "resume" && !automation.StartedAt.IsZero() ||
 			action == "start" && strings.EqualFold(
@@ -800,7 +813,7 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 		automation.ResolvedCommitSHA == resolvedCommit && automation.ActiveRunID == "" &&
 		automation.StartedAt.IsZero() && automation.Progress.CompletedBatches == 0 &&
 		automation.Progress.ReviewedFiles == 0 && automation.Progress.InspectedFiles == 0
-	newCampaign := restart && !restartPrepared || commitChanged ||
+	newCampaign := restart && !restartPrepared || commitChanged || runtimeProfileChanged ||
 		automation.CampaignID == "" && !legacyContinuation
 	recoverLegacyCampaign := !newCampaign &&
 		repositoryReviewShouldRecoverLegacyCampaign(automation, action)
@@ -966,6 +979,46 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 	go c.executeAutomation(id, runID)
 	c.lifecycleMu.Unlock()
 	return updated, nil
+}
+
+func (c *repositoryReviewController) repositoryReviewRuntimeProfileChanged(
+	ctx context.Context,
+	store repoaudit.Store,
+	cfg *config.Config,
+	automation repoaudit.RepositoryReviewAutomation,
+) (bool, error) {
+	// A continuation may adopt a changed resolved model graph, but it must do so
+	// under a new campaign rather than failing later inside native planning.
+	if automation.CampaignID == "" || automation.ScopePlan.Hash == "" ||
+		automation.CampaignRecoveryPending {
+		return false, nil
+	}
+	state, found, err := store.Get(
+		repoaudit.CanonicalRepositoryIdentity(automation.Repository),
+	)
+	if err != nil {
+		return false, err
+	}
+	if !found || state.CurrentCampaign == nil ||
+		state.CurrentCampaign.ID != automation.CampaignID {
+		return true, nil
+	}
+	if state.CurrentCampaign.ProfileHash == "" {
+		return false, nil
+	}
+	resolved, err := resolveRepositoryReviewCampaignProfile(
+		ctx, c.handler.configPath, cfg, automation,
+	)
+	if err != nil {
+		return false, err
+	}
+	profileHash, err := repositoryReviewLegacyProfileHash(
+		automation, automation.ScopePlan.Hash, resolved,
+	)
+	if err != nil {
+		return false, err
+	}
+	return profileHash != state.CurrentCampaign.ProfileHash, nil
 }
 
 func resolveRepositoryReviewCampaignProfile(

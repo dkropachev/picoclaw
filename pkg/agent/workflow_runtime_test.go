@@ -25,6 +25,7 @@ import (
 	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -111,6 +112,7 @@ func TestRepositoryReviewProfileUsesDefaultFallbackChainAndRelevantDependencies(
 		Enabled: true,
 	}}
 	loop := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
+	t.Cleanup(loop.Close)
 	runner := &workflowAgentRunner{loop: loop}
 	profile, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", "", nil)
 	if err != nil || !profile.IncludeDefaultReviewer ||
@@ -134,6 +136,28 @@ func TestRepositoryReviewProfileUsesDefaultFallbackChainAndRelevantDependencies(
 	if err != nil || exact.IncludeDefaultReviewer ||
 		!reflect.DeepEqual(exact.ReviewerModels, []string{"review-primary", "review-fallback"}) {
 		t.Fatalf("explicit review profile=%#v err=%v", exact, err)
+	}
+	agent, found := loop.GetRegistry().GetAgent("main")
+	if !found {
+		t.Fatal("main agent not found")
+	}
+	agent.Candidates = []providers.FallbackCandidate{{
+		Provider: "openai", Model: "volatile-default-selection",
+	}}
+	stableExplicit, err := runner.ResolveRepositoryReviewProfile(
+		t.Context(), "main", "", []string{"review-primary", "review-fallback"},
+	)
+	if err != nil || stableExplicit.Revision != exact.Revision {
+		t.Fatalf(
+			"default runtime selection changed explicit profile from %q to %q: %v",
+			exact.Revision,
+			stableExplicit.Revision,
+			err,
+		)
+	}
+	changedDefault, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", "", nil)
+	if err != nil || changedDefault.Revision == relevant.Revision {
+		t.Fatalf("default runtime selection did not change inherited profile=%#v err=%v", changedDefault, err)
 	}
 	cfg.ModelList[0].Provider = "codex-cli"
 	cfg.ModelList[0].Model = "codex-cli/codex"
@@ -247,6 +271,85 @@ func TestRepositoryReviewProfileRejectsUnavailableRuntimeAgentsAndModels(t *test
 	); !errors.Is(err, errAgentRuntimeStopped) {
 		t.Fatalf("stopped runtime error = %v", err)
 	}
+}
+
+func TestRepositoryReviewProfileRuntimeDependencyEdges(t *testing.T) {
+	profileFor := func(cfg *config.Config, agent *AgentInstance, requested ...string) (
+		workflows.RepositoryReviewModelProfile,
+		error,
+	) {
+		t.Helper()
+		loop := &AgentLoop{
+			cfg: cfg,
+			registry: &AgentRegistry{agents: map[string]*AgentInstance{
+				"main": agent,
+			}},
+		}
+		return (&workflowAgentRunner{loop: loop}).ResolveRepositoryReviewProfile(
+			t.Context(), "main", "", requested,
+		)
+	}
+
+	t.Run("invalid inherited account", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.ModelAliases = []config.ModelAliasConfig{{Name: "review", Model: "review-v1"}}
+		_, err := profileFor(cfg, &AgentInstance{
+			ID: "main", Model: "review", AccountRef: "missing-account",
+		})
+		if err == nil || !strings.Contains(err.Error(), "effective account") {
+			t.Fatalf("inherited account error=%v", err)
+		}
+	})
+
+	t.Run("explicit reviewer alias missing", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.ModelAliases = []config.ModelAliasConfig{{Name: "review", Model: "review-v1"}}
+		_, err := profileFor(cfg, &AgentInstance{ID: "main", Model: "review"}, "missing")
+		if err == nil || !strings.Contains(err.Error(), `reviewer model "missing"`) {
+			t.Fatalf("missing reviewer alias error=%v", err)
+		}
+	})
+
+	t.Run("disabled routers light dependency and default bounds", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.ModelAliases = []config.ModelAliasConfig{
+			{Name: "review", Model: "review-v1"},
+			{Name: "review-light", Model: "review-light-v1"},
+		}
+		cfg.ModelRouters = []config.ModelRouterConfig{
+			{Name: "review", Enabled: false},
+			{Name: "other", Enabled: true},
+		}
+		cfg.ModelList = []*config.ModelConfig{nil}
+		profile, err := profileFor(cfg, &AgentInstance{
+			ID: "main", Model: "review",
+			Router: routing.New(routing.RouterConfig{LightModel: "review-light"}),
+		})
+		if err != nil || profile.MaxContentBytes != 12<<10 {
+			t.Fatalf("default-bounds profile=%#v err=%v", profile, err)
+		}
+	})
+
+	t.Run("account router dependencies", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.ModelAliases = []config.ModelAliasConfig{{Name: "review", Model: "review-v1"}}
+		cfg.ModelList = []*config.ModelConfig{{
+			ModelName: "direct", Provider: "openai", Model: "review-v1", Enabled: true,
+		}}
+		cfg.AccountRouters = []config.AccountRouterConfig{{
+			Name: "review-pool", Enabled: true, Entry: "primary",
+			Blocks: []config.AccountRouterBlock{{
+				ID: "primary", Type: config.AccountRouterBlockTypeAccount, Account: "direct",
+			}},
+		}}
+		profile, err := profileFor(cfg, &AgentInstance{
+			ID: "main", Model: "review", AccountRef: "review-pool",
+			ContextWindow: 16 << 10, MaxTokens: 4 << 10,
+		})
+		if err != nil || profile.AccountRef != "review-pool" || profile.Revision == "" {
+			t.Fatalf("account-router profile=%#v err=%v", profile, err)
+		}
+	})
 }
 
 func TestWorkflowAgentAccountReferenceValidationCoversEveryRuntimeAccountKind(t *testing.T) {
