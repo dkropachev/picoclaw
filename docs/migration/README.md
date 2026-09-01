@@ -11,3 +11,6 @@ versions.
 - [Development Workspace V20 Cutover](development-workspace-v20-cutover.md):
   prepare for the destructive replacement of v18/v19 PR state with `devw_`
   development workspaces and durable notifications.
+- [Local-CI passing cache SQLite cutover](local-ci-cache-sqlite.md): migrate
+  mutable passing-result JSON indexes while retaining portable immutable
+  evidence artifacts.

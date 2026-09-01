@@ -628,6 +628,97 @@ func pathExists(path string) bool {
 	return err == nil
 }
 
+func TestAgentFileMutationPolicyProtectsLocalCIEvidenceSQLiteStore(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+
+	cfg := agentFileMutationTestConfig(workspace)
+	cfg.Events.Ingress.Enabled = true
+	cfg.Events.Ingress.DatabasePath = filepath.Join("eventing", "events.db")
+	evidenceRoot := filepath.Join(
+		workspace,
+		"eventing",
+		"pr-workspace-local-ci",
+		"evidence",
+	)
+	database := filepath.Join(evidenceRoot, "cache.db")
+	targets := []string{
+		database,
+		database + "-wal",
+		database + "-shm",
+		filepath.Join(evidenceRoot, "cache", "aa", strings.Repeat("a", 64)+".json"),
+		filepath.Join(
+			evidenceRoot,
+			"legacy-json",
+			"local-ci-cache-v1",
+			"cache",
+			"aa",
+			strings.Repeat("a", 64)+".json",
+		),
+	}
+	for _, target := range targets {
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Tools.AllowWritePaths = append(
+			cfg.Tools.AllowWritePaths,
+			"^"+regexp.QuoteMeta(target)+"$",
+		)
+	}
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+
+	for _, target := range targets {
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			requireAgentFileMutationDenied(
+				t,
+				agent.Tools,
+				toolName,
+				workspace,
+				target,
+				true,
+			)
+		}
+		content, err := os.ReadFile(target)
+		if err != nil || string(content) != "before" {
+			t.Fatalf("protected local CI state %q = %q, %v", target, content, err)
+		}
+	}
+	hardlink := filepath.Join(workspace, "local-ci-cache-hardlink.db")
+	if err := os.Link(database, hardlink); err == nil {
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			if toolName == "apply_patch" {
+				tool, _ := agent.Tools.Get(toolName)
+				result := executeAgentFileMutation(
+					t,
+					tool,
+					toolName,
+					workspace,
+					hardlink,
+					true,
+				)
+				if result == nil || !result.IsError {
+					t.Fatalf("apply_patch accepted local CI database hardlink: %#v", result)
+				}
+				continue
+			}
+			requireAgentFileMutationDenied(
+				t,
+				agent.Tools,
+				toolName,
+				workspace,
+				hardlink,
+				true,
+			)
+		}
+	}
+}
+
 func TestAgentFileMutationPolicyHomeInsideWorkspaceOmitsUnsafeApplyPatch(t *testing.T) {
 	workspace := t.TempDir()
 	home := filepath.Join(workspace, ".picoclaw")

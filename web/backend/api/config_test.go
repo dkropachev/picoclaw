@@ -48,6 +48,16 @@ func TestValidateConfigRejectsInvalidCommonChannelSettings(t *testing.T) {
 	}
 	decodedDiscord.(*config.DiscordSettings).Token = *config.NewSecureString("")
 
+	wecom := cfg.Channels[config.ChannelWeCom]
+	wecom.Enabled = true
+	decodedWeCom, err := wecom.GetDecoded()
+	if err != nil {
+		t.Fatalf("GetDecoded() WeCom error = %v", err)
+	}
+	wecomSettings := decodedWeCom.(*config.WeComSettings)
+	wecomSettings.BotID = ""
+	wecomSettings.Secret = *config.NewSecureString("")
+
 	errs := validateConfig(cfg)
 	for _, want := range []string{
 		"model_list[0]: model config is required",
@@ -56,6 +66,8 @@ func TestValidateConfigRejectsInvalidCommonChannelSettings(t *testing.T) {
 		"channels.pico.token is required",
 		"channels.telegram.token is required",
 		"channels.discord.token is required",
+		"channels.wecom.bot_id is required",
+		"channels.wecom.secret is required",
 	} {
 		found := false
 		for _, got := range errs {

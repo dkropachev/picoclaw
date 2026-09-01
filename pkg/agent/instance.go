@@ -378,6 +378,10 @@ func newAgentInstanceWithRuntimePolicies(
 		panic(fmt.Sprintf("build workflow file-mutation policy: %v", workflowProtectedErr))
 	}
 	fileMutationProtectedRoots = append(fileMutationProtectedRoots, workflowProtectedRoots...)
+	fileMutationProtectedRoots = append(
+		fileMutationProtectedRoots,
+		mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg)...,
+	)
 	fileMutationPolicy := tools.FileMutationPolicy{
 		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
 			fileMutationProtectedRoots,

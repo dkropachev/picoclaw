@@ -17,6 +17,7 @@ const (
 	agentAuthDatabaseName         = "auth.db"
 	agentModelCatalogDatabaseName = "model-catalogs.db"
 	agentToolAdaptationDatabase   = "tool-adaptation.db"
+	agentLocalCICacheDatabaseName = "cache.db"
 )
 
 const (
@@ -252,6 +253,42 @@ func mustAgentRuntimeFileMutationProtectedRoots(configPath string) []string {
 	roots, err := agentRuntimeFileMutationProtectedRoots(configPath)
 	if err != nil {
 		panic(fmt.Sprintf("build file-mutation policy: %v", err))
+	}
+	return roots
+}
+
+func agentLocalCIEvidenceFileMutationProtectedRoots(cfg *config.Config) ([]string, error) {
+	if cfg == nil || !cfg.Events.Ingress.Enabled {
+		return nil, nil
+	}
+	ingress := config.EffectiveEventIngressConfig(cfg, cfg.WorkspacePath())
+	databasePath, err := filepath.Abs(filepath.Clean(ingress.DatabasePath))
+	if err != nil {
+		return nil, fmt.Errorf("resolve local CI event database path: %w", err)
+	}
+	evidenceRoot := filepath.Join(
+		filepath.Dir(databasePath),
+		"pr-workspace-local-ci",
+		"evidence",
+	)
+	cacheDatabase := filepath.Join(evidenceRoot, agentLocalCICacheDatabaseName)
+	return []string{
+		// The namespace protects immutable evidence plus active and archived
+		// legacy cache indexes. Exact database paths additionally catch an
+		// existing hardlink alias outside this namespace.
+		evidenceRoot,
+		cacheDatabase,
+		cacheDatabase + "-wal",
+		cacheDatabase + "-shm",
+		filepath.Join(evidenceRoot, "cache"),
+		filepath.Join(evidenceRoot, "legacy-json"),
+	}, nil
+}
+
+func mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg *config.Config) []string {
+	roots, err := agentLocalCIEvidenceFileMutationProtectedRoots(cfg)
+	if err != nil {
+		panic(fmt.Sprintf("build local CI file-mutation policy: %v", err))
 	}
 	return roots
 }
