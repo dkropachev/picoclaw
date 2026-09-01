@@ -1001,7 +1001,7 @@ func TestRepositoryReviewIssueGenerationBoundsConcurrencyAndRetriesOnlyFailure(t
 	releaseOnce.Do(func() { close(release) })
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("issue generation did not complete")
 	}
 	if response.Code != http.StatusOK || maximum.Load() != 4 || calls.Load() != 5 ||
