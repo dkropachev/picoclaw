@@ -492,33 +492,19 @@ func TestBackfillRepositoryReviewFileAttributionsPublicErrorsAndNoop(t *testing.
 		}
 	})
 	t.Run("corrupt ledger", func(t *testing.T) {
-		t.Skip("per-ledger JSON corruption was replaced by SQLite integrity coverage")
 		fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
 			inspected: []int{0},
 		})
-		entries, err := os.ReadDir(filepath.Join(fixture.workspace, "repository_reviews"))
-		if err != nil {
+		if err := os.WriteFile(
+			filepath.Join(
+				fixture.workspace, "repository_reviews", "repository-reviews.db",
+			),
+			[]byte("not-sqlite"),
+			0o600,
+		); err != nil {
 			t.Fatal(err)
 		}
-		corrupted := false
-		for _, entry := range entries {
-			if strings.HasPrefix(entry.Name(), "repo_") &&
-				strings.HasSuffix(entry.Name(), ".json") &&
-				!strings.HasSuffix(entry.Name(), ".summary.json") {
-				if writeErr := os.WriteFile(
-					filepath.Join(fixture.workspace, "repository_reviews", entry.Name()),
-					[]byte("{"), 0o600,
-				); writeErr != nil {
-					t.Fatal(writeErr)
-				}
-				corrupted = true
-				break
-			}
-		}
-		if !corrupted {
-			t.Fatal("repository ledger file was not found")
-		}
-		_, err = BackfillRepositoryReviewFileAttributions(
+		_, err := BackfillRepositoryReviewFileAttributions(
 			t.Context(), fixture.workspace, fixture.automation.ID,
 			RepositoryReviewFileAttributionBackfillOptions{},
 		)

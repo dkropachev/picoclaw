@@ -1994,6 +1994,80 @@ func TestRepositoryReviewSQLiteDetectsRelationshipProjectionTamper(t *testing.T)
 	}
 }
 
+func TestRepositoryReviewSQLitePrimitiveEncodings(t *testing.T) {
+	codeTypes := []RepositoryReviewCodeType{
+		RepositoryReviewCodeTypeCode,
+		RepositoryReviewCodeTypeTest,
+	}
+	if got := repositoryReviewCodeTypeStrings(codeTypes); !reflect.DeepEqual(
+		got, []string{"code", "test"},
+	) {
+		t.Fatalf("code type strings=%#v", got)
+	}
+	if reviewBoolInteger(true) != 1 || reviewBoolInteger(false) != 0 {
+		t.Fatal("boolean encoding mismatch")
+	}
+	if id, version := nullableReviewProfile("", 7); id != nil || version != nil {
+		t.Fatalf("nil profile encoding=(%#v, %#v)", id, version)
+	}
+	if id, version := nullableReviewProfile("rrpf_encoding", 7); id != "rrpf_encoding" || version != int64(7) {
+		t.Fatalf("profile encoding=(%#v, %#v)", id, version)
+	}
+
+	now := time.Date(2026, time.August, 31, 12, 34, 56, 789, time.FixedZone("offset", 3600))
+	if nullableReviewTime(time.Time{}) != nil || nullableReviewTime(now) != now.UTC().UnixNano() {
+		t.Fatal("time encoding mismatch")
+	}
+	if !reviewNullTimeMatches(time.Time{}, sql.NullInt64{}) ||
+		reviewNullTimeMatches(time.Time{}, sql.NullInt64{Valid: true}) ||
+		!reviewNullTimeMatches(now, sql.NullInt64{Int64: now.UTC().UnixNano(), Valid: true}) ||
+		reviewNullTimeMatches(now, sql.NullInt64{Int64: now.UTC().UnixNano() + 1, Valid: true}) {
+		t.Fatal("nullable time comparison mismatch")
+	}
+	if !equalReviewStrings([]string{"a", "b"}, []string{"a", "b"}) ||
+		equalReviewStrings([]string{"a"}, []string{"a", "b"}) ||
+		equalReviewStrings([]string{"a", "b"}, []string{"a", "c"}) {
+		t.Fatal("ordered string comparison mismatch")
+	}
+
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.SetMaxOpenConns(1)
+	defer database.Close()
+	if _, err = database.Exec(`CREATE TABLE ordered_values (
+		owner TEXT NOT NULL, position INTEGER NOT NULL, value TEXT
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = database.Exec(`INSERT INTO ordered_values VALUES
+		('owner', 1, 'second'), ('owner', 0, 'first')`); err != nil {
+		t.Fatal(err)
+	}
+	values, err := loadReviewOrderedStrings(
+		t.Context(), database,
+		`SELECT value FROM ordered_values WHERE owner = ? ORDER BY position`, "owner",
+	)
+	if err != nil || !reflect.DeepEqual(values, []string{"first", "second"}) {
+		t.Fatalf("ordered values=%#v err=%v", values, err)
+	}
+	if _, err = loadReviewOrderedStrings(
+		t.Context(), database, `SELECT value FROM missing_values WHERE owner = ?`, "owner",
+	); err == nil {
+		t.Fatal("missing ordered-value table was accepted")
+	}
+	if _, err = database.Exec(`INSERT INTO ordered_values VALUES ('null', 0, NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = loadReviewOrderedStrings(
+		t.Context(), database,
+		`SELECT value FROM ordered_values WHERE owner = ? ORDER BY position`, "null",
+	); err == nil {
+		t.Fatal("NULL ordered value was accepted")
+	}
+}
+
 func requireReviewLegacyArchived(t *testing.T, root, name string) {
 	t.Helper()
 	if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {

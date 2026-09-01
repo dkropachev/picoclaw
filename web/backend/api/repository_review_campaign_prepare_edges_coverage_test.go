@@ -517,21 +517,11 @@ func TestRepositoryReviewLegacyAdapterRemainingErrorsCoverage(t *testing.T) {
 	})
 
 	t.Run("corrupt repository state", func(t *testing.T) {
-		t.Skip("per-ledger JSON corruption was replaced by SQLite integrity coverage")
 		fixture := newFixture(t)
-		matches, err := filepath.Glob(filepath.Join(
-			fixture.workspace, "repository_reviews", "repo_*.json",
-		))
-		var statePath string
-		for _, candidate := range matches {
-			if !strings.HasSuffix(candidate, ".summary.json") {
-				statePath = candidate
-			}
-		}
-		if err != nil || statePath == "" {
-			t.Fatalf("repository state matches=%#v err=%v", matches, err)
-		}
-		if err := os.WriteFile(statePath, []byte("not-json"), 0o600); err != nil {
+		statePath := filepath.Join(
+			fixture.workspace, "repository_reviews", "repository-reviews.db",
+		)
+		if err := os.WriteFile(statePath, []byte("not-sqlite"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := (&repositoryReviewController{}).recoverLegacyRepositoryReviewCampaign(

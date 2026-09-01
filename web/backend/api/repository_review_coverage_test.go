@@ -2321,14 +2321,13 @@ func TestRepositoryReviewCommitOptionsBoundaryCoverage(t *testing.T) {
 		}
 	})
 	t.Run("state corrupts during resolution", func(t *testing.T) {
-		t.Skip("per-automation JSON corruption was replaced by SQLite integrity coverage")
 		_, _, automation, controller, workspace := setup(
 			t, repoaudit.RepositoryReviewAutomationPaused, commit,
 		)
 		statePath := filepath.Join(
 			workspace,
 			"repository_reviews",
-			"automation_"+automation.ID+".json",
+			"repository-reviews.db",
 		)
 		controller.resolveCommit = func(
 			context.Context,
@@ -2336,7 +2335,7 @@ func TestRepositoryReviewCommitOptionsBoundaryCoverage(t *testing.T) {
 			repoaudit.RepositoryReviewAutomation,
 			string,
 		) (string, error) {
-			return commit, os.WriteFile(statePath, []byte("{"), 0o600)
+			return commit, os.WriteFile(statePath, []byte("not-sqlite"), 0o600)
 		}
 		if _, _, _, err := controller.repositoryReviewCommitOptions(
 			t.Context(), automation.ID,

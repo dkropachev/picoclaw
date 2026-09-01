@@ -283,18 +283,17 @@ func TestRepositoryReviewDirectPostBoundaryOutcomes(t *testing.T) {
 	})
 
 	t.Run("ledger disappears after publication", func(t *testing.T) {
-		t.Skip("per-ledger JSON removal was replaced by SQLite transaction coverage")
 		_, mux, workspace, state, automation := newMappedRepositoryReviewDetailFixture(t)
 		previous := runRepositoryReviewIssueWriter
 		t.Cleanup(func() { runRepositoryReviewIssueWriter = previous })
 		runRepositoryReviewIssueWriter = successfulRepositoryReviewCoverageWriter
 		installEventProxyStubs(t, func(*http.Request, time.Duration) (*http.Response, error) {
-			statePath := filepath.Join(
-				workspace, "repository_reviews",
-				"repo_"+strings.TrimPrefix(state.ID, "rrp_")+".json",
+			databasePath := filepath.Join(
+				workspace, "repository_reviews", "repository-reviews.db",
 			)
-			_ = os.Remove(statePath)
-			_ = os.Remove(strings.TrimSuffix(statePath, ".json") + ".summary.json")
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				_ = os.Remove(databasePath + suffix)
+			}
 			return eventUpstreamResponse(http.StatusOK, `{"outcome":"posted"}`), nil
 		})
 		response := repositoryReviewAutomationMutation(
