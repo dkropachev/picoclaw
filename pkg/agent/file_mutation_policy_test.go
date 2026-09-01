@@ -1476,6 +1476,9 @@ func TestAgentFileMutationPolicyFailureBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	absoluteStateRoot := t.TempDir()
+	absoluteHome := filepath.Join(absoluteStateRoot, "home")
+	absoluteWorkspace := filepath.Join(absoluteStateRoot, "workspace")
 	unavailableWorkingDirectory := t.TempDir()
 	if err = os.Chdir(unavailableWorkingDirectory); err != nil {
 		t.Fatal(err)
@@ -1503,7 +1506,7 @@ func TestAgentFileMutationPolicyFailureBoundaries(t *testing.T) {
 		_ = mustAgentRuntimeFileMutationProtectedRoots("")
 	}()
 
-	t.Setenv(config.EnvHome, filepath.Join(originalWorkingDirectory, "absolute-home"))
+	t.Setenv(config.EnvHome, absoluteHome)
 	if roots, rootErr := agentRuntimeFileMutationProtectedRoots(
 		"relative-config.json",
 	); rootErr == nil ||
@@ -1536,7 +1539,7 @@ func TestAgentFileMutationPolicyFailureBoundaries(t *testing.T) {
 	executionPolicy := isolation.NewExecutionPolicy(config.IsolationConfig{})
 	diagnosticPolicy := logger.DiagnosticPolicy{}
 	absoluteDefaults := cfg.Agents.Defaults
-	absoluteDefaults.Workspace = filepath.Join(originalWorkingDirectory, "absolute-workspace")
+	absoluteDefaults.Workspace = absoluteWorkspace
 	constructors := map[string]func(){
 		"loop": func() {
 			_ = newAgentLoop(cfg, nil, &mockProvider{}, executionPolicy, diagnosticPolicy)
