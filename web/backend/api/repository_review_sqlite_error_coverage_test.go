@@ -22,6 +22,16 @@ func overwriteRepositoryReviewPayloadForCoverage(
 	query string,
 	id string,
 ) {
+	setRepositoryReviewPayloadForCoverage(t, workspace, query, id, []byte(`{}`))
+}
+
+func setRepositoryReviewPayloadForCoverage(
+	t *testing.T,
+	workspace string,
+	query string,
+	id string,
+	payload []byte,
+) {
 	t.Helper()
 	database, err := sql.Open(
 		"sqlite", filepath.Join(workspace, "repository_reviews", "repository-reviews.db"),
@@ -30,7 +40,11 @@ func overwriteRepositoryReviewPayloadForCoverage(
 		t.Fatal(err)
 	}
 	database.SetMaxOpenConns(1)
-	result, execErr := database.Exec(query, []byte(`{}`), id)
+	if _, err := database.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	result, execErr := database.Exec(query, payload, id)
 	closeErr := database.Close()
 	if execErr != nil || closeErr != nil {
 		t.Fatalf("overwrite repository-review payload: exec=%v close=%v", execErr, closeErr)
@@ -38,6 +52,35 @@ func overwriteRepositoryReviewPayloadForCoverage(
 	if changed, rowsErr := result.RowsAffected(); rowsErr != nil || changed != 1 {
 		t.Fatalf("overwritten repository-review rows=%d err=%v", changed, rowsErr)
 	}
+}
+
+func repositoryReviewStatePayloadForCoverage(
+	t *testing.T,
+	workspace string,
+	stateID string,
+) []byte {
+	t.Helper()
+	database, err := sql.Open(
+		"sqlite", filepath.Join(workspace, "repository_reviews", "repository-reviews.db"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.SetMaxOpenConns(1)
+	if _, err := database.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	var payload []byte
+	queryErr := database.QueryRow(
+		`SELECT payload_json FROM repository_review_states WHERE state_id = ?`,
+		stateID,
+	).Scan(&payload)
+	closeErr := database.Close()
+	if queryErr != nil || closeErr != nil {
+		t.Fatalf("read repository-review payload: query=%v close=%v", queryErr, closeErr)
+	}
+	return payload
 }
 
 func overwriteRepositoryReviewStatePayloadForCoverage(
