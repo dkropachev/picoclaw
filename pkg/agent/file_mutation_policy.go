@@ -240,7 +240,7 @@ func agentWeixinRetainedStateFiles(weixinRoot, archiveRoot string) ([]string, er
 			files[filepath.Join(archiveRoot, directory, entry.Name())] = struct{}{}
 		}
 	}
-	err = filepath.WalkDir(archiveRoot, func(path string, entry os.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(archiveRoot, func(path string, entry os.DirEntry, walkErr error) error {
 		if os.IsNotExist(walkErr) {
 			return nil
 		}

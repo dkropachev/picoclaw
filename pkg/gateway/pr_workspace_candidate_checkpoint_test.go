@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,6 +204,362 @@ func TestPRWorkspaceCandidateCheckpointSQLiteCASAndSchemaFences(t *testing.T) {
 	_ = raw.Close()
 	if _, err := newPRWorkspaceCandidateCheckpointStore(root); !errors.Is(err, sqlitestore.ErrTooNew) {
 		t.Fatalf("too-new checkpoint schema = %v", err)
+	}
+}
+
+func TestPRWorkspaceCandidateCheckpointSQLiteInputAndNilBoundaries(t *testing.T) {
+	for _, root := range []string{"", "relative/checkpoints"} {
+		if store, err := newPRWorkspaceCandidateCheckpointStore(root); err == nil || store != nil {
+			t.Fatalf("constructor root %q = %#v, %v", root, store, err)
+		}
+	}
+	fileRoot := filepath.Join(t.TempDir(), "checkpoints-file")
+	if err := os.WriteFile(fileRoot, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := newPRWorkspaceCandidateCheckpointStore(fileRoot); err == nil || store != nil {
+		t.Fatalf("constructor file root = %#v, %v", store, err)
+	}
+
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	var nilStore *prWorkspaceCandidateCheckpointStore
+	if database, err := nilStore.open(t.Context()); err == nil || database != nil {
+		t.Fatalf("nil store open = %#v, %v", database, err)
+	}
+	if err := nilStore.Save(checkpoint); err == nil {
+		t.Fatal("nil store Save succeeded")
+	}
+	if _, found, err := nilStore.Load(checkpoint.WorkspaceID); err == nil || found {
+		t.Fatalf("nil store Load = found %v, error %v", found, err)
+	}
+	if err := nilStore.Remove(checkpoint.WorkspaceID); err == nil {
+		t.Fatal("nil store Remove succeeded")
+	}
+
+	store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, workspaceID := range []string{"", " \t\r\n "} {
+		if _, found, loadErr := store.Load(workspaceID); loadErr == nil || found {
+			t.Fatalf("Load(%q) = found %v, error %v", workspaceID, found, loadErr)
+		}
+		if removeErr := store.Remove(workspaceID); removeErr == nil {
+			t.Fatalf("Remove(%q) succeeded", workspaceID)
+		}
+	}
+	oversized := checkpoint
+	oversized.Repository = strings.Repeat("r", prWorkspaceCandidateCheckpointMaxSize)
+	if saveErr := store.Save(oversized); saveErr == nil || !strings.Contains(saveErr.Error(), "too large") {
+		t.Fatalf("oversized Save error = %v", saveErr)
+	}
+	invalid := checkpoint
+	invalid.Fence = &prworkspace.ImplementationPublicationFence{}
+	if saveErr := store.Save(invalid); saveErr == nil {
+		t.Fatal("active checkpoint with fence was accepted")
+	}
+	invalid = checkpoint
+	invalid.State = prWorkspaceCandidateCheckpointParked
+	if saveErr := store.Save(invalid); saveErr == nil {
+		t.Fatal("parked checkpoint without fence was accepted")
+	}
+
+	alreadyOwned := checkpoint
+	alreadyOwned.Lease.AlreadyOwned = true
+	if saveErr := store.Save(alreadyOwned); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	loaded, found, err := store.Load(alreadyOwned.WorkspaceID)
+	if err != nil || !found || !loaded.Lease.AlreadyOwned {
+		t.Fatalf("already-owned round trip = %#v, found=%v err=%v", loaded, found, err)
+	}
+	if got := stringsTrimmed(" \t\r\n checkpoint \n\t "); got != "checkpoint" {
+		t.Fatalf("stringsTrimmed() = %q", got)
+	}
+}
+
+func TestPRWorkspaceCandidateCheckpointSQLiteDecoderRejectsTrailers(t *testing.T) {
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	encoded, err := json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, suffix := range map[string]string{
+		"trailing value":    `{}`,
+		"malformed trailer": `{`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if decoded, decodeErr := decodeLegacyPRWorkspaceCheckpoint(
+				append(append([]byte(nil), encoded...), suffix...),
+			); decodeErr == nil || decoded != (prWorkspaceCandidateCheckpoint{}) {
+				t.Fatalf("decode with %s = %#v, %v", name, decoded, decodeErr)
+			}
+		})
+	}
+}
+
+func TestPRWorkspaceCandidateCheckpointSQLiteAuditsConflictingLegacyIdentity(t *testing.T) {
+	store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	if saveErr := store.Save(checkpoint); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	encoded, err := json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	err = sqlitestore.Immediate(t.Context(), database, func(conn *sql.Conn) error {
+		for _, test := range []struct {
+			name      string
+			relative  string
+			data      []byte
+			issueCode string
+		}{
+			{"malformed", "malformed.json", []byte(`{`), "malformed-checkpoint"},
+			{"identity", "wrong-name.json", encoded, "invalid-checkpoint"},
+			{"conflict", legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID), encoded, "identity-conflict"},
+		} {
+			result, importErr := importLegacyPRWorkspaceCheckpoint(t.Context(), conn, sqlitestore.LegacyInput{
+				Relative: test.relative,
+				Data:     test.data,
+			})
+			if importErr != nil || result.Skipped != 1 || result.Imported != 0 ||
+				len(result.Issues) != 1 || result.Issues[0].Code != test.issueCode {
+				return fmt.Errorf("%s import = %#v, %v", test.name, result, importErr)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPRWorkspaceCandidateCheckpointSQLiteRejectsSchemaAndRowTampering(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		tamper func(*testing.T, *sql.DB)
+	}{
+		{
+			name: "missing index",
+			tamper: func(t *testing.T, database *sql.DB) {
+				if _, err := database.Exec(`DROP INDEX candidate_checkpoints_state_idx`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unexpected object",
+			tamper: func(t *testing.T, database *sql.DB) {
+				if _, err := database.Exec(`CREATE TABLE checkpoint_injected(value TEXT) STRICT`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "extra unique index",
+			tamper: func(t *testing.T, database *sql.DB) {
+				if _, err := database.Exec(`CREATE UNIQUE INDEX checkpoint_unique_tamper
+                    ON candidate_checkpoints(charter_id)`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "invalid row",
+			tamper: func(t *testing.T, database *sql.DB) {
+				if _, err := database.Exec(`UPDATE candidate_checkpoints
+                    SET candidate_parent_commit = 'different-parent'`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "active")
+			store, err := newPRWorkspaceCandidateCheckpointStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.name == "invalid row" {
+				if saveErr := store.Save(prWorkspaceCandidateCheckpointFixture()); saveErr != nil {
+					t.Fatal(saveErr)
+				}
+			}
+			database, err := sql.Open("sqlite", store.databasePath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			database.SetMaxOpenConns(1)
+			test.tamper(t, database)
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := newPRWorkspaceCandidateCheckpointStore(root); !errors.Is(err, sqlitestore.ErrInvalidSchema) {
+				t.Fatalf("tampered checkpoint schema error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPRWorkspaceCandidateCheckpointSQLiteLegacyEnumerationBoundaries(t *testing.T) {
+	missing := &prWorkspaceCandidateCheckpointStore{root: filepath.Join(t.TempDir(), "missing")}
+	if sources, err := missing.legacySources(); err == nil || sources != nil {
+		t.Fatalf("missing legacy root = %#v, %v", sources, err)
+	}
+	root := t.TempDir()
+	for _, name := range []string{"z.json", "a.json"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "ignored.txt"), []byte("ignored"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &prWorkspaceCandidateCheckpointStore{root: root}
+	sources, err := store.legacySources()
+	if err != nil || len(sources) != 2 || sources[0].Relative != "a.json" || sources[1].Relative != "z.json" {
+		t.Fatalf("sorted legacy sources = %#v, %v", sources, err)
+	}
+}
+
+func TestPRWorkspaceCandidateCheckpointSQLiteConstraintFailuresRollback(t *testing.T) {
+	t.Run("insert", func(t *testing.T) {
+		store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkpoint := prWorkspaceCandidateCheckpointFixture()
+		checkpoint.Repository = strings.Repeat("r", 4097)
+		if err := store.Save(checkpoint); err == nil || !strings.Contains(err.Error(), "write") {
+			t.Fatalf("constraint insert error = %v", err)
+		}
+		if _, found, err := store.Load(checkpoint.WorkspaceID); err != nil || found {
+			t.Fatalf("failed insert remained: found=%v err=%v", found, err)
+		}
+	})
+
+	t.Run("update", func(t *testing.T) {
+		store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkpoint := prWorkspaceCandidateCheckpointFixture()
+		if saveErr := store.Save(checkpoint); saveErr != nil {
+			t.Fatal(saveErr)
+		}
+		invalidUpdate := checkpoint
+		invalidUpdate.Candidate.CandidateDigest = "short"
+		if saveErr := store.Save(invalidUpdate); saveErr == nil || !strings.Contains(saveErr.Error(), "write") {
+			t.Fatalf("constraint update error = %v", saveErr)
+		}
+		loaded, found, err := store.Load(checkpoint.WorkspaceID)
+		if err != nil || !found || !equivalentPRWorkspaceCheckpoint(loaded, checkpoint) {
+			t.Fatalf("failed update state = %#v, found=%v err=%v", loaded, found, err)
+		}
+	})
+}
+
+func TestPRWorkspaceCandidateCheckpointSQLiteImportDatabaseFailuresRollback(t *testing.T) {
+	t.Run("identity query", func(t *testing.T) {
+		store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkpoint := prWorkspaceCandidateCheckpointFixture()
+		encoded, err := json.Marshal(checkpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		database, err := store.open(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		err = sqlitestore.Immediate(t.Context(), database, func(conn *sql.Conn) error {
+			if _, dropErr := conn.ExecContext(t.Context(), `DROP TABLE candidate_checkpoints`); dropErr != nil {
+				return dropErr
+			}
+			_, importErr := importLegacyPRWorkspaceCheckpoint(t.Context(), conn, sqlitestore.LegacyInput{
+				Relative: legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID), Data: encoded,
+			})
+			return importErr
+		})
+		if err == nil {
+			t.Fatal("legacy import identity query failure committed")
+		}
+	})
+
+	t.Run("row insert", func(t *testing.T) {
+		store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkpoint := prWorkspaceCandidateCheckpointFixture()
+		checkpoint.Repository = strings.Repeat("r", 4097)
+		encoded, err := json.Marshal(checkpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		database, err := store.open(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		err = sqlitestore.Immediate(t.Context(), database, func(conn *sql.Conn) error {
+			_, importErr := importLegacyPRWorkspaceCheckpoint(t.Context(), conn, sqlitestore.LegacyInput{
+				Relative: legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID), Data: encoded,
+			})
+			return importErr
+		})
+		if err == nil {
+			t.Fatal("legacy import constraint failure committed")
+		}
+		if _, found, err := store.Load(checkpoint.WorkspaceID); err != nil || found {
+			t.Fatalf("failed legacy insert remained: found=%v err=%v", found, err)
+		}
+	})
+}
+
+func TestPRWorkspaceCandidateCheckpointSQLiteOperationsFailClosedWhenDatabasePathIsUnsafe(t *testing.T) {
+	for _, operation := range []struct {
+		name string
+		run  func(*prWorkspaceCandidateCheckpointStore) error
+	}{
+		{"save", func(store *prWorkspaceCandidateCheckpointStore) error {
+			return store.Save(prWorkspaceCandidateCheckpointFixture())
+		}},
+		{"load", func(store *prWorkspaceCandidateCheckpointStore) error {
+			_, _, err := store.Load(prWorkspaceCandidateCheckpointFixture().WorkspaceID)
+			return err
+		}},
+		{"remove", func(store *prWorkspaceCandidateCheckpointStore) error {
+			return store.Remove(prWorkspaceCandidateCheckpointFixture().WorkspaceID)
+		}},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(store.databasePath()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(store.databasePath(), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := operation.run(store); err == nil {
+				t.Fatal("operation accepted a directory at the database path")
+			}
+		})
 	}
 }
 
