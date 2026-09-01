@@ -11,7 +11,6 @@ import {
   RepositoryReviewAPIError,
   getRepositoryReviewFindingsProcessingSource,
   retryRepositoryReviewFindingsProcessingSource,
-  retryRepositoryReviewHistoricalDeduplication,
 } from "@/api/repository-reviews"
 import { CollectionDetailShell } from "@/components/collection"
 import { Badge } from "@/components/ui/badge"
@@ -86,22 +85,6 @@ export function RepositoryReviewFindingProcessingPage({
           : "Finding processing could not be retried.",
       )
       void query.refetch()
-    },
-  })
-  const retryHistorical = useMutation({
-    mutationFn: () =>
-      retryRepositoryReviewHistoricalDeduplication(automationID),
-    onSuccess: async () => {
-      await Promise.all([query.refetch(), healthQuery.refetch()])
-      toast.success("Historical consolidation queued.")
-    },
-    onError: (error) => {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Historical consolidation could not be retried.",
-      )
-      void healthQuery.refetch()
     },
   })
   const notFound =
@@ -185,13 +168,15 @@ export function RepositoryReviewFindingProcessingPage({
           )}
 
           <RepositoryReviewHistoricalConsolidationNotice
+            automationID={automationID}
             consolidation={
               detail.health?.historical_consolidation ??
               detail.historical_consolidation ??
               healthQuery.data?.historical_consolidation
             }
-            retrying={retryHistorical.isPending}
-            onRetry={() => retryHistorical.mutate()}
+            onRefresh={() =>
+              Promise.all([query.refetch(), healthQuery.refetch()])
+            }
           />
 
           {(findingID || repositoryFindingID) && (

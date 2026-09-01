@@ -39,6 +39,7 @@ import {
   publishRepositoryReviewIssueDraft,
   repositoryReviewDefaultIssuePrompt,
   restartRepositoryReviewAutomation,
+  restartRepositoryReviewHistoricalDeduplication,
   resumeRepositoryReviewAutomation,
   retryRepositoryReviewFindingsProcessingSource,
   retryRepositoryReviewFindingsProcessingSources,
@@ -1297,6 +1298,12 @@ describe("repository review API", () => {
           historical_deduplication: { required: true, status: "pending" },
         }),
       )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          historical_deduplication: { required: true, status: "pending" },
+        }),
+      )
 
     await expect(
       listRepositoryReviewAutomationRawFindingsPage("auto/slash", {
@@ -1322,6 +1329,11 @@ describe("repository review API", () => {
     ).resolves.toMatchObject({
       historical_deduplication: { required: true, status: "pending" },
     })
+    await expect(
+      restartRepositoryReviewHistoricalDeduplication("auto/slash"),
+    ).resolves.toMatchObject({
+      historical_deduplication: { required: true, status: "pending" },
+    })
 
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       1,
@@ -1342,6 +1354,14 @@ describe("repository review API", () => {
       4,
       "/api/repository-reviews/automations/auto%2Fslash/historical-deduplication/retry",
       expect.objectContaining({ method: "POST", body: "{}" }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      5,
+      "/api/repository-reviews/automations/auto%2Fslash/historical-deduplication/restart",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ confirmed: true }),
+      }),
     )
   })
 

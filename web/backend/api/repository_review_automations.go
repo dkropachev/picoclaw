@@ -218,6 +218,10 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 		h.handleRetryRepositoryReviewHistoricalDeduplication,
 	)
 	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/historical-deduplication/restart",
+		h.handleRestartRepositoryReviewHistoricalDeduplication,
+	)
+	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/repository-findings",
 		h.handleListRepositoryReviewRepositoryFindingsCollection,
 	)
@@ -1894,7 +1898,10 @@ func writeRepositoryReviewAutomationError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(err.Error()), "not found"):
 		status, code = http.StatusNotFound, "not_found"
-	case errors.Is(err, repoaudit.ErrHistoricalDeduplicationInProgress):
+	case errors.Is(err, repoaudit.ErrHistoricalDeduplicationRestartRequired):
+		status, code = http.StatusConflict, "historical_consolidation_restart_required"
+	case errors.Is(err, repoaudit.ErrHistoricalDeduplicationInProgress),
+		errors.Is(err, repoaudit.ErrHistoricalDeduplicationNotQuiescent):
 		status, code = http.StatusConflict, "historical_deduplication_in_progress"
 	case errors.Is(err, errRepositoryReviewCommitSelection):
 		status, code = http.StatusConflict, "repository_review_commit_selection_required"

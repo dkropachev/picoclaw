@@ -48,6 +48,7 @@ import {
   reserveRepositoryReviewValidations,
   resolveRepositoryReviewPossibleDuplicate,
   restartRepositoryReviewAutomation,
+  restartRepositoryReviewHistoricalDeduplication,
   resumeRepositoryReviewAutomation,
   retryRepositoryReviewFindingsProcessingSource,
   retryRepositoryReviewFindingsProcessingSources,
@@ -79,10 +80,12 @@ import type { RepositoryReviewCollectionSearch } from "./repository-review-route
 vi.mock("@/api/repository-reviews", () => ({
   RepositoryReviewAPIError: class RepositoryReviewAPIError extends Error {
     status: number
+    code?: string
 
-    constructor(status: number, message: string) {
+    constructor(status: number, message: string, code?: string) {
       super(message)
       this.status = status
+      this.code = code
     }
   },
   generateRepositoryReviewIssues: vi.fn(),
@@ -105,6 +108,7 @@ vi.mock("@/api/repository-reviews", () => ({
   pauseRepositoryReviewAutomation: vi.fn(),
   resumeRepositoryReviewAutomation: vi.fn(),
   restartRepositoryReviewAutomation: vi.fn(),
+  restartRepositoryReviewHistoricalDeduplication: vi.fn(),
   updateRepositoryReviewAutomationFinding: vi.fn(),
   updateRepositoryReviewAutomationIssue: vi.fn(),
   deleteRepositoryReviewAutomationIssue: vi.fn(),
@@ -660,6 +664,13 @@ describe("routed repository review pages", () => {
       repository: repositorySummary,
       historical_deduplication: { required: true, status: "pending" },
     })
+    vi.mocked(restartRepositoryReviewHistoricalDeduplication).mockResolvedValue(
+      {
+        automation,
+        repository: repositorySummary,
+        historical_deduplication: { required: true, status: "pending" },
+      },
+    )
     vi.mocked(listRepositoryReviewAutomationIssuesPage).mockResolvedValue({
       automation,
       repository: repositorySummary,
@@ -1507,7 +1518,7 @@ describe("routed repository review pages", () => {
     )
   })
 
-  it("shows raw counters and explicitly retries failed historical consolidation", async () => {
+  it("shows raw counters and explicitly resumes failed historical consolidation", async () => {
     vi.mocked(getRepositoryReviewFindingHealth).mockResolvedValue({
       ...findingHealth,
       historical_consolidation: {
@@ -1553,7 +1564,7 @@ describe("routed repository review pages", () => {
     expect(screen.getByText("Historical consolidation")).toBeVisible()
     await user.click(
       screen.getByRole("button", {
-        name: "Retry historical consolidation",
+        name: "Resume historical consolidation",
       }),
     )
     await waitFor(() =>
@@ -1561,6 +1572,159 @@ describe("routed repository review pages", () => {
         automation.id,
       ),
     )
+  })
+
+  it("reveals and confirms incompatible-work restart only after its specific resume conflict", async () => {
+    vi.mocked(getRepositoryReviewFindingHealth).mockResolvedValue({
+      ...findingHealth,
+      historical_consolidation: {
+        required: true,
+        status: "failed",
+        retryable: true,
+      },
+    })
+    vi.mocked(listRepositoryReviewAutomationFindingsPage).mockResolvedValue({
+      automation: { ...automation, status: "failed" },
+      repository: repositorySummary,
+      findings: [findingSummary],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY severity DESC, updated DESC",
+      query_schema: { fields: [] },
+    })
+    vi.mocked(
+      retryRepositoryReviewHistoricalDeduplication,
+    ).mockRejectedValueOnce(
+      new RepositoryReviewAPIError(
+        409,
+        "The saved profile no longer matches this historical replay.",
+        "historical_consolidation_restart_required",
+      ),
+    )
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewFindingsPage
+        automationID={automation.id}
+        search={{ q: "ALL ORDER BY severity DESC, updated DESC" }}
+        onSearchChange={vi.fn()}
+        onBack={vi.fn()}
+        onOpenFinding={vi.fn()}
+        onOpenRawFindings={vi.fn()}
+        onOpenRepositoryFindings={vi.fn()}
+        onOpenRepositoryFinding={vi.fn()}
+        onOpenThread={vi.fn()}
+      />,
+    )
+
+    expect(
+      await screen.findByRole("button", {
+        name: "Resume historical consolidation",
+      }),
+    ).toBeVisible()
+    expect(
+      screen.queryByRole("button", { name: "Restart incompatible work" }),
+    ).not.toBeInTheDocument()
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Resume historical consolidation",
+      }),
+    )
+    const restartButton = await screen.findByRole("button", {
+      name: "Restart incompatible work",
+    })
+    expect(
+      restartRepositoryReviewHistoricalDeduplication,
+    ).not.toHaveBeenCalled()
+
+    await user.click(restartButton)
+    const dialog = screen.getByRole("alertdialog")
+    expect(
+      within(dialog).getByText(
+        /Completed results in affected historical buckets will be reprocessed/u,
+      ),
+    ).toBeVisible()
+    expect(
+      within(dialog).getByText(
+        /Completed work in unrelated buckets will remain preserved/u,
+      ),
+    ).toBeVisible()
+    expect(
+      restartRepositoryReviewHistoricalDeduplication,
+    ).not.toHaveBeenCalled()
+
+    const healthCallsBeforeRestart = vi.mocked(getRepositoryReviewFindingHealth)
+      .mock.calls.length
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Restart incompatible work",
+      }),
+    )
+    await waitFor(() =>
+      expect(
+        restartRepositoryReviewHistoricalDeduplication,
+      ).toHaveBeenCalledWith(automation.id),
+    )
+    await waitFor(() =>
+      expect(
+        vi.mocked(getRepositoryReviewFindingHealth).mock.calls.length,
+      ).toBeGreaterThan(healthCallsBeforeRestart),
+    )
+  })
+
+  it("keeps unrelated resume failures on the normal error path", async () => {
+    vi.mocked(getRepositoryReviewFindingHealth).mockResolvedValue({
+      ...findingHealth,
+      historical_consolidation: {
+        required: true,
+        status: "failed",
+        retryable: true,
+      },
+    })
+    vi.mocked(
+      retryRepositoryReviewHistoricalDeduplication,
+    ).mockRejectedValueOnce(
+      new RepositoryReviewAPIError(
+        409,
+        "Exact historical campaign evidence is unavailable.",
+        "historical_deduplication_campaign_recovery_required",
+      ),
+    )
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewFindingsPage
+        automationID={automation.id}
+        search={{ q: "ALL ORDER BY severity DESC, updated DESC" }}
+        onSearchChange={vi.fn()}
+        onBack={vi.fn()}
+        onOpenFinding={vi.fn()}
+        onOpenRawFindings={vi.fn()}
+        onOpenRepositoryFindings={vi.fn()}
+        onOpenRepositoryFinding={vi.fn()}
+        onOpenThread={vi.fn()}
+      />,
+    )
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Resume historical consolidation",
+      }),
+    )
+    await waitFor(() =>
+      expect(retryRepositoryReviewHistoricalDeduplication).toHaveBeenCalledWith(
+        automation.id,
+      ),
+    )
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: "Resume historical consolidation",
+        }),
+      ).toBeEnabled(),
+    )
+    expect(
+      screen.queryByRole("button", { name: "Restart incompatible work" }),
+    ).not.toBeInTheDocument()
   })
 
   it("selects only failed processing records and retains safe bulk failures", async () => {
@@ -1687,7 +1851,7 @@ describe("routed repository review pages", () => {
     ).toBeVisible()
     expect(
       screen.getByRole("button", {
-        name: "Retry historical consolidation",
+        name: "Resume historical consolidation",
       }),
     ).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Retry" }))

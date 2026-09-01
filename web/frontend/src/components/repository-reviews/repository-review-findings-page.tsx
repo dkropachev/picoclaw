@@ -12,7 +12,6 @@ import {
   type RepositoryReviewRunFindingSummary,
   getRepositoryReviewAutomationFinding,
   listRepositoryReviewAutomationFindingsPage,
-  retryRepositoryReviewHistoricalDeduplication,
   retryRepositoryReviewRunFindingStatuses,
 } from "@/api/repository-reviews"
 import { createThread, dropThread } from "@/api/threads"
@@ -167,22 +166,6 @@ export function RepositoryReviewFindingsPage({
         error instanceof Error
           ? error.message
           : "Finding status could not be retried.",
-      )
-      void query.refetch()
-    },
-  })
-  const retryHistorical = useMutation({
-    mutationFn: () =>
-      retryRepositoryReviewHistoricalDeduplication(automationID),
-    onSuccess: async () => {
-      await Promise.all([query.refetch(), healthQuery.refetch()])
-      toast.success("Historical consolidation queued.")
-    },
-    onError: (error) => {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Historical consolidation could not be retried.",
       )
       void query.refetch()
     },
@@ -464,9 +447,11 @@ export function RepositoryReviewFindingsPage({
               onOpenRawFindings={onOpenRawFindings}
             />
             <RepositoryReviewHistoricalConsolidationNotice
+              automationID={automationID}
               consolidation={healthQuery.data?.historical_consolidation}
-              retrying={retryHistorical.isPending}
-              onRetry={() => retryHistorical.mutate()}
+              onRefresh={() =>
+                Promise.all([query.refetch(), healthQuery.refetch()])
+              }
             />
             <div className="flex justify-end">
               <Button

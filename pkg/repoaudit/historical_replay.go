@@ -24,6 +24,9 @@ var (
 	ErrHistoricalDeduplicationNotQuiescent = errors.New(
 		"historical deduplication is waiting for downstream work to quiesce",
 	)
+	ErrHistoricalDeduplicationRestartRequired = errors.New(
+		"historical deduplication incompatible work restart required",
+	)
 )
 
 type HistoricalDeduplicationReplayStatus string
@@ -36,9 +39,21 @@ const (
 	HistoricalDeduplicationCompleted HistoricalDeduplicationReplayStatus = "completed"
 )
 
+// HistoricalDeduplicationFailurePhase identifies the durable boundary at
+// which a replay stopped. Older ledgers omit the field; callers must use
+// HistoricalDeduplicationFailurePhaseForState to obtain the inferred value.
+type HistoricalDeduplicationFailurePhase string
+
+const (
+	HistoricalDeduplicationFailureSetup      HistoricalDeduplicationFailurePhase = "setup"
+	HistoricalDeduplicationFailureProcessing HistoricalDeduplicationFailurePhase = "processing"
+	HistoricalDeduplicationFailureMerge      HistoricalDeduplicationFailurePhase = "merge"
+)
+
 // HistoricalDeduplicationProfileSnapshot freezes the same assigned profile
-// policy and account/model revision as a live campaign. A retry deliberately
-// clears this snapshot so intervening profile changes are observed.
+// policy and account/model revision as a live campaign. Checkpoint resume
+// deliberately preserves it; adopting a different snapshot requires an
+// explicit incompatible-work restart.
 type HistoricalDeduplicationProfileSnapshot = RepositoryReviewDeduplicationSnapshot
 
 type HistoricalDeduplicationFindingVersion struct {
@@ -71,9 +86,10 @@ func HistoricalDeduplicationMergeLeaseID(
 	)
 }
 
-// HistoricalDeduplicationReplay is the compact durable replay marker. It does
-// not contain model output. Model work is restartable; only the exact merge
-// targets and their versions are retained while the narrow fence is active.
+// HistoricalDeduplicationReplay is the compact durable replay marker. Model
+// output remains in the ordinary raw and deduplicated checkpoint ledgers; the
+// marker retains only the frozen profile identity, failure phase, and exact
+// merge targets held while the narrow fence is active.
 type HistoricalDeduplicationReplay struct {
 	Required        bool                                   `json:"required"`
 	Status          HistoricalDeduplicationReplayStatus    `json:"status,omitempty"`
@@ -81,8 +97,87 @@ type HistoricalDeduplicationReplay struct {
 	SnapshotVersion int64                                  `json:"snapshot_version,omitempty"`
 	Attempts        int                                    `json:"attempts,omitempty"`
 	Error           string                                 `json:"error,omitempty"`
+	FailurePhase    HistoricalDeduplicationFailurePhase    `json:"failure_phase,omitempty"`
 	MergeLease      HistoricalDeduplicationMergeLease      `json:"merge_lease,omitempty"`
 	UpdatedAt       time.Time                              `json:"updated_at,omitempty"`
+}
+
+// HistoricalDeduplicationFailurePhaseForState returns the recorded phase or
+// infers it for phase-less ledgers written before checkpoint resume existed.
+// A terminal historical raw is processing evidence; a fully completed raw
+// ledger is merge evidence; every other shape stopped during setup.
+func HistoricalDeduplicationFailurePhaseForState(
+	state RepositoryState,
+) HistoricalDeduplicationFailurePhase {
+	if phase := state.HistoricalDeduplication.FailurePhase; phase != "" {
+		return phase
+	}
+	return inferHistoricalDeduplicationFailurePhase(state)
+}
+
+func inferHistoricalDeduplicationFailurePhase(
+	state RepositoryState,
+) HistoricalDeduplicationFailurePhase {
+	phase, _ := historicalDeduplicationFailureEvidence(state)
+	return phase
+}
+
+func historicalDeduplicationFailureEvidence(
+	state RepositoryState,
+) (HistoricalDeduplicationFailurePhase, bool) {
+	historical := 0
+	allCompleted := true
+	for _, raw := range state.RawFindings {
+		if !HistoricalDeduplicationRawFinding(raw) {
+			continue
+		}
+		historical++
+		if raw.State == RawFindingDeduplicationFailed {
+			return HistoricalDeduplicationFailureProcessing, true
+		}
+		allCompleted = allCompleted && raw.State == RawFindingDeduplicationCompleted
+	}
+	if historical > 0 && allCompleted {
+		return HistoricalDeduplicationFailureMerge, true
+	}
+	if historical > 0 || len(HistoricalDeduplicationReplayBatches(state)) > 0 {
+		return HistoricalDeduplicationFailureSetup, true
+	}
+	// With neither a source nor a legacy batch, raw evidence cannot
+	// distinguish an empty merge from setup. Setup is the conservative
+	// inference for phase-less ledgers; an explicitly recorded merge remains
+	// valid evidence from the state transition that held the merge lease.
+	return HistoricalDeduplicationFailureSetup, false
+}
+
+// historicalDeduplicationResumePhase reconciles a recorded transition phase
+// with checkpoints that may have advanced while the replay was failed. A raw
+// terminal failure always needs processing resume, a nonempty fully completed
+// raw ledger needs merge resume, and only an empty recorded merge relies on
+// the persisted transition evidence.
+func historicalDeduplicationResumePhase(
+	state RepositoryState,
+) HistoricalDeduplicationFailurePhase {
+	historical := 0
+	allCompleted := true
+	for _, raw := range state.RawFindings {
+		if !HistoricalDeduplicationRawFinding(raw) {
+			continue
+		}
+		historical++
+		if raw.State == RawFindingDeduplicationFailed {
+			return HistoricalDeduplicationFailureProcessing
+		}
+		allCompleted = allCompleted && raw.State == RawFindingDeduplicationCompleted
+	}
+	if historical > 0 && allCompleted {
+		return HistoricalDeduplicationFailureMerge
+	}
+	if historical == 0 &&
+		state.HistoricalDeduplication.FailurePhase == HistoricalDeduplicationFailureMerge {
+		return HistoricalDeduplicationFailureMerge
+	}
+	return HistoricalDeduplicationFailureSetup
 }
 
 // HistoricalDeduplicationReplayBatch is a deterministic projection of legacy
@@ -101,6 +196,22 @@ type HistoricalDeduplicationAdmission struct {
 	Admitted    int                                `json:"admitted"`
 	Complete    bool                               `json:"complete"`
 	AllComplete bool                               `json:"all_complete"`
+}
+
+// HistoricalDeduplicationDependency is the exact processing identity for one
+// legacy source. A complete dependency plan includes admitted and not-yet-
+// admitted sources so compatibility checks cannot silently change a later
+// checkpoint.
+type HistoricalDeduplicationDependency struct {
+	LegacyFindingID string `json:"legacy_finding_id"`
+	RawFindingID    string `json:"raw_finding_id"`
+	CampaignID      string `json:"campaign_id"`
+	AdmissionBucket string `json:"admission_bucket"`
+}
+
+type HistoricalDeduplicationRestartRequest struct {
+	ProfileSnapshot HistoricalDeduplicationProfileSnapshot `json:"profile_snapshot"`
+	Dependencies    []HistoricalDeduplicationDependency    `json:"dependencies"`
 }
 
 type HistoricalDeduplicationQuiescence struct {
@@ -223,6 +334,147 @@ func HistoricalDeduplicationReplayBatches(
 		return result[left].CreatedAt.Before(result[right].CreatedAt)
 	})
 	return result
+}
+
+// HistoricalDeduplicationDependencies projects the exact campaign and bucket
+// identity for every historical source. recoveredFindingIDs may override a
+// proven subset with recoveredCampaignID; all other sources use the campaign
+// currently proven by their legacy batch. The admitted raw ID is retained,
+// while compatibility comparison against its durable campaign happens under
+// the Store lock.
+func HistoricalDeduplicationDependencies(
+	state RepositoryState,
+	recoveredCampaignID string,
+	recoveredFindingIDs []string,
+) ([]HistoricalDeduplicationDependency, error) {
+	recoveredCampaignID = strings.TrimSpace(recoveredCampaignID)
+	if (recoveredCampaignID == "") != (len(recoveredFindingIDs) == 0) ||
+		(recoveredCampaignID != "" && !ValidRepositoryReviewCampaignID(recoveredCampaignID)) {
+		return nil, errors.New("invalid historical deduplication dependency recovery")
+	}
+	recovered := make(map[string]struct{}, len(recoveredFindingIDs))
+	for _, findingID := range recoveredFindingIDs {
+		findingID = strings.TrimSpace(findingID)
+		if !validBoundedText(findingID, 256) {
+			return nil, errors.New("invalid historical deduplication dependency finding")
+		}
+		if _, duplicate := recovered[findingID]; duplicate {
+			return nil, errors.New("duplicate historical deduplication dependency finding")
+		}
+		recovered[findingID] = struct{}{}
+	}
+	findingsByID := make(map[string]Finding, len(state.Findings))
+	for _, finding := range state.Findings {
+		findingsByID[finding.ID] = finding
+	}
+	rawByLegacyID := make(map[string]RawReviewFinding, len(state.RawFindings))
+	for _, raw := range state.RawFindings {
+		if HistoricalDeduplicationRawFinding(raw) {
+			rawByLegacyID[raw.LegacyFindingID] = raw
+		}
+	}
+	dependencies := make([]HistoricalDeduplicationDependency, 0)
+	seen := make(map[string]struct{})
+	for _, batch := range HistoricalDeduplicationReplayBatches(state) {
+		for _, findingID := range batch.FindingIDs {
+			finding, found := findingsByID[findingID]
+			if !found {
+				return nil, ErrConflict
+			}
+			if _, duplicate := seen[findingID]; duplicate {
+				return nil, ErrConflict
+			}
+			seen[findingID] = struct{}{}
+			campaignID := historicalDeduplicationCampaignID(
+				state.Repository, finding.CommitSHA, batch,
+			)
+			rawID := stableID("rrw_", state.Repository, "historical", findingID)
+			if raw, admitted := rawByLegacyID[findingID]; admitted {
+				rawID = raw.ID
+			}
+			if _, selected := recovered[findingID]; selected {
+				campaignID = recoveredCampaignID
+				delete(recovered, findingID)
+			}
+			bucket, err := DeduplicationAdmissionBucket(campaignID, finding.File, finding.Symbol)
+			if err != nil {
+				return nil, err
+			}
+			dependencies = append(dependencies, HistoricalDeduplicationDependency{
+				LegacyFindingID: findingID,
+				RawFindingID:    rawID,
+				CampaignID:      campaignID,
+				AdmissionBucket: bucket,
+			})
+		}
+	}
+	if len(recovered) != 0 {
+		return nil, ErrConflict
+	}
+	return dependencies, nil
+}
+
+func normalizeHistoricalDeduplicationDependencies(
+	state RepositoryState,
+	dependencies []HistoricalDeduplicationDependency,
+) ([]HistoricalDeduplicationDependency, error) {
+	current, err := HistoricalDeduplicationDependencies(state, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(dependencies) != len(current) {
+		return nil, errors.New("incomplete historical deduplication dependency plan")
+	}
+	wanted := make(map[string]HistoricalDeduplicationDependency, len(current))
+	for _, dependency := range current {
+		wanted[dependency.LegacyFindingID] = dependency
+	}
+	admitted := make(map[string]struct{})
+	for _, raw := range state.RawFindings {
+		if HistoricalDeduplicationRawFinding(raw) {
+			admitted[raw.LegacyFindingID] = struct{}{}
+		}
+	}
+	result := make([]HistoricalDeduplicationDependency, 0, len(dependencies))
+	seen := make(map[string]struct{}, len(dependencies))
+	for _, dependency := range dependencies {
+		dependency.LegacyFindingID = strings.TrimSpace(dependency.LegacyFindingID)
+		dependency.RawFindingID = strings.TrimSpace(dependency.RawFindingID)
+		dependency.CampaignID = strings.TrimSpace(dependency.CampaignID)
+		dependency.AdmissionBucket = strings.TrimSpace(dependency.AdmissionBucket)
+		baseline, found := wanted[dependency.LegacyFindingID]
+		if !found || dependency.RawFindingID != baseline.RawFindingID ||
+			!ValidRepositoryReviewCampaignID(dependency.CampaignID) ||
+			!validBoundedText(dependency.AdmissionBucket, 256) {
+			return nil, errors.New("invalid historical deduplication dependency plan")
+		}
+		findingIndex := findingIndexByID(state.Findings, dependency.LegacyFindingID)
+		if findingIndex < 0 {
+			return nil, ErrConflict
+		}
+		bucket, bucketErr := DeduplicationAdmissionBucket(
+			dependency.CampaignID,
+			state.Findings[findingIndex].File,
+			state.Findings[findingIndex].Symbol,
+		)
+		if bucketErr != nil || bucket != dependency.AdmissionBucket {
+			return nil, errors.New("invalid historical deduplication dependency bucket")
+		}
+		if _, exists := admitted[dependency.LegacyFindingID]; !exists &&
+			(dependency.CampaignID != baseline.CampaignID ||
+				dependency.AdmissionBucket != baseline.AdmissionBucket) {
+			return nil, ErrHistoricalDeduplicationRestartRequired
+		}
+		if _, duplicate := seen[dependency.LegacyFindingID]; duplicate {
+			return nil, errors.New("duplicate historical deduplication dependency")
+		}
+		seen[dependency.LegacyFindingID] = struct{}{}
+		result = append(result, dependency)
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		return result[left].LegacyFindingID < result[right].LegacyFindingID
+	})
+	return result, nil
 }
 
 // AdmitNextHistoricalDeduplicationBatch atomically inserts raw findings and
@@ -746,8 +998,11 @@ func (s Store) FreezeHistoricalDeduplicationReplay(
 		if !HistoricalDeduplicationQuiescenceForState(state).Ready() {
 			return state, *replay, ErrHistoricalDeduplicationNotQuiescent
 		}
-		if err := resetHistoricalDeduplicationModelWork(&state, snapshot, now); err != nil {
-			return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+		for _, raw := range state.RawFindings {
+			if HistoricalDeduplicationRawFinding(raw) &&
+				deduplicationJobIndexByRawID(state.DeduplicationJobs, raw.ID) < 0 {
+				return RepositoryState{}, HistoricalDeduplicationReplay{}, ErrConflict
+			}
 		}
 	}
 	replay.ProfileSnapshot = snapshot
@@ -755,6 +1010,7 @@ func (s Store) FreezeHistoricalDeduplicationReplay(
 	replay.Status = HistoricalDeduplicationReplaying
 	replay.Attempts++
 	replay.Error = ""
+	replay.FailurePhase = ""
 	replay.UpdatedAt = now
 	state.Version++
 	state.UpdatedAt = now
@@ -772,24 +1028,10 @@ func resetHistoricalDeduplicationModelWork(
 	if state == nil {
 		return errors.New("repository review state is required")
 	}
-	historicalRawIDs := make(map[string]struct{})
-	rawIndexes := make(map[string]int, len(state.RawFindings))
-	for index, raw := range state.RawFindings {
-		rawIndexes[raw.ID] = index
-		if HistoricalDeduplicationRawFinding(raw) {
-			historicalRawIDs[raw.ID] = struct{}{}
-		}
-	}
-	jobsByRawID := make(map[string]*DeduplicationJob, len(state.DeduplicationJobs))
-	for index := range state.DeduplicationJobs {
-		job := &state.DeduplicationJobs[index]
-		jobsByRawID[job.RawFindingID] = job
-	}
-	// Production callers always pass a loaded repository state. A handful of
-	// narrow pure-helper tests use detached zero-value fixtures; they still
-	// exercise graph reset behavior but have no campaign ledger to migrate.
+	selected := make(map[string]struct{})
+	dependencies := make(map[string]HistoricalDeduplicationDependency)
+	campaignByLegacyFinding := make(map[string]string)
 	if state.Repository != "" {
-		campaignByLegacyFinding := make(map[string]string, len(historicalRawIDs))
 		for _, batch := range HistoricalDeduplicationReplayBatches(*state) {
 			for _, findingID := range batch.FindingIDs {
 				findingIndex := findingIndexByID(state.Findings, findingID)
@@ -801,39 +1043,106 @@ func resetHistoricalDeduplicationModelWork(
 				)
 			}
 		}
-		for rawID := range historicalRawIDs {
-			rawIndex := rawIndexes[rawID]
-			raw := &state.RawFindings[rawIndex]
-			job := jobsByRawID[raw.ID]
-			if job == nil {
-				return ErrConflict
-			}
-			campaignID := campaignByLegacyFinding[raw.LegacyFindingID]
-			if campaignID == "" {
-				findingIndex := findingIndexByID(state.Findings, raw.LegacyFindingID)
-				if findingIndex < 0 {
-					return ErrConflict
+	}
+	for _, raw := range state.RawFindings {
+		if HistoricalDeduplicationRawFinding(raw) {
+			selected[raw.ID] = struct{}{}
+			campaignID := raw.CampaignID
+			bucket := raw.AdmissionBucket
+			if state.Repository != "" {
+				campaignID = campaignByLegacyFinding[raw.LegacyFindingID]
+				if campaignID == "" {
+					if findingIndexByID(state.Findings, raw.LegacyFindingID) < 0 {
+						return ErrConflict
+					}
+					campaignID = historicalDeduplicationCampaignID(
+						state.Repository, raw.CommitSHA,
+						HistoricalDeduplicationReplayBatch{BoundaryID: raw.RunID},
+					)
 				}
-				campaignID = historicalDeduplicationCampaignID(
-					state.Repository,
-					raw.CommitSHA,
-					HistoricalDeduplicationReplayBatch{BoundaryID: raw.RunID},
-				)
+				var err error
+				bucket, err = DeduplicationAdmissionBucket(campaignID, raw.File, raw.Symbol)
+				if err != nil {
+					return err
+				}
 			}
-			if err := bindHistoricalDeduplicationCampaign(
-				state, raw.LegacyFindingID, raw.ContextID, campaignID, raw.CommitSHA,
-			); err != nil {
-				return err
+			dependencies[raw.ID] = HistoricalDeduplicationDependency{
+				LegacyFindingID: raw.LegacyFindingID,
+				RawFindingID:    raw.ID,
+				CampaignID:      campaignID,
+				AdmissionBucket: bucket,
 			}
-			bucket, err := DeduplicationAdmissionBucket(campaignID, raw.File, raw.Symbol)
-			if err != nil {
-				return err
-			}
-			raw.CampaignID = campaignID
-			raw.AdmissionBucket = bucket
-			raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(*raw)
-			job.AdmissionBucket = bucket
 		}
+	}
+	return resetHistoricalDeduplicationModelWorkSelection(
+		state, snapshot, selected, dependencies, now,
+	)
+}
+
+func resetHistoricalDeduplicationModelWorkSelection(
+	state *RepositoryState,
+	snapshot RepositoryReviewDeduplicationSnapshot,
+	historicalRawIDs map[string]struct{},
+	dependenciesByRawID map[string]HistoricalDeduplicationDependency,
+	now time.Time,
+) error {
+	if state == nil {
+		return errors.New("repository review state is required")
+	}
+	rawIndexes := make(map[string]int, len(state.RawFindings))
+	for index, raw := range state.RawFindings {
+		rawIndexes[raw.ID] = index
+		if _, selected := historicalRawIDs[raw.ID]; selected &&
+			!HistoricalDeduplicationRawFinding(raw) {
+			return ErrConflict
+		}
+	}
+	jobsByRawID := make(map[string]*DeduplicationJob, len(state.DeduplicationJobs))
+	for index := range state.DeduplicationJobs {
+		job := &state.DeduplicationJobs[index]
+		jobsByRawID[job.RawFindingID] = job
+	}
+	for rawID := range historicalRawIDs {
+		rawIndex, found := rawIndexes[rawID]
+		if !found {
+			return ErrConflict
+		}
+		raw := &state.RawFindings[rawIndex]
+		job := jobsByRawID[raw.ID]
+		dependency, found := dependenciesByRawID[raw.ID]
+		if job == nil || !found || dependency.LegacyFindingID != raw.LegacyFindingID ||
+			dependency.RawFindingID != raw.ID {
+			return ErrConflict
+		}
+		if raw.CampaignID != dependency.CampaignID && state.Repository != "" {
+			if err := bindHistoricalDeduplicationCampaign(
+				state, raw.LegacyFindingID, raw.ContextID,
+				dependency.CampaignID, raw.CommitSHA,
+			); err != nil {
+				// Confirmed restart may move an admitted checkpoint away
+				// from a different, still-valid legacy campaign. Preserve
+				// that legacy provenance and retag only the replay clone.
+				contextIndex := -1
+				for index := range state.Contexts {
+					if state.Contexts[index].ID == raw.ContextID {
+						contextIndex = index
+						break
+					}
+				}
+				if contextIndex < 0 ||
+					state.Contexts[contextIndex].InventoryHash != "historical-replay" ||
+					state.Contexts[contextIndex].ProfileHash != "historical-replay" ||
+					state.Contexts[contextIndex].CommitSHA != raw.CommitSHA ||
+					state.CampaignHistory[dependency.CampaignID] != raw.CommitSHA {
+					return err
+				}
+				state.Contexts[contextIndex].CampaignID = dependency.CampaignID
+			}
+		}
+		raw.CampaignID = dependency.CampaignID
+		raw.AdmissionBucket = dependency.AdmissionBucket
+		raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(*raw)
+		job.AdmissionBucket = dependency.AdmissionBucket
 	}
 	removedDeduplicated := make(map[string]struct{})
 	replacementIDs := make(map[string]string)
@@ -854,8 +1163,8 @@ func resetHistoricalDeduplicationModelWork(
 			keptDeduplicated = append(keptDeduplicated, finding)
 			continue
 		}
-		removedDeduplicated[finding.ID] = struct{}{}
 		if len(nonHistoricalRawIDs) == 0 {
+			removedDeduplicated[finding.ID] = struct{}{}
 			legacyID, rehomeErr := rehomeHistoricalDeduplicatedLifecycle(
 				state, finding, historicalRawIDs, rawIndexes, now,
 			)
@@ -877,6 +1186,25 @@ func resetHistoricalDeduplicationModelWork(
 		replacement := newDeduplicatedReviewFinding(
 			firstRaw, firstJob.InsertionOrdinal, state.Findings, now,
 		)
+		if replacement.ID == finding.ID {
+			// The retained first source already owns this aggregate identity.
+			// Only aggregate membership changes; every completed retained raw,
+			// job, projection, association, and downstream reference remains a
+			// durable checkpoint.
+			replacement = finding
+			replacement.RawSourceIDs = append([]string(nil), nonHistoricalRawIDs...)
+			replacement.Version++
+			replacement.UpdatedAt = now
+			replacement.History = appendDeduplicatedFindingHistory(
+				replacement.History,
+				DeduplicatedFindingHistoryEntry{
+					Action: "historical_sources_split", At: now,
+				},
+			)
+			keptDeduplicated = append(keptDeduplicated, replacement)
+			continue
+		}
+		removedDeduplicated[finding.ID] = struct{}{}
 		replacement.Status = finding.Status
 		replacement.IssueDraftID = finding.IssueDraftID
 		replacement.RepositoryFindingID = finding.RepositoryFindingID
@@ -1257,6 +1585,47 @@ func (s Store) AcquireHistoricalDeduplicationMerge(
 	return state, *replay, true, nil
 }
 
+// RecoverHistoricalDeduplicationMerge atomically releases a merge lease left
+// by an interrupted controller and returns to the result-preserving merge
+// preparation boundary. The next pass recomputes groups and current target
+// versions before acquiring a fresh lease; no model checkpoint is reset.
+func (s Store) RecoverHistoricalDeduplicationMerge(
+	repository, leaseID string,
+) (RepositoryState, HistoricalDeduplicationReplay, error) {
+	leaseID = strings.TrimSpace(leaseID)
+	unlock, err := s.lock(repository)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	defer unlock()
+	state, err := s.load(repository)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	replay := &state.HistoricalDeduplication
+	if replay.Required && replay.Status == HistoricalDeduplicationReplaying &&
+		replay.MergeLease.ID == "" {
+		return state, *replay, nil
+	}
+	if !replay.Required || replay.Status != HistoricalDeduplicationMerging ||
+		leaseID == "" || replay.MergeLease.ID != leaseID {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, ErrConflict
+	}
+	now := s.clock()
+	replay.Status = HistoricalDeduplicationReplaying
+	replay.Attempts++
+	replay.Error = ""
+	replay.FailurePhase = ""
+	replay.MergeLease = HistoricalDeduplicationMergeLease{}
+	replay.UpdatedAt = now
+	state.Version++
+	state.UpdatedAt = now
+	if err := s.save(&state); err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	return state, *replay, nil
+}
+
 func (s Store) CompleteHistoricalDeduplicationMerge(
 	repository, leaseID string,
 ) (RepositoryState, HistoricalDeduplicationReplay, error) {
@@ -1294,6 +1663,7 @@ func (s Store) CompleteHistoricalDeduplicationMerge(
 	replay.Required = false
 	replay.Status = HistoricalDeduplicationCompleted
 	replay.Error = ""
+	replay.FailurePhase = ""
 	replay.MergeLease = HistoricalDeduplicationMergeLease{}
 	replay.UpdatedAt = now
 	state.Version++
@@ -1402,12 +1772,20 @@ func (s Store) FailHistoricalDeduplicationReplay(
 	if !replay.Required || replay.Status == HistoricalDeduplicationCompleted {
 		return state, *replay, nil
 	}
+	if replay.Status == HistoricalDeduplicationFailed {
+		return state, *replay, nil
+	}
 	if replay.Status == HistoricalDeduplicationMerging && replay.MergeLease.ID != leaseID {
 		return RepositoryState{}, HistoricalDeduplicationReplay{}, ErrConflict
 	}
 	now := s.clock()
+	phase := HistoricalDeduplicationFailurePhaseForState(state)
+	if replay.Status == HistoricalDeduplicationMerging {
+		phase = HistoricalDeduplicationFailureMerge
+	}
 	replay.Status = HistoricalDeduplicationFailed
 	replay.Error = "Historical deduplication failed."
+	replay.FailurePhase = phase
 	replay.MergeLease = HistoricalDeduplicationMergeLease{}
 	replay.UpdatedAt = now
 	state.Version++
@@ -1430,26 +1808,247 @@ func (s Store) RetryHistoricalDeduplicationReplay(
 	if err != nil {
 		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
 	}
-	replay := &state.HistoricalDeduplication
-	if !replay.Required || replay.Status == HistoricalDeduplicationCompleted {
-		return state, *replay, nil
+	now := s.clock()
+	changed, err := retryHistoricalDeduplicationReplayInState(&state, now)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
 	}
-	// A lost HTTP response may race the background worker through any of these
-	// states. Returning the durable state makes the explicit retry idempotent;
-	// importantly, it never clears or repeats already-running model work.
-	if replay.Status == HistoricalDeduplicationPending ||
-		replay.Status == HistoricalDeduplicationReplaying ||
-		replay.Status == HistoricalDeduplicationMerging {
-		return state, *replay, nil
+	if !changed {
+		return state, state.HistoricalDeduplication, nil
 	}
-	if replay.Status != HistoricalDeduplicationFailed {
-		return RepositoryState{}, HistoricalDeduplicationReplay{}, ErrConflict
+	state.Version++
+	state.UpdatedAt = now
+	if err := s.save(&state); err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	return state, state.HistoricalDeduplication, nil
+}
+
+// ResumeHistoricalDeduplicationReplay atomically verifies the current exact
+// profile and source dependency plan before performing non-destructive
+// checkpoint resume. Drift is reported without mutating the ledger.
+func (s Store) ResumeHistoricalDeduplicationReplay(
+	repository string,
+	snapshot HistoricalDeduplicationProfileSnapshot,
+	dependencies []HistoricalDeduplicationDependency,
+) (RepositoryState, HistoricalDeduplicationReplay, error) {
+	if err := validateHistoricalDeduplicationProfileSnapshot(snapshot); err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	unlock, err := s.lock(repository)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	defer unlock()
+	state, err := s.load(repository)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	if !state.HistoricalDeduplication.Required ||
+		state.HistoricalDeduplication.Status == HistoricalDeduplicationCompleted {
+		return state, state.HistoricalDeduplication, nil
+	}
+	dependencies, err = normalizeHistoricalDeduplicationDependencies(state, dependencies)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	compatible, err := historicalDeduplicationDependenciesCompatible(
+		state, snapshot, dependencies,
+	)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	if !compatible {
+		return state, state.HistoricalDeduplication,
+			ErrHistoricalDeduplicationRestartRequired
 	}
 	now := s.clock()
-	replay.Status = HistoricalDeduplicationPending
-	replay.ProfileSnapshot = HistoricalDeduplicationProfileSnapshot{}
-	replay.SnapshotVersion = 0
+	changed, err := retryHistoricalDeduplicationReplayInState(&state, now)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	if !changed {
+		return state, state.HistoricalDeduplication, nil
+	}
+	state.Version++
+	state.UpdatedAt = now
+	if err := s.save(&state); err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	return state, state.HistoricalDeduplication, nil
+}
+
+func historicalDeduplicationDependenciesCompatible(
+	state RepositoryState,
+	snapshot HistoricalDeduplicationProfileSnapshot,
+	dependencies []HistoricalDeduplicationDependency,
+) (bool, error) {
+	replay := state.HistoricalDeduplication
+	if validateHistoricalDeduplicationProfileSnapshot(replay.ProfileSnapshot) == nil {
+		if !reflect.DeepEqual(replay.ProfileSnapshot, snapshot) {
+			return false, nil
+		}
+	} else if historicalDeduplicationHasAdmittedRaw(state) {
+		return false, nil
+	}
+	current, err := currentHistoricalDeduplicationDependencies(state)
+	if err != nil {
+		return false, err
+	}
+	currentByLegacy := make(map[string]HistoricalDeduplicationDependency, len(current))
+	for _, dependency := range current {
+		currentByLegacy[dependency.LegacyFindingID] = dependency
+	}
+	for _, dependency := range dependencies {
+		if currentByLegacy[dependency.LegacyFindingID] != dependency {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func currentHistoricalDeduplicationDependencies(
+	state RepositoryState,
+) ([]HistoricalDeduplicationDependency, error) {
+	current, err := HistoricalDeduplicationDependencies(state, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	indexes := make(map[string]int, len(current))
+	for index, dependency := range current {
+		indexes[dependency.LegacyFindingID] = index
+	}
+	for _, raw := range state.RawFindings {
+		if !HistoricalDeduplicationRawFinding(raw) {
+			continue
+		}
+		index, found := indexes[raw.LegacyFindingID]
+		if !found || current[index].RawFindingID != raw.ID {
+			return nil, ErrConflict
+		}
+		current[index].CampaignID = raw.CampaignID
+		current[index].AdmissionBucket = raw.AdmissionBucket
+	}
+	return current, nil
+}
+
+// RestartHistoricalDeduplicationReplay removes only the incompatible
+// dependency closure and applies fresh identities to that reset work. Profile
+// drift selects all historical sources; campaign/bucket drift expands through
+// both old/new buckets and shared deduplicated aggregates.
+func (s Store) RestartHistoricalDeduplicationReplay(
+	repository string,
+	request HistoricalDeduplicationRestartRequest,
+) (RepositoryState, HistoricalDeduplicationReplay, error) {
+	if err := validateHistoricalDeduplicationProfileSnapshot(request.ProfileSnapshot); err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	unlock, err := s.lock(repository)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	defer unlock()
+	state, err := s.load(repository)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	if !state.HistoricalDeduplication.Required ||
+		state.HistoricalDeduplication.Status == HistoricalDeduplicationCompleted {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, ErrConflict
+	}
+	dependencies, err := normalizeHistoricalDeduplicationDependencies(
+		state, request.Dependencies,
+	)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	compatible, err := historicalDeduplicationDependenciesCompatible(
+		state, request.ProfileSnapshot, dependencies,
+	)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	if state.HistoricalDeduplication.Status != HistoricalDeduplicationFailed {
+		if compatible {
+			return state, state.HistoricalDeduplication, nil
+		}
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, ErrConflict
+	}
+	if compatible {
+		now := s.clock()
+		changed, retryErr := retryHistoricalDeduplicationReplayInState(&state, now)
+		if retryErr != nil {
+			return RepositoryState{}, HistoricalDeduplicationReplay{}, retryErr
+		}
+		if !changed {
+			return state, state.HistoricalDeduplication, nil
+		}
+		state.Version++
+		state.UpdatedAt = now
+		if err := s.save(&state); err != nil {
+			return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+		}
+		return state, state.HistoricalDeduplication, nil
+	}
+	if !HistoricalDeduplicationQuiescenceForState(state).Ready() ||
+		!historicalDeduplicationRunningWorkQuiescent(state) {
+		return state, state.HistoricalDeduplication,
+			ErrHistoricalDeduplicationNotQuiescent
+	}
+	current, err := currentHistoricalDeduplicationDependencies(state)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	selected, err := historicalDeduplicationRestartClosure(
+		state, current, dependencies,
+		historicalDeduplicationProfileRestartRequired(state, request.ProfileSnapshot),
+	)
+	if err != nil {
+		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+	}
+	desiredByLegacy := make(map[string]HistoricalDeduplicationDependency, len(dependencies))
+	for _, dependency := range dependencies {
+		desiredByLegacy[dependency.LegacyFindingID] = dependency
+	}
+	selectedRawIDs := make(map[string]struct{})
+	desiredByRawID := make(map[string]HistoricalDeduplicationDependency)
+	for _, raw := range state.RawFindings {
+		if !HistoricalDeduplicationRawFinding(raw) {
+			continue
+		}
+		if _, reset := selected[raw.LegacyFindingID]; !reset {
+			continue
+		}
+		dependency, found := desiredByLegacy[raw.LegacyFindingID]
+		if !found || dependency.RawFindingID != raw.ID {
+			return RepositoryState{}, HistoricalDeduplicationReplay{}, ErrConflict
+		}
+		selectedRawIDs[raw.ID] = struct{}{}
+		desiredByRawID[raw.ID] = dependency
+	}
+	now := s.clock()
+	if len(selectedRawIDs) > 0 {
+		if err := resetHistoricalDeduplicationModelWorkSelection(
+			&state, request.ProfileSnapshot, selectedRawIDs, desiredByRawID, now,
+		); err != nil {
+			return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+		}
+	}
+	// Dependency restart and ordinary checkpoint resume are orthogonal. A
+	// failed source outside the incompatible closure must still be re-admitted
+	// without adopting the fresh identities applied to reset work.
+	if historicalDeduplicationHasFailedRaw(state) {
+		if err := resetFailedHistoricalDeduplicationModelWork(&state, now); err != nil {
+			return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+		}
+	}
+	replay := &state.HistoricalDeduplication
+	replay.ProfileSnapshot = request.ProfileSnapshot
+	replay.SnapshotVersion = state.Version
+	replay.Status = HistoricalDeduplicationReplaying
+	replay.Attempts++
 	replay.Error = ""
+	replay.FailurePhase = ""
 	replay.MergeLease = HistoricalDeduplicationMergeLease{}
 	replay.UpdatedAt = now
 	state.Version++
@@ -1458,6 +2057,269 @@ func (s Store) RetryHistoricalDeduplicationReplay(
 		return RepositoryState{}, HistoricalDeduplicationReplay{}, err
 	}
 	return state, *replay, nil
+}
+
+func historicalDeduplicationHasFailedRaw(state RepositoryState) bool {
+	for _, raw := range state.RawFindings {
+		if HistoricalDeduplicationRawFinding(raw) &&
+			raw.State == RawFindingDeduplicationFailed {
+			return true
+		}
+	}
+	return false
+}
+
+func historicalDeduplicationHasAdmittedRaw(state RepositoryState) bool {
+	for _, raw := range state.RawFindings {
+		if HistoricalDeduplicationRawFinding(raw) {
+			return true
+		}
+	}
+	return false
+}
+
+func historicalDeduplicationProfileRestartRequired(
+	state RepositoryState,
+	snapshot HistoricalDeduplicationProfileSnapshot,
+) bool {
+	frozen := state.HistoricalDeduplication.ProfileSnapshot
+	if validateHistoricalDeduplicationProfileSnapshot(frozen) != nil {
+		return historicalDeduplicationHasAdmittedRaw(state)
+	}
+	return !reflect.DeepEqual(frozen, snapshot)
+}
+
+func historicalDeduplicationRunningWorkQuiescent(state RepositoryState) bool {
+	for _, job := range state.DeduplicationJobs {
+		if job.State != DeduplicationJobRunning {
+			continue
+		}
+		rawIndex := rawFindingIndexByID(state.RawFindings, job.RawFindingID)
+		if rawIndex >= 0 && HistoricalDeduplicationRawFinding(state.RawFindings[rawIndex]) {
+			return false
+		}
+	}
+	return true
+}
+
+// HistoricalDeduplicationModelWorkQuiescent reports whether no historical
+// model lease is active. Callers that span multiple Store mutations must also
+// hold their controller's deduplication-worker gate across this check and the
+// mutations so pending work cannot become running between them.
+func HistoricalDeduplicationModelWorkQuiescent(state RepositoryState) bool {
+	return historicalDeduplicationRunningWorkQuiescent(state)
+}
+
+func historicalDeduplicationRestartClosure(
+	state RepositoryState,
+	current []HistoricalDeduplicationDependency,
+	desired []HistoricalDeduplicationDependency,
+	profileChanged bool,
+) (map[string]struct{}, error) {
+	currentByLegacy := make(map[string]HistoricalDeduplicationDependency, len(current))
+	desiredByLegacy := make(map[string]HistoricalDeduplicationDependency, len(desired))
+	for _, dependency := range current {
+		currentByLegacy[dependency.LegacyFindingID] = dependency
+	}
+	for _, dependency := range desired {
+		desiredByLegacy[dependency.LegacyFindingID] = dependency
+	}
+	selected := make(map[string]struct{})
+	affectedBuckets := make(map[string]struct{})
+	bucketKey := func(dependency HistoricalDeduplicationDependency) string {
+		return dependency.CampaignID + "\x00" + dependency.AdmissionBucket
+	}
+	for legacyID, wanted := range desiredByLegacy {
+		was, found := currentByLegacy[legacyID]
+		if !found {
+			return nil, ErrConflict
+		}
+		if profileChanged || was != wanted {
+			selected[legacyID] = struct{}{}
+			affectedBuckets[bucketKey(was)] = struct{}{}
+			affectedBuckets[bucketKey(wanted)] = struct{}{}
+		}
+	}
+	rawByID := make(map[string]RawReviewFinding, len(state.RawFindings))
+	for _, raw := range state.RawFindings {
+		rawByID[raw.ID] = raw
+	}
+	changed := true
+	for changed {
+		changed = false
+		for legacyID, wanted := range desiredByLegacy {
+			was := currentByLegacy[legacyID]
+			_, oldAffected := affectedBuckets[bucketKey(was)]
+			_, newAffected := affectedBuckets[bucketKey(wanted)]
+			if !oldAffected && !newAffected {
+				continue
+			}
+			if _, found := selected[legacyID]; !found {
+				selected[legacyID] = struct{}{}
+				changed = true
+			}
+			if _, found := affectedBuckets[bucketKey(was)]; !found {
+				affectedBuckets[bucketKey(was)] = struct{}{}
+				changed = true
+			}
+			if _, found := affectedBuckets[bucketKey(wanted)]; !found {
+				affectedBuckets[bucketKey(wanted)] = struct{}{}
+				changed = true
+			}
+		}
+		for _, aggregate := range state.DeduplicatedFindings {
+			sharesSelected := false
+			for _, rawID := range aggregate.RawSourceIDs {
+				raw, found := rawByID[rawID]
+				if found && HistoricalDeduplicationRawFinding(raw) {
+					_, sharesSelected = selected[raw.LegacyFindingID]
+				}
+				if sharesSelected {
+					break
+				}
+			}
+			if !sharesSelected {
+				continue
+			}
+			for _, rawID := range aggregate.RawSourceIDs {
+				raw, found := rawByID[rawID]
+				if !found || !HistoricalDeduplicationRawFinding(raw) {
+					continue
+				}
+				if _, exists := desiredByLegacy[raw.LegacyFindingID]; !exists {
+					return nil, ErrConflict
+				}
+				if _, found := selected[raw.LegacyFindingID]; !found {
+					selected[raw.LegacyFindingID] = struct{}{}
+					was := currentByLegacy[raw.LegacyFindingID]
+					wanted := desiredByLegacy[raw.LegacyFindingID]
+					affectedBuckets[bucketKey(was)] = struct{}{}
+					affectedBuckets[bucketKey(wanted)] = struct{}{}
+					changed = true
+				}
+			}
+		}
+	}
+	return selected, nil
+}
+
+func retryHistoricalDeduplicationReplayInState(
+	state *RepositoryState,
+	now time.Time,
+) (bool, error) {
+	if state == nil {
+		return false, errors.New("repository review state is required")
+	}
+	replay := &state.HistoricalDeduplication
+	if !replay.Required || replay.Status == HistoricalDeduplicationCompleted {
+		return false, nil
+	}
+	// A lost response may race the worker through these states. Returning the
+	// durable state is idempotent and never repeats running model work.
+	if replay.Status == HistoricalDeduplicationPending ||
+		replay.Status == HistoricalDeduplicationReplaying ||
+		replay.Status == HistoricalDeduplicationMerging {
+		return false, nil
+	}
+	if replay.Status != HistoricalDeduplicationFailed {
+		return false, ErrConflict
+	}
+	phase := historicalDeduplicationResumePhase(*state)
+	switch phase {
+	case HistoricalDeduplicationFailureProcessing:
+		if err := resetFailedHistoricalDeduplicationModelWork(state, now); err != nil {
+			return false, err
+		}
+		replay = &state.HistoricalDeduplication
+		replay.Status = HistoricalDeduplicationReplaying
+		replay.Attempts++
+	case HistoricalDeduplicationFailureMerge:
+		// All raw and deduplicated decisions are durable checkpoints. Returning
+		// to replaying makes the controller recompute merge groups and current
+		// repository-finding versions before acquiring a fresh lease.
+		replay.Status = HistoricalDeduplicationReplaying
+		replay.Attempts++
+	case HistoricalDeduplicationFailureSetup:
+		// Setup can fail before a profile is frozen. If it was already frozen,
+		// continue directly without adopting a different dependency snapshot.
+		if validateHistoricalDeduplicationProfileSnapshot(replay.ProfileSnapshot) == nil {
+			replay.Status = HistoricalDeduplicationReplaying
+			replay.Attempts++
+		} else {
+			replay.Status = HistoricalDeduplicationPending
+			replay.Attempts++
+		}
+	default:
+		return false, ErrConflict
+	}
+	replay.Error = ""
+	replay.FailurePhase = ""
+	replay.MergeLease = HistoricalDeduplicationMergeLease{}
+	replay.UpdatedAt = now
+	return true, nil
+}
+
+// resetFailedHistoricalDeduplicationModelWork re-admits only terminal failed
+// replay jobs. Completed raw sources, aggregate projections, associations,
+// histories, IDs, versions, ordinals, dependency identities, and model
+// snapshots remain byte-for-byte unchanged.
+func resetFailedHistoricalDeduplicationModelWork(
+	state *RepositoryState,
+	now time.Time,
+) error {
+	if state == nil {
+		return errors.New("repository review state is required")
+	}
+	jobsByRawID := make(map[string]*DeduplicationJob, len(state.DeduplicationJobs))
+	for index := range state.DeduplicationJobs {
+		job := &state.DeduplicationJobs[index]
+		jobsByRawID[job.RawFindingID] = job
+	}
+	reset := 0
+	for index := range state.RawFindings {
+		raw := &state.RawFindings[index]
+		if !HistoricalDeduplicationRawFinding(*raw) ||
+			raw.State != RawFindingDeduplicationFailed {
+			continue
+		}
+		job := jobsByRawID[raw.ID]
+		if job == nil || job.State != DeduplicationJobFailed ||
+			raw.DeduplicatedFindingID != "" ||
+			job.AdmissionBucket != raw.AdmissionBucket ||
+			job.InsertionOrdinal != raw.InsertionOrdinal {
+			return ErrConflict
+		}
+		raw.State = RawFindingDeduplicationPending
+		raw.Disposition = RawFindingDispositionUndecided
+		raw.Failure = nil
+		raw.Version++
+		raw.UpdatedAt = now
+		raw.History = appendRawFindingHistory(raw.History, RawFindingHistoryEntry{
+			State:       RawFindingDeduplicationPending,
+			Disposition: RawFindingDispositionUndecided,
+			At:          now,
+		})
+		job.State = DeduplicationJobPending
+		job.LeaseID = ""
+		job.LeaseExpiresAt = time.Time{}
+		job.Attempts = 0
+		job.CandidateUniverseDigest = ""
+		job.CandidateVersions = nil
+		job.ShortlistedScores = nil
+		job.Decision = DeduplicationJudgment{}
+		job.Failure = nil
+		job.UpdatedAt = now
+		job.History = appendDeduplicationJobHistory(job.History, DeduplicationJobHistoryEntry{
+			State: DeduplicationJobPending, At: now,
+		})
+		reset++
+	}
+	if reset == 0 {
+		return ErrConflict
+	}
+	reconcileFindingsProcessingCounters(state)
+	state.FindingsProcessing.UpdatedAt = now
+	return nil
 }
 
 func normalizeHistoricalDeduplicationMergeGroups(
@@ -1732,13 +2594,23 @@ func validateHistoricalDeduplicationReplay(state RepositoryState) error {
 		return errors.New("invalid historical deduplication replay")
 	}
 	if replay.Status == HistoricalDeduplicationCompleted {
-		if replay.Required || replay.MergeLease.ID != "" {
+		if replay.Required || replay.MergeLease.ID != "" || replay.FailurePhase != "" {
 			return errors.New("invalid completed historical deduplication replay")
 		}
 		return nil
 	}
 	if !replay.Required {
 		return errors.New("invalid inactive historical deduplication replay")
+	}
+	if replay.Status == HistoricalDeduplicationFailed {
+		phase := HistoricalDeduplicationFailurePhaseForState(state)
+		if phase != HistoricalDeduplicationFailureSetup &&
+			phase != HistoricalDeduplicationFailureProcessing &&
+			phase != HistoricalDeduplicationFailureMerge {
+			return errors.New("invalid historical deduplication failure phase")
+		}
+	} else if replay.FailurePhase != "" {
+		return errors.New("inactive historical deduplication failure phase")
 	}
 	if replay.Status == HistoricalDeduplicationReplaying ||
 		replay.Status == HistoricalDeduplicationMerging {

@@ -1,11 +1,9 @@
-import { useInfiniteQuery, useMutation } from "@tanstack/react-query"
+import { useInfiniteQuery } from "@tanstack/react-query"
 import { useMemo } from "react"
-import { toast } from "sonner"
 
 import {
   type RepositoryReviewRawFinding,
   listRepositoryReviewAutomationRawFindingsPage,
-  retryRepositoryReviewHistoricalDeduplication,
 } from "@/api/repository-reviews"
 import {
   type CollectionDefinition,
@@ -95,22 +93,6 @@ export function RepositoryReviewRawFindingsPage({
     () => pages?.flatMap((page) => page.raw_findings) ?? [],
     [pages],
   )
-  const retryHistorical = useMutation({
-    mutationFn: () =>
-      retryRepositoryReviewHistoricalDeduplication(automationID),
-    onSuccess: async () => {
-      await Promise.all([query.refetch(), healthQuery.refetch()])
-      toast.success("Historical consolidation queued.")
-    },
-    onError: (error) => {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Historical consolidation could not be retried.",
-      )
-      void query.refetch()
-    },
-  })
   const definition = useMemo<CollectionDefinition<RepositoryReviewRawFinding>>(
     () => ({
       key: `repository-review-raw-findings:${automationID}`,
@@ -258,9 +240,11 @@ export function RepositoryReviewRawFindingsPage({
               counters={firstPage.findings_processing}
             />
             <RepositoryReviewHistoricalConsolidationNotice
+              automationID={automationID}
               consolidation={healthQuery.data?.historical_consolidation}
-              retrying={retryHistorical.isPending}
-              onRetry={() => retryHistorical.mutate()}
+              onRefresh={() =>
+                Promise.all([query.refetch(), healthQuery.refetch()])
+              }
             />
           </>
         ) : undefined
