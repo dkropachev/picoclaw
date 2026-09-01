@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -31,6 +32,8 @@ import (
 	"github.com/sipeed/picoclaw/pkg/pid"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/prworkspace/localci"
+	"github.com/sipeed/picoclaw/pkg/repoaudit"
+	"github.com/sipeed/picoclaw/pkg/repoeval"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/threads"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -57,6 +60,8 @@ type runtimeStorageIntegrationFixture struct {
 	planDigest    string
 	resultKey     string
 	executionID   string
+	reviewID      string
+	evaluationID  string
 }
 
 type runtimeStorageScan struct {
@@ -73,6 +78,7 @@ func TestIntegrationRuntimeOwnedJSONAllowlist(t *testing.T) {
 	fixture := newRuntimeStorageIntegrationFixture(t)
 	allowlist := runtimeStorageJSONAllowlist{fixture: fixture}
 	assertRuntimeStorageAllowlistExamples(t, allowlist)
+	assertRuntimeStorageCandidateExamples(t)
 
 	exerciseRuntimeStorageFirstStartup(t, fixture)
 	first := scanRuntimeStorage(t, allowlist)
@@ -96,18 +102,7 @@ func TestIntegrationRuntimeOwnedJSONAllowlist(t *testing.T) {
 		)
 	}
 
-	canaryPath := filepath.Join(fixture.workspace, "state", "runtime-owned-canary.json")
-	if err := os.WriteFile(canaryPath, []byte("private-canary-payload"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := scanRuntimeStorageTree(allowlist)
-	if err == nil || !strings.Contains(err.Error(), "workspace/state/runtime-owned-canary.json") ||
-		strings.Contains(err.Error(), "private-canary-payload") {
-		t.Fatalf("unexpected canary scan result: %v", err)
-	}
-	if err := os.Remove(canaryPath); err != nil {
-		t.Fatal(err)
-	}
+	assertRuntimeStorageScannerCanaries(t, allowlist)
 	final := scanRuntimeStorage(t, allowlist)
 	databasesChanged := !slices.Equal(second.databases, final.databases)
 	jsonChanged := !slices.Equal(second.jsonFiles, final.jsonFiles)
@@ -305,13 +300,62 @@ func exerciseRuntimeStorageFirstStartup(t *testing.T, fixture *runtimeStorageInt
 		t,
 		fixture.evidenceRoot,
 	)
+	fixture.reviewID = writeRepositoryReviewSentinel(t, fixture.workspace)
+	fixture.evaluationID = writeRepositoryEvaluationSentinel(t, fixture.workspace)
 
-	// TODO(runtime-json-allowlist): after the remaining held migration branches
-	// merge, extend this same fixture with gitworkspace.NewManager inventory
-	// mutation + checkpoint Save and repoaudit/repoeval create/reopen
-	// assertions. Calling those mutations on this base would intentionally
-	// create the legacy mutable JSON stores that the held branches remove.
+	// TODO(runtime-json-allowlist): after the held Git Workspace migration
+	// merges, extend this same fixture with gitworkspace inventory mutation and
+	// PR-workspace checkpoint Save/reopen assertions.
 	time.Sleep(150 * time.Millisecond) // release workflow/channel idle handles before scanning
+}
+
+func writeRepositoryReviewSentinel(t *testing.T, workspace string) string {
+	t.Helper()
+	ctx := context.Background()
+	store := repoaudit.NewSQLiteStore(workspace)
+	file := repoaudit.FileRef{
+		Path: "pkg/runtime_storage.go", BlobSHA: strings.Repeat("a", 40), SizeBytes: 128,
+		Category: "code", Mode: "100644",
+	}
+	plan, err := store.Plan(
+		ctx,
+		"owner/runtime-storage",
+		strings.Repeat("b", 40),
+		"sha256:runtime-storage-inventory",
+		[]repoaudit.FileRef{file},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := store.Record(ctx, repoaudit.RecordRequest{
+		Plan: plan, RunID: "runtime-storage-review", CompletedAt: time.Now().UTC(),
+		Observations: []repoaudit.Observation{{
+			Model: "runtime-model", ScopeFiles: []repoaudit.FileRef{file}, Summary: "reviewed",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return recorded.State.ID
+}
+
+func writeRepositoryEvaluationSentinel(t *testing.T, workspace string) string {
+	t.Helper()
+	created, err := repoeval.NewSQLiteStore(workspace).Create(t.Context(), repoeval.CreateRequest{
+		Repository: "owner/runtime-storage", Ref: "main",
+		CandidateModels:    []string{"model-a", "model-b"},
+		SelectorModelAlias: "selector", JudgeModelAlias: "judge",
+		Focus: repoeval.Focus{
+			CodeTypes:      []repoeval.CodeType{repoeval.CodeTypeCode, repoeval.CodeTypeTest},
+			IncludeFolders: []string{"pkg"}, ExcludeFolders: []string{"vendor"},
+		},
+		FilesPerLanguage: map[string]int{"Go": 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return created.ID
 }
 
 func exerciseChannelStorage(t *testing.T, ctx context.Context) {
@@ -615,6 +659,26 @@ func exerciseRuntimeStorageSecondStartup(t *testing.T, fixture *runtimeStorageIn
 		t.Fatal(err)
 	}
 
+	review, reviewFound, reviewErr := repoaudit.NewSQLiteStore(fixture.workspace).GetByID(fixture.reviewID)
+	if reviewErr != nil || !reviewFound || review.ID != fixture.reviewID ||
+		review.Repository != "owner/runtime-storage" || review.ReviewedFileCount != 1 {
+		t.Fatalf("reopened repository review = %#v, %v, %v", review, reviewFound, reviewErr)
+	}
+	evaluation, evaluationFound, evaluationErr := repoeval.NewSQLiteStore(fixture.workspace).Get(
+		ctx,
+		fixture.evaluationID,
+	)
+	if evaluationErr != nil || !evaluationFound || evaluation.ID != fixture.evaluationID ||
+		evaluation.Repository != "owner/runtime-storage" ||
+		!slices.Equal(evaluation.CandidateModels, []string{"model-a", "model-b"}) {
+		t.Fatalf(
+			"reopened repository evaluation = %#v, %v, %v",
+			evaluation,
+			evaluationFound,
+			evaluationErr,
+		)
+	}
+
 	cfg, loadConfigErr := config.LoadConfig(fixture.configPath)
 	if loadConfigErr != nil || cfg.WorkspacePath() != fixture.workspace {
 		t.Fatalf("reopened config workspace = %#v, %v", cfg, loadConfigErr)
@@ -640,13 +704,12 @@ func (allowlist runtimeStorageJSONAllowlist) allows(path string) bool {
 			return true
 		}
 	}
+	if allowlist.allowsLegacyArchive(path) {
+		return true
+	}
 	relative, ok := runtimeStorageRelative(fixture.root, path)
 	if !ok {
 		return false
-	}
-	parts := strings.Split(relative, "/")
-	if slices.Contains(parts, "legacy-json") {
-		return true
 	}
 	if relative == runtimeStorageSlashRelative(fixture.root, filepath.Join(
 		fixture.workspace, "workflow_state", "publish-transaction.json",
@@ -669,6 +732,56 @@ func (allowlist runtimeStorageJSONAllowlist) allows(path string) bool {
 		return true
 	}
 	return runtimeStorageImmutableEvidenceJSON(fixture.evidenceRoot, path)
+}
+
+func (allowlist runtimeStorageJSONAllowlist) allowsLegacyArchive(path string) bool {
+	for _, root := range allowlist.legacyArchiveRoots() {
+		if runtimeStorageHasPrefix(path, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func (allowlist runtimeStorageJSONAllowlist) allowsDatabase(path string) bool {
+	path = filepath.Clean(path)
+	for _, expected := range runtimeStorageExpectedDatabasePaths(allowlist.fixture) {
+		if path == filepath.Clean(expected) {
+			return true
+		}
+	}
+	return false
+}
+
+func (allowlist runtimeStorageJSONAllowlist) legacyArchiveRoots() []string {
+	fixture := allowlist.fixture
+	return []string{
+		filepath.Join(filepath.Dir(fixture.configPath), "legacy-json", "launcher-auth-v1"),
+		filepath.Join(fixture.home, "legacy-json", "auth-v1"),
+		filepath.Join(fixture.home, "legacy-json", "model-catalogs-v1"),
+		filepath.Join(fixture.home, "legacy-json", "tool-adaptation-v1"),
+		filepath.Join(fixture.home, "legacy-json", "wecom-reqid-v1"),
+		filepath.Join(fixture.home, "channels", "weixin", "legacy-json", "weixin-state-v1"),
+		filepath.Join(fixture.workspace, "legacy-json", "sessions-v1"),
+		filepath.Join(fixture.workspace, "legacy-json", "workflows-v1"),
+		filepath.Join(fixture.workspace, "cron", "legacy-json", "cron-jobs-v1"),
+		filepath.Join(fixture.workspace, "state", "legacy-json", "runtime-state-v1"),
+		filepath.Join(fixture.workspace, "state", "legacy-json", "account-router-v1"),
+		filepath.Join(
+			fixture.workspace,
+			"repository_reviews",
+			"legacy-json",
+			"repository-reviews-v1",
+		),
+		filepath.Join(
+			fixture.workspace,
+			"repository_evaluations",
+			"legacy-json",
+			"repository-evaluations-v1",
+		),
+		filepath.Join(fixture.evolutionRoot, "legacy-json", "evolution-v1"),
+		filepath.Join(fixture.evidenceRoot, "legacy-json", "local-ci-cache-v1"),
+	}
 }
 
 func runtimeStorageApplyPatchJournal(home, path string) bool {
@@ -717,9 +830,34 @@ func runtimeStorageLowerHex(value string, length int) bool {
 	return true
 }
 
+func runtimeStorageJSONCandidate(path string) bool {
+	name := strings.ToLower(filepath.Base(path))
+	for _, suffix := range []string{
+		".json",
+		".jsonl",
+		".json.migrated",
+		".history-a",
+		".history-b",
+	} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return strings.HasPrefix(name, "account_router_state.json.auth-invalidation.")
+}
+
 func runtimeStorageJSONExtension(path string) bool {
 	extension := strings.ToLower(filepath.Ext(path))
 	return extension == ".json" || extension == ".jsonl"
+}
+
+func runtimeStorageSQLiteCandidate(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".db", ".sqlite", ".sqlite3":
+		return true
+	default:
+		return false
+	}
 }
 
 func runtimeStorageHasPrefix(path, root string) bool {
@@ -755,8 +893,19 @@ func assertRuntimeStorageAllowlistExamples(t *testing.T, allowlist runtimeStorag
 		{"launcher settings", fixture.launcherPath, true},
 		{"PID metadata", fixture.pidPath, true},
 		{
-			"legacy archive",
-			filepath.Join(fixture.workspace, "state", "legacy-json", "component-v1", "record.jsonl"),
+			"registered runtime archive",
+			filepath.Join(
+				fixture.workspace,
+				"state",
+				"legacy-json",
+				"runtime-state-v1",
+				"state.json",
+			),
+			true,
+		},
+		{
+			"registered custom evolution archive",
+			filepath.Join(fixture.evolutionRoot, "legacy-json", "evolution-v1", "task-records.jsonl"),
 			true,
 		},
 		{
@@ -811,6 +960,33 @@ func assertRuntimeStorageAllowlistExamples(t *testing.T, allowlist runtimeStorag
 		{"session JSONL", filepath.Join(fixture.workspace, "sessions", "session.jsonl"), false},
 		{"cron JSON", filepath.Join(fixture.workspace, "cron", "jobs.json"), false},
 		{
+			"unregistered archive component",
+			filepath.Join(fixture.workspace, "state", "legacy-json", "component-v1", "record.jsonl"),
+			false,
+		},
+		{
+			"archive version near miss",
+			filepath.Join(
+				fixture.workspace,
+				"state",
+				"legacy-json",
+				"runtime-state-v2",
+				"state.json",
+			),
+			false,
+		},
+		{
+			"archive root spelling near miss",
+			filepath.Join(
+				fixture.workspace,
+				"state",
+				"legacy-json-copy",
+				"runtime-state-v1",
+				"state.json",
+			),
+			false,
+		},
+		{
 			"review JSON",
 			filepath.Join(fixture.workspace, "repository_reviews", "repo_record.json"),
 			false,
@@ -864,6 +1040,121 @@ func assertRuntimeStorageAllowlistExamples(t *testing.T, allowlist runtimeStorag
 	}
 }
 
+func assertRuntimeStorageCandidateExamples(t *testing.T) {
+	t.Helper()
+	jsonTests := []struct {
+		name      string
+		candidate bool
+	}{
+		{"record.json", true},
+		{"record.JSONL", true},
+		{"thread.json.migrated", true},
+		{"session.history-a", true},
+		{"session.history-b", true},
+		{"account_router_state.json.auth-invalidation.0123456789abcdef0123456789abcdef", true},
+		{"record.json.backup", false},
+		{"history-a", false},
+	}
+	for _, test := range jsonTests {
+		t.Run("JSON candidate "+test.name, func(t *testing.T) {
+			if got := runtimeStorageJSONCandidate(test.name); got != test.candidate {
+				t.Fatalf("runtimeStorageJSONCandidate(%q) = %v, want %v", test.name, got, test.candidate)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name      string
+		candidate bool
+	}{
+		{"state.db", true},
+		{"state.SQLITE", true},
+		{"state.sqlite3", true},
+		{"state.db-wal", false},
+		{"state.sql", false},
+	} {
+		t.Run("SQLite candidate "+test.name, func(t *testing.T) {
+			if got := runtimeStorageSQLiteCandidate(test.name); got != test.candidate {
+				t.Fatalf("runtimeStorageSQLiteCandidate(%q) = %v, want %v", test.name, got, test.candidate)
+			}
+		})
+	}
+}
+
+func assertRuntimeStorageScannerCanaries(
+	t *testing.T,
+	allowlist runtimeStorageJSONAllowlist,
+) {
+	t.Helper()
+	fixture := allowlist.fixture
+	assertRejected := func(t *testing.T, want string) {
+		t.Helper()
+		_, err := scanRuntimeStorageTree(allowlist)
+		if err == nil || !strings.Contains(err.Error(), want) ||
+			strings.Contains(err.Error(), "private-canary-payload") {
+			t.Fatalf("unexpected canary scan result: %v", err)
+		}
+	}
+	t.Run("active JSON", func(t *testing.T) {
+		path := filepath.Join(fixture.workspace, "state", "runtime-owned-canary.json")
+		if err := os.WriteFile(path, []byte("private-canary-payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(path) }()
+		assertRejected(t, "workspace/state/runtime-owned-canary.json")
+	})
+	t.Run("active invalidation sidecar", func(t *testing.T) {
+		name := "account_router_state.json.auth-invalidation." + strings.Repeat("a", 32)
+		path := filepath.Join(fixture.workspace, "state", name)
+		if err := os.WriteFile(path, []byte("private-canary-payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(path) }()
+		assertRejected(t, "workspace/state/"+name)
+	})
+	t.Run("archive label near miss", func(t *testing.T) {
+		directory := filepath.Join(fixture.workspace, "state", "legacy-json", "runtime-state-v2")
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(directory, "state.json")
+		if err := os.WriteFile(path, []byte("private-canary-payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(path) }()
+		assertRejected(t, "workspace/state/legacy-json/runtime-state-v2/state.json")
+	})
+	t.Run("JSON-like directory", func(t *testing.T) {
+		path := filepath.Join(fixture.workspace, "state", "runtime-owned-directory.json")
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(path) }()
+		assertRejected(t, "workspace/state/runtime-owned-directory.json: storage candidate is a directory")
+	})
+	t.Run("unregistered SQLite extension", func(t *testing.T) {
+		path := filepath.Join(fixture.workspace, "state", "runtime-owned.sqlite3")
+		if err := os.WriteFile(path, []byte("private-canary-payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(path) }()
+		assertRejected(t, "workspace/state/runtime-owned.sqlite3: SQLite path is not allowlisted")
+	})
+	t.Run("symlinked archive root", func(t *testing.T) {
+		archiveRoot := filepath.Join(fixture.evolutionRoot, "legacy-json", "evolution-v1")
+		if err := os.MkdirAll(filepath.Dir(archiveRoot), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(fixture.workspace, archiveRoot); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation is unavailable: %v", err)
+			}
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(archiveRoot) }()
+		assertRejected(t, "custom-evolution/legacy-json/evolution-v1: unsafe archive root ancestry")
+	})
+}
+
 func scanRuntimeStorage(t *testing.T, allowlist runtimeStorageJSONAllowlist) runtimeStorageScan {
 	t.Helper()
 	scan, err := scanRuntimeStorageTree(allowlist)
@@ -875,8 +1166,12 @@ func scanRuntimeStorage(t *testing.T, allowlist runtimeStorageJSONAllowlist) run
 
 func scanRuntimeStorageTree(allowlist runtimeStorageJSONAllowlist) (runtimeStorageScan, error) {
 	var scan runtimeStorageScan
-	issues := make([]string, 0)
-	err := filepath.WalkDir(allowlist.fixture.root, func(
+	issues, err := runtimeStorageArchiveRootIssues(allowlist)
+	if err != nil {
+		return runtimeStorageScan{}, err
+	}
+	foundDatabases := make(map[string]struct{})
+	walkErr := filepath.WalkDir(allowlist.fixture.root, func(
 		path string,
 		entry fs.DirEntry,
 		walkErr error,
@@ -884,16 +1179,17 @@ func scanRuntimeStorageTree(allowlist runtimeStorageJSONAllowlist) (runtimeStora
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() {
-			return nil
-		}
 		isPID := filepath.Clean(path) == filepath.Clean(allowlist.fixture.pidPath)
-		isJSON := runtimeStorageJSONExtension(path) || isPID
-		isDatabase := strings.EqualFold(filepath.Ext(path), ".db")
+		isJSON := runtimeStorageJSONCandidate(path) || isPID
+		isDatabase := runtimeStorageSQLiteCandidate(path)
 		if !isJSON && !isDatabase {
 			return nil
 		}
 		relative := runtimeStorageSlashRelative(allowlist.fixture.root, path)
+		if entry.IsDir() {
+			issues = append(issues, relative+": storage candidate is a directory")
+			return filepath.SkipDir
+		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
@@ -903,10 +1199,15 @@ func scanRuntimeStorageTree(allowlist runtimeStorageJSONAllowlist) (runtimeStora
 			return nil
 		}
 		if isDatabase {
+			if !allowlist.allowsDatabase(path) {
+				issues = append(issues, relative+": SQLite path is not allowlisted")
+				return nil
+			}
 			if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 				issues = append(issues, fmt.Sprintf("%s: database mode %04o", relative, info.Mode().Perm()))
 			}
 			scan.databases = append(scan.databases, relative)
+			foundDatabases[filepath.Clean(path)] = struct{}{}
 		}
 		if isJSON {
 			if !allowlist.allows(path) {
@@ -917,8 +1218,16 @@ func scanRuntimeStorageTree(allowlist runtimeStorageJSONAllowlist) (runtimeStora
 		}
 		return nil
 	})
-	if err != nil {
-		return runtimeStorageScan{}, fmt.Errorf("walk runtime storage: %w", err)
+	if walkErr != nil {
+		return runtimeStorageScan{}, fmt.Errorf("walk runtime storage: %w", walkErr)
+	}
+	for _, path := range runtimeStorageExpectedDatabasePaths(allowlist.fixture) {
+		if _, found := foundDatabases[filepath.Clean(path)]; !found {
+			issues = append(
+				issues,
+				runtimeStorageSlashRelative(allowlist.fixture.root, path)+": expected database is missing",
+			)
+		}
 	}
 	sort.Strings(scan.databases)
 	sort.Strings(scan.jsonFiles)
@@ -932,13 +1241,52 @@ func scanRuntimeStorageTree(allowlist runtimeStorageJSONAllowlist) (runtimeStora
 	return scan, nil
 }
 
-func assertRuntimeStorageDatabases(
-	t *testing.T,
+func runtimeStorageArchiveRootIssues(
+	allowlist runtimeStorageJSONAllowlist,
+) ([]string, error) {
+	issues := make([]string, 0)
+	inspected := make(map[string]struct{})
+	for _, archiveRoot := range allowlist.legacyArchiveRoots() {
+		relative, ok := runtimeStorageRelative(allowlist.fixture.root, archiveRoot)
+		if !ok {
+			return nil, fmt.Errorf("archive root is outside runtime storage: %s", filepath.Base(archiveRoot))
+		}
+		current := allowlist.fixture.root
+		for _, part := range strings.Split(relative, "/") {
+			current = filepath.Join(current, filepath.FromSlash(part))
+			cleaned := filepath.Clean(current)
+			if _, seen := inspected[cleaned]; seen {
+				continue
+			}
+			inspected[cleaned] = struct{}{}
+			info, err := os.Lstat(cleaned)
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf(
+					"inspect archive root %s: %w",
+					runtimeStorageSlashRelative(allowlist.fixture.root, cleaned),
+					err,
+				)
+			}
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				issues = append(
+					issues,
+					runtimeStorageSlashRelative(allowlist.fixture.root, cleaned)+
+						": unsafe archive root ancestry",
+				)
+				break
+			}
+		}
+	}
+	return issues, nil
+}
+
+func runtimeStorageExpectedDatabasePaths(
 	fixture *runtimeStorageIntegrationFixture,
-	got []string,
-) {
-	t.Helper()
-	wantPaths := []string{
+) []string {
+	return []string{
 		filepath.Join(fixture.home, "auth.db"),
 		filepath.Join(fixture.home, "launcher-auth.db"),
 		filepath.Join(fixture.home, "model-catalogs.db"),
@@ -950,9 +1298,20 @@ func assertRuntimeStorageDatabases(
 		filepath.Join(fixture.workspace, "state", "runtime.db"),
 		filepath.Join(fixture.workspace, "state", "account-router.db"),
 		filepath.Join(fixture.workspace, "state", "workflows.db"),
+		filepath.Join(fixture.workspace, "repository_reviews", "repository-reviews.db"),
+		filepath.Join(fixture.workspace, "repository_evaluations", "evaluations.db"),
 		filepath.Join(fixture.evolutionRoot, "evolution.db"),
 		filepath.Join(fixture.evidenceRoot, "cache.db"),
 	}
+}
+
+func assertRuntimeStorageDatabases(
+	t *testing.T,
+	fixture *runtimeStorageIntegrationFixture,
+	got []string,
+) {
+	t.Helper()
+	wantPaths := runtimeStorageExpectedDatabasePaths(fixture)
 	want := make([]string, 0, len(wantPaths))
 	for _, path := range wantPaths {
 		want = append(want, runtimeStorageSlashRelative(fixture.root, path))

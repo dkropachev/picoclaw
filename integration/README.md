@@ -70,13 +70,16 @@ test initializes every migrated store represented on the current branch under
 one disposable PicoClaw home/workspace, reopens the public owners, verifies the
 exact private SQLite database inventory, and scans the complete generated root.
 
-JSON and JSONL are default-denied. The scanner admits only exact human-authored
-config and PID paths, retained `legacy-json` archives, workflow publish/template
-journals and explicitly requested artifacts, skill-origin sidecars in skill
-roots, authenticated apply-patch journals, and content-addressed immutable
-local-CI evidence. It includes allowlist near-miss cases and a live rejected
-canary, and requires the JSON path set to remain unchanged after the second
-startup.
+JSON, JSONL, migrated session snapshots, history slots, and account-router
+invalidation sidecars are default-denied. The scanner admits only exact
+human-authored config and PID paths, explicitly registered component archive
+roots, workflow publish/template journals and requested artifacts, skill-origin
+sidecars in skill roots, authenticated apply-patch journals, and
+content-addressed immutable local-CI evidence. Database-like `.db`, `.sqlite`,
+and `.sqlite3` paths are also default-denied outside the exact expected database
+inventory. Live near-miss, unsafe archive-link, JSON-like-directory, and rogue
+SQLite canaries must be rejected without exposing their payloads, and both
+inventories must remain unchanged after the second startup.
 
 ## Coding-agent benchmark fixture
 

@@ -88,7 +88,7 @@ are removed while the catalog lock is held.
 | Evaluation | `workspace/repository_evaluations/evaluations.db` | Typed versioned repository/ref/status/timestamps, ordered candidate and run relationships, and bounded JSON BLOBs only for nested corpus, checkpoint, sizing, usage, and comparison payloads; mode `0600`, WAL, foreign keys, and `synchronous=FULL`. |
 | Corpus manifest | Commit/inventory/policy/rubric hashes plus selected path/blob/size/language/type/module/region/chunk IDs | No source content; becomes immutable when execution starts. |
 | Work-sizing observations | Per point/model requested files/bytes, completion, observed provider-call file/content min/mean/max, batch score statistics, claims, analyzed scope, point-specific concrete models, candidate-only usage, effective tokens, and effective tokens/KiB within the evaluation | Bounded native aggregate derived from durable judged checkpoints; sparse batches retain their actual observed maxima and ineligible points remain explicit rather than being converted into ceilings. |
-| Workflow runs | `workspace/workflow_runs/<run-id>/` | Durable preflight/evaluation execution and bounded internal artifacts; ordinary evaluation API projects only safe summaries. |
+| Workflow runs | `workspace/state/workflows.db` | Durable typed preflight/evaluation execution, ordered events, and bounded internal payloads; ordinary evaluation API projects only safe summaries. |
 | Active controller state | Process-local cancellation plus workspace controller lease | Reconciles orphaned durable statuses at startup and never creates duplicate task IDs. |
 
 On first open, legacy `evaluation_rme_*.json` files are imported in deterministic
