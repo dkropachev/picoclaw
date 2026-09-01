@@ -131,10 +131,15 @@ version fences, and compatibility constructors. Workspace protection treats
 database directories, database/WAL/SHM files, and legacy archives as
 runtime-owned; model-facing mutation tools must enforce frozen lexical,
 resolved, and exact-file-alias exclusions even when those paths fall inside a
-workspace or an outside-write allowlist. Dynamic legacy and archive trees use
-one bounded immutable physical-identity snapshot per agent generation, shared
-across root/owner tools and local repair so a source-to-archive rename cannot
-make a pre-existing hardlink alias writable. Unsafe tree entries, enumeration
+workspace or an outside-write allowlist. Dynamic legacy and archive trees from
+the configured/default workspace and every named-agent workspace use one
+generation-wide immutable physical-identity catalog. Its first pinned,
+batched pass retains only a streaming digest; its second pass retains the final
+deduplicated identity set. Root/owner tools and local repair share that pointer,
+so a source-to-archive rename cannot make a pre-existing hardlink alias
+writable. Reads, listings, edit/append read-before-write, and apply-patch source
+reads authorize the actual opened handle with `fstat`/`SameFile` and the catalog
+before consuming bytes or names. Unsafe tree entries, aggregate entry/path/depth
 bounds, or a changing two-pass snapshot fail agent construction without
 disclosing a protected path. Portability excludes
 targets on which the required SQLite implementation is unsupported instead of

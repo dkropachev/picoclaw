@@ -34,6 +34,10 @@ const (
 const (
 	agentWecomReqIDDatabaseName  = "reqid-store.db"
 	agentWeixinStateDatabaseName = "state.db"
+
+	agentFileIdentityDirectoryEntryLimit = 131_072
+	agentAccountRouterLegacySidecarLimit = 100_000
+	agentFileIdentityDirectoryReadBatch  = 256
 )
 
 func agentWorkflowRuntimeFileMutationProtectedRoots(workspace string) ([]string, error) {
@@ -149,12 +153,6 @@ func agentRuntimeFileMutationProtectedRoots(
 		filepath.Join(weixinRoot, "context-tokens"),
 		weixinArchiveRoot,
 	)
-	weixinFiles, err := agentWeixinRetainedStateFiles(weixinRoot, weixinArchiveRoot)
-	if err != nil {
-		return nil, err
-	}
-	protected = append(protected, weixinFiles...)
-
 	var activeConfig *config.Config
 	if len(activeConfigs) > 0 {
 		activeConfig = activeConfigs[0]
@@ -432,55 +430,6 @@ func mustAgentWorkspaceFileMutationProtectedRoots(workspace string) []string {
 	return roots
 }
 
-func agentWeixinRetainedStateFiles(weixinRoot, archiveRoot string) ([]string, error) {
-	files := make(map[string]struct{})
-	for _, directory := range []string{"sync", "context-tokens"} {
-		sourceRoot := filepath.Join(weixinRoot, directory)
-		info, err := os.Lstat(sourceRoot)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("enumerate Weixin state roots: %w", err)
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return nil, errors.New("enumerate Weixin state roots: legacy directory is unsafe")
-		}
-		entries, err := os.ReadDir(sourceRoot)
-		if err != nil {
-			return nil, fmt.Errorf("enumerate Weixin state roots: %w", err)
-		}
-		for _, entry := range entries {
-			if strings.ToLower(filepath.Ext(entry.Name())) != ".json" {
-				continue
-			}
-			files[filepath.Join(sourceRoot, entry.Name())] = struct{}{}
-			files[filepath.Join(archiveRoot, directory, entry.Name())] = struct{}{}
-		}
-	}
-	err := filepath.WalkDir(archiveRoot, func(path string, entry os.DirEntry, walkErr error) error {
-		if os.IsNotExist(walkErr) {
-			return nil
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if path != archiveRoot && !entry.IsDir() {
-			files[path] = struct{}{}
-		}
-		return nil
-	})
-	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("enumerate Weixin retained state: %w", err)
-	}
-	result := make([]string, 0, len(files))
-	for path := range files {
-		result = append(result, path)
-	}
-	slices.Sort(result)
-	return result, nil
-}
-
 func agentEvolutionFileMutationProtectedRoots(workspace, stateDir string) ([]string, error) {
 	root := strings.TrimSpace(stateDir)
 	if root == "" {
@@ -578,33 +527,7 @@ func agentWorkspaceAccountRouterProtectedRoots(workspace string) ([]string, erro
 		archiveRoot,
 		filepath.Join(archiveRoot, "account_router_state.json"),
 	}
-	entries, err := os.ReadDir(workspace)
-	if os.IsNotExist(err) {
-		entries = nil
-	} else if err != nil {
-		return nil, fmt.Errorf("enumerate account-router legacy state: %w", err)
-	}
-	for _, entry := range entries {
-		if agentAccountRouterLegacySidecarName(entry.Name()) {
-			roots = append(roots, filepath.Join(workspace, entry.Name()))
-		}
-	}
-	if err := filepath.WalkDir(archiveRoot, func(path string, entry os.DirEntry, walkErr error) error {
-		if os.IsNotExist(walkErr) {
-			return nil
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if path != archiveRoot && !entry.IsDir() {
-			roots = append(roots, path)
-		}
-		return nil
-	}); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("enumerate account-router archives: %w", err)
-	}
-	slices.Sort(roots)
-	return slices.Compact(roots), nil
+	return roots, nil
 }
 
 func agentAccountRouterLegacySidecarName(name string) bool {
@@ -668,7 +591,15 @@ func appendAgentWorkspaceSQLiteProtectedRoots(
 }
 
 func appendAgentRepositoryFileMutationProtectedRoots(roots []string, workspace string) []string {
-	for _, directory := range []string{agentRepositoryReviewStateDir, agentRepositoryEvalStateDir} {
+	stores := []struct {
+		directory string
+		database  string
+	}{
+		{directory: agentRepositoryReviewStateDir, database: "repository-reviews.db"},
+		{directory: agentRepositoryEvalStateDir, database: "evaluations.db"},
+	}
+	for _, store := range stores {
+		directory := store.directory
 		candidate := filepath.Join(workspace, directory)
 		duplicate := false
 		for _, existing := range roots {
@@ -680,8 +611,75 @@ func appendAgentRepositoryFileMutationProtectedRoots(roots []string, workspace s
 		if !duplicate {
 			roots = append(roots, candidate)
 		}
+		database := filepath.Join(candidate, store.database)
+		roots = append(roots, agentSQLiteFileMutationProtectedRoots(database)...)
 	}
 	return roots
+}
+
+func appendAgentCompleteWorkspaceFileMutationProtectedRoots(
+	roots []string,
+	workspace string,
+	cfg *config.Config,
+) ([]string, error) {
+	workspace, err := filepath.Abs(filepath.Clean(workspace))
+	if err != nil {
+		return nil, fmt.Errorf("resolve complete file-mutation workspace: %w", err)
+	}
+	workspaceRoots, err := agentWorkspaceFileMutationProtectedRoots(workspace)
+	if err != nil {
+		return nil, err
+	}
+	accountRouterRoots, err := agentWorkspaceAccountRouterProtectedRoots(workspace)
+	if err != nil {
+		return nil, err
+	}
+	workflowRoots, err := agentWorkflowRuntimeFileMutationProtectedRoots(workspace)
+	if err != nil {
+		return nil, err
+	}
+	evolutionStateDir := ""
+	if cfg != nil {
+		evolutionStateDir = cfg.Evolution.StateDir
+	}
+	evolutionRoots, err := agentEvolutionFileMutationProtectedRoots(
+		workspace,
+		evolutionStateDir,
+	)
+	if err != nil {
+		return nil, err
+	}
+	roots = append(roots, workspaceRoots...)
+	roots = append(roots, accountRouterRoots...)
+	roots = append(roots, agentSessionFileMutationProtectedRoots(workspace)...)
+	roots = append(roots, agentCronFileMutationProtectedRoots(workspace)...)
+	roots = append(roots, workflowRoots...)
+	roots = append(roots, evolutionRoots...)
+	roots = appendAgentRepositoryFileMutationProtectedRoots(roots, workspace)
+	return roots, nil
+}
+
+func normalizeAgentFileMutationWorkspaces(workspaces []string) ([]string, error) {
+	result := make([]string, 0, len(workspaces))
+	seen := make(map[string]struct{}, len(workspaces))
+	for index, workspace := range workspaces {
+		if workspace == "" || workspace != strings.TrimSpace(workspace) ||
+			strings.ContainsRune(workspace, '\x00') {
+			return nil, fmt.Errorf("file-mutation workspace %d is invalid", index)
+		}
+		absolute, err := filepath.Abs(filepath.Clean(workspace))
+		if err != nil {
+			return nil, fmt.Errorf("file-mutation workspace %d is invalid", index)
+		}
+		key := absolute
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, absolute)
+	}
+	slices.Sort(result)
+	return result, nil
 }
 
 // agentFileMutationIdentityCatalog snapshots physical identities for mutable
@@ -694,54 +692,28 @@ func agentFileMutationIdentityCatalog(
 	cfg *config.Config,
 	exactRoots []string,
 ) (*tools.FileIdentityCatalog, error) {
-	workspace, err := filepath.Abs(filepath.Clean(workspace))
-	if err != nil {
-		return nil, fmt.Errorf("resolve file-identity workspace: %w", err)
-	}
-	trees := []string{
-		filepath.Join(workspace, "sessions"),
-		filepath.Join(workspace, "threads"),
-		filepath.Join(workspace, "legacy-json", "sessions-v1"),
-		filepath.Join(workspace, "workflow_runs"),
-		filepath.Join(workspace, "workflow_validations"),
-		filepath.Join(workspace, "workflow_dev"),
-		filepath.Join(workspace, "workflow_state"),
-		filepath.Join(workspace, "legacy-json", "workflows-v1"),
-		filepath.Join(workspace, agentRepositoryReviewStateDir),
-		filepath.Join(workspace, agentRepositoryEvalStateDir),
-	}
-	evolutionRoots, err := agentEvolutionFileMutationProtectedRoots(
-		workspace,
-		func() string {
-			if cfg == nil {
-				return ""
-			}
-			return cfg.Evolution.StateDir
-		}(),
+	return agentFileMutationIdentityCatalogForWorkspaces(
+		[]string{workspace},
+		cfg,
+		exactRoots,
 	)
+}
+
+func agentFileMutationIdentityCatalogForWorkspaces(
+	workspaces []string,
+	cfg *config.Config,
+	exactRoots []string,
+) (*tools.FileIdentityCatalog, error) {
+	workspaces, err := normalizeAgentFileMutationWorkspaces(workspaces)
 	if err != nil {
 		return nil, err
 	}
-	if len(evolutionRoots) != 0 {
-		evolutionRoot := filepath.Dir(evolutionRoots[0])
-		trees = append(trees,
-			filepath.Join(evolutionRoot, "profiles"),
-			filepath.Join(evolutionRoot, "backups"),
-			filepath.Join(evolutionRoot, "legacy-json", "evolution-v1"),
-		)
+	if len(workspaces) == 0 {
+		return nil, errors.New("file-identity catalog has no workspace")
 	}
-	if cfg != nil {
-		localCIRoots, localCIErr := agentLocalCIEvidenceFileMutationProtectedRoots(cfg)
-		if localCIErr != nil {
-			return nil, localCIErr
-		}
-		if len(localCIRoots) != 0 {
-			evidenceRoot := localCIRoots[0]
-			trees = append(trees,
-				filepath.Join(evidenceRoot, "cache"),
-				filepath.Join(evidenceRoot, "legacy-json", "local-ci-cache-v1"),
-			)
-		}
+	trees, exclusions, err := agentFileMutationIdentityCatalogTrees(workspaces, cfg)
+	if err != nil {
+		return nil, err
 	}
 	exactIdentities := make([]string, 0, len(exactRoots))
 	for _, candidate := range exactRoots {
@@ -751,24 +723,281 @@ func agentFileMutationIdentityCatalog(
 			exactIdentities = append(exactIdentities, candidate)
 		}
 	}
-	excludePaths := make([]string, 0, 9)
-	for _, database := range []string{
-		filepath.Join(workspace, "sessions", "sessions.db"),
-		filepath.Join(workspace, agentRepositoryReviewStateDir, "repository-reviews.db"),
-		filepath.Join(workspace, agentRepositoryEvalStateDir, "evaluations.db"),
-	} {
-		excludePaths = append(excludePaths, database, database+"-wal", database+"-shm")
+	beforeSidecars, err := agentAccountRouterLegacySidecarSnapshot(
+		workspaces,
+		agentFileIdentityDirectoryEntryLimit,
+		agentAccountRouterLegacySidecarLimit,
+	)
+	if err != nil {
+		return nil, err
 	}
-	return tools.NewFileIdentityCatalog(tools.FileIdentityCatalogOptions{
+	for path := range beforeSidecars {
+		exactIdentities = append(exactIdentities, path)
+	}
+	catalog, err := tools.NewFileIdentityCatalog(tools.FileIdentityCatalogOptions{
 		ExactPaths:   exactIdentities,
 		TreeRoots:    trees,
-		ExcludePaths: excludePaths,
+		ExcludePaths: exclusions,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if agentFileMutationIdentityBetweenSidecarSnapshots != nil {
+		agentFileMutationIdentityBetweenSidecarSnapshots()
+	}
+	afterSidecars, err := agentAccountRouterLegacySidecarSnapshot(
+		workspaces,
+		agentFileIdentityDirectoryEntryLimit,
+		agentAccountRouterLegacySidecarLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !equalAgentAccountRouterLegacySidecarSnapshots(beforeSidecars, afterSidecars) {
+		return nil, errors.New("account-router legacy sidecars changed during snapshot")
+	}
+	return catalog, nil
+}
+
+func agentFileMutationIdentityCatalogTrees(
+	workspaces []string,
+	cfg *config.Config,
+) ([]string, []string, error) {
+	home, err := filepath.Abs(filepath.Clean(config.GetHome()))
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve file-identity home: %w", err)
+	}
+	configPath := os.Getenv(config.EnvConfig)
+	if configPath == "" {
+		configPath = filepath.Join(home, "config.json")
+	}
+	configPath, err = filepath.Abs(filepath.Clean(configPath))
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve file-identity config path: %w", err)
+	}
+	weixinRoot := filepath.Join(home, "channels", "weixin")
+	trees := []string{
+		filepath.Join(filepath.Dir(configPath), "legacy-json", "launcher-auth-v1"),
+		filepath.Join(home, "legacy-json", "auth-v1"),
+		filepath.Join(home, "legacy-json", "model-catalogs-v1"),
+		filepath.Join(home, "legacy-json", "tool-adaptation-v1"),
+		filepath.Join(home, "legacy-json", "wecom-reqid-v1"),
+		filepath.Join(weixinRoot, "sync"),
+		filepath.Join(weixinRoot, "context-tokens"),
+		filepath.Join(weixinRoot, "legacy-json", "weixin-state-v1"),
+	}
+	exclusions := make([]string, 0, len(workspaces)*9)
+	evolutionStateDir := ""
+	if cfg != nil {
+		evolutionStateDir = cfg.Evolution.StateDir
+	}
+	for _, workspace := range workspaces {
+		trees = append(trees,
+			filepath.Join(workspace, "sessions"),
+			filepath.Join(workspace, "threads"),
+			filepath.Join(workspace, "legacy-json", "sessions-v1"),
+			filepath.Join(workspace, "workflow_runs"),
+			filepath.Join(workspace, "workflow_validations"),
+			filepath.Join(workspace, "workflow_dev"),
+			filepath.Join(workspace, "workflow_state"),
+			filepath.Join(workspace, "legacy-json", "workflows-v1"),
+			filepath.Join(workspace, "state", "legacy-json", "runtime-state-v1"),
+			filepath.Join(workspace, "state", "legacy-json", "account-router-v1"),
+			filepath.Join(workspace, "cron", "legacy-json", "cron-jobs-v1"),
+			filepath.Join(workspace, agentRepositoryReviewStateDir),
+			filepath.Join(workspace, agentRepositoryEvalStateDir),
+		)
+		evolutionRoots, evolutionErr := agentEvolutionFileMutationProtectedRoots(
+			workspace,
+			evolutionStateDir,
+		)
+		if evolutionErr != nil {
+			return nil, nil, evolutionErr
+		}
+		if len(evolutionRoots) != 0 {
+			evolutionRoot := filepath.Dir(evolutionRoots[0])
+			trees = append(trees,
+				filepath.Join(evolutionRoot, "profiles"),
+				filepath.Join(evolutionRoot, "backups"),
+				filepath.Join(evolutionRoot, "legacy-json", "evolution-v1"),
+			)
+		}
+		for _, database := range []string{
+			filepath.Join(workspace, "sessions", "sessions.db"),
+			filepath.Join(workspace, agentRepositoryReviewStateDir, "repository-reviews.db"),
+			filepath.Join(workspace, agentRepositoryEvalStateDir, "evaluations.db"),
+		} {
+			exclusions = append(exclusions, database, database+"-wal", database+"-shm")
+		}
+	}
+	if cfg != nil {
+		localCIRoots, localCIErr := agentLocalCIEvidenceFileMutationProtectedRoots(cfg)
+		if localCIErr != nil {
+			return nil, nil, localCIErr
+		}
+		if len(localCIRoots) != 0 {
+			evidenceRoot := localCIRoots[0]
+			trees = append(trees,
+				filepath.Join(evidenceRoot, "cache"),
+				filepath.Join(evidenceRoot, "legacy-json", "local-ci-cache-v1"),
+			)
+		}
+	}
+	return trees, exclusions, nil
+}
+
+type agentLegacySidecarSnapshot map[string]os.FileInfo
+
+// Test seam proving that account-router sidecar namespace changes around the
+// shared catalog fail generation construction instead of producing a partial
+// identity set.
+var agentFileMutationIdentityBetweenSidecarSnapshots func()
+
+func agentAccountRouterLegacySidecarSnapshot(
+	workspaces []string,
+	maximumDirectoryEntries int,
+	maximumSidecars int,
+) (agentLegacySidecarSnapshot, error) {
+	if maximumDirectoryEntries < 1 || maximumSidecars < 1 {
+		return nil, errors.New("account-router legacy sidecar limits are invalid")
+	}
+	snapshot := make(agentLegacySidecarSnapshot)
+	totalSidecars := 0
+	totalEntries := 0
+	for _, workspace := range workspaces {
+		before, err := os.Lstat(workspace)
+		switch {
+		case os.IsNotExist(err):
+			continue
+		case err != nil:
+			return nil, errors.New("account-router legacy workspace cannot be inspected")
+		case before.Mode()&os.ModeSymlink != 0 || !before.IsDir():
+			return nil, errors.New("account-router legacy workspace is unsafe")
+		}
+		root, err := os.OpenRoot(workspace)
+		if err != nil {
+			return nil, errors.New("account-router legacy workspace cannot be opened")
+		}
+		opened, openedErr := root.Stat(".")
+		if openedErr != nil || !stableAgentLegacyDirectory(before, opened) {
+			_ = root.Close()
+			return nil, errors.New("account-router legacy workspace changed while opening")
+		}
+		directory, err := root.Open(".")
+		if err != nil {
+			_ = root.Close()
+			return nil, errors.New("account-router legacy workspace cannot be enumerated")
+		}
+		for {
+			entries, readErr := directory.ReadDir(agentFileIdentityDirectoryReadBatch)
+			for _, entry := range entries {
+				totalEntries++
+				if totalEntries > maximumDirectoryEntries {
+					_ = directory.Close()
+					_ = root.Close()
+					return nil, errors.New("account-router legacy directory entry limit exceeded")
+				}
+				if !agentAccountRouterLegacySidecarName(entry.Name()) {
+					continue
+				}
+				totalSidecars++
+				if totalSidecars > maximumSidecars {
+					_ = directory.Close()
+					_ = root.Close()
+					return nil, errors.New("account-router legacy sidecar limit exceeded")
+				}
+				info, infoErr := root.Lstat(entry.Name())
+				if infoErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+					_ = directory.Close()
+					_ = root.Close()
+					return nil, errors.New("account-router legacy sidecar is unsafe")
+				}
+				snapshot[filepath.Join(workspace, entry.Name())] = info
+			}
+			if readErr != nil {
+				if !errors.Is(readErr, io.EOF) {
+					_ = directory.Close()
+					_ = root.Close()
+					return nil, errors.New("account-router legacy workspace cannot be enumerated")
+				}
+				break
+			}
+		}
+		directoryCloseErr := directory.Close()
+		after, afterErr := root.Stat(".")
+		current, currentErr := os.Lstat(workspace)
+		rootCloseErr := root.Close()
+		if directoryCloseErr != nil || rootCloseErr != nil ||
+			afterErr != nil || currentErr != nil ||
+			!stableAgentLegacyDirectory(before, after) ||
+			!stableAgentLegacyDirectory(before, current) {
+			return nil, errors.New("account-router legacy workspace changed during enumeration")
+		}
+	}
+	return snapshot, nil
+}
+
+func stableAgentLegacyDirectory(before, after os.FileInfo) bool {
+	return before != nil && after != nil && before.IsDir() && after.IsDir() &&
+		before.Mode() == after.Mode() && os.SameFile(before, after)
+}
+
+func equalAgentAccountRouterLegacySidecarSnapshots(
+	left agentLegacySidecarSnapshot,
+	right agentLegacySidecarSnapshot,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for path, leftInfo := range left {
+		rightInfo := right[path]
+		if rightInfo == nil || !os.SameFile(leftInfo, rightInfo) ||
+			leftInfo.Mode() != rightInfo.Mode() || leftInfo.Size() != rightInfo.Size() ||
+			!leftInfo.ModTime().Equal(rightInfo.ModTime()) {
+			return false
+		}
+	}
+	return true
 }
 
 type agentFileMutationIdentityGeneration struct {
-	mu       sync.Mutex
-	catalogs map[string]*tools.FileIdentityCatalog
+	mu                         sync.Mutex
+	sharedCatalog              *tools.FileIdentityCatalog
+	preparedPolicy             *tools.PreparedFileMutationPolicy
+	preparedApplyPatchRoots    *tools.PreparedApplyPatchVolatileRoots
+	fileMutationProtectedRoots []string
+}
+
+func newAgentFileMutationIdentityGeneration(
+	workspaces []string,
+	cfg *config.Config,
+	exactRoots []string,
+	protectedRoots []string,
+) (*agentFileMutationIdentityGeneration, error) {
+	catalog, err := agentFileMutationIdentityCatalogForWorkspaces(workspaces, cfg, exactRoots)
+	if err != nil {
+		return nil, err
+	}
+	preparedPolicy, err := tools.NewPreparedFileMutationPolicy("", tools.FileMutationPolicy{
+		ProtectedRoots:      protectedRoots,
+		ProtectedIdentities: catalog,
+	})
+	if err != nil {
+		return nil, err
+	}
+	preparedApplyPatchRoots, err := tools.NewPreparedApplyPatchVolatileRoots(
+		"",
+		protectedRoots,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &agentFileMutationIdentityGeneration{
+		sharedCatalog:              catalog,
+		preparedPolicy:             preparedPolicy,
+		preparedApplyPatchRoots:    preparedApplyPatchRoots,
+		fileMutationProtectedRoots: append([]string(nil), protectedRoots...),
+	}, nil
 }
 
 func (generation *agentFileMutationIdentityGeneration) catalog(
@@ -779,22 +1008,15 @@ func (generation *agentFileMutationIdentityGeneration) catalog(
 	if generation == nil {
 		return agentFileMutationIdentityCatalog(workspace, cfg, exactRoots)
 	}
-	key := workspace + "\x00" + strings.Join(exactRoots, "\x00")
-	if cfg != nil {
-		key += "\x00" + cfg.Evolution.StateDir + "\x00" + cfg.Events.Ingress.DatabasePath
-	}
 	generation.mu.Lock()
 	defer generation.mu.Unlock()
-	if catalog := generation.catalogs[key]; catalog != nil {
-		return catalog, nil
+	if generation.sharedCatalog != nil {
+		return generation.sharedCatalog, nil
 	}
 	catalog, err := agentFileMutationIdentityCatalog(workspace, cfg, exactRoots)
 	if err != nil {
 		return nil, err
 	}
-	if generation.catalogs == nil {
-		generation.catalogs = make(map[string]*tools.FileIdentityCatalog)
-	}
-	generation.catalogs[key] = catalog
+	generation.sharedCatalog = catalog
 	return catalog, nil
 }

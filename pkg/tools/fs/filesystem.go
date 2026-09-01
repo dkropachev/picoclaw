@@ -331,6 +331,33 @@ func NewReadFileLinesTool(
 	}
 }
 
+// NewReadFileLinesToolWithPolicy creates a line reader whose opens are bound
+// to the protected-runtime policy. Edit and append tools use the same guarded
+// filesystem for their read-before-write phase; local repair uses this
+// constructor so a namespace swap cannot disclose protected bytes between its
+// path guard and the actual read handle.
+func NewReadFileLinesToolWithPolicy(
+	workspace string,
+	restrict bool,
+	maxReadFileSize int,
+	policy FileMutationPolicy,
+	allowPaths ...[]*regexp.Regexp,
+) (*ReadFileLinesTool, error) {
+	var patterns []*regexp.Regexp
+	if len(allowPaths) > 0 {
+		patterns = allowPaths[0]
+	}
+	maxSize := int64(maxReadFileSize)
+	if maxSize <= 0 {
+		maxSize = MaxReadFileSize
+	}
+	policyFS, err := buildMutationFS(workspace, restrict, patterns, policy)
+	if err != nil {
+		return nil, err
+	}
+	return &ReadFileLinesTool{fs: policyFS, maxSize: maxSize}, nil
+}
+
 func (t *ReadFileTool) Name() string {
 	return "read_file"
 }
@@ -1022,6 +1049,23 @@ func NewListDirTool(workspace string, restrict bool, allowPaths ...[]*regexp.Reg
 		patterns = allowPaths[0]
 	}
 	return &ListDirTool{fs: buildFs(workspace, restrict, patterns)}
+}
+
+func NewListDirToolWithPolicy(
+	workspace string,
+	restrict bool,
+	policy FileMutationPolicy,
+	allowPaths ...[]*regexp.Regexp,
+) (*ListDirTool, error) {
+	var patterns []*regexp.Regexp
+	if len(allowPaths) > 0 {
+		patterns = allowPaths[0]
+	}
+	policyFS, err := buildMutationFS(workspace, restrict, patterns, policy)
+	if err != nil {
+		return nil, err
+	}
+	return &ListDirTool{fs: policyFS}, nil
 }
 
 func (t *ListDirTool) Name() string {

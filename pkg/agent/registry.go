@@ -105,6 +105,38 @@ func newAgentRegistryWithRuntimePolicies(
 	if protectedRootErr != nil {
 		panic(fmt.Sprintf("build workspace file-mutation policy: %v", protectedRootErr))
 	}
+	agentConfigs := cfg.Agents.List
+	mutationWorkspaces, workspaceErr := agentRegistryFileMutationWorkspaces(cfg, agentConfigs)
+	if workspaceErr != nil {
+		panic(fmt.Sprintf("build registry file-mutation workspaces: %v", workspaceErr))
+	}
+	for _, workspace := range mutationWorkspaces {
+		fileMutationProtectedRoots, protectedRootErr = appendAgentCompleteWorkspaceFileMutationProtectedRoots(
+			fileMutationProtectedRoots,
+			workspace,
+			cfg,
+		)
+		if protectedRootErr != nil {
+			panic(fmt.Sprintf("build registry file-mutation policy: %v", protectedRootErr))
+		}
+	}
+	localCIRoots := mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg)
+	fileMutationProtectedRoots = append(
+		fileMutationProtectedRoots,
+		localCIRoots...,
+	)
+	identityExactRoots := cloneAgentRuntimeFileMutationProtectedRoots(
+		fileMutationProtectedRoots,
+	)
+	identityGeneration, identityErr := newAgentFileMutationIdentityGeneration(
+		mutationWorkspaces,
+		cfg,
+		identityExactRoots,
+		fileMutationProtectedRoots,
+	)
+	if identityErr != nil {
+		panic(fmt.Sprintf("build registry file-mutation identity catalog: %v", identityErr))
+	}
 	registry := &AgentRegistry{
 		cfg:               cfg,
 		agents:            make(map[string]*AgentInstance),
@@ -117,9 +149,6 @@ func newAgentRegistryWithRuntimePolicies(
 		registry.borrowedProviders = providerGeneration.providerSet()
 	}
 	defer (&agentRegistryConstructionGuard{registry: registry}).cleanupPanic()
-	identityGeneration := &agentFileMutationIdentityGeneration{}
-
-	agentConfigs := cfg.Agents.List
 	if len(agentConfigs) == 0 {
 		implicitAgent := &config.AgentConfig{
 			ID:      "main",
@@ -187,6 +216,32 @@ func newAgentRegistryWithRuntimePolicies(
 	}
 
 	return registry
+}
+
+func agentRegistryFileMutationWorkspaces(
+	cfg *config.Config,
+	agentConfigs []config.AgentConfig,
+) ([]string, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("configuration is unavailable")
+	}
+	candidates := make([]string, 0, len(agentConfigs)+2)
+	if configured := cfg.WorkspacePath(); configured != "" {
+		candidates = append(candidates, configured)
+	}
+	if len(agentConfigs) == 0 {
+		if implicit := resolveAgentWorkspace(nil, &cfg.Agents.Defaults); implicit != "" {
+			candidates = append(candidates, implicit)
+		}
+	} else {
+		for index := range agentConfigs {
+			workspace := resolveAgentWorkspace(&agentConfigs[index], &cfg.Agents.Defaults)
+			if workspace != "" {
+				candidates = append(candidates, workspace)
+			}
+		}
+	}
+	return normalizeAgentFileMutationWorkspaces(candidates)
 }
 
 // CloseCandidate closes an unpublished registry and every internally-created

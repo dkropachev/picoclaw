@@ -1,8 +1,11 @@
 package fstools
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +15,9 @@ import (
 )
 
 const (
+	defaultFileIdentityCatalogEntries   = 131_072
+	defaultFileIdentityCatalogPathBytes = int64(32 << 20)
+	defaultFileIdentityCatalogDepth     = 32
 	maximumFileIdentityCatalogEntries   = 2_000_000
 	maximumFileIdentityCatalogPathBytes = int64(1 << 30)
 	maximumFileIdentityCatalogDepth     = 64
@@ -46,66 +52,85 @@ type FileIdentityCatalog struct {
 	identities map[string]struct{}
 }
 
-type fileIdentityCatalogEntry struct {
-	info     os.FileInfo
-	identity string
-}
-
-type fileIdentityCatalogSnapshot struct {
-	entries map[string]fileIdentityCatalogEntry
-	missing map[string]struct{}
+// fileIdentityCatalogDigest is the complete retained state from the first
+// pass. Its fixed size is important: catalog construction must not retain a
+// path-sized snapshot while it builds the final identity set.
+type fileIdentityCatalogDigest struct {
+	xor     [sha256.Size]byte
+	sum     [sha256.Size]byte
+	records uint64
 }
 
 // Test seam used to deterministically prove that namespace changes between
-// the two complete snapshots fail closed.
+// the two complete streaming passes fail closed.
 var fileIdentityCatalogBetweenSnapshots func()
 
-// NewFileIdentityCatalog captures a bounded two-pass snapshot. Diagnostics are
-// intentionally path-free because the protected paths can encode identities
-// or other private runtime details.
+// NewFileIdentityCatalog captures a bounded two-pass snapshot. The first pass
+// retains only a fixed-size digest; the second pass builds the final distinct
+// physical-identity set. Diagnostics are intentionally path-free because the
+// protected paths can encode identities or other private runtime details.
 func NewFileIdentityCatalog(options FileIdentityCatalogOptions) (*FileIdentityCatalog, error) {
 	limit := options.MaxEntries
 	if limit == 0 {
-		limit = maximumFileIdentityCatalogEntries
+		limit = defaultFileIdentityCatalogEntries
 	}
 	if limit < 1 || limit > maximumFileIdentityCatalogEntries {
 		return nil, errors.New("file-identity catalog limit is invalid")
 	}
 	pathLimit := options.MaxPathBytes
 	if pathLimit == 0 {
-		pathLimit = maximumFileIdentityCatalogPathBytes
+		pathLimit = defaultFileIdentityCatalogPathBytes
 	}
 	if pathLimit < 1 || pathLimit > maximumFileIdentityCatalogPathBytes {
 		return nil, errors.New("file-identity catalog path-byte limit is invalid")
 	}
 	depthLimit := options.MaxDepth
 	if depthLimit == 0 {
-		depthLimit = maximumFileIdentityCatalogDepth
+		depthLimit = defaultFileIdentityCatalogDepth
 	}
 	if depthLimit < 1 || depthLimit > maximumFileIdentityCatalogDepth {
 		return nil, errors.New("file-identity catalog depth limit is invalid")
 	}
 	if len(options.ExactPaths) > limit || len(options.TreeRoots) > limit ||
-		len(options.ExcludePaths) > 1024 {
+		len(options.ExcludePaths) > limit ||
+		len(options.ExactPaths) > limit-len(options.TreeRoots) ||
+		len(options.ExactPaths)+len(options.TreeRoots) > limit-len(options.ExcludePaths) {
 		return nil, errors.New("file-identity catalog input limit exceeded")
 	}
-	exact, err := prepareFileIdentityCatalogInputs(options.ExactPaths, "exact")
+	inputBudget := fileIdentityCatalogInputBudget{
+		entries: limit,
+		bytes:   pathLimit,
+	}
+	exact, err := prepareFileIdentityCatalogInputs(
+		options.ExactPaths,
+		"exact",
+		&inputBudget,
+	)
 	if err != nil {
 		return nil, err
 	}
-	trees, err := prepareFileIdentityCatalogInputs(options.TreeRoots, "tree")
+	trees, err := prepareFileIdentityCatalogInputs(
+		options.TreeRoots,
+		"tree",
+		&inputBudget,
+	)
 	if err != nil {
 		return nil, err
 	}
-	excluded, err := prepareFileIdentityCatalogExclusions(options.ExcludePaths)
+	excluded, err := prepareFileIdentityCatalogExclusions(
+		options.ExcludePaths,
+		&inputBudget,
+	)
 	if err != nil {
 		return nil, err
 	}
-	first, err := collectFileIdentityCatalogSnapshot(
+	limits := fileIdentityCatalogLimits{entries: limit, pathBytes: pathLimit, depth: depthLimit}
+	first, _, err := collectFileIdentityCatalogPass(
 		exact,
 		trees,
 		excluded,
-		fileIdentityCatalogLimits{entries: limit, pathBytes: pathLimit, depth: depthLimit},
+		limits,
+		false,
 	)
 	if err != nil {
 		return nil, err
@@ -113,49 +138,152 @@ func NewFileIdentityCatalog(options FileIdentityCatalogOptions) (*FileIdentityCa
 	if fileIdentityCatalogBetweenSnapshots != nil {
 		fileIdentityCatalogBetweenSnapshots()
 	}
-	second, err := collectFileIdentityCatalogSnapshot(
+	second, identities, err := collectFileIdentityCatalogPass(
 		exact,
 		trees,
 		excluded,
-		fileIdentityCatalogLimits{entries: limit, pathBytes: pathLimit, depth: depthLimit},
+		limits,
+		true,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if !equalFileIdentityCatalogSnapshots(first, second) {
+	if first != second {
 		return nil, errors.New("file-identity catalog inputs changed during snapshot")
-	}
-	identities := make(map[string]struct{}, len(second.entries))
-	for _, entry := range second.entries {
-		if entry.identity != "" {
-			identities[entry.identity] = struct{}{}
-		}
 	}
 	return &FileIdentityCatalog{identities: identities}, nil
 }
 
-func prepareFileIdentityCatalogExclusions(paths []string) (map[string]struct{}, error) {
-	prepared := make(map[string]struct{}, len(paths)*2)
+type fileIdentityCatalogInputBudget struct {
+	entries       int
+	bytes         int64
+	usedEntries   int
+	usedPathBytes int64
+}
+
+func (budget *fileIdentityCatalogInputBudget) consumeRaw(value string) error {
+	if budget == nil || budget.entries < 1 || budget.bytes < 1 ||
+		budget.usedEntries >= budget.entries {
+		return errors.New("file-identity catalog input limit exceeded")
+	}
+	length := int64(len(value))
+	if length < 0 || budget.usedPathBytes > budget.bytes-length {
+		return errors.New("file-identity catalog input path-byte limit exceeded")
+	}
+	budget.usedEntries++
+	budget.usedPathBytes += length
+	return nil
+}
+
+func (budget *fileIdentityCatalogInputBudget) accountExpansion(before, after int) error {
+	if budget == nil || before < 0 || after < 0 {
+		return errors.New("file-identity catalog input budget is invalid")
+	}
+	if after <= before {
+		return nil
+	}
+	extra := int64(after - before)
+	if budget.usedPathBytes > budget.bytes-extra {
+		return errors.New("file-identity catalog input path-byte limit exceeded")
+	}
+	budget.usedPathBytes += extra
+	return nil
+}
+
+func (budget *fileIdentityCatalogInputBudget) accountRetained(length int) error {
+	if budget == nil || length < 0 {
+		return errors.New("file-identity catalog input budget is invalid")
+	}
+	extra := int64(length)
+	if budget.usedPathBytes > budget.bytes-extra {
+		return errors.New("file-identity catalog input path-byte limit exceeded")
+	}
+	budget.usedPathBytes += extra
+	return nil
+}
+
+func prepareFileIdentityCatalogExclusions(
+	paths []string,
+	budget *fileIdentityCatalogInputBudget,
+) (fileIdentityCatalogExclusions, error) {
+	prepared := fileIdentityCatalogExclusions{
+		paths:      make(map[string]struct{}, len(paths)*2),
+		identities: make(map[string]struct{}, len(paths)),
+	}
 	for index, path := range append([]string(nil), paths...) {
 		if path == "" || path != strings.TrimSpace(path) || !utf8.ValidString(path) ||
 			strings.ContainsRune(path, '\x00') {
-			return nil, fmt.Errorf("file-identity catalog exclusion %d is invalid", index)
+			return fileIdentityCatalogExclusions{}, fmt.Errorf(
+				"file-identity catalog exclusion %d is invalid",
+				index,
+			)
+		}
+		if err := budget.consumeRaw(path); err != nil {
+			return fileIdentityCatalogExclusions{}, err
 		}
 		absolute, err := filepath.Abs(filepath.Clean(path))
 		if err != nil {
-			return nil, fmt.Errorf("file-identity catalog exclusion %d is invalid", index)
+			return fileIdentityCatalogExclusions{}, fmt.Errorf(
+				"file-identity catalog exclusion %d is invalid",
+				index,
+			)
 		}
-		prepared[fileMutationPathKey(absolute)] = struct{}{}
+		if err := budget.accountExpansion(len(path), len(absolute)); err != nil {
+			return fileIdentityCatalogExclusions{}, err
+		}
+		prepared.paths[fileMutationDistinctPathKey(absolute)] = struct{}{}
 		canonical, resolveErr := resolvePathAgainstExistingAncestor(absolute)
 		if resolveErr != nil {
-			return nil, fmt.Errorf("file-identity catalog exclusion %d cannot be resolved", index)
+			return fileIdentityCatalogExclusions{}, fmt.Errorf(
+				"file-identity catalog exclusion %d cannot be resolved",
+				index,
+			)
 		}
-		prepared[fileMutationPathKey(canonical)] = struct{}{}
+		if err := budget.accountRetained(len(canonical)); err != nil {
+			return fileIdentityCatalogExclusions{}, err
+		}
+		prepared.paths[fileMutationDistinctPathKey(canonical)] = struct{}{}
+		info, statErr := os.Lstat(absolute)
+		switch {
+		case os.IsNotExist(statErr):
+			continue
+		case statErr != nil:
+			return fileIdentityCatalogExclusions{}, errors.New(
+				"file-identity catalog exclusion cannot be inspected",
+			)
+		case info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular():
+			return fileIdentityCatalogExclusions{}, errors.New(
+				"file-identity catalog exclusion is unsafe",
+			)
+		}
+		file, openErr := os.Open(absolute)
+		if openErr != nil {
+			return fileIdentityCatalogExclusions{}, errors.New(
+				"file-identity catalog exclusion cannot be opened",
+			)
+		}
+		_, identity, identityErr := verifiedOpenedFileIdentity(file, info, true)
+		closeErr := file.Close()
+		if identityErr != nil || closeErr != nil {
+			return fileIdentityCatalogExclusions{}, errors.New(
+				"file-identity catalog exclusion changed while opening",
+			)
+		}
+		prepared.identities[identity] = struct{}{}
 	}
 	return prepared, nil
 }
 
-func prepareFileIdentityCatalogInputs(inputs []string, kind string) ([]string, error) {
+type fileIdentityCatalogExclusions struct {
+	paths      map[string]struct{}
+	identities map[string]struct{}
+}
+
+func prepareFileIdentityCatalogInputs(
+	inputs []string,
+	kind string,
+	budget *fileIdentityCatalogInputBudget,
+) ([]string, error) {
 	prepared := make([]string, 0, len(inputs))
 	seen := make(map[string]struct{}, len(inputs))
 	for index, input := range append([]string(nil), inputs...) {
@@ -163,11 +291,17 @@ func prepareFileIdentityCatalogInputs(inputs []string, kind string) ([]string, e
 			strings.ContainsRune(input, '\x00') {
 			return nil, fmt.Errorf("file-identity catalog %s input %d is invalid", kind, index)
 		}
+		if err := budget.consumeRaw(input); err != nil {
+			return nil, err
+		}
 		absolute, err := filepath.Abs(filepath.Clean(input))
 		if err != nil {
 			return nil, fmt.Errorf("file-identity catalog %s input %d is invalid", kind, index)
 		}
-		key := fileMutationPathKey(absolute)
+		if err := budget.accountExpansion(len(input), len(absolute)); err != nil {
+			return nil, err
+		}
+		key := fileMutationDistinctPathKey(absolute)
 		if _, exists := seen[key]; exists {
 			continue
 		}
@@ -178,55 +312,151 @@ func prepareFileIdentityCatalogInputs(inputs []string, kind string) ([]string, e
 	return prepared, nil
 }
 
-func collectFileIdentityCatalogSnapshot(
+type fileIdentityCatalogRecorder struct {
+	identities map[string]struct{}
+	xor        [sha256.Size]byte
+	sum        [sha256.Size]byte
+	records    uint64
+}
+
+func newFileIdentityCatalogRecorder(captureIdentities bool) *fileIdentityCatalogRecorder {
+	recorder := &fileIdentityCatalogRecorder{}
+	if captureIdentities {
+		recorder.identities = make(map[string]struct{})
+	}
+	return recorder
+}
+
+func (recorder *fileIdentityCatalogRecorder) record(
+	kind byte,
+	path string,
+	info os.FileInfo,
+	identity string,
+) error {
+	if recorder == nil || path == "" || info == nil || identity == "" {
+		return errors.New("file-identity catalog record is invalid")
+	}
+	recorder.records++
+	if recorder.records == 0 {
+		return errors.New("file-identity catalog record count overflow")
+	}
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("picoclaw-file-identity-catalog-v3\x00"))
+	writeFileIdentityCatalogDigestByte(digest, kind)
+	writeFileIdentityCatalogDigestString(digest, fileMutationDistinctPathKey(path))
+	writeFileIdentityCatalogDigestUint64(digest, uint64(info.Mode()))
+	writeFileIdentityCatalogDigestString(digest, identity)
+	if info.IsDir() {
+		writeFileIdentityCatalogDigestUint64(digest, uint64(info.Size()))
+		writeFileIdentityCatalogDigestUint64(digest, uint64(info.ModTime().UnixNano()))
+	}
+	recorder.accumulate(digest.Sum(nil))
+	if info.Mode().IsRegular() && recorder.identities != nil {
+		recorder.identities[identity] = struct{}{}
+	}
+	return nil
+}
+
+func (recorder *fileIdentityCatalogRecorder) recordMissing(kind byte, path string) error {
+	if recorder == nil || path == "" {
+		return errors.New("file-identity catalog missing record is invalid")
+	}
+	recorder.records++
+	if recorder.records == 0 {
+		return errors.New("file-identity catalog record count overflow")
+	}
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("picoclaw-file-identity-catalog-v3\x00"))
+	writeFileIdentityCatalogDigestByte(digest, kind)
+	writeFileIdentityCatalogDigestString(digest, fileMutationDistinctPathKey(path))
+	recorder.accumulate(digest.Sum(nil))
+	return nil
+}
+
+// accumulate forms an order-independent multiset digest. XOR preserves every
+// bit of each cryptographic record hash while modular addition and the record
+// count prevent even-multiplicity cancellation. No path-sized ordering buffer
+// is retained between batches or passes.
+func (recorder *fileIdentityCatalogRecorder) accumulate(record []byte) {
+	if recorder == nil || len(record) != sha256.Size {
+		return
+	}
+	carry := uint16(0)
+	for index := sha256.Size - 1; index >= 0; index-- {
+		recorder.xor[index] ^= record[index]
+		total := uint16(recorder.sum[index]) + uint16(record[index]) + carry
+		recorder.sum[index] = byte(total)
+		carry = total >> 8
+	}
+}
+
+func (recorder *fileIdentityCatalogRecorder) finish() fileIdentityCatalogDigest {
+	var result fileIdentityCatalogDigest
+	if recorder == nil {
+		return result
+	}
+	result.xor = recorder.xor
+	result.sum = recorder.sum
+	result.records = recorder.records
+	return result
+}
+
+func writeFileIdentityCatalogDigestByte(digest hash.Hash, value byte) {
+	_, _ = digest.Write([]byte{value})
+}
+
+func writeFileIdentityCatalogDigestUint64(digest hash.Hash, value uint64) {
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], value)
+	_, _ = digest.Write(encoded[:])
+}
+
+func writeFileIdentityCatalogDigestString(digest hash.Hash, value string) {
+	writeFileIdentityCatalogDigestUint64(digest, uint64(len(value)))
+	_, _ = digest.Write([]byte(value))
+}
+
+func collectFileIdentityCatalogPass(
 	exact []string,
 	trees []string,
-	excludedPaths map[string]struct{},
+	exclusions fileIdentityCatalogExclusions,
 	limits fileIdentityCatalogLimits,
-) (fileIdentityCatalogSnapshot, error) {
-	snapshot := fileIdentityCatalogSnapshot{
-		entries: make(map[string]fileIdentityCatalogEntry),
-		missing: make(map[string]struct{}),
-	}
-	add := func(path string, info os.FileInfo) error {
-		key := fileMutationPathKey(path)
-		if previous, exists := snapshot.entries[key]; exists {
-			if previous.info == nil || info == nil || !os.SameFile(previous.info, info) ||
-				previous.info.Mode() != info.Mode() {
-				return errors.New("file-identity catalog contains an unstable entry")
-			}
-			return nil
-		}
-		if len(snapshot.entries) >= limits.entries {
-			return errors.New("file-identity catalog entry limit exceeded")
-		}
-		entry := fileIdentityCatalogEntry{info: info}
-		if info.Mode().IsRegular() {
-			identity, err := snapshotFileIdentity(path, info)
-			if err != nil {
-				return errors.New("file-identity catalog entry cannot be identified")
-			}
-			entry.identity = identity
-		}
-		snapshot.entries[key] = entry
-		return nil
-	}
+	captureIdentities bool,
+) (fileIdentityCatalogDigest, map[string]struct{}, error) {
+	recorder := newFileIdentityCatalogRecorder(captureIdentities)
 	budget := fileIdentityCatalogBudget{limits: limits}
 	for _, path := range exact {
 		if err := budget.consume(path); err != nil {
-			return fileIdentityCatalogSnapshot{}, err
+			return fileIdentityCatalogDigest{}, nil, err
 		}
 		info, err := os.Lstat(path)
 		switch {
 		case os.IsNotExist(err):
-			snapshot.missing["exact\x00"+fileMutationPathKey(path)] = struct{}{}
+			if recordErr := recorder.recordMissing('E', path); recordErr != nil {
+				return fileIdentityCatalogDigest{}, nil, recordErr
+			}
 		case err != nil:
-			return fileIdentityCatalogSnapshot{}, errors.New("file-identity catalog exact input cannot be inspected")
+			return fileIdentityCatalogDigest{}, nil, errors.New(
+				"file-identity catalog exact input cannot be inspected",
+			)
 		case info.Mode()&os.ModeSymlink != 0 || !info.IsDir() && !info.Mode().IsRegular():
-			return fileIdentityCatalogSnapshot{}, errors.New("file-identity catalog exact input is unsafe")
+			return fileIdentityCatalogDigest{}, nil, errors.New("file-identity catalog exact input is unsafe")
 		default:
-			if err := add(path, info); err != nil {
-				return fileIdentityCatalogSnapshot{}, err
+			opened, openErr := os.Open(path)
+			if openErr != nil {
+				return fileIdentityCatalogDigest{}, nil, errors.New(
+					"file-identity catalog exact input cannot be opened",
+				)
+			}
+			openedInfo, identity, identityErr := verifiedOpenedFileIdentity(opened, info, info.Mode().IsRegular())
+			closeErr := opened.Close()
+			if identityErr != nil || closeErr != nil {
+				return fileIdentityCatalogDigest{}, nil, errors.New(
+					"file-identity catalog exact input changed while opening",
+				)
+			}
+			if recordErr := recorder.record('e', path, openedInfo, identity); recordErr != nil {
+				return fileIdentityCatalogDigest{}, nil, recordErr
 			}
 		}
 	}
@@ -235,39 +465,41 @@ func collectFileIdentityCatalogSnapshot(
 		switch {
 		case os.IsNotExist(err):
 			if budgetErr := budget.consume(root); budgetErr != nil {
-				return fileIdentityCatalogSnapshot{}, budgetErr
+				return fileIdentityCatalogDigest{}, nil, budgetErr
 			}
-			snapshot.missing["tree\x00"+fileMutationPathKey(root)] = struct{}{}
+			if recordErr := recorder.recordMissing('T', root); recordErr != nil {
+				return fileIdentityCatalogDigest{}, nil, recordErr
+			}
 			continue
 		case err != nil:
-			return fileIdentityCatalogSnapshot{}, errors.New("file-identity catalog tree cannot be inspected")
+			return fileIdentityCatalogDigest{}, nil, errors.New("file-identity catalog tree cannot be inspected")
 		case rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir():
-			return fileIdentityCatalogSnapshot{}, errors.New("file-identity catalog tree is unsafe")
+			return fileIdentityCatalogDigest{}, nil, errors.New("file-identity catalog tree is unsafe")
 		}
 		pinned, openErr := os.OpenRoot(root)
 		if openErr != nil {
-			return fileIdentityCatalogSnapshot{}, errors.New("file-identity catalog tree cannot be opened")
+			return fileIdentityCatalogDigest{}, nil, errors.New("file-identity catalog tree cannot be opened")
 		}
 		openedInfo, openedErr := pinned.Stat(".")
 		if openedErr != nil || !stableFileIdentityCatalogDirectory(rootInfo, openedInfo) {
 			_ = pinned.Close()
-			return fileIdentityCatalogSnapshot{}, errors.New("file-identity catalog tree changed while opening")
+			return fileIdentityCatalogDigest{}, nil, errors.New("file-identity catalog tree changed while opening")
 		}
 		walkErr := collectPinnedFileIdentityCatalogTree(
 			pinned,
 			root,
 			".",
-			excludedPaths,
+			exclusions,
 			1,
 			&budget,
-			add,
+			recorder,
 		)
 		closeErr := pinned.Close()
 		if walkErr != nil || closeErr != nil {
-			return fileIdentityCatalogSnapshot{}, errors.New("file-identity catalog tree cannot be enumerated")
+			return fileIdentityCatalogDigest{}, nil, errors.New("file-identity catalog tree cannot be enumerated")
 		}
 	}
-	return snapshot, nil
+	return recorder.finish(), recorder.identities, nil
 }
 
 type fileIdentityCatalogLimits struct {
@@ -303,12 +535,12 @@ func collectPinnedFileIdentityCatalogTree(
 	root *os.Root,
 	lexical string,
 	relative string,
-	excludedPaths map[string]struct{},
+	exclusions fileIdentityCatalogExclusions,
 	depth int,
 	budget *fileIdentityCatalogBudget,
-	add func(string, os.FileInfo) error,
+	recorder *fileIdentityCatalogRecorder,
 ) error {
-	if root == nil || add == nil || budget == nil || depth < 1 ||
+	if root == nil || recorder == nil || budget == nil || depth < 1 ||
 		depth > budget.limits.depth {
 		return errors.New("pinned identity tree is invalid")
 	}
@@ -319,17 +551,18 @@ func collectPinnedFileIdentityCatalogTree(
 	if err != nil || !before.IsDir() {
 		return errors.New("pinned identity directory is unavailable")
 	}
-	if addErr := add(lexical, before); addErr != nil {
-		return addErr
-	}
 	directory, err := root.Open(".")
 	if err != nil {
 		return errors.New("pinned identity directory cannot be opened")
 	}
-	opened, openedErr := directory.Stat()
+	opened, directoryIdentity, openedErr := verifiedOpenedFileIdentity(directory, before, false)
 	if openedErr != nil || !stableFileIdentityCatalogDirectory(before, opened) {
 		_ = directory.Close()
 		return errors.New("pinned identity directory changed while opening")
+	}
+	if recordErr := recorder.record('d', lexical, opened, directoryIdentity); recordErr != nil {
+		_ = directory.Close()
+		return recordErr
 	}
 	closeDirectory := func(returnErr error) error {
 		if closeErr := directory.Close(); closeErr != nil && returnErr == nil {
@@ -359,11 +592,23 @@ func collectPinnedFileIdentityCatalogTree(
 				if consumeErr := budget.consume(childRelative); consumeErr != nil {
 					return closeDirectory(consumeErr)
 				}
-				if fileIdentityCatalogExcluded(path, excludedPaths) {
+				if fileIdentityCatalogPathExcluded(path, exclusions) {
 					continue
 				}
-				if addErr := add(path, info); addErr != nil {
-					return closeDirectory(addErr)
+				openedFile, openFileErr := root.Open(name)
+				if openFileErr != nil {
+					return closeDirectory(errors.New("pinned identity file cannot be opened"))
+				}
+				openedFileInfo, identity, identityErr := verifiedOpenedFileIdentity(openedFile, info, true)
+				fileCloseErr := openedFile.Close()
+				if identityErr != nil || fileCloseErr != nil {
+					return closeDirectory(errors.New("pinned identity file changed while opening"))
+				}
+				if fileIdentityCatalogIdentityExcluded(identity, exclusions) {
+					continue
+				}
+				if recordErr := recorder.record('f', path, openedFileInfo, identity); recordErr != nil {
+					return closeDirectory(recordErr)
 				}
 				continue
 			}
@@ -380,10 +625,10 @@ func collectPinnedFileIdentityCatalogTree(
 				child,
 				path,
 				childRelative,
-				excludedPaths,
+				exclusions,
 				depth+1,
 				budget,
-				add,
+				recorder,
 			)
 			childCloseErr := child.Close()
 			if childErr != nil || childCloseErr != nil {
@@ -410,30 +655,60 @@ func stableFileIdentityCatalogDirectory(before, after os.FileInfo) bool {
 		before.ModTime().Equal(after.ModTime()) && os.SameFile(before, after)
 }
 
-func fileIdentityCatalogExcluded(path string, excluded map[string]struct{}) bool {
-	_, found := excluded[fileMutationPathKey(path)]
+func fileIdentityCatalogPathExcluded(
+	path string,
+	exclusions fileIdentityCatalogExclusions,
+) bool {
+	_, found := exclusions.paths[fileMutationDistinctPathKey(path)]
 	return found
 }
 
-func equalFileIdentityCatalogSnapshots(left, right fileIdentityCatalogSnapshot) bool {
-	if len(left.entries) != len(right.entries) || len(left.missing) != len(right.missing) {
-		return false
+func fileIdentityCatalogIdentityExcluded(
+	identity string,
+	exclusions fileIdentityCatalogExclusions,
+) bool {
+	_, found := exclusions.identities[identity]
+	return found
+}
+
+func verifiedOpenedFileIdentity(
+	file *os.File,
+	expected os.FileInfo,
+	requireRegular bool,
+) (os.FileInfo, string, error) {
+	if file == nil || expected == nil {
+		return nil, "", errors.New("opened file identity is invalid")
 	}
-	for missing := range left.missing {
-		if _, exists := right.missing[missing]; !exists {
-			return false
-		}
+	actual, err := file.Stat()
+	if err != nil || actual == nil || actual.Mode() != expected.Mode() ||
+		!os.SameFile(expected, actual) || requireRegular && !actual.Mode().IsRegular() ||
+		!requireRegular && !actual.IsDir() && !actual.Mode().IsRegular() {
+		return nil, "", errors.New("opened file identity does not match preflight")
 	}
-	for key, before := range left.entries {
-		after, exists := right.entries[key]
-		if !exists || before.info == nil || after.info == nil ||
-			before.info.Mode() != after.info.Mode() || !os.SameFile(before.info, after.info) ||
-			before.identity != after.identity || before.info.IsDir() &&
-			(!before.info.ModTime().Equal(after.info.ModTime()) || before.info.Size() != after.info.Size()) {
-			return false
-		}
+	identity, err := fileIdentityFromOpenedHandle(file, actual)
+	if err != nil || identity == "" {
+		return nil, "", errors.New("opened file identity is unavailable")
 	}
-	return true
+	return actual, identity, nil
+}
+
+func snapshotFileIdentity(path string, expected os.FileInfo) (string, error) {
+	if path == "" || expected == nil || !expected.Mode().IsRegular() {
+		return "", errors.New("file identity is invalid")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	_, identity, identityErr := verifiedOpenedFileIdentity(file, expected, true)
+	closeErr := file.Close()
+	if identityErr != nil {
+		return "", identityErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return identity, nil
 }
 
 // ProtectsPath reports whether path still names an identity captured by the
@@ -449,6 +724,27 @@ func (catalog *FileIdentityCatalog) ProtectsPath(path string, info os.FileInfo) 
 	identity, err := snapshotFileIdentity(path, info)
 	if err != nil {
 		return false, errors.New("file-identity lookup failed")
+	}
+	_, protected := catalog.identities[identity]
+	return protected, nil
+}
+
+// ProtectsOpenedFile reports whether file is a captured regular-file identity.
+// expected must be the caller's preflight FileInfo for the same open handle;
+// lookup fails closed if the handle does not still match that preflight.
+func (catalog *FileIdentityCatalog) ProtectsOpenedFile(
+	file *os.File,
+	expected os.FileInfo,
+) (bool, error) {
+	if catalog == nil {
+		return false, nil
+	}
+	if file == nil || expected == nil || !expected.Mode().IsRegular() {
+		return false, errors.New("opened file-identity lookup is invalid")
+	}
+	_, identity, err := verifiedOpenedFileIdentity(file, expected, true)
+	if err != nil {
+		return false, errors.New("opened file-identity lookup failed")
 	}
 	_, protected := catalog.identities[identity]
 	return protected, nil

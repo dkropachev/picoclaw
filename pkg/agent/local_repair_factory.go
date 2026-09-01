@@ -9,6 +9,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // NewControllerLocalRepairRunner resolves one controller-owned repair runner
@@ -135,52 +136,58 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 		return nil, errors.New("controller local repair agent configuration is invalid")
 	}
 
-	protectedRoots := append(
-		[]string(nil),
-		al.fileMutationProtectedRoots...,
-	)
-	if strings.TrimSpace(agent.Workspace) != "" {
-		protectedRoots = append(
-			protectedRoots,
-			mustAgentWorkspaceFileMutationProtectedRoots(agent.Workspace)...,
-		)
-		protectedRoots = append(
-			protectedRoots,
-			mustAgentWorkspaceAccountRouterProtectedRoots(agent.Workspace)...,
-		)
-		protectedRoots = append(
-			protectedRoots,
-			agentSessionFileMutationProtectedRoots(agent.Workspace)...,
-		)
-		protectedRoots = append(
-			protectedRoots,
-			agentCronFileMutationProtectedRoots(agent.Workspace)...,
-		)
-		workflowRoots, workflowErr := agentWorkflowRuntimeFileMutationProtectedRoots(
-			agent.Workspace,
-		)
-		if workflowErr != nil {
-			return nil, errors.New("controller local repair workflow state is invalid")
+	preparedMutationPolicy := agent.preparedFileMutationPolicy
+	var protectedRoots []string
+	var protectedIdentities *tools.FileIdentityCatalog
+	if preparedMutationPolicy == nil {
+		protectedRoots = append([]string(nil), al.fileMutationProtectedRoots...)
+		if len(agent.fileMutationProtectedRoots) != 0 {
+			protectedRoots = append([]string(nil), agent.fileMutationProtectedRoots...)
 		}
-		protectedRoots = append(protectedRoots, workflowRoots...)
-		protectedRoots = appendAgentRepositoryFileMutationProtectedRoots(
-			protectedRoots,
+		if strings.TrimSpace(agent.Workspace) != "" {
+			protectedRoots = append(
+				protectedRoots,
+				mustAgentWorkspaceFileMutationProtectedRoots(agent.Workspace)...,
+			)
+			protectedRoots = append(
+				protectedRoots,
+				mustAgentWorkspaceAccountRouterProtectedRoots(agent.Workspace)...,
+			)
+			protectedRoots = append(
+				protectedRoots,
+				agentSessionFileMutationProtectedRoots(agent.Workspace)...,
+			)
+			protectedRoots = append(
+				protectedRoots,
+				agentCronFileMutationProtectedRoots(agent.Workspace)...,
+			)
+			workflowRoots, workflowErr := agentWorkflowRuntimeFileMutationProtectedRoots(
+				agent.Workspace,
+			)
+			if workflowErr != nil {
+				return nil, errors.New("controller local repair workflow state is invalid")
+			}
+			protectedRoots = append(protectedRoots, workflowRoots...)
+			protectedRoots = appendAgentRepositoryFileMutationProtectedRoots(
+				protectedRoots,
+				agent.Workspace,
+			)
+		}
+		evolutionRoots, rootsErr := agentEvolutionFileMutationProtectedRoots(
 			agent.Workspace,
+			cfg.Evolution.StateDir,
 		)
+		if rootsErr != nil {
+			return nil, errors.New("controller local repair evolution state is invalid")
+		}
+		protectedRoots = append(protectedRoots, evolutionRoots...)
+		localCIRoots, localCIRootsErr := agentLocalCIEvidenceFileMutationProtectedRoots(cfg)
+		if localCIRootsErr != nil {
+			return nil, errors.New("controller local repair local CI state is invalid")
+		}
+		protectedRoots = append(protectedRoots, localCIRoots...)
+		protectedIdentities = agent.fileMutationIdentityCatalog
 	}
-	evolutionRoots, rootsErr := agentEvolutionFileMutationProtectedRoots(
-		agent.Workspace,
-		cfg.Evolution.StateDir,
-	)
-	if rootsErr != nil {
-		return nil, errors.New("controller local repair evolution state is invalid")
-	}
-	protectedRoots = append(protectedRoots, evolutionRoots...)
-	localCIRoots, localCIRootsErr := agentLocalCIEvidenceFileMutationProtectedRoots(cfg)
-	if localCIRootsErr != nil {
-		return nil, errors.New("controller local repair local CI state is invalid")
-	}
-	protectedRoots = append(protectedRoots, localCIRoots...)
 	runner, err := NewLocalRepairRunner(LocalRepairRunnerConfig{
 		Workspaces:      workspaces,
 		Provider:        provider,
@@ -192,7 +199,8 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
 			protectedRoots,
 		),
-		ProtectedIdentities: agent.fileMutationIdentityCatalog,
+		ProtectedIdentities:    protectedIdentities,
+		PreparedMutationPolicy: preparedMutationPolicy,
 	})
 	if err != nil {
 		return nil, errors.New("controller local repair agent configuration is invalid")

@@ -188,13 +188,16 @@ sources; workflow `workflow_runs`, `workflow_validations`, `workflow_dev`, and
 database, WAL/SHM companions, legacy sources, rollback backups, archive
 namespace, and exact archived sources. Configured workflow definitions,
 `workflow_artifacts`, and human-authored config remain editable. Each registry
-generation builds at most one bounded two-pass physical-file identity catalog
-per distinct workspace policy. Pinned directory handles, batched enumeration,
-entry/path-byte/depth limits, and path-free errors make unsafe entries or races
-fail construction. Root tools, every owner product, `apply_patch`, and
-controller local repair share the immutable catalog pointer, so a hardlink
-alias remains denied after its source is renamed into an archive without
-duplicating a million-entry catalog per owner. Controller repair additionally
+generation builds one bounded physical-file identity catalog over the
+configured/default workspace and all named-agent workspace policies. Pinned
+directory handles, batched enumeration, a streaming-digest first pass, one
+final deduplicated identity set, aggregate entry/path-byte/depth limits, and
+path-free errors make unsafe entries or races fail construction. Root tools,
+every owner product, `apply_patch`, and controller local repair share the
+immutable catalog pointer, so a cross-workspace hardlink alias remains denied
+after its source is renamed into an archive without duplicating the catalog per
+owner. Each read is authorized again against its actual opened handle before
+bytes or directory names are consumed. Controller repair additionally
 receives the workflow, Cron, local-CI, repository review/evaluation, and exact
 configured evolution roots.
 

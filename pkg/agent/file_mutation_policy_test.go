@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -1054,7 +1056,7 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 	}
 }
 
-func TestAgentRuntimeFileMutationProtectedRootsRejectWeixinDirectorySymlink(t *testing.T) {
+func TestAgentRuntimeFileMutationProtectedRootsAvoidPreCatalogWeixinEnumeration(t *testing.T) {
 	home := t.TempDir()
 	weixinRoot := filepath.Join(home, "channels", "weixin")
 	if err := os.MkdirAll(weixinRoot, 0o700); err != nil {
@@ -1065,8 +1067,16 @@ func TestAgentRuntimeFileMutationProtectedRootsRejectWeixinDirectorySymlink(t *t
 	}
 	t.Setenv(config.EnvHome, home)
 	roots, err := agentRuntimeFileMutationProtectedRoots(filepath.Join(home, "config.json"))
-	if err == nil || roots != nil || !strings.Contains(err.Error(), "unsafe") {
-		t.Fatalf("symlinked Weixin roots = %#v, %v", roots, err)
+	if err != nil || len(roots) == 0 {
+		t.Fatalf("lexical Weixin roots = %#v, %v", roots, err)
+	}
+	workspace := t.TempDir()
+	if catalog, catalogErr := agentFileMutationIdentityCatalog(
+		workspace,
+		&config.Config{},
+		roots,
+	); catalogErr == nil || catalog != nil || !strings.Contains(catalogErr.Error(), "unsafe") {
+		t.Fatalf("symlinked Weixin catalog = %#v, %v", catalog, catalogErr)
 	}
 }
 
@@ -1777,6 +1787,322 @@ func TestAgentFileMutationIdentityGenerationReusesOneImmutableCatalog(t *testing
 	}
 }
 
+func TestAgentRegistrySharesCrossWorkspaceIdentityUnionWithRootOwnerAndLocalRepair(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	configuredWorkspace := filepath.Join(root, "configured-default")
+	mainWorkspace := filepath.Join(root, "main")
+	namedWorkspace := filepath.Join(root, "named")
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+	type fixture struct {
+		source  string
+		archive string
+	}
+	fixtures := []fixture{
+		{
+			source: filepath.Join(configuredWorkspace, agentRepositoryReviewStateDir, "default.json"),
+			archive: filepath.Join(
+				configuredWorkspace,
+				agentRepositoryReviewStateDir,
+				"legacy-json",
+				"repository-reviews-v1",
+				"default.json",
+			),
+		},
+		{
+			source: filepath.Join(mainWorkspace, agentRepositoryEvalStateDir, "main.json"),
+			archive: filepath.Join(
+				mainWorkspace,
+				agentRepositoryEvalStateDir,
+				"legacy-json",
+				"repository-evaluations-v1",
+				"main.json",
+			),
+		},
+		{
+			source: filepath.Join(namedWorkspace, agentRepositoryReviewStateDir, "named.json"),
+			archive: filepath.Join(
+				namedWorkspace,
+				agentRepositoryReviewStateDir,
+				"legacy-json",
+				"repository-reviews-v1",
+				"named.json",
+			),
+		},
+	}
+	for _, fixture := range fixtures {
+		if err := os.MkdirAll(filepath.Dir(fixture.source), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fixture.source, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := agentFileMutationTestConfig(configuredWorkspace)
+	cfg.Agents.List = []config.AgentConfig{
+		{ID: "main", Default: true, Workspace: mainWorkspace},
+		{ID: "reviewer", Workspace: namedWorkspace},
+	}
+	registry := NewAgentRegistry(cfg, &mockProvider{})
+	t.Cleanup(registry.Close)
+	main, mainOK := registry.GetAgent("main")
+	named, namedOK := registry.GetAgent("reviewer")
+	if !mainOK || !namedOK || main.fileMutationIdentityCatalog == nil ||
+		main.fileMutationIdentityCatalog != named.fileMutationIdentityCatalog ||
+		main.preparedFileMutationPolicy == nil ||
+		main.preparedFileMutationPolicy != named.preparedFileMutationPolicy {
+		t.Fatalf("registry catalogs main=%#v named=%#v", main, named)
+	}
+
+	agents := []*AgentInstance{main, named}
+	aliases := make(map[*AgentInstance][]string, len(agents))
+	for _, agent := range agents {
+		aliasRoot := filepath.Join(agent.Workspace, "ordinary-aliases")
+		if err := os.MkdirAll(aliasRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for index, fixture := range fixtures {
+			alias := filepath.Join(aliasRoot, fmt.Sprintf("legacy-%d.alias", index))
+			if err := os.Link(fixture.source, alias); err != nil {
+				t.Skipf("hardlinks unavailable: %v", err)
+			}
+			aliases[agent] = append(aliases[agent], alias)
+		}
+	}
+	for _, fixture := range fixtures {
+		if err := os.MkdirAll(filepath.Dir(fixture.archive), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(fixture.source, fixture.archive); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, agent := range agents {
+		owner, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+			Scope: tools.ToolOwnerScopeAgent, AgentID: agent.ID + "-owner",
+		}, []string{"write_file", "edit_file", "append_file", "apply_patch"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for registryName, toolRegistry := range map[string]*tools.ToolRegistry{
+			"root": agent.Tools, "owner": owner,
+		} {
+			for _, alias := range aliases[agent] {
+				for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+					t.Run(agent.ID+"_"+registryName+"_"+toolName+"_"+filepath.Base(alias), func(t *testing.T) {
+						requireAgentFileMutationDenied(
+							t,
+							toolRegistry,
+							toolName,
+							agent.Workspace,
+							alias,
+							true,
+						)
+					})
+				}
+			}
+		}
+		owner.Close()
+	}
+
+	candidate := controllerRepairFactoryCandidate("account-a", "coding", "openai", "coding")
+	main.Model = "coding"
+	main.Candidates = []providers.FallbackCandidate{candidate}
+	main.Provider = &controllerRepairFactoryProvider{}
+	main.MaxIterations = 2
+	main.MaxTokens = 512
+	main.ConfigurationError = nil
+	loop := newControllerRepairFactoryLoop(t, cfg, main)
+	runner, err := loop.NewControllerLocalRepairRunner("main", "cross-workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.protectedIdentities != nil || len(runner.protectedRoots) != 0 {
+		t.Fatal("prepared local repair retained parallel source policy")
+	}
+	if runner.preparedMutationPolicy != main.preparedFileMutationPolicy {
+		t.Fatal("local repair did not retain registry prepared mutation policy")
+	}
+	pin, repairWorkspace, checkout := newLocalRepairTestWorkspace(t)
+	repairAlias := filepath.Join(checkout, "cross-workspace-runtime.alias")
+	if linkErr := os.Link(fixtures[0].archive, repairAlias); linkErr != nil {
+		t.Skipf("hardlinks unavailable for local repair: %v", linkErr)
+	}
+	guard, err := newLocalRepairPathGuardWithPolicy(
+		repairWorkspace,
+		pin,
+		nil,
+		nil,
+		runner.preparedMutationPolicy,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.validateMutation(filepath.Base(repairAlias)); err == nil {
+		t.Fatal("local repair accepted cross-workspace archived-state hardlink")
+	}
+	if mixedGuard, mixedErr := newLocalRepairPathGuardWithPolicy(
+		repairWorkspace,
+		pin,
+		[]string{fixtures[0].archive},
+		nil,
+		runner.preparedMutationPolicy,
+	); mixedErr == nil || mixedGuard != nil {
+		t.Fatalf("mixed prepared/source guard = %#v, %v", mixedGuard, mixedErr)
+	}
+	if mixedRunner, mixedErr := NewLocalRepairRunner(LocalRepairRunnerConfig{
+		Workspaces:             &localRepairTestAcquirer{},
+		Provider:               &localRepairTestProvider{},
+		Model:                  "repair-model",
+		ProtectedRoots:         []string{fixtures[0].archive},
+		PreparedMutationPolicy: runner.preparedMutationPolicy,
+	}); mixedErr == nil || mixedRunner != nil {
+		t.Fatalf("mixed prepared/source runner = %#v, %v", mixedRunner, mixedErr)
+	}
+}
+
+func TestAgentRegistryProtectsSiblingWorkspaceSQLiteFromOutsideWriters(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		restricted bool
+	}{
+		{name: "unrestricted"},
+		{name: "outside-allowlist", restricted: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			mainWorkspace := filepath.Join(root, "main")
+			siblingWorkspace := filepath.Join(root, "sibling")
+			t.Setenv(config.EnvHome, home)
+			t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+			cfg := agentFileMutationTestConfig(mainWorkspace)
+			cfg.Agents.Defaults.RestrictToWorkspace = test.restricted
+			cfg.Agents.List = []config.AgentConfig{
+				{ID: "main", Default: true, Workspace: mainWorkspace},
+				{ID: "sibling", Workspace: siblingWorkspace},
+			}
+			siblingDatabase := filepath.Join(siblingWorkspace, "sessions", "sessions.db")
+			if test.restricted {
+				cfg.Tools.AllowWritePaths = []string{"^" + regexp.QuoteMeta(siblingDatabase) + "$"}
+			}
+			registry := NewAgentRegistry(cfg, &mockProvider{})
+			t.Cleanup(registry.Close)
+			main, ok := registry.GetAgent("main")
+			if !ok {
+				t.Fatal("main agent is unavailable")
+			}
+			if info, err := os.Stat(siblingDatabase); err != nil || !info.Mode().IsRegular() {
+				t.Fatalf("sibling sessions database = %#v, %v", info, err)
+			}
+			siblingAlias := filepath.Join(mainWorkspace, "sibling-sessions.alias")
+			if err := os.Link(siblingDatabase, siblingAlias); err != nil {
+				t.Skipf("hardlinks unavailable: %v", err)
+			}
+			owner, err := main.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+				Scope: tools.ToolOwnerScopeAgent, AgentID: "sibling-database-writer",
+			}, []string{"write_file", "edit_file", "append_file"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = owner.Close() })
+			for registryName, toolRegistry := range map[string]*tools.ToolRegistry{
+				"root": main.Tools, "owner": owner,
+			} {
+				for _, target := range []string{siblingDatabase, siblingAlias} {
+					for _, toolName := range []string{"write_file", "edit_file", "append_file"} {
+						t.Run(registryName+"_"+toolName+"_"+filepath.Base(target), func(t *testing.T) {
+							requireAgentFileMutationDenied(
+								t,
+								toolRegistry,
+								toolName,
+								mainWorkspace,
+								target,
+								true,
+							)
+						})
+					}
+				}
+			}
+			pin, repairWorkspace, checkout := newLocalRepairTestWorkspace(t)
+			repairAlias := filepath.Join(checkout, "sibling-sessions.alias")
+			if linkErr := os.Link(siblingDatabase, repairAlias); linkErr != nil {
+				t.Skipf("hardlinks unavailable for local repair: %v", linkErr)
+			}
+			guard, err := newLocalRepairPathGuardWithPolicy(
+				repairWorkspace,
+				pin,
+				nil,
+				nil,
+				main.preparedFileMutationPolicy,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := guard.validateMutation(filepath.Base(repairAlias)); err == nil {
+				t.Fatal("local repair accepted sibling SQLite hardlink alias")
+			}
+		})
+	}
+}
+
+func TestDirectAgentConstructorProtectsCustomRepositoryDatabasesAndAliases(t *testing.T) {
+	home := t.TempDir()
+	defaultWorkspace := t.TempDir()
+	customWorkspace := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+	cfg := agentFileMutationTestConfig(defaultWorkspace)
+	cfg.Agents.Defaults.RestrictToWorkspace = false
+	agentConfig := &config.AgentConfig{ID: "custom", Workspace: customWorkspace}
+	databaseTargets := []string{
+		filepath.Join(customWorkspace, agentRepositoryReviewStateDir, "repository-reviews.db"),
+		filepath.Join(customWorkspace, agentRepositoryEvalStateDir, "evaluations.db"),
+	}
+	for _, target := range databaseTargets {
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent := NewAgentInstance(agentConfig, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	t.Cleanup(func() { _ = agent.Close() })
+	owner, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "custom-owner",
+	}, []string{"write_file", "edit_file", "append_file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+	for _, target := range databaseTargets {
+		alias := filepath.Join(customWorkspace, filepath.Base(filepath.Dir(target))+".alias")
+		if err := os.Link(target, alias); err != nil {
+			t.Skipf("hardlinks unavailable: %v", err)
+		}
+		for registryName, toolRegistry := range map[string]*tools.ToolRegistry{
+			"root": agent.Tools, "owner": owner,
+		} {
+			for _, candidate := range []string{target, alias} {
+				for _, toolName := range []string{"write_file", "edit_file", "append_file"} {
+					t.Run(registryName+"_"+toolName+"_"+filepath.Base(candidate), func(t *testing.T) {
+						requireAgentFileMutationDenied(
+							t,
+							toolRegistry,
+							toolName,
+							customWorkspace,
+							candidate,
+							true,
+						)
+					})
+				}
+			}
+		}
+	}
+}
+
 func TestAgentDynamicIdentityCatalogCoversEveryMutableLegacyTreeAcrossRename(t *testing.T) {
 	workspace := t.TempDir()
 	evolutionRoot := filepath.Join(workspace, "custom-evolution")
@@ -1887,6 +2213,137 @@ func TestAgentDynamicIdentityCatalogCoversEveryMutableLegacyTreeAcrossRename(t *
 				t.Fatalf("renamed %s identity protected=%v err=%v", fixture.name, protected, err)
 			}
 		})
+	}
+}
+
+func TestAgentAccountRouterLegacySidecarSnapshotIsPinnedAndBounded(t *testing.T) {
+	workspace := t.TempDir()
+	for index := 0; index < 2; index++ {
+		sidecar := filepath.Join(
+			workspace,
+			fmt.Sprintf(
+				"account_router_state.json.auth-invalidation.%032x",
+				index+1,
+			),
+		)
+		if err := os.WriteFile(sidecar, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"ordinary-a", "ordinary-b"} {
+		if err := os.WriteFile(filepath.Join(workspace, name), []byte("ordinary"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := agentAccountRouterLegacySidecarSnapshot(
+		[]string{workspace},
+		4,
+		2,
+	)
+	if err != nil || len(snapshot) != 2 {
+		t.Fatalf("bounded sidecar snapshot = %#v, %v", snapshot, err)
+	}
+	if snapshot, err = agentAccountRouterLegacySidecarSnapshot(
+		[]string{workspace},
+		3,
+		2,
+	); err == nil || snapshot != nil || !strings.Contains(err.Error(), "entry limit") {
+		t.Fatalf("wide sidecar snapshot = %#v, %v", snapshot, err)
+	}
+	if snapshot, err = agentAccountRouterLegacySidecarSnapshot(
+		[]string{workspace},
+		4,
+		1,
+	); err == nil || snapshot != nil || !strings.Contains(err.Error(), "sidecar limit") {
+		t.Fatalf("sidecar capacity snapshot = %#v, %v", snapshot, err)
+	}
+	if snapshot, err = agentAccountRouterLegacySidecarSnapshot(
+		[]string{workspace},
+		0,
+		1,
+	); err == nil || snapshot != nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("invalid sidecar limits = %#v, %v", snapshot, err)
+	}
+
+	symlinkWorkspace := t.TempDir()
+	symlink := filepath.Join(
+		symlinkWorkspace,
+		"account_router_state.json.auth-invalidation.0123456789abcdef0123456789abcdef",
+	)
+	if symlinkErr := os.Symlink(filepath.Join(workspace, "ordinary-a"), symlink); symlinkErr != nil {
+		t.Skipf("symlinks unavailable: %v", symlinkErr)
+	}
+	if snapshot, err = agentAccountRouterLegacySidecarSnapshot(
+		[]string{symlinkWorkspace},
+		1,
+		1,
+	); err == nil || snapshot != nil || !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("symlink sidecar snapshot = %#v, %v", snapshot, err)
+	}
+
+	secondWorkspace := t.TempDir()
+	secondSidecar := filepath.Join(
+		secondWorkspace,
+		"account_router_state.json.auth-invalidation.abcdef0123456789abcdef0123456789",
+	)
+	if writeErr := os.WriteFile(secondSidecar, []byte("before"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if snapshot, err = agentAccountRouterLegacySidecarSnapshot(
+		[]string{workspace, secondWorkspace},
+		8,
+		2,
+	); err == nil || snapshot != nil || !strings.Contains(err.Error(), "sidecar limit") {
+		t.Fatalf("aggregate multi-workspace sidecar bound = %#v, %v", snapshot, err)
+	}
+	if snapshot, err = agentAccountRouterLegacySidecarSnapshot(
+		[]string{workspace, secondWorkspace},
+		4,
+		4,
+	); err == nil || snapshot != nil || !strings.Contains(err.Error(), "entry limit") {
+		t.Fatalf("aggregate multi-workspace entry bound = %#v, %v", snapshot, err)
+	}
+}
+
+func TestAgentFileMutationIdentityCatalogRejectsSidecarNamespaceRace(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+	sidecar := filepath.Join(
+		workspace,
+		"account_router_state.json.auth-invalidation.0123456789abcdef0123456789abcdef",
+	)
+	agentFileMutationIdentityBetweenSidecarSnapshots = func() {
+		if err := os.WriteFile(sidecar, []byte("raced"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { agentFileMutationIdentityBetweenSidecarSnapshots = nil })
+	catalog, err := agentFileMutationIdentityCatalog(workspace, &config.Config{}, nil)
+	if err == nil || catalog != nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("raced sidecar catalog = %#v, %v", catalog, err)
+	}
+}
+
+func TestAgentFileMutationIdentityCatalogRejectsOverdeepMutableArchive(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+	deep := filepath.Join(workspace, agentRepositoryReviewStateDir)
+	for index := 0; index < 65; index++ {
+		deep = filepath.Join(deep, "nested")
+	}
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "legacy.json"), []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := agentFileMutationIdentityCatalog(workspace, &config.Config{}, nil)
+	if err == nil || catalog != nil || !strings.Contains(err.Error(), "enumerated") {
+		t.Fatalf("overdeep archive catalog = %#v, %v", catalog, err)
 	}
 }
 

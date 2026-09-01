@@ -1,11 +1,14 @@
 package fstools
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,6 +20,9 @@ import (
 type FileMutationPolicy struct {
 	ProtectedRoots      []string
 	ProtectedIdentities *FileIdentityCatalog
+	// Prepared is an immutable root/identity policy resolved once for a whole
+	// runtime generation. It is mutually exclusive with the source fields.
+	Prepared *PreparedFileMutationPolicy
 }
 
 type fileMutationProtectedRoot struct {
@@ -24,9 +30,187 @@ type fileMutationProtectedRoot struct {
 	canonical string
 }
 
+// PreparedFileMutationPolicy is an immutable, generation-shareable policy.
+// Its resolved roots are never exposed or copied into individual tools.
+type PreparedFileMutationPolicy struct {
+	roots      []fileMutationProtectedRoot
+	identities *FileIdentityCatalog
+}
+
+// NewPreparedFileMutationPolicy detaches and resolves one source policy for
+// reuse by every root tool and owner-factory product in a runtime generation.
+func NewPreparedFileMutationPolicy(
+	workspace string,
+	policy FileMutationPolicy,
+) (*PreparedFileMutationPolicy, error) {
+	if policy.Prepared != nil {
+		return nil, errors.New("file-mutation policy is already prepared")
+	}
+	roots, err := prepareFileMutationProtectedRoots(workspace, policy.ProtectedRoots)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedFileMutationPolicy{
+		roots:      roots,
+		identities: policy.ProtectedIdentities,
+	}, nil
+}
+
+// ProtectsPath reports whether one absolute path is covered by this immutable
+// policy. It revalidates current root namespaces and physical file aliases.
+func (policy *PreparedFileMutationPolicy) ProtectsPath(path string) (bool, error) {
+	if policy == nil || path == "" || !filepath.IsAbs(path) {
+		return false, errors.New("prepared file-mutation path is invalid")
+	}
+	candidate, err := fileMutationAbs(filepath.Clean(path))
+	if err != nil {
+		return false, errors.New("prepared file-mutation path is invalid")
+	}
+	canonicalCandidate, err := resolvePathAgainstExistingAncestor(candidate)
+	if err != nil {
+		return false, errors.New("prepared file-mutation path cannot be resolved")
+	}
+	candidateInfo, statErr := os.Stat(canonicalCandidate)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return false, errors.New("prepared file-mutation path cannot be inspected")
+	}
+	if os.IsNotExist(statErr) {
+		candidateInfo = nil
+	}
+	if policy.identities != nil {
+		if candidateInfo != nil && candidateInfo.Mode().IsRegular() {
+			protected, identityErr := policy.identities.ProtectsPath(
+				canonicalCandidate,
+				candidateInfo,
+			)
+			if identityErr != nil || protected {
+				return protected, identityErr
+			}
+		}
+	}
+	for _, root := range policy.roots {
+		currentCanonical, resolveErr := resolvePathAgainstExistingAncestor(root.lexical)
+		if resolveErr != nil ||
+			fileMutationPathKey(currentCanonical) != fileMutationPathKey(root.canonical) {
+			return false, errors.New("prepared file-mutation root changed")
+		}
+		if fileMutationPathWithin(candidate, root.lexical) ||
+			fileMutationPathWithin(candidate, root.canonical) ||
+			fileMutationPathWithin(canonicalCandidate, root.lexical) ||
+			fileMutationPathWithin(canonicalCandidate, currentCanonical) {
+			return true, nil
+		}
+		sameFile, sameFileErr := fileMutationSameInfoExistingFile(
+			candidateInfo,
+			currentCanonical,
+		)
+		if sameFileErr != nil {
+			return false, sameFileErr
+		}
+		if sameFile {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// OverlapsPath reports whether an absolute path contains, equals, or lies
+// beneath a protected root. It is used to reject managed checkout/runtime-root
+// overlap before any local-repair file capability is exposed.
+func (policy *PreparedFileMutationPolicy) OverlapsPath(path string) (bool, error) {
+	if policy == nil || path == "" || !filepath.IsAbs(path) {
+		return false, errors.New("prepared file-mutation path is invalid")
+	}
+	candidate, err := fileMutationAbs(filepath.Clean(path))
+	if err != nil {
+		return false, errors.New("prepared file-mutation path is invalid")
+	}
+	canonicalCandidate, err := resolvePathAgainstExistingAncestor(candidate)
+	if err != nil {
+		return false, errors.New("prepared file-mutation path cannot be resolved")
+	}
+	for _, root := range policy.roots {
+		currentCanonical, resolveErr := resolvePathAgainstExistingAncestor(root.lexical)
+		if resolveErr != nil ||
+			fileMutationPathKey(currentCanonical) != fileMutationPathKey(root.canonical) {
+			return false, errors.New("prepared file-mutation root changed")
+		}
+		if fileMutationPathWithin(candidate, root.lexical) ||
+			fileMutationPathWithin(root.lexical, candidate) ||
+			fileMutationPathWithin(canonicalCandidate, currentCanonical) ||
+			fileMutationPathWithin(currentCanonical, canonicalCandidate) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ProtectsOpenedFile binds prepared root/identity checks to an already-opened
+// regular file, closing the path-to-open race for local-repair readers.
+func (policy *PreparedFileMutationPolicy) ProtectsOpenedFile(
+	file *os.File,
+	expected os.FileInfo,
+) (bool, error) {
+	return policy.ProtectsOpenedPath("", "", file, expected)
+}
+
+// ProtectsOpenedPath checks one coherent path snapshot and its opened handle.
+// candidate and canonical must be the lexical/canonical names captured before
+// a caller's final fstat; empty names retain handle-only compatibility.
+func (policy *PreparedFileMutationPolicy) ProtectsOpenedPath(
+	candidate string,
+	canonical string,
+	file *os.File,
+	expected os.FileInfo,
+) (bool, error) {
+	if policy == nil || file == nil || expected == nil {
+		return false, errors.New("prepared file-mutation opened file is invalid")
+	}
+	if candidate != "" || canonical != "" {
+		if candidate == "" || canonical == "" || !filepath.IsAbs(candidate) ||
+			!filepath.IsAbs(canonical) {
+			return false, errors.New("prepared file-mutation opened path is invalid")
+		}
+		candidate = filepath.Clean(candidate)
+		canonical = filepath.Clean(canonical)
+	}
+	actual, err := file.Stat()
+	if err != nil || !actual.Mode().IsRegular() || actual.Mode() != expected.Mode() ||
+		!os.SameFile(actual, expected) {
+		return false, errors.New("prepared file-mutation opened file changed")
+	}
+	if policy.identities != nil {
+		protected, identityErr := policy.identities.ProtectsOpenedFile(file, expected)
+		if identityErr != nil || protected {
+			return protected, identityErr
+		}
+	}
+	for _, root := range policy.roots {
+		currentCanonical, resolveErr := resolvePathAgainstExistingAncestor(root.lexical)
+		if resolveErr != nil ||
+			fileMutationPathKey(currentCanonical) != fileMutationPathKey(root.canonical) {
+			return false, errors.New("prepared file-mutation root changed")
+		}
+		if candidate != "" && (fileMutationPathWithin(candidate, root.lexical) ||
+			fileMutationPathWithin(candidate, root.canonical) ||
+			fileMutationPathWithin(canonical, root.lexical) ||
+			fileMutationPathWithin(canonical, currentCanonical)) {
+			return true, nil
+		}
+		rootInfo, statErr := os.Stat(currentCanonical)
+		switch {
+		case statErr != nil && !os.IsNotExist(statErr):
+			return false, statErr
+		case statErr == nil && os.SameFile(actual, rootInfo):
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // protectedMutationFS is deliberately below write_file, edit_file, and
-// append_file. This keeps every mutation path on one policy boundary while
-// leaving reads and directory listings unchanged.
+// append_file. This keeps every read-before-write and mutation path on one
+// policy boundary and binds reads/listings to their actual opened handles.
 type protectedMutationFS struct {
 	delegate   fileSystem
 	workspace  string
@@ -38,6 +222,9 @@ type protectedMutationFS struct {
 	// Package-test seam executed after the destination parent is pinned and
 	// before namespace/root revalidation.
 	beforePinnedWrite func()
+	// Package-test seam executed after the namespace preflight and before the
+	// delegate opens a read handle. Production code never sets it.
+	beforeProtectedOpen func(string)
 }
 
 var (
@@ -56,11 +243,22 @@ func buildMutationFS(
 	policy FileMutationPolicy,
 ) (fileSystem, error) {
 	delegate := buildFs(workspace, restrict, patterns)
-	roots, err := prepareFileMutationProtectedRoots(workspace, policy.ProtectedRoots)
-	if err != nil {
-		return nil, err
+	var roots []fileMutationProtectedRoot
+	identities := policy.ProtectedIdentities
+	if policy.Prepared != nil {
+		if len(policy.ProtectedRoots) != 0 || policy.ProtectedIdentities != nil {
+			return nil, errors.New("prepared file-mutation policy has source fields")
+		}
+		roots = policy.Prepared.roots
+		identities = policy.Prepared.identities
+	} else {
+		var err error
+		roots, err = prepareFileMutationProtectedRoots(workspace, policy.ProtectedRoots)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if len(roots) == 0 && policy.ProtectedIdentities == nil {
+	if len(roots) == 0 && identities == nil {
 		return delegate, nil
 	}
 	return &protectedMutationFS{
@@ -69,7 +267,7 @@ func buildMutationFS(
 		restrict:   restrict,
 		patterns:   append([]*regexp.Regexp(nil), patterns...),
 		roots:      roots,
-		identities: policy.ProtectedIdentities,
+		identities: identities,
 	}, nil
 }
 
@@ -114,7 +312,8 @@ func prepareFileMutationProtectedRoots(
 			return nil, fmt.Errorf("file-mutation protected root %d cannot be resolved", index)
 		}
 
-		identity := fileMutationPathKey(lexical) + "\x00" + fileMutationPathKey(canonical)
+		identity := fileMutationDistinctPathKey(lexical) + "\x00" +
+			fileMutationDistinctPathKey(canonical)
 		if _, exists := seen[identity]; exists {
 			continue
 		}
@@ -128,24 +327,104 @@ func prepareFileMutationProtectedRoots(
 }
 
 func (p *protectedMutationFS) ReadFile(path string) ([]byte, error) {
-	if err := p.validateAccess(path); err != nil {
+	file, err := p.openValidated(path)
+	if err != nil {
 		return nil, err
 	}
-	return p.delegate.ReadFile(path)
+	defer file.Close()
+	content, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+	return content, nil
 }
 
 func (p *protectedMutationFS) ReadDir(path string) ([]os.DirEntry, error) {
-	if err := p.validateAccess(path); err != nil {
+	file, err := p.openValidated(path)
+	if err != nil {
 		return nil, err
 	}
-	return p.delegate.ReadDir(path)
+	defer file.Close()
+	directory, ok := file.(fs.ReadDirFile)
+	if !ok {
+		return nil, errors.New("failed to read directory: opened handle cannot enumerate")
+	}
+	entries, err := directory.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(entries, func(left, right int) bool {
+		return entries[left].Name() < entries[right].Name()
+	})
+	return entries, nil
 }
 
 func (p *protectedMutationFS) Open(path string) (fs.File, error) {
-	if err := p.validateAccess(path); err != nil {
+	return p.openValidated(path)
+}
+
+type fileMutationAccessSnapshot struct {
+	canonical string
+	info      os.FileInfo
+}
+
+// openValidated binds authorization to the actual opened object. Checking a
+// pathname and then asking the delegate to open it leaves a rename window in
+// which a protected hardlink can replace an ordinary file. No bytes or names
+// are consumed until fstat proves the handle is the preflight object and the
+// immutable catalog accepts the handle identity.
+func (p *protectedMutationFS) openValidated(path string) (fs.File, error) {
+	snapshot, err := p.validateAccessSnapshot(path)
+	if err != nil {
 		return nil, err
 	}
-	return p.delegate.Open(path)
+	if p.beforeProtectedOpen != nil {
+		p.beforeProtectedOpen(path)
+	}
+	opened, err := p.delegate.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if err = p.validateOpenedAccess(path, snapshot, opened); err != nil {
+		_ = opened.Close()
+		return nil, err
+	}
+	return opened, nil
+}
+
+func (p *protectedMutationFS) validateOpenedAccess(
+	path string,
+	before fileMutationAccessSnapshot,
+	opened fs.File,
+) error {
+	if before.info == nil || opened == nil {
+		return fileMutationPolicyDenied()
+	}
+	actual, err := opened.Stat()
+	if err != nil || actual == nil || actual.Mode() != before.info.Mode() ||
+		!os.SameFile(before.info, actual) {
+		return fileMutationPolicyDenied()
+	}
+	// Re-resolve the namespace after open. A handle to the old ordinary inode is
+	// not sufficient authority when the requested name now denotes runtime
+	// state; callers must retry against one coherent namespace generation.
+	after, err := p.validateAccessSnapshot(path)
+	if err != nil || after.info == nil ||
+		fileMutationPathKey(after.canonical) != fileMutationPathKey(before.canonical) ||
+		after.info.Mode() != actual.Mode() || !os.SameFile(after.info, actual) {
+		return fileMutationPolicyDenied()
+	}
+	if p.identities != nil && actual.Mode().IsRegular() {
+		file, ok := opened.(*os.File)
+		if !ok {
+			return fileMutationPolicyDenied()
+		}
+		protected, identityErr := p.identities.ProtectsOpenedFile(file, before.info)
+		if identityErr != nil || protected {
+			return fileMutationPolicyDenied()
+		}
+	}
+	return nil
 }
 
 func (p *protectedMutationFS) WriteFile(path string, data []byte) error {
@@ -298,27 +577,44 @@ func writeFileInPinnedRootWithOpen(
 }
 
 func (p *protectedMutationFS) validateAccess(path string) error {
+	_, err := p.validateAccessSnapshot(path)
+	return err
+}
+
+func (p *protectedMutationFS) validateAccessSnapshot(
+	path string,
+) (fileMutationAccessSnapshot, error) {
 	candidate, err := fileMutationAbsolutePath(p.workspace, p.restrict, path)
 	if err != nil {
-		return fileMutationPolicyDenied()
+		return fileMutationAccessSnapshot{}, fileMutationPolicyDenied()
 	}
 	if platformErr := fileMutationValidatePlatform(candidate); platformErr != nil {
-		return fileMutationPolicyDenied()
+		return fileMutationAccessSnapshot{}, fileMutationPolicyDenied()
 	}
 	canonicalCandidate, err := resolvePathAgainstExistingAncestor(candidate)
 	if err != nil {
-		return fileMutationPolicyDenied()
+		return fileMutationAccessSnapshot{}, fileMutationPolicyDenied()
 	}
+	var candidateInfo os.FileInfo
 	if p.identities != nil {
-		candidateInfo, statErr := os.Stat(canonicalCandidate)
+		var statErr error
+		candidateInfo, statErr = os.Stat(canonicalCandidate)
 		if statErr != nil && !os.IsNotExist(statErr) {
-			return fileMutationPolicyDenied()
+			return fileMutationAccessSnapshot{}, fileMutationPolicyDenied()
 		}
 		if statErr == nil && candidateInfo.Mode().IsRegular() {
 			protected, identityErr := p.identities.ProtectsPath(canonicalCandidate, candidateInfo)
 			if identityErr != nil || protected {
-				return fileMutationPolicyDenied()
+				return fileMutationAccessSnapshot{}, fileMutationPolicyDenied()
 			}
+		}
+	} else {
+		candidateInfo, err = os.Stat(canonicalCandidate)
+		if err != nil && !os.IsNotExist(err) {
+			return fileMutationAccessSnapshot{}, fileMutationPolicyDenied()
+		}
+		if os.IsNotExist(err) {
+			candidateInfo = nil
 		}
 	}
 
@@ -326,23 +622,25 @@ func (p *protectedMutationFS) validateAccess(path string) error {
 		currentCanonical, resolveErr := resolvePathAgainstExistingAncestor(root.lexical)
 		if resolveErr != nil ||
 			fileMutationPathKey(currentCanonical) != fileMutationPathKey(root.canonical) {
-			return fileMutationPolicyDenied()
+			return fileMutationAccessSnapshot{}, fileMutationPolicyDenied()
 		}
 		if fileMutationPathWithin(candidate, root.lexical) ||
 			fileMutationPathWithin(candidate, root.canonical) ||
 			fileMutationPathWithin(canonicalCandidate, root.lexical) ||
 			fileMutationPathWithin(canonicalCandidate, currentCanonical) {
-			return fileMutationPolicyDenied()
+			return fileMutationAccessSnapshot{}, fileMutationPolicyDenied()
 		}
-		sameFile, sameFileErr := fileMutationSameExistingFile(
-			canonicalCandidate,
+		sameFile, sameFileErr := fileMutationSameInfoExistingFile(
+			candidateInfo,
 			currentCanonical,
 		)
 		if sameFileErr != nil || sameFile {
-			return fileMutationPolicyDenied()
+			return fileMutationAccessSnapshot{}, fileMutationPolicyDenied()
 		}
 	}
-	return nil
+	return fileMutationAccessSnapshot{
+		canonical: canonicalCandidate, info: candidateInfo,
+	}, nil
 }
 
 func fileMutationSameExistingFile(left, right string) (bool, error) {
@@ -352,6 +650,20 @@ func fileMutationSameExistingFile(left, right string) (bool, error) {
 			return false, nil
 		}
 		return false, leftErr
+	}
+	rightInfo, rightErr := os.Stat(right)
+	if rightErr != nil {
+		if os.IsNotExist(rightErr) {
+			return false, nil
+		}
+		return false, rightErr
+	}
+	return os.SameFile(leftInfo, rightInfo), nil
+}
+
+func fileMutationSameInfoExistingFile(leftInfo os.FileInfo, right string) (bool, error) {
+	if leftInfo == nil {
+		return false, nil
 	}
 	rightInfo, rightErr := os.Stat(right)
 	if rightErr != nil {

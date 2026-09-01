@@ -138,10 +138,13 @@ archive layout, and removing or restoring `sessions.db` together with matching
 
 Agent write/edit/append/apply-patch tools protect the active `sessions` and
 `threads` runtime namespaces, `sessions.db`, its WAL/SHM companions, and the
-workspace `legacy-json` namespace. A bounded two-pass physical-identity catalog
-captures legacy and archived session files and is shared by root/owner tool
-factories and local repair. Renaming an imported source into `sessions-v1`
-therefore does not make a hardlink alias outside those namespaces writable.
+workspace `legacy-json` namespace. One generation-wide bounded catalog uses a
+streaming-digest first pass and a final deduplicated physical-identity set to
+capture legacy and archived session files across configured/default and named
+agent workspaces. Root/owner tool factories and local repair share it, and
+validate actual opened handles before reading. Renaming an imported source into
+`sessions-v1` therefore does not make a hardlink alias outside those namespaces
+writable.
 Session storage opens before apply-patch captures volatile roots, preventing
 database creation or archival from invalidating ordinary source-file patches.
 

@@ -137,6 +137,61 @@ func TestFileMutationPolicyProtectsPresentAndAbsentRuntimePaths(t *testing.T) {
 	}
 }
 
+func TestPreparedFileMutationPolicyIsDetachedAndSharedByToolFilesystems(t *testing.T) {
+	workspace := t.TempDir()
+	protected := filepath.Join(workspace, "runtime.db")
+	if err := os.WriteFile(protected, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	roots := []string{protected}
+	prepared, err := NewPreparedFileMutationPolicy(workspace, FileMutationPolicy{
+		ProtectedRoots: roots,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots[0] = filepath.Join(workspace, "ordinary.txt")
+	first, err := buildMutationFS(
+		workspace,
+		false,
+		nil,
+		FileMutationPolicy{Prepared: prepared},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := buildMutationFS(
+		workspace,
+		false,
+		nil,
+		FileMutationPolicy{Prepared: prepared},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstProtected, firstOK := first.(*protectedMutationFS)
+	secondProtected, secondOK := second.(*protectedMutationFS)
+	if !firstOK || !secondOK || len(firstProtected.roots) != 1 ||
+		len(secondProtected.roots) != 1 || &firstProtected.roots[0] != &secondProtected.roots[0] {
+		t.Fatalf("prepared roots were copied: %#v / %#v", first, second)
+	}
+	if err := first.WriteFile(protected, []byte("changed")); err == nil {
+		t.Fatal("detached prepared policy accepted protected mutation")
+	}
+	if mixed, mixedErr := buildMutationFS(workspace, false, nil, FileMutationPolicy{
+		Prepared:       prepared,
+		ProtectedRoots: []string{protected},
+	}); mixedErr == nil || mixed != nil {
+		t.Fatalf("mixed prepared/source policy = %#v, %v", mixed, mixedErr)
+	}
+	if preparedAgain, preparedErr := NewPreparedFileMutationPolicy(
+		workspace,
+		FileMutationPolicy{Prepared: prepared},
+	); preparedErr == nil || preparedAgain != nil {
+		t.Fatalf("reprepared policy = %#v, %v", preparedAgain, preparedErr)
+	}
+}
+
 func TestFileMutationPolicyProtectsMissingArchiveNamespace(t *testing.T) {
 	workspace := t.TempDir()
 	archiveRoot := filepath.Join(workspace, "legacy-json")
@@ -445,6 +500,114 @@ func TestFileMutationPolicyInternalAccessAndPreparationEdges(t *testing.T) {
 	absolute, absErr := fileMutationAbsolutePath("", true, "relative.txt")
 	if absErr != nil || !filepath.IsAbs(absolute) {
 		t.Fatalf("empty-workspace relative path = %q, %v", absolute, absErr)
+	}
+}
+
+func TestFileMutationPolicyBindsReadsToOpenedHandleIdentity(t *testing.T) {
+	workspace := t.TempDir()
+	protected := filepath.Join(t.TempDir(), "runtime-secret.json")
+	if err := os.WriteFile(protected, []byte("never disclose this runtime secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewFileIdentityCatalog(FileIdentityCatalogOptions{
+		ExactPaths: []string{protected},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, operation := range []string{"read", "open", "edit", "append"} {
+		t.Run(operation, func(t *testing.T) {
+			ordinary := filepath.Join(workspace, operation+".txt")
+			if err := os.WriteFile(ordinary, []byte("ordinary"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			policyFS, err := buildMutationFS(workspace, true, nil, FileMutationPolicy{
+				ProtectedIdentities: catalog,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			guarded := policyFS.(*protectedMutationFS)
+			guarded.beforeProtectedOpen = func(string) {
+				guarded.beforeProtectedOpen = nil
+				if removeErr := os.Remove(ordinary); removeErr != nil {
+					t.Fatal(removeErr)
+				}
+				if linkErr := os.Link(protected, ordinary); linkErr != nil {
+					t.Fatal(linkErr)
+				}
+			}
+
+			var result *ToolResult
+			switch operation {
+			case "read":
+				content, readErr := guarded.ReadFile(filepath.Base(ordinary))
+				if readErr == nil || content != nil || strings.Contains(string(content), "secret") {
+					t.Fatalf("swap-raced read = %q, %v", content, readErr)
+				}
+			case "open":
+				opened, openErr := guarded.Open(filepath.Base(ordinary))
+				if openErr == nil || opened != nil {
+					t.Fatalf("swap-raced open = %#v, %v", opened, openErr)
+				}
+			case "edit":
+				result = (&EditFileTool{fs: guarded}).Execute(context.Background(), map[string]any{
+					"path": filepath.Base(ordinary), "old_text": "ordinary", "new_text": "changed",
+				})
+			case "append":
+				result = (&AppendFileTool{fs: guarded}).Execute(context.Background(), map[string]any{
+					"path": filepath.Base(ordinary), "content": "changed",
+				})
+			}
+			if result != nil && (!result.IsError ||
+				strings.Contains(result.ForLLM, "runtime secret") ||
+				strings.Contains(result.ForUser, "runtime secret")) {
+				t.Fatalf("swap-raced %s result = %#v", operation, result)
+			}
+			content, readErr := os.ReadFile(protected)
+			if readErr != nil || string(content) != "never disclose this runtime secret" {
+				t.Fatalf("protected bytes after %s = %q, %v", operation, content, readErr)
+			}
+		})
+	}
+}
+
+func TestFileMutationPolicyBindsDirectoryListingToOpenedHandle(t *testing.T) {
+	workspace := t.TempDir()
+	safe := filepath.Join(workspace, "safe")
+	protected := filepath.Join(workspace, "runtime")
+	for _, directory := range []string{safe, protected} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const privateName = "private-account-identity.json"
+	if err := os.WriteFile(filepath.Join(protected, privateName), []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policyFS, err := buildMutationFS(workspace, false, nil, FileMutationPolicy{
+		ProtectedRoots: []string{protected},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guarded := policyFS.(*protectedMutationFS)
+	guarded.beforeProtectedOpen = func(string) {
+		guarded.beforeProtectedOpen = nil
+		if renameErr := os.Rename(safe, safe+"-original"); renameErr != nil {
+			t.Fatal(renameErr)
+		}
+		if linkErr := os.Symlink(protected, safe); linkErr != nil {
+			t.Skipf("symlinks unavailable: %v", linkErr)
+		}
+	}
+	entries, readErr := guarded.ReadDir(safe)
+	if readErr == nil || entries != nil {
+		t.Fatalf("swap-raced directory listing = %#v, %v", entries, readErr)
+	}
+	if strings.Contains(readErr.Error(), privateName) {
+		t.Fatalf("directory rejection disclosed protected entry: %v", readErr)
 	}
 }
 

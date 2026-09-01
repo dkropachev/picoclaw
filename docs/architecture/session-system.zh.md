@@ -117,8 +117,10 @@ imported/skipped 计数，因此 audit 与已提交 row 一致。
 ## 文件工具保护
 
 Agent write/edit/append/apply-patch 工具保护活动的 `sessions`、`threads`、
-`sessions.db`、WAL/SHM 以及 workspace `legacy-json` namespace。一个有界的双遍
-物理文件身份目录由 root/owner factory 和 local repair 共享；旧源文件移动到
+`sessions.db`、WAL/SHM 以及 workspace `legacy-json` namespace。每个 generation
+使用一个覆盖默认、配置及所有命名 agent workspace 的有界目录：第一遍仅保留
+流式摘要，第二遍保留去重后的物理文件身份集合。root/owner factory 与 local
+repair 共享该目录，并在读取前校验实际打开的 handle；旧源文件移动到
 `sessions-v1` 后，其 namespace 外的硬链接别名仍不可写。Session store 在
 apply-patch 捕获 volatile roots 前打开，避免数据库创建或归档使普通源码 patch
 失效。

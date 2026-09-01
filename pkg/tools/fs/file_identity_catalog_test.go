@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -236,4 +237,214 @@ func TestFileIdentityCatalogBatchesWideTreesAndBoundsPathBytesAndDepth(t *testin
 			t.Fatalf("depth-bounded catalog = %#v, %v", catalog, err)
 		}
 	})
+}
+
+func TestFileIdentityCatalogUsesMobileSafeDefaultsAndFixedFirstPassState(t *testing.T) {
+	if defaultFileIdentityCatalogEntries != 131_072 ||
+		defaultFileIdentityCatalogPathBytes != 32<<20 ||
+		defaultFileIdentityCatalogDepth != 32 {
+		t.Fatalf(
+			"catalog defaults = entries:%d paths:%d depth:%d",
+			defaultFileIdentityCatalogEntries,
+			defaultFileIdentityCatalogPathBytes,
+			defaultFileIdentityCatalogDepth,
+		)
+	}
+
+	digestType := reflect.TypeOf(fileIdentityCatalogDigest{})
+	if digestType.Size() > 80 {
+		t.Fatalf("first-pass retained digest size = %d, want <= 80", digestType.Size())
+	}
+	for index := range digestType.NumField() {
+		kind := digestType.Field(index).Type.Kind()
+		if kind == reflect.Map || kind == reflect.Slice || kind == reflect.Pointer ||
+			kind == reflect.Interface {
+			t.Fatalf("first-pass digest field %d retains variable-size state: %s", index, kind)
+		}
+	}
+}
+
+func TestFileIdentityCatalogStreamsNearEntryLimitAndDeduplicatesFinalSet(t *testing.T) {
+	root := t.TempDir()
+	const entries = fileIdentityCatalogReadBatch*2 + 3
+	seed := filepath.Join(root, "entry-0000")
+	if err := os.WriteFile(seed, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index < entries; index++ {
+		path := filepath.Join(root, fmt.Sprintf("entry-%04d", index))
+		if err := os.Link(seed, path); err != nil {
+			t.Skipf("hardlinks unavailable: %v", err)
+		}
+	}
+
+	// One budget entry names the pinned root; every other entry is streamed in
+	// bounded ReadDir batches. The final set stores only one physical identity.
+	catalog, err := NewFileIdentityCatalog(FileIdentityCatalogOptions{
+		TreeRoots: []string{root}, MaxEntries: entries + 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog.Len() != 1 {
+		t.Fatalf("near-limit hardlink catalog identities = %d, want 1", catalog.Len())
+	}
+	if catalog, err = NewFileIdentityCatalog(FileIdentityCatalogOptions{
+		TreeRoots: []string{root}, MaxEntries: entries,
+	}); err == nil || catalog != nil {
+		t.Fatalf("over-limit streaming catalog = %#v, %v", catalog, err)
+	}
+}
+
+func TestFileIdentityCatalogBoundsLargeExclusionSetsWithAggregateLimit(t *testing.T) {
+	root := t.TempDir()
+	const exclusions = 1_200
+	paths := make([]string, 0, exclusions)
+	for index := range exclusions {
+		paths = append(paths, filepath.Join(root, fmt.Sprintf("database-%04d.db", index)))
+	}
+	catalog, err := NewFileIdentityCatalog(FileIdentityCatalogOptions{ExcludePaths: paths})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog.Len() != 0 {
+		t.Fatalf("exclusion-only catalog identities = %d, want 0", catalog.Len())
+	}
+	if catalog, err = NewFileIdentityCatalog(FileIdentityCatalogOptions{
+		ExcludePaths: paths,
+		MaxEntries:   exclusions - 1,
+	}); err == nil || catalog != nil {
+		t.Fatalf("over-limit exclusion catalog = %#v, %v", catalog, err)
+	}
+}
+
+func TestFileIdentityCatalogBoundsPreparedInputsInAggregate(t *testing.T) {
+	root := t.TempDir()
+	exact := filepath.Join(root, "exact")
+	tree := filepath.Join(root, "tree")
+	excluded := filepath.Join(root, "excluded")
+	if catalog, err := NewFileIdentityCatalog(FileIdentityCatalogOptions{
+		ExactPaths: []string{exact}, TreeRoots: []string{tree},
+		ExcludePaths: []string{excluded}, MaxEntries: 2,
+	}); err == nil || catalog != nil || !strings.Contains(err.Error(), "input limit") {
+		t.Fatalf("aggregate input-count catalog = %#v, %v", catalog, err)
+	}
+	pathBytes := int64(len(exact) + len(tree) + len(excluded) - 1)
+	if catalog, err := NewFileIdentityCatalog(FileIdentityCatalogOptions{
+		ExactPaths: []string{exact}, TreeRoots: []string{tree},
+		ExcludePaths: []string{excluded}, MaxPathBytes: pathBytes,
+	}); err == nil || catalog != nil || !strings.Contains(err.Error(), "path-byte") {
+		t.Fatalf("aggregate input-byte catalog = %#v, %v", catalog, err)
+	}
+	t.Chdir(root)
+	if catalog, err := NewFileIdentityCatalog(FileIdentityCatalogOptions{
+		ExactPaths: []string{"x"}, MaxPathBytes: 1,
+	}); err == nil || catalog != nil || !strings.Contains(err.Error(), "path-byte") {
+		t.Fatalf("absolute-expansion catalog = %#v, %v", catalog, err)
+	}
+}
+
+func TestFileIdentityCatalogStreamingDigestIsOrderIndependent(t *testing.T) {
+	root := t.TempDir()
+	paths := []string{filepath.Join(root, "first"), filepath.Join(root, "second")}
+	infos := make([]os.FileInfo, 0, len(paths))
+	identities := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if err := os.WriteFile(path, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity, err := snapshotFileIdentity(path, info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		infos = append(infos, info)
+		identities = append(identities, identity)
+	}
+	forward := newFileIdentityCatalogRecorder(false)
+	reverse := newFileIdentityCatalogRecorder(false)
+	for index := range paths {
+		if err := forward.record('f', paths[index], infos[index], identities[index]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := len(paths) - 1; index >= 0; index-- {
+		if err := reverse.record('f', paths[index], infos[index], identities[index]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if forward.finish() != reverse.finish() {
+		t.Fatal("streaming digest depends on enumeration order")
+	}
+}
+
+func TestFileIdentityCatalogProtectsOpenedFileFromActualHandle(t *testing.T) {
+	root := t.TempDir()
+	protectedPath := filepath.Join(root, "protected")
+	ordinaryPath := filepath.Join(root, "ordinary")
+	for _, path := range []string{protectedPath, ordinaryPath} {
+		if err := os.WriteFile(path, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	catalog, err := NewFileIdentityCatalog(FileIdentityCatalogOptions{
+		ExactPaths: []string{protectedPath},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	protectedInfo, err := os.Stat(protectedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedFile, err := os.Open(protectedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = protectedFile.Close() })
+	protected, err := catalog.ProtectsOpenedFile(protectedFile, protectedInfo)
+	if err != nil || !protected {
+		t.Fatalf("protected opened handle = %t, %v", protected, err)
+	}
+
+	ordinaryInfo, err := os.Stat(ordinaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinaryFile, err := os.Open(ordinaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ordinaryFile.Close() })
+	protected, err = catalog.ProtectsOpenedFile(ordinaryFile, ordinaryInfo)
+	if err != nil || protected {
+		t.Fatalf("ordinary opened handle = %t, %v", protected, err)
+	}
+	if protected, err = catalog.ProtectsOpenedFile(protectedFile, ordinaryInfo); err == nil || protected {
+		t.Fatalf("mismatched preflight = %t, %v", protected, err)
+	}
+	if directory, openErr := os.Open(root); openErr != nil {
+		t.Fatal(openErr)
+	} else {
+		directoryInfo, statErr := directory.Stat()
+		if statErr != nil {
+			_ = directory.Close()
+			t.Fatal(statErr)
+		}
+		protected, err = catalog.ProtectsOpenedFile(directory, directoryInfo)
+		_ = directory.Close()
+		if err == nil || protected {
+			t.Fatalf("directory opened handle = %t, %v", protected, err)
+		}
+	}
+	if closeErr := ordinaryFile.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if protected, err = catalog.ProtectsOpenedFile(ordinaryFile, ordinaryInfo); err == nil || protected {
+		t.Fatalf("closed opened handle = %t, %v", protected, err)
+	}
 }

@@ -32,15 +32,23 @@ const (
 var errLocalRepairStaleRevision = errors.New("local repair edit revision is stale")
 
 type localRepairRevisionReadTool struct {
-	delegate      tools.Tool
-	guard         *localRepairPathGuard
-	revisionBytes atomic.Int64
+	delegate        tools.Tool
+	guard           *localRepairPathGuard
+	constructionErr error
+	revisionBytes   atomic.Int64
 }
 
 func newLocalRepairRevisionReadTool(guard *localRepairPathGuard) tools.Tool {
+	delegate, err := tools.NewReadFileLinesToolWithPolicy(
+		guard.root,
+		true,
+		tools.MaxReadFileSize,
+		guard.fileMutationPolicy(),
+	)
 	return &localRepairRevisionReadTool{
-		delegate: tools.NewReadFileLinesTool(guard.root, true, tools.MaxReadFileSize),
-		guard:    guard,
+		delegate:        delegate,
+		guard:           guard,
+		constructionErr: err,
 	}
 }
 
@@ -59,7 +67,7 @@ func (tool *localRepairRevisionReadTool) Execute(
 	ctx context.Context,
 	args map[string]any,
 ) *tools.ToolResult {
-	if tool == nil || tool.delegate == nil || tool.guard == nil {
+	if tool == nil || tool.delegate == nil || tool.guard == nil || tool.constructionErr != nil {
 		return tools.ErrorResult("local repair read tool is unavailable")
 	}
 	path, ok := args["path"].(string)
@@ -238,7 +246,8 @@ func localRepairFileRevision(
 	if guard == nil {
 		return "", errors.New("path guard is unavailable")
 	}
-	if _, err := guard.validate(path, false); err != nil {
+	resolved, err := guard.validate(path, false)
+	if err != nil {
 		return "", err
 	}
 	root, err := os.OpenRoot(guard.root)
@@ -255,11 +264,22 @@ func localRepairFileRevision(
 	if !reserveLocalRepairRevisionBytes(revisionBytes, info.Size()) {
 		return "", errors.New("revision byte budget is exhausted")
 	}
+	if guard.beforeFileOpen != nil {
+		guard.beforeFileOpen()
+	}
 	file, err := root.Open(relative)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
+	if validateErr := guard.validateOpenedRegular(
+		filepath.Join(guard.root, path),
+		resolved,
+		info,
+		file,
+	); validateErr != nil {
+		return "", validateErr
+	}
 	digest := sha256.New()
 	written, err := io.Copy(digest, io.LimitReader(file, maxLocalRepairRevisionFile+1))
 	if err != nil || written != info.Size() || written > maxLocalRepairRevisionFile {
@@ -302,8 +322,26 @@ func readLocalRepairEditableFile(
 		info.Size() < 0 || info.Size() > maxLocalRepairEditableFile {
 		return nil, 0, errors.New("editable file is invalid or too large")
 	}
-	content, err := root.ReadFile(relative)
-	if err != nil || int64(len(content)) != info.Size() {
+	if guard.beforeFileOpen != nil {
+		guard.beforeFileOpen()
+	}
+	file, err := root.Open(relative)
+	if err != nil {
+		return nil, 0, errors.New("editable file changed during read")
+	}
+	defer file.Close()
+	if err = guard.validateOpenedRegular(
+		filepath.Join(guard.root, path),
+		resolved,
+		info,
+		file,
+	); err != nil {
+		return nil, 0, errors.New("editable file changed during read")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, maxLocalRepairEditableFile+1))
+	afterInfo, statErr := file.Stat()
+	if err != nil || int64(len(content)) != info.Size() ||
+		statErr != nil || afterInfo.Mode() != info.Mode() || !os.SameFile(info, afterInfo) {
 		return nil, 0, errors.New("editable file changed during read")
 	}
 	return content, info.Mode().Perm(), nil
@@ -375,6 +413,7 @@ func writeLocalRepairEditableFile(
 			return err
 		}
 		currentRevision, revisionErr := localRepairRootFileRevision(
+			guard,
 			root,
 			relative,
 			maxLocalRepairEditableFile,
@@ -404,8 +443,13 @@ func writeLocalRepairEditableFile(
 	return errors.New("unable to reserve an edit temporary file")
 }
 
-func localRepairRootFileRevision(root *os.Root, path string, maximum int64) (string, error) {
-	if root == nil || maximum < 1 {
+func localRepairRootFileRevision(
+	guard *localRepairPathGuard,
+	root *os.Root,
+	path string,
+	maximum int64,
+) (string, error) {
+	if guard == nil || root == nil || maximum < 1 {
 		return "", errors.New("revision source is unavailable")
 	}
 	info, err := root.Lstat(path)
@@ -413,11 +457,19 @@ func localRepairRootFileRevision(root *os.Root, path string, maximum int64) (str
 		info.Size() < 0 || info.Size() > maximum {
 		return "", errors.New("revision source is invalid or too large")
 	}
+	if guard.beforeFileOpen != nil {
+		guard.beforeFileOpen()
+	}
 	file, err := root.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
+	candidate := filepath.Join(guard.root, filepath.FromSlash(path))
+	resolved, err := resolveLocalRepairPath(candidate)
+	if err != nil || guard.validateOpenedRegular(candidate, resolved, info, file) != nil {
+		return "", errors.New("revision source changed during hashing")
+	}
 	digest := sha256.New()
 	written, err := io.Copy(digest, io.LimitReader(file, maximum+1))
 	if err != nil || written != info.Size() || written > maximum {

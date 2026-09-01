@@ -38,11 +38,12 @@ type applyPatchWorkspace struct {
 }
 
 type applyPatchFileSnapshot struct {
-	path      string
-	info      os.FileInfo
-	mode      os.FileMode
-	data      []byte
-	linkCount uint64
+	path            string
+	info            os.FileInfo
+	mode            os.FileMode
+	data            []byte
+	linkCount       uint64
+	identityCatalog *FileIdentityCatalog
 }
 
 type plannedApplyPatchOp struct {
@@ -231,6 +232,16 @@ func (t *ApplyPatchTool) planPatch(
 	protectedRoots, err := snapshotApplyPatchProtectedRoots(workspace, t.protectedRoots)
 	if err != nil {
 		return nil, err
+	}
+	if t.volatileRoots != nil {
+		volatileRoots, volatileErr := snapshotApplyPatchProtectedRoots(
+			workspace,
+			t.volatileRoots.roots,
+		)
+		if volatileErr != nil {
+			return nil, volatileErr
+		}
+		protectedRoots = append(protectedRoots, volatileRoots...)
 	}
 	plan := &applyPatchPlan{workspace: workspace, protectedRoots: protectedRoots}
 	plan.fences = append(plan.fences, workspace.fences...)
@@ -485,11 +496,12 @@ func (t *ApplyPatchTool) guardApplyPatchPath(ctx context.Context, path string, m
 }
 
 type applyPatchCandidate struct {
-	lexical   string
-	canonical string
-	exists    bool
-	info      os.FileInfo
-	fences    []applyPatchPathFence
+	lexical         string
+	canonical       string
+	exists          bool
+	info            os.FileInfo
+	fences          []applyPatchPathFence
+	identityCatalog *FileIdentityCatalog
 }
 
 func (t *ApplyPatchTool) resolveApplyPatchCandidate(
@@ -577,6 +589,7 @@ func (t *ApplyPatchTool) resolveApplyPatchCandidate(
 	return applyPatchCandidate{
 		lexical: lexical, canonical: canonical,
 		exists: lstatErr == nil, info: info, fences: fences,
+		identityCatalog: t.protectedIdentities,
 	}, nil
 }
 
@@ -597,7 +610,20 @@ func (t *ApplyPatchTool) authorizeApplyPatchCanonical(
 	for _, root := range plan.protectedRoots {
 		workspaceException := root.allowWorkspaceException &&
 			root.containsWorkspace && insideWorkspace
-		if applyPatchPathWithinIdentity(canonical, root.canonical) && !workspaceException {
+		if workspaceException {
+			continue
+		}
+		if applyPatchPathWithinIdentity(canonical, root.canonical) {
+			return fmt.Errorf("patch path is protected")
+		}
+		candidateInfo, candidateErr := os.Stat(canonical)
+		rootInfo, rootErr := os.Stat(root.canonical)
+		switch {
+		case candidateErr != nil && !os.IsNotExist(candidateErr):
+			return fmt.Errorf("patch path cannot be inspected")
+		case rootErr != nil && !os.IsNotExist(rootErr):
+			return fmt.Errorf("protected patch root cannot be inspected")
+		case candidateErr == nil && rootErr == nil && os.SameFile(candidateInfo, rootInfo):
 			return fmt.Errorf("patch path is protected")
 		}
 	}
@@ -673,6 +699,12 @@ func snapshotApplyPatchSource(
 		candidate.info == nil || !os.SameFile(candidate.info, beforeInfo) {
 		return nil, fmt.Errorf("inspect patch source %q", label)
 	}
+	if candidate.identityCatalog != nil {
+		protected, identityErr := candidate.identityCatalog.ProtectsOpenedFile(file, candidate.info)
+		if identityErr != nil || protected {
+			return nil, fmt.Errorf("patch source %q is protected", label)
+		}
+	}
 	linkCount, err := applyPatchLinkCount(file, beforeInfo)
 	if err != nil {
 		return nil, fmt.Errorf("inspect patch source %q links: %w", label, err)
@@ -695,7 +727,7 @@ func snapshotApplyPatchSource(
 	return &applyPatchFileSnapshot{
 		path: candidate.canonical, info: beforeInfo,
 		mode: beforeInfo.Mode(), data: data,
-		linkCount: linkCount,
+		linkCount: linkCount, identityCatalog: candidate.identityCatalog,
 	}, nil
 }
 
@@ -926,6 +958,7 @@ func revalidateApplyPatchPlan(ctx context.Context, plan *applyPatchPlan) error {
 		if op.source != nil {
 			current, snapshotErr := snapshotApplyPatchSource(ctx, applyPatchCandidate{
 				canonical: op.source.path, exists: true, info: op.source.info,
+				identityCatalog: op.source.identityCatalog,
 			}, op.sourceLabel, nil)
 			if snapshotErr != nil {
 				return snapshotErr

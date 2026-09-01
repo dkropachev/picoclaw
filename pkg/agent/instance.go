@@ -72,6 +72,8 @@ type AgentInstance struct {
 	ConfigurationError          error
 	executionPolicy             isolation.ExecutionPolicy
 	fileMutationIdentityCatalog *tools.FileIdentityCatalog
+	fileMutationProtectedRoots  []string
+	preparedFileMutationPolicy  *tools.PreparedFileMutationPolicy
 
 	managedCalibrationCache map[string]workflowManagedCalibrationCacheEntry
 }
@@ -355,47 +357,6 @@ func newAgentInstanceWithRuntimePolicies(
 	toolsRegistry.SetAllowlist(agentToolAllowlist)
 	readPathPatterns := cloneToolPathPatterns(allowReadPaths)
 	writePathPatterns := cloneToolPathPatterns(allowWritePaths)
-	fileMutationProtectedRoots = append(
-		cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots),
-		mustAgentWorkspaceFileMutationProtectedRoots(workspace)...,
-	)
-	fileMutationProtectedRoots = append(
-		fileMutationProtectedRoots,
-		mustAgentWorkspaceAccountRouterProtectedRoots(workspace)...,
-	)
-	fileMutationProtectedRoots = append(
-		fileMutationProtectedRoots,
-		agentSessionFileMutationProtectedRoots(workspace)...,
-	)
-	fileMutationProtectedRoots = append(
-		fileMutationProtectedRoots,
-		agentCronFileMutationProtectedRoots(workspace)...,
-	)
-	evolutionProtectedRoots, evolutionRootsErr := agentEvolutionFileMutationProtectedRoots(
-		workspace,
-		cfg.Evolution.StateDir,
-	)
-	if evolutionRootsErr != nil {
-		panic(fmt.Sprintf("build evolution file-mutation policy: %v", evolutionRootsErr))
-	}
-	fileMutationProtectedRoots = append(fileMutationProtectedRoots, evolutionProtectedRoots...)
-	workflowProtectedRoots, workflowProtectedErr := agentWorkflowRuntimeFileMutationProtectedRoots(workspace)
-	if workflowProtectedErr != nil {
-		panic(fmt.Sprintf("build workflow file-mutation policy: %v", workflowProtectedErr))
-	}
-	fileMutationProtectedRoots = append(fileMutationProtectedRoots, workflowProtectedRoots...)
-	fileMutationProtectedRoots = append(
-		fileMutationProtectedRoots,
-		mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg)...,
-	)
-	var protectedRootErr error
-	fileMutationProtectedRoots, protectedRootErr = appendAgentWorkspaceSQLiteProtectedRoots(
-		fileMutationProtectedRoots,
-		cfg,
-	)
-	if protectedRootErr != nil {
-		panic(fmt.Sprintf("build workspace file-mutation policy: %v", protectedRootErr))
-	}
 	if len(identityGenerations) > 1 {
 		panic("build file-mutation identity catalog: multiple generations")
 	}
@@ -403,19 +364,68 @@ func newAgentInstanceWithRuntimePolicies(
 	if len(identityGenerations) == 1 {
 		identityGeneration = identityGenerations[0]
 	}
-	fileMutationIdentityCatalog, identityCatalogErr := identityGeneration.catalog(
-		workspace,
-		cfg,
-		fileMutationProtectedRoots,
-	)
-	if identityCatalogErr != nil {
-		panic(fmt.Sprintf("build file-mutation identity catalog: %v", identityCatalogErr))
+	var fileMutationIdentityCatalog *tools.FileIdentityCatalog
+	var preparedFileMutationPolicy *tools.PreparedFileMutationPolicy
+	var preparedApplyPatchRoots *tools.PreparedApplyPatchVolatileRoots
+	if identityGeneration != nil && identityGeneration.preparedPolicy != nil &&
+		identityGeneration.preparedApplyPatchRoots != nil {
+		fileMutationProtectedRoots = identityGeneration.fileMutationProtectedRoots
+		fileMutationIdentityCatalog = identityGeneration.sharedCatalog
+		preparedFileMutationPolicy = identityGeneration.preparedPolicy
+		preparedApplyPatchRoots = identityGeneration.preparedApplyPatchRoots
+	} else {
+		fileMutationProtectedRoots = cloneAgentRuntimeFileMutationProtectedRoots(
+			fileMutationProtectedRoots,
+		)
+		var protectedRootErr error
+		fileMutationProtectedRoots, protectedRootErr = appendAgentCompleteWorkspaceFileMutationProtectedRoots(
+			fileMutationProtectedRoots,
+			workspace,
+			cfg,
+		)
+		if protectedRootErr != nil {
+			panic(fmt.Sprintf("build complete workspace file-mutation policy: %v", protectedRootErr))
+		}
+		fileMutationProtectedRoots = append(
+			fileMutationProtectedRoots,
+			mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg)...,
+		)
+		fileMutationProtectedRoots, protectedRootErr = appendAgentWorkspaceSQLiteProtectedRoots(
+			fileMutationProtectedRoots,
+			cfg,
+		)
+		if protectedRootErr != nil {
+			panic(fmt.Sprintf("build workspace file-mutation policy: %v", protectedRootErr))
+		}
+		var identityCatalogErr error
+		fileMutationIdentityCatalog, identityCatalogErr = identityGeneration.catalog(
+			workspace,
+			cfg,
+			fileMutationProtectedRoots,
+		)
+		if identityCatalogErr != nil {
+			panic(fmt.Sprintf("build file-mutation identity catalog: %v", identityCatalogErr))
+		}
+		preparedFileMutationPolicy, protectedRootErr = tools.NewPreparedFileMutationPolicy(
+			workspace,
+			tools.FileMutationPolicy{
+				ProtectedRoots:      fileMutationProtectedRoots,
+				ProtectedIdentities: fileMutationIdentityCatalog,
+			},
+		)
+		if protectedRootErr != nil {
+			panic(fmt.Sprintf("prepare file-mutation policy: %v", protectedRootErr))
+		}
+		preparedApplyPatchRoots, protectedRootErr = tools.NewPreparedApplyPatchVolatileRoots(
+			workspace,
+			fileMutationProtectedRoots,
+		)
+		if protectedRootErr != nil {
+			panic(fmt.Sprintf("prepare apply-patch file-mutation policy: %v", protectedRootErr))
+		}
 	}
 	fileMutationPolicy := tools.FileMutationPolicy{
-		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
-			fileMutationProtectedRoots,
-		),
-		ProtectedIdentities: fileMutationIdentityCatalog,
+		Prepared: preparedFileMutationPolicy,
 	}
 	applyPatchCandidate := mayUseCodexCompatibleTools &&
 		(cfg.Tools.IsToolEnabled("edit_file") || cfg.Tools.IsToolEnabled("write_file"))
@@ -477,10 +487,7 @@ func newAgentInstanceWithRuntimePolicies(
 			return tools.NewEditFileToolWithPolicy(
 				workspace,
 				restrict,
-				tools.FileMutationPolicy{
-					ProtectedRoots:      append([]string(nil), fileMutationPolicy.ProtectedRoots...),
-					ProtectedIdentities: fileMutationPolicy.ProtectedIdentities,
-				},
+				fileMutationPolicy,
 				cloneToolPathPatterns(writePathPatterns),
 			)
 		}
@@ -501,10 +508,7 @@ func newAgentInstanceWithRuntimePolicies(
 			return tools.NewAppendFileToolWithPolicy(
 				workspace,
 				restrict,
-				tools.FileMutationPolicy{
-					ProtectedRoots:      append([]string(nil), fileMutationPolicy.ProtectedRoots...),
-					ProtectedIdentities: fileMutationPolicy.ProtectedIdentities,
-				},
+				fileMutationPolicy,
 				cloneToolPathPatterns(writePathPatterns),
 			)
 		}
@@ -534,10 +538,7 @@ func newAgentInstanceWithRuntimePolicies(
 			writeTool, err := tools.NewWriteFileToolWithPolicy(
 				workspace,
 				restrict,
-				tools.FileMutationPolicy{
-					ProtectedRoots:      append([]string(nil), fileMutationPolicy.ProtectedRoots...),
-					ProtectedIdentities: fileMutationPolicy.ProtectedIdentities,
-				},
+				fileMutationPolicy,
 				cloneToolPathPatterns(writePathPatterns),
 			)
 			if err != nil {
@@ -575,11 +576,9 @@ func newAgentInstanceWithRuntimePolicies(
 					ProtectedRoots: append(
 						[]string(nil), applyPatchProtectedRoots...,
 					),
-					VolatileProtectedRoots: append(
-						[]string(nil), fileMutationProtectedRoots...,
-					),
-					ProtectedIdentities:  fileMutationIdentityCatalog,
-					TransactionStateRoot: applyPatchTransactionRoot,
+					PreparedVolatileProtectedRoots: preparedApplyPatchRoots,
+					ProtectedIdentities:            fileMutationIdentityCatalog,
+					TransactionStateRoot:           applyPatchTransactionRoot,
 				},
 				cloneToolPathPatterns(writePathPatterns),
 			)
@@ -919,6 +918,8 @@ func newAgentInstanceWithRuntimePolicies(
 		ConfigurationError:          configurationErr,
 		executionPolicy:             executionPolicy,
 		fileMutationIdentityCatalog: fileMutationIdentityCatalog,
+		fileMutationProtectedRoots:  fileMutationProtectedRoots,
+		preparedFileMutationPolicy:  preparedFileMutationPolicy,
 		managedCalibrationCache:     make(map[string]workflowManagedCalibrationCacheEntry),
 	}
 }

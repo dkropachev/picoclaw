@@ -123,6 +123,65 @@ func TestLocalRepairFileToolsDenyRuntimeProtectedRoots(t *testing.T) {
 	}
 }
 
+func TestLocalRepairOpenedHandleRejectsProtectedSwapWithoutLeakingDiff(t *testing.T) {
+	for _, operation := range []string{"read", "edit"} {
+		t.Run(operation, func(t *testing.T) {
+			pin, workspace, checkout := newLocalRepairTestWorkspace(t)
+			protected := filepath.Join(t.TempDir(), "runtime-private.json")
+			const secret = "never disclose protected runtime bytes"
+			if err := os.WriteFile(protected, []byte(secret), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			catalog, err := tools.NewFileIdentityCatalog(tools.FileIdentityCatalogOptions{
+				ExactPaths: []string{protected},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			guard, err := newLocalRepairPathGuardWithPolicy(workspace, pin, nil, catalog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ordinary := filepath.Join(checkout, operation+".txt")
+			if err := os.WriteFile(ordinary, []byte("ordinary"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			guard.beforeFileOpen = func() {
+				guard.beforeFileOpen = nil
+				if removeErr := os.Remove(ordinary); removeErr != nil {
+					t.Fatal(removeErr)
+				}
+				if linkErr := os.Link(protected, ordinary); linkErr != nil {
+					t.Skipf("hardlinks unavailable: %v", linkErr)
+				}
+			}
+
+			var result *tools.ToolResult
+			if operation == "read" {
+				result = newLocalRepairRevisionReadTool(guard).Execute(
+					context.Background(),
+					map[string]any{"path": filepath.Base(ordinary)},
+				)
+			} else {
+				result = newLocalRepairRevisionEditTool(guard).Execute(
+					context.Background(),
+					map[string]any{
+						"path": filepath.Base(ordinary), "old_text": "ordinary", "new_text": "changed",
+					},
+				)
+			}
+			if result == nil || !result.IsError ||
+				strings.Contains(result.ForLLM, secret) || strings.Contains(result.ForUser, secret) {
+				t.Fatalf("swap-raced %s result = %#v", operation, result)
+			}
+			content, readErr := os.ReadFile(protected)
+			if readErr != nil || string(content) != secret {
+				t.Fatalf("protected content after %s = %q, %v", operation, content, readErr)
+			}
+		})
+	}
+}
+
 func TestLocalRepairIdentityCatalogDeniesAliasAfterArchiveRename(t *testing.T) {
 	pin, workspace, checkout := newLocalRepairTestWorkspace(t)
 	activeRoot := filepath.Join(t.TempDir(), "workflow_runs")

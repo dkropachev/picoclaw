@@ -3,23 +3,13 @@
 package fstools
 
 import (
-	"errors"
 	"fmt"
 	"os"
 
 	"golang.org/x/sys/windows"
 )
 
-func snapshotFileIdentity(path string, expected os.FileInfo) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil || expected == nil || !os.SameFile(expected, opened) {
-		return "", errors.New("file identity changed while opening")
-	}
+func fileIdentityFromOpenedHandle(file *os.File, _ os.FileInfo) (string, error) {
 	var identity windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &identity); err != nil {
 		return "", err

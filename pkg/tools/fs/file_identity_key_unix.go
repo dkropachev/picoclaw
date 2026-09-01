@@ -9,7 +9,7 @@ import (
 	"syscall"
 )
 
-func snapshotFileIdentity(_ string, info os.FileInfo) (string, error) {
+func fileIdentityFromOpenedHandle(_ *os.File, info os.FileInfo) (string, error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat == nil {
 		return "", errors.New("file identity is unavailable")
