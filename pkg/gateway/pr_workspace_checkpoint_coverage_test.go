@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/sipeed/picoclaw/pkg/prworkspace"
 	"github.com/sipeed/picoclaw/pkg/prworkspace/localci"
@@ -97,9 +98,9 @@ func TestCheckpointSaveIdempotenceAndRevisionExhaustion(t *testing.T) {
 }
 
 func TestCheckpointTerminalReconciliationRejectsInProcessParkedABA(t *testing.T) {
-	store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
-	if err != nil {
-		t.Fatal(err)
+	store, storeErr := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+	if storeErr != nil {
+		t.Fatal(storeErr)
 	}
 	checkpoint := prWorkspaceCandidateCheckpointFixture()
 	candidate := prWorkspaceCandidateFromCheckpoint(
@@ -151,9 +152,9 @@ func TestCheckpointDefensiveHelperBoundaries(t *testing.T) {
 		t.Fatalf("nil finalized reconciliation = %v, %v", ok, err)
 	}
 
-	store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
-	if err != nil {
-		t.Fatal(err)
+	store, storeErr := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+	if storeErr != nil {
+		t.Fatal(storeErr)
 	}
 	absent := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
 	if _, ok, reconcileErr := store.reconcileFinalized(checkpoint, absent); reconcileErr == nil || ok {
@@ -518,5 +519,113 @@ func TestImplementationValidationAndSummaryDefensiveBranches(t *testing.T) {
 	}
 	if index := publicLocalCIStackStart("ordinary output without a stack marker"); index != -1 {
 		t.Fatalf("ordinary output stack index = %d", index)
+	}
+}
+
+func TestImplementationRuntimeDefensiveLifecycleBoundaries(t *testing.T) {
+	if created, err := newPRWorkspaceImplementationRuntime(nil, nil, "", nil); err == nil || created != nil {
+		t.Fatalf("incomplete implementation runtime = %#v, %v", created, err)
+	}
+	if created, err := newPRWorkspaceImplementationRuntime(
+		&agent.AgentLoop{}, &localci.Runner{}, "controller-agent", nil,
+	); err == nil || created != nil {
+		t.Fatalf("runtime without a controller Git manager = %#v, %v", created, err)
+	}
+
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	_, fence := parkedPRWorkspaceCheckpoint(checkpoint)
+	result := prworkspace.RepairResult{
+		WorkspaceID: checkpoint.GitWorkspaceID, CandidateSHA: fence.Tip, PublicationFence: fence,
+	}
+	var nilRuntime *prWorkspaceImplementationRuntime
+	if err := nilRuntime.AcknowledgeFinalizedRepair(
+		t.Context(), checkpoint.WorkspaceID, result,
+	); err == nil {
+		t.Fatal("nil finalized-repair acknowledgement succeeded")
+	}
+	if err := nilRuntime.saveCandidateCheckpoint(checkpoint.WorkspaceID, nil); err == nil {
+		t.Fatal("nil runtime saved an active candidate checkpoint")
+	}
+	if _, found, err := nilRuntime.restoreCheckpointedCandidate(
+		t.Context(), gitworkspace.PinnedAcquireRequest{}, "", "", prworkspace.Charter{},
+	); err == nil || found {
+		t.Fatalf("nil checkpoint restoration = found:%v error:%v", found, err)
+	}
+	if evidence, err := nilRuntime.LoadCandidateEvidence(t.Context(), prworkspace.RepairAttempt{}); err == nil ||
+		evidence.CandidateSHA != "" || evidence.CandidateDiff != "" ||
+		evidence.EvidenceDigest != "" || len(evidence.Metrics.ChangedFiles) != 0 {
+		t.Fatalf("nil candidate evidence = %#v, %v", evidence, err)
+	}
+
+	store, storeErr := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+	if storeErr != nil {
+		t.Fatal(storeErr)
+	}
+	runtime := &prWorkspaceImplementationRuntime{checkpoints: store}
+	changed := result
+	changed.CandidateSHA = "changed-tip"
+	if err := runtime.AcknowledgeFinalizedRepair(
+		t.Context(), checkpoint.WorkspaceID, changed,
+	); err == nil {
+		t.Fatal("changed finalized-repair acknowledgement succeeded")
+	}
+	if err := runtime.AcknowledgeFinalizedRepair(
+		t.Context(), checkpoint.WorkspaceID, result,
+	); err != nil {
+		t.Fatalf("absent finalized checkpoint acknowledgement = %v", err)
+	}
+
+	revision, saveErr := store.Save(
+		checkpoint,
+		requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID),
+	)
+	if saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	if err := runtime.AcknowledgeFinalizedRepair(
+		t.Context(), checkpoint.WorkspaceID, result,
+	); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("active checkpoint acknowledgement = %v", err)
+	}
+
+	candidate := prWorkspaceCandidate{checkpointRevision: revision}
+	if err := runtime.saveFinalizedCandidateCheckpoint(
+		checkpoint.WorkspaceID, &candidate, fence,
+	); err == nil {
+		t.Fatal("candidate without parked evidence was finalized")
+	}
+	if err := runtime.saveCandidateCheckpointRevision(checkpoint, &candidate); err == nil {
+		t.Fatal("active checkpoint was accepted as finalized")
+	}
+
+	unsafeStore, unsafeStoreErr := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+	if unsafeStoreErr != nil {
+		t.Fatal(unsafeStoreErr)
+	}
+	if err := os.Remove(unsafeStore.databasePath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(unsafeStore.databasePath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unsafeRuntime := &prWorkspaceImplementationRuntime{checkpoints: unsafeStore}
+	if err := unsafeRuntime.AcknowledgeFinalizedRepair(
+		t.Context(), checkpoint.WorkspaceID, result,
+	); err == nil {
+		t.Fatal("acknowledgement ignored an unsafe checkpoint database")
+	}
+
+	if _, err := snapshotPRWorkspaceExpectedCandidate(
+		t.Context(), &gitworkspace.Manager{}, gitworkspace.PinnedCandidateRequest{}, 0,
+	); err == nil {
+		t.Fatal("validation snapshot unexpectedly succeeded without a manager root")
+	}
+	ctx, release, err := (&prWorkspaceImplementationRuntime{}).acquire(t.Context())
+	if err != nil || ctx == nil || release == nil {
+		t.Fatalf("default runtime acquisition = %#v, %v, %v", ctx, release != nil, err)
+	}
+	release()
+	if got := stablePRWorkspaceLineID("malformed-workspace"); got != "pdln_00000000000000000000000000000000" {
+		t.Fatalf("fallback development line ID = %q", got)
 	}
 }
