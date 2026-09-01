@@ -249,9 +249,6 @@ func TestRepositoryReviewPublicationHandlerRejectsMissingToolRuntime(t *testing.
 }
 
 func TestRepositoryReviewPublicationHandlerReportsClaimPersistenceFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can bypass directory permission checks")
-	}
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	cfg.Tools.MCP.Enabled = false
@@ -263,12 +260,27 @@ func TestRepositoryReviewPublicationHandlerReportsClaimPersistenceFailure(t *tes
 		loop.Close()
 	})
 	store, state, draft := repositoryReviewPublicationTestDraft(t, cfg.WorkspacePath(), "owner/repo")
-	root := filepath.Join(cfg.WorkspacePath(), "repository_reviews")
-	if err := os.Chmod(root, 0o500); err != nil {
-		t.Fatal(err)
+	handler := newRepositoryReviewPublicationHandler(loop)
+	handler.newToolRunner = func(*agent.AgentLoop, string) (workflows.ToolRunner, error) {
+		return nil, nil
 	}
-	restore := func() { _ = os.Chmod(root, 0o700) }
-	t.Cleanup(restore)
+	handler.newGitHubProvider = func(
+		workflows.ToolRunner,
+		string,
+	) (*reviews.GitHubProvider, error) {
+		_, _, updateErr := store.UpdateIssueDraft(
+			state.Repository,
+			draft.ID,
+			draft.Title+" updated",
+			draft.Body,
+			draft.Labels,
+			draft.Version,
+		)
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		return &reviews.GitHubProvider{}, nil
+	}
 
 	request := httptest.NewRequest(
 		http.MethodPost,
@@ -276,12 +288,11 @@ func TestRepositoryReviewPublicationHandlerReportsClaimPersistenceFailure(t *tes
 		strings.NewReader(`{"expected_version":`+strconv.FormatInt(draft.Version, 10)+`}`),
 	)
 	response := httptest.NewRecorder()
-	newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
-	if response.Code != http.StatusServiceUnavailable ||
-		!strings.Contains(response.Body.String(), `"code":"publication_unavailable"`) {
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), `"code":"stale_repository_review"`) {
 		t.Fatalf("response = %d %s", response.Code, response.Body.String())
 	}
-	restore()
 	current, found, err := store.GetByID(state.ID)
 	if err != nil || !found || len(current.IssueDrafts) != 1 ||
 		current.IssueDrafts[0].State != repoaudit.IssueDraftEditing {
