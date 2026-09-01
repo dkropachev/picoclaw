@@ -61,8 +61,9 @@ func securePrivateWindowsPath(path string, directory bool) (os.FileInfo, error) 
 	if err := windows.SetSecurityInfo(
 		handle,
 		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|
+			windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		user.User.Sid,
 		nil,
 		acl,
 		nil,
@@ -111,7 +112,7 @@ func openPrivateWindowsPath(
 	}
 	access := uint32(windows.READ_CONTROL | windows.FILE_READ_ATTRIBUTES)
 	if writeDACL {
-		access |= windows.WRITE_DAC
+		access |= windows.WRITE_DAC | windows.WRITE_OWNER
 	}
 	flags := uint32(windows.FILE_FLAG_OPEN_REPARSE_POINT)
 	if directory {
@@ -167,10 +168,14 @@ func validatePrivateWindowsHandle(handle windows.Handle, user *windows.SID) erro
 	descriptor, err := windows.GetSecurityInfo(
 		handle,
 		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
 		return err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil || !owner.Equals(user) {
+		return errors.Join(errors.New("private Windows path has another owner"), err)
 	}
 	control, _, err := descriptor.Control()
 	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
