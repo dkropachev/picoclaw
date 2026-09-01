@@ -186,8 +186,7 @@ func migrateRepositoryState(state *RepositoryState) (bool, error) {
 	}
 	if state.HistoricalDeduplication.Status == HistoricalDeduplicationFailed &&
 		state.HistoricalDeduplication.FailurePhase == "" {
-		state.HistoricalDeduplication.FailurePhase =
-			HistoricalDeduplicationFailurePhaseForState(*state)
+		state.HistoricalDeduplication.FailurePhase = HistoricalDeduplicationFailurePhaseForState(*state)
 		migrated = true
 	}
 	if state.Contexts == nil {

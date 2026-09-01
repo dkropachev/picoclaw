@@ -71,8 +71,8 @@ func seedHistoricalCheckpointSources(
 	}
 	state.Version++
 	state.UpdatedAt = now
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	snapshot := historicalReplayCoverageSnapshot()
 	state, _, err := store.FreezeHistoricalDeduplicationReplay(state.Repository, snapshot)
@@ -133,15 +133,15 @@ func TestHistoricalCheckpointResumePreservesCompletedPrefix(t *testing.T) {
 	state.Version++
 	state.UpdatedAt = store.clock()
 	reconcileFindingsProcessingCounters(&state)
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	completedCheckpoint, _ := json.Marshal(struct {
-		Raw          RawReviewFinding
-		Job          DeduplicationJob
-		Deduplicated []DeduplicatedReviewFinding
-		Findings     []Finding
-		Mappings     []RepositoryMappingJob
+		Raw          RawReviewFinding            `json:"raw"`
+		Job          DeduplicationJob            `json:"job"`
+		Deduplicated []DeduplicatedReviewFinding `json:"deduplicated"`
+		Findings     []Finding                   `json:"findings"`
+		Mappings     []RepositoryMappingJob      `json:"mappings"`
 	}{
 		Raw: state.RawFindings[0], Job: state.DeduplicationJobs[0],
 		Deduplicated: state.DeduplicatedFindings,
@@ -157,11 +157,11 @@ func TestHistoricalCheckpointResumePreservesCompletedPrefix(t *testing.T) {
 		t.Fatalf("resume=%#v err=%v", replay, err)
 	}
 	resumedCheckpoint, _ := json.Marshal(struct {
-		Raw          RawReviewFinding
-		Job          DeduplicationJob
-		Deduplicated []DeduplicatedReviewFinding
-		Findings     []Finding
-		Mappings     []RepositoryMappingJob
+		Raw          RawReviewFinding            `json:"raw"`
+		Job          DeduplicationJob            `json:"job"`
+		Deduplicated []DeduplicatedReviewFinding `json:"deduplicated"`
+		Findings     []Finding                   `json:"findings"`
+		Mappings     []RepositoryMappingJob      `json:"mappings"`
 	}{
 		Raw: resumed.RawFindings[0], Job: resumed.DeduplicationJobs[0],
 		Deduplicated: resumed.DeduplicatedFindings,
@@ -200,8 +200,8 @@ func TestHistoricalTerminalFailureFencesOnlyItsBucketAcrossPasses(t *testing.T) 
 	state.Version++
 	state.UpdatedAt = store.clock()
 	reconcileFindingsProcessingCounters(&state)
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	result, err := store.ProcessPendingDeduplicationJobs(
 		t.Context(), state.Repository, DeduplicationProcessOptions{},
@@ -252,9 +252,9 @@ func TestHistoricalResumeAcceptsLaterCompletedCandidate(t *testing.T) {
 	firstID := state.RawFindings[0].DeduplicatedFindingID
 	laterID := state.RawFindings[1].DeduplicatedFindingID
 	laterBefore, _ := json.Marshal(struct {
-		Raw     RawReviewFinding
-		Job     DeduplicationJob
-		Finding DeduplicatedReviewFinding
+		Raw     RawReviewFinding          `json:"raw"`
+		Job     DeduplicationJob          `json:"job"`
+		Finding DeduplicatedReviewFinding `json:"finding"`
 	}{
 		state.RawFindings[1], state.DeduplicationJobs[1],
 		state.DeduplicatedFindings[deduplicatedFindingIndexByID(
@@ -295,17 +295,17 @@ func TestHistoricalResumeAcceptsLaterCompletedCandidate(t *testing.T) {
 	state.Version++
 	state.UpdatedAt = store.clock()
 	reconcileFindingsProcessingCounters(&state)
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	resumed, _, err := store.RetryHistoricalDeduplicationReplay(state.Repository)
 	if err != nil {
 		t.Fatal(err)
 	}
 	laterAfter, _ := json.Marshal(struct {
-		Raw     RawReviewFinding
-		Job     DeduplicationJob
-		Finding DeduplicatedReviewFinding
+		Raw     RawReviewFinding          `json:"raw"`
+		Job     DeduplicationJob          `json:"job"`
+		Finding DeduplicatedReviewFinding `json:"finding"`
 	}{
 		resumed.RawFindings[1], resumed.DeduplicationJobs[1],
 		resumed.DeduplicatedFindings[deduplicatedFindingIndexByID(
@@ -366,10 +366,8 @@ func TestHistoricalSelectiveRestartAlsoResumesFailedOutsideClosure(t *testing.T)
 	driftedAggregateIndex := deduplicatedFindingIndexByID(
 		state.DeduplicatedFindings, state.RawFindings[1].DeduplicatedFindingID,
 	)
-	state.DeduplicatedFindings[driftedAggregateIndex].AdmissionBucket =
-		state.RawFindings[1].AdmissionBucket
-	state.DeduplicatedFindings[driftedAggregateIndex].DiagnosisDigest =
-		state.RawFindings[1].DiagnosisDigest
+	state.DeduplicatedFindings[driftedAggregateIndex].AdmissionBucket = state.RawFindings[1].AdmissionBucket
+	state.DeduplicatedFindings[driftedAggregateIndex].DiagnosisDigest = state.RawFindings[1].DiagnosisDigest
 	driftedRaw := state.RawFindings[1]
 	desiredByLegacy := make(map[string]HistoricalDeduplicationDependency)
 	for _, dependency := range dependencies {
@@ -382,9 +380,9 @@ func TestHistoricalSelectiveRestartAlsoResumesFailedOutsideClosure(t *testing.T)
 	}
 	stableID := state.RawFindings[2].DeduplicatedFindingID
 	stableBefore, _ := json.Marshal(struct {
-		Raw     RawReviewFinding
-		Job     DeduplicationJob
-		Finding DeduplicatedReviewFinding
+		Raw     RawReviewFinding          `json:"raw"`
+		Job     DeduplicationJob          `json:"job"`
+		Finding DeduplicatedReviewFinding `json:"finding"`
 	}{
 		state.RawFindings[2], state.DeduplicationJobs[2],
 		state.DeduplicatedFindings[deduplicatedFindingIndexByID(
@@ -398,8 +396,8 @@ func TestHistoricalSelectiveRestartAlsoResumesFailedOutsideClosure(t *testing.T)
 	state.Version++
 	state.UpdatedAt = store.clock()
 	reconcileFindingsProcessingCounters(&state)
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	restarted, replay, err := store.RestartHistoricalDeduplicationReplay(
 		state.Repository,
@@ -427,9 +425,9 @@ func TestHistoricalSelectiveRestartAlsoResumesFailedOutsideClosure(t *testing.T)
 		t.Fatalf("drifted checkpoint=%#v job=%#v", restarted.RawFindings[1], restarted.DeduplicationJobs[1])
 	}
 	stableAfter, _ := json.Marshal(struct {
-		Raw     RawReviewFinding
-		Job     DeduplicationJob
-		Finding DeduplicatedReviewFinding
+		Raw     RawReviewFinding          `json:"raw"`
+		Job     DeduplicationJob          `json:"job"`
+		Finding DeduplicatedReviewFinding `json:"finding"`
 	}{
 		restarted.RawFindings[2], restarted.DeduplicationJobs[2],
 		restarted.DeduplicatedFindings[deduplicatedFindingIndexByID(
@@ -454,8 +452,8 @@ func TestHistoricalFutureDependencyRequiresRecoveredAuthority(t *testing.T) {
 	state.Version++
 	state.UpdatedAt = store.clock()
 	reconcileFindingsProcessingCounters(&state)
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	newCampaignID := NewRepositoryReviewCampaignID()
 	dependencies, err := HistoricalDeduplicationDependencies(
@@ -487,8 +485,8 @@ func TestHistoricalFutureDependencyRequiresRecoveredAuthority(t *testing.T) {
 	state.CampaignHistory[newCampaignID] = state.Findings[findingIndex].CommitSHA
 	state.Version++
 	state.UpdatedAt = store.clock()
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	state, replay, err := store.RestartHistoricalDeduplicationReplay(
 		state.Repository,
@@ -526,8 +524,8 @@ func TestHistoricalMissingFrozenSnapshotRequiresProfileRestartAfterAdmission(t *
 	state.Version++
 	state.UpdatedAt = store.clock()
 	reconcileFindingsProcessingCounters(&state)
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	_, _, err = store.ResumeHistoricalDeduplicationReplay(
 		state.Repository, snapshot, dependencies,
@@ -561,8 +559,8 @@ func TestHistoricalResumeCompletedLostResponseIsNoOp(t *testing.T) {
 		Status: HistoricalDeduplicationCompleted, UpdatedAt: now,
 	}
 	state.UpdatedAt = now
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	resumed, replay, err := store.ResumeHistoricalDeduplicationReplay(
 		state.Repository, historicalReplayCoverageSnapshot(), nil,
@@ -587,8 +585,8 @@ func TestHistoricalSetupResumeIsIdempotentAndMarksAttempt(t *testing.T) {
 		Error:        "Historical deduplication failed.", UpdatedAt: now,
 	}
 	state.UpdatedAt = now
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	resumed, replay, err := store.RetryHistoricalDeduplicationReplay(state.Repository)
 	if err != nil || replay.Status != HistoricalDeduplicationPending || replay.Attempts != 1 {
@@ -752,13 +750,13 @@ func TestHistoricalSelectiveResetSplitsMixedAggregateAndPreservesUnrelated(t *te
 		},
 	}
 	unrelatedBefore, _ := json.Marshal(struct {
-		Raw     RawReviewFinding
-		Job     DeduplicationJob
-		Finding DeduplicatedReviewFinding
+		Raw     RawReviewFinding          `json:"raw"`
+		Job     DeduplicationJob          `json:"job"`
+		Finding DeduplicatedReviewFinding `json:"finding"`
 	}{state.RawFindings[2], state.DeduplicationJobs[2], state.DeduplicatedFindings[1]})
 	liveBefore, _ := json.Marshal(struct {
-		Raw RawReviewFinding
-		Job DeduplicationJob
+		Raw RawReviewFinding `json:"raw"`
+		Job DeduplicationJob `json:"job"`
 	}{state.RawFindings[1], state.DeduplicationJobs[1]})
 	mixedVersion := mixed.Version
 	mixedCreatedAt := mixed.CreatedAt
@@ -776,9 +774,9 @@ func TestHistoricalSelectiveResetSplitsMixedAggregateAndPreservesUnrelated(t *te
 		t.Fatal(err)
 	}
 	unrelatedAfter, _ := json.Marshal(struct {
-		Raw     RawReviewFinding
-		Job     DeduplicationJob
-		Finding DeduplicatedReviewFinding
+		Raw     RawReviewFinding          `json:"raw"`
+		Job     DeduplicationJob          `json:"job"`
+		Finding DeduplicatedReviewFinding `json:"finding"`
 	}{
 		state.RawFindings[2], state.DeduplicationJobs[2],
 		state.DeduplicatedFindings[deduplicatedFindingIndexByID(
@@ -789,8 +787,8 @@ func TestHistoricalSelectiveResetSplitsMixedAggregateAndPreservesUnrelated(t *te
 		t.Fatalf("unrelated historical checkpoint changed\nbefore=%s\nafter=%s", unrelatedBefore, unrelatedAfter)
 	}
 	liveAfter, _ := json.Marshal(struct {
-		Raw RawReviewFinding
-		Job DeduplicationJob
+		Raw RawReviewFinding `json:"raw"`
+		Job DeduplicationJob `json:"job"`
 	}{state.RawFindings[1], state.DeduplicationJobs[1]})
 	if string(liveBefore) != string(liveAfter) {
 		t.Fatalf("retained live checkpoint changed\nbefore=%s\nafter=%s", liveBefore, liveAfter)
@@ -877,12 +875,17 @@ func TestHistoricalPhaseInferenceAndInterruptedMergeRecovery(t *testing.T) {
 	}
 	persisted.Version++
 	persisted.UpdatedAt = now
-	if err := store.save(&persisted); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&persisted); saveErr != nil {
+		t.Fatal(saveErr)
 	}
-	_, _, _, err = store.reconcileRepositoryJobs(persisted.Repository)
-	if err != nil {
-		t.Fatal(err)
+	created, mappingReset, validationReset, reconcileErr := store.reconcileRepositoryJobs(
+		persisted.Repository,
+	)
+	if reconcileErr != nil || created != 0 || mappingReset != 0 || validationReset != 0 {
+		t.Fatalf(
+			"merge startup reconciliation created=%d mapping_reset=%d validation_reset=%d err=%v",
+			created, mappingReset, validationReset, reconcileErr,
+		)
 	}
 	recovered, _, err := store.Get(persisted.Repository)
 	if err != nil {

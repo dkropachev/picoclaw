@@ -60,8 +60,8 @@ func newRepositoryReviewHistoricalRestartFixture(
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = backfill.workspace
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		t.Fatal(err)
+	if saveErr := config.SaveConfig(configPath, cfg); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	handler := NewHandler(configPath)
 	t.Cleanup(handler.Shutdown)
@@ -277,8 +277,8 @@ func TestRepositoryReviewHistoricalRestartDoesNotRecoverCampaignWhileModelWorkRu
 		APIKeys: config.SecureStrings{config.NewSecureString("test-api-key")},
 	}}
 	cfg.ModelAliases = []config.ModelAliasConfig{{Name: "review-a", Model: "gpt-review"}}
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		t.Fatal(err)
+	if saveErr := config.SaveConfig(configPath, cfg); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	handler := NewHandler(configPath)
 	t.Cleanup(handler.Shutdown)
