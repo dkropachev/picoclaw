@@ -724,13 +724,22 @@ func TestRepositoryReviewHistoricalDedupAdditionalErrorCoverage(t *testing.T) {
 		t.Fatalf("canceled historical processing err=%v", processErr)
 	}
 
-	missingProfile := state
-	missingProfile.HistoricalDeduplication.Status = repoaudit.HistoricalDeduplicationPending
-	missingProfile.HistoricalDeduplication.ProfileSnapshot = repoaudit.HistoricalDeduplicationProfileSnapshot{}
-	missingProfile.HistoricalDeduplication.UpdatedAt = time.Now().UTC()
-	missingProfile.Version++
-	missingProfile.UpdatedAt = missingProfile.HistoricalDeduplication.UpdatedAt
-	persistRepositoryReviewAdditionalCoverageState(t, workspace, missingProfile)
+	resetMissingProfile := func() {
+		missingProfile, found, loadErr := store.Get(state.Repository)
+		if loadErr != nil || !found {
+			t.Fatalf("load current historical replay state found=%v err=%v", found, loadErr)
+		}
+		missingProfile.HistoricalDeduplication.Status = repoaudit.HistoricalDeduplicationPending
+		missingProfile.HistoricalDeduplication.ProfileSnapshot = repoaudit.HistoricalDeduplicationProfileSnapshot{}
+		missingProfile.HistoricalDeduplication.Error = ""
+		missingProfile.HistoricalDeduplication.FailurePhase = ""
+		missingProfile.HistoricalDeduplication.MergeLease = repoaudit.HistoricalDeduplicationMergeLease{}
+		missingProfile.HistoricalDeduplication.UpdatedAt = time.Now().UTC()
+		missingProfile.Version++
+		missingProfile.UpdatedAt = missingProfile.HistoricalDeduplication.UpdatedAt
+		persistRepositoryReviewAdditionalCoverageState(t, workspace, missingProfile)
+	}
+	resetMissingProfile()
 	profileAutomation := testRepositoryReviewAutomation()
 	profileAutomation.ID = "rra_historical_process_error"
 	profileAutomation.Repository = state.Repository
@@ -744,7 +753,7 @@ func TestRepositoryReviewHistoricalDedupAdditionalErrorCoverage(t *testing.T) {
 
 	// Install a real durable merge with a different lease so the stale input
 	// exercises the lease fence rather than the failed-merge resume path.
-	persistRepositoryReviewAdditionalCoverageState(t, workspace, missingProfile)
+	resetMissingProfile()
 	mergeSnapshot := repoaudit.RepositoryReviewDeduplicationSnapshot{
 		ReviewerModel: "cheap", DeduplicationModel: "cheap", AccountRef: "api",
 		SimilarityThreshold: 90, CandidateLimit: 0,
@@ -766,7 +775,7 @@ func TestRepositoryReviewHistoricalDedupAdditionalErrorCoverage(t *testing.T) {
 	); advanceErr == nil {
 		t.Fatal("mismatched historical merge unexpectedly completed")
 	}
-	persistRepositoryReviewAdditionalCoverageState(t, workspace, missingProfile)
+	resetMissingProfile()
 
 	invalidRefProfile := repoaudit.RepositoryReviewProfile{
 		ID: "rrpf_historical_invalid_ref", Name: "Historical invalid ref",

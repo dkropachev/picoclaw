@@ -1,11 +1,10 @@
 package api
 
 import (
-	"bytes"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -285,32 +284,15 @@ func TestRepositoryReviewHistoricalRestartDoesNotRecoverCampaignWhileModelWorkRu
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 
-	automationPath := filepath.Join(
-		backfill.workspace, "repository_reviews", "automation_"+backfill.automation.ID+".json",
+	automationBefore, found, err := backfill.store.GetAutomation(
+		t.Context(), backfill.automation.ID,
 	)
-	repositoryPaths, err := filepath.Glob(filepath.Join(
-		backfill.workspace, "repository_reviews", "repo_*.json",
-	))
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || !found {
+		t.Fatalf("automation before restart found=%v err=%v", found, err)
 	}
-	repositoryPath := ""
-	for _, path := range repositoryPaths {
-		if !strings.HasSuffix(path, ".summary.json") {
-			repositoryPath = path
-			break
-		}
-	}
-	if repositoryPath == "" {
-		t.Fatal("repository state path is missing")
-	}
-	automationBefore, err := os.ReadFile(automationPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repositoryBefore, err := os.ReadFile(repositoryPath)
-	if err != nil {
-		t.Fatal(err)
+	repositoryBefore, found, err := backfill.store.Get(state.Repository)
+	if err != nil || !found {
+		t.Fatalf("repository before restart found=%v err=%v", found, err)
 	}
 
 	request := httptest.NewRequest(
@@ -327,16 +309,18 @@ func TestRepositoryReviewHistoricalRestartDoesNotRecoverCampaignWhileModelWorkRu
 	) {
 		t.Fatalf("running restart status=%d body=%s", response.Code, response.Body.String())
 	}
-	automationAfter, err := os.ReadFile(automationPath)
-	if err != nil {
-		t.Fatal(err)
+	automationAfter, found, err := backfill.store.GetAutomation(
+		t.Context(), backfill.automation.ID,
+	)
+	if err != nil || !found {
+		t.Fatalf("automation after restart found=%v err=%v", found, err)
 	}
-	repositoryAfter, err := os.ReadFile(repositoryPath)
-	if err != nil {
-		t.Fatal(err)
+	repositoryAfter, found, err := backfill.store.Get(state.Repository)
+	if err != nil || !found {
+		t.Fatalf("repository after restart found=%v err=%v", found, err)
 	}
-	if !bytes.Equal(automationBefore, automationAfter) ||
-		!bytes.Equal(repositoryBefore, repositoryAfter) {
+	if !reflect.DeepEqual(automationBefore, automationAfter) ||
+		!reflect.DeepEqual(repositoryBefore, repositoryAfter) {
 		t.Fatal("running historical restart mutated campaign authority before quiescence")
 	}
 }
