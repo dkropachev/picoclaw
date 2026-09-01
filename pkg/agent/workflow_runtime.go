@@ -452,7 +452,9 @@ func (r *workflowAgentRunner) ResolveRepositoryReviewProfile(
 		"model_configs": modelConfigs, "alias_bindings": aliasBindings,
 		"account_router": accountRouter, "model_router": modelRouterConfig,
 	}
-	if effectiveAccountRef == strings.TrimSpace(agent.AccountRef) {
+	// Explicit reviewer aliases already freeze their account bindings above.
+	// Only the inherited default chain depends on its health-filtered candidates.
+	if includeDefaultReviewer && effectiveAccountRef == strings.TrimSpace(agent.AccountRef) {
 		payload["runtime_candidates"] = agent.Candidates
 		payload["light_candidates"] = agent.LightCandidates
 	}

@@ -61,6 +61,10 @@ the same redacted context construction as automatic dispatch. Native workflow
 functions provide common state, artifact, git inventory, and git filter
 primitives so AI-authored workflows do not need helper scripts for durable
 planning and reporting.
+Repository-review workflow profiles bind explicit reviewer aliases to their
+configured account/model graph without inheriting health-filtered candidates
+from the unrelated default reviewer chain; default-review profiles continue to
+freeze that chain because it is part of their execution identity.
 An explicitly installed GitHub issue-triage template composes deterministic
 `issues.opened` routing, a no-tool structured classifier, and one separately
 declared GitHub MCP comment action.
