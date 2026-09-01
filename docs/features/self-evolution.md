@@ -20,7 +20,9 @@ provider-supplied default model.
 - Non-obvious constraints: disabled mode is side-effect free, heartbeat turns
   are skipped, generated skill content is prompt-sensitive, rollback is manual
   from backups, and a missing resolved model uses the deterministic evolution
-  fallback without invoking a provider.
+  fallback without invoking a provider. Mutable state is normalized in
+  `evolution.db`; legacy JSON/JSONL is imported once and archived without dual
+  writes.
 
 ## Requirements
 
@@ -33,12 +35,14 @@ provider-supplied default model.
 | `FR-EVO-005` | MUST | Cold path execution supports after-turn and scheduled triggers, with manual mode disabling automatic runs. | Draft timing must follow config. |
 | `FR-EVO-006` | SHOULD | Invalid drafts are rejected without creating partial skill directories. | Bad generated content must not pollute workspace. |
 | `FR-EVO-007` | MUST | Model-backed success judging, pattern clustering, and draft generation use the default agent's runtime-resolved candidate: account routing chooses a concrete account, the configured exact alias or model-router result resolves for that account, and its per-account override selects the concrete upstream model. Evolution invokes only that candidate's provider and model; it never reads a provider default or treats an alias as an upstream model ID. If no runnable explicit target exists, the component takes its configured deterministic fallback without a provider call, while normal agent startup still reports `no model configured` for an absent required selection. | Background learning must use the same reviewed model policy as foreground turns and must not silently select a different upstream default. |
+| `FR-EVO-008` | MUST | The configured evolution state directory owns one private `evolution.db` with normalized ordered evidence, drafts, profiles, and version history. First open transactionally imports bounded legacy record, draft, and profile files, records digest-only skip audits, archives committed sources, and performs no JSON/JSONL dual writes. | Concurrent hot/cold paths need one durable authority and safe automatic upgrade. |
 
 ## Data And State Model
 
-Evolution state includes learning records, clustered pattern records, candidate
-drafts, skill profiles, configured thresholds, cold-path trigger state, and
-backup copies for replaced workspace skills. Model-backed work holds only the
+`<state-dir>/evolution.db` includes typed learning records, normalized ordered
+evidence, clustered pattern records, candidate drafts, skill profiles, and
+profile version history. Backup copies for replaced workspace skills remain
+recovery files. Model-backed work holds only the
 resolved candidate provider and concrete model for the active agent generation;
 the durable records do not turn raw provider model IDs into selection policy.
 
@@ -55,7 +59,7 @@ Owns: TEST pkg/evolution/*
 | --- | --- | --- | --- |
 | Config | `evolution.*` | Enablement, mode, state directory, thresholds, and cold path trigger. | `FR-EVO-001` through `FR-EVO-005` |
 | Runtime | Default agent account, model alias, and candidate registry | Resolve the same concrete account/provider/model candidate used by foreground execution, including router selection and per-account alias overrides. | `FR-EVO-007` |
-| Storage | Workspace evolution state | Learning records, clusters, drafts, profiles, and backups. | `FR-EVO-002`, `FR-EVO-004` |
+| Storage | `<state-dir>/evolution.db` | Typed learning records, clusters, drafts, profiles, ordered relationships, transactional migration, and retained legacy archives. | `FR-EVO-002`, `FR-EVO-004`, `FR-EVO-008` |
 
 ## Algorithms And Ordering
 
@@ -94,6 +98,7 @@ prompt-sensitive material.
 | `FR-EVO-003` | [pkg/evolution/pattern_clusterer_test.go](../../pkg/evolution/pattern_clusterer_test.go), [pkg/evolution/llm_draft_generator_test.go](../../pkg/evolution/llm_draft_generator_test.go) |
 | `FR-EVO-004`, `FR-EVO-006` | [pkg/evolution/apply_test.go](../../pkg/evolution/apply_test.go), [pkg/evolution/draft_review_test.go](../../pkg/evolution/draft_review_test.go), [docs/architecture/agent-self-evolution.md](../architecture/agent-self-evolution.md) |
 | `FR-EVO-007` | [pkg/agent/evolution_bridge_test.go](../../pkg/agent/evolution_bridge_test.go), [pkg/evolution/llm_draft_generator_test.go](../../pkg/evolution/llm_draft_generator_test.go), [pkg/evolution/pattern_clusterer_test.go](../../pkg/evolution/pattern_clusterer_test.go) |
+| `FR-EVO-008` | [pkg/evolution/sqlite_store_test.go](../../pkg/evolution/sqlite_store_test.go), [pkg/agent/file_mutation_policy_test.go](../../pkg/agent/file_mutation_policy_test.go) |
 
 ## Implementation Anchors
 

@@ -14,6 +14,12 @@ func TestNewPaths_DefaultRoot(t *testing.T) {
 	if paths.RootDir != wantRoot {
 		t.Fatalf("RootDir = %q, want %q", paths.RootDir, wantRoot)
 	}
+	if paths.Database != filepath.Join(wantRoot, "evolution.db") {
+		t.Fatalf("Database = %q", paths.Database)
+	}
+	if paths.LegacyArchive != filepath.Join(wantRoot, "legacy-json", "evolution-v1") {
+		t.Fatalf("LegacyArchive = %q", paths.LegacyArchive)
+	}
 	if paths.LearningRecords != filepath.Join(wantRoot, "learning-records.jsonl") {
 		t.Fatalf("LearningRecords = %q", paths.LearningRecords)
 	}
@@ -42,6 +48,9 @@ func TestNewPaths_UsesOverride(t *testing.T) {
 
 	if paths.RootDir != override {
 		t.Fatalf("RootDir = %q, want %q", paths.RootDir, override)
+	}
+	if paths.Database != filepath.Join(override, "evolution.db") {
+		t.Fatalf("Database = %q", paths.Database)
 	}
 	if paths.LearningRecords != filepath.Join(override, "learning-records.jsonl") {
 		t.Fatalf("LearningRecords = %q", paths.LearningRecords)

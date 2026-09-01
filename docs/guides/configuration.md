@@ -103,13 +103,18 @@ The `evolution` block controls PicoClaw's self-evolution runtime. When enabled, 
 |-------|---------|-------------|
 | `enabled` | `false` | Enables learning-record capture for completed agent turns. Heartbeat turns are ignored. |
 | `mode` | `observe` | `observe` records data only. `draft` can generate candidate skill drafts. `apply` can apply accepted drafts to workspace skills. |
-| `state_dir` | `""` | Optional directory for evolution state. Leave empty to use the default under the workspace. |
+| `state_dir` | `""` | Optional evolution state directory. The database is `<state_dir>/evolution.db`; leave empty for `<workspace>/state/evolution/evolution.db`. |
 | `min_task_count` | `2` | Minimum related task records required before a pattern is eligible for draft generation. |
 | `min_success_ratio` | `0.7` | Minimum success ratio for a task cluster. Use a value greater than `0` and up to `1`. |
 | `cold_path_trigger` | `after_turn` | Runs draft generation `after_turn`, on a `scheduled` cadence, or disables automatic cold-path runs when set to `manual`. There is no user-facing manual trigger yet. Applies only in `draft` and `apply` modes. |
 | `cold_path_times` | `[]` | Scheduled run times used when `cold_path_trigger` is `scheduled`, written as `HH:MM` strings. |
 
 Use `observe` first if you want to inspect learning records without generating skill changes. Use `draft` when you want PicoClaw to prepare reviewable improvements. Use `apply` only when you are comfortable letting accepted drafts update workspace skills.
+
+Legacy evolution JSON/JSONL is transactionally imported on first open and
+retained under `<state_dir>/legacy-json/evolution-v1/`. Stop all PicoClaw
+processes for the upgrade; the new database is authoritative immediately and
+is not dual-written to the old files.
 
 ### Request Context Policy
 

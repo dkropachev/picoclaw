@@ -34,8 +34,7 @@ func TestEvolutionBridge_DisabledWritesNothing(t *testing.T) {
 		t.Fatalf("response = %q, want %q", resp, "ok")
 	}
 
-	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "task-records.jsonl"))
-	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "skill-drafts.json"))
+	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "evolution.db"))
 }
 
 func TestEvolutionBridge_ObserveWritesCaseRecord(t *testing.T) {
@@ -488,7 +487,7 @@ func TestEvolutionBridge_ObserveDoesNotCreateDraftFile(t *testing.T) {
 	}
 
 	waitForEvolutionRecord(t, filepath.Join(tmpDir, "state", "evolution", "task-records.jsonl"))
-	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "skill-drafts.json"))
+	assertNoEvolutionDrafts(t, tmpDir)
 }
 
 func TestEvolutionBridge_DraftModeAutomaticallyRunsColdPathAndCreatesDraftFile(t *testing.T) {
@@ -534,8 +533,7 @@ func TestEvolutionBridge_DraftModeDoesNotRunColdPathForHeartbeat(t *testing.T) {
 	}
 
 	time.Sleep(150 * time.Millisecond)
-	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "task-records.jsonl"))
-	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "skill-drafts.json"))
+	assertNoEvolutionDrafts(t, tmpDir)
 }
 
 func TestEvolutionBridge_ScheduledModeDoesNotRunColdPathAfterTurn(t *testing.T) {
@@ -565,7 +563,7 @@ func TestEvolutionBridge_ScheduledModeDoesNotRunColdPathAfterTurn(t *testing.T) 
 
 	waitForEvolutionRecord(t, filepath.Join(tmpDir, "state", "evolution", "task-records.jsonl"))
 	time.Sleep(150 * time.Millisecond)
-	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "skill-drafts.json"))
+	assertNoEvolutionDrafts(t, tmpDir)
 }
 
 func TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator(t *testing.T) {
@@ -983,7 +981,7 @@ func TestEvolutionBridge_ObserveModeDoesNotRunColdPathOrCreateDraftFile(t *testi
 	}
 
 	waitForEvolutionRecord(t, filepath.Join(tmpDir, "state", "evolution", "task-records.jsonl"))
-	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "skill-drafts.json"))
+	assertNoEvolutionDrafts(t, tmpDir)
 }
 
 func TestEvolutionBridge_TurnEndUsesPayloadWorkspace(t *testing.T) {
@@ -1139,7 +1137,7 @@ func TestEvolutionBridge_CloseRejectsLateTurnEndEvents(t *testing.T) {
 		t.Fatalf("OnEvent() error = %v", err)
 	}
 
-	assertNotExists(t, filepath.Join(workspace, "state", "evolution", "task-records.jsonl"))
+	assertNotExists(t, filepath.Join(workspace, "state", "evolution", "evolution.db"))
 }
 
 func TestAgentLoop_ReloadProviderAndConfig_RebuildsEvolutionBridge(t *testing.T) {
@@ -1573,20 +1571,22 @@ func waitForEvolutionRecord(t *testing.T, path string) map[string]any {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			for i := len(lines) - 1; i >= 0; i-- {
-				if strings.TrimSpace(lines[i]) == "" {
-					continue
+		paths := evolutionPathsFromLegacyRecordPath(path)
+		if _, err := os.Stat(paths.Database); err == nil {
+			records, loadErr := evolution.NewSQLiteStore(paths).LoadTaskRecords()
+			if loadErr != nil {
+				t.Fatalf("LoadTaskRecords(%s): %v", paths.Database, loadErr)
+			}
+			if len(records) > 0 {
+				encoded, marshalErr := json.Marshal(records[len(records)-1])
+				if marshalErr != nil {
+					t.Fatalf("json.Marshal(%s): %v", paths.Database, marshalErr)
 				}
 				var record map[string]any
-				if err := json.Unmarshal([]byte(lines[i]), &record); err != nil {
-					t.Fatalf("json.Unmarshal(%s): %v", path, err)
+				if unmarshalErr := json.Unmarshal(encoded, &record); unmarshalErr != nil {
+					t.Fatalf("json.Unmarshal(%s): %v", paths.Database, unmarshalErr)
 				}
-				if kind, _ := record["kind"].(string); kind == string(evolution.RecordKindTask) {
-					return record
-				}
+				return record
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1598,37 +1598,30 @@ func waitForEvolutionRecord(t *testing.T, path string) map[string]any {
 
 func countEvolutionTaskRecords(t *testing.T, path string) int {
 	t.Helper()
-
-	data, err := os.ReadFile(path)
+	paths := evolutionPathsFromLegacyRecordPath(path)
+	records, err := evolution.NewSQLiteStore(paths).LoadTaskRecords()
 	if err != nil {
-		t.Fatalf("ReadFile(%s): %v", path, err)
+		t.Fatalf("LoadTaskRecords(%s): %v", paths.Database, err)
 	}
-	count := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var record map[string]any
-		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			t.Fatalf("json.Unmarshal(%s): %v", path, err)
-		}
-		if kind, _ := record["kind"].(string); kind == string(evolution.RecordKindTask) {
-			count++
-		}
-	}
-	return count
+	return len(records)
+}
+
+func evolutionPathsFromLegacyRecordPath(path string) evolution.Paths {
+	root := filepath.Dir(path)
+	workspace := filepath.Dir(filepath.Dir(root))
+	return evolution.NewPaths(workspace, "")
 }
 
 func waitForDrafts(t *testing.T, path string, want int) []evolution.SkillDraft {
 	t.Helper()
 
+	paths := evolutionPathsFromLegacyRecordPath(path)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			var drafts []evolution.SkillDraft
-			if err := json.Unmarshal(data, &drafts); err != nil {
-				t.Fatalf("json.Unmarshal(%s): %v", path, err)
+		if _, err := os.Stat(paths.Database); err == nil {
+			drafts, loadErr := evolution.NewSQLiteStore(paths).LoadDrafts()
+			if loadErr != nil {
+				t.Fatalf("LoadDrafts(%s): %v", paths.Database, loadErr)
 			}
 			if len(drafts) == want {
 				return drafts
@@ -1639,6 +1632,17 @@ func waitForDrafts(t *testing.T, path string, want int) []evolution.SkillDraft {
 
 	t.Fatalf("timed out waiting for %d drafts at %s", want, path)
 	return nil
+}
+
+func assertNoEvolutionDrafts(t *testing.T, workspace string) {
+	t.Helper()
+	drafts, err := evolution.NewSQLiteStore(evolution.NewPaths(workspace, "")).LoadDrafts()
+	if err != nil {
+		t.Fatalf("LoadDrafts: %v", err)
+	}
+	if len(drafts) != 0 {
+		t.Fatalf("drafts = %#v, want none", drafts)
+	}
 }
 
 func waitForSkillBody(t *testing.T, path string) string {

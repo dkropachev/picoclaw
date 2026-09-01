@@ -204,6 +204,32 @@ func agentWeixinRetainedStateFiles(weixinRoot, archiveRoot string) ([]string, er
 	return result, nil
 }
 
+func agentEvolutionFileMutationProtectedRoots(workspace, stateDir string) ([]string, error) {
+	root := strings.TrimSpace(stateDir)
+	if root == "" {
+		if strings.TrimSpace(workspace) == "" {
+			return nil, nil
+		}
+		root = filepath.Join(workspace, "state", "evolution")
+	}
+	root, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return nil, fmt.Errorf("resolve evolution state directory: %w", err)
+	}
+	database := filepath.Join(root, "evolution.db")
+	return []string{
+		database,
+		database + "-wal",
+		database + "-shm",
+		filepath.Join(root, "legacy-json"),
+		filepath.Join(root, "learning-records.jsonl"),
+		filepath.Join(root, "task-records.jsonl"),
+		filepath.Join(root, "pattern-records.jsonl"),
+		filepath.Join(root, "skill-drafts.json"),
+		filepath.Join(root, "profiles"),
+	}, nil
+}
+
 func mustAgentRuntimeFileMutationProtectedRoots(configPath string) []string {
 	roots, err := agentRuntimeFileMutationProtectedRoots(configPath)
 	if err != nil {

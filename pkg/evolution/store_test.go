@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -52,11 +53,14 @@ func TestStore_AppendLearningRecordsPersistsCaseAndRule(t *testing.T) {
 	if _, statErr := os.Stat(paths.LearningRecords); !os.IsNotExist(statErr) {
 		t.Fatalf("legacy learning records file should not be written, stat err = %v", statErr)
 	}
-	if _, statErr := os.Stat(paths.TaskRecords); statErr != nil {
-		t.Fatalf("task records file should exist: %v", statErr)
+	if _, statErr := os.Stat(paths.TaskRecords); !os.IsNotExist(statErr) {
+		t.Fatalf("legacy task records file should not be written, stat err = %v", statErr)
 	}
-	if _, statErr := os.Stat(paths.PatternRecords); statErr != nil {
-		t.Fatalf("pattern records file should exist: %v", statErr)
+	if _, statErr := os.Stat(paths.PatternRecords); !os.IsNotExist(statErr) {
+		t.Fatalf("legacy pattern records file should not be written, stat err = %v", statErr)
+	}
+	if info, statErr := os.Stat(paths.Database); statErr != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("evolution database = %v, %v", info, statErr)
 	}
 }
 
@@ -401,20 +405,16 @@ func TestStore_LoadLearningRecordsIgnoresTruncatedTrailingLine(t *testing.T) {
 		Summary:     "weather task completed",
 		Status:      evolution.RecordStatus("new"),
 	}
-	if err := store.AppendLearningRecords([]evolution.LearningRecord{record}); err != nil {
-		t.Fatalf("AppendLearningRecords: %v", err)
-	}
-
-	f, err := os.OpenFile(paths.TaskRecords, os.O_APPEND|os.O_WRONLY, 0o644)
+	encoded, err := json.Marshal(record)
 	if err != nil {
-		t.Fatalf("OpenFile: %v", err)
+		t.Fatalf("Marshal: %v", err)
 	}
-	if _, writeErr := f.WriteString("{\"id\":\"broken\""); writeErr != nil {
-		f.Close()
-		t.Fatalf("WriteString: %v", writeErr)
+	if err := os.MkdirAll(paths.RootDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
 	}
-	if closeErr := f.Close(); closeErr != nil {
-		t.Fatalf("Close: %v", closeErr)
+	legacy := append(append(encoded, '\n'), []byte("{\"id\":\"broken\"")...)
+	if err := os.WriteFile(paths.TaskRecords, legacy, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
 
 	loaded, err := store.LoadLearningRecords()
@@ -428,11 +428,12 @@ func TestStore_LoadLearningRecordsIgnoresTruncatedTrailingLine(t *testing.T) {
 		t.Fatalf("loaded[0].ID = %q, want %q", loaded[0].ID, "case-1")
 	}
 
-	data, err := os.ReadFile(paths.TaskRecords)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+	if _, err := os.Stat(paths.TaskRecords); !os.IsNotExist(err) {
+		t.Fatalf("legacy source was not archived: %v", err)
 	}
-	if !strings.Contains(string(data), "\"broken\"") {
-		t.Fatalf("expected test fixture to include broken trailing line")
+	archived := filepath.Join(paths.LegacyArchive, "task-records.jsonl")
+	data, err := os.ReadFile(archived)
+	if err != nil || !strings.Contains(string(data), "\"broken\"") {
+		t.Fatalf("archived legacy fixture = %q, %v", data, err)
 	}
 }

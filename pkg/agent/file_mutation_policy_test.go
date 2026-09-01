@@ -806,6 +806,65 @@ func TestAgentRuntimeFileMutationProtectedRootsRejectWeixinDirectorySymlink(t *t
 	}
 }
 
+func TestAgentEvolutionFileMutationProtectedRootsCoverDatabaseAndLegacySources(t *testing.T) {
+	workspace := t.TempDir()
+	custom := filepath.Join(t.TempDir(), "custom-evolution")
+	for _, test := range []struct {
+		name, stateDir, root string
+	}{
+		{name: "default", root: filepath.Join(workspace, "state", "evolution")},
+		{name: "custom", stateDir: custom, root: custom},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			roots, err := agentEvolutionFileMutationProtectedRoots(workspace, test.stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			database := filepath.Join(test.root, "evolution.db")
+			want := []string{
+				database, database + "-wal", database + "-shm",
+				filepath.Join(test.root, "legacy-json"),
+				filepath.Join(test.root, "learning-records.jsonl"),
+				filepath.Join(test.root, "task-records.jsonl"),
+				filepath.Join(test.root, "pattern-records.jsonl"),
+				filepath.Join(test.root, "skill-drafts.json"),
+				filepath.Join(test.root, "profiles"),
+			}
+			if len(roots) != len(want) {
+				t.Fatalf("roots = %#v, want %#v", roots, want)
+			}
+			for index := range want {
+				if roots[index] != want[index] {
+					t.Fatalf("root %d = %q, want %q", index, roots[index], want[index])
+				}
+			}
+		})
+	}
+}
+
+func TestAgentFileMutationPolicyProtectsConfiguredEvolutionDatabase(t *testing.T) {
+	workspace := t.TempDir()
+	stateDir := filepath.Join(workspace, "custom-evolution")
+	database := filepath.Join(stateDir, "evolution.db")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(database, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := agentFileMutationTestConfig(workspace)
+	cfg.Evolution.StateDir = stateDir
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+	for _, toolName := range []string{"write_file", "edit_file", "append_file"} {
+		requireAgentFileMutationDenied(t, agent.Tools, toolName, workspace, database, true)
+	}
+	content, err := os.ReadFile(database)
+	if err != nil || string(content) != "before" {
+		t.Fatalf("protected evolution database = %q, %v", content, err)
+	}
+}
+
 func TestAgentFileMutationPolicyFailureBoundaries(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not permit removing the process working directory")

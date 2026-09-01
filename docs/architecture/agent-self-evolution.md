@@ -42,6 +42,26 @@ When `evolution.enabled` is false, `mode` is treated as disabled at runtime.
 
 ## State
 
-By default, evolution state is stored under the workspace. `state_dir` can redirect that state to another directory. The state includes learning records, clustered pattern records, drafts, and skill profiles.
+By default, mutable evolution state is stored in the private WAL-backed database
+`<workspace>/state/evolution/evolution.db`. `state_dir` redirects the database to
+`<state_dir>/evolution.db`. Learning records, ordered tool/skill evidence,
+clustered patterns, drafts, profiles, and profile version history are typed rows;
+only the arbitrary nested `LearningRecord.Source` value is a bounded canonical
+JSON BLOB. Skill backup copies remain ordinary recovery files.
+
+On the first open after upgrade, PicoClaw imports `learning-records.jsonl`,
+`task-records.jsonl`, `pattern-records.jsonl`, `skill-drafts.json`, and profile
+JSON files in one immediate transaction. Invalid individual records are skipped
+with digest-only audit entries. Unsafe paths, oversized sources, enumeration
+errors, or database failures abort the entire migration. After commit, examined
+sources move without overwrite to
+`<state-dir>/legacy-json/evolution-v1/`; SQLite is immediately authoritative and
+there are no dual writes.
+
+Stop every PicoClaw process before upgrading or rolling back. To roll back,
+restore the retained legacy files to their original relative paths and remove
+or restore `evolution.db` together with its matching `-wal` and `-shm`
+companions. Mixed old and new binaries sharing an evolution state directory are
+unsupported.
 
 For user-facing configuration fields, see the [Configuration Guide](../guides/configuration.md#agent-self-evolution).

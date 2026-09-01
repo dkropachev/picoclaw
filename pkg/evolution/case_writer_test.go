@@ -2,9 +2,6 @@ package evolution_test
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -26,29 +23,15 @@ func TestCaseWriter_AppendsOneRecord(t *testing.T) {
 		t.Fatalf("AppendCase second record: %v", err)
 	}
 
-	data, err := os.ReadFile(paths.TaskRecords)
+	loaded, err := evolution.NewSQLiteStore(paths).LoadTaskRecords()
 	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+		t.Fatalf("LoadTaskRecords: %v", err)
 	}
-
-	text := string(data)
-	if !strings.HasSuffix(text, "\n") {
-		t.Fatalf("record file should end with newline, got %q", text)
+	if len(loaded) != 2 {
+		t.Fatalf("record count = %d, want 2", len(loaded))
 	}
-
-	lines := strings.Split(strings.TrimSpace(text), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("record file line count = %d, want 2", len(lines))
-	}
-
-	records := []evolution.LearningRecord{record1, record2}
-	for i, line := range lines {
-		var got evolution.LearningRecord
-		if err := json.Unmarshal([]byte(line), &got); err != nil {
-			t.Fatalf("Unmarshal line %d: %v", i, err)
-		}
-
-		want := records[i]
+	for i, want := range []evolution.LearningRecord{record1, record2} {
+		got := loaded[i]
 		if got.ID != want.ID {
 			t.Fatalf("record %d ID = %q, want %q", i, got.ID, want.ID)
 		}
