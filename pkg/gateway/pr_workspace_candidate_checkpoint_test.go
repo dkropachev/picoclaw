@@ -1,12 +1,14 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,7 +25,9 @@ func TestPRWorkspaceCandidateCheckpointStoreRoundTripAndRemove(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkpoint := prWorkspaceCandidateCheckpointFixture()
-	if err = store.Save(checkpoint); err != nil {
+	absent := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
+	revision, err := store.Save(checkpoint, absent)
+	if err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 	info, err := os.Lstat(store.databasePath())
@@ -33,17 +37,18 @@ func TestPRWorkspaceCandidateCheckpointStoreRoundTripAndRemove(t *testing.T) {
 	if info.Mode().Perm() != 0o600 || !info.Mode().IsRegular() {
 		t.Fatalf("checkpoint mode = %v", info.Mode())
 	}
-	loaded, found, err := store.Load(checkpoint.WorkspaceID)
-	if err != nil || !found || loaded != checkpoint {
+	loaded, loadedRevision, found, err := store.Load(checkpoint.WorkspaceID)
+	if err != nil || !found || loaded != checkpoint || loadedRevision != revision {
 		t.Fatalf("Load() = %#v, %v, %v", loaded, found, err)
 	}
-	if err = store.Remove(checkpoint.WorkspaceID); err != nil {
+	if err = store.Remove(checkpoint.WorkspaceID, loadedRevision); err != nil {
 		t.Fatalf("Remove() error = %v", err)
 	}
-	if _, found, err = store.Load(checkpoint.WorkspaceID); err != nil || found {
+	_, absent, found, err = store.Load(checkpoint.WorkspaceID)
+	if err != nil || found {
 		t.Fatalf("Load(after remove) found = %v, error = %v", found, err)
 	}
-	if err = store.Remove(checkpoint.WorkspaceID); err != nil {
+	if err = store.Remove(checkpoint.WorkspaceID, absent); err != nil {
 		t.Fatalf("idempotent Remove() error = %v", err)
 	}
 }
@@ -68,7 +73,7 @@ func TestPRWorkspaceCandidateCheckpointStoreRejectsUnsafeOrMalformedFiles(t *tes
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, found, loadErr := store.Load(checkpoint.WorkspaceID); loadErr != nil || found {
+		if _, _, found, loadErr := store.Load(checkpoint.WorkspaceID); loadErr != nil || found {
 			t.Fatalf("malformed legacy checkpoint = found %v, error %v", found, loadErr)
 		}
 		archive := filepath.Join(root, "legacy-json", prWorkspaceCheckpointArchiveLabel, filepath.Base(legacyPath))
@@ -115,8 +120,71 @@ func TestPRWorkspaceCandidateCheckpointStoreRejectsUnsafeOrMalformedFiles(t *tes
 			t.Fatal("constructor accepted a symlink checkpoint")
 		}
 	})
+
+	t.Run("archive parent symlink without sources", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "active")
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), filepath.Join(root, "legacy-json")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if _, err := newPRWorkspaceCandidateCheckpointStore(root); err == nil ||
+			!strings.Contains(err.Error(), "archive ancestor") {
+			t.Fatalf("constructor with symlinked empty archive error = %v", err)
+		}
+	})
 }
 
+//nolint:govet // Narrow test assertions intentionally use independent error scopes.
+func TestPRWorkspaceCheckpointDuplicateJSONNameIsAuditedAndArchived(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "active")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	encoded, err := json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded[:len(encoded)-1], []byte(`,"VERSION":2}`)...)
+	if _, err := decodeLegacyPRWorkspaceCheckpoint(encoded); err == nil ||
+		!strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("duplicate checkpoint decoder error = %v", err)
+	}
+	legacy := filepath.Join(root, legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID))
+	if err := os.WriteFile(legacy, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := newPRWorkspaceCandidateCheckpointStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(root, "legacy-json", prWorkspaceCheckpointArchiveLabel, filepath.Base(legacy))
+	if _, err := os.Lstat(archive); err != nil {
+		t.Fatalf("duplicate checkpoint was not archived: %v", err)
+	}
+	database, err := store.open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var skipped, issues int
+	if err := database.QueryRow(`SELECT
+	    (SELECT skipped_count FROM storage_imports WHERE component = ?),
+	    (SELECT COUNT(*) FROM storage_import_issues
+	      WHERE component = ? AND issue_code = 'malformed-checkpoint')`,
+		prWorkspaceCheckpointComponent,
+		prWorkspaceCheckpointComponent,
+	).Scan(&skipped, &issues); err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 1 || issues != 1 {
+		t.Fatalf("duplicate checkpoint audit = skipped:%d issues:%d", skipped, issues)
+	}
+}
+
+//nolint:govet // Narrow test assertions intentionally use independent error scopes.
 func TestPRWorkspaceCandidateCheckpointSQLiteMigratesArchivesAndReopens(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "active")
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -135,7 +203,7 @@ func TestPRWorkspaceCandidateCheckpointSQLiteMigratesArchivesAndReopens(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, found, err := store.Load(checkpoint.WorkspaceID)
+	loaded, _, found, err := store.Load(checkpoint.WorkspaceID)
 	if err != nil || !found || !equivalentPRWorkspaceCheckpoint(loaded, checkpoint) {
 		t.Fatalf("migrated checkpoint = %#v, found=%v err=%v", loaded, found, err)
 	}
@@ -165,6 +233,168 @@ func TestPRWorkspaceCandidateCheckpointSQLiteMigratesArchivesAndReopens(t *testi
 	if _, err := newPRWorkspaceCandidateCheckpointStore(root); err != nil {
 		t.Fatalf("idempotent checkpoint reopen: %v", err)
 	}
+	if err := os.Rename(archive, legacy); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", store.databasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE storage_imports
+	    SET archive_status = 'pending', archived_at = NULL
+	    WHERE component = ?`, prWorkspaceCheckpointComponent); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newPRWorkspaceCandidateCheckpointStore(root); err != nil {
+		t.Fatalf("checkpoint archive retry with closed import horizon: %v", err)
+	}
+	if _, err := os.Lstat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("checkpoint archive retry retained source: %v", err)
+	}
+	if _, err := os.Lstat(archive); err != nil {
+		t.Fatalf("checkpoint archive retry lost destination: %v", err)
+	}
+}
+
+//nolint:govet // Narrow test assertions intentionally use independent error scopes.
+func TestPRWorkspaceCheckpointEmptyFirstOpenRejectsLateLegacySource(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "active")
+	store, err := newPRWorkspaceCandidateCheckpointStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	encoded, err := json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(root, legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID))
+	if err := os.WriteFile(legacy, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := newPRWorkspaceCandidateCheckpointStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, found, err := reopened.Load(checkpoint.WorkspaceID); err != nil || found {
+		t.Fatalf("late legacy checkpoint = found:%v error:%v", found, err)
+	}
+	archive := filepath.Join(
+		root, "legacy-json", prWorkspaceCheckpointArchiveLabel, filepath.Base(legacy),
+	)
+	if _, err := os.Lstat(archive); err != nil {
+		t.Fatalf("late legacy checkpoint was not archived: %v", err)
+	}
+	database, err := store.open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var skipped, issues int
+	if err := database.QueryRow(`SELECT
+	    (SELECT skipped_count FROM storage_imports WHERE component = ?),
+	    (SELECT COUNT(*) FROM storage_import_issues
+	      WHERE component = ? AND issue_code = 'sqlite-authoritative')`,
+		prWorkspaceCheckpointComponent,
+		prWorkspaceCheckpointComponent,
+	).Scan(&skipped, &issues); err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 1 || issues != 1 {
+		t.Fatalf("late checkpoint audit = skipped:%d issues:%d", skipped, issues)
+	}
+}
+
+//nolint:govet // Narrow test assertions intentionally use independent error scopes.
+func TestPRWorkspaceCheckpointSchemaV1UpgradeClosesImportAndSeedsRevision(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "active")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, prWorkspaceCheckpointDatabaseFilename)
+	v1, err := sqlitestore.Open(t.Context(), path, sqlitestore.Options{
+		Component: prWorkspaceCheckpointComponent,
+		Migrations: []sqlitestore.Migration{{
+			Version: 1,
+			Statements: []string{
+				prWorkspaceCheckpointsSchema,
+				prWorkspaceCheckpointsStateIndexSchema,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	arguments := append(prWorkspaceCheckpointArguments(checkpoint), int64(41))
+	if _, err := v1.Exec(prWorkspaceCheckpointInsertSQL, arguments...); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	late := checkpoint
+	late.WorkspaceID = "devw-late-v1-checkpoint"
+	encoded, err := json.Marshal(late)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(root, legacyPRWorkspaceCheckpointFilename(late.WorkspaceID))
+	if err := os.WriteFile(legacy, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := newPRWorkspaceCandidateCheckpointStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, revision, found, err := store.Load(checkpoint.WorkspaceID)
+	if err != nil || !found || loaded != checkpoint || revision.sequence != 41 {
+		t.Fatalf("upgraded v1 checkpoint = %#v, revision:%#v found:%v error:%v", loaded, revision, found, err)
+	}
+	if _, _, found, err := store.Load(late.WorkspaceID); err != nil || found {
+		t.Fatalf("late v1 checkpoint = found:%v error:%v", found, err)
+	}
+	loaded.Candidate.CandidateDigest = strings.Repeat("8", 64)
+	next, err := store.Save(loaded, revision)
+	if err != nil || next.sequence != 42 {
+		t.Fatalf("first upgraded revision = %#v, %v", next, err)
+	}
+	database, err := store.open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var userVersion int
+	if err := database.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
+		t.Fatal(err)
+	}
+	if userVersion != 2 {
+		t.Fatalf("upgraded checkpoint user_version = %d", userVersion)
+	}
+}
+
+func TestPRWorkspaceCheckpointMissingImportHorizonFailsClosed(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "active")
+	store, err := newPRWorkspaceCandidateCheckpointStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", store.databasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DELETE FROM checkpoint_legacy_import_state`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newPRWorkspaceCandidateCheckpointStore(root); !errors.Is(err, sqlitestore.ErrInvalidSchema) {
+		t.Fatalf("missing checkpoint import horizon error = %v", err)
+	}
 }
 
 func TestPRWorkspaceCandidateCheckpointSQLiteCASAndSchemaFences(t *testing.T) {
@@ -174,7 +404,9 @@ func TestPRWorkspaceCandidateCheckpointSQLiteCASAndSchemaFences(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkpoint := prWorkspaceCandidateCheckpointFixture()
-	if saveErr := store.Save(checkpoint); saveErr != nil {
+	revision := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
+	revision, saveErr := store.Save(checkpoint, revision)
+	if saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	parked := checkpoint
@@ -185,12 +417,13 @@ func TestPRWorkspaceCandidateCheckpointSQLiteCASAndSchemaFences(t *testing.T) {
 		ParkIntentID: "park-checkpoint", BaseCommit: checkpoint.HeadSHA,
 		Tip: "5555555555555555555555555555555555555555", Tree: checkpoint.Candidate.Tree,
 	}
-	if saveErr := store.Save(parked); saveErr != nil {
+	revision, saveErr = store.Save(parked, revision)
+	if saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	conflict := parked
 	conflict.Candidate.CandidateDigest = strings.Repeat("6", 64)
-	if saveErr := store.Save(conflict); saveErr == nil || !strings.Contains(saveErr.Error(), "conflict") {
+	if _, saveErr := store.Save(conflict, revision); saveErr == nil || !strings.Contains(saveErr.Error(), "conflict") {
 		t.Fatalf("parked checkpoint overwrite = %v", saveErr)
 	}
 
@@ -198,12 +431,247 @@ func TestPRWorkspaceCandidateCheckpointSQLiteCASAndSchemaFences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`PRAGMA user_version = 2`); err != nil {
+	if _, err := raw.Exec(`PRAGMA user_version = 3`); err != nil {
 		t.Fatal(err)
 	}
 	_ = raw.Close()
 	if _, err := newPRWorkspaceCandidateCheckpointStore(root); !errors.Is(err, sqlitestore.ErrTooNew) {
 		t.Fatalf("too-new checkpoint schema = %v", err)
+	}
+}
+
+//nolint:govet // Parent and subprocess assertions intentionally use independent error scopes.
+func TestPRWorkspaceCheckpointStaleRevisionIsFencedAcrossProcesses(t *testing.T) {
+	if os.Getenv("PICOCLAW_CHECKPOINT_CAS_HELPER") == "1" {
+		root := os.Getenv("PICOCLAW_CHECKPOINT_CAS_ROOT")
+		ready := os.Getenv("PICOCLAW_CHECKPOINT_CAS_READY")
+		release := os.Getenv("PICOCLAW_CHECKPOINT_CAS_RELEASE")
+		operation := os.Getenv("PICOCLAW_CHECKPOINT_CAS_OPERATION")
+		store, err := newPRWorkspaceCandidateCheckpointStore(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkpoint, revision, found, err := store.Load(
+			prWorkspaceCandidateCheckpointFixture().WorkspaceID,
+		)
+		if err != nil || !found {
+			t.Fatalf("helper checkpoint load = found:%v error:%v", found, err)
+		}
+		if err := os.WriteFile(ready, []byte("ready\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		waitForPRWorkspaceCheckpointProcessFile(t, release)
+		switch operation {
+		case "overwrite":
+			checkpoint.Candidate.CandidateDigest = strings.Repeat("7", 64)
+			_, err = store.Save(checkpoint, revision)
+		case "delete":
+			err = store.Remove(checkpoint.WorkspaceID, revision)
+		default:
+			t.Fatalf("unknown helper operation %q", operation)
+		}
+		if !errors.Is(err, errPRWorkspaceCandidateCheckpointConflict) {
+			t.Fatalf("stale helper %s error = %v", operation, err)
+		}
+		return
+	}
+
+	for _, operation := range []string{"overwrite", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "active")
+			store, err := newPRWorkspaceCandidateCheckpointStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkpoint := prWorkspaceCandidateCheckpointFixture()
+			absent := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
+			if _, err := store.Save(checkpoint, absent); err != nil {
+				t.Fatal(err)
+			}
+
+			ready := filepath.Join(t.TempDir(), "ready")
+			release := filepath.Join(t.TempDir(), "release")
+			var output bytes.Buffer
+			command := exec.Command(
+				os.Args[0],
+				"-test.run=^TestPRWorkspaceCheckpointStaleRevisionIsFencedAcrossProcesses$",
+			)
+			command.Env = append(
+				os.Environ(),
+				"PICOCLAW_CHECKPOINT_CAS_HELPER=1",
+				"PICOCLAW_CHECKPOINT_CAS_ROOT="+root,
+				"PICOCLAW_CHECKPOINT_CAS_READY="+ready,
+				"PICOCLAW_CHECKPOINT_CAS_RELEASE="+release,
+				"PICOCLAW_CHECKPOINT_CAS_OPERATION="+operation,
+			)
+			command.Stdout = &output
+			command.Stderr = &output
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if command.Process != nil {
+					_ = command.Process.Kill()
+				}
+			})
+			waitForPRWorkspaceCheckpointProcessFile(t, ready)
+
+			current, revision, found, err := store.Load(checkpoint.WorkspaceID)
+			if err != nil || !found {
+				t.Fatalf("parent checkpoint load = found:%v error:%v", found, err)
+			}
+			current.Candidate.CandidateDigest = strings.Repeat("6", 64)
+			if operation == "delete" {
+				if err := store.Remove(current.WorkspaceID, revision); err != nil {
+					t.Fatal(err)
+				}
+				revision = requireAbsentPRWorkspaceCheckpointRevision(t, store, current.WorkspaceID)
+			}
+			if _, err := store.Save(current, revision); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(release, []byte("release\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := command.Wait(); err != nil {
+				t.Fatalf("stale %s helper failed: %v\n%s", operation, err, output.String())
+			}
+			retained, _, found, err := store.Load(checkpoint.WorkspaceID)
+			if err != nil || !found || retained.Candidate.CandidateDigest != strings.Repeat("6", 64) {
+				t.Fatalf("retained checkpoint after stale %s = %#v, found:%v error:%v", operation, retained, found, err)
+			}
+		})
+	}
+}
+
+//nolint:govet // Narrow test assertions intentionally use independent error scopes.
+func TestPRWorkspaceCheckpointCapacityGuardDoesNotWedgeStore(t *testing.T) {
+	store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	absent := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
+	if _, err := store.Save(checkpoint, absent); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = sqlitestore.Immediate(t.Context(), database, func(conn *sql.Conn) error {
+		_, err := conn.ExecContext(t.Context(), `WITH RECURSIVE sequence(value) AS (
+		    SELECT 2 UNION ALL SELECT value + 1 FROM sequence WHERE value < 10000
+		) INSERT INTO candidate_checkpoints
+		SELECT printf('devw-capacity-%05d', value), checkpoint_version, state,
+		    repository, source_ref, head_sha, charter_id, charter_head_sha, git_workspace_id, line_id,
+		    lease_workspace_id, lease_version, lease_mutation_epoch, lease_tip, lease_tree,
+		    lease_already_owned, candidate_workspace_id, candidate_parent_commit, candidate_tree,
+		    candidate_digest, candidate_changed_files, fence_git_workspace_id, fence_line_id,
+		    fence_line_version, fence_mutation_epoch, fence_park_intent_id, fence_base_commit,
+		    fence_tip, fence_tree, value
+		FROM candidate_checkpoints CROSS JOIN sequence
+		WHERE workspace_id = ?`, checkpoint.WorkspaceID)
+		if err != nil {
+			return err
+		}
+		_, err = conn.ExecContext(t.Context(), `UPDATE checkpoint_metadata
+		    SET next_revision = 10001 WHERE singleton = 1`)
+		return err
+	})
+	if closeErr := database.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newCheckpoint := checkpoint
+	newCheckpoint.WorkspaceID = "devw-capacity-new"
+	newAbsent := requireAbsentPRWorkspaceCheckpointRevision(t, store, newCheckpoint.WorkspaceID)
+	if _, err := store.Save(newCheckpoint, newAbsent); !errors.Is(err, errPRWorkspaceCheckpointCapacity) {
+		t.Fatalf("10,001st checkpoint save error = %v", err)
+	}
+	current, revision, found, err := store.Load(checkpoint.WorkspaceID)
+	if err != nil || !found {
+		t.Fatalf("full-store checkpoint load = found:%v error:%v", found, err)
+	}
+	current.Candidate.CandidateDigest = strings.Repeat("6", 64)
+	if _, err := store.Save(current, revision); err != nil {
+		t.Fatalf("full-store checkpoint update: %v", err)
+	}
+	removedID := "devw-capacity-00002"
+	_, removedRevision, found, err := store.Load(removedID)
+	if err != nil || !found {
+		t.Fatalf("capacity checkpoint load = found:%v error:%v", found, err)
+	}
+	if err := store.Remove(removedID, removedRevision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Save(newCheckpoint, newAbsent); err != nil {
+		t.Fatalf("checkpoint save after freeing capacity: %v", err)
+	}
+}
+
+//nolint:govet // Narrow test assertions intentionally use independent error scopes.
+func TestPRWorkspaceRuntimeCarriesCheckpointRevisionAcrossSaves(t *testing.T) {
+	store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	candidate := prWorkspaceCandidate{
+		pin: gitworkspace.PinnedAcquireRequest{
+			Repository: checkpoint.Repository, SourceRef: checkpoint.SourceRef,
+			ExpectedCommit: checkpoint.HeadSHA, ReservationKey: "pr-workspace:" + checkpoint.WorkspaceID,
+		},
+		candidate: checkpoint.Candidate,
+		charter: prworkspace.Charter{
+			ID: checkpoint.CharterID, HeadSHA: checkpoint.CharterHeadSHA,
+		},
+		lineID: checkpoint.LineID,
+		lease:  checkpoint.Lease,
+		checkpointRevision: requireAbsentPRWorkspaceCheckpointRevision(
+			t, store, checkpoint.WorkspaceID,
+		),
+	}
+	runtime := &prWorkspaceImplementationRuntime{checkpoints: store}
+	if err := runtime.saveCandidateCheckpoint(checkpoint.WorkspaceID, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	if !candidate.checkpointRevision.exists {
+		t.Fatal("runtime did not retain the committed checkpoint revision")
+	}
+	stale := candidate
+	current, revision, found, err := store.Load(checkpoint.WorkspaceID)
+	if err != nil || !found {
+		t.Fatalf("runtime checkpoint load = found:%v error:%v", found, err)
+	}
+	current.Candidate.CandidateDigest = strings.Repeat("6", 64)
+	if _, err := store.Save(current, revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.saveCandidateCheckpoint(checkpoint.WorkspaceID, &stale); !errors.Is(
+		err,
+		errPRWorkspaceCandidateCheckpointConflict,
+	) {
+		t.Fatalf("runtime stale checkpoint save error = %v", err)
+	}
+}
+
+func waitForPRWorkspaceCheckpointProcessFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for checkpoint process file %s", filepath.Base(path))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -226,13 +694,13 @@ func TestPRWorkspaceCandidateCheckpointSQLiteInputAndNilBoundaries(t *testing.T)
 	if database, err := nilStore.open(t.Context()); err == nil || database != nil {
 		t.Fatalf("nil store open = %#v, %v", database, err)
 	}
-	if err := nilStore.Save(checkpoint); err == nil {
+	if _, err := nilStore.Save(checkpoint, prWorkspaceCandidateCheckpointRevision{}); err == nil {
 		t.Fatal("nil store Save succeeded")
 	}
-	if _, found, err := nilStore.Load(checkpoint.WorkspaceID); err == nil || found {
+	if _, _, found, err := nilStore.Load(checkpoint.WorkspaceID); err == nil || found {
 		t.Fatalf("nil store Load = found %v, error %v", found, err)
 	}
-	if err := nilStore.Remove(checkpoint.WorkspaceID); err == nil {
+	if err := nilStore.Remove(checkpoint.WorkspaceID, prWorkspaceCandidateCheckpointRevision{}); err == nil {
 		t.Fatal("nil store Remove succeeded")
 	}
 
@@ -241,35 +709,36 @@ func TestPRWorkspaceCandidateCheckpointSQLiteInputAndNilBoundaries(t *testing.T)
 		t.Fatal(err)
 	}
 	for _, workspaceID := range []string{"", " \t\r\n "} {
-		if _, found, loadErr := store.Load(workspaceID); loadErr == nil || found {
+		if _, _, found, loadErr := store.Load(workspaceID); loadErr == nil || found {
 			t.Fatalf("Load(%q) = found %v, error %v", workspaceID, found, loadErr)
 		}
-		if removeErr := store.Remove(workspaceID); removeErr == nil {
+		if removeErr := store.Remove(workspaceID, prWorkspaceCandidateCheckpointRevision{}); removeErr == nil {
 			t.Fatalf("Remove(%q) succeeded", workspaceID)
 		}
 	}
+	absent := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
 	oversized := checkpoint
 	oversized.Repository = strings.Repeat("r", prWorkspaceCandidateCheckpointMaxSize)
-	if saveErr := store.Save(oversized); saveErr == nil || !strings.Contains(saveErr.Error(), "too large") {
+	if _, saveErr := store.Save(oversized, absent); saveErr == nil || !strings.Contains(saveErr.Error(), "too large") {
 		t.Fatalf("oversized Save error = %v", saveErr)
 	}
 	invalid := checkpoint
 	invalid.Fence = &prworkspace.ImplementationPublicationFence{}
-	if saveErr := store.Save(invalid); saveErr == nil {
+	if _, saveErr := store.Save(invalid, absent); saveErr == nil {
 		t.Fatal("active checkpoint with fence was accepted")
 	}
 	invalid = checkpoint
 	invalid.State = prWorkspaceCandidateCheckpointParked
-	if saveErr := store.Save(invalid); saveErr == nil {
+	if _, saveErr := store.Save(invalid, absent); saveErr == nil {
 		t.Fatal("parked checkpoint without fence was accepted")
 	}
 
 	alreadyOwned := checkpoint
 	alreadyOwned.Lease.AlreadyOwned = true
-	if saveErr := store.Save(alreadyOwned); saveErr != nil {
+	if _, saveErr := store.Save(alreadyOwned, absent); saveErr != nil {
 		t.Fatal(saveErr)
 	}
-	loaded, found, err := store.Load(alreadyOwned.WorkspaceID)
+	loaded, _, found, err := store.Load(alreadyOwned.WorkspaceID)
 	if err != nil || !found || !loaded.Lease.AlreadyOwned {
 		t.Fatalf("already-owned round trip = %#v, found=%v err=%v", loaded, found, err)
 	}
@@ -304,7 +773,8 @@ func TestPRWorkspaceCandidateCheckpointSQLiteAuditsConflictingLegacyIdentity(t *
 		t.Fatal(err)
 	}
 	checkpoint := prWorkspaceCandidateCheckpointFixture()
-	if saveErr := store.Save(checkpoint); saveErr != nil {
+	absent := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
+	if _, saveErr := store.Save(checkpoint, absent); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	encoded, err := json.Marshal(checkpoint)
@@ -317,6 +787,12 @@ func TestPRWorkspaceCandidateCheckpointSQLiteAuditsConflictingLegacyIdentity(t *
 	}
 	defer database.Close()
 	err = sqlitestore.Immediate(t.Context(), database, func(conn *sql.Conn) error {
+		if _, deleteErr := conn.ExecContext(
+			t.Context(),
+			`DELETE FROM checkpoint_legacy_import_state`,
+		); deleteErr != nil {
+			return deleteErr
+		}
 		for _, test := range []struct {
 			name      string
 			relative  string
@@ -336,7 +812,10 @@ func TestPRWorkspaceCandidateCheckpointSQLiteAuditsConflictingLegacyIdentity(t *
 				return fmt.Errorf("%s import = %#v, %v", test.name, result, importErr)
 			}
 		}
-		return nil
+		_, insertErr := conn.ExecContext(t.Context(), `INSERT INTO checkpoint_legacy_import_state(
+		    singleton, import_closed
+		) VALUES (1, 1)`)
+		return insertErr
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -390,7 +869,9 @@ func TestPRWorkspaceCandidateCheckpointSQLiteRejectsSchemaAndRowTampering(t *tes
 				t.Fatal(err)
 			}
 			if test.name == "invalid row" {
-				if saveErr := store.Save(prWorkspaceCandidateCheckpointFixture()); saveErr != nil {
+				checkpoint := prWorkspaceCandidateCheckpointFixture()
+				absent := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
+				if _, saveErr := store.Save(checkpoint, absent); saveErr != nil {
 					t.Fatal(saveErr)
 				}
 			}
@@ -438,11 +919,12 @@ func TestPRWorkspaceCandidateCheckpointSQLiteConstraintFailuresRollback(t *testi
 			t.Fatal(err)
 		}
 		checkpoint := prWorkspaceCandidateCheckpointFixture()
+		absent := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
 		checkpoint.Repository = strings.Repeat("r", 4097)
-		if err := store.Save(checkpoint); err == nil || !strings.Contains(err.Error(), "write") {
+		if _, err := store.Save(checkpoint, absent); err == nil || !strings.Contains(err.Error(), "write") {
 			t.Fatalf("constraint insert error = %v", err)
 		}
-		if _, found, err := store.Load(checkpoint.WorkspaceID); err != nil || found {
+		if _, _, found, err := store.Load(checkpoint.WorkspaceID); err != nil || found {
 			t.Fatalf("failed insert remained: found=%v err=%v", found, err)
 		}
 	})
@@ -453,15 +935,20 @@ func TestPRWorkspaceCandidateCheckpointSQLiteConstraintFailuresRollback(t *testi
 			t.Fatal(err)
 		}
 		checkpoint := prWorkspaceCandidateCheckpointFixture()
-		if saveErr := store.Save(checkpoint); saveErr != nil {
+		absent := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
+		revision, saveErr := store.Save(checkpoint, absent)
+		if saveErr != nil {
 			t.Fatal(saveErr)
 		}
 		invalidUpdate := checkpoint
 		invalidUpdate.Candidate.CandidateDigest = "short"
-		if saveErr := store.Save(invalidUpdate); saveErr == nil || !strings.Contains(saveErr.Error(), "write") {
+		if _, saveErr := store.Save(
+			invalidUpdate,
+			revision,
+		); saveErr == nil || !strings.Contains(saveErr.Error(), "write") {
 			t.Fatalf("constraint update error = %v", saveErr)
 		}
-		loaded, found, err := store.Load(checkpoint.WorkspaceID)
+		loaded, _, found, err := store.Load(checkpoint.WorkspaceID)
 		if err != nil || !found || !equivalentPRWorkspaceCheckpoint(loaded, checkpoint) {
 			t.Fatalf("failed update state = %#v, found=%v err=%v", loaded, found, err)
 		}
@@ -485,6 +972,12 @@ func TestPRWorkspaceCandidateCheckpointSQLiteImportDatabaseFailuresRollback(t *t
 		}
 		defer database.Close()
 		err = sqlitestore.Immediate(t.Context(), database, func(conn *sql.Conn) error {
+			if _, deleteErr := conn.ExecContext(
+				t.Context(),
+				`DELETE FROM checkpoint_legacy_import_state`,
+			); deleteErr != nil {
+				return deleteErr
+			}
 			if _, dropErr := conn.ExecContext(t.Context(), `DROP TABLE candidate_checkpoints`); dropErr != nil {
 				return dropErr
 			}
@@ -515,6 +1008,12 @@ func TestPRWorkspaceCandidateCheckpointSQLiteImportDatabaseFailuresRollback(t *t
 		}
 		defer database.Close()
 		err = sqlitestore.Immediate(t.Context(), database, func(conn *sql.Conn) error {
+			if _, deleteErr := conn.ExecContext(
+				t.Context(),
+				`DELETE FROM checkpoint_legacy_import_state`,
+			); deleteErr != nil {
+				return deleteErr
+			}
 			_, importErr := importLegacyPRWorkspaceCheckpoint(t.Context(), conn, sqlitestore.LegacyInput{
 				Relative: legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID), Data: encoded,
 			})
@@ -523,7 +1022,7 @@ func TestPRWorkspaceCandidateCheckpointSQLiteImportDatabaseFailuresRollback(t *t
 		if err == nil {
 			t.Fatal("legacy import constraint failure committed")
 		}
-		if _, found, err := store.Load(checkpoint.WorkspaceID); err != nil || found {
+		if _, _, found, err := store.Load(checkpoint.WorkspaceID); err != nil || found {
 			t.Fatalf("failed legacy insert remained: found=%v err=%v", found, err)
 		}
 	})
@@ -535,14 +1034,21 @@ func TestPRWorkspaceCandidateCheckpointSQLiteOperationsFailClosedWhenDatabasePat
 		run  func(*prWorkspaceCandidateCheckpointStore) error
 	}{
 		{"save", func(store *prWorkspaceCandidateCheckpointStore) error {
-			return store.Save(prWorkspaceCandidateCheckpointFixture())
+			checkpoint := prWorkspaceCandidateCheckpointFixture()
+			_, err := store.Save(checkpoint, prWorkspaceCandidateCheckpointRevision{
+				workspaceID: checkpoint.WorkspaceID,
+			})
+			return err
 		}},
 		{"load", func(store *prWorkspaceCandidateCheckpointStore) error {
-			_, _, err := store.Load(prWorkspaceCandidateCheckpointFixture().WorkspaceID)
+			_, _, _, err := store.Load(prWorkspaceCandidateCheckpointFixture().WorkspaceID)
 			return err
 		}},
 		{"remove", func(store *prWorkspaceCandidateCheckpointStore) error {
-			return store.Remove(prWorkspaceCandidateCheckpointFixture().WorkspaceID)
+			checkpoint := prWorkspaceCandidateCheckpointFixture()
+			return store.Remove(checkpoint.WorkspaceID, prWorkspaceCandidateCheckpointRevision{
+				workspaceID: checkpoint.WorkspaceID,
+			})
 		}},
 	} {
 		t.Run(operation.name, func(t *testing.T) {
@@ -604,13 +1110,16 @@ func TestPRWorkspaceCandidateCheckpointRestoresExactCandidateAfterManagerRestart
 	if err != nil {
 		t.Fatal(err)
 	}
-	active := prWorkspaceCandidate{pin: pin, candidate: baseline, charter: charter, lineID: lineID, lease: lease}
+	active := prWorkspaceCandidate{
+		pin: pin, candidate: baseline, charter: charter, lineID: lineID, lease: lease,
+		checkpointRevision: requireAbsentPRWorkspaceCheckpointRevision(t, store, workspaceID),
+	}
 	runtime := &prWorkspaceImplementationRuntime{
 		manager: manager, checkpoints: store,
 		candidates: make(map[prWorkspaceCandidateKey]prWorkspaceCandidate),
 		active:     map[string]prWorkspaceCandidate{workspaceID: active},
 	}
-	if err = runtime.saveCandidateCheckpoint(workspaceID, active); err != nil {
+	if err = runtime.saveCandidateCheckpoint(workspaceID, &active); err != nil {
 		t.Fatal(err)
 	}
 	if err = os.WriteFile(
@@ -736,7 +1245,10 @@ func TestPRWorkspaceFinalizationRetainsCheckpointUntilAggregateAcknowledgement(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored := prWorkspaceCandidate{pin: pin, candidate: candidate, charter: charter, lineID: lineID, lease: lease}
+	stored := prWorkspaceCandidate{
+		pin: pin, candidate: candidate, charter: charter, lineID: lineID, lease: lease,
+		checkpointRevision: requireAbsentPRWorkspaceCheckpointRevision(t, store, workspaceID),
+	}
 	runtime := &prWorkspaceImplementationRuntime{
 		manager: manager, checkpoints: store,
 		candidates: map[prWorkspaceCandidateKey]prWorkspaceCandidate{
@@ -744,9 +1256,11 @@ func TestPRWorkspaceFinalizationRetainsCheckpointUntilAggregateAcknowledgement(t
 		},
 		active: map[string]prWorkspaceCandidate{workspaceID: stored},
 	}
-	if err = runtime.saveCandidateCheckpoint(workspaceID, stored); err != nil {
+	if err = runtime.saveCandidateCheckpoint(workspaceID, &stored); err != nil {
 		t.Fatal(err)
 	}
+	runtime.candidates[prWorkspaceCandidateKey{workspaceID: workspaceID, tree: candidate.Tree}] = stored
+	runtime.active[workspaceID] = stored
 	repair := prworkspace.RepairResult{
 		WorkspaceID: workspace.ID, CandidateSHA: candidate.Tree, Summary: "finalized",
 	}
@@ -757,7 +1271,7 @@ func TestPRWorkspaceFinalizationRetainsCheckpointUntilAggregateAcknowledgement(t
 	if err != nil || finalized.PublicationFence == nil || finalized.CandidateSHA == candidate.Tree {
 		t.Fatalf("FinalizeRepair() = %#v, %v", finalized, err)
 	}
-	checkpoint, found, loadErr := store.Load(workspaceID)
+	checkpoint, _, found, loadErr := store.Load(workspaceID)
 	if loadErr != nil || !found || checkpoint.State != prWorkspaceCandidateCheckpointParked || checkpoint.Fence == nil {
 		t.Fatalf("checkpoint was removed before aggregate acknowledgement: found=%v err=%v", found, loadErr)
 	}
@@ -780,7 +1294,7 @@ func TestPRWorkspaceFinalizationRetainsCheckpointUntilAggregateAcknowledgement(t
 	if err = restarted.AcknowledgeFinalizedRepair(ctx, workspaceID, finalized); err != nil {
 		t.Fatal(err)
 	}
-	if _, found, loadErr := restartedStore.Load(workspaceID); loadErr != nil || found {
+	if _, _, found, loadErr := restartedStore.Load(workspaceID); loadErr != nil || found {
 		t.Fatalf("acknowledged checkpoint remains: found=%v err=%v", found, loadErr)
 	}
 	if err = restarted.AcknowledgeFinalizedRepair(ctx, workspaceID, finalized); err != nil {
@@ -812,4 +1326,17 @@ func prWorkspaceCandidateCheckpointFixture() prWorkspaceCandidateCheckpoint {
 			ChangedFiles:    2,
 		},
 	}
+}
+
+func requireAbsentPRWorkspaceCheckpointRevision(
+	t *testing.T,
+	store *prWorkspaceCandidateCheckpointStore,
+	workspaceID string,
+) prWorkspaceCandidateCheckpointRevision {
+	t.Helper()
+	_, revision, found, err := store.Load(workspaceID)
+	if err != nil || found || !validPRWorkspaceCheckpointRevision(revision, workspaceID) || revision.exists {
+		t.Fatalf("observe absent checkpoint %q = %#v, found=%v err=%v", workspaceID, revision, found, err)
+	}
+	return revision
 }

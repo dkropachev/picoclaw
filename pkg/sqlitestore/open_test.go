@@ -203,6 +203,130 @@ func TestOpenImportsArchivesAndDoesNotReimport(t *testing.T) {
 	}
 }
 
+func TestLegacySealRunsForEmptyEnumerationAndAfterFinalizer(t *testing.T) {
+	t.Run("empty enumeration", func(t *testing.T) {
+		root := t.TempDir()
+		options := testOptions()
+		options.Migrations[0].Statements = append(
+			options.Migrations[0].Statements,
+			`CREATE TABLE import_horizon(singleton INTEGER PRIMARY KEY CHECK(singleton = 1)) STRICT`,
+		)
+		sealCalls := 0
+		options.Legacy = &LegacyOptions{
+			SourceRoot:  root,
+			ArchiveRoot: filepath.Join(root, "archive"),
+			Sources:     func() ([]LegacySource, error) { return nil, nil },
+			Import: func(context.Context, *sql.Conn, LegacyInput) (ImportResult, error) {
+				t.Fatal("empty enumeration invoked importer")
+				return ImportResult{}, nil
+			},
+			Seal: func(ctx context.Context, conn *sql.Conn) error {
+				sealCalls++
+				_, err := conn.ExecContext(ctx, `INSERT OR IGNORE INTO import_horizon(singleton) VALUES (1)`)
+				return err
+			},
+		}
+		path := filepath.Join(root, "store.db")
+		for attempt := 1; attempt <= 2; attempt++ {
+			database, err := Open(t.Context(), path, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rows int
+			if err := database.QueryRow(`SELECT COUNT(*) FROM import_horizon`).Scan(&rows); err != nil || rows != 1 {
+				t.Fatalf("sealed empty enumeration = rows:%d error:%v", rows, err)
+			}
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if sealCalls != 2 {
+			t.Fatalf("empty-enumeration seal calls = %d", sealCalls)
+		}
+	})
+
+	t.Run("after finalizer", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "legacy.json"), []byte("value"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var order []string
+		options := testOptions()
+		options.Legacy = &LegacyOptions{
+			SourceRoot:  root,
+			ArchiveRoot: filepath.Join(root, "archive"),
+			Sources: func() ([]LegacySource, error) {
+				return []LegacySource{{ID: "legacy", Relative: "legacy.json"}}, nil
+			},
+			Import: func(context.Context, *sql.Conn, LegacyInput) (ImportResult, error) {
+				order = append(order, "import")
+				return ImportResult{Imported: 1}, nil
+			},
+			Finalize: func(context.Context, *sql.Conn, LegacyFinalizeInput) error {
+				order = append(order, "finalize")
+				return nil
+			},
+			Seal: func(context.Context, *sql.Conn) error {
+				order = append(order, "seal")
+				return nil
+			},
+		}
+		database, err := Open(t.Context(), filepath.Join(root, "store.db"), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		if strings.Join(order, ",") != "import,finalize,seal" {
+			t.Fatalf("legacy closeout order = %v", order)
+		}
+	})
+}
+
+func TestLegacySealFailureRollsBackMigrationAndPreventsArchive(t *testing.T) {
+	root := t.TempDir()
+	legacy := filepath.Join(root, "legacy.json")
+	if err := os.WriteFile(legacy, []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := testOptions()
+	options.Legacy = &LegacyOptions{
+		SourceRoot:  root,
+		ArchiveRoot: filepath.Join(root, "archive"),
+		Sources: func() ([]LegacySource, error) {
+			return []LegacySource{{ID: "legacy", Relative: "legacy.json"}}, nil
+		},
+		Import: func(ctx context.Context, conn *sql.Conn, _ LegacyInput) (ImportResult, error) {
+			_, err := conn.ExecContext(ctx, `INSERT INTO records(id, value) VALUES ('legacy', 'value')`)
+			return ImportResult{Imported: 1}, err
+		},
+		Seal: func(context.Context, *sql.Conn) error {
+			return errors.New("injected seal failure")
+		},
+	}
+	path := filepath.Join(root, "store.db")
+	if _, err := Open(t.Context(), path, options); err == nil || !strings.Contains(err.Error(), "seal") {
+		t.Fatalf("seal failure Open() error = %v", err)
+	}
+	if _, err := os.Lstat(legacy); err != nil {
+		t.Fatalf("seal failure removed legacy source: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "archive", "legacy.json")); !os.IsNotExist(err) {
+		t.Fatalf("seal failure published archive: %v", err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var records int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE name = 'records'`).Scan(&records); err != nil {
+		t.Fatal(err)
+	}
+	if records != 0 {
+		t.Fatal("seal failure committed schema migration")
+	}
+}
+
 func TestLegacyImportFailureRollsBackAndUnsafeSourcesAbort(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {

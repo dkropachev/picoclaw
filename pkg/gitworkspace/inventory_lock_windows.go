@@ -29,6 +29,10 @@ func lockInventoryFile(ctx context.Context, path string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
 	var overlapped windows.Overlapped
 	for {
 		err = windows.LockFileEx(
@@ -67,4 +71,35 @@ func lockInventoryFile(ctx context.Context, path string) (func(), error) {
 		case <-timer.C:
 		}
 	}
+}
+
+func lockInventoryFileInDirectory(
+	ctx context.Context,
+	directory,
+	filename string,
+	expected os.FileInfo,
+) (func(), error) {
+	if filename == "" || filepath.Base(filename) != filename || filename == "." || filename == ".." {
+		return nil, errors.New("git workspace operation lock filename is invalid")
+	}
+	if err := validatePrivateManagedDirectory(
+		directory,
+		expected,
+		"git workspace operation lock root",
+	); err != nil {
+		return nil, err
+	}
+	unlock, err := lockInventoryFile(ctx, filepath.Join(directory, filename))
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePrivateManagedDirectory(
+		directory,
+		expected,
+		"git workspace operation lock root",
+	); err != nil {
+		unlock()
+		return nil, err
+	}
+	return unlock, nil
 }

@@ -10,6 +10,7 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/sqlitestore"
@@ -25,9 +26,18 @@ const (
 	inventoryMaximumRows       = 1_000_000
 )
 
+var errDuplicateLegacyInventoryIdentity = errors.New(
+	"legacy git workspace inventory contains a duplicate JSON identity",
+)
+
 const inventoryMetaSchema = `CREATE TABLE inventory_meta (
     singleton  INTEGER PRIMARY KEY CHECK(singleton = 1),
     generation INTEGER NOT NULL CHECK(generation >= 0)
+) STRICT`
+
+const inventoryLegacyImportStateSchema = `CREATE TABLE inventory_legacy_import_state (
+    singleton      INTEGER PRIMARY KEY CHECK(singleton = 1),
+    import_closed  INTEGER NOT NULL CHECK(import_closed = 1)
 ) STRICT`
 
 const inventoryRepositoriesSchema = `CREATE TABLE inventory_repositories (
@@ -252,10 +262,32 @@ const inventoryDevelopmentLinesStateIndexSchema = `CREATE INDEX inventory_develo
 const inventoryHistoryActionIndexSchema = `CREATE INDEX inventory_history_action_idx
     ON inventory_history(stream, action, time_unix_seconds, time_nanosecond, ordinal)`
 
+const inventoryWorkspacesDevelopmentLineIndexSchema = `CREATE INDEX inventory_workspaces_development_line_idx
+    ON inventory_workspaces(development_line_id, workspace_id)`
+
+const inventoryRepositoryOrderWorkspaceIndexSchema = `CREATE INDEX inventory_repository_workspace_order_workspace_idx
+    ON inventory_repository_workspace_order(workspace_id, repository_id)`
+
+const inventoryDevelopmentLinesRepositoryIndexSchema = `CREATE INDEX inventory_development_lines_repository_idx
+    ON inventory_development_lines(repository_id, line_id)`
+
+const inventorySuspensionsWorkspaceIndexSchema = `CREATE INDEX inventory_suspensions_workspace_idx
+    ON inventory_development_line_suspensions(workspace_id, line_id, ordinal)`
+
+const inventorySuspensionsRepositoryIndexSchema = `CREATE INDEX inventory_suspensions_repository_idx
+    ON inventory_development_line_suspensions(repository_id, line_id, ordinal)`
+
+const inventoryRotationsLineIndexSchema = `CREATE INDEX inventory_rotations_line_idx
+    ON inventory_reservation_rotations(line_id, workspace_id, ordinal)`
+
+const inventoryRotationsRepositoryIndexSchema = `CREATE INDEX inventory_rotations_repository_idx
+    ON inventory_reservation_rotations(repository_id, workspace_id, ordinal)`
+
 var inventorySchemaObjects = []struct {
 	typ, name, ddl string
 }{
 	{"table", "inventory_meta", inventoryMetaSchema},
+	{"table", "inventory_legacy_import_state", inventoryLegacyImportStateSchema},
 	{"table", "inventory_repositories", inventoryRepositoriesSchema},
 	{"table", "inventory_workspaces", inventoryWorkspacesSchema},
 	{"table", "inventory_repository_workspace_order", inventoryRepositoryWorkspaceOrderSchema},
@@ -268,33 +300,63 @@ var inventorySchemaObjects = []struct {
 	{"index", "inventory_workspaces_repository_idx", inventoryWorkspacesRepositoryIndexSchema},
 	{"index", "inventory_development_lines_state_idx", inventoryDevelopmentLinesStateIndexSchema},
 	{"index", "inventory_history_action_idx", inventoryHistoryActionIndexSchema},
+	{"index", "inventory_workspaces_development_line_idx", inventoryWorkspacesDevelopmentLineIndexSchema},
+	{"index", "inventory_repository_workspace_order_workspace_idx", inventoryRepositoryOrderWorkspaceIndexSchema},
+	{"index", "inventory_development_lines_repository_idx", inventoryDevelopmentLinesRepositoryIndexSchema},
+	{"index", "inventory_suspensions_workspace_idx", inventorySuspensionsWorkspaceIndexSchema},
+	{"index", "inventory_suspensions_repository_idx", inventorySuspensionsRepositoryIndexSchema},
+	{"index", "inventory_rotations_line_idx", inventoryRotationsLineIndexSchema},
+	{"index", "inventory_rotations_repository_idx", inventoryRotationsRepositoryIndexSchema},
 }
 
 func (m *Manager) openInventoryDatabase(ctx context.Context) (*sql.DB, error) {
 	if m == nil {
 		return nil, errors.New("git workspace manager is not configured")
 	}
+	freshDatabase := false
 	return sqlitestore.Open(ctx, m.databasePath(), sqlitestore.Options{
 		Component: inventoryDatabaseComponent,
-		Migrations: []sqlitestore.Migration{{
-			Version: 1,
-			Statements: []string{
-				inventoryMetaSchema,
-				`INSERT INTO inventory_meta(singleton, generation) VALUES (1, 0)`,
-				inventoryRepositoriesSchema,
-				inventoryWorkspacesSchema,
-				inventoryRepositoryWorkspaceOrderSchema,
-				inventoryWorkspaceLocksSchema,
-				inventoryDevelopmentLinesSchema,
-				inventoryRetiredReservationsSchema,
-				inventorySuspensionsSchema,
-				inventoryRotationsSchema,
-				inventoryHistorySchema,
-				inventoryWorkspacesRepositoryIndexSchema,
-				inventoryDevelopmentLinesStateIndexSchema,
-				inventoryHistoryActionIndexSchema,
+		Migrations: []sqlitestore.Migration{
+			{
+				Version: 1,
+				Statements: []string{
+					inventoryMetaSchema,
+					`INSERT INTO inventory_meta(singleton, generation) VALUES (1, 0)`,
+					inventoryRepositoriesSchema,
+					inventoryWorkspacesSchema,
+					inventoryRepositoryWorkspaceOrderSchema,
+					inventoryWorkspaceLocksSchema,
+					inventoryDevelopmentLinesSchema,
+					inventoryRetiredReservationsSchema,
+					inventorySuspensionsSchema,
+					inventoryRotationsSchema,
+					inventoryHistorySchema,
+					inventoryWorkspacesRepositoryIndexSchema,
+					inventoryDevelopmentLinesStateIndexSchema,
+					inventoryHistoryActionIndexSchema,
+				},
+				Apply: func(context.Context, *sql.Conn) error {
+					freshDatabase = true
+					return nil
+				},
 			},
-		}},
+			{
+				Version: 2,
+				Statements: []string{
+					inventoryLegacyImportStateSchema,
+					inventoryWorkspacesDevelopmentLineIndexSchema,
+					inventoryRepositoryOrderWorkspaceIndexSchema,
+					inventoryDevelopmentLinesRepositoryIndexSchema,
+					inventorySuspensionsWorkspaceIndexSchema,
+					inventorySuspensionsRepositoryIndexSchema,
+					inventoryRotationsLineIndexSchema,
+					inventoryRotationsRepositoryIndexSchema,
+				},
+				Apply: func(ctx context.Context, conn *sql.Conn) error {
+					return initializeInventoryImportState(ctx, conn, freshDatabase)
+				},
+			},
+		},
 		Validate: validateInventorySchema,
 		Legacy: &sqlitestore.LegacyOptions{
 			SourceRoot:  m.rootDir,
@@ -305,7 +367,10 @@ func (m *Manager) openInventoryDatabase(ctx context.Context) (*sql.DB, error) {
 					MaxBytes: inventoryLegacyMaxBytes,
 				}}, nil
 			},
-			Import:   m.importLegacyInventory,
+			Import: m.importLegacyInventory,
+			Seal: func(ctx context.Context, conn *sql.Conn) error {
+				return sealInventoryImport(ctx, conn, freshDatabase)
+			},
 			MaxBytes: inventoryLegacyMaxBytes,
 		},
 	})
@@ -318,7 +383,8 @@ func validateInventorySchema(ctx context.Context, conn *sql.Conn) error {
 		}
 	}
 	for _, table := range []string{
-		"inventory_meta", "inventory_repositories", "inventory_workspaces",
+		"inventory_meta", "inventory_legacy_import_state",
+		"inventory_repositories", "inventory_workspaces",
 		"inventory_repository_workspace_order", "inventory_workspace_locks",
 		"inventory_development_lines", "inventory_development_line_retired_reservations",
 		"inventory_development_line_suspensions", "inventory_reservation_rotations",
@@ -349,6 +415,15 @@ func validateInventorySchema(ctx context.Context, conn *sql.Conn) error {
 	if unexpected != 0 {
 		return errors.New("git workspace inventory schema has unexpected objects")
 	}
+	var importStateRows int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*)
+	    FROM inventory_legacy_import_state
+	    WHERE singleton = 1 AND import_closed = 1`).Scan(&importStateRows); err != nil {
+		return err
+	}
+	if importStateRows != 1 {
+		return errors.New("git workspace inventory import horizon is missing")
+	}
 	for _, table := range []string{
 		"inventory_repositories", "inventory_workspaces", "inventory_repository_workspace_order",
 		"inventory_workspace_locks", "inventory_development_lines",
@@ -370,11 +445,62 @@ func validateInventorySchema(ctx context.Context, conn *sql.Conn) error {
 	return validateDevelopmentLineInventory(state)
 }
 
+func initializeInventoryImportState(ctx context.Context, conn *sql.Conn, fresh bool) error {
+	if fresh {
+		return nil
+	}
+	_, err := conn.ExecContext(ctx, `INSERT INTO inventory_legacy_import_state(
+	    singleton, import_closed
+	) VALUES (1, 1)`)
+	return err
+}
+
+func sealInventoryImport(ctx context.Context, conn *sql.Conn, fresh bool) error {
+	if fresh {
+		_, err := conn.ExecContext(ctx, `INSERT INTO inventory_legacy_import_state(
+		    singleton, import_closed
+		) VALUES (1, 1)`)
+		return err
+	}
+	var rows int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*)
+	    FROM inventory_legacy_import_state
+	    WHERE singleton = 1 AND import_closed = 1`).Scan(&rows); err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf(
+			"%w: git workspace inventory import horizon is missing",
+			sqlitestore.ErrInvalidSchema,
+		)
+	}
+	return nil
+}
+
 func (m *Manager) importLegacyInventory(
 	ctx context.Context,
 	conn *sql.Conn,
 	input sqlitestore.LegacyInput,
 ) (sqlitestore.ImportResult, error) {
+	var importClosed int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*)
+	    FROM inventory_legacy_import_state
+	    WHERE singleton = 1 AND import_closed = 1`).Scan(&importClosed); err != nil {
+		return sqlitestore.ImportResult{}, err
+	}
+	if importClosed == 1 {
+		return sqlitestore.ImportResult{
+			Skipped: 1,
+			Issues: []sqlitestore.ImportIssue{{
+				Code: "sqlite-authoritative", RecordDigest: input.Digest,
+			}},
+		}, nil
+	}
+	if importClosed != 0 {
+		return sqlitestore.ImportResult{}, errors.New(
+			"git workspace inventory import horizon is invalid",
+		)
+	}
 	var generation int64
 	if err := conn.QueryRowContext(ctx, `SELECT generation FROM inventory_meta WHERE singleton = 1`).
 		Scan(&generation); err != nil {
@@ -388,6 +514,14 @@ func (m *Manager) importLegacyInventory(
 	}
 	state, err := m.decodeLegacyInventory(input.Data)
 	if err != nil {
+		if errors.Is(err, errDuplicateLegacyInventoryIdentity) {
+			return sqlitestore.ImportResult{
+				Skipped: 1,
+				Issues: []sqlitestore.ImportIssue{{
+					Code: "duplicate-identity", RecordDigest: input.Digest,
+				}},
+			}, nil
+		}
 		return sqlitestore.ImportResult{}, errors.New("legacy git workspace inventory is malformed")
 	}
 	if err := rewriteInventoryState(ctx, conn, state, 0); err != nil {
@@ -397,6 +531,9 @@ func (m *Manager) importLegacyInventory(
 }
 
 func (m *Manager) decodeLegacyInventory(data []byte) (*storeState, error) {
+	if err := rejectDuplicateLegacyInventoryIdentities(data); err != nil {
+		return nil, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var state storeState
 	if err := decoder.Decode(&state); err != nil {
@@ -454,6 +591,82 @@ func (m *Manager) decodeLegacyInventory(data []byte) (*storeState, error) {
 		return nil, err
 	}
 	return &state, nil
+}
+
+func rejectDuplicateLegacyInventoryIdentities(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := consumeUniqueLegacyInventoryJSONValue(decoder, 0); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("legacy inventory contains trailing JSON")
+		}
+		return err
+	}
+	return nil
+}
+
+func consumeUniqueLegacyInventoryJSONValue(decoder *json.Decoder, depth int) error {
+	if depth > 128 {
+		return errors.New("legacy inventory JSON nesting exceeds its limit")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if !isDelimiter {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			nameToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := nameToken.(string)
+			if !ok {
+				return errors.New("legacy inventory JSON object name is invalid")
+			}
+			identity := strings.ToLower(name)
+			if _, duplicate := seen[identity]; duplicate {
+				return errDuplicateLegacyInventoryIdentity
+			}
+			seen[identity] = struct{}{}
+			if err := consumeUniqueLegacyInventoryJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			if err != nil {
+				return err
+			}
+			return errors.New("legacy inventory JSON object is unterminated")
+		}
+		return nil
+	case '[':
+		for decoder.More() {
+			if err := consumeUniqueLegacyInventoryJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			if err != nil {
+				return err
+			}
+			return errors.New("legacy inventory JSON array is unterminated")
+		}
+		return nil
+	default:
+		return errors.New("legacy inventory JSON delimiter is invalid")
+	}
 }
 
 func inventoryStateRecordCount(state *storeState) int {

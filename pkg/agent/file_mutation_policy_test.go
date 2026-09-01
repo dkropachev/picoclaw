@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1337,6 +1338,128 @@ func TestAgentGitWorkspaceProtectedRootsRejectUnsafeCheckpointState(t *testing.T
 			roots, err := agentGitWorkspaceFileMutationProtectedRoots(cfg)
 			if err == nil || roots != nil || !strings.Contains(err.Error(), "unsafe") {
 				t.Fatalf("unsafe checkpoint roots = %#v, %v", roots, err)
+			}
+		})
+	}
+}
+
+func TestAgentCheckpointRetainedStateEnumerationBoundsAndModes(t *testing.T) {
+	newRoots := func(t *testing.T) (string, string) {
+		t.Helper()
+		checkpointRoot := filepath.Join(t.TempDir(), "active")
+		if err := os.MkdirAll(checkpointRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return checkpointRoot, filepath.Join(checkpointRoot, "legacy-json")
+	}
+
+	t.Run("exact bounded state", func(t *testing.T) {
+		checkpointRoot, archiveRoot := newRoots(t)
+		archive := filepath.Join(archiveRoot, "pr-workspace-checkpoints-v1", "retained.json")
+		if err := os.MkdirAll(filepath.Dir(archive), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(archive, []byte("retained\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		files, err := agentCheckpointRetainedStateFilesBounded(
+			checkpointRoot, archiveRoot, 1, 1, 2, 1,
+		)
+		if err != nil || !slices.Contains(files, archive) {
+			t.Fatalf("bounded checkpoint state = %#v, %v", files, err)
+		}
+	})
+
+	for _, test := range []struct {
+		name      string
+		setup     func(*testing.T, string, string)
+		rootLimit int
+		sources   int
+		entries   int
+		depth     int
+		want      string
+	}{
+		{
+			name: "active entry limit", rootLimit: 1, sources: 1, entries: 4, depth: 2,
+			setup: func(t *testing.T, checkpointRoot, _ string) {
+				for _, name := range []string{"one.txt", "two.txt"} {
+					if err := os.WriteFile(filepath.Join(checkpointRoot, name), []byte("x"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			want: "entry limit",
+		},
+		{
+			name: "active source limit", rootLimit: 3, sources: 1, entries: 4, depth: 2,
+			setup: func(t *testing.T, checkpointRoot, _ string) {
+				for _, name := range []string{"one.json", "two.json"} {
+					if err := os.WriteFile(filepath.Join(checkpointRoot, name), []byte("{}"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			want: "source limit",
+		},
+		{
+			name: "archive entry limit", rootLimit: 2, sources: 1, entries: 1, depth: 2,
+			setup: func(t *testing.T, _, archiveRoot string) {
+				for _, name := range []string{"one", "two"} {
+					if err := os.MkdirAll(filepath.Join(archiveRoot, name), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			want: "entry limit",
+		},
+		{
+			name: "archive depth limit", rootLimit: 2, sources: 1, entries: 4, depth: 1,
+			setup: func(t *testing.T, _, archiveRoot string) {
+				if err := os.MkdirAll(filepath.Join(archiveRoot, "one", "two"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "depth limit",
+		},
+		{
+			name: "public archive directory", rootLimit: 2, sources: 1, entries: 4, depth: 2,
+			setup: func(t *testing.T, _, archiveRoot string) {
+				path := filepath.Join(archiveRoot, "public")
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "unsafe directory",
+		},
+		{
+			name: "nested archive symlink", rootLimit: 2, sources: 1, entries: 4, depth: 2,
+			setup: func(t *testing.T, _, archiveRoot string) {
+				if err := os.MkdirAll(archiveRoot, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(t.TempDir(), filepath.Join(archiveRoot, "linked")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+			want: "unsafe symlink",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			checkpointRoot, archiveRoot := newRoots(t)
+			test.setup(t, checkpointRoot, archiveRoot)
+			files, err := agentCheckpointRetainedStateFilesBounded(
+				checkpointRoot,
+				archiveRoot,
+				test.rootLimit,
+				test.sources,
+				test.entries,
+				test.depth,
+			)
+			if err == nil || files != nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("bounded unsafe checkpoint state = %#v, %v", files, err)
 			}
 		})
 	}

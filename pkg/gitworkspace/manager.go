@@ -49,8 +49,10 @@ type Options struct {
 type Manager struct {
 	rootDir          string
 	checkoutRoot     string
+	lockRoot         string
 	rootIdentity     fs.FileInfo
 	checkoutIdentity fs.FileInfo
+	lockIdentity     fs.FileInfo
 	opts             Options
 	now              func() time.Time
 	mu               sync.Mutex
@@ -299,7 +301,7 @@ func NewManager(opts Options) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve absolute git workspace root: %w", err)
 	}
-	if mkdirErr := os.MkdirAll(root, 0o755); mkdirErr != nil {
+	if mkdirErr := os.MkdirAll(root, 0o700); mkdirErr != nil {
 		return nil, fmt.Errorf("create git workspace root: %w", mkdirErr)
 	}
 	root, err = filepath.EvalSymlinks(root)
@@ -307,39 +309,42 @@ func NewManager(opts Options) (*Manager, error) {
 		return nil, fmt.Errorf("resolve git workspace root: %w", err)
 	}
 	root = filepath.Clean(root)
+	rootIdentity, err := os.Lstat(root)
+	if err != nil || rootIdentity.Mode()&os.ModeSymlink != 0 || !rootIdentity.IsDir() {
+		return nil, errors.New("git workspace root is not a real directory")
+	}
+	if chmodErr := os.Chmod(root, 0o700); chmodErr != nil {
+		return nil, fmt.Errorf("secure git workspace root: %w", chmodErr)
+	}
+	rootIdentity, err = os.Lstat(root)
+	if err != nil || rootIdentity.Mode().Perm() != 0o700 {
+		return nil, errors.New("git workspace root is not private")
+	}
 	checkoutRoot := filepath.Join(root, "checkouts")
-	if mkdirErr := os.MkdirAll(checkoutRoot, 0o755); mkdirErr != nil {
-		return nil, fmt.Errorf("create git workspace root: %w", mkdirErr)
-	}
-	checkoutRootIdentity, err := os.Lstat(checkoutRoot)
-	if err != nil || checkoutRootIdentity.Mode()&os.ModeSymlink != 0 ||
-		!checkoutRootIdentity.IsDir() {
-		return nil, errors.New("git workspace checkout root is not a real directory")
-	}
-	canonicalCheckoutRoot, err := filepath.EvalSymlinks(checkoutRoot)
+	checkoutRootIdentity, err := preparePrivateManagedDirectory(
+		checkoutRoot, "git workspace checkout root",
+	)
 	if err != nil {
-		return nil, fmt.Errorf("resolve git workspace checkout root: %w", err)
+		return nil, err
 	}
-	canonicalCheckoutRoot, err = filepath.Abs(canonicalCheckoutRoot)
+	lockRoot := filepath.Join(root, pinnedOperationLockDirectory)
+	lockRootIdentity, err := preparePrivateManagedDirectory(
+		lockRoot, "git workspace operation lock root",
+	)
 	if err != nil {
-		return nil, fmt.Errorf("resolve absolute git workspace checkout root: %w", err)
-	}
-	if filepath.Clean(canonicalCheckoutRoot) != filepath.Clean(checkoutRoot) {
-		return nil, errors.New("git workspace checkout root escapes the manager root")
+		return nil, err
 	}
 	now := opts.Now
 	if now == nil {
 		now = time.Now
 	}
-	rootIdentity, err := os.Lstat(root)
-	if err != nil || rootIdentity.Mode()&os.ModeSymlink != 0 || !rootIdentity.IsDir() {
-		return nil, errors.New("git workspace root is not a real directory")
-	}
 	manager := &Manager{
 		rootDir:          root,
-		checkoutRoot:     filepath.Clean(canonicalCheckoutRoot),
+		checkoutRoot:     checkoutRoot,
+		lockRoot:         lockRoot,
 		rootIdentity:     rootIdentity,
 		checkoutIdentity: checkoutRootIdentity,
+		lockIdentity:     lockRootIdentity,
 		opts:             opts,
 		now:              now,
 	}
@@ -351,6 +356,35 @@ func NewManager(opts Options) (*Manager, error) {
 		return nil, fmt.Errorf("close git workspace inventory: %w", closeErr)
 	}
 	return manager, nil
+}
+
+func preparePrivateManagedDirectory(path, label string) (fs.FileInfo, error) {
+	if err := os.Mkdir(path, 0o700); err != nil && !os.IsExist(err) {
+		return nil, fmt.Errorf("create %s: %w", label, err)
+	}
+	identity, err := os.Lstat(path)
+	if err != nil || identity.Mode()&os.ModeSymlink != 0 || !identity.IsDir() {
+		return nil, fmt.Errorf("%s is not a real directory", label)
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", label, err)
+	}
+	canonical, err = filepath.Abs(canonical)
+	if err != nil {
+		return nil, fmt.Errorf("resolve absolute %s: %w", label, err)
+	}
+	if filepath.Clean(canonical) != filepath.Clean(path) {
+		return nil, fmt.Errorf("%s is not canonical", label)
+	}
+	if chmodErr := os.Chmod(path, 0o700); chmodErr != nil {
+		return nil, fmt.Errorf("secure %s: %w", label, chmodErr)
+	}
+	secured, err := os.Lstat(path)
+	if err != nil || !os.SameFile(identity, secured) || secured.Mode().Perm() != 0o700 {
+		return nil, fmt.Errorf("%s changed while being secured", label)
+	}
+	return secured, nil
 }
 
 func (m *Manager) RootDir() string {
@@ -1648,10 +1682,21 @@ func (m *Manager) validatePinnedCheckoutRoot() error {
 	if m == nil {
 		return errors.New("git workspace manager is not configured")
 	}
-	return validateManagedDirectory(
+	return validatePrivateManagedDirectory(
 		m.checkoutRoot,
 		m.checkoutIdentity,
 		"git workspace checkout root",
+	)
+}
+
+func (m *Manager) validatePinnedOperationLockRoot() error {
+	if m == nil {
+		return errors.New("git workspace manager is not configured")
+	}
+	return validatePrivateManagedDirectory(
+		m.lockRoot,
+		m.lockIdentity,
+		"git workspace operation lock root",
 	)
 }
 
@@ -1659,7 +1704,7 @@ func (m *Manager) validateRoot() error {
 	if m == nil {
 		return errors.New("git workspace manager is not configured")
 	}
-	return validateManagedDirectory(m.rootDir, m.rootIdentity, "git workspace root")
+	return validatePrivateManagedDirectory(m.rootDir, m.rootIdentity, "git workspace root")
 }
 
 func validateManagedDirectory(path string, identity fs.FileInfo, label string) error {
@@ -1683,6 +1728,20 @@ func validateManagedDirectory(path string, identity fs.FileInfo, label string) e
 	}
 	if filepath.Clean(canonicalPath) != filepath.Clean(path) {
 		return fmt.Errorf("%s resolves outside its initialized path", label)
+	}
+	return nil
+}
+
+func validatePrivateManagedDirectory(path string, identity fs.FileInfo, label string) error {
+	if err := validateManagedDirectory(path, identity, label); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect %s permissions: %w", label, err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("%s is not private", label)
 	}
 	return nil
 }

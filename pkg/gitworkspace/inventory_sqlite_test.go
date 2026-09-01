@@ -21,7 +21,10 @@ func TestGitWorkspaceInventorySQLiteFreshSchemaDurabilityAndPermissions(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	for path, mode := range map[string]os.FileMode{root: 0o700, manager.databasePath(): 0o600} {
+	for path, mode := range map[string]os.FileMode{
+		root: 0o700, manager.checkoutRoot: 0o700, manager.lockRoot: 0o700,
+		manager.databasePath(): 0o600,
+	} {
 		info, statErr := os.Lstat(path)
 		if statErr != nil || info.Mode().Perm() != mode || info.Mode()&os.ModeSymlink != 0 {
 			t.Fatalf("%s mode = %v, %v", path, info.Mode(), statErr)
@@ -49,7 +52,7 @@ func TestGitWorkspaceInventorySQLiteFreshSchemaDurabilityAndPermissions(t *testi
 	if queryErr := database.QueryRow(`PRAGMA user_version`).Scan(&userVersion); queryErr != nil {
 		t.Fatal(queryErr)
 	}
-	if journal != "wal" || foreignKeys != 1 || busyTimeout != 5000 || synchronous != 2 || userVersion != 1 {
+	if journal != "wal" || foreignKeys != 1 || busyTimeout != 5000 || synchronous != 2 || userVersion != 2 {
 		t.Fatalf("SQLite contract = journal=%q fk=%d busy=%d sync=%d version=%d",
 			journal, foreignKeys, busyTimeout, synchronous, userVersion)
 	}
@@ -59,6 +62,7 @@ func TestGitWorkspaceInventorySQLiteFreshSchemaDurabilityAndPermissions(t *testi
 	}
 }
 
+//nolint:govet // Narrow test assertions intentionally use independent error scopes.
 func TestGitWorkspaceInventorySQLiteMigratesArchivesAndReopensIdempotently(t *testing.T) {
 	root := filepath.Join(t.TempDir(), ".git-workspaces")
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -123,6 +127,184 @@ func TestGitWorkspaceInventorySQLiteMigratesArchivesAndReopensIdempotently(t *te
 	if _, reopenErr := NewManager(Options{RootDir: root}); reopenErr != nil {
 		t.Fatalf("idempotent reopen: %v", reopenErr)
 	}
+	if err := os.Rename(archive, legacy); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", manager.databasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE storage_imports
+	    SET archive_status = 'pending', archived_at = NULL
+	    WHERE component = ? AND source_id = ?`,
+		inventoryDatabaseComponent,
+		inventoryLegacySourceID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewManager(Options{RootDir: root}); err != nil {
+		t.Fatalf("archive retry with closed import horizon: %v", err)
+	}
+	if _, err := os.Lstat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("archive retry retained source: %v", err)
+	}
+	if _, err := os.Lstat(archive); err != nil {
+		t.Fatalf("archive retry lost destination: %v", err)
+	}
+}
+
+//nolint:govet // Narrow test assertions intentionally use independent error scopes.
+func TestGitWorkspaceInventoryEmptyFirstOpenRejectsLateLegacySource(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".git-workspaces")
+	manager, err := NewManager(Options{RootDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := inventorySQLiteValidState(t)
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(root, inventoryLegacyFilename)
+	if err := os.WriteFile(legacy, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewManager(Options{RootDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := adversarialCloneInventory(t, reopened)
+	if loaded.generation != 0 || len(loaded.Repositories) != 0 || len(loaded.Workspaces) != 0 {
+		t.Fatalf("late legacy inventory became authoritative: %#v", loaded)
+	}
+	archive := filepath.Join(root, "legacy-json", inventoryLegacyArchive, inventoryLegacyFilename)
+	if _, err := os.Lstat(archive); err != nil {
+		t.Fatalf("late legacy inventory was not archived: %v", err)
+	}
+	database, err := manager.openInventoryDatabase(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var skipped, issues int
+	if err := database.QueryRow(`SELECT
+	    (SELECT skipped_count FROM storage_imports WHERE component = ? AND source_id = ?),
+	    (SELECT COUNT(*) FROM storage_import_issues
+	      WHERE component = ? AND source_id = ? AND issue_code = 'sqlite-authoritative')`,
+		inventoryDatabaseComponent,
+		inventoryLegacySourceID,
+		inventoryDatabaseComponent,
+		inventoryLegacySourceID,
+	).Scan(&skipped, &issues); err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 1 || issues != 1 {
+		t.Fatalf("late inventory audit = skipped:%d issues:%d", skipped, issues)
+	}
+}
+
+//nolint:govet // Narrow test assertions intentionally use independent error scopes.
+func TestGitWorkspaceInventorySchemaV1UpgradeClosesImportAndAddsForeignKeyIndexes(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".git-workspaces")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, inventoryDatabaseFilename)
+	v1, err := sqlitestore.Open(t.Context(), path, sqlitestore.Options{
+		Component: inventoryDatabaseComponent,
+		Migrations: []sqlitestore.Migration{{
+			Version: 1,
+			Statements: []string{
+				inventoryMetaSchema,
+				`INSERT INTO inventory_meta(singleton, generation) VALUES (1, 0)`,
+				inventoryRepositoriesSchema,
+				inventoryWorkspacesSchema,
+				inventoryRepositoryWorkspaceOrderSchema,
+				inventoryWorkspaceLocksSchema,
+				inventoryDevelopmentLinesSchema,
+				inventoryRetiredReservationsSchema,
+				inventorySuspensionsSchema,
+				inventoryRotationsSchema,
+				inventoryHistorySchema,
+				inventoryWorkspacesRepositoryIndexSchema,
+				inventoryDevelopmentLinesStateIndexSchema,
+				inventoryHistoryActionIndexSchema,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state := inventorySQLiteValidState(t)
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, inventoryLegacyFilename), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(Options{RootDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := adversarialCloneInventory(t, manager)
+	if loaded.generation != 0 || len(loaded.Repositories) != 0 {
+		t.Fatalf("v1 upgrade imported a late legacy source: %#v", loaded)
+	}
+	database, err := manager.openInventoryDatabase(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var version int
+	if err := database.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("upgraded inventory user_version = %d", version)
+	}
+	for _, index := range []string{
+		"inventory_workspaces_development_line_idx",
+		"inventory_repository_workspace_order_workspace_idx",
+		"inventory_development_lines_repository_idx",
+		"inventory_suspensions_workspace_idx",
+		"inventory_suspensions_repository_idx",
+		"inventory_rotations_line_idx",
+		"inventory_rotations_repository_idx",
+	} {
+		var rows int
+		if err := database.QueryRow(`SELECT COUNT(*) FROM sqlite_schema
+		    WHERE type = 'index' AND name = ?`, index).Scan(&rows); err != nil || rows != 1 {
+			t.Fatalf("upgraded inventory index %s = %d, %v", index, rows, err)
+		}
+	}
+}
+
+func TestGitWorkspaceInventoryMissingImportHorizonFailsClosed(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".git-workspaces")
+	manager, err := NewManager(Options{RootDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", manager.databasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DELETE FROM inventory_legacy_import_state`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewManager(Options{RootDir: root}); !errors.Is(err, sqlitestore.ErrInvalidSchema) {
+		t.Fatalf("missing inventory import horizon error = %v", err)
+	}
 }
 
 func TestGitWorkspaceInventorySQLiteMigrationFailureRollsBackAndRetries(t *testing.T) {
@@ -159,6 +341,50 @@ func TestGitWorkspaceInventorySQLiteMigrationFailureRollsBackAndRetries(t *testi
 	}
 }
 
+//nolint:govet // Narrow test assertions intentionally use independent error scopes.
+func TestGitWorkspaceInventoryDuplicateJSONIdentityIsAuditedAndArchived(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".git-workspaces")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(root, inventoryLegacyFilename)
+	duplicate := []byte(`{"version":4,"repositories":{},"Repositories":{}}`)
+	if err := os.WriteFile(legacy, duplicate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(Options{RootDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.decodeLegacyInventory(duplicate); !errors.Is(err, errDuplicateLegacyInventoryIdentity) {
+		t.Fatalf("duplicate inventory decoder error = %v", err)
+	}
+	archive := filepath.Join(root, "legacy-json", inventoryLegacyArchive, inventoryLegacyFilename)
+	if _, err := os.Lstat(archive); err != nil {
+		t.Fatalf("duplicate inventory was not archived: %v", err)
+	}
+	database, err := manager.openInventoryDatabase(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var skipped, issues int
+	if err := database.QueryRow(`SELECT
+	    (SELECT skipped_count FROM storage_imports WHERE component = ? AND source_id = ?),
+	    (SELECT COUNT(*) FROM storage_import_issues
+	      WHERE component = ? AND source_id = ? AND issue_code = 'duplicate-identity')`,
+		inventoryDatabaseComponent,
+		inventoryLegacySourceID,
+		inventoryDatabaseComponent,
+		inventoryLegacySourceID,
+	).Scan(&skipped, &issues); err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 1 || issues != 1 {
+		t.Fatalf("duplicate inventory audit = skipped:%d issues:%d", skipped, issues)
+	}
+}
+
 func TestGitWorkspaceInventorySQLiteGenerationCASAndSchemaFences(t *testing.T) {
 	root := filepath.Join(t.TempDir(), ".git-workspaces")
 	manager, err := NewManager(Options{RootDir: root})
@@ -192,7 +418,7 @@ func TestGitWorkspaceInventorySQLiteGenerationCASAndSchemaFences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, execErr := raw.Exec(`PRAGMA user_version = 2`); execErr != nil {
+	if _, execErr := raw.Exec(`PRAGMA user_version = 3`); execErr != nil {
 		t.Fatal(execErr)
 	}
 	_ = raw.Close()
@@ -629,6 +855,12 @@ func TestGitWorkspaceInventorySQLiteImportAuthorityAndRollback(t *testing.T) {
 		}
 		defer database.Close()
 		err = sqlitestore.Immediate(t.Context(), database, func(conn *sql.Conn) error {
+			if _, deleteErr := conn.ExecContext(
+				t.Context(),
+				`DELETE FROM inventory_legacy_import_state`,
+			); deleteErr != nil {
+				return deleteErr
+			}
 			if _, dropErr := conn.ExecContext(t.Context(), `DROP TABLE inventory_meta`); dropErr != nil {
 				return dropErr
 			}
@@ -674,6 +906,12 @@ func TestGitWorkspaceInventorySQLiteImportAuthorityAndRollback(t *testing.T) {
 			t.Fatal(err)
 		}
 		err = sqlitestore.Immediate(t.Context(), database, func(conn *sql.Conn) error {
+			if _, deleteErr := conn.ExecContext(
+				t.Context(),
+				`DELETE FROM inventory_legacy_import_state`,
+			); deleteErr != nil {
+				return deleteErr
+			}
 			_, importErr := manager.importLegacyInventory(t.Context(), conn, sqlitestore.LegacyInput{Data: encoded})
 			return importErr
 		})

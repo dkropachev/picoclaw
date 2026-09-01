@@ -43,10 +43,16 @@ type LegacyOptions struct {
 	// determines whether parsed records were actually imported. It replaces
 	// the provisional per-source accounting atomically before commit.
 	FinalizeResults LegacyResultFinalizer
-	MaxBytes        int64
-	MaxSources      int
-	MaxTotalBytes   int64
-	Now             func() time.Time
+	// Seal closes the subsystem's legacy import horizon after deterministic
+	// enumeration and import. It runs on every successful open, including when
+	// no source exists or no source is newly imported, inside the same
+	// BEGIN IMMEDIATE transaction and before schema validation. Implementations
+	// must be idempotent.
+	Seal          LegacySealer
+	MaxBytes      int64
+	MaxSources    int
+	MaxTotalBytes int64
+	Now           func() time.Time
 }
 
 // LegacySource is one deterministic, relative source below SourceRoot.
@@ -107,6 +113,10 @@ type LegacyResultFinalizer func(
 	*sql.Conn,
 	LegacyFinalizeInput,
 ) (map[string]ImportResult, error)
+
+// LegacySealer durably marks a subsystem's SQLite database authoritative once
+// its first complete legacy enumeration has succeeded.
+type LegacySealer func(context.Context, *sql.Conn) error
 
 const storageImportsSchema = `CREATE TABLE IF NOT EXISTS storage_imports (
     component       TEXT NOT NULL,
@@ -217,11 +227,10 @@ func importLegacySources(
 			component,
 		)
 	}
-	if len(sources) == 0 {
-		return legacyImportSummary{}, nil
-	}
-	if err := validateLegacyRoots(options); err != nil {
-		return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
+	if len(sources) > 0 {
+		if err := validateLegacyRoots(options); err != nil {
+			return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
+		}
 	}
 	sources = append([]LegacySource(nil), sources...)
 	sort.Slice(sources, func(left, right int) bool {
@@ -427,6 +436,11 @@ func importLegacySources(
 					"finalize %s legacy import: %w", component, err,
 				)
 			}
+		}
+	}
+	if options.Seal != nil {
+		if err := options.Seal(ctx, conn); err != nil {
+			return legacyImportSummary{}, fmt.Errorf("seal %s legacy import: %w", component, err)
 		}
 	}
 	return summary, nil

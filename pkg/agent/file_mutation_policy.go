@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,6 +24,9 @@ const (
 	agentGitInventoryDatabase     = "inventory.db"
 	agentCheckpointDatabase       = "checkpoints.db"
 	agentCheckpointMaximumSources = 10_000
+	agentCheckpointArchiveEntries = agentCheckpointMaximumSources + 16
+	agentCheckpointArchiveDepth   = 4
+	agentCheckpointReadBatch      = 128
 )
 
 const (
@@ -195,33 +199,66 @@ func agentGitWorkspaceFileMutationProtectedRoots(activeConfig *config.Config) ([
 }
 
 func agentCheckpointRetainedStateFiles(checkpointRoot, archiveRoot string) ([]string, error) {
+	return agentCheckpointRetainedStateFilesBounded(
+		checkpointRoot,
+		archiveRoot,
+		agentCheckpointMaximumSources+4,
+		agentCheckpointMaximumSources,
+		agentCheckpointArchiveEntries,
+		agentCheckpointArchiveDepth,
+	)
+}
+
+func agentCheckpointRetainedStateFilesBounded(
+	checkpointRoot,
+	archiveRoot string,
+	maximumRootEntries,
+	maximumSources,
+	maximumArchiveEntries,
+	maximumArchiveDepth int,
+) ([]string, error) {
+	if maximumRootEntries < 1 || maximumSources < 1 || maximumArchiveEntries < 1 ||
+		maximumArchiveDepth < 1 {
+		return nil, errors.New("enumerate PR workspace checkpoint state: bounds are invalid")
+	}
 	files := make(map[string]struct{})
 	rootInfo, err := os.Lstat(checkpointRoot)
 	switch {
 	case os.IsNotExist(err):
 	case err != nil:
 		return nil, fmt.Errorf("enumerate PR workspace checkpoint state: %w", err)
-	case !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0:
+	case !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || rootInfo.Mode().Perm()&0o077 != 0:
 		return nil, errors.New("enumerate PR workspace checkpoint state: root is unsafe")
 	default:
-		entries, readErr := os.ReadDir(checkpointRoot)
-		if readErr != nil {
-			return nil, fmt.Errorf("enumerate PR workspace checkpoint state: %w", readErr)
+		root, openErr := os.Open(checkpointRoot)
+		if openErr != nil {
+			return nil, fmt.Errorf("enumerate PR workspace checkpoint state: %w", openErr)
 		}
-		if len(entries) > agentCheckpointMaximumSources+4 {
-			return nil, errors.New("enumerate PR workspace checkpoint state: entry limit exceeded")
+		openedInfo, statErr := root.Stat()
+		if statErr != nil || !os.SameFile(rootInfo, openedInfo) {
+			_ = root.Close()
+			return nil, errors.New("enumerate PR workspace checkpoint state: root changed")
 		}
-		for _, entry := range entries {
+		entries, sources := 0, 0
+		readErr := forEachCheckpointDirectoryEntry(root, func(entry os.DirEntry) error {
+			entries++
+			if entries > maximumRootEntries {
+				return errors.New("entry limit exceeded")
+			}
 			if !strings.HasSuffix(entry.Name(), ".json") {
-				continue
+				return nil
+			}
+			sources++
+			if sources > maximumSources {
+				return errors.New("source limit exceeded")
 			}
 			path := filepath.Join(checkpointRoot, entry.Name())
 			info, statErr := os.Lstat(path)
 			if statErr != nil {
-				return nil, fmt.Errorf("enumerate PR workspace checkpoint state: %w", statErr)
+				return statErr
 			}
 			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-				return nil, errors.New("enumerate PR workspace checkpoint state: source is unsafe")
+				return errors.New("source is unsafe")
 			}
 			files[path] = struct{}{}
 			files[filepath.Join(
@@ -229,40 +266,27 @@ func agentCheckpointRetainedStateFiles(checkpointRoot, archiveRoot string) ([]st
 				"pr-workspace-checkpoints-v1",
 				entry.Name(),
 			)] = struct{}{}
+			return nil
+		})
+		closeErr := root.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("enumerate PR workspace checkpoint state: %w", readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("enumerate PR workspace checkpoint state: %w", closeErr)
 		}
 	}
 
-	archiveFiles := 0
-	err = filepath.WalkDir(archiveRoot, func(path string, entry os.DirEntry, walkErr error) error {
-		if os.IsNotExist(walkErr) {
-			return nil
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		info, infoErr := os.Lstat(path)
-		if infoErr != nil {
-			return infoErr
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("checkpoint archive contains an unsafe symlink")
-		}
-		if path == archiveRoot && !info.IsDir() {
-			return errors.New("checkpoint archive root is unsafe")
-		}
-		if info.IsDir() {
-			return nil
-		}
-		if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-			return errors.New("checkpoint archive contains an unsafe file")
-		}
-		archiveFiles++
-		if archiveFiles > agentCheckpointMaximumSources {
-			return errors.New("checkpoint archive exceeds its safe file limit")
-		}
-		files[path] = struct{}{}
-		return nil
-	})
+	archiveEntries := 0
+	err = enumerateCheckpointArchive(
+		archiveRoot,
+		archiveRoot,
+		0,
+		maximumArchiveDepth,
+		maximumArchiveEntries,
+		&archiveEntries,
+		files,
+	)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("enumerate PR workspace checkpoint archives: %w", err)
 	}
@@ -272,6 +296,88 @@ func agentCheckpointRetainedStateFiles(checkpointRoot, archiveRoot string) ([]st
 	}
 	slices.Sort(result)
 	return result, nil
+}
+
+func enumerateCheckpointArchive(
+	archiveRoot,
+	directory string,
+	depth,
+	maximumDepth,
+	maximumEntries int,
+	entries *int,
+	files map[string]struct{},
+) error {
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return errors.New("checkpoint archive contains an unsafe directory")
+	}
+	opened, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	openedInfo, statErr := opened.Stat()
+	if statErr != nil || !os.SameFile(info, openedInfo) {
+		_ = opened.Close()
+		return errors.New("checkpoint archive directory changed during enumeration")
+	}
+	err = forEachCheckpointDirectoryEntry(opened, func(entry os.DirEntry) error {
+		*entries++
+		if *entries > maximumEntries {
+			return errors.New("checkpoint archive exceeds its safe entry limit")
+		}
+		path := filepath.Join(directory, entry.Name())
+		entryInfo, entryErr := os.Lstat(path)
+		if entryErr != nil {
+			return entryErr
+		}
+		if entryInfo.Mode()&os.ModeSymlink != 0 {
+			return errors.New("checkpoint archive contains an unsafe symlink")
+		}
+		if entryInfo.IsDir() {
+			if depth >= maximumDepth {
+				return errors.New("checkpoint archive exceeds its safe depth limit")
+			}
+			return enumerateCheckpointArchive(
+				archiveRoot, path, depth+1, maximumDepth, maximumEntries, entries, files,
+			)
+		}
+		if !entryInfo.Mode().IsRegular() || entryInfo.Mode().Perm()&0o077 != 0 {
+			return errors.New("checkpoint archive contains an unsafe file")
+		}
+		files[path] = struct{}{}
+		return nil
+	})
+	closeErr := opened.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return nil
+}
+
+func forEachCheckpointDirectoryEntry(
+	directory *os.File,
+	visit func(os.DirEntry) error,
+) error {
+	for {
+		entries, err := directory.ReadDir(agentCheckpointReadBatch)
+		for _, entry := range entries {
+			if visitErr := visit(entry); visitErr != nil {
+				return visitErr
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 func agentWorkspaceFileMutationProtectedRoots(workspace string) ([]string, error) {
