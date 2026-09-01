@@ -353,7 +353,10 @@ func newAgentInstanceWithRuntimePolicies(
 	toolsRegistry.SetAllowlist(agentToolAllowlist)
 	readPathPatterns := cloneToolPathPatterns(allowReadPaths)
 	writePathPatterns := cloneToolPathPatterns(allowWritePaths)
-	fileMutationProtectedRoots = cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots)
+	fileMutationProtectedRoots = append(
+		cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots),
+		mustAgentWorkspaceFileMutationProtectedRoots(workspace)...,
+	)
 	fileMutationPolicy := tools.FileMutationPolicy{
 		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
 			fileMutationProtectedRoots,

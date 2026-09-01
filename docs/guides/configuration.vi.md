@@ -55,7 +55,7 @@ PicoClaw lưu trữ dữ liệu trong workspace đã cấu hình (mặc định:
 ~/.picoclaw/workspace/
 ├── sessions/          # Phiên hội thoại và lịch sử
 ├── memory/           # Bộ nhớ dài hạn (MEMORY.md)
-├── state/            # Trạng thái bền vững (kênh cuối, v.v.)
+├── state/            # Trạng thái SQLite lúc chạy (runtime.db, kênh/cuộc trò chuyện gần nhất)
 ├── cron/             # Cơ sở dữ liệu tác vụ lên lịch
 ├── skills/           # Skill tùy chỉnh
 ├── AGENT.md          # Hướng dẫn hành vi agent
@@ -64,6 +64,12 @@ PicoClaw lưu trữ dữ liệu trong workspace đã cấu hình (mặc định:
 ├── SOUL.md           # Linh hồn agent
 └── USER.md           # Tùy chọn người dùng
 ```
+
+Trạng thái phân phối có thể thay đổi của channel nằm ngoài workspace tại
+`~/.picoclaw/channels/`: route yêu cầu WeCom dùng `wecom/reqid-store.db`, còn
+cursor và context token của Weixin dùng `weixin/state.db`. Lần mở đầu tiên sẽ
+nhập và lưu trữ JSON cũ có giới hạn đúng một lần; không chỉnh sửa các database,
+file WAL/SHM hoặc khóa, hay kho `legacy-json/` khi PicoClaw đang chạy.
 
 > **Lưu ý:** Các thay đổi đối với `AGENT.md`, `SOUL.md`, `USER.md` và `memory/MEMORY.md` được tự động phát hiện trong thời gian chạy thông qua theo dõi thời gian sửa đổi file (mtime). **Không cần khởi động lại gateway** sau khi chỉnh sửa các file này — agent sẽ tải nội dung mới vào yêu cầu tiếp theo.
 

@@ -110,6 +110,7 @@ WeCom AI Bot プラットフォームから `bot_id` と `secret` を既にお�
 - 受信メディアはエージェントに渡される前にローカルメディアストアにダウンロードされます。
 - 送信メディアは WeCom に一時ファイルとしてアップロードされ、メディアメッセージとして送信されます。
 - 重複メッセージは検出され抑制されます（最新 1000 件のメッセージ ID のリングバッファ）。
+- リクエストルート状態は `$PICOCLAW_HOME/channels/wecom/reqid-store.db` の型付き SQLite に保存されます。初回オープン時に制限付きの旧 `wecom/reqid-store.json` を一度だけインポートし、正確なバイト列を `$PICOCLAW_HOME/legacy-json/wecom-reqid-v1/` に保持します。PicoClaw はルート JSON を新規作成しません。
 
 ---
 

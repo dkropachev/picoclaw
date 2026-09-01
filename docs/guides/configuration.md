@@ -57,7 +57,7 @@ PicoClaw stores data in your configured workspace (default: `~/.picoclaw/workspa
 ~/.picoclaw/workspace/
 ├── sessions/          # Conversation sessions and history
 ├── memory/           # Long-term memory (MEMORY.md)
-├── state/            # Persistent state (last channel, etc.)
+├── state/            # Runtime SQLite state (runtime.db, last channel/chat)
 ├── cron/             # Scheduled jobs database
 ├── skills/           # Custom skills
 ├── AGENT.md          # Agent behavior guide
@@ -66,6 +66,18 @@ PicoClaw stores data in your configured workspace (default: `~/.picoclaw/workspa
 ├── SOUL.md           # Agent soul
 └── USER.md           # User preferences
 ```
+
+Channel-owned mutable delivery state lives outside the workspace under
+`~/.picoclaw/channels/`: WeCom request routes use `wecom/reqid-store.db`, and
+Weixin cursors/context tokens use `weixin/state.db`. First open imports and
+archives bounded legacy JSON once; do not edit these databases, their WAL/SHM
+or lock companions, or retained `legacy-json/` archives while PicoClaw runs.
+
+Upgrade every PicoClaw process that shares a home/workspace together. For a
+rollback, stop all processes, restore each retained archive to its original
+relative path, and remove or restore the corresponding database together with
+its matching `-wal`, `-shm`, and `.locks` entries. Mixed old/new binaries are
+unsupported.
 
 > **Note:** Ordinary prompt-prose changes in `AGENT.md`, `SOUL.md`, `USER.md`, and `memory/MEMORY.md` are automatically detected through file modification time (mtime) tracking and apply on the next request. Machine-readable `AGENT.md` frontmatter that changes agent identity, model, tools, skills, or MCP access, and the structured `Tasks` section in `AGENT.md`, are resolved when the agent runtime is constructed and apply after a gateway restart; the Agent UI reports when that restart is required.
 

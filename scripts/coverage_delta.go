@@ -59,6 +59,7 @@ type coveragePlan struct {
 const (
 	featureCoverageRegressionToleranceStatements = 10
 	coverageNestedBenchmarkSkipPattern           = `^Test(GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath)$`
+	coverageGoTestParallelism                    = 1
 )
 
 type listedPackage struct {
@@ -472,7 +473,15 @@ func runGoCoverage(
 	coverImports, testImports []string,
 	environment []string,
 ) (coverageProfile, error) {
-	args := []string{"test", "-buildvcs=false"}
+	// A repository-wide -coverpkg build produces large instrumented binaries
+	// and counter mappings. Bound concurrent package processes so small CI
+	// disks cannot truncate a live mapping and surface a spurious SIGBUS.
+	args := []string{
+		"test",
+		"-buildvcs=false",
+		"-p",
+		strconv.Itoa(coverageGoTestParallelism),
+	}
 	if tags != "" {
 		args = append(args, "-tags", tags)
 	}

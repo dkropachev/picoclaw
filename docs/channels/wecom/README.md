@@ -110,6 +110,7 @@ All fields can be overridden via environment variables with the prefix `PICOCLAW
 - Incoming media is downloaded into the local media store before being passed to the agent.
 - Outbound media is uploaded to WeCom as a temporary file and then sent as a media message.
 - Duplicate messages are detected and suppressed (ring buffer of last 1000 message IDs).
+- Request-route state is typed SQLite at `$PICOCLAW_HOME/channels/wecom/reqid-store.db`. First open imports bounded legacy `wecom/reqid-store.json` once and retains its exact bytes under `$PICOCLAW_HOME/legacy-json/wecom-reqid-v1/`; PicoClaw no longer writes route JSON.
 
 ---
 

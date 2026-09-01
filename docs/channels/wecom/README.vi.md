@@ -110,6 +110,7 @@ Tất cả các trường có thể được ghi đè bằng biến môi trườ
 - Phương tiện nhận được sẽ được tải xuống bộ lưu trữ phương tiện cục bộ trước khi chuyển cho agent.
 - Phương tiện gửi đi được tải lên WeCom dưới dạng tệp tạm thời, sau đó gửi dưới dạng tin nhắn phương tiện.
 - Tin nhắn trùng lặp được phát hiện và loại bỏ (bộ đệm vòng của 1000 ID tin nhắn gần nhất).
+- Trạng thái route yêu cầu dùng SQLite có kiểu tại `$PICOCLAW_HOME/channels/wecom/reqid-store.db`. Lần mở đầu tiên nhập một lần `wecom/reqid-store.json` cũ có giới hạn và giữ nguyên byte tại `$PICOCLAW_HOME/legacy-json/wecom-reqid-v1/`; PicoClaw không còn ghi JSON route.
 
 ---
 

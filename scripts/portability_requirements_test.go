@@ -102,6 +102,16 @@ func TestPRRunsBuildAllBeforeMerge(t *testing.T) {
 	}
 }
 
+func TestPRGoTestsBoundPackageParallelism(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/pr.yml")
+	if !strings.Contains(
+		workflow,
+		"go run ./scripts/hermetic-go-test -- go test -p 4 -tags goolm,stdjson ./...",
+	) {
+		t.Fatal("PR workflow does not bound repository-wide Go test package parallelism")
+	}
+}
+
 func TestLauncherBuildIncludesFrontendAndBackendPackaging(t *testing.T) {
 	rootMakefile := readRepoFile(t, "Makefile")
 	rootLauncher := targetBlock(t, rootMakefile, "## build-launcher:", "build-launcher-frontend:")

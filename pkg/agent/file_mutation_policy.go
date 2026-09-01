@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 )
@@ -13,6 +16,11 @@ const (
 	agentAuthDatabaseName         = "auth.db"
 	agentModelCatalogDatabaseName = "model-catalogs.db"
 	agentToolAdaptationDatabase   = "tool-adaptation.db"
+)
+
+const (
+	agentWecomReqIDDatabaseName  = "reqid-store.db"
+	agentWeixinStateDatabaseName = "state.db"
 )
 
 // agentRuntimeFileMutationProtectedRoots freezes model-facing filesystem
@@ -36,7 +44,7 @@ func agentRuntimeFileMutationProtectedRoots(configPath string) ([]string, error)
 		return nil, fmt.Errorf("resolve active config path: %w", err)
 	}
 
-	protected := make([]string, 0, 21)
+	protected := make([]string, 0, 40)
 	for _, databaseName := range []string{
 		agentLauncherAuthDatabaseName,
 		agentAuthDatabaseName,
@@ -46,7 +54,12 @@ func agentRuntimeFileMutationProtectedRoots(configPath string) ([]string, error)
 		database := filepath.Join(home, databaseName)
 		protected = append(protected, database, database+"-wal", database+"-shm")
 	}
-	protected = append(protected, filepath.Join(home, agentAuthDatabaseName+".locks"))
+	authLockDirectory := filepath.Join(home, agentAuthDatabaseName+".locks")
+	protected = append(
+		protected,
+		authLockDirectory,
+		filepath.Join(authLockDirectory, "store.lock"),
+	)
 
 	activeArchiveRoot := filepath.Join(filepath.Dir(configPath), "legacy-json")
 	homeArchiveRoot := filepath.Join(home, "legacy-json")
@@ -74,7 +87,120 @@ func agentRuntimeFileMutationProtectedRoots(configPath string) ([]string, error)
 			"tool_adaptation_state.json",
 		),
 	)
-	return protected, nil
+
+	wecomDatabase := filepath.Join(home, "channels", "wecom", agentWecomReqIDDatabaseName)
+	wecomArchiveRoot := filepath.Join(home, "legacy-json", "wecom-reqid-v1")
+	protected = append(protected, agentSQLiteFileMutationProtectedRoots(wecomDatabase)...)
+	protected = append(protected,
+		filepath.Join(home, "wecom", "reqid-store.json"),
+		wecomArchiveRoot,
+		filepath.Join(wecomArchiveRoot, "wecom", "reqid-store.json"),
+	)
+
+	weixinRoot := filepath.Join(home, "channels", "weixin")
+	weixinDatabase := filepath.Join(weixinRoot, agentWeixinStateDatabaseName)
+	weixinArchiveRoot := filepath.Join(weixinRoot, "legacy-json", "weixin-state-v1")
+	protected = append(protected, agentSQLiteFileMutationProtectedRoots(weixinDatabase)...)
+	protected = append(protected,
+		filepath.Join(weixinRoot, "sync"),
+		filepath.Join(weixinRoot, "context-tokens"),
+		weixinArchiveRoot,
+	)
+	weixinFiles, err := agentWeixinRetainedStateFiles(weixinRoot, weixinArchiveRoot)
+	if err != nil {
+		return nil, err
+	}
+	return append(protected, weixinFiles...), nil
+}
+
+func agentWorkspaceFileMutationProtectedRoots(workspace string) ([]string, error) {
+	workspace, err := filepath.Abs(filepath.Clean(workspace))
+	if err != nil {
+		return nil, fmt.Errorf("resolve agent workspace: %w", err)
+	}
+	stateRoot := filepath.Join(workspace, "state")
+	database := filepath.Join(stateRoot, "runtime.db")
+	archiveRoot := filepath.Join(stateRoot, "legacy-json", "runtime-state-v1")
+	roots := make([]string, 0, 11)
+	roots = append(roots, agentSQLiteFileMutationProtectedRoots(database)...)
+	roots = append(roots,
+		// The root-level legacy source lies outside stateRoot and must remain
+		// protected until its first authoritative SQLite open archives it.
+		filepath.Join(workspace, "state.json"),
+		filepath.Join(stateRoot, "state.json"),
+		archiveRoot,
+		filepath.Join(archiveRoot, "state.json"),
+		filepath.Join(archiveRoot, "state", "state.json"),
+	)
+	return roots, nil
+}
+
+func agentSQLiteFileMutationProtectedRoots(database string) []string {
+	lockDirectory := database + ".locks"
+	return []string{
+		database,
+		database + "-wal",
+		database + "-shm",
+		lockDirectory,
+		filepath.Join(lockDirectory, "store.lock"),
+	}
+}
+
+func mustAgentWorkspaceFileMutationProtectedRoots(workspace string) []string {
+	roots, err := agentWorkspaceFileMutationProtectedRoots(workspace)
+	if err != nil {
+		panic(fmt.Sprintf("build workspace file-mutation policy: %v", err))
+	}
+	return roots
+}
+
+func agentWeixinRetainedStateFiles(weixinRoot, archiveRoot string) ([]string, error) {
+	files := make(map[string]struct{})
+	for _, directory := range []string{"sync", "context-tokens"} {
+		sourceRoot := filepath.Join(weixinRoot, directory)
+		info, err := os.Lstat(sourceRoot)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("enumerate Weixin state roots: %w", err)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("enumerate Weixin state roots: legacy directory is unsafe")
+		}
+		entries, err := os.ReadDir(sourceRoot)
+		if err != nil {
+			return nil, fmt.Errorf("enumerate Weixin state roots: %w", err)
+		}
+		for _, entry := range entries {
+			if strings.ToLower(filepath.Ext(entry.Name())) != ".json" {
+				continue
+			}
+			files[filepath.Join(sourceRoot, entry.Name())] = struct{}{}
+			files[filepath.Join(archiveRoot, directory, entry.Name())] = struct{}{}
+		}
+	}
+	err := filepath.WalkDir(archiveRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if os.IsNotExist(walkErr) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if path != archiveRoot && !entry.IsDir() {
+			files[path] = struct{}{}
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("enumerate Weixin retained state: %w", err)
+	}
+	result := make([]string, 0, len(files))
+	for path := range files {
+		result = append(result, path)
+	}
+	slices.Sort(result)
+	return result, nil
 }
 
 func mustAgentRuntimeFileMutationProtectedRoots(configPath string) []string {

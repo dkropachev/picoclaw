@@ -55,7 +55,7 @@ PicoClaw 将数据存储在您配置的工作区中（默认：`~/.picoclaw/work
 ~/.picoclaw/workspace/
 ├── sessions/          # 对话会话和历史
 ├── memory/           # 长期记忆 (MEMORY.md)
-├── state/            # 持久化状态 (最后一次频道等)
+├── state/            # SQLite 运行时状态 (runtime.db，最近频道/聊天)
 ├── cron/             # 定时任务数据库
 ├── skills/           # 自定义技能
 ├── AGENT.md          # Agent 行为指南
@@ -64,6 +64,12 @@ PicoClaw 将数据存储在您配置的工作区中（默认：`~/.picoclaw/work
 ├── SOUL.md           # Agent 灵魂/性格
 └── USER.md           # 用户偏好
 ```
+
+频道拥有的可变投递状态位于工作区之外的 `~/.picoclaw/channels/`：WeCom
+请求路由使用 `wecom/reqid-store.db`，Weixin 游标和上下文令牌使用
+`weixin/state.db`。首次打开时会对受限的旧 JSON 执行一次导入和归档；
+PicoClaw 运行期间请勿编辑这些数据库、其 WAL/SHM 或锁文件，也不要编辑
+保留的 `legacy-json/` 归档。
 
 > **提示：** 对 `AGENT.md`、`SOUL.md`、`USER.md` 和 `memory/MEMORY.md` 的修改会通过文件修改时间（mtime）在运行时自动检测。**无需重启 gateway**，Agent 将在下一次请求时自动加载最新内容。
 

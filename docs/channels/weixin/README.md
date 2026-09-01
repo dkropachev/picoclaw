@@ -53,6 +53,15 @@ You can also manually configure the filter rules in `config.json` under the `cha
 | `allow_from` | (Optional) List of WeChat User IDs permitted to interact with the bot. If empty, anyone who can send messages to the connected account can trigger the bot. |
 | `proxy` | (Optional) HTTP proxy address (e.g. `http://localhost:7890`) for environments where connection to `ilinkai.weixin.qq.com` is restricted. |
 
+## Runtime State Storage
+
+Weixin cursors and per-user context tokens are typed rows in
+`$PICOCLAW_HOME/channels/weixin/state.db`. On first use, bounded files under
+`channels/weixin/sync/*.json` and `channels/weixin/context-tokens/*.json` are
+imported deterministically and retained under
+`channels/weixin/legacy-json/weixin-state-v1/`. PicoClaw does not dual-write or
+create new mutable Weixin state JSON.
+
 ## ⚠️ Important Notes
 
 - **One Account Only**: The iLink token binds to a single session. Starting a new interaction generally invalidates older tokens if another device authorizes.

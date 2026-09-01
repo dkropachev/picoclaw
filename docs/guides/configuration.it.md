@@ -88,7 +88,7 @@ PicoClaw salva i dati nel workspace configurato (predefinito: `~/.picoclaw/works
 ~/.picoclaw/workspace/
 ├── sessions/          # Sessioni di conversazione e cronologia
 ├── memory/           # Memoria a lungo termine (MEMORY.md)
-├── state/            # Stato persistente (ultimo canale, ecc.)
+├── state/            # Stato SQLite di runtime (runtime.db, ultimo canale/chat)
 ├── cron/             # Database dei job pianificati
 ├── skills/           # Skill personalizzate
 ├── AGENT.md          # Guida al comportamento dell'agent
@@ -96,6 +96,13 @@ PicoClaw salva i dati nel workspace configurato (predefinito: `~/.picoclaw/works
 ├── SOUL.md           # Anima dell'agent
 └── USER.md           # Preferenze dell'utente
 ```
+
+Lo stato mutabile di consegna dei canali risiede fuori dal workspace, in
+`~/.picoclaw/channels/`: le route WeCom usano `wecom/reqid-store.db`, mentre
+i cursori e i token di contesto Weixin usano `weixin/state.db`. Alla prima
+apertura i file JSON legacy limitati vengono importati e archiviati una sola
+volta; non modificare database, file WAL/SHM o lock, né archivi `legacy-json/`
+mentre PicoClaw è in esecuzione.
 
 > **Nota:** Le modifiche a `AGENT.md`, `SOUL.md`, `USER.md` e `memory/MEMORY.md` vengono rilevate automaticamente a runtime tramite il tracciamento della data di modifica (mtime). **Non è necessario riavviare il gateway** dopo aver modificato questi file — l'agent caricherà il nuovo contenuto alla prossima richiesta.
 

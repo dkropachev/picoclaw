@@ -317,7 +317,7 @@ func TestOfficialGoTestEntryPointsUseHermeticRunner(t *testing.T) {
 	checks := map[string]string{
 		"Makefile":                 "$(GO) run ./scripts/hermetic-go-test -- $(GO) test",
 		"web/Makefile":             "${WEB_GO} run ../../scripts/hermetic-go-test -- $(GO) test",
-		".github/workflows/pr.yml": "go run ./scripts/hermetic-go-test -- go test -tags goolm,stdjson ./...",
+		".github/workflows/pr.yml": "go run ./scripts/hermetic-go-test -- go test -p 4 -tags goolm,stdjson ./...",
 	}
 	for path, snippet := range checks {
 		if content := readRepoFile(t, path); !strings.Contains(content, snippet) {

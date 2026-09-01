@@ -1,177 +1,252 @@
+// Package state stores the workspace's last active delivery context.
 package state
 
 import (
-	"encoding/json"
+	"context"
+	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
+	"hash/fnv"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
-	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
-// State represents the persistent state for a workspace.
-// It includes information about the last active channel/chat.
+const maxRuntimeStateValueBytes = 64 << 10
+
+const runtimeDatabaseLockShards = 64
+
+// State represents the persistent runtime delivery state for a workspace.
 type State struct {
-	// LastChannel is the last channel used for communication
+	// LastChannel is the last channel used for communication.
 	LastChannel string `json:"last_channel,omitempty"`
 
-	// LastChatID is the last chat ID used for communication
+	// LastChatID is the last chat ID used for communication.
 	LastChatID string `json:"last_chat_id,omitempty"`
 
-	// Timestamp is the last time this state was updated
+	// Timestamp is the last time this state was updated.
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// Manager manages persistent state with atomic saves.
+// Manager manages the workspace-local SQLite runtime-state database.
+//
+// Each operation reads or updates the authoritative database instead of
+// retaining a whole-state cache. Independently constructed managers therefore
+// cannot overwrite one another's fields with stale snapshots.
 type Manager struct {
-	workspace string
-	state     *State
-	mu        sync.RWMutex
-	stateFile string
+	workspace    string
+	databasePath string
+	now          func() time.Time
 }
 
-// NewManager creates a new state manager for the given workspace.
-func NewManager(workspace string) *Manager {
-	stateDir := filepath.Join(workspace, "state")
-	stateFile := filepath.Join(stateDir, "state.json")
-	oldStateFile := filepath.Join(workspace, "state.json")
+var runtimeDatabaseLocks [runtimeDatabaseLockShards]sync.Mutex
 
-	// Create state directory if it doesn't exist
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		logger.WarnCF("state", "failed to create state directory", map[string]any{
-			"dir":   stateDir,
+var closeInitializedRuntimeDatabase = func(db *sql.DB) error { return db.Close() }
+
+// NewSQLiteManager creates and validates a SQLite runtime-state manager.
+func NewSQLiteManager(workspace string) (*Manager, error) {
+	manager, err := newManager(workspace)
+	if err != nil {
+		return nil, err
+	}
+	db, unlock, err := manager.openDatabase(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	closeErr := closeInitializedRuntimeDatabase(db)
+	unlock()
+	if closeErr != nil {
+		return nil, fmt.Errorf("close runtime-state database: %w", closeErr)
+	}
+	return manager, nil
+}
+
+// NewManager creates a state manager while retaining the historical no-error
+// constructor. Initialization failures are logged; later operations retry the
+// same authoritative SQLite path, and setters return any failure to callers.
+func NewManager(workspace string) *Manager {
+	manager, err := newManager(workspace)
+	if err != nil {
+		logger.WarnCF("state", "failed to resolve runtime-state database", map[string]any{
 			"error": err.Error(),
 		})
+		return &Manager{workspace: workspace, now: time.Now}
 	}
-
-	sm := &Manager{
-		workspace: workspace,
-		stateFile: stateFile,
-		state:     &State{},
+	db, unlock, openErr := manager.openDatabase(context.Background())
+	if openErr != nil {
+		logger.WarnCF("state", "failed to initialize runtime-state database", map[string]any{
+			"error": openErr.Error(),
+		})
+		return manager
 	}
-
-	// Try to load from new location first
-	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
-		// New file doesn't exist, try migrating from old location
-		if data, err := os.ReadFile(oldStateFile); err == nil {
-			if err := json.Unmarshal(data, sm.state); err == nil {
-				// Migrate to new location
-				if err := sm.saveAtomic(); err != nil {
-					logger.WarnCF("state", "failed to save state", map[string]any{
-						"error": err.Error(),
-					})
-				}
-				logger.InfoCF("state", "migrated state", map[string]any{
-					"from": oldStateFile,
-					"to":   stateFile,
-				})
-			}
-		}
-	} else {
-		// Load from new location
-		if err := sm.load(); err != nil {
-			logger.WarnCF("state", "failed to load state", map[string]any{
-				"error": err.Error(),
-			})
-		}
+	if closeErr := closeInitializedRuntimeDatabase(db); closeErr != nil {
+		logger.WarnCF("state", "failed to close initialized runtime-state database", map[string]any{
+			"error": closeErr.Error(),
+		})
 	}
-
-	return sm
+	unlock()
+	return manager
 }
 
-// SetLastChannel atomically updates the last channel and saves the state.
-// This method uses a temp file + rename pattern for atomic writes,
-// ensuring that the state file is never corrupted even if the process crashes.
+func newManager(workspace string) (*Manager, error) {
+	databasePath, err := resolveRuntimeDatabasePath(workspace)
+	if err != nil {
+		return nil, fmt.Errorf("resolve runtime-state database: %w", err)
+	}
+	return &Manager{
+		workspace:    workspace,
+		databasePath: databasePath,
+		now:          time.Now,
+	}, nil
+}
+
+// SetLastChannel atomically updates the last channel and shared timestamp.
 func (sm *Manager) SetLastChannel(channel string) error {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	// Update state
-	sm.state.LastChannel = channel
-	sm.state.Timestamp = time.Now()
-
-	// Atomic save using temp file + rename
-	if err := sm.saveAtomic(); err != nil {
-		return fmt.Errorf("failed to save state atomically: %w", err)
-	}
-
-	return nil
+	return sm.updateValue("last_channel", channel)
 }
 
-// SetLastChatID atomically updates the last chat ID and saves the state.
+// SetLastChatID atomically updates the last chat ID and shared timestamp.
 func (sm *Manager) SetLastChatID(chatID string) error {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
+	return sm.updateValue("last_chat_id", chatID)
+}
 
-	// Update state
-	sm.state.LastChatID = chatID
-	sm.state.Timestamp = time.Now()
-
-	// Atomic save using temp file + rename
-	if err := sm.saveAtomic(); err != nil {
+func (sm *Manager) updateValue(field, value string) error {
+	if sm == nil {
+		return nil
+	}
+	if err := validateRuntimeStateValue(value); err != nil {
 		return fmt.Errorf("failed to save state atomically: %w", err)
 	}
-
+	now := sm.now().UTC()
+	seconds, nanoseconds, err := runtimeTimestampValues(now)
+	if err != nil {
+		return fmt.Errorf("failed to save state atomically: %w", err)
+	}
+	ctx := context.Background()
+	db, unlock, err := sm.openDatabase(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to save state atomically: %w", err)
+	}
+	defer unlock()
+	defer db.Close()
+	err = sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		var version int64
+		if loadErr := conn.QueryRowContext(
+			ctx,
+			`SELECT version FROM runtime_state WHERE id = 1`,
+		).Scan(&version); loadErr != nil {
+			return loadErr
+		}
+		query := updateLastChannelSQL
+		if field == "last_chat_id" {
+			query = updateLastChatIDSQL
+		}
+		result, updateErr := conn.ExecContext(ctx, query, value, seconds, nanoseconds, version)
+		if updateErr != nil {
+			return updateErr
+		}
+		changed, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if changed != 1 {
+			return errRuntimeStateVersionChanged
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to save state atomically: %w", err)
+	}
 	return nil
 }
 
-// GetLastChannel returns the last channel from the state.
+// GetLastChannel returns the last channel from authoritative state.
 func (sm *Manager) GetLastChannel() string {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	return sm.state.LastChannel
+	return sm.snapshot().LastChannel
 }
 
-// GetLastChatID returns the last chat ID from the state.
+// GetLastChatID returns the last chat ID from authoritative state.
 func (sm *Manager) GetLastChatID() string {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	return sm.state.LastChatID
+	return sm.snapshot().LastChatID
 }
 
 // GetTimestamp returns the timestamp of the last state update.
 func (sm *Manager) GetTimestamp() time.Time {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	return sm.state.Timestamp
+	return sm.snapshot().Timestamp
 }
 
-// saveAtomic performs an atomic save using temp file + rename.
-// This ensures that the state file is never corrupted:
-// 1. Write to a temp file
-// 2. Sync to disk (critical for SD cards/flash storage)
-// 3. Rename temp file to target (atomic on POSIX systems)
-// 4. If rename fails, cleanup the temp file
-//
-// Must be called with the lock held.
-func (sm *Manager) saveAtomic() error {
-	// Use unified atomic write utility with explicit sync for flash storage reliability.
-	// Using 0o600 (owner read/write only) for secure default permissions.
-	data, err := json.MarshalIndent(sm.state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal state: %w", err)
+func (sm *Manager) snapshot() State {
+	if sm == nil {
+		return State{}
 	}
-
-	return fileutil.WriteFileAtomic(sm.stateFile, data, 0o600)
+	ctx := context.Background()
+	db, unlock, err := sm.openDatabase(ctx)
+	if err != nil {
+		sm.logReadFailure(err)
+		return State{}
+	}
+	defer unlock()
+	defer db.Close()
+	state, _, _, err := scanRuntimeState(db.QueryRowContext(ctx, selectRuntimeStateSQL))
+	if err != nil {
+		sm.logReadFailure(err)
+		return State{}
+	}
+	return state
 }
 
-// load loads the state from disk.
-func (sm *Manager) load() error {
-	data, err := os.ReadFile(sm.stateFile)
+func (sm *Manager) logReadFailure(err error) {
+	logger.WarnCF("state", "failed to load runtime state", map[string]any{
+		"error": err.Error(),
+	})
+}
+
+func (sm *Manager) openDatabase(ctx context.Context) (*sql.DB, func(), error) {
+	if sm == nil || strings.TrimSpace(sm.databasePath) == "" {
+		return nil, nil, fmt.Errorf("runtime-state database path is unavailable")
+	}
+	localLock := runtimeLocalDatabaseLock(sm.databasePath)
+	localLock.Lock()
+	unlockFile, err := lockRuntimeDatabase(sm.databasePath)
 	if err != nil {
-		// File doesn't exist yet, that's OK
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to read state file: %w", err)
+		localLock.Unlock()
+		return nil, nil, err
 	}
-
-	if err := json.Unmarshal(data, sm.state); err != nil {
-		return fmt.Errorf("failed to unmarshal state: %w", err)
+	unlock := func() {
+		unlockFile()
+		localLock.Unlock()
 	}
+	options, err := runtimeStoreOptions(sm.workspace)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	db, err := sqlitestore.Open(ctx, sm.databasePath, options)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	return db, unlock, nil
+}
 
+func runtimeLocalDatabaseLock(databasePath string) *sync.Mutex {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(databasePath))
+	return &runtimeDatabaseLocks[hash.Sum32()%runtimeDatabaseLockShards]
+}
+
+func validateRuntimeStateValue(value string) error {
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("runtime-state value is not valid UTF-8")
+	}
+	if len(value) > maxRuntimeStateValueBytes {
+		return fmt.Errorf("runtime-state value exceeds its size limit")
+	}
+	if strings.ContainsRune(value, '\x00') {
+		return fmt.Errorf("runtime-state value contains a NUL byte")
+	}
 	return nil
 }

@@ -110,6 +110,7 @@ picoclaw auth wecom --timeout 10m
 - 接收到的媒体文件先下载到本地媒体存储，再传递给 Agent。
 - 发送媒体时先上传为企业微信临时文件，再作为媒体消息发送。
 - 自动检测并过滤重复消息（环形缓冲区，最多记录 1000 条消息 ID）。
+- 请求路由状态以类型化 SQLite 存放在 `$PICOCLAW_HOME/channels/wecom/reqid-store.db`。首次打开时会一次性导入受限的旧 `wecom/reqid-store.json`，并在 `$PICOCLAW_HOME/legacy-json/wecom-reqid-v1/` 下保留原始字节；PicoClaw 不再写入路由 JSON。
 
 ---
 
