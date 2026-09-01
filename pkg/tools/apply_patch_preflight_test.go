@@ -992,6 +992,71 @@ func TestApplyPatchPreflightVolatileProtectedRootAllowsRuntimeReplacement(t *tes
 	}
 }
 
+func TestApplyPatchPreflightSharesDetachedPreparedVolatileRoots(t *testing.T) {
+	workspace := t.TempDir()
+	protected := filepath.Join(workspace, "runtime.db")
+	if err := os.WriteFile(protected, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	roots := []string{protected}
+	prepared, err := NewPreparedApplyPatchVolatileRoots(workspace, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots[0] = filepath.Join(workspace, "ordinary.txt")
+	first, err := NewApplyPatchToolWithPermissionsAndPolicy(
+		workspace,
+		true,
+		true,
+		true,
+		ApplyPatchPreflightPolicy{PreparedVolatileProtectedRoots: prepared},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewApplyPatchToolWithPermissionsAndPolicy(
+		workspace,
+		true,
+		true,
+		true,
+		ApplyPatchPreflightPolicy{PreparedVolatileProtectedRoots: prepared},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.volatileRoots != prepared || second.volatileRoots != prepared {
+		t.Fatal("apply_patch copied the prepared volatile-root policy")
+	}
+	result := first.Execute(context.Background(), map[string]any{
+		"patch": "*** Begin Patch\n*** Update File: runtime.db\n@@\n-before\n+changed\n*** End Patch",
+	})
+	if result == nil || !result.IsError {
+		t.Fatalf("prepared volatile root mutation = %#v", result)
+	}
+	alias := filepath.Join(workspace, "runtime.alias")
+	if err := os.Link(protected, alias); err != nil {
+		t.Skipf("hardlinks unavailable: %v", err)
+	}
+	result = second.Execute(context.Background(), map[string]any{
+		"patch": "*** Begin Patch\n*** Update File: runtime.alias\n@@\n-before\n+changed\n*** End Patch",
+	})
+	if result == nil || !result.IsError {
+		t.Fatalf("prepared volatile-root hardlink mutation = %#v", result)
+	}
+	if mixed, mixedErr := NewApplyPatchToolWithPermissionsAndPolicy(
+		workspace,
+		true,
+		true,
+		true,
+		ApplyPatchPreflightPolicy{
+			VolatileProtectedRoots:         []string{protected},
+			PreparedVolatileProtectedRoots: prepared,
+		},
+	); mixedErr == nil || mixed != nil {
+		t.Fatalf("mixed prepared/source volatile roots = %#v, %v", mixed, mixedErr)
+	}
+}
+
 func TestApplyPatchPreflightPolicyRejectsInvalidRuntimeRoots(t *testing.T) {
 	workspace := t.TempDir()
 	transactionRoot := filepath.Join(t.TempDir(), "apply-patch-transactions")
