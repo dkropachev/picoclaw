@@ -376,6 +376,21 @@ func agentSessionFileMutationProtectedRoots(workspace string) []string {
 	}
 }
 
+func agentCronFileMutationProtectedRoots(workspace string) []string {
+	root := filepath.Join(workspace, "cron")
+	database := filepath.Join(root, "jobs.db")
+	archiveRoot := filepath.Join(root, "legacy-json")
+	return []string{
+		root,
+		database,
+		database + "-wal",
+		database + "-shm",
+		filepath.Join(root, "jobs.json"),
+		archiveRoot,
+		filepath.Join(archiveRoot, "cron-jobs-v1", "jobs.json"),
+	}
+}
+
 func appendAgentWorkspaceSQLiteProtectedRoots(
 	roots []string,
 	cfg *config.Config,

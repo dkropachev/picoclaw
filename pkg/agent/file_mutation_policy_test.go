@@ -623,6 +623,101 @@ func TestAgentFileMutationPolicyProtectsSessionDatabaseAndArchive(t *testing.T) 
 	}
 }
 
+func TestAgentFileMutationPolicyProtectsCronDatabaseAndLegacyState(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+
+	cfg := agentFileMutationTestConfig(workspace)
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	t.Cleanup(func() { agent.Close() })
+	owned, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "cron-protection-owner",
+	}, []string{"write_file", "edit_file", "append_file", "apply_patch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owned.Close()
+
+	cronRoot := filepath.Join(workspace, "cron")
+	if pathExists(cronRoot) {
+		t.Fatal("cron namespace unexpectedly exists before the protection check")
+	}
+	for registryName, registry := range map[string]*tools.ToolRegistry{
+		"root": agent.Tools, "owner": owned,
+	} {
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			t.Run(registryName+"_"+toolName+"_absent_cron_root", func(t *testing.T) {
+				requireAgentFileMutationDenied(
+					t, registry, toolName, workspace, cronRoot, false,
+				)
+			})
+		}
+	}
+
+	database := filepath.Join(cronRoot, "jobs.db")
+	archive := filepath.Join(cronRoot, "legacy-json", "cron-jobs-v1", "jobs.json")
+	targets := []string{
+		database,
+		database + "-wal",
+		database + "-shm",
+		filepath.Join(cronRoot, "jobs.json"),
+		archive,
+	}
+	for _, target := range targets {
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for registryName, registry := range map[string]*tools.ToolRegistry{
+		"root": agent.Tools, "owner": owned,
+	} {
+		for _, target := range targets {
+			for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+				t.Run(registryName+"_"+toolName+"_"+filepath.Base(target), func(t *testing.T) {
+					requireAgentFileMutationDenied(
+						t, registry, toolName, workspace, target, true,
+					)
+				})
+			}
+			content, err := os.ReadFile(target)
+			if err != nil || string(content) != "before" {
+				t.Fatalf("protected cron state %q = %q, %v", target, content, err)
+			}
+		}
+	}
+
+	hardlink := filepath.Join(workspace, "cron-archive-hardlink.json")
+	if err := os.Link(archive, hardlink); err == nil {
+		for registryName, registry := range map[string]*tools.ToolRegistry{
+			"root": agent.Tools, "owner": owned,
+		} {
+			for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+				t.Run(registryName+"_"+toolName+"_archive_hardlink", func(t *testing.T) {
+					if toolName == "apply_patch" {
+						tool, _ := registry.Get(toolName)
+						result := executeAgentFileMutation(
+							t, tool, toolName, workspace, hardlink, true,
+						)
+						if result == nil || !result.IsError {
+							t.Fatalf("apply_patch accepted cron archive hardlink: %#v", result)
+						}
+						return
+					}
+					requireAgentFileMutationDenied(
+						t, registry, toolName, workspace, hardlink, true,
+					)
+				})
+			}
+		}
+	}
+}
+
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil

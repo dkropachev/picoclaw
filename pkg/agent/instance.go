@@ -365,6 +365,10 @@ func newAgentInstanceWithRuntimePolicies(
 		fileMutationProtectedRoots,
 		agentSessionFileMutationProtectedRoots(workspace)...,
 	)
+	fileMutationProtectedRoots = append(
+		fileMutationProtectedRoots,
+		agentCronFileMutationProtectedRoots(workspace)...,
+	)
 	evolutionProtectedRoots, evolutionRootsErr := agentEvolutionFileMutationProtectedRoots(
 		workspace,
 		cfg.Evolution.StateDir,
