@@ -1311,7 +1311,7 @@ func TestRepositoryModelEvaluationAPIConfigStoreAndMissingFailures(t *testing.T)
 	}
 
 	root := filepath.Join(workspace, "repository_evaluations")
-	if err := os.Chmod(root, 0o777); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "evaluations.db"), []byte("not-sqlite"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {

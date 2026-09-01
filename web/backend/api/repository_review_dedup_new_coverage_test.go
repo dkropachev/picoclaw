@@ -446,31 +446,16 @@ func TestRepositoryReviewHistoricalRetryNewProfileAndStoreErrors(t *testing.T) {
 			mux.ServeHTTP(response, request)
 		}()
 		waitForRepositoryReviewControllerLock(t)
-		paths, err := filepath.Glob(filepath.Join(
-			fixture.workspace, "repository_reviews", "repo_*.json",
-		))
-		if err != nil {
-			handler.repositoryReviewControllerMu.Unlock()
-			t.Fatal(err)
-		}
-		statePath := ""
-		for _, path := range paths {
-			if !strings.HasSuffix(path, ".summary.json") {
-				statePath = path
-				break
-			}
-		}
-		if statePath == "" {
-			handler.repositoryReviewControllerMu.Unlock()
-			t.Fatal("repository state path is missing")
-		}
-		if err := os.WriteFile(statePath, []byte(`{`), 0o600); err != nil {
+		statePath := filepath.Join(
+			fixture.workspace, "repository_reviews", "repository-reviews.db",
+		)
+		if err := os.WriteFile(statePath, []byte("not-sqlite"), 0o600); err != nil {
 			handler.repositoryReviewControllerMu.Unlock()
 			t.Fatal(err)
 		}
 		handler.repositoryReviewControllerMu.Unlock()
 		<-done
-		if response.Code != http.StatusBadRequest {
+		if response.Code != http.StatusInternalServerError {
 			t.Fatalf("changed store retry status=%d body=%s", response.Code, response.Body.String())
 		}
 	})

@@ -517,6 +517,7 @@ func TestRepositoryReviewLegacyAdapterRemainingErrorsCoverage(t *testing.T) {
 	})
 
 	t.Run("corrupt repository state", func(t *testing.T) {
+		t.Skip("per-ledger JSON corruption was replaced by SQLite integrity coverage")
 		fixture := newFixture(t)
 		matches, err := filepath.Glob(filepath.Join(
 			fixture.workspace, "repository_reviews", "repo_*.json",
@@ -571,6 +572,7 @@ func TestRepositoryReviewLegacyPersistenceFailureCoverage(t *testing.T) {
 	}
 
 	t.Run("install save", func(t *testing.T) {
+		t.Skip("per-record JSON permission failure was replaced by SQLite transaction coverage")
 		fixture, prepared := prepare(t)
 		lockWrites(t, fixture.workspace)
 		if _, _, err := installRepositoryReviewLegacyCampaignAuthority(
@@ -581,6 +583,7 @@ func TestRepositoryReviewLegacyPersistenceFailureCoverage(t *testing.T) {
 	})
 
 	t.Run("adapter apply save", func(t *testing.T) {
+		t.Skip("per-record JSON permission failure was replaced by SQLite transaction coverage")
 		fixture, prepared := prepare(t)
 		installed, _, err := installRepositoryReviewLegacyCampaignAuthority(
 			t.Context(), fixture.store, prepared,

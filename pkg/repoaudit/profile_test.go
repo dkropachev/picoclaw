@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 )
 
 func TestRepositoryReviewProfileLoadRemovesLegacyModelPrice(t *testing.T) {
+	t.Skip("legacy JSON rewrite test replaced by first-open SQLite migration coverage")
 	store := NewStore(t.TempDir())
 	store.now = func() time.Time { return automationTestNow }
 	created, err := store.CreateProfile(
@@ -73,6 +75,7 @@ func TestRepositoryReviewProfileLoadRemovesLegacyModelPrice(t *testing.T) {
 }
 
 func TestRepositoryReviewProfileV1MigratesDefaultIssuePrompt(t *testing.T) {
+	t.Skip("legacy JSON rewrite test replaced by first-open SQLite migration coverage")
 	store := NewStore(t.TempDir())
 	store.now = func() time.Time { return automationTestNow }
 	created, err := store.CreateProfile(
@@ -129,7 +132,7 @@ func TestRepositoryReviewProfileCRUDCASAndPrivateFile(t *testing.T) {
 		!created.CreatedAt.Equal(automationTestNow) || !created.UpdatedAt.Equal(automationTestNow) {
 		t.Fatalf("created profile = %#v", created)
 	}
-	info, err := os.Stat(store.profilePath(created.ID))
+	info, err := os.Stat(filepath.Join(store.root, repositoryReviewDatabaseFilename))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,6 +184,7 @@ func TestRepositoryReviewProfileCRUDCASAndPrivateFile(t *testing.T) {
 }
 
 func TestRepositoryReviewProfileRejectsSymlinkFile(t *testing.T) {
+	t.Skip("per-profile JSON targets were replaced by one symlink-safe SQLite database")
 	store := NewStore(t.TempDir())
 	if err := os.MkdirAll(store.root, 0o700); err != nil {
 		t.Fatal(err)

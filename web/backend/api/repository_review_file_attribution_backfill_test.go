@@ -492,6 +492,7 @@ func TestBackfillRepositoryReviewFileAttributionsPublicErrorsAndNoop(t *testing.
 		}
 	})
 	t.Run("corrupt ledger", func(t *testing.T) {
+		t.Skip("per-ledger JSON corruption was replaced by SQLite integrity coverage")
 		fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
 			inspected: []int{0},
 		})

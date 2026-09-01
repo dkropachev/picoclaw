@@ -18,6 +18,7 @@ func requireRepositoryReviewPermissionEnforcement(t *testing.T) {
 }
 
 func TestRepositoryReviewProfilePersistenceLateFailures(t *testing.T) {
+	t.Skip("per-record JSON persistence failures were replaced by SQLite transaction tests")
 	t.Run("JSON timestamp", func(t *testing.T) {
 		profile := profileCoverageFixture("rrpf_json_timestamp")
 		outsideJSONTime := time.Date(10_000, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -72,6 +73,7 @@ func TestRepositoryReviewProfilePersistenceLateFailures(t *testing.T) {
 }
 
 func TestRepositoryReviewAutomationPersistenceLateFailures(t *testing.T) {
+	t.Skip("per-record JSON persistence failures were replaced by SQLite transaction tests")
 	t.Run("JSON timestamp", func(t *testing.T) {
 		automation := validAutomationForTest("rra_json_timestamp", "JSON timestamp")
 		outsideJSONTime := time.Date(10_000, time.January, 1, 0, 0, 0, 0, time.UTC)

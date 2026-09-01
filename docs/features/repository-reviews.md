@@ -154,9 +154,7 @@ aggregate-only reports remain readable.
 
 | State                        | Shape And Location                                                          | Contract                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Review profile               | `workspace/repository_reviews/profile_rrpf_*.json`                          | Reusable versioned `0600` behavior, one reviewer alias, optional issue-writer and deduplication aliases, editable issue prompt, deduplication threshold/candidate limit, optional execution account, scope, sizing, and one guard expression without repository or lifecycle state. Blank writer or deduplicator means reviewer.                                                                 |
-| Repository configuration/run | `workspace/repository_reviews/automation_rra_*.json`                        | Unique normalized repository/profile assignment, optional branch, exact admitted `resolved_commit_sha`, campaign start and durable run IDs, materialized profile/account/reviewer/writer version, lifecycle, cumulative usage/cost, bounded run history, latest selected-account limit snapshots, and internal approximate coverage sketch.                                                 |
-| Repository ledger            | `workspace/repository_reviews/repo_*.json` plus summary sidecar             | Exact commit/blob checkpoints, immutable raw and deduplicated review findings, deduplication/mapping/validation jobs, canonical repository findings, observations, contexts, completed review runs, replay/merge state, lifecycle/resolution history, canonical finding-to-draft references, and issue previews/drafts including safe provenance and errors.                              |
+| Review state database        | `workspace/repository_reviews/repository-reviews.db`                        | Typed summaries, versions, statuses, timestamps, normalized profile scopes, ordered reviewer/run relationships, and ledger record identities. Bounded JSON BLOBs retain only nested evidence, policy, checkpoint, and aggregate payloads. The private `0600` SQLite database uses WAL, foreign keys, `synchronous=FULL`, integrity checks, and transactional CAS. |
 | Current campaign coverage    | `current_campaign` and `campaign_history` in the repository ledger          | Controller-authorized single-use identity; exact commit/inventory/profile/scope/required-assignment binding; a frozen deduplication profile/account/model snapshot; bounded monotonic per-path inspected, completed, and unsupported state; verified run/context/finding provenance; and a bounded recovery digest. An absent or inexact coverage record is unknown, never an inferred zero. |
 | Issue-generation reservation | Canonical finding reference plus an issue draft in the repository ledger    | Durable reservation written before an isolated call. It binds one finding to one generation ID and survives retry/restart without retaining provider history or raw output. Per-attempt and four-slot OS locks make dispatch idempotent and bounded across launcher processes sharing the workspace.                                                                                        |
 | Workflow run                 | `workspace/workflow_runs/<run-id>/`                                         | Generic durable job/step state and events; automation stores only bounded identities/progress and requires a verified `record` output or authoritative no-op checkpoint.                                                                                                                                                                                                                    |
@@ -416,9 +414,8 @@ Owns: TEST web/frontend/src/routes/-repository-reviews*.test.tsx
 Owns: HTTP * /api/repository-reviews*
 Owns: UI /repository-reviews*
 
-Profile state is stored in `workspace/repository_reviews/profile_rrpf_*.json`;
-repository configuration and runtime state remains in
-`workspace/repository_reviews/automation_rra_*.json`. Authenticated profile CRUD
+Profile, repository configuration, summary, and ledger state is stored in
+`workspace/repository_reviews/repository-reviews.db`. Authenticated profile CRUD
 uses `/api/repository-reviews/profiles*`. Repository configuration and run
 lifecycle use `/api/repository-reviews/automations*`, with `start`, `pause`,
 `resume`, and `restart` action subresources, a per-run `commit-options`
@@ -436,6 +433,15 @@ Profileless automation files written by older versions remain readable for
 recovery and have legacy `HEAD`/target values sanitized at admission. New HTTP
 creation always requires `profile_id`; the split UI does not expose legacy
 profileless editing or multi-model actual-review configuration.
+
+The first database open imports legacy profile, automation, repository-ledger,
+and summary JSON in dependency-safe deterministic order. Examined sources move
+without replacement to
+`repository_reviews/legacy-json/repository-reviews-v1/`; SQLite is immediately
+authoritative and no dual writes occur. Stop all PicoClaw processes before an
+upgrade or rollback. Rollback requires restoring that archive and removing or
+restoring `repository-reviews.db` together with matching `-wal` and `-shm`
+files.
 
 The shared application sidebar and thread/chat controller remain auxiliary
 interfaces owned by their existing feature specifications.

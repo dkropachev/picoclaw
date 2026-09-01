@@ -327,6 +327,7 @@ func TestRepositoryReviewAssignmentAdmissionFailureBranches(t *testing.T) {
 	})
 
 	t.Run("ledger read", func(t *testing.T) {
+		t.Skip("per-ledger JSON corruption was replaced by SQLite integrity coverage")
 		fixture := prepare(t, "ledger-failure")
 		calls := 0
 		fixture.controller.update = func(

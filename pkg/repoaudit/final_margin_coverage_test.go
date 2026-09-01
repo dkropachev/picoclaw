@@ -10,6 +10,7 @@ import (
 // legacy summary has been decoded successfully: migration can fail, or the
 // migrated ledger can legitimately remain an uncreated (version-zero) state.
 func TestRepositoryReviewSummaryLegacyReloadMargins(t *testing.T) {
+	t.Skip("legacy JSON summary reload was replaced by SQLite import and typed projection tests")
 	t.Run("migration error", func(t *testing.T) {
 		store := NewStore(t.TempDir())
 		repository := "owner/legacy-summary-invalid-state"

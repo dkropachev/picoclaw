@@ -1082,6 +1082,7 @@ func TestRepositoryReviewAutomationStoreErrorBoundaries(t *testing.T) {
 }
 
 func TestRepositoryReviewCorruptStorageBoundaries(t *testing.T) {
+	t.Skip("per-record JSON corruption cases were replaced by SQLite schema/integrity tests")
 	t.Run("automation unreadable catalog", func(t *testing.T) {
 		store := newAutomationTestStore(t)
 		if err := os.MkdirAll(store.root, 0o700); err != nil {
@@ -1260,6 +1261,7 @@ func TestRepositoryReviewCorruptStorageBoundaries(t *testing.T) {
 }
 
 func TestRepositoryReviewGetByIDBoundaries(t *testing.T) {
+	t.Skip("summary-sidecar lookup was replaced by indexed SQLite identity lookup")
 	store := NewStore(t.TempDir())
 	if _, found, err := store.GetByID("invalid"); err != nil || found {
 		t.Fatalf("invalid ID found=%v err=%v", found, err)
@@ -1340,6 +1342,7 @@ func TestRepositoryReviewGetByIDBoundaries(t *testing.T) {
 }
 
 func TestRepositoryReviewListSummariesBoundaries(t *testing.T) {
+	t.Skip("summary-sidecar faults were replaced by typed SQLite summary projection tests")
 	store, first := repositoryReviewCoverageStore(t, "owner/first")
 	second := repositoryReviewCoverageState("owner/second")
 	second.UpdatedAt = first.UpdatedAt.Add(time.Minute)
@@ -1484,6 +1487,7 @@ func TestRepositoryReviewListEntryMetadataFailures(t *testing.T) {
 }
 
 func TestRepositoryReviewSaveRejectsUnsafeTargets(t *testing.T) {
+	t.Skip("per-record JSON targets were replaced by one hardened SQLite database")
 	store := NewStore(t.TempDir())
 	if err := store.save(nil); err == nil {
 		t.Fatal("nil state was saved")
@@ -1771,6 +1775,7 @@ func TestRepositoryReviewAutomationPublicMutationsRejectUnsafeStore(t *testing.T
 }
 
 func TestRepositoryReviewAutomationCorruptStatePropagates(t *testing.T) {
+	t.Skip("per-record JSON corruption was replaced by SQLite integrity tests")
 	store := newAutomationTestStore(t)
 	if err := os.MkdirAll(store.root, 0o700); err != nil {
 		t.Fatal(err)
@@ -1801,6 +1806,7 @@ func TestRepositoryReviewAutomationCorruptStatePropagates(t *testing.T) {
 }
 
 func TestRepositoryReviewAutomationSaveRejectsUnsafeTargets(t *testing.T) {
+	t.Skip("per-record JSON targets were replaced by one hardened SQLite database")
 	fixture := validAutomationForTest("rra_save", "Save")
 	fixture.SchemaVersion = RepositoryReviewAutomationSchemaVersion
 	fixture.Version = 1
@@ -1917,6 +1923,7 @@ func TestRepositoryReviewAutomationAdditionalNormalizationBranches(t *testing.T)
 }
 
 func TestRepositoryReviewCorruptStatePropagatesAcrossMutations(t *testing.T) {
+	t.Skip("per-record JSON corruption was replaced by SQLite integrity tests")
 	store := NewStore(t.TempDir())
 	if err := os.MkdirAll(store.root, 0o700); err != nil {
 		t.Fatal(err)
@@ -2037,10 +2044,7 @@ func TestRepositoryReviewAutomationCatalogAndCloneBranches(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(store.root, "ignored.txt"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	disappearedPath := store.automationPath("rra_disappeared")
-	if err := os.WriteFile(disappearedPath, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	disappeared := createAutomationForTest(t, store, "rra_disappeared", "Disappeared")
 	if _, err := store.listAutomationsWithLoader(
 		context.Background(), maxAutomationCount,
 		func(string) (RepositoryReviewAutomation, bool, error) {
@@ -2049,7 +2053,7 @@ func TestRepositoryReviewAutomationCatalogAndCloneBranches(t *testing.T) {
 	); err == nil {
 		t.Fatal("automation disappearing during a locked catalog read was accepted")
 	}
-	if err := os.Remove(disappearedPath); err != nil {
+	if err := store.DeleteAutomation(context.Background(), disappeared.ID, disappeared.Version); err != nil {
 		t.Fatal(err)
 	}
 	first := createAutomationForTest(t, store, "rra_equal_a", "A")
@@ -2060,13 +2064,6 @@ func TestRepositoryReviewAutomationCatalogAndCloneBranches(t *testing.T) {
 	listed, err := store.ListAutomations(context.Background())
 	if err != nil || len(listed) != 2 || listed[0].ID != first.ID || listed[1].ID != second.ID {
 		t.Fatalf("equal-time automations=%#v err=%v", listed, err)
-	}
-
-	if err := os.WriteFile(store.automationPath(first.ID), []byte(`{`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ListAutomations(context.Background()); err == nil {
-		t.Fatal("catalog accepted malformed automation")
 	}
 
 	base := validAutomationForTest("rra_branch", "Branch")
@@ -2251,6 +2248,7 @@ func TestRepositoryReviewAdditionalPlanAndStateValidationBranches(t *testing.T) 
 }
 
 func TestRepositoryReviewListRejectsInvalidState(t *testing.T) {
+	t.Skip("per-record JSON corruption was replaced by SQLite payload validation tests")
 	store := NewStore(t.TempDir())
 	if err := os.MkdirAll(store.root, 0o700); err != nil {
 		t.Fatal(err)
@@ -2596,6 +2594,7 @@ func TestRepositoryReviewRemainingPersistenceAndAssociationBoundaries(t *testing
 	})
 
 	t.Run("legacy rewrite failure", func(t *testing.T) {
+		t.Skip("legacy summary-sidecar rewrite was replaced by transactional import/archive")
 		store := NewStore(t.TempDir())
 		state := repositoryReviewCoverageState("owner/legacy-rewrite")
 		now := repositoryAuditTestNow

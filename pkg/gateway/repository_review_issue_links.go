@@ -126,7 +126,7 @@ func (handler *repositoryReviewPublicationHandler) serveRepositoryReviewAutomati
 		writeRepositoryReviewPublicationError(w, http.StatusServiceUnavailable, "repository_review_unavailable")
 		return
 	}
-	store := repoaudit.NewStore(loop.GetConfig().WorkspacePath())
+	store := repoaudit.NewSQLiteStore(loop.GetConfig().WorkspacePath())
 	automation, found, err := store.GetAutomation(r.Context(), operation.AutomationID)
 	if err != nil || !found {
 		writeRepositoryReviewPublicationStoreError(w, err, found)

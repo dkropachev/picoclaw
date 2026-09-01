@@ -3,16 +3,15 @@ package repoaudit
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
@@ -262,7 +261,21 @@ func (s Store) DeleteProfile(ctx context.Context, id string, expectedVersion int
 	if assigned {
 		return ErrProfileAssigned
 	}
-	return fileutil.RemoveDurable(s.profilePath(id))
+	database, err := s.openDatabase(ctx)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	return sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
+		result, deleteErr := conn.ExecContext(ctx,
+			`DELETE FROM repository_review_profiles WHERE profile_id = ? AND version = ?`,
+			id, expectedVersion,
+		)
+		if deleteErr != nil {
+			return deleteErr
+		}
+		return sqlitestore.RequireOneRow(result, ErrConflict)
+	})
 }
 
 // MaterializeRepositoryReviewAutomation applies reusable profile policy to a
@@ -314,106 +327,52 @@ func MaterializeRepositoryReviewAutomation(
 }
 
 func (s Store) listProfilesUnlocked(maximum int) ([]RepositoryReviewProfile, error) {
-	if err := s.requireSafeRoot(true); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(s.root)
-	if os.IsNotExist(err) {
-		return []RepositoryReviewProfile{}, nil
-	}
+	database, err := s.openDatabase(context.Background())
 	if err != nil {
 		return nil, err
 	}
+	defer database.Close()
+	rows, err := database.Query(`
+		SELECT profile_id FROM repository_review_profiles
+	 ORDER BY updated_at_unix_nano DESC, profile_id ASC
+	 LIMIT ?`, maximum+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	profiles := make([]RepositoryReviewProfile, 0)
-	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), "profile_") || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
-			return nil, fmt.Errorf("repository review profile %q must be a regular file", entry.Name())
-		}
-		id := strings.TrimSuffix(strings.TrimPrefix(entry.Name(), "profile_"), ".json")
-		if !validProfileID(id) || entry.Name() != profileFilename(id) {
-			return nil, fmt.Errorf("%w: invalid profile filename", ErrInvalidProfile)
-		}
+	for rows.Next() {
 		if len(profiles) >= maximum {
 			return nil, fmt.Errorf("%w: profile catalog exceeds its limit", ErrInvalidProfile)
 		}
-		profile, found, err := s.loadProfile(id)
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		profile, err := loadRepositoryReviewProfileRow(context.Background(), database, id)
 		if err != nil {
 			return nil, err
 		}
-		if !found {
-			return nil, errors.New("repository review profile disappeared while locked")
-		}
 		profiles = append(profiles, profile)
 	}
-	sort.Slice(profiles, func(i, j int) bool {
-		if profiles[i].UpdatedAt.Equal(profiles[j].UpdatedAt) {
-			return profiles[i].ID < profiles[j].ID
-		}
-		return profiles[i].UpdatedAt.After(profiles[j].UpdatedAt)
-	})
-	return profiles, nil
+	return profiles, rows.Err()
 }
 
 func (s Store) loadProfile(id string) (RepositoryReviewProfile, bool, error) {
 	if !validProfileID(id) {
 		return RepositoryReviewProfile{}, false, fmt.Errorf("%w: invalid ID", ErrInvalidProfile)
 	}
-	statePath := s.profilePath(id)
-	data, found, err := s.readStateFile(
-		statePath,
-		maxProfileFileBytes,
-		"repository review profile",
-	)
+	database, err := s.openDatabase(context.Background())
 	if err != nil {
 		return RepositoryReviewProfile{}, false, err
 	}
-	if !found {
+	defer database.Close()
+	profile, err := loadRepositoryReviewProfileRow(context.Background(), database, id)
+	if errors.Is(err, sql.ErrNoRows) {
 		return RepositoryReviewProfile{}, false, nil
 	}
-	var profile RepositoryReviewProfile
-	hadLegacyGuard, err := unmarshalRepositoryReviewGuardState(data, &profile)
 	if err != nil {
 		return RepositoryReviewProfile{}, false, err
-	}
-	var legacy map[string]json.RawMessage
-	// unmarshalRepositoryReviewGuardState already decoded this exact JSON.
-	_ = json.Unmarshal(data, &legacy)
-	if profile.ID != id {
-		return RepositoryReviewProfile{}, false, errors.New("repository review profile identity mismatch")
-	}
-	hadLegacySchema := false
-	switch profile.SchemaVersion {
-	case 1:
-		profile.SchemaVersion = RepositoryReviewProfileSchemaVersion
-		if strings.TrimSpace(profile.IssuePrompt) == "" {
-			profile.IssuePrompt = DefaultRepositoryReviewIssuePrompt
-		}
-		hadLegacySchema = true
-	case 2, 3:
-		profile.SchemaVersion = RepositoryReviewProfileSchemaVersion
-		hadLegacySchema = true
-	}
-	_, hadDeduplicationThreshold := legacy["deduplication_similarity_threshold"]
-	_, hadDeduplicationCandidateLimit := legacy["deduplication_candidate_limit"]
-	if !hadDeduplicationThreshold {
-		profile.DeduplicationSimilarityThreshold = DeduplicationDefaultThreshold
-	}
-	if !hadDeduplicationCandidateLimit {
-		profile.DeduplicationCandidateLimit = DeduplicationDefaultCandidateLimit
-	}
-	hadLegacyAssignmentTimeout := profile.AssignmentTimeoutSeconds == 0
-	if err := normalizeProfile(&profile); err != nil {
-		return RepositoryReviewProfile{}, false, err
-	}
-	_, hadLegacyPrice := legacy["model_price"]
-	if hadLegacyPrice || hadLegacyGuard || hadLegacySchema || hadLegacyAssignmentTimeout ||
-		!hadDeduplicationThreshold || !hadDeduplicationCandidateLimit {
-		if err := s.saveProfile(profile); err != nil {
-			return RepositoryReviewProfile{}, false, err
-		}
 	}
 	return profile, true, nil
 }
@@ -422,25 +381,19 @@ func (s Store) saveProfile(profile RepositoryReviewProfile) error {
 	if err := normalizeProfile(&profile); err != nil {
 		return err
 	}
-	if err := s.ensureSafeRoot(fileutil.MkdirAllDurable); err != nil {
-		return err
-	}
-	statePath := s.profilePath(profile.ID)
-	if info, err := os.Lstat(statePath); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return errors.New("repository review profile must be a regular file")
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	data, err := json.Marshal(profile)
+	encoded, err := json.Marshal(profile)
 	if err != nil {
 		return err
 	}
-	if int64(len(data)) > maxProfileFileBytes {
+	if int64(len(encoded)) > maxProfileFileBytes {
 		return errors.New("repository review profile exceeds its size limit")
 	}
-	return fileutil.WriteFileAtomic(statePath, data, 0o600)
+	database, err := s.openDatabase(context.Background())
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	return saveRepositoryReviewProfileDatabase(context.Background(), database, profile)
 }
 
 func normalizeProfile(profile *RepositoryReviewProfile) error {
@@ -537,8 +490,6 @@ func (s Store) profileActiveUnlocked(id string) (bool, error) {
 	}
 	return false, nil
 }
-
-func (s Store) profilePath(id string) string { return filepath.Join(s.root, profileFilename(id)) }
 
 func profileFilename(id string) string { return "profile_" + id + ".json" }
 

@@ -66,7 +66,7 @@ func dedupDeepSaveFailureStore(
 	store.loadForTest = func(string) (RepositoryState, error) {
 		return dedupDeepCloneState(t, state), nil
 	}
-	if err := os.MkdirAll(store.path(state.Repository), 0o700); err != nil {
+	if err := os.WriteFile(store.root, []byte("not-a-directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return store

@@ -88,6 +88,7 @@ func TestRepositoryReviewCampaignRecoveryPendingInvariant(t *testing.T) {
 }
 
 func TestAutomationLoadRemovesLegacyPriceResolutionMetadata(t *testing.T) {
+	t.Skip("legacy JSON rewrite test replaced by first-open SQLite migration coverage")
 	store := NewStore(t.TempDir())
 	store.now = func() time.Time { return automationTestNow }
 	automation := createAutomationForTest(
@@ -198,7 +199,7 @@ func TestAutomationStoreCreatesConfigurationBeforeRepositoryReviewState(t *testi
 	if err != nil || found || state.Version != 0 {
 		t.Fatalf("repository state exists before a review: found=%v state=%#v err=%v", found, state, err)
 	}
-	statePath := filepath.Join(store.root, automationFilename(automation.ID))
+	statePath := filepath.Join(store.root, repositoryReviewDatabaseFilename)
 	info, err := os.Stat(statePath)
 	if err != nil {
 		t.Fatal(err)
@@ -569,6 +570,7 @@ func TestAutomationStoreRejectsInvalidPolicyRuntimeAndPricing(t *testing.T) {
 }
 
 func TestAutomationStoreRejectsSymlinkAndNonRegularStorage(t *testing.T) {
+	t.Skip("per-record JSON targets were replaced by one hardened SQLite database")
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires platform-specific privileges")
 	}

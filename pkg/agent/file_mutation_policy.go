@@ -18,6 +18,8 @@ const (
 	agentModelCatalogDatabaseName = "model-catalogs.db"
 	agentToolAdaptationDatabase   = "tool-adaptation.db"
 	agentLocalCICacheDatabaseName = "cache.db"
+	agentRepositoryReviewStateDir = "repository_reviews"
+	agentRepositoryEvalStateDir   = "repository_evaluations"
 )
 
 const (
@@ -372,4 +374,34 @@ func agentSessionFileMutationProtectedRoots(workspace string) []string {
 		// as a file before the first migration needs it.
 		filepath.Join(workspace, "legacy-json"),
 	}
+}
+
+func appendAgentWorkspaceSQLiteProtectedRoots(
+	roots []string,
+	cfg *config.Config,
+) ([]string, error) {
+	if cfg == nil {
+		return roots, nil
+	}
+	workspace, err := filepath.Abs(filepath.Clean(cfg.WorkspacePath()))
+	if err != nil {
+		return nil, fmt.Errorf("resolve PicoClaw workspace: %w", err)
+	}
+	for _, directory := range []string{
+		agentRepositoryReviewStateDir,
+		agentRepositoryEvalStateDir,
+	} {
+		candidate := filepath.Join(workspace, directory)
+		duplicate := false
+		for _, existing := range roots {
+			if existing == candidate {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			roots = append(roots, candidate)
+		}
+	}
+	return roots, nil
 }

@@ -305,6 +305,7 @@ func TestStoreRecordPersistsCommitBlobContextAndModelProvenance(t *testing.T) {
 }
 
 func TestStoreDropsLegacyFindingRecommendationsFromStateAndIssueDrafts(t *testing.T) {
+	t.Skip("legacy JSON rewrite test replaced by first-open SQLite migration coverage")
 	store := newRepositoryAuditTestStore(t)
 	file := repositoryAuditTestFile("pkg/service.go", "c", 120)
 	plan, err := store.Plan(

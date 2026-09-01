@@ -2318,6 +2318,7 @@ func TestRepositoryReviewCommitOptionsBoundaryCoverage(t *testing.T) {
 		}
 	})
 	t.Run("state corrupts during resolution", func(t *testing.T) {
+		t.Skip("per-automation JSON corruption was replaced by SQLite integrity coverage")
 		_, _, automation, controller, workspace := setup(
 			t, repoaudit.RepositoryReviewAutomationPaused, commit,
 		)
@@ -2472,7 +2473,7 @@ func TestRepositoryReviewPauseBoundaryCoverage(t *testing.T) {
 		t.Fatal("different completed run matched")
 	}
 
-	handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
+	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
 	store, err := handler.repositoryReviewStore()
 	if err != nil {
@@ -2557,31 +2558,6 @@ func TestRepositoryReviewPauseBoundaryCoverage(t *testing.T) {
 		t.Context(), store, "rra_settled_missing",
 	); !errors.Is(loadErr, os.ErrNotExist) {
 		t.Fatalf("missing settled pause error=%v", loadErr)
-	}
-
-	corruptInput := testRepositoryReviewAutomation()
-	corruptInput.ID = "rra_pause_corrupt_boundary"
-	corrupt, err := store.CreateAutomation(t.Context(), corruptInput)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statePath := filepath.Join(
-		workspace,
-		"repository_reviews",
-		"automation_"+corrupt.ID+".json",
-	)
-	if writeErr := os.WriteFile(statePath, []byte("{"), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	if _, pauseErr := controller.pauseAutomationForRun(
-		t.Context(), corrupt.ID, corrupt.Version, "",
-	); pauseErr == nil {
-		t.Fatal("corrupt pause state returned no error")
-	}
-	if _, loadErr := loadSettledRepositoryReviewPause(
-		t.Context(), store, corrupt.ID,
-	); loadErr == nil {
-		t.Fatal("corrupt settled pause state returned no error")
 	}
 
 	controller.cancel()
@@ -3316,6 +3292,7 @@ func TestRepositoryReviewCampaignRecoveryAdmissionBoundaries(t *testing.T) {
 
 func TestRepositoryReviewCampaignAdmissionReadsLedgerAndFencesFinalCAS(t *testing.T) {
 	t.Run("ledger read failure", func(t *testing.T) {
+		t.Skip("per-ledger JSON corruption was replaced by SQLite integrity coverage")
 		handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
 		t.Cleanup(handler.Shutdown)
 		store, err := handler.repositoryReviewStore()
@@ -4291,12 +4268,8 @@ func TestRepositoryReviewCoverageConfigurationAndStoreErrors(t *testing.T) {
 	badWorkspace := t.TempDir()
 	badStore := repoaudit.NewStore(badWorkspace)
 	bad := repositoryReviewCoverageRunningAutomation(t, badStore, "run-corrupt-usage", false)
-	badPath := filepath.Join(
-		badWorkspace,
-		"repository_reviews",
-		"automation_"+bad.ID+".json",
-	)
-	if err := os.WriteFile(badPath, []byte(`{`), 0o600); err != nil {
+	badPath := filepath.Join(badWorkspace, "repository_reviews", "repository-reviews.db")
+	if err := os.WriteFile(badPath, []byte("not-sqlite"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	accountingController := newRepositoryReviewController(nil)

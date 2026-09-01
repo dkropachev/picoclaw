@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -448,26 +446,10 @@ func seedRepositoryReviewDeduplicationAPIState(
 	}
 	state.Version++
 	state.UpdatedAt = failed.UpdatedAt
-	paths, err := filepath.Glob(filepath.Join(workspace, "repository_reviews", "repo_*.json"))
-	if err != nil {
+	if _, err := repoaudit.NewSQLiteStore(workspace).RewriteStateForMigration(
+		t.Context(), state,
+	); err != nil {
 		t.Fatal(err)
-	}
-	statePath := ""
-	for _, path := range paths {
-		if !strings.HasSuffix(path, ".summary.json") {
-			statePath = path
-			break
-		}
-	}
-	if statePath == "" {
-		t.Fatal("repository review state path is missing")
-	}
-	data, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if writeErr := os.WriteFile(statePath, data, 0o600); writeErr != nil {
-		t.Fatal(writeErr)
 	}
 	loaded, found, err := repoaudit.NewStore(workspace).Get(state.Repository)
 	if err != nil || !found {

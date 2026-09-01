@@ -719,6 +719,49 @@ func TestAgentFileMutationPolicyProtectsLocalCIEvidenceSQLiteStore(t *testing.T)
 	}
 }
 
+func TestAgentFileMutationPolicyProtectsRepositorySQLiteStores(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+
+	targets := []string{
+		filepath.Join(workspace, "repository_reviews", "repository-reviews.db"),
+		filepath.Join(workspace, "repository_reviews", "repository-reviews.db-wal"),
+		filepath.Join(workspace, "repository_reviews", "legacy-json", "repository-reviews-v1", "repo_legacy.json"),
+		filepath.Join(workspace, "repository_evaluations", "evaluations.db"),
+		filepath.Join(workspace, "repository_evaluations", "evaluations.db-shm"),
+		filepath.Join(
+			workspace,
+			"repository_evaluations",
+			"legacy-json",
+			"repository-evaluations-v1",
+			"evaluation_legacy.json",
+		),
+	}
+	cfg := agentFileMutationTestConfig(workspace)
+	for _, target := range targets {
+		cfg.Tools.AllowWritePaths = append(cfg.Tools.AllowWritePaths, "^"+regexp.QuoteMeta(target)+"$")
+	}
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+	for _, target := range targets {
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			requireAgentFileMutationDenied(t, agent.Tools, toolName, workspace, target, true)
+		}
+		content, err := os.ReadFile(target)
+		if err != nil || string(content) != "before" {
+			t.Fatalf("protected repository state %q=%q err=%v", target, content, err)
+		}
+	}
+}
+
 func TestAgentFileMutationPolicyHomeInsideWorkspaceOmitsUnsafeApplyPatch(t *testing.T) {
 	workspace := t.TempDir()
 	home := filepath.Join(workspace, ".picoclaw")

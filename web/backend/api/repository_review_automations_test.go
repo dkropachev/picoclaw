@@ -95,7 +95,7 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 		created.Automation.CompareModels {
 		t.Fatalf("created automation=%#v", created.Automation)
 	}
-	statePath := filepath.Join(workspace, "repository_reviews", "automation_"+created.Automation.ID+".json")
+	statePath := filepath.Join(workspace, "repository_reviews", "repository-reviews.db")
 	if info, err := os.Stat(statePath); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("automation file info=%v err=%v", info, err)
 	}

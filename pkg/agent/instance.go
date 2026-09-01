@@ -382,6 +382,14 @@ func newAgentInstanceWithRuntimePolicies(
 		fileMutationProtectedRoots,
 		mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg)...,
 	)
+	var protectedRootErr error
+	fileMutationProtectedRoots, protectedRootErr = appendAgentWorkspaceSQLiteProtectedRoots(
+		fileMutationProtectedRoots,
+		cfg,
+	)
+	if protectedRootErr != nil {
+		panic(fmt.Sprintf("build workspace file-mutation policy: %v", protectedRootErr))
+	}
 	fileMutationPolicy := tools.FileMutationPolicy{
 		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
 			fileMutationProtectedRoots,

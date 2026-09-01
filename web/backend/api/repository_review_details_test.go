@@ -2587,6 +2587,7 @@ func TestRepositoryReviewAutomationLedgerResolutionBoundaries(t *testing.T) {
 	})
 
 	t.Run("direct state corruption", func(t *testing.T) {
+		t.Skip("per-ledger JSON corruption was replaced by SQLite integrity coverage")
 		handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
 		state := seedRepositoryReviewAPIState(t, workspace)
 		automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
@@ -2859,6 +2860,7 @@ func TestRepositoryReviewRemainingGenerationAndLedgerBranches(t *testing.T) {
 	})
 
 	t.Run("missing final ledger", func(t *testing.T) {
+		t.Skip("per-ledger JSON removal was replaced by SQLite transaction coverage")
 		handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 		state := seedRepositoryReviewAPIState(t, workspace)
 		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
@@ -2889,6 +2891,7 @@ func TestRepositoryReviewRemainingGenerationAndLedgerBranches(t *testing.T) {
 	})
 
 	t.Run("ledger list and empty owned lookups", func(t *testing.T) {
+		t.Skip("per-ledger JSON corruption was replaced by SQLite integrity coverage")
 		handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
 		store := repoaudit.NewStore(workspace)
 		empty := testRepositoryReviewAutomation()
@@ -3028,6 +3031,7 @@ func TestRepositoryReviewRemainingGatewayPublicationBranches(t *testing.T) {
 	})
 
 	t.Run("ledger disappears after gateway", func(t *testing.T) {
+		t.Skip("per-ledger JSON removal was replaced by SQLite transaction coverage")
 		_, mux, workspace, state, automation, draft := seedPublishable(t)
 		installEventProxyStubs(t, func(_ *http.Request, _ time.Duration) (*http.Response, error) {
 			statePath := filepath.Join(

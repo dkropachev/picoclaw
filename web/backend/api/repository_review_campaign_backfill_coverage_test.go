@@ -806,6 +806,7 @@ func TestRepositoryReviewLegacyInstallAndApplyReadErrorCoverage(t *testing.T) {
 		return fixture, prepared
 	}
 	t.Run("install read error", func(t *testing.T) {
+		t.Skip("per-automation JSON corruption was replaced by SQLite integrity coverage")
 		fixture, prepared := prepare(t)
 		path := filepath.Join(
 			fixture.workspace, "repository_reviews", "automation_"+fixture.automation.ID+".json",
@@ -820,6 +821,7 @@ func TestRepositoryReviewLegacyInstallAndApplyReadErrorCoverage(t *testing.T) {
 		}
 	})
 	t.Run("apply read error", func(t *testing.T) {
+		t.Skip("per-automation JSON corruption was replaced by SQLite integrity coverage")
 		fixture, prepared := prepare(t)
 		_, installedPrepared, err := installRepositoryReviewLegacyCampaignAuthority(
 			t.Context(), fixture.store, prepared,

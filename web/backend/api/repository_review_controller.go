@@ -319,7 +319,7 @@ func (c *repositoryReviewController) store() (repoaudit.Store, *config.Config, e
 	if err != nil {
 		return repoaudit.Store{}, nil, err
 	}
-	return repoaudit.NewStore(cfg.WorkspacePath()), cfg, nil
+	return repoaudit.NewSQLiteStore(cfg.WorkspacePath()), cfg, nil
 }
 
 func resolveRepositoryReviewAutomationCommit(

@@ -237,7 +237,7 @@ func nativeRepositoryReview(
 	exec ExecutionContext,
 ) (map[string]any, error) {
 	action := strings.ToLower(strings.TrimSpace(nativeString(args, "action")))
-	store := repoaudit.NewStore(nativeWorkspace(exec))
+	store := repoaudit.NewSQLiteStore(nativeWorkspace(exec))
 	switch action {
 	case "plan":
 		files, err := nativeRepositoryReviewFiles(args["files"])

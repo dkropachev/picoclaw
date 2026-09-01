@@ -3,8 +3,8 @@ package repoaudit
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
@@ -345,31 +345,29 @@ func (s Store) listAutomationsUnlockedWithLoader(
 	maximum int,
 	load func(string) (RepositoryReviewAutomation, bool, error),
 ) ([]RepositoryReviewAutomation, error) {
-	if rootErr := s.requireSafeRoot(true); rootErr != nil {
-		return nil, rootErr
-	}
-	entries, err := os.ReadDir(s.root)
-	if os.IsNotExist(err) {
-		return []RepositoryReviewAutomation{}, nil
-	}
+	database, err := s.openDatabase(context.Background())
 	if err != nil {
 		return nil, err
 	}
+	//nolint:rowserrcheck // ScanStrings checks rows.Err and closes the result set.
+	rows, err := database.Query(`
+		SELECT automation_id FROM repository_review_automations
+	 ORDER BY updated_at_unix_nano DESC, automation_id ASC
+	 LIMIT ?`, maximum+1)
+	if err != nil {
+		database.Close()
+		return nil, err
+	}
+	ids, err := sqlitestore.ScanStrings(rows)
+	_ = database.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) > maximum {
+		return nil, fmt.Errorf("%w: automation catalog exceeds its limit", ErrInvalidAutomation)
+	}
 	automations := make([]RepositoryReviewAutomation, 0)
-	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), "automation_") || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
-			return nil, fmt.Errorf("repository review automation %q must be a regular file", entry.Name())
-		}
-		id := strings.TrimSuffix(strings.TrimPrefix(entry.Name(), "automation_"), ".json")
-		if !validAutomationID(id) || entry.Name() != automationFilename(id) {
-			return nil, fmt.Errorf("%w: invalid automation filename", ErrInvalidAutomation)
-		}
-		if len(automations) >= maximum {
-			return nil, fmt.Errorf("%w: automation catalog exceeds its limit", ErrInvalidAutomation)
-		}
+	for _, id := range ids {
 		automation, found, loadErr := load(id)
 		if loadErr != nil {
 			return nil, loadErr
@@ -379,12 +377,6 @@ func (s Store) listAutomationsUnlockedWithLoader(
 		}
 		automations = append(automations, automation)
 	}
-	sort.Slice(automations, func(i, j int) bool {
-		if automations[i].UpdatedAt.Equal(automations[j].UpdatedAt) {
-			return automations[i].ID < automations[j].ID
-		}
-		return automations[i].UpdatedAt.After(automations[j].UpdatedAt)
-	})
 	return automations, nil
 }
 
@@ -561,139 +553,51 @@ func (s Store) DeleteAutomation(ctx context.Context, id string, expectedVersion 
 		automation.Status == RepositoryReviewAutomationStopping {
 		return ErrAutomationActive
 	}
-	return fileutil.RemoveDurable(s.automationPath(id))
+	database, err := s.openDatabase(ctx)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	return sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
+		result, deleteErr := conn.ExecContext(ctx, `
+			DELETE FROM repository_review_automations
+			 WHERE automation_id = ? AND version = ?`, id, expectedVersion)
+		if deleteErr != nil {
+			return deleteErr
+		}
+		return sqlitestore.RequireOneRow(result, ErrConflict)
+	})
 }
 
 func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, error) {
 	if !validAutomationID(id) {
 		return RepositoryReviewAutomation{}, false, fmt.Errorf("%w: invalid ID", ErrInvalidAutomation)
 	}
-	statePath := s.automationPath(id)
-	data, found, err := s.readStateFile(
-		statePath,
-		maxAutomationFileBytes,
-		"repository review automation",
-	)
+	database, err := s.openDatabase(context.Background())
 	if err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
-	if !found {
+	defer database.Close()
+	automation, err := loadRepositoryReviewAutomationRow(context.Background(), database, id)
+	if errors.Is(err, sql.ErrNoRows) {
 		return RepositoryReviewAutomation{}, false, nil
 	}
-	var automation RepositoryReviewAutomation
-	hadLegacyGuard, err := unmarshalRepositoryReviewGuardState(data, &automation)
 	if err != nil {
 		return RepositoryReviewAutomation{}, false, err
-	}
-	var persistedFields map[string]json.RawMessage
-	_ = json.Unmarshal(data, &persistedFields)
-	_, hadDeduplicationThreshold := persistedFields["deduplication_similarity_threshold"]
-	_, hadDeduplicationCandidateLimit := persistedFields["deduplication_candidate_limit"]
-	var persistedProgress map[string]json.RawMessage
-	_ = json.Unmarshal(persistedFields["progress"], &persistedProgress)
-	_, hadRawFindingProgress := persistedProgress["raw_findings"]
-	_, hadDeduplicatedFindingProgress := persistedProgress["deduplicated_findings"]
-	if !hadDeduplicatedFindingProgress {
-		automation.Progress.DeduplicatedFindings = automation.Progress.Findings
-	}
-	automation.DeduplicationSettingsSpecified = hadDeduplicationThreshold ||
-		hadDeduplicationCandidateLimit
-	// unmarshalRepositoryReviewGuardState already decoded this exact JSON.
-	legacy, _ := decodeLegacyAutomationPriceMetadata(data)
-	hasLegacyPriceMetadata := false
-	for _, price := range legacy.ModelPrices {
-		if _, exists := price["subscription"]; exists {
-			hasLegacyPriceMetadata = true
-		}
-		if _, exists := price["equivalent_model"]; exists {
-			hasLegacyPriceMetadata = true
-		}
-	}
-	hadLegacyIssueWriter := strings.TrimSpace(automation.IssueWriterModel) == ""
-	hadLegacyAssignmentTimeout := automation.AssignmentTimeoutSeconds == 0
-	if automation.ID != id {
-		return RepositoryReviewAutomation{}, false, errors.New("repository review automation identity mismatch")
-	}
-	hadLegacySchema := false
-	if automation.SchemaVersion == 1 {
-		automation.SchemaVersion = RepositoryReviewAutomationSchemaVersion
-		hadLegacySchema = true
-	}
-	if err := normalizeAutomation(&automation); err != nil {
-		return RepositoryReviewAutomation{}, false, err
-	}
-	if hasLegacyPriceMetadata || hadLegacyGuard || hadLegacyIssueWriter ||
-		hadLegacyAssignmentTimeout || hadLegacySchema ||
-		!hadDeduplicationThreshold || !hadDeduplicationCandidateLimit ||
-		!hadRawFindingProgress || !hadDeduplicatedFindingProgress {
-		if err := s.saveAutomation(automation); err != nil {
-			return RepositoryReviewAutomation{}, false, err
-		}
 	}
 	return automation, true, nil
-}
-
-func (s Store) readStateFile(
-	statePath string,
-	maximumBytes int64,
-	kind string,
-) ([]byte, bool, error) {
-	if err := s.requireSafeRoot(true); err != nil {
-		return nil, false, err
-	}
-	info, err := os.Lstat(statePath)
-	if os.IsNotExist(err) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("%s must be a regular file", kind)
-	}
-	if info.Size() > maximumBytes {
-		return nil, false, fmt.Errorf("%s exceeds its size limit", kind)
-	}
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		return nil, false, err
-	}
-	return data, true, nil
 }
 
 func (s Store) saveAutomation(automation RepositoryReviewAutomation) error {
 	if err := normalizeAutomation(&automation); err != nil {
 		return err
 	}
-	if err := s.ensureSafeRoot(fileutil.MkdirAllDurable); err != nil {
-		return err
-	}
-	statePath := s.automationPath(automation.ID)
-	if info, err := os.Lstat(statePath); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return errors.New("repository review automation must be a regular file")
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	data, err := json.Marshal(automation)
+	database, err := s.openDatabase(context.Background())
 	if err != nil {
 		return err
 	}
-	if err := validateEncodedAutomationSize(data); err != nil {
-		return err
-	}
-	return fileutil.WriteFileAtomic(statePath, data, 0o600)
-}
-
-type legacyAutomationPriceMetadata struct {
-	ModelPrices map[string]map[string]json.RawMessage `json:"model_prices"`
-}
-
-func decodeLegacyAutomationPriceMetadata(data []byte) (legacyAutomationPriceMetadata, error) {
-	var legacy legacyAutomationPriceMetadata
-	err := json.Unmarshal(data, &legacy)
-	return legacy, err
+	defer database.Close()
+	return saveRepositoryReviewAutomationDatabase(context.Background(), database, automation)
 }
 
 func validateEncodedAutomationSize(data []byte) error {
@@ -701,10 +605,6 @@ func validateEncodedAutomationSize(data []byte) error {
 		return errors.New("repository review automation exceeds its size limit")
 	}
 	return nil
-}
-
-func (s Store) automationPath(id string) string {
-	return filepath.Join(s.root, automationFilename(id))
 }
 
 func automationFilename(id string) string {

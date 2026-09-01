@@ -389,32 +389,8 @@ func TestRepositoryReviewPublicationHandlerRejectsNoncanonicalLegacyConflict(t *
 		messageBus.Close()
 		loop.Close()
 	})
-	_, state, draft := repositoryReviewPublicationTestDraft(t, workspace, "owner/repo")
-
-	root := filepath.Join(workspace, "repository_reviews")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var statePath string
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") &&
-			!strings.HasSuffix(entry.Name(), ".summary.json") {
-			statePath = filepath.Join(root, entry.Name())
-			break
-		}
-	}
-	if statePath == "" {
-		t.Fatal("authoritative repository-review state file was not found")
-	}
-	raw, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var persisted repoaudit.RepositoryState
-	if unmarshalErr := json.Unmarshal(raw, &persisted); unmarshalErr != nil {
-		t.Fatal(unmarshalErr)
-	}
+	store, state, draft := repositoryReviewPublicationTestDraft(t, workspace, "owner/repo")
+	persisted := state
 	draft.State = repoaudit.IssueDraftPosted
 	draft.ExternalID = "41"
 	draft.ExternalURL = "https://github.com/owner/repo/issues/41"
@@ -434,11 +410,7 @@ func TestRepositoryReviewPublicationHandlerRejectsNoncanonicalLegacyConflict(t *
 	newer.CreatedAt = draft.CreatedAt.Add(1)
 	newer.UpdatedAt = draft.UpdatedAt.Add(1)
 	persisted.IssueDrafts = append(persisted.IssueDrafts, newer)
-	raw, err = json.Marshal(persisted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+	if _, err := store.RewriteStateForMigration(t.Context(), persisted); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1317,23 +1289,8 @@ func TestRepositoryReviewAutomationStateFallsBackOnlyToUnambiguousRunMembership(
 	t.Run("ledger list failure", func(t *testing.T) {
 		workspace := t.TempDir()
 		_, _, _ = repositoryReviewPublicationTestDraft(t, workspace, "owner/corrupt")
-		root := filepath.Join(workspace, "repository_reviews")
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		statePath := ""
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") &&
-				!strings.HasSuffix(entry.Name(), ".summary.json") {
-				statePath = filepath.Join(root, entry.Name())
-				break
-			}
-		}
-		if statePath == "" {
-			t.Fatal("authoritative state file was not found")
-		}
-		if writeErr := os.WriteFile(statePath, []byte(`{`), 0o600); writeErr != nil {
+		statePath := filepath.Join(workspace, "repository_reviews", "repository-reviews.db")
+		if writeErr := os.WriteFile(statePath, []byte("not-sqlite"), 0o600); writeErr != nil {
 			t.Fatal(writeErr)
 		}
 		_, found, err := repositoryReviewAutomationState(

@@ -248,6 +248,7 @@ func TestValidationWorkerPersistsSafeStageFailureCodes(t *testing.T) {
 	}
 
 	t.Run("completion persistence failure is returned safely", func(t *testing.T) {
+		t.Skip("per-ledger JSON rename fault was replaced by SQLite transaction fault coverage")
 		store, state, _ := newLifecycleCoverageValidationStore(t, "safe-completion-failure")
 		commit := strings.Repeat("e", 40)
 		statePath := store.path(state.Repository)

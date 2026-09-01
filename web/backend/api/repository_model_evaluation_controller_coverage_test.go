@@ -128,11 +128,11 @@ jobs:
 	corruptConfigPath := filepath.Join(t.TempDir(), "config.json")
 	writeRepositoryModelEvaluationTestConfig(t, corruptConfigPath, workspace)
 	stateRoot := filepath.Join(workspace, "repository_evaluations")
-	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+	if _, err := repoeval.NewSQLiteStore(workspace).List(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(stateRoot, "evaluation_rme_"+strings.Repeat("a", 32)+".json")
-	if err := os.WriteFile(statePath, []byte("{"), 0o600); err != nil {
+	statePath := filepath.Join(stateRoot, "evaluations.db")
+	if err := os.WriteFile(statePath, []byte("not-sqlite"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	corruptController := newRepositoryModelEvaluationController(NewHandler(corruptConfigPath))

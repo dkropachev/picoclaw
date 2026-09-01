@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -677,25 +676,6 @@ func TestRepositoryReviewHistoricalDedupAdditionalErrorCoverage(t *testing.T) {
 	controller.leasedStore = store
 	controller.leasedConfig = cfg
 	t.Cleanup(controller.Stop)
-	corruptProfileID := "rrpf_historical_corrupt"
-	corruptProfilePath := filepath.Join(workspace, "repository_reviews", "profile_"+corruptProfileID+".json")
-	if writeErr := os.WriteFile(corruptProfilePath, []byte(`{`), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	corruptProfileAutomation := testRepositoryReviewAutomation()
-	corruptProfileAutomation.ID = "rra_historical_corrupt_profile"
-	corruptProfileAutomation.Repository = state.Repository
-	corruptProfileAutomation.RunIDs = []string{state.Runs[0].ID}
-	corruptProfileAutomation.ProfileID = corruptProfileID
-	if advanceErr := controller.advanceHistoricalFindingDeduplication(
-		t.Context(), state, []repoaudit.RepositoryReviewAutomation{corruptProfileAutomation},
-	); advanceErr == nil {
-		t.Fatal("historical replay loaded a corrupt profile")
-	}
-	if removeErr := os.Remove(corruptProfilePath); removeErr != nil {
-		t.Fatal(removeErr)
-	}
-
 	badSnapshotController := newRepositoryReviewController(NewHandler(t.TempDir()))
 	badSnapshotController.startOnce.Do(func() {})
 	badSnapshotController.leasedStore = store
@@ -1280,22 +1260,9 @@ func persistRepositoryReviewAdditionalCoverageState(
 	state repoaudit.RepositoryState,
 ) {
 	t.Helper()
-	paths, err := filepath.Glob(filepath.Join(workspace, "repository_reviews", "repo_*.json"))
-	if err != nil {
+	if _, err := repoaudit.NewSQLiteStore(workspace).RewriteStateForMigration(
+		t.Context(), state,
+	); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range paths {
-		if strings.HasSuffix(path, ".summary.json") {
-			continue
-		}
-		encoded, encodeErr := json.Marshal(state)
-		if encodeErr != nil {
-			t.Fatal(encodeErr)
-		}
-		if writeErr := os.WriteFile(path, encoded, 0o600); writeErr != nil {
-			t.Fatal(writeErr)
-		}
-		return
-	}
-	t.Fatal("repository review state path is missing")
 }

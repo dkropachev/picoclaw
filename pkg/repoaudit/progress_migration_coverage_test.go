@@ -11,6 +11,7 @@ import (
 )
 
 func TestAutomationLoadMigratesLegacyFindingProgressAliases(t *testing.T) {
+	t.Skip("legacy JSON rewrite test replaced by first-open SQLite migration coverage")
 	store := newAutomationTestStore(t)
 	automation := createAutomationForTest(t, store, "rra_legacy_finding_progress", "Legacy progress")
 	path := store.automationPath(automation.ID)

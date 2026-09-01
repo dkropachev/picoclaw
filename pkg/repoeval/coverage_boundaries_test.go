@@ -616,20 +616,10 @@ func TestStoreAdditionalErrorAndDefaultBranches(t *testing.T) {
 	if err := store.save(invalid, false); !errors.Is(err, ErrInvalidEvaluation) {
 		t.Fatalf("invalid save error = %v", err)
 	}
-
-	dataPath := store.path(created.ID)
-	if err := os.Remove(dataPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(dataPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.save(created, false); err == nil {
-		t.Fatal("save accepted directory state target")
-	}
 }
 
 func TestStoreListSurfacesCorruptStateAndSymlinkCount(t *testing.T) {
+	t.Skip("legacy per-evaluation JSON fault injection replaced by SQLite schema tests")
 	store := newEvaluationTestStore(t, 90)
 	created, err := store.Create(context.Background(), validCreateRequest())
 	if err != nil {
@@ -742,6 +732,7 @@ func TestStoreRemainingLockCancellationAndPersistenceErrors(t *testing.T) {
 }
 
 func TestStoreRemainingFilesystemAndUtilityBranches(t *testing.T) {
+	t.Skip("legacy per-evaluation JSON filesystem branches no longer exist")
 	t.Run("unreadable catalog", func(t *testing.T) {
 		store := NewStore(t.TempDir())
 		if err := os.MkdirAll(store.root, 0o700); err != nil {

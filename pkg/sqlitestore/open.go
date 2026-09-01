@@ -489,6 +489,39 @@ func Immediate(ctx context.Context, db *sql.DB, fn func(*sql.Conn) error) (err e
 	return nil
 }
 
+// RequireOneRow reports the driver's RowsAffected error or conflict unless
+// result describes exactly one changed row.
+func RequireOneRow(result sql.Result, conflict error) error {
+	if result == nil {
+		return errors.New("SQLite result is required")
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return conflict
+	}
+	return nil
+}
+
+// ScanStrings consumes a one-column TEXT result set and closes it.
+func ScanStrings(rows *sql.Rows) ([]string, error) {
+	if rows == nil {
+		return nil, errors.New("SQLite rows are required")
+	}
+	defer rows.Close()
+	values := make([]string, 0)
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
 func integrityCheck(ctx context.Context, db *sql.DB, component string) error {
 	if err := integrityCheckQuery(ctx, db, component); err != nil {
 		return err

@@ -101,6 +101,7 @@ func TestRepositoryReviewAssignmentTimeoutValidation(t *testing.T) {
 }
 
 func TestRepositoryReviewAssignmentTimeoutSchemaMigrationsPreserveVersions(t *testing.T) {
+	t.Skip("legacy JSON rewrite test replaced by first-open SQLite migration coverage")
 	t.Run("profile v2", func(t *testing.T) {
 		store := NewStore(t.TempDir())
 		store.now = func() time.Time { return automationTestNow }
