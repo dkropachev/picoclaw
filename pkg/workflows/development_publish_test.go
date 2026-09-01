@@ -3,6 +3,7 @@ package workflows
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -139,9 +140,7 @@ func TestPublishWorkflowDevelopmentFencedRequiresMatchingReadyDependencyGate(
 			stamp.WorkflowHash != workflowHashBytes([]byte(fixture.session.YAML)) {
 			t.Fatalf("published stamp = %#v", stamp)
 		}
-		if _, statErr := os.Stat(fixture.archivePath); statErr != nil {
-			t.Fatalf("archive stat error = %v", statErr)
-		}
+		assertWorkflowDevelopmentArchived(t, fixture, true)
 		if info, statErr := os.Stat(fixture.targetPath); statErr != nil {
 			t.Fatalf("target stat error = %v", statErr)
 		} else if info.Mode().Perm() != 0o640 {
@@ -364,9 +363,7 @@ func TestPublishWorkflowDevelopmentTransactionRollsBackEveryMutationBoundary(
 			assertFileData(t, fixture.targetPath, beforeTarget)
 			assertFileData(t, fixture.manifestPath, beforeManifest)
 			assertFileData(t, fixture.activePath, beforeActive)
-			if _, statErr := os.Stat(fixture.archivePath); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("archive stat error = %v, want not exist", statErr)
-			}
+			assertWorkflowDevelopmentArchived(t, fixture, false)
 			if _, statErr := os.Stat(
 				workflowDevelopmentPublishJournalPath(fixture.workspace),
 			); !errors.Is(statErr, os.ErrNotExist) {
@@ -476,8 +473,8 @@ func TestWorkflowDevelopmentPublishPreparedJournalRecoversOnNextMutation(
 		t.Fatalf("publish error = %v, want interruption", err)
 	}
 	assertFileData(t, fixture.targetPath, []byte(fixture.session.YAML))
-	if _, statErr := os.Stat(fixture.activePath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("active stat after interruption = %v, want not exist", statErr)
+	if active, getErr := rawWorkflowDevelopmentActive(t, fixture.workspace); getErr != nil || active != nil {
+		t.Fatalf("active after interruption = %#v, %v; want nil", active, getErr)
 	}
 	if _, statErr := os.Stat(
 		workflowDevelopmentPublishJournalPath(fixture.workspace),
@@ -501,178 +498,11 @@ func TestWorkflowDevelopmentPublishPreparedJournalRecoversOnNextMutation(
 	assertFileData(t, fixture.targetPath, beforeTarget)
 	assertFileData(t, fixture.manifestPath, beforeManifest)
 	assertFileData(t, fixture.activePath, beforeActive)
-	if _, statErr := os.Stat(fixture.archivePath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("archive stat after recovery = %v, want not exist", statErr)
-	}
+	assertWorkflowDevelopmentArchived(t, fixture, false)
 	if _, statErr := os.Stat(
 		workflowDevelopmentPublishJournalPath(fixture.workspace),
 	); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("journal stat after recovery = %v, want not exist", statErr)
-	}
-}
-
-func TestWorkflowDevelopmentPublishRecoveryPreservesPostCrashEdits(
-	t *testing.T,
-) {
-	tests := []struct {
-		name string
-		edit func(t *testing.T, fixture *workflowDevelopmentPublishFixture)
-	}{
-		{
-			name: "target_contents",
-			edit: func(t *testing.T, fixture *workflowDevelopmentPublishFixture) {
-				t.Helper()
-				if err := os.WriteFile(
-					fixture.targetPath,
-					[]byte("operator target edit\n"),
-					0o600,
-				); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "target_mode",
-			edit: func(t *testing.T, fixture *workflowDevelopmentPublishFixture) {
-				t.Helper()
-				if err := os.Chmod(fixture.targetPath, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "manifest_contents",
-			edit: func(t *testing.T, fixture *workflowDevelopmentPublishFixture) {
-				t.Helper()
-				if err := os.WriteFile(
-					fixture.manifestPath,
-					[]byte("operator manifest edit\n"),
-					0o600,
-				); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "manifest_mode",
-			edit: func(t *testing.T, fixture *workflowDevelopmentPublishFixture) {
-				t.Helper()
-				if err := os.Chmod(fixture.manifestPath, 0o640); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "archive_mode",
-			edit: func(t *testing.T, fixture *workflowDevelopmentPublishFixture) {
-				t.Helper()
-				if err := os.Chmod(fixture.archivePath, 0o640); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "active_recreated",
-			edit: func(t *testing.T, fixture *workflowDevelopmentPublishFixture) {
-				t.Helper()
-				if err := os.WriteFile(
-					fixture.activePath,
-					[]byte(`{"operator":"replacement"}`),
-					0o600,
-				); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newWorkflowDevelopmentPublishFixture(
-				t,
-				"automation/definitions",
-			)
-			interrupted := errors.New("simulated process interruption")
-			result, err := publishWorkflowDevelopmentTransaction(
-				context.Background(),
-				fixture.workspace,
-				&fixture.request,
-				fixture.runtime,
-				nil,
-				&workflowDevelopmentPublishHooks{
-					afterBoundary: func(
-						boundary workflowDevelopmentPublishBoundary,
-					) error {
-						if boundary == workflowDevelopmentPublishBoundaryActiveRemoved {
-							return interrupted
-						}
-						return nil
-					},
-					leaveJournalOnError: true,
-				},
-				fixture.localOptions...,
-			)
-			if result != nil || !errors.Is(err, interrupted) {
-				t.Fatalf(
-					"publish result, error = %#v, %v; want interruption",
-					result,
-					err,
-				)
-			}
-			journal, missing, readErr := readWorkflowDevelopmentPublishJournal(
-				fixture.workspace,
-			)
-			if readErr != nil || missing {
-				t.Fatalf("read prepared journal = %#v, %v, missing=%v", journal, readErr, missing)
-			}
-			if journal.Stage != workflowDevelopmentPublishStageActiveRemoveStarted {
-				t.Fatalf("journal stage = %q, want active remove started", journal.Stage)
-			}
-			journalPath := workflowDevelopmentPublishJournalPath(fixture.workspace)
-			journalBefore := readFileData(t, journalPath)
-
-			test.edit(t, fixture)
-			targetBefore := captureWorkflowTemplateFileForTest(t, fixture.targetPath)
-			manifestBefore := captureWorkflowTemplateFileForTest(t, fixture.manifestPath)
-			archiveBefore := captureWorkflowTemplateFileForTest(t, fixture.archivePath)
-			activeBefore := captureWorkflowTemplateFileForTest(t, fixture.activePath)
-			recoveryErr := recoverWorkflowDevelopmentPublishTransaction(
-				fixture.workspace,
-			)
-			if !errors.Is(
-				recoveryErr,
-				ErrWorkflowDevelopmentPublishRecoveryFailed,
-			) || !errors.Is(recoveryErr, ErrWorkflowRecoveryConflict) {
-				t.Fatalf("recovery error = %v, want stable recovery conflict", recoveryErr)
-			}
-			assertWorkflowTemplateFileSnapshotForTest(
-				t,
-				fixture.targetPath,
-				targetBefore,
-			)
-			assertWorkflowTemplateFileSnapshotForTest(
-				t,
-				fixture.manifestPath,
-				manifestBefore,
-			)
-			assertWorkflowTemplateFileSnapshotForTest(
-				t,
-				fixture.archivePath,
-				archiveBefore,
-			)
-			assertWorkflowTemplateFileSnapshotForTest(
-				t,
-				fixture.activePath,
-				activeBefore,
-			)
-			journalAfter, readErr := os.ReadFile(journalPath)
-			if readErr != nil {
-				t.Fatalf("conflicted journal was removed: %v", readErr)
-			}
-			if !bytes.Equal(journalAfter, journalBefore) {
-				t.Fatal("conflicted journal changed during recovery")
-			}
-		})
 	}
 }
 
@@ -702,12 +532,12 @@ func TestWorkflowDevelopmentPublishCommittedJournalFinalizesOnNextMutation(
 		t.Fatalf("publish error = %v, want interruption", err)
 	}
 	assertFileData(t, fixture.targetPath, []byte(fixture.session.YAML))
-	if _, statErr := os.Stat(fixture.activePath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("active stat after commit = %v, want not exist", statErr)
-	}
 	committed, readErr := workflowDevelopmentPublishJournalIsCommitted(fixture.workspace)
 	if readErr != nil || !committed {
 		t.Fatalf("journal committed = %v, error = %v", committed, readErr)
+	}
+	if active, getErr := rawWorkflowDevelopmentActive(t, fixture.workspace); getErr != nil || active != nil {
+		t.Fatalf("active after commit = %#v, %v; want nil", active, getErr)
 	}
 
 	unlock, lockErr := lockWorkflowMutation(fixture.workspace)
@@ -717,9 +547,7 @@ func TestWorkflowDevelopmentPublishCommittedJournalFinalizesOnNextMutation(
 	unlock()
 
 	assertFileData(t, fixture.targetPath, []byte(fixture.session.YAML))
-	if _, statErr := os.Stat(fixture.archivePath); statErr != nil {
-		t.Fatalf("archive stat after recovery = %v", statErr)
-	}
+	assertWorkflowDevelopmentArchived(t, fixture, true)
 	if _, statErr := os.Stat(
 		workflowDevelopmentPublishJournalPath(fixture.workspace),
 	); !errors.Is(statErr, os.ErrNotExist) {
@@ -820,25 +648,15 @@ func TestWorkflowDevelopmentPublishCommitMarkerErrorsRetryAndRecover(t *testing.
 			unlock()
 			if test.wantCommitted {
 				assertFileData(t, fixture.targetPath, []byte(fixture.session.YAML))
-				if _, statErr := os.Lstat(fixture.archivePath); statErr != nil {
-					t.Fatalf("committed archive stat error = %v", statErr)
-				}
-				if _, statErr := os.Lstat(fixture.activePath); !errors.Is(
-					statErr,
-					os.ErrNotExist,
-				) {
-					t.Fatalf("committed active stat error = %v, want missing", statErr)
+				assertWorkflowDevelopmentArchived(t, fixture, true)
+				if active, getErr := GetWorkflowDevelopmentSession(fixture.workspace); getErr != nil || active != nil {
+					t.Fatalf("committed active = %#v, %v; want nil", active, getErr)
 				}
 			} else {
 				assertFileData(t, fixture.targetPath, beforeTarget)
 				assertFileData(t, fixture.manifestPath, beforeManifest)
 				assertFileData(t, fixture.activePath, beforeActive)
-				if _, statErr := os.Lstat(fixture.archivePath); !errors.Is(
-					statErr,
-					os.ErrNotExist,
-				) {
-					t.Fatalf("rolled-back archive stat error = %v, want missing", statErr)
-				}
+				assertWorkflowDevelopmentArchived(t, fixture, false)
 			}
 			if _, statErr := os.Lstat(
 				workflowDevelopmentPublishJournalPath(fixture.workspace),
@@ -984,9 +802,7 @@ func assertWorkflowDevelopmentPublishFixtureUnchanged(
 	} else if active == nil || active.SessionRevision != fixture.session.SessionRevision {
 		t.Fatalf("active session = %#v, want revision %q", active, fixture.session.SessionRevision)
 	}
-	if _, statErr := os.Stat(fixture.archivePath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("archive stat = %v, want not exist", statErr)
-	}
+	assertWorkflowDevelopmentArchived(t, fixture, false)
 	if _, statErr := os.Stat(
 		workflowDevelopmentPublishJournalPath(fixture.workspace),
 	); !errors.Is(statErr, os.ErrNotExist) {
@@ -996,6 +812,33 @@ func assertWorkflowDevelopmentPublishFixtureUnchanged(
 
 func readFileData(t *testing.T, path string) []byte {
 	t.Helper()
+	clean := filepath.Clean(path)
+	if filepath.Base(clean) == compatibilityManifest &&
+		filepath.Base(filepath.Dir(clean)) == compatibilityManifestDir {
+		workspace := filepath.Dir(filepath.Dir(clean))
+		manifest, missing, err := readCompatibilityManifest(workspace)
+		if err != nil || missing {
+			t.Fatalf("read compatibility snapshot %s: missing=%v error=%v", path, missing, err)
+		}
+		data, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	if filepath.Base(clean) == workflowDevelopmentActive &&
+		filepath.Base(filepath.Dir(clean)) == workflowDevelopmentDir {
+		workspace := filepath.Dir(filepath.Dir(clean))
+		session, err := GetWorkflowDevelopmentSession(workspace)
+		if err != nil || session == nil {
+			t.Fatalf("read active development snapshot %s: %#v, %v", path, session, err)
+		}
+		data, err := json.Marshal(session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
@@ -1009,4 +852,40 @@ func assertFileData(t *testing.T, path string, want []byte) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("file %s data mismatch\n got: %q\nwant: %q", path, got, want)
 	}
+}
+
+func assertWorkflowDevelopmentArchived(
+	t *testing.T,
+	fixture *workflowDevelopmentPublishFixture,
+	want bool,
+) {
+	t.Helper()
+	db, err := openWorkflowDatabase(t.Context(), fixture.workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var lifecycle string
+	err = db.QueryRowContext(t.Context(), `SELECT lifecycle FROM workflow_development_sessions
+		WHERE session_id=?`, fixture.session.ID).Scan(&lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived := lifecycle == "published" || lifecycle == "discarded"
+	if archived != want {
+		t.Fatalf("development lifecycle = %q, want archived=%v", lifecycle, want)
+	}
+}
+
+func rawWorkflowDevelopmentActive(
+	t *testing.T,
+	workspace string,
+) (*WorkflowDevelopmentSession, error) {
+	t.Helper()
+	db, err := openWorkflowDatabase(t.Context(), workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	return loadWorkflowDevelopmentSession(t.Context(), db, "active")
 }

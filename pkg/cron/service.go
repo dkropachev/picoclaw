@@ -76,6 +76,7 @@ type CronService struct {
 	running      bool
 	stopChan     chan struct{}
 	runCancel    context.CancelFunc
+	runDone      chan struct{}
 	wakeChan     chan struct{}
 	gronx        *gronx.Gronx
 }
@@ -131,20 +132,23 @@ func (cs *CronService) Start() error {
 	cs.stopChan = make(chan struct{})
 	runCtx, runCancel := context.WithCancel(context.Background())
 	cs.runCancel = runCancel
+	cs.runDone = make(chan struct{})
 	if cs.wakeChan == nil {
 		cs.wakeChan = make(chan struct{})
 	}
 	cs.running = true
-	go cs.runLoop(runCtx, cs.stopChan)
+	go func(done chan struct{}, stopChan chan struct{}) {
+		defer close(done)
+		cs.runLoop(runCtx, stopChan)
+	}(cs.runDone, cs.stopChan)
 
 	return nil
 }
 
 func (cs *CronService) Stop() {
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
 	if !cs.running {
+		cs.mu.Unlock()
 		return
 	}
 
@@ -156,6 +160,12 @@ func (cs *CronService) Stop() {
 	if cs.stopChan != nil {
 		close(cs.stopChan)
 		cs.stopChan = nil
+	}
+	done := cs.runDone
+	cs.runDone = nil
+	cs.mu.Unlock()
+	if done != nil {
+		<-done
 	}
 }
 

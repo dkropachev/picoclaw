@@ -93,36 +93,8 @@ func TestDiscardWorkflowDevelopmentFencedAndLockedHelperFailureBoundaries(t *tes
 	}
 
 	symlinkRoot := t.TempDir()
-	symlinkOrSkip(t, t.TempDir(), filepath.Join(symlinkRoot, workflowDevelopmentDir))
-	if _, err := discardWorkflowDevelopmentLocked(
-		symlinkRoot,
-		&WorkflowDevelopmentSession{ID: "dev_root"},
-	); !errors.Is(err, ErrWorkflowInternalStateRootUnsafe) {
-		t.Fatalf("unsafe root discard error = %v", err)
-	}
-
-	archiveRoot := t.TempDir()
-	developmentRoot := filepath.Join(archiveRoot, workflowDevelopmentDir)
-	if err := os.MkdirAll(developmentRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	symlinkOrSkip(t, t.TempDir(), filepath.Join(developmentRoot, "archive"))
-	if _, err := discardWorkflowDevelopmentLocked(
-		archiveRoot,
-		&WorkflowDevelopmentSession{ID: "dev_archive"},
-	); !errors.Is(err, ErrWorkflowInternalStateRootUnsafe) {
-		t.Fatalf("unsafe archive discard error = %v", err)
-	}
-
-	removeRoot := t.TempDir()
-	activePath := activeDevelopmentPath(removeRoot)
-	if err := os.MkdirAll(filepath.Join(activePath, "child"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := discardWorkflowDevelopmentLocked(
-		removeRoot,
-		&WorkflowDevelopmentSession{ID: "dev_remove"},
-	); err == nil {
-		t.Fatal("non-empty active directory was removed as a file")
+	symlinkOrSkip(t, t.TempDir(), filepath.Join(symlinkRoot, workflowDatabaseStateDir))
+	if _, err := GetWorkflowDevelopmentSession(symlinkRoot); err == nil {
+		t.Fatal("development store followed a symlinked database directory")
 	}
 }

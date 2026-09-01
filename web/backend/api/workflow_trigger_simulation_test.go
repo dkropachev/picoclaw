@@ -2088,13 +2088,13 @@ func readWorkflowTriggerActiveSessionBytes(
 	workspace string,
 ) []byte {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(
-		workspace,
-		"workflow_dev",
-		"active.json",
-	))
+	session, err := workflows.GetWorkflowDevelopmentSession(workspace)
 	if err != nil {
 		t.Fatalf("read active session: %v", err)
+	}
+	data, err := json.Marshal(session)
+	if err != nil {
+		t.Fatalf("marshal active session: %v", err)
 	}
 	return data
 }

@@ -2,10 +2,10 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -393,17 +393,17 @@ func TestWorkflowRunListHTTPProjectionDistinguishesPrunedAndUnreadableAncestor(
 				t.Fatalf("CreateRun(child) error = %v", err)
 			}
 			if test.corrupt {
-				if err := os.WriteFile(
-					filepath.Join(
-						workspace,
-						"workflow_runs",
-						rootID,
-						"run.json",
-					),
-					[]byte(`{"id":`),
-					0o600,
-				); err != nil {
+				db, err := sql.Open("sqlite", filepath.Join(workspace, "state", "workflows.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE workflow_run_payloads SET event_json=? WHERE run_id=?`,
+					[]byte(`{"id":`), rootID); err != nil {
+					db.Close()
 					t.Fatalf("corrupt ancestor run: %v", err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
 				}
 			}
 
@@ -414,6 +414,12 @@ func TestWorkflowRunListHTTPProjectionDistinguishesPrunedAndUnreadableAncestor(
 				nil,
 			)
 			handler.handleListWorkflowRuns(recorder, request)
+			if test.corrupt {
+				if recorder.Code != http.StatusInternalServerError {
+					t.Fatalf("corrupt workflow store status = %d, body=%s", recorder.Code, recorder.Body.String())
+				}
+				return
+			}
 			if recorder.Code != http.StatusOK {
 				t.Fatalf(
 					"workflow run list status = %d, body=%s",

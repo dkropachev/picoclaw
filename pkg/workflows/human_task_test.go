@@ -155,14 +155,11 @@ jobs:
 	if strings.Contains(string(publicJSON), "execution") || strings.Contains(string(publicJSON), "human_tasks") {
 		t.Fatalf("public run leaked private execution state: %s", publicJSON)
 	}
-	raw, err := os.ReadFile(filepath.Join(workspace, "workflow_runs", started.RunID, "run.json"))
-	if err != nil {
-		t.Fatal(err)
+	privatePayload := persistedWorkflowPrivatePayloadForTest(t, workspace, started.RunID)
+	if len(privatePayload) == 0 {
+		t.Fatal("persisted run is missing private resume state")
 	}
-	if !strings.Contains(string(raw), `"execution"`) || !strings.Contains(string(raw), `"human_tasks"`) {
-		t.Fatalf("persisted run is missing resume state: %s", raw)
-	}
-	if strings.Contains(string(raw), secret) || strings.Contains(canonicalJSON(tasks), secret) {
+	if strings.Contains(string(privatePayload), secret) || strings.Contains(canonicalJSON(tasks), secret) {
 		t.Fatal("resume secret leaked into durable run or task projection")
 	}
 }

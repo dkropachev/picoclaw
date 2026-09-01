@@ -21,6 +21,7 @@ func TestCoverageNestedBenchmarkSkipPatternIsExact(t *testing.T) {
 	for _, name := range []string{
 		"TestGraderAcceptsReferenceAndReportsMutationEvidence",
 		"TestCodingAgentBenchmarkScriptedGatewayPath",
+		"TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig",
 	} {
 		if !pattern.MatchString(name) {
 			t.Fatalf("coverage skip pattern omitted %q", name)
@@ -30,6 +31,7 @@ func TestCoverageNestedBenchmarkSkipPatternIsExact(t *testing.T) {
 		"TestGraderRejectsOutsideOutput",
 		"TestCodingAgentBenchmarkLiveOptIn",
 		"PrefixTestCodingAgentBenchmarkScriptedGatewayPath",
+		"TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfigExtra",
 	} {
 		if pattern.MatchString(name) {
 			t.Fatalf("coverage skip pattern was too broad for %q", name)

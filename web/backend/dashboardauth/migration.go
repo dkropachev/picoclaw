@@ -261,7 +261,13 @@ type queryRower interface {
 }
 
 func finishLegacyLauncherConfigMigration(ctx context.Context, db *sql.DB, path string) error {
-	record, found, readErr := readLegacyImportRecord(ctx, db)
+	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		return finishLegacyLauncherConfigMigrationConn(ctx, conn, path)
+	})
+}
+
+func finishLegacyLauncherConfigMigrationConn(ctx context.Context, conn *sql.Conn, path string) error {
+	record, found, readErr := readLegacyImportRecord(ctx, conn)
 	if readErr != nil || !found {
 		return readErr
 	}
@@ -294,7 +300,7 @@ func finishLegacyLauncherConfigMigration(ctx context.Context, db *sql.DB, path s
 		if err := verifyArchiveCopy(archivePath, record.digest, record.size, record.mode); err != nil {
 			return err
 		}
-		return markArchiveComplete(ctx, db, record)
+		return markArchiveCompleteConn(ctx, conn, record)
 	}
 	if err := publishArchiveCopy(path, archiveDir, record.relative, snapshot); err != nil {
 		return err
@@ -302,7 +308,7 @@ func finishLegacyLauncherConfigMigration(ctx context.Context, db *sql.DB, path s
 	if err := stripLegacyAuthFields(path, record.digest, record.mode); err != nil {
 		return err
 	}
-	return markArchiveComplete(ctx, db, record)
+	return markArchiveCompleteConn(ctx, conn, record)
 }
 
 func readLegacyImportRecord(ctx context.Context, query queryRower) (legacyImportRecord, bool, error) {
@@ -339,33 +345,41 @@ func validateLegacyImportRecord(record legacyImportRecord) error {
 
 func markArchiveComplete(ctx context.Context, db *sql.DB, expected legacyImportRecord) error {
 	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
-		current, found, err := readLegacyImportRecord(ctx, conn)
-		if err != nil {
-			return err
-		}
-		if !found || current.relative != expected.relative || current.digest != expected.digest ||
-			current.size != expected.size || current.limit != expected.limit || current.mode != expected.mode {
-			return errors.New("launcher auth legacy import record changed")
-		}
-		if current.status == "complete" {
-			return nil
-		}
-		if current.status != "pending" {
-			return errors.New("launcher auth legacy import status is invalid")
-		}
-		result, err := conn.ExecContext(ctx, `UPDATE launcher_auth_legacy_imports
-            SET archive_status = 'complete', archived_at = ?
-          WHERE source_id = ? AND archive_status = 'pending'`,
-			time.Now().UTC().Format(time.RFC3339Nano), legacySourceID)
-		if err != nil {
-			return err
-		}
-		changed, err := result.RowsAffected()
-		if err != nil || changed != 1 {
-			return errors.New("launcher auth legacy import record changed")
-		}
-		return nil
+		return markArchiveCompleteConn(ctx, conn, expected)
 	})
+}
+
+func markArchiveCompleteConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	expected legacyImportRecord,
+) error {
+	current, found, err := readLegacyImportRecord(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if !found || current.relative != expected.relative || current.digest != expected.digest ||
+		current.size != expected.size || current.limit != expected.limit || current.mode != expected.mode {
+		return errors.New("launcher auth legacy import record changed")
+	}
+	if current.status == "complete" {
+		return nil
+	}
+	if current.status != "pending" {
+		return errors.New("launcher auth legacy import status is invalid")
+	}
+	result, err := conn.ExecContext(ctx, `UPDATE launcher_auth_legacy_imports
+        SET archive_status = 'complete', archived_at = ?
+      WHERE source_id = ? AND archive_status = 'pending'`,
+		time.Now().UTC().Format(time.RFC3339Nano), legacySourceID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return errors.New("launcher auth legacy import record changed")
+	}
+	return nil
 }
 
 func readLegacyConfig(path string) (legacyConfigSnapshot, bool, error) {

@@ -54,6 +54,10 @@ type LegacySource struct {
 	ID       string
 	Relative string
 	MaxBytes int64
+	// Order is an optional stable primary import key. Zero preserves the
+	// historical Relative/ID ordering for existing callers. Subsystems use
+	// nonzero phases only when referential dependencies require it.
+	Order int
 }
 
 // LegacyInput is the safely read, bounded source passed to an importer.
@@ -221,6 +225,9 @@ func importLegacySources(
 	}
 	sources = append([]LegacySource(nil), sources...)
 	sort.Slice(sources, func(left, right int) bool {
+		if sources[left].Order != sources[right].Order {
+			return sources[left].Order < sources[right].Order
+		}
 		if sources[left].Relative != sources[right].Relative {
 			return sources[left].Relative < sources[right].Relative
 		}

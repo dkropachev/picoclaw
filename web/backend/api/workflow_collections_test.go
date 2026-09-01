@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -784,11 +785,23 @@ on:
   manual: {}
 jobs: {}
 `)
-	manifestDir := filepath.Join(workspace, "workflow_validations")
-	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+	if _, err := workflows.LoadCompatibilitySummary(
+		context.Background(), workspace, workflows.RuntimeCompatibility{},
+	); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(manifestDir, "manifest.json"), []byte("{"), 0o600); err != nil {
+	raw, err := sql.Open(
+		"sqlite",
+		"file:"+filepath.ToSlash(filepath.Join(workspace, "state", "workflows.db")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DROP TABLE workflow_compatibility_runtime`); err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
 	response := serveWorkflowCollectionRequest(

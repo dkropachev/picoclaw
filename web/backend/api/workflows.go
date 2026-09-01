@@ -414,6 +414,10 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		admission.Config,
 	)
 	if err != nil {
+		if errors.Is(err, workflows.ErrWorkflowStorageUnavailable) {
+			writeWorkflowRunDependencyError(w, errWorkflowDependencyUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -467,7 +471,8 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 			},
 		)
 		switch {
-		case errors.Is(err, workflows.ErrWorkflowSnapshotAdmissionUnavailable):
+		case errors.Is(err, workflows.ErrWorkflowSnapshotAdmissionUnavailable),
+			errors.Is(err, workflows.ErrWorkflowStorageUnavailable):
 			return fmt.Errorf("%w: %v", errWorkflowDependencyUnavailable, err)
 		case errors.Is(err, workflows.ErrWorkflowSnapshotsNotRunnable):
 			return fmt.Errorf("%w: %v", errWorkflowDependenciesNotReady, err)
@@ -693,7 +698,8 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 			if errors.Is(admissionErr, errWorkflowDependencyRevisionStale) {
 				return workflows.ErrRunAdmissionConflict
 			}
-			if errors.Is(admissionErr, workflows.ErrWorkflowSnapshotAdmissionUnavailable) {
+			if errors.Is(admissionErr, workflows.ErrWorkflowSnapshotAdmissionUnavailable) ||
+				errors.Is(admissionErr, workflows.ErrWorkflowStorageUnavailable) {
 				return workflows.ErrRunAdmissionUnavailable
 			}
 			return admissionErr
@@ -738,6 +744,10 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 		admission.Config,
 	)
 	if err != nil {
+		if errors.Is(err, workflows.ErrWorkflowStorageUnavailable) {
+			writeWorkflowRunDependencyError(w, errWorkflowDependencyUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

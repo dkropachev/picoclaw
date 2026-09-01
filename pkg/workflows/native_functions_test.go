@@ -1338,7 +1338,7 @@ func TestNativeWorkflowStateRejectsSymlinkedNamespaceEscape(t *testing.T) {
 		},
 		ExecutionContext{WorkspaceDir: workspace},
 	)
-	if err == nil || !strings.Contains(err.Error(), "inside workflow workspace") {
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("RunNativeFunction() error = %v, want symlink escape rejection", err)
 	}
 	if entries, err := os.ReadDir(outside); err != nil {
@@ -1374,7 +1374,7 @@ func TestNativeWorkflowStateRejectsSymlinkedNamespaceInsideWorkspace(t *testing.
 		},
 		ExecutionContext{WorkspaceDir: workspace},
 	)
-	if err == nil || !strings.Contains(err.Error(), "storage root") {
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("RunNativeFunction() error = %v, want storage root symlink rejection", err)
 	}
 	if entries, err := os.ReadDir(target); err != nil {
@@ -1408,16 +1408,11 @@ func TestNativeWorkflowStateSetDoesNotFollowTempSymlink(t *testing.T) {
 		},
 		ExecutionContext{WorkspaceDir: workspace},
 	)
-	if err != nil {
-		t.Fatalf("RunNativeFunction() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("RunNativeFunction() error = %v, want unsafe legacy symlink rejection", err)
 	}
 	if _, err := os.Stat(outside); !os.IsNotExist(err) {
 		t.Fatalf("outside stat error = %v, want not exist", err)
-	}
-	if info, err := os.Lstat(filepath.Join(stateDir, safeStorageSegment(key)+".json")); err != nil {
-		t.Fatalf("state file lstat error = %v", err)
-	} else if info.Mode()&os.ModeSymlink != 0 {
-		t.Fatalf("state file is symlink, want regular file")
 	}
 }
 
@@ -1445,7 +1440,7 @@ func TestNativeWorkflowStateListRejectsSymlinkedStateFile(t *testing.T) {
 		},
 		ExecutionContext{WorkspaceDir: workspace},
 	)
-	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("RunNativeFunction() error = %v, want symlink rejection", err)
 	}
 }

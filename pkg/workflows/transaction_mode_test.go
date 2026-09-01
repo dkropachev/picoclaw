@@ -26,3 +26,16 @@ func TestNormalizeWorkflowWindowsTransactionFileMode(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkflowTemplateFileSnapshotsEqualMissingPreimages(t *testing.T) {
+	missing := workflowTemplateFileSnapshot{}
+	if !workflowTemplateFileSnapshotsEqual(missing, missing) {
+		t.Fatal("two nonexistent template snapshots must compare equal")
+	}
+	if workflowTemplateFileSnapshotsEqual(
+		missing,
+		workflowTemplateFileSnapshot{exists: true},
+	) {
+		t.Fatal("missing and existing template snapshots compared equal")
+	}
+}

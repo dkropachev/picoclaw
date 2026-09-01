@@ -731,14 +731,9 @@ func TestHandleTestWorkflowDevelopmentUsesProductionEventParityContext(t *testin
 		t.Fatalf("tool large value = %#v, want exact integer", toolRequest.Args["large"])
 	}
 
-	rawRun, err := os.ReadFile(filepath.Join(
-		workspace,
-		"workflow_runs",
-		response.Result.RunID,
-		"run.json",
-	))
+	rawRun, err := json.Marshal(run)
 	if err != nil {
-		t.Fatalf("read raw run error = %v", err)
+		t.Fatalf("marshal durable run error = %v", err)
 	}
 	if !strings.Contains(string(rawRun), "9007199254740993") {
 		t.Fatalf("raw run changed exact numeric token: %s", rawRun)

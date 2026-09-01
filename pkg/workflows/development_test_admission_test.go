@@ -2,6 +2,8 @@ package workflows
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -284,21 +286,27 @@ func TestAdmitWorkflowDevelopmentTestRunStartErrorLeavesDraftUntouched(
 	)
 }
 
-func TestAdmitWorkflowDevelopmentTestRunReturnsDurableStartOnWriteFailure(
+func TestAdmitWorkflowDevelopmentTestRunReturnsDurableStartOnSQLiteWriteFailure(
 	t *testing.T,
 ) {
 	workspace, original, activePath, before := newDevelopmentAdmissionFixture(t)
 	admission := developmentTestRunAdmissionFor(original)
-	developmentDir := filepath.Join(workspace, workflowDevelopmentDir)
-	savedDevelopmentDir := developmentDir + ".saved"
-	outside := t.TempDir()
-	sabotaged := false
+	var sabotageDB *sql.DB
+	var releaseSabotageDB func()
+	triggerCreated := false
 	t.Cleanup(func() {
-		if !sabotaged {
+		if sabotageDB == nil {
 			return
 		}
-		_ = os.Remove(developmentDir)
-		_ = os.Rename(savedDevelopmentDir, developmentDir)
+		if triggerCreated {
+			_, _ = sabotageDB.ExecContext(
+				context.Background(),
+				`DROP TRIGGER workflow_development_admission_write_failure`,
+			)
+		}
+		if releaseSabotageDB != nil {
+			releaseSabotageDB()
+		}
 	})
 
 	session, recorded, started, err := AdmitWorkflowDevelopmentTestRun(
@@ -309,34 +317,34 @@ func TestAdmitWorkflowDevelopmentTestRunReturnsDurableStartOnWriteFailure(
 				t,
 				activePath,
 				before,
-				"before write failure",
+				"before SQLite write failure",
 			)
-			if renameErr := os.Rename(
-				developmentDir,
-				savedDevelopmentDir,
-			); renameErr != nil {
-				t.Fatalf("os.Rename(workflow_dev) error = %v", renameErr)
+			var openErr error
+			sabotageDB, releaseSabotageDB, openErr = borrowWorkflowDatabase(
+				t.Context(),
+				workspace,
+			)
+			if openErr != nil {
+				t.Fatalf("borrow workflow database: %v", openErr)
 			}
-			if symlinkErr := os.Symlink(
-				outside,
-				developmentDir,
-			); symlinkErr != nil {
-				t.Fatalf("os.Symlink(workflow_dev) error = %v", symlinkErr)
+			if _, createErr := sabotageDB.ExecContext(
+				t.Context(),
+				`CREATE TRIGGER workflow_development_admission_write_failure
+				 BEFORE UPDATE ON workflow_development_sessions
+				 BEGIN SELECT RAISE(ABORT, 'injected development write failure'); END`,
+			); createErr != nil {
+				t.Fatalf("create development write-failure trigger: %v", createErr)
 			}
-			sabotaged = true
+			triggerCreated = true
 			return "durable-start", nil
 		},
 	)
-	if !errors.Is(err, ErrWorkflowInternalStateRootUnsafe) ||
-		recorded ||
-		started != "durable-start" ||
-		session == nil ||
-		session == original ||
+	if err == nil || recorded || started != "durable-start" ||
+		session == nil || session == original ||
 		session.SessionRevision != original.SessionRevision ||
 		session.DraftRevision != original.DraftRevision ||
 		session.TargetWorkflowRef != original.TargetWorkflowRef ||
-		session.YAML != original.YAML ||
-		session.LastTest != nil {
+		session.YAML != original.YAML || session.LastTest != nil {
 		t.Fatalf(
 			"write failure session=%#v recorded=%v started=%q error=%v",
 			session,
@@ -345,21 +353,23 @@ func TestAdmitWorkflowDevelopmentTestRunReturnsDurableStartOnWriteFailure(
 			err,
 		)
 	}
-	if removeErr := os.Remove(developmentDir); removeErr != nil {
-		t.Fatalf("os.Remove(symlink) error = %v", removeErr)
+	if _, restoreErr := sabotageDB.ExecContext(
+		t.Context(),
+		`DROP TRIGGER workflow_development_admission_write_failure`,
+	); restoreErr != nil {
+		t.Fatalf("drop development write-failure trigger: %v", restoreErr)
 	}
-	if renameErr := os.Rename(
-		savedDevelopmentDir,
-		developmentDir,
-	); renameErr != nil {
-		t.Fatalf("restore workflow_dev error = %v", renameErr)
+	triggerCreated = false
+	if releaseSabotageDB != nil {
+		releaseSabotageDB()
+		releaseSabotageDB = nil
 	}
-	sabotaged = false
+	sabotageDB = nil
 	assertDevelopmentAdmissionBytes(
 		t,
 		activePath,
 		before,
-		"after failed persistence",
+		"after failed SQLite persistence",
 	)
 }
 
@@ -464,10 +474,7 @@ func TestAdmitWorkflowDevelopmentTestRunRejectsRunningTest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecordWorkflowDevelopmentTest() error = %v", err)
 	}
-	before, err := os.ReadFile(activePath)
-	if err != nil {
-		t.Fatalf("os.ReadFile(active) error = %v", err)
-	}
+	before := readDevelopmentAdmissionSnapshot(t, activePath)
 	admission := developmentTestRunAdmissionFor(running)
 	callbacks := 0
 	session, recorded, _, err := AdmitWorkflowDevelopmentTestRun(
@@ -530,14 +537,8 @@ func newDevelopmentAdmissionFixture(
 	if err != nil {
 		t.Fatalf("StartWorkflowDevelopment() error = %v", err)
 	}
-	activePath, err = checkedActiveDevelopmentPath(workspace)
-	if err != nil {
-		t.Fatalf("checkedActiveDevelopmentPath() error = %v", err)
-	}
-	activeBytes, err = os.ReadFile(activePath)
-	if err != nil {
-		t.Fatalf("os.ReadFile(active) error = %v", err)
-	}
+	activePath = workspace
+	activeBytes = readDevelopmentAdmissionSnapshot(t, workspace)
 	return workspace, session, activePath, activeBytes
 }
 
@@ -562,13 +563,28 @@ func assertDevelopmentAdmissionBytes(
 	when string,
 ) {
 	t.Helper()
-	got, err := os.ReadFile(activePath)
-	if err != nil {
-		t.Fatalf("os.ReadFile(active) %s error = %v", when, err)
-	}
+	got := readDevelopmentAdmissionSnapshot(t, activePath)
 	if string(got) != string(want) {
 		t.Fatalf("active development bytes changed %s", when)
 	}
+}
+
+func readDevelopmentAdmissionSnapshot(t *testing.T, workspace string) []byte {
+	t.Helper()
+	db, err := openWorkflowDatabase(t.Context(), workspace)
+	if err != nil {
+		t.Fatalf("open workflow database: %v", err)
+	}
+	defer db.Close()
+	session, err := loadWorkflowDevelopmentSession(t.Context(), db, "active")
+	if err != nil {
+		t.Fatalf("load workflow development snapshot: %v", err)
+	}
+	data, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func assertWorkflowMutationLockHeld(t *testing.T, workspace string) {

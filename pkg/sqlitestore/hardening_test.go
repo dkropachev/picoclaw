@@ -386,6 +386,55 @@ func TestLegacySourcesAreSortedFencedAndBounded(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit dependency order then relative and id", func(t *testing.T) {
+		root := t.TempDir()
+		for _, name := range []string{"event.json", "run-z.json", "run-a.json"} {
+			writeLegacyTestFile(t, root, name, name)
+		}
+		options := testOptions()
+		options.Legacy = legacyTestOptions(
+			root,
+			[]LegacySource{
+				{ID: "event", Relative: "event.json", Order: 20},
+				{ID: "run-z", Relative: "run-z.json", Order: 10},
+				{ID: "run-a", Relative: "run-a.json", Order: 10},
+			},
+			func(ctx context.Context, conn *sql.Conn, input LegacyInput) (ImportResult, error) {
+				_, err := conn.ExecContext(
+					ctx,
+					`INSERT INTO records(id, value) VALUES (?, ?)`,
+					input.ID,
+					input.Relative,
+				)
+				return ImportResult{Imported: 1}, err
+			},
+		)
+		db, err := Open(t.Context(), filepath.Join(root, "db", "store.db"), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		rows, err := db.Query(`SELECT id FROM records ORDER BY rowid`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var order []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			order = append(order, id)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(order, ",") != "run-a,run-z,event" {
+			t.Fatalf("import order = %v", order)
+		}
+	})
+
 	t.Run("source count", func(t *testing.T) {
 		root := t.TempDir()
 		options := testOptions()

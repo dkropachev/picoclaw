@@ -1167,8 +1167,8 @@ func TestHandleConfigReloadFencesDueCandidateCommandOnRollback(t *testing.T) {
 			if setupErr != nil {
 				return setupErr
 			}
-			cronService.SetOnJob(func(job *cron.CronJob) (string, error) {
-				result := cronTool.ExecuteJob(context.Background(), job)
+			cronService.SetOnJobContext(func(ctx context.Context, job *cron.CronJob) (string, error) {
+				result := cronTool.ExecuteJob(ctx, job)
 				commandDone <- result
 				return result, nil
 			})
@@ -1219,8 +1219,9 @@ func TestHandleConfigReloadFencesDueCandidateCommandOnRollback(t *testing.T) {
 	}
 	select {
 	case result := <-commandDone:
-		if !strings.Contains(result, "runtime config generation changed") {
-			t.Fatalf("candidate command result = %q, want stale-generation rejection", result)
+		if !strings.Contains(result, "runtime config generation changed") &&
+			!strings.Contains(result, "context canceled") {
+			t.Fatalf("candidate command result = %q, want canceled/stale rejection", result)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("candidate command did not leave the runtime fence after rollback")

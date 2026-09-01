@@ -332,13 +332,17 @@ jobs:
 	if err != nil {
 		t.Fatalf("LoadValidatedLocalSnapshot() error = %v", err)
 	}
-	manifestPath := filepath.Join(
-		workspace,
-		compatibilityManifestDir,
-		compatibilityManifest,
-	)
-	if writeErr := os.WriteFile(manifestPath, []byte("{"), 0o600); writeErr != nil {
-		t.Fatalf("WriteFile(malformed manifest) error = %v", writeErr)
+	db, openErr := openWorkflowDatabase(ctx, workspace)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	if _, corruptErr := db.ExecContext(ctx, `ALTER TABLE workflow_compatibility_runtime
+		RENAME TO corrupt_workflow_compatibility_runtime`); corruptErr != nil {
+		db.Close()
+		t.Fatalf("corrupt compatibility schema: %v", corruptErr)
+	}
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 
 	err = WithFencedRunnableWorkflowSnapshots(

@@ -459,14 +459,13 @@ jobs:
 				t.Fatal(err)
 			}
 			test.mutate(t, run)
-			if updateErr := store.UpdateRun(ctx, run); updateErr != nil {
-				t.Fatal(updateErr)
-			}
-			runPath := filepath.Join(workspace, "workflow_runs", started.RunID, "run.json")
-			before, err := os.ReadFile(runPath)
-			if err != nil {
-				t.Fatal(err)
-			}
+			overwritePersistedWorkflowExecutionForTest(t, workspace, run)
+			before := persistedWorkflowClaimSnapshotForTest(
+				t,
+				workspace,
+				started.RunID,
+				task.ID,
+			)
 			_, err = executor.ResumeHumanTask(ctx, started.RunID, task.ID, HumanTaskResumeRequest{
 				ExpectedRevision: task.Revision,
 				InputHash:        task.InputHash,
@@ -476,10 +475,12 @@ jobs:
 			if !errors.Is(err, ErrHumanTaskConflict) {
 				t.Fatalf("ResumeHumanTask() error = %v, want conflict", err)
 			}
-			after, err := os.ReadFile(runPath)
-			if err != nil {
-				t.Fatal(err)
-			}
+			after := persistedWorkflowClaimSnapshotForTest(
+				t,
+				workspace,
+				started.RunID,
+				task.ID,
+			)
 			if !bytes.Equal(after, before) {
 				t.Fatal("rejected claim mutated the persisted waiting run")
 			}
@@ -682,15 +683,12 @@ jobs:
 	}
 
 	// Simulate the continuation process crashing and its durable lease expiring.
-	claimed.execution.Resume.ExpiresAt = time.Now().UTC().Add(-time.Second)
-	data, err := marshalPersistedRun(claimed)
+	crashed, err := store.GetRun(ctx, started.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runPath := filepath.Join(workspace, "workflow_runs", started.RunID, "run.json")
-	if writeErr := os.WriteFile(runPath, data, 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
+	crashed.execution.Resume.ExpiresAt = time.Now().UTC().Add(-time.Second)
+	overwritePersistedWorkflowExecutionForTest(t, workspace, crashed)
 	projected, err = executor.ListHumanTasks(ctx, started.RunID)
 	if err != nil || len(projected) != 1 || projected[0].Status != HumanTaskStatusRecoveryRequired ||
 		projected[0].RetryAt == nil {
@@ -951,14 +949,7 @@ jobs:
 		t.Fatalf("crash checkpoint = %#v execution=%#v", crashed, crashed.execution)
 	}
 	crashed.execution.Resume.ExpiresAt = time.Now().UTC().Add(-time.Second)
-	data, err := marshalPersistedRun(crashed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runPath := filepath.Join(workspace, "workflow_runs", started.RunID, "run.json")
-	if writeErr := os.WriteFile(runPath, data, 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
+	overwritePersistedWorkflowExecutionForTest(t, workspace, crashed)
 
 	// Do not re-supply admit_later. A stale claimant must use the complete B
 	// checkpoint, not re-evaluate its job-level if or repeat its effect.
@@ -1534,14 +1525,7 @@ func expirePersistedHumanTaskClaim(
 		t.Fatalf("run %s has no durable resume claim", runID)
 	}
 	run.execution.Resume.ExpiresAt = time.Now().UTC().Add(-time.Second)
-	data, err := marshalPersistedRun(run)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runPath := filepath.Join(workspace, "workflow_runs", runID, "run.json")
-	if err := os.WriteFile(runPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	overwritePersistedWorkflowExecutionForTest(t, workspace, run)
 }
 
 func TestExecutorCapturedReusableSnapshotNormalizesPartialCompatibility(t *testing.T) {
