@@ -48,6 +48,7 @@ var (
 	migrateOpenedSQLiteDatabase    = migrate
 	checkOpenedSQLiteIntegrity     = integrityCheck
 	archiveOpenedSQLiteLegacyFiles = archiveImportedSources
+	securePrivateSQLiteFile        = fileutil.SecurePrivateFile
 	openSQLiteFile                 = func(path string, flag int, mode os.FileMode) (sqliteFile, error) {
 		return os.OpenFile(path, flag, mode)
 	}
@@ -569,7 +570,7 @@ func foreignKeyCheckQuery(ctx context.Context, queryer contextQueryer, component
 }
 
 func secureSQLiteFiles(path string) error {
-	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
+	for index, candidate := range []string{path, path + "-wal", path + "-shm"} {
 		info, err := lstatSQLitePath(candidate)
 		if os.IsNotExist(err) {
 			continue
@@ -603,7 +604,13 @@ func secureSQLiteFiles(path string) error {
 		if err := file.Close(); err != nil {
 			return err
 		}
-		if _, err := fileutil.SecurePrivateFile(candidate); err != nil {
+		if _, err := securePrivateSQLiteFile(candidate); err != nil {
+			// SQLite may remove an unused WAL or SHM companion after its opened
+			// handle is hardened and closed. A vanished companion no longer has an
+			// ACL to validate; the primary database must always remain strict.
+			if index > 0 && os.IsNotExist(err) {
+				continue
+			}
 			return err
 		}
 	}

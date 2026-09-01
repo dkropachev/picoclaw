@@ -45,6 +45,57 @@ func TestSecureSQLiteFilesRoutesFinalIdentityThroughPrivateFileValidation(t *tes
 	}
 }
 
+func TestSecureSQLiteFilesAllowsOnlyVanishedCompanionsAtFinalValidation(t *testing.T) {
+	t.Run("WAL companion", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "store.db")
+		wal := path + "-wal"
+		for _, candidate := range []string{path, wal} {
+			if err := os.WriteFile(candidate, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		original := securePrivateSQLiteFile
+		swapTestHook(t, &securePrivateSQLiteFile, func(candidate string) (os.FileInfo, error) {
+			if candidate != wal {
+				return original(candidate)
+			}
+			if err := os.Remove(candidate); err != nil {
+				return nil, err
+			}
+			return nil, os.ErrNotExist
+		})
+		if err := secureSQLiteFiles(path); err != nil {
+			t.Fatalf("vanished WAL companion: %v", err)
+		}
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("primary database disappeared: %v", err)
+		}
+		if _, err := os.Lstat(wal); !os.IsNotExist(err) {
+			t.Fatalf("WAL companion still exists: %v", err)
+		}
+	})
+
+	t.Run("primary database", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "store.db")
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		original := securePrivateSQLiteFile
+		swapTestHook(t, &securePrivateSQLiteFile, func(candidate string) (os.FileInfo, error) {
+			if candidate != path {
+				return original(candidate)
+			}
+			if err := os.Remove(candidate); err != nil {
+				return nil, err
+			}
+			return nil, os.ErrNotExist
+		})
+		if err := secureSQLiteFiles(path); !os.IsNotExist(err) {
+			t.Fatalf("vanished primary database error = %v", err)
+		}
+	})
+}
+
 func TestLegacyArchiveDirectoryCreationRoutesThroughPrivateValidation(t *testing.T) {
 	tests := []struct {
 		name string
