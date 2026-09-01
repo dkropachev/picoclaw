@@ -723,6 +723,15 @@ func pathExists(path string) bool {
 	return err == nil
 }
 
+func TestAppendAgentWorkspaceSQLiteProtectedRootsNilConfigPassesThrough(t *testing.T) {
+	existing := []string{"already-protected"}
+	protected, err := appendAgentWorkspaceSQLiteProtectedRoots(existing, nil)
+	if err != nil || len(protected) != 1 || protected[0] != existing[0] ||
+		&protected[0] != &existing[0] {
+		t.Fatalf("nil-config protected roots=%#v err=%v", protected, err)
+	}
+}
+
 func TestAgentFileMutationPolicyProtectsLocalCIEvidenceSQLiteStore(t *testing.T) {
 	workspace := t.TempDir()
 	home := t.TempDir()

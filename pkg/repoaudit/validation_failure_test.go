@@ -2,10 +2,10 @@ package repoaudit
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -248,29 +248,32 @@ func TestValidationWorkerPersistsSafeStageFailureCodes(t *testing.T) {
 	}
 
 	t.Run("completion persistence failure is returned safely", func(t *testing.T) {
-		t.Skip("per-ledger JSON rename fault was replaced by SQLite transaction fault coverage")
-		store, state, _ := newLifecycleCoverageValidationStore(t, "safe-completion-failure")
+		store, state, pending := newLifecycleCoverageValidationStore(t, "safe-completion-failure")
 		commit := strings.Repeat("e", 40)
-		statePath := store.path(state.Repository)
-		backupPath := statePath + ".validation-failure-backup"
-		moved := false
-		defer func() {
-			if moved {
-				if err := os.Rename(backupPath, statePath); err != nil {
-					t.Errorf("restore validation state: %v", err)
-				}
-			}
-		}()
+		const privateFailure = "provider token=secret private/path.go"
+		database, err := sql.Open("sqlite", store.database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		database.SetMaxOpenConns(1)
+		if _, err = database.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+			_ = database.Close()
+			t.Fatal(err)
+		}
+		_, triggerErr := database.Exec(`CREATE TRIGGER reject_nonfailed_validation_completion
+			BEFORE UPDATE OF payload_json ON repository_review_states
+			WHEN json_extract(CAST(NEW.payload_json AS TEXT), '$.validation_jobs[0].state') = 'not_fixed'
+			BEGIN SELECT RAISE(ABORT, 'provider token=secret private/path.go'); END`)
+		closeErr := database.Close()
+		if triggerErr != nil || closeErr != nil {
+			t.Fatalf("install validation completion fault: trigger=%v close=%v", triggerErr, closeErr)
+		}
 		result, err := store.ProcessPendingValidationJobs(
 			t.Context(), state.Repository, RepositoryValidationProcessOptions{
 				Evidence: func(context.Context, RepositoryFinding, []string) ([]RepositoryValidationEvidence, error) {
 					return []RepositoryValidationEvidence{{CommitSHA: commit, CommitTime: time.Now().UTC()}}, nil
 				},
 				Adjudicate: func(context.Context, RepositoryMappingModelSnapshot, RepositoryFinding, []RepositoryValidationEvidence) (RepositoryValidationDecision, error) {
-					if err := os.Rename(statePath, backupPath); err != nil {
-						return RepositoryValidationDecision{}, err
-					}
-					moved = true
 					return RepositoryValidationDecision{
 						Outcome: RepositoryValidationNotFixed, Summary: "No fix found.",
 					}, nil
@@ -278,8 +281,22 @@ func TestValidationWorkerPersistsSafeStageFailureCodes(t *testing.T) {
 				VerifyAncestry: func(context.Context, string) (bool, error) { return true, nil },
 			},
 		)
-		if err == nil || result.Completed != 0 {
+		if err != nil || result.Completed != 1 || result.Failed != 1 {
 			t.Fatalf("completion persistence result=%#v err=%v", result, err)
+		}
+		current, found, loadErr := store.Get(state.Repository)
+		if loadErr != nil || !found {
+			t.Fatalf("load failed validation state found=%v err=%v", found, loadErr)
+		}
+		job := lifecycleValidationJobByID(t, current, pending.ID)
+		if job.State != RepositoryValidationFailed || job.Failure == nil ||
+			job.Failure.Code != RepositoryValidationFailureCodeProcessing ||
+			job.Failure.Message != "Fix-check processing failed." {
+			t.Fatalf("safe processing failure=%#v", job)
+		}
+		encoded, encodeErr := json.Marshal(current)
+		if encodeErr != nil || strings.Contains(string(encoded), privateFailure) {
+			t.Fatalf("private completion failure leaked: err=%v state=%s", encodeErr, encoded)
 		}
 	})
 }
