@@ -339,10 +339,12 @@ func TestRepositoryReviewAssignmentAdmissionFailureBranches(t *testing.T) {
 			calls++
 			updated, err := updateRepositoryReviewAutomation(ctx, store, id, version, mutate)
 			if err == nil && calls == 2 {
-				identity := repoaudit.CanonicalRepositoryIdentity(updated.Repository)
-				filename := strings.Replace(repoaudit.RepositoryID(identity), "rrp_", "repo_", 1) + ".json"
 				if writeErr := os.WriteFile(
-					filepath.Join(fixture.workspace, "repository_reviews", filename), []byte("{"), 0o600,
+					filepath.Join(
+						fixture.workspace, "repository_reviews", "repository-reviews.db",
+					),
+					[]byte("not-sqlite"),
+					0o600,
 				); writeErr != nil {
 					t.Fatal(writeErr)
 				}

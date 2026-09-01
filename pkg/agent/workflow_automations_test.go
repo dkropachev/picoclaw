@@ -26,6 +26,33 @@ type workflowTriggerMutationBus struct {
 	mutate func()
 }
 
+type closedWorkflowRuntimeEventSubscription struct {
+	runtimeevents.Subscription
+}
+
+func (*closedWorkflowRuntimeEventSubscription) Close() error { return nil }
+
+type closedWorkflowRuntimeEventChannel struct {
+	runtimeevents.EventChannel
+	events <-chan runtimeevents.Event
+}
+
+func (channel closedWorkflowRuntimeEventChannel) SubscribeChan(
+	context.Context,
+	runtimeevents.SubscribeOptions,
+) (runtimeevents.Subscription, <-chan runtimeevents.Event, error) {
+	return &closedWorkflowRuntimeEventSubscription{}, channel.events, nil
+}
+
+type closedWorkflowRuntimeEventBus struct {
+	runtimeevents.Bus
+	channel runtimeevents.EventChannel
+}
+
+func (eventBus closedWorkflowRuntimeEventBus) Channel() runtimeevents.EventChannel {
+	return eventBus.channel
+}
+
 func (b *workflowTriggerMutationBus) PublishNonBlocking(
 	evt runtimeevents.Event,
 ) runtimeevents.PublishResult {
@@ -495,6 +522,24 @@ func TestRuntimeEventWorkflowPumpFollowsWorkflowEnableReloads(t *testing.T) {
 	}
 }
 
+func TestRuntimeEventWorkflowPumpReturnsForClosedSubscription(t *testing.T) {
+	events := make(chan runtimeevents.Event)
+	close(events)
+	loop := &AgentLoop{runtimeEvents: closedWorkflowRuntimeEventBus{
+		Bus: runtimeevents.NewBus(),
+		channel: closedWorkflowRuntimeEventChannel{
+			events: events,
+		},
+	}}
+	ready := make(chan struct{})
+	loop.runRuntimeEventWorkflowTriggers(t.Context(), &config.Config{}, ready)
+	select {
+	case <-ready:
+	default:
+		t.Fatal("closed runtime-event subscription did not signal readiness")
+	}
+}
+
 func TestRuntimeEventWorkflowPumpDropsProvisionalEventsOnRollback(t *testing.T) {
 	workspaceA := t.TempDir()
 	workspaceB := t.TempDir()
@@ -526,6 +571,7 @@ jobs:
 		al.Stop()
 		_ = al.WaitStopped(context.Background())
 		al.Close()
+		waitForWorkflowAutomationSQLiteIdle(t, workspaceA)
 	}()
 	waitForWorkflowRuntimeEventSubscribers(t, al, 1)
 
@@ -711,4 +757,24 @@ func waitForWorkflowRunCompletion(t *testing.T, workspace string) *workflows.Run
 	}
 	t.Fatal("timed out waiting for workflow run completion")
 	return nil
+}
+
+func waitForWorkflowAutomationSQLiteIdle(t *testing.T, workspace string) {
+	t.Helper()
+	database := filepath.Join(workspace, "state", "workflows.db")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		idle := true
+		for _, companion := range []string{database + "-wal", database + "-shm"} {
+			if _, err := os.Stat(companion); err == nil || !os.IsNotExist(err) {
+				idle = false
+				break
+			}
+		}
+		if idle {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("workflow SQLite pool did not become idle")
 }

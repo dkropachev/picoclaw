@@ -1071,6 +1071,15 @@ func TestManagerAcquirePinnedReservationAndWorkspaceIntegrity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The orphan commit is deliberate workspace tampering for this test.
+		// Disable Git's unrelated background maintenance actor before creating it
+		// so the heartbeat observes only the intended ancestry violation.
+		if _, err := runGit(ctx, workspace.Path, "config", "maintenance.auto", "false"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runGit(ctx, workspace.Path, "config", "gc.auto", "0"); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := runGit(ctx, workspace.Path, "checkout", "--orphan", "unrelated"); err != nil {
 			t.Fatal(err)
 		}

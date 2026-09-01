@@ -1001,7 +1001,7 @@ func TestRepositoryReviewIssueGenerationBoundsConcurrencyAndRetriesOnlyFailure(t
 	releaseOnce.Do(func() { close(release) })
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("issue generation did not complete")
 	}
 	if response.Code != http.StatusOK || maximum.Load() != 4 || calls.Load() != 5 ||
@@ -2591,9 +2591,9 @@ func TestRepositoryReviewAutomationLedgerResolutionBoundaries(t *testing.T) {
 		state := seedRepositoryReviewAPIState(t, workspace)
 		automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 		statePath := filepath.Join(
-			workspace, "repository_reviews", "repo_"+strings.TrimPrefix(state.ID, "rrp_")+".json",
+			workspace, "repository_reviews", "repository-reviews.db",
 		)
-		if err := os.WriteFile(statePath, []byte(`{`), 0o600); err != nil {
+		if err := os.WriteFile(statePath, []byte("not-sqlite"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := handler.repositoryReviewAutomationLedger(t.Context(), automation.ID); err == nil {
@@ -2869,11 +2869,12 @@ func TestRepositoryReviewRemainingGenerationAndLedgerBranches(t *testing.T) {
 			_ context.Context, _ *Handler, _ repoaudit.RepositoryReviewAutomation,
 			_ repoaudit.Finding, _ []repoaudit.FindingContext, _, _ string,
 		) (repositoryReviewIssueWriterResult, error) {
-			statePath := filepath.Join(
-				workspace, "repository_reviews", "repo_"+strings.TrimPrefix(state.ID, "rrp_")+".json",
+			databasePath := filepath.Join(
+				workspace, "repository_reviews", "repository-reviews.db",
 			)
-			_ = os.Remove(statePath)
-			_ = os.Remove(strings.TrimSuffix(statePath, ".json") + ".summary.json")
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				_ = os.Remove(databasePath + suffix)
+			}
 			return repositoryReviewIssueWriterResult{Title: "Preview", Body: "Evidence"}, nil
 		}
 		response := repositoryReviewAutomationMutation(
@@ -2933,10 +2934,8 @@ func TestRepositoryReviewRemainingGenerationAndLedgerBranches(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		badState := filepath.Join(
-			workspace, "repository_reviews", "repo_"+strings.Repeat("0", 64)+".json",
-		)
-		if err := os.WriteFile(badState, []byte(`{`), 0o600); err != nil {
+		badState := filepath.Join(workspace, "repository_reviews", "repository-reviews.db")
+		if err := os.WriteFile(badState, []byte("not-sqlite"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := handler.repositoryReviewAutomationLedger(t.Context(), withRuns.ID); err == nil {
@@ -3028,13 +3027,14 @@ func TestRepositoryReviewRemainingGatewayPublicationBranches(t *testing.T) {
 	})
 
 	t.Run("ledger disappears after gateway", func(t *testing.T) {
-		_, mux, workspace, state, automation, draft := seedPublishable(t)
+		_, mux, workspace, _, automation, draft := seedPublishable(t)
 		installEventProxyStubs(t, func(_ *http.Request, _ time.Duration) (*http.Response, error) {
-			statePath := filepath.Join(
-				workspace, "repository_reviews", "repo_"+strings.TrimPrefix(state.ID, "rrp_")+".json",
+			databasePath := filepath.Join(
+				workspace, "repository_reviews", "repository-reviews.db",
 			)
-			_ = os.Remove(statePath)
-			_ = os.Remove(strings.TrimSuffix(statePath, ".json") + ".summary.json")
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				_ = os.Remove(databasePath + suffix)
+			}
 			return eventUpstreamResponse(http.StatusOK, `{"draft":{"id":"`+draft.ID+`","state":"posted"}}`), nil
 		})
 		response := repositoryReviewAutomationMutation(

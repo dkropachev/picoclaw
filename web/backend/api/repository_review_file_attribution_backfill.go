@@ -137,7 +137,7 @@ func BackfillRepositoryReviewFileAttributions(
 	if workspace == "" || automationID == "" || options.Apply && options.ExpectedDigest == "" {
 		return RepositoryReviewFileAttributionBackfillReport{}, repoaudit.ErrInvalidPlan
 	}
-	store := repoaudit.NewStore(workspace)
+	store := repoaudit.NewSQLiteStore(workspace)
 	unlockController, err := store.LockAutomationController()
 	if err != nil {
 		return RepositoryReviewFileAttributionBackfillReport{}, err

@@ -2498,7 +2498,7 @@ func repositoryReviewManagedAssignmentCallbacks(
 	if len(plan.AssignmentCatalog) == 0 {
 		return nil, nil, nil
 	}
-	store := repoaudit.NewStore(nativeWorkspace(exec))
+	store := repoaudit.NewSQLiteStore(nativeWorkspace(exec))
 	dispatch := func(event ManagedAssignmentDispatchEvent) error {
 		files, err := nativeRepositoryReviewFiles(event.Scope)
 		if err != nil {

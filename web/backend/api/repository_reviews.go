@@ -386,7 +386,7 @@ func (h *Handler) repositoryReviewStore() (repoaudit.Store, error) {
 	if err != nil {
 		return repoaudit.Store{}, err
 	}
-	return repoaudit.NewStore(cfg.WorkspacePath()), nil
+	return repoaudit.NewSQLiteStore(cfg.WorkspacePath()), nil
 }
 
 func decodeRepositoryReviewRequest(r *http.Request, target any) error {

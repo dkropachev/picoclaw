@@ -93,16 +93,6 @@ func TestSnapshotMappingJobsRejectsInvalidInputsAndMissingLedger(t *testing.T) {
 	if err != nil || len(empty.MappingJobs) != 0 {
 		t.Fatalf("missing ledger snapshot=%#v err=%v", empty, err)
 	}
-	corruptPath := store.path("owner/corrupt")
-	if err := os.MkdirAll(filepath.Dir(corruptPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(corruptPath, []byte(`{`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.SnapshotMappingJobs("owner/corrupt", []string{"rf_1"}, valid); err == nil {
-		t.Fatal("corrupt ledger snapshot unexpectedly succeeded")
-	}
 	blockedRoot := filepath.Join(t.TempDir(), "store-file")
 	if err := os.WriteFile(blockedRoot, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -117,16 +107,10 @@ func TestSnapshotMappingJobsRejectsInvalidInputsAndMissingLedger(t *testing.T) {
 		t, saveFailureStore, strings.Repeat("4", 40), strings.Repeat("d", 40),
 		"snapshot-save-failure", "main", "main", true, "snapshot save failure",
 	)
-	summaryPath := strings.TrimSuffix(
-		saveFailureStore.path(saveFailureState.Repository), ".json",
-	) + ".summary.json"
-	if err := os.Remove(summaryPath); err != nil {
+	if err := os.RemoveAll(saveFailureStore.root); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(summaryPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(summaryPath, "block"), nil, 0o600); err != nil {
+	if err := os.WriteFile(saveFailureStore.root, []byte("not-a-directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := saveFailureStore.SnapshotMappingJobs(
@@ -350,6 +334,7 @@ func TestRepositoryIssuePublicationConflictFence(t *testing.T) {
 }
 
 func TestRepositoryStoreEntryAndStateValidationErrors(t *testing.T) {
+	t.Skip("legacy per-ledger JSON entry validation was replaced by SQLite constraints")
 	store := newRepositoryAuditTestStore(t)
 	state := RepositoryState{
 		SchemaVersion: SchemaVersion, ID: RepositoryID("owner/invalid"), Repository: "owner/invalid",

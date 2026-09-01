@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -764,25 +762,9 @@ func writeRepositoryReviewProcessingTestState(
 	state repoaudit.RepositoryState,
 ) {
 	t.Helper()
-	paths, err := filepath.Glob(filepath.Join(workspace, "repository_reviews", "repo_*.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	statePath := ""
-	for _, path := range paths {
-		if !strings.HasSuffix(path, ".summary.json") {
-			statePath = path
-			break
-		}
-	}
-	if statePath == "" {
-		t.Fatal("repository review state path is missing")
-	}
-	encoded, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(statePath, encoded, 0o600); err != nil {
+	if _, err := repoaudit.NewSQLiteStore(workspace).RewriteStateForMigration(
+		t.Context(), state,
+	); err != nil {
 		t.Fatal(err)
 	}
 }

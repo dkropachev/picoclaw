@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -220,8 +219,11 @@ func TestRepositoryReviewFileAttributionValidationAndMergeBoundaries(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mkdirStateErr := os.MkdirAll(persistFailure.path(repository), 0o700); mkdirStateErr != nil {
-		t.Fatal(mkdirStateErr)
+	if removeErr := os.RemoveAll(persistFailure.root); removeErr != nil {
+		t.Fatal(removeErr)
+	}
+	if writeErr := os.WriteFile(persistFailure.root, []byte("not-a-directory"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	persistFailure.loadForTest = func(string) (RepositoryState, error) { return initial, nil }
 	if _, persistMergeErr := persistFailure.MergeRepositoryReviewFileAttributions(
@@ -580,10 +582,7 @@ func repositoryReviewAttributionPersistenceFailureStore(
 ) Store {
 	t.Helper()
 	store := NewStore(t.TempDir())
-	if err := os.MkdirAll(filepath.Dir(store.path(state.Repository)), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(store.path(state.Repository), 0o700); err != nil {
+	if err := os.WriteFile(store.root, []byte("not-a-directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store.loadForTest = func(string) (RepositoryState, error) { return state, nil }

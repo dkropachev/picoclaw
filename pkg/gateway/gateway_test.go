@@ -604,9 +604,13 @@ func TestPublishGatewayEvent(t *testing.T) {
 		}
 	})
 
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	msgBus := bus.NewMessageBus()
+	t.Cleanup(msgBus.Close)
 	al := agent.NewAgentLoop(
-		config.DefaultConfig(),
-		bus.NewMessageBus(),
+		cfg,
+		msgBus,
 		&startupBlockedProvider{reason: "not used"},
 		agent.WithRuntimeEvents(eventBus),
 	)
@@ -634,9 +638,11 @@ func TestPublishGatewayEvent(t *testing.T) {
 }
 
 func TestShutdownGatewayClosesMessageBus(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
 	msgBus := bus.NewMessageBus()
 	al := agent.NewAgentLoop(
-		config.DefaultConfig(),
+		cfg,
 		msgBus,
 		&startupBlockedProvider{reason: "not used"},
 	)

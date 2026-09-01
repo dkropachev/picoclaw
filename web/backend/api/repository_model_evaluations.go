@@ -180,7 +180,7 @@ func (h *Handler) repositoryModelEvaluationStore() (repoeval.Store, *config.Conf
 	if err != nil {
 		return repoeval.Store{}, nil, err
 	}
-	return repoeval.NewStore(cfg.WorkspacePath()), cfg, nil
+	return repoeval.NewSQLiteStore(cfg.WorkspacePath()), cfg, nil
 }
 
 func (h *Handler) handleListRepositoryModelEvaluations(w http.ResponseWriter, r *http.Request) {
@@ -1003,7 +1003,7 @@ func (h *Handler) handleRepositoryModelEvaluationOptions(w http.ResponseWriter, 
 		}
 	}
 	profiles := make([]repositoryModelEvaluationProfileOption, 0)
-	reviewStore := repoaudit.NewStore(cfg.WorkspacePath())
+	reviewStore := repoaudit.NewSQLiteStore(cfg.WorkspacePath())
 	storedProfiles, listErr := reviewStore.ListProfiles(r.Context())
 	if listErr != nil {
 		writeRepositoryModelEvaluationError(w, listErr)

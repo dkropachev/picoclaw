@@ -365,6 +365,10 @@ func newAgentInstanceWithRuntimePolicies(
 		fileMutationProtectedRoots,
 		agentSessionFileMutationProtectedRoots(workspace)...,
 	)
+	fileMutationProtectedRoots = append(
+		fileMutationProtectedRoots,
+		agentCronFileMutationProtectedRoots(workspace)...,
+	)
 	evolutionProtectedRoots, evolutionRootsErr := agentEvolutionFileMutationProtectedRoots(
 		workspace,
 		cfg.Evolution.StateDir,
@@ -382,6 +386,14 @@ func newAgentInstanceWithRuntimePolicies(
 		fileMutationProtectedRoots,
 		mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg)...,
 	)
+	var protectedRootErr error
+	fileMutationProtectedRoots, protectedRootErr = appendAgentWorkspaceSQLiteProtectedRoots(
+		fileMutationProtectedRoots,
+		cfg,
+	)
+	if protectedRootErr != nil {
+		panic(fmt.Sprintf("build workspace file-mutation policy: %v", protectedRootErr))
+	}
 	fileMutationPolicy := tools.FileMutationPolicy{
 		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
 			fileMutationProtectedRoots,

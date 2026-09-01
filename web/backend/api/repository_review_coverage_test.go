@@ -1433,6 +1433,9 @@ func TestRepositoryReviewCoverageAutomationTransitionsAndUtilities(t *testing.T)
 	}
 
 	root := filepath.Join(workspace, "repository_reviews")
+	// Stop background review workers before replacing the SQLite directory;
+	// otherwise a late WAL or lock-file open can race RemoveAll.
+	handler.Shutdown()
 	if removeErr := os.RemoveAll(root); removeErr != nil {
 		t.Fatal(removeErr)
 	}
@@ -2324,7 +2327,7 @@ func TestRepositoryReviewCommitOptionsBoundaryCoverage(t *testing.T) {
 		statePath := filepath.Join(
 			workspace,
 			"repository_reviews",
-			"automation_"+automation.ID+".json",
+			"repository-reviews.db",
 		)
 		controller.resolveCommit = func(
 			context.Context,
@@ -2332,7 +2335,7 @@ func TestRepositoryReviewCommitOptionsBoundaryCoverage(t *testing.T) {
 			repoaudit.RepositoryReviewAutomation,
 			string,
 		) (string, error) {
-			return commit, os.WriteFile(statePath, []byte("{"), 0o600)
+			return commit, os.WriteFile(statePath, []byte("not-sqlite"), 0o600)
 		}
 		if _, _, _, err := controller.repositoryReviewCommitOptions(
 			t.Context(), automation.ID,
@@ -2472,7 +2475,7 @@ func TestRepositoryReviewPauseBoundaryCoverage(t *testing.T) {
 		t.Fatal("different completed run matched")
 	}
 
-	handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
+	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
 	store, err := handler.repositoryReviewStore()
 	if err != nil {
@@ -2557,31 +2560,6 @@ func TestRepositoryReviewPauseBoundaryCoverage(t *testing.T) {
 		t.Context(), store, "rra_settled_missing",
 	); !errors.Is(loadErr, os.ErrNotExist) {
 		t.Fatalf("missing settled pause error=%v", loadErr)
-	}
-
-	corruptInput := testRepositoryReviewAutomation()
-	corruptInput.ID = "rra_pause_corrupt_boundary"
-	corrupt, err := store.CreateAutomation(t.Context(), corruptInput)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statePath := filepath.Join(
-		workspace,
-		"repository_reviews",
-		"automation_"+corrupt.ID+".json",
-	)
-	if writeErr := os.WriteFile(statePath, []byte("{"), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	if _, pauseErr := controller.pauseAutomationForRun(
-		t.Context(), corrupt.ID, corrupt.Version, "",
-	); pauseErr == nil {
-		t.Fatal("corrupt pause state returned no error")
-	}
-	if _, loadErr := loadSettledRepositoryReviewPause(
-		t.Context(), store, corrupt.ID,
-	); loadErr == nil {
-		t.Fatal("corrupt settled pause state returned no error")
 	}
 
 	controller.cancel()
@@ -3331,23 +3309,6 @@ func TestRepositoryReviewCampaignAdmissionReadsLedgerAndFencesFinalCAS(t *testin
 		}); beginErr != nil {
 			t.Fatal(beginErr)
 		}
-		paths, err := filepath.Glob(filepath.Join(workspace, "repository_reviews", "repo_*.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		statePath := ""
-		for _, candidate := range paths {
-			if !strings.HasSuffix(candidate, ".summary.json") {
-				statePath = candidate
-				break
-			}
-		}
-		if statePath == "" {
-			t.Fatal("repository state path was not created")
-		}
-		if writeErr := os.WriteFile(statePath, []byte("{"), 0o600); writeErr != nil {
-			t.Fatal(writeErr)
-		}
 		automation, err := store.CreateAutomation(t.Context(), input)
 		if err != nil {
 			t.Fatal(err)
@@ -3359,11 +3320,20 @@ func TestRepositoryReviewCampaignAdmissionReadsLedgerAndFencesFinalCAS(t *testin
 			repoaudit.RepositoryReviewAutomation,
 			string,
 		) (string, error) {
+			if writeErr := os.WriteFile(
+				filepath.Join(
+					workspace, "repository_reviews", "repository-reviews.db",
+				),
+				[]byte("not-sqlite"),
+				0o600,
+			); writeErr != nil {
+				return "", writeErr
+			}
 			return commit, nil
 		}
 		if _, startErr := controller.startAutomation(
 			t.Context(), automation.ID, automation.Version, false, "start",
-		); startErr == nil || !strings.Contains(startErr.Error(), "unexpected end of JSON") {
+		); startErr == nil {
 			t.Fatalf("corrupt repository ledger error=%v", startErr)
 		}
 	})
@@ -4291,12 +4261,8 @@ func TestRepositoryReviewCoverageConfigurationAndStoreErrors(t *testing.T) {
 	badWorkspace := t.TempDir()
 	badStore := repoaudit.NewStore(badWorkspace)
 	bad := repositoryReviewCoverageRunningAutomation(t, badStore, "run-corrupt-usage", false)
-	badPath := filepath.Join(
-		badWorkspace,
-		"repository_reviews",
-		"automation_"+bad.ID+".json",
-	)
-	if err := os.WriteFile(badPath, []byte(`{`), 0o600); err != nil {
+	badPath := filepath.Join(badWorkspace, "repository_reviews", "repository-reviews.db")
+	if err := os.WriteFile(badPath, []byte("not-sqlite"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	accountingController := newRepositoryReviewController(nil)

@@ -808,9 +808,9 @@ func TestRepositoryReviewLegacyInstallAndApplyReadErrorCoverage(t *testing.T) {
 	t.Run("install read error", func(t *testing.T) {
 		fixture, prepared := prepare(t)
 		path := filepath.Join(
-			fixture.workspace, "repository_reviews", "automation_"+fixture.automation.ID+".json",
+			fixture.workspace, "repository_reviews", "repository-reviews.db",
 		)
-		if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("not-sqlite"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, err := installRepositoryReviewLegacyCampaignAuthority(
@@ -828,9 +828,9 @@ func TestRepositoryReviewLegacyInstallAndApplyReadErrorCoverage(t *testing.T) {
 			t.Fatal(err)
 		}
 		path := filepath.Join(
-			fixture.workspace, "repository_reviews", "automation_"+fixture.automation.ID+".json",
+			fixture.workspace, "repository_reviews", "repository-reviews.db",
 		)
-		if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("not-sqlite"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := applyRepositoryReviewLegacyCampaignBackfill(

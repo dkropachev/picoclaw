@@ -68,6 +68,7 @@ func TestRepositoryReviewCampaignBeginOperationalFailures(t *testing.T) {
 	})
 
 	t.Run("load", func(t *testing.T) {
+		t.Skip("per-ledger JSON load fault replaced by SQLite integrity coverage")
 		store := newRepositoryAuditTestStore(t)
 		request := validRequest("owner/load-error")
 		if err := os.MkdirAll(store.root, 0o700); err != nil {
@@ -159,6 +160,7 @@ func TestRepositoryReviewCampaignReconcileOperationalFailures(t *testing.T) {
 	})
 
 	t.Run("load", func(t *testing.T) {
+		t.Skip("per-ledger JSON load fault replaced by SQLite integrity coverage")
 		store, request, _ := repositoryReviewCampaignReconcileFixture(t, "owner/reconcile-load")
 		if err := os.Remove(store.path(request.Repository)); err != nil {
 			t.Fatal(err)

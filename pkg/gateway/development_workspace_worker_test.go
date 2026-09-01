@@ -295,6 +295,24 @@ func TestDevelopmentWorkspaceWorkerRejectsRepeatedCursor(t *testing.T) {
 	}
 }
 
+func TestDevelopmentWorkspaceWorkerCanceledContextReturnsBeforeList(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	service := &fakeDevelopmentWorkspaceService{}
+	worker := &developmentWorkspaceWorker{
+		service: service,
+		handler: &fakeDevelopmentWorkspaceAdvancer{},
+	}
+
+	processed, err := worker.ProcessOne(ctx)
+	if processed || !errors.Is(err, context.Canceled) {
+		t.Fatalf("ProcessOne() = (%v, %v), want (false, context.Canceled)", processed, err)
+	}
+	if len(service.listCalls) != 0 {
+		t.Fatalf("List() calls = %d, want zero", len(service.listCalls))
+	}
+}
+
 func TestDevelopmentWorkspaceRunnableStopsAtCharterClarification(t *testing.T) {
 	aggregate := developmentWorkerAggregate(
 		"devw_77777777777777777777777777777777",

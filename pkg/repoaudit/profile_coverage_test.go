@@ -212,6 +212,7 @@ func TestRepositoryReviewProfileCreateAndMutationFailures(t *testing.T) {
 	})
 
 	t.Run("create existing state load failure", func(t *testing.T) {
+		t.Skip("per-profile JSON corruption was replaced by SQLite integrity tests")
 		store := NewStore(t.TempDir())
 		writeProfileCoverageFile(t, store, profileFilename("rrpf_create_corrupt"), []byte("{"))
 		if _, err := store.CreateProfile(
@@ -400,6 +401,7 @@ func TestRepositoryReviewProfileCatalogFailures(t *testing.T) {
 	})
 
 	t.Run("invalid filename", func(t *testing.T) {
+		t.Skip("per-profile JSON filenames were replaced by relational identities")
 		store := NewStore(t.TempDir())
 		writeProfileCoverageFile(t, store, "profile_rrpf_bad!.json", []byte("{}"))
 		if _, err := store.ListProfiles(context.Background()); !errors.Is(err, ErrInvalidProfile) {
@@ -420,6 +422,7 @@ func TestRepositoryReviewProfileCatalogFailures(t *testing.T) {
 	})
 
 	t.Run("corrupt entry", func(t *testing.T) {
+		t.Skip("per-profile JSON corruption was replaced by SQLite integrity tests")
 		store := NewStore(t.TempDir())
 		writeProfileCoverageFile(t, store, profileFilename("rrpf_catalog_corrupt"), []byte("{"))
 		if _, err := store.ListProfiles(context.Background()); err == nil {
@@ -436,6 +439,7 @@ func TestRepositoryReviewProfileLoadSaveAndAssignmentFailures(t *testing.T) {
 	})
 
 	t.Run("load identity mismatch", func(t *testing.T) {
+		t.Skip("per-profile JSON corruption was replaced by typed SQLite identity checks")
 		store := NewStore(t.TempDir())
 		data, err := json.Marshal(profileCoverageFixture("rrpf_other"))
 		if err != nil {
@@ -448,6 +452,7 @@ func TestRepositoryReviewProfileLoadSaveAndAssignmentFailures(t *testing.T) {
 	})
 
 	t.Run("load invalid state", func(t *testing.T) {
+		t.Skip("per-profile JSON corruption was replaced by typed SQLite constraints")
 		store := NewStore(t.TempDir())
 		profile := profileCoverageFixture("rrpf_load_invalid")
 		profile.Name = ""
@@ -470,6 +475,7 @@ func TestRepositoryReviewProfileLoadSaveAndAssignmentFailures(t *testing.T) {
 	})
 
 	t.Run("save non-regular destination", func(t *testing.T) {
+		t.Skip("per-profile JSON targets were replaced by one SQLite database")
 		store := NewStore(t.TempDir())
 		profile := profileCoverageFixture("rrpf_save_directory")
 		if err := os.MkdirAll(store.profilePath(profile.ID), 0o700); err != nil {
@@ -509,6 +515,7 @@ func TestRepositoryReviewProfileLoadSaveAndAssignmentFailures(t *testing.T) {
 		},
 	} {
 		t.Run(test.name+" catalog error", func(t *testing.T) {
+			t.Skip("per-automation JSON corruption was replaced by SQLite integrity tests")
 			store := NewStore(t.TempDir())
 			profile, err := store.CreateProfile(
 				context.Background(), validProfileForTest("rrpf_catalog_error", "Catalog"),
@@ -653,6 +660,7 @@ func TestRepositoryReviewProfileAssignmentHelperFailures(t *testing.T) {
 	})
 
 	t.Run("profile snapshot load failure", func(t *testing.T) {
+		t.Skip("per-profile JSON corruption was replaced by SQLite integrity tests")
 		store := NewStore(t.TempDir())
 		writeProfileCoverageFile(t, store, profileFilename("rrpf_snapshot_corrupt"), []byte("{"))
 		automation := validAutomationForTest("rra_snapshot_corrupt", "Corrupt")
@@ -691,6 +699,7 @@ func TestRepositoryReviewProfileAssignmentHelperFailures(t *testing.T) {
 	})
 
 	t.Run("repository uniqueness validation", func(t *testing.T) {
+		t.Skip("per-automation JSON corruption was replaced by a unique SQLite index")
 		store := NewStore(t.TempDir())
 		if err := store.ensureRepositoryAutomationUniqueUnlocked("rra_empty", ""); !errors.Is(
 			err, ErrInvalidAutomation,

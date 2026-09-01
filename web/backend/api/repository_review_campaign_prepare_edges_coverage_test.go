@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -518,19 +517,10 @@ func TestRepositoryReviewLegacyAdapterRemainingErrorsCoverage(t *testing.T) {
 
 	t.Run("corrupt repository state", func(t *testing.T) {
 		fixture := newFixture(t)
-		matches, err := filepath.Glob(filepath.Join(
-			fixture.workspace, "repository_reviews", "repo_*.json",
-		))
-		var statePath string
-		for _, candidate := range matches {
-			if !strings.HasSuffix(candidate, ".summary.json") {
-				statePath = candidate
-			}
-		}
-		if err != nil || statePath == "" {
-			t.Fatalf("repository state matches=%#v err=%v", matches, err)
-		}
-		if err := os.WriteFile(statePath, []byte("not-json"), 0o600); err != nil {
+		statePath := filepath.Join(
+			fixture.workspace, "repository_reviews", "repository-reviews.db",
+		)
+		if err := os.WriteFile(statePath, []byte("not-sqlite"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := (&repositoryReviewController{}).recoverLegacyRepositoryReviewCampaign(
@@ -543,9 +533,6 @@ func TestRepositoryReviewLegacyAdapterRemainingErrorsCoverage(t *testing.T) {
 }
 
 func TestRepositoryReviewLegacyPersistenceFailureCoverage(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory mode enforcement is POSIX-specific")
-	}
 	prepare := func(t *testing.T) (repositoryReviewBackfillFixture, repositoryReviewLegacyCampaignBackfill) {
 		t.Helper()
 		fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
@@ -561,18 +548,20 @@ func TestRepositoryReviewLegacyPersistenceFailureCoverage(t *testing.T) {
 		}
 		return fixture, prepared
 	}
-	lockWrites := func(t *testing.T, workspace string) {
+	corruptDatabase := func(t *testing.T, workspace string) {
 		t.Helper()
-		directory := filepath.Join(workspace, "repository_reviews")
-		if err := os.Chmod(directory, 0o500); err != nil {
+		if err := os.WriteFile(
+			filepath.Join(workspace, "repository_reviews", "repository-reviews.db"),
+			[]byte("not-sqlite"),
+			0o600,
+		); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
 	}
 
 	t.Run("install save", func(t *testing.T) {
 		fixture, prepared := prepare(t)
-		lockWrites(t, fixture.workspace)
+		corruptDatabase(t, fixture.workspace)
 		if _, _, err := installRepositoryReviewLegacyCampaignAuthority(
 			t.Context(), fixture.store, prepared,
 		); err == nil {
@@ -588,7 +577,7 @@ func TestRepositoryReviewLegacyPersistenceFailureCoverage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		lockWrites(t, fixture.workspace)
+		corruptDatabase(t, fixture.workspace)
 		if _, err := (&repositoryReviewController{}).recoverLegacyRepositoryReviewCampaign(
 			t.Context(), fixture.store, fixture.workspace, installed,
 			fixture.automation.ResolvedCommitSHA, repositoryReviewRecoveryProfileForEdges(fixture),

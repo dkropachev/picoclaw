@@ -3,8 +3,8 @@ package repoeval
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
@@ -35,9 +35,12 @@ var (
 )
 
 type Store struct {
-	root  string
-	now   func() time.Time
-	newID func() (string, error)
+	workspace   string
+	root        string
+	database    string
+	now         func() time.Time
+	newID       func() (string, error)
+	openForTest func(context.Context) (*sql.DB, error)
 }
 
 // BulkDeleteItem identifies one explicitly selected evaluation version.
@@ -59,9 +62,22 @@ type BulkDeleteResult struct {
 	Failures   []BulkDeleteFailure `json:"failures"`
 }
 
-func NewStore(workspace string) Store {
-	return Store{root: filepath.Join(workspace, storeDirectory), now: time.Now, newID: randomEvaluationID}
+// NewSQLiteStore constructs the durable repository model-evaluation store.
+// Schema creation and legacy import happen on the first operation.
+func NewSQLiteStore(workspace string) Store {
+	root := filepath.Join(workspace, storeDirectory)
+	return Store{
+		workspace: workspace,
+		root:      root,
+		database:  filepath.Join(root, evaluationDatabaseFilename),
+		now:       time.Now,
+		newID:     randomEvaluationID,
+	}
 }
+
+// NewStore is retained for source compatibility and no longer writes JSON.
+// Deprecated: use NewSQLiteStore.
+func NewStore(workspace string) Store { return NewSQLiteStore(workspace) }
 
 func (s Store) Create(ctx context.Context, request CreateRequest) (Evaluation, error) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -99,10 +115,12 @@ func (s Store) Create(ctx context.Context, request CreateRequest) (Evaluation, e
 		if !validEvaluationID(id) {
 			return Evaluation{}, errors.New("repository evaluation ID generator returned an invalid ID")
 		}
-		if _, statErr := os.Lstat(s.path(id)); statErr == nil {
+		exists, existsErr := s.exists(ctx, id)
+		if existsErr != nil {
+			return Evaluation{}, existsErr
+		}
+		if exists {
 			continue
-		} else if !os.IsNotExist(statErr) {
-			return Evaluation{}, statErr
 		}
 		status := StatusDraft
 		progress := Progress{Stage: ProgressIdle, Languages: make(map[string]LanguageProgress), UpdatedAt: now}
@@ -180,44 +198,36 @@ func (s Store) list(ctx context.Context, maximum int) ([]Evaluation, error) {
 		return nil, err
 	}
 	defer unlock()
-	if rootErr := s.requireSafeRoot(true); rootErr != nil {
-		return nil, rootErr
-	}
-	entries, err := os.ReadDir(s.root)
-	if os.IsNotExist(err) {
-		return []Evaluation{}, nil
-	}
+	database, err := s.open(ctx)
 	if err != nil {
 		return nil, err
 	}
-	evaluations := make([]Evaluation, 0, len(entries))
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("repository evaluation state %q must not be a symlink", entry.Name())
-		}
-		if entry.IsDir() || !entry.Type().IsRegular() || !evaluationStateFilename(entry.Name()) {
-			continue
-		}
+	defer database.Close()
+	rows, err := database.QueryContext(ctx, `
+		SELECT evaluation_id
+		  FROM repository_evaluations
+	 ORDER BY updated_at_unix_nano DESC, evaluation_id ASC
+	 LIMIT ?`, maximum+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	evaluations := make([]Evaluation, 0)
+	for rows.Next() {
 		if len(evaluations) >= maximum {
 			return nil, errors.New("repository evaluation catalog exceeds its evaluation limit")
 		}
-		id := strings.TrimSuffix(strings.TrimPrefix(entry.Name(), stateNamePrefix), stateFileSuffix)
-		evaluation, loadErr := s.load(id)
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			return nil, scanErr
+		}
+		evaluation, loadErr := loadEvaluation(ctx, database, id)
 		if loadErr != nil {
 			return nil, loadErr
 		}
 		evaluations = append(evaluations, Clone(evaluation))
 	}
-	sort.Slice(evaluations, func(i, j int) bool {
-		if evaluations[i].UpdatedAt.Equal(evaluations[j].UpdatedAt) {
-			return evaluations[i].ID < evaluations[j].ID
-		}
-		return evaluations[i].UpdatedAt.After(evaluations[j].UpdatedAt)
-	})
-	return evaluations, nil
+	return evaluations, rows.Err()
 }
 
 // Update applies a mutation to a clone of the durable state. The mutation is
@@ -333,8 +343,8 @@ func (s Store) Update(
 }
 
 func (s Store) Delete(ctx context.Context, id string, expectedVersion int64) error {
-	if err := ctx.Err(); err != nil {
-		return err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
 	}
 	id = strings.TrimSpace(id)
 	if !validEvaluationID(id) {
@@ -355,10 +365,24 @@ func (s Store) Delete(ctx context.Context, id string, expectedVersion int64) err
 	if evaluation.Status != StatusDraft {
 		return ErrInvalidTransition
 	}
-	if err := ctx.Err(); err != nil {
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
+	}
+	database, err := s.open(ctx)
+	if err != nil {
 		return err
 	}
-	return fileutil.RemoveDurable(s.path(id))
+	defer database.Close()
+	return sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
+		result, deleteErr := conn.ExecContext(ctx, `
+			DELETE FROM repository_evaluations
+			 WHERE evaluation_id = ? AND version = ? AND status = ?`,
+			id, expectedVersion, string(StatusDraft))
+		if deleteErr != nil {
+			return deleteErr
+		}
+		return sqlitestore.RequireOneRow(result, ErrConflict)
+	})
 }
 
 // BulkDelete holds the catalog lock while it classifies and removes at most
@@ -376,9 +400,11 @@ func (s Store) BulkDelete(ctx context.Context, items []BulkDeleteItem) (BulkDele
 		return BulkDeleteResult{}, err
 	}
 	defer unlock()
-	if err := s.requireSafeRoot(true); err != nil {
+	database, err := s.open(ctx)
+	if err != nil {
 		return BulkDeleteResult{}, err
 	}
+	defer database.Close()
 
 	counts := make(map[string]int, len(items))
 	versions := make(map[string]int64, len(items))
@@ -398,8 +424,8 @@ func (s Store) BulkDelete(ctx context.Context, items []BulkDeleteItem) (BulkDele
 	}
 	deletable := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if err := ctx.Err(); err != nil {
-			return BulkDeleteResult{}, err
+		if contextErr := ctx.Err(); contextErr != nil {
+			return BulkDeleteResult{}, contextErr
 		}
 		if id == "" || !validEvaluationID(id) {
 			result.Failures = append(result.Failures, BulkDeleteFailure{ID: id, Code: "invalid_id"})
@@ -413,8 +439,8 @@ func (s Store) BulkDelete(ctx context.Context, items []BulkDeleteItem) (BulkDele
 			result.Failures = append(result.Failures, BulkDeleteFailure{ID: id, Code: "invalid_version"})
 			continue
 		}
-		evaluation, loadErr := s.load(id)
-		if os.IsNotExist(loadErr) {
+		evaluation, loadErr := loadEvaluation(ctx, database, id)
+		if errors.Is(loadErr, sql.ErrNoRows) {
 			result.Failures = append(result.Failures, BulkDeleteFailure{ID: id, Code: "not_found"})
 			continue
 		}
@@ -434,15 +460,27 @@ func (s Store) BulkDelete(ctx context.Context, items []BulkDeleteItem) (BulkDele
 	// Cancellation before the deletion phase leaves the catalog unchanged.
 	// Once removal starts, finish classifying every selected draft so callers
 	// never receive a cancellation error after an unreported partial mutation.
-	if err := ctx.Err(); err != nil {
-		return BulkDeleteResult{}, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return BulkDeleteResult{}, contextErr
 	}
-	for _, id := range deletable {
-		if removeErr := fileutil.RemoveDurable(s.path(id)); removeErr != nil {
-			result.Failures = append(result.Failures, BulkDeleteFailure{ID: id, Code: "delete_failed"})
-			continue
+	err = sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
+		for _, id := range deletable {
+			deleted, deleteErr := conn.ExecContext(ctx, `
+				DELETE FROM repository_evaluations
+				 WHERE evaluation_id = ? AND version = ? AND status = ?`,
+				id, versions[id], string(StatusDraft))
+			if deleteErr != nil {
+				return deleteErr
+			}
+			if deleteErr := sqlitestore.RequireOneRow(deleted, ErrConflict); deleteErr != nil {
+				return deleteErr
+			}
+			result.DeletedIDs = append(result.DeletedIDs, id)
 		}
-		result.DeletedIDs = append(result.DeletedIDs, id)
+		return nil
+	})
+	if err != nil {
+		return BulkDeleteResult{}, err
 	}
 	return result, nil
 }
@@ -451,122 +489,41 @@ func (s Store) load(id string) (Evaluation, error) {
 	if !validEvaluationID(id) {
 		return Evaluation{}, os.ErrNotExist
 	}
-	if err := s.requireSafeRoot(true); err != nil {
-		return Evaluation{}, err
-	}
-	statePath := s.path(id)
-	info, err := os.Lstat(statePath)
+	database, err := s.open(context.Background())
 	if err != nil {
 		return Evaluation{}, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return Evaluation{}, errors.New("repository evaluation state must be a regular file")
+	defer database.Close()
+	evaluation, err := loadEvaluation(context.Background(), database, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Evaluation{}, os.ErrNotExist
 	}
-	if info.Size() > maxStateFileBytes {
-		return Evaluation{}, errors.New("repository evaluation state exceeds its size limit")
-	}
-	if !repositoryEvaluationPermissionsSafe(info.Mode()) {
-		return Evaluation{}, errors.New("repository evaluation state permissions are too broad")
-	}
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		return Evaluation{}, err
-	}
-	var evaluation Evaluation
-	if err := json.Unmarshal(data, &evaluation); err != nil {
-		return Evaluation{}, err
-	}
-	if evaluation.ID != id {
-		return Evaluation{}, errors.New("repository evaluation state ID mismatch")
-	}
-	if err := validateEvaluation(evaluation); err != nil {
-		return Evaluation{}, err
-	}
-	return evaluation, nil
+	return evaluation, err
 }
 
 func (s Store) save(evaluation Evaluation, exclusive bool) error {
 	if err := validateEvaluation(evaluation); err != nil {
 		return err
 	}
-	if err := s.ensureSafeRoot(); err != nil {
-		return err
-	}
-	statePath := s.path(evaluation.ID)
-	if info, err := os.Lstat(statePath); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return errors.New("repository evaluation state must be a regular file")
-		}
-		if exclusive {
-			return os.ErrExist
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	} else if !exclusive {
-		return os.ErrNotExist
-	}
-	data, err := json.Marshal(evaluation)
+	database, err := s.open(context.Background())
 	if err != nil {
 		return err
 	}
-	if int64(len(data)) > maxStateFileBytes {
-		return errors.New("repository evaluation state exceeds its size limit")
-	}
-	return fileutil.WriteFileAtomic(statePath, data, 0o600)
+	defer database.Close()
+	return saveEvaluation(context.Background(), database, evaluation, exclusive)
 }
 
 func (s Store) stateCount() (int, error) {
-	if err := s.requireSafeRoot(true); err != nil {
-		return 0, err
-	}
-	entries, err := os.ReadDir(s.root)
-	if os.IsNotExist(err) {
-		return 0, nil
-	}
+	database, err := s.open(context.Background())
 	if err != nil {
 		return 0, err
 	}
-	count := 0
-	for _, entry := range entries {
-		if entry.Type()&os.ModeSymlink != 0 {
-			return 0, fmt.Errorf("repository evaluation state %q must not be a symlink", entry.Name())
-		}
-		if !entry.IsDir() && entry.Type().IsRegular() && evaluationStateFilename(entry.Name()) {
-			count++
-		}
+	defer database.Close()
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM repository_evaluations`).Scan(&count); err != nil {
+		return 0, err
 	}
 	return count, nil
-}
-
-func (s Store) requireSafeRoot(allowMissing bool) error {
-	info, err := os.Lstat(s.root)
-	if os.IsNotExist(err) && allowMissing {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("repository evaluation storage root must be a real directory")
-	}
-	if !repositoryEvaluationPermissionsSafe(info.Mode()) {
-		return errors.New("repository evaluation storage root permissions are too broad")
-	}
-	return nil
-}
-
-func (s Store) ensureSafeRoot() error {
-	if err := s.requireSafeRoot(true); err != nil {
-		return err
-	}
-	if err := fileutil.MkdirAllDurable(s.root, 0o700); err != nil {
-		return err
-	}
-	return s.requireSafeRoot(false)
-}
-
-func (s Store) path(id string) string {
-	return filepath.Join(s.root, stateNamePrefix+id+stateFileSuffix)
 }
 
 func (s Store) lock() (func(), error) {

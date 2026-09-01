@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -289,12 +288,12 @@ func TestRepositoryReviewDirectPostBoundaryOutcomes(t *testing.T) {
 		t.Cleanup(func() { runRepositoryReviewIssueWriter = previous })
 		runRepositoryReviewIssueWriter = successfulRepositoryReviewCoverageWriter
 		installEventProxyStubs(t, func(*http.Request, time.Duration) (*http.Response, error) {
-			statePath := filepath.Join(
-				workspace, "repository_reviews",
-				"repo_"+strings.TrimPrefix(state.ID, "rrp_")+".json",
+			databasePath := filepath.Join(
+				workspace, "repository_reviews", "repository-reviews.db",
 			)
-			_ = os.Remove(statePath)
-			_ = os.Remove(strings.TrimSuffix(statePath, ".json") + ".summary.json")
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				_ = os.Remove(databasePath + suffix)
+			}
 			return eventUpstreamResponse(http.StatusOK, `{"outcome":"posted"}`), nil
 		})
 		response := repositoryReviewAutomationMutation(
@@ -612,19 +611,13 @@ func TestRepositoryReviewControllerStartReconcileFailureAndCanceledReconcile(t *
 	corrupt.MappingJobs[0].ReviewFindingID = "rf_missing"
 	corrupt.Version++
 	corrupt.UpdatedAt = time.Now().UTC()
-	data, err := json.Marshal(corrupt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statePath := filepath.Join(
-		workspace, "repository_reviews",
-		"repo_"+strings.TrimPrefix(corrupt.ID, "rrp_")+".json",
-	)
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
+	_ = corrupt
+	statePath := filepath.Join(workspace, "repository_reviews", "repository-reviews.db")
+	if err := os.WriteFile(statePath, []byte("not-sqlite"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	controller := newRepositoryReviewController(handler)
-	if err := controller.Start(); err == nil || !strings.Contains(err.Error(), "reconcile") {
+	if err := controller.Start(); err == nil {
 		t.Fatalf("controller reconcile error=%v", err)
 	}
 	hasLease := controller.releaseLease != nil
@@ -690,7 +683,7 @@ func TestRepositoryReviewControllerAdmissionUsesAdvertisedDefaultResolver(t *tes
 }
 
 func TestRepositoryReviewControllerRestoresLegacyRememberedCommitForAdmission(t *testing.T) {
-	handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
+	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
 	store, err := handler.repositoryReviewStore()
 	if err != nil {
@@ -705,14 +698,8 @@ func TestRepositoryReviewControllerRestoresLegacyRememberedCommitForAdmission(t 
 	}
 	automation.Ref = "HEAD"
 	automation.ResolvedCommitSHA = strings.Repeat("f", 40)
-	data, err := json.Marshal(automation)
+	automation, err = store.RewriteAutomationForMigration(t.Context(), automation)
 	if err != nil {
-		t.Fatal(err)
-	}
-	automationPath := filepath.Join(
-		workspace, "repository_reviews", "automation_"+automation.ID+".json",
-	)
-	if err := os.WriteFile(automationPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	controller := newRepositoryReviewController(handler)

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -488,11 +489,27 @@ func TestRepositoryReviewCandidateRouteFailsClosedForMissingCurrentProfile(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	profilePath := filepath.Join(
-		loop.GetConfig().WorkspacePath(), "repository_reviews", "profile_"+profile.ID+".json",
-	)
-	if err := os.Remove(profilePath); err != nil {
+	database, err := sql.Open("sqlite", filepath.Join(
+		loop.GetConfig().WorkspacePath(), "repository_reviews", "repository-reviews.db",
+	))
+	if err != nil {
 		t.Fatal(err)
+	}
+	database.SetMaxOpenConns(1)
+	if _, err = database.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	result, corruptErr := database.Exec(
+		`UPDATE repository_review_profiles SET reviewer_model = '' WHERE profile_id = ?`,
+		profile.ID,
+	)
+	closeErr := database.Close()
+	if corruptErr != nil || closeErr != nil {
+		t.Fatalf("corrupt current profile: update=%v close=%v", corruptErr, closeErr)
+	}
+	if changed, rowsErr := result.RowsAffected(); rowsErr != nil || changed != 1 {
+		t.Fatalf("corrupt current profile rows=%d err=%v", changed, rowsErr)
 	}
 	request := httptest.NewRequest(
 		http.MethodPost,

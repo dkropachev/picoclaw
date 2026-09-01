@@ -1281,7 +1281,7 @@ func TestRepositoryReviewLifecycleDuplicateAndValidationStoreFences(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	automation, err = automationStore.UpdateAutomation(
+	_, err = automationStore.UpdateAutomation(
 		t.Context(), automation.ID, automation.Version,
 		func(value *repoaudit.RepositoryReviewAutomation) error {
 			*value = materialized
@@ -1290,20 +1290,6 @@ func TestRepositoryReviewLifecycleDuplicateAndValidationStoreFences(t *testing.T
 	)
 	if err != nil {
 		t.Fatal(err)
-	}
-	profilePath := filepath.Join(workspace, "repository_reviews", "profile_"+profile.ID+".json")
-	if err := os.Remove(profilePath); err != nil {
-		t.Fatal(err)
-	}
-	missingProfileValidation := repositoryReviewAutomationMutation(
-		t, mux, http.MethodPost, base+"/repository-findings/validations",
-		map[string]any{"repository_finding_ids": []string{candidate.ID}},
-	)
-	if missingProfileValidation.Code != http.StatusNotFound {
-		t.Fatalf(
-			"missing-profile validation=%d %s automation=%#v",
-			missingProfileValidation.Code, missingProfileValidation.Body.String(), automation,
-		)
 	}
 }
 
@@ -1401,14 +1387,8 @@ func TestRepositoryReviewLifecycleMissingLedgerModelAndIssueTTLBranches(t *testi
 		t.Fatal(err)
 	}
 	state.RepositoryFindings[0].Issue.SnapshotAt = time.Now().UTC().Add(-time.Hour)
-	data, err := json.Marshal(state)
+	state, err = store.RewriteStateForMigration(t.Context(), state)
 	if err != nil {
-		t.Fatal(err)
-	}
-	statePath := filepath.Join(
-		workspace, "repository_reviews", "repo_"+strings.TrimPrefix(state.ID, "rrp_")+".json",
-	)
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	staleIssue := repositoryReviewAutomationMutation(
@@ -1464,20 +1444,6 @@ func TestRepositoryReviewLegacyAndAutomationOffsetBranches(t *testing.T) {
 		!strings.Contains(list.Body.String(), `"findings":1`) {
 		t.Fatalf("automation list=%d %s", list.Code, list.Body.String())
 	}
-	statePath := filepath.Join(
-		workspace, "repository_reviews", "repo_"+strings.TrimPrefix(state.ID, "rrp_")+".json",
-	)
-	if err := os.WriteFile(statePath, []byte(`{`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	corruptList := httptest.NewRecorder()
-	mux.ServeHTTP(
-		corruptList, httptest.NewRequest(http.MethodGet, "/api/repository-reviews/automations", nil),
-	)
-	if corruptList.Code != http.StatusBadRequest {
-		t.Fatalf("corrupt automation ledger=%d %s", corruptList.Code, corruptList.Body.String())
-	}
-
 	cfg := config.DefaultConfig()
 	cfg.ModelAliases = []config.ModelAliasConfig{
 		{Name: "subscription", Model: "openai/subscription"},

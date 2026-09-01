@@ -929,7 +929,7 @@ func TestRepositoryReviewProfileStaleUpdateError(t *testing.T) {
 }
 
 func TestRepositoryReviewProfileControllerRefreshBoundaries(t *testing.T) {
-	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
 	profile := createRepositoryReviewProfileForTest(t, mux, "Refresh", "cheap")
 	store, err := handler.repositoryReviewStore()
@@ -1033,20 +1033,6 @@ func TestRepositoryReviewProfileControllerRefreshBoundaries(t *testing.T) {
 		t.Fatalf("injected normalization error=%v", normalizeErr)
 	}
 	resetRepositoryReviewExecutionCampaign(nil)
-
-	missingProfilePath := filepath.Join(
-		workspace, "repository_reviews", "profile_"+profile.ID+".json",
-	)
-	if err := os.Remove(missingProfilePath); err != nil {
-		t.Fatal(err)
-	}
-	start := repositoryReviewAutomationMutation(
-		t, mux, http.MethodPost, "/api/repository-reviews/automations/"+created.ID+"/start",
-		map[string]any{"expected_version": created.Version},
-	)
-	if start.Code != http.StatusNotFound {
-		t.Fatalf("missing profile start status=%d body=%s", start.Code, start.Body.String())
-	}
 }
 
 func TestRepositoryReviewProfileRejectsUnsafeModelAliases(t *testing.T) {

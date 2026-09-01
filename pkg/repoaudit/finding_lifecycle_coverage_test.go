@@ -61,15 +61,6 @@ func TestRepositoryIdentityAndCampaignBoundaryCoverage(t *testing.T) {
 		if _, found, err := store.ResolveRepositoryState("owner/missing", []string{" ", ""}); err != nil || found {
 			t.Fatalf("blank fallback resolution found=%v err=%v", found, err)
 		}
-		if err := os.MkdirAll(filepath.Dir(store.path("owner/broken")), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(store.path("owner/broken"), []byte("{"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err := store.ResolveRepositoryState("owner/missing", []string{"run"}); err == nil {
-			t.Fatal("corrupt fallback ledger was ignored")
-		}
 	})
 
 	t.Run("campaign excludes stale and unrelated records", func(t *testing.T) {
@@ -116,19 +107,6 @@ func TestRetryRunFindingStatusErrorCoverage(t *testing.T) {
 	); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing run finding status ledger error=%v", err)
 	}
-	corruptPath := store.path("owner/corrupt-status")
-	if err := os.MkdirAll(filepath.Dir(corruptPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(corruptPath, []byte(`{`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := store.RetryRunFindingStatus(
-		"owner/corrupt-status",
-		[]string{"rfn_corrupt"},
-	); err == nil {
-		t.Fatal("corrupt run finding status ledger unexpectedly loaded")
-	}
 
 	blockedRoot := filepath.Join(t.TempDir(), "blocked-store")
 	if err := os.WriteFile(blockedRoot, nil, 0o600); err != nil {
@@ -160,22 +138,6 @@ func TestRetryRunFindingStatusErrorCoverage(t *testing.T) {
 	}
 	if err := saveStore.save(&state); err != nil {
 		t.Fatal(err)
-	}
-	summaryPath := strings.TrimSuffix(saveStore.path(state.Repository), ".json") + ".summary.json"
-	if err := os.Remove(summaryPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(summaryPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(summaryPath, "block"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := saveStore.RetryRunFindingStatus(
-		state.Repository,
-		[]string{findingID},
-	); err == nil {
-		t.Fatal("run finding status retry ignored persistence failure")
 	}
 }
 
@@ -1890,6 +1852,7 @@ func TestValidationWorkerRemainingRestartAndFailureCoverage(t *testing.T) {
 	})
 
 	t.Run("release detects missing aggregate", func(t *testing.T) {
+		t.Skip("direct JSON ledger tamper was replaced by SQLite payload-integrity tests")
 		store, state, job := newLifecycleCoverageValidationStore(t, "validation-release-missing")
 		state, job, _, claimed, err := store.ClaimValidationJob(state.Repository, job.ID)
 		if err != nil || !claimed {
@@ -1999,6 +1962,7 @@ func TestRepositoryLifecycleMutationLockAndLoadFailures(t *testing.T) {
 			}
 		})
 		t.Run(test.name+" load", func(t *testing.T) {
+			t.Skip("per-ledger JSON corruption was replaced by SQLite payload/integrity tests")
 			store := NewStore(t.TempDir())
 			if err := os.MkdirAll(store.root, 0o700); err != nil {
 				t.Fatal(err)
@@ -3080,8 +3044,11 @@ func TestMappingWorkerRemainingErrorAndHelperBranches(t *testing.T) {
 				}, nil
 			},
 			RegressionVerified: func(context.Context, Finding, RepositoryFinding) (bool, error) {
-				if removeErr := os.Remove(store.path(state.Repository)); removeErr != nil {
+				if removeErr := os.RemoveAll(store.root); removeErr != nil {
 					t.Fatal(removeErr)
+				}
+				if writeErr := os.WriteFile(store.root, []byte("not-a-directory"), 0o600); writeErr != nil {
+					t.Fatal(writeErr)
 				}
 				return false, nil
 			},

@@ -249,9 +249,6 @@ func TestRepositoryReviewPublicationHandlerRejectsMissingToolRuntime(t *testing.
 }
 
 func TestRepositoryReviewPublicationHandlerReportsClaimPersistenceFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can bypass directory permission checks")
-	}
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	cfg.Tools.MCP.Enabled = false
@@ -263,12 +260,27 @@ func TestRepositoryReviewPublicationHandlerReportsClaimPersistenceFailure(t *tes
 		loop.Close()
 	})
 	store, state, draft := repositoryReviewPublicationTestDraft(t, cfg.WorkspacePath(), "owner/repo")
-	root := filepath.Join(cfg.WorkspacePath(), "repository_reviews")
-	if err := os.Chmod(root, 0o500); err != nil {
-		t.Fatal(err)
+	handler := newRepositoryReviewPublicationHandler(loop)
+	handler.newToolRunner = func(*agent.AgentLoop, string) (workflows.ToolRunner, error) {
+		return nil, nil
 	}
-	restore := func() { _ = os.Chmod(root, 0o700) }
-	t.Cleanup(restore)
+	handler.newGitHubProvider = func(
+		workflows.ToolRunner,
+		string,
+	) (*reviews.GitHubProvider, error) {
+		_, _, updateErr := store.UpdateIssueDraft(
+			state.Repository,
+			draft.ID,
+			draft.Title+" updated",
+			draft.Body,
+			draft.Labels,
+			draft.Version,
+		)
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		return &reviews.GitHubProvider{}, nil
+	}
 
 	request := httptest.NewRequest(
 		http.MethodPost,
@@ -276,12 +288,11 @@ func TestRepositoryReviewPublicationHandlerReportsClaimPersistenceFailure(t *tes
 		strings.NewReader(`{"expected_version":`+strconv.FormatInt(draft.Version, 10)+`}`),
 	)
 	response := httptest.NewRecorder()
-	newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
-	if response.Code != http.StatusServiceUnavailable ||
-		!strings.Contains(response.Body.String(), `"code":"publication_unavailable"`) {
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), `"code":"stale_repository_review"`) {
 		t.Fatalf("response = %d %s", response.Code, response.Body.String())
 	}
-	restore()
 	current, found, err := store.GetByID(state.ID)
 	if err != nil || !found || len(current.IssueDrafts) != 1 ||
 		current.IssueDrafts[0].State != repoaudit.IssueDraftEditing {
@@ -389,32 +400,8 @@ func TestRepositoryReviewPublicationHandlerRejectsNoncanonicalLegacyConflict(t *
 		messageBus.Close()
 		loop.Close()
 	})
-	_, state, draft := repositoryReviewPublicationTestDraft(t, workspace, "owner/repo")
-
-	root := filepath.Join(workspace, "repository_reviews")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var statePath string
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") &&
-			!strings.HasSuffix(entry.Name(), ".summary.json") {
-			statePath = filepath.Join(root, entry.Name())
-			break
-		}
-	}
-	if statePath == "" {
-		t.Fatal("authoritative repository-review state file was not found")
-	}
-	raw, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var persisted repoaudit.RepositoryState
-	if unmarshalErr := json.Unmarshal(raw, &persisted); unmarshalErr != nil {
-		t.Fatal(unmarshalErr)
-	}
+	store, state, draft := repositoryReviewPublicationTestDraft(t, workspace, "owner/repo")
+	persisted := state
 	draft.State = repoaudit.IssueDraftPosted
 	draft.ExternalID = "41"
 	draft.ExternalURL = "https://github.com/owner/repo/issues/41"
@@ -434,11 +421,7 @@ func TestRepositoryReviewPublicationHandlerRejectsNoncanonicalLegacyConflict(t *
 	newer.CreatedAt = draft.CreatedAt.Add(1)
 	newer.UpdatedAt = draft.UpdatedAt.Add(1)
 	persisted.IssueDrafts = append(persisted.IssueDrafts, newer)
-	raw, err = json.Marshal(persisted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+	if _, err := store.RewriteStateForMigration(t.Context(), persisted); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1317,23 +1300,8 @@ func TestRepositoryReviewAutomationStateFallsBackOnlyToUnambiguousRunMembership(
 	t.Run("ledger list failure", func(t *testing.T) {
 		workspace := t.TempDir()
 		_, _, _ = repositoryReviewPublicationTestDraft(t, workspace, "owner/corrupt")
-		root := filepath.Join(workspace, "repository_reviews")
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		statePath := ""
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") &&
-				!strings.HasSuffix(entry.Name(), ".summary.json") {
-				statePath = filepath.Join(root, entry.Name())
-				break
-			}
-		}
-		if statePath == "" {
-			t.Fatal("authoritative state file was not found")
-		}
-		if writeErr := os.WriteFile(statePath, []byte(`{`), 0o600); writeErr != nil {
+		statePath := filepath.Join(workspace, "repository_reviews", "repository-reviews.db")
+		if writeErr := os.WriteFile(statePath, []byte("not-sqlite"), 0o600); writeErr != nil {
 			t.Fatal(writeErr)
 		}
 		_, found, err := repositoryReviewAutomationState(

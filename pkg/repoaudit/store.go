@@ -3,6 +3,7 @@ package repoaudit
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,8 +18,6 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 const storeDirectory = "repository_reviews"
@@ -44,14 +43,31 @@ var (
 )
 
 type Store struct {
+	workspace   string
 	root        string
+	database    string
 	now         func() time.Time
 	loadForTest func(string) (RepositoryState, error)
+	openForTest func(context.Context) (*sql.DB, error)
 }
 
-func NewStore(workspace string) Store {
-	return Store{root: filepath.Join(workspace, storeDirectory), now: time.Now}
+// NewSQLiteStore opens repository-review persistence lazily at the first
+// operation. The returned value is safe to copy; mutations remain version
+// fenced in repository-reviews.db.
+func NewSQLiteStore(workspace string) Store {
+	root := filepath.Join(workspace, storeDirectory)
+	return Store{
+		workspace: workspace,
+		root:      root,
+		database:  filepath.Join(root, repositoryReviewDatabaseFilename),
+		now:       time.Now,
+	}
 }
+
+// NewStore is retained for source compatibility. Repository reviews are
+// persisted exclusively in SQLite.
+// Deprecated: use NewSQLiteStore.
+func NewStore(workspace string) Store { return NewSQLiteStore(workspace) }
 
 func (s Store) Plan(
 	ctx context.Context,
@@ -1015,34 +1031,19 @@ func (s Store) GetByID(id string) (RepositoryState, bool, error) {
 	if !valid || len(suffix) != 64 || !validHexDigest(suffix) {
 		return RepositoryState{}, false, nil
 	}
-	if err := s.requireSafeRoot(true); err != nil {
+	database, err := s.openDatabase(context.Background())
+	if err != nil {
 		return RepositoryState{}, false, err
 	}
-	statePath := filepath.Join(s.root, "repo_"+suffix+".json")
-	info, err := os.Lstat(statePath)
-	if os.IsNotExist(err) {
+	defer database.Close()
+	state, err := loadRepositoryStateRow(context.Background(), database, id)
+	if errors.Is(err, sql.ErrNoRows) {
 		return RepositoryState{}, false, nil
 	}
 	if err != nil {
 		return RepositoryState{}, false, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > maxStateFileBytes {
-		return RepositoryState{}, false, errors.New("invalid repository review state")
-	}
-	file, err := os.Open(statePath)
-	if err != nil {
-		return RepositoryState{}, false, err
-	}
-	var summary RepositorySummary
-	decodeErr := json.NewDecoder(file).Decode(&summary)
-	closeErr := file.Close()
-	if decodeErr != nil || closeErr != nil {
-		return RepositoryState{}, false, errors.Join(decodeErr, closeErr)
-	}
-	if summary.ID != id || summary.ID != RepositoryID(summary.Repository) {
-		return RepositoryState{}, false, errors.New("repository review state ID mismatch")
-	}
-	return s.Get(summary.Repository)
+	return state, true, nil
 }
 
 func (s Store) ListSummaries() ([]RepositorySummary, error) {
@@ -1050,82 +1051,42 @@ func (s Store) ListSummaries() ([]RepositorySummary, error) {
 }
 
 func (s Store) listSummaries(maximum int) ([]RepositorySummary, error) {
-	if err := s.requireSafeRoot(true); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(s.root)
-	if os.IsNotExist(err) {
-		return []RepositorySummary{}, nil
-	}
+	database, err := s.openDatabase(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	summaries := make([]RepositorySummary, 0, len(entries))
-	stateCount := 0
-	for _, entry := range entries {
-		if entry.Type()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("repository review state %q must not be a symlink", entry.Name())
-		}
-		if entry.IsDir() || !entry.Type().IsRegular() || !repositoryReviewStateFilename(entry.Name()) {
-			continue
-		}
-		stateCount++
-		if stateCount > maximum {
+	defer database.Close()
+	rows, err := database.Query(`
+		SELECT schema_version, state_id, repository, version, review_version, last_commit_sha,
+		       finding_count, repository_finding_count, open_finding_count, issue_draft_count,
+		       unsupported_count, reviewed_file_count, excluded_file_count, updated_at_unix_nano
+		  FROM repository_review_states
+	 ORDER BY updated_at_unix_nano DESC, state_id ASC
+	 LIMIT ?`, maximum+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	summaries := make([]RepositorySummary, 0)
+	for rows.Next() {
+		if len(summaries) >= maximum {
 			return nil, errors.New("repository review catalog exceeds its repository limit")
 		}
-		summary, summaryErr := repositoryReviewSummaryFromEntry(s.root, entry)
-		if summaryErr != nil {
-			return nil, summaryErr
+		var summary RepositorySummary
+		var updated int64
+		if err := rows.Scan(
+			&summary.SchemaVersion, &summary.ID, &summary.Repository, &summary.Version,
+			&summary.ReviewVersion, &summary.LastCommitSHA, &summary.FindingCount,
+			&summary.RepositoryFindingCount, &summary.OpenFindingCount, &summary.IssueDraftCount,
+			&summary.UnsupportedCount, &summary.ReviewedFileCount, &summary.ExcludedFileCount,
+			&updated,
+		); err != nil {
+			return nil, err
 		}
-		if summary.SchemaVersion != SchemaVersion {
-			state, found, migrationErr := s.Get(summary.Repository)
-			if migrationErr != nil {
-				return nil, migrationErr
-			}
-			if !found {
-				return nil, errors.New("repository review state disappeared during migration")
-			}
-			summary = Summarize(state)
-		}
+		summary.UpdatedAt = time.Unix(0, updated).UTC()
 		summaries = append(summaries, summary)
 	}
-	sort.Slice(summaries, func(i, j int) bool { return summaries[i].UpdatedAt.After(summaries[j].UpdatedAt) })
-	return summaries, nil
-}
-
-func repositoryReviewSummaryFromEntry(root string, entry os.DirEntry) (RepositorySummary, error) {
-	statePath := filepath.Join(root, entry.Name())
-	stateInfo, infoErr := entry.Info()
-	if infoErr != nil || stateInfo.Size() > maxStateFileBytes {
-		return RepositorySummary{}, errors.Join(infoErr, errors.New("repository review state exceeds its size limit"))
-	}
-	summaryPath := strings.TrimSuffix(statePath, ".json") + ".summary.json"
-	readPath := statePath
-	if summaryInfo, summaryErr := os.Lstat(summaryPath); summaryErr == nil {
-		if summaryInfo.Mode()&os.ModeSymlink != 0 || !summaryInfo.Mode().IsRegular() {
-			return RepositorySummary{}, errors.New("repository review summary must be a regular file")
-		}
-		if !summaryInfo.ModTime().Before(stateInfo.ModTime()) {
-			readPath = summaryPath
-		}
-	} else if !os.IsNotExist(summaryErr) {
-		return RepositorySummary{}, summaryErr
-	}
-	file, openErr := os.Open(readPath)
-	if openErr != nil {
-		return RepositorySummary{}, openErr
-	}
-	var summary RepositorySummary
-	decodeErr := json.NewDecoder(file).Decode(&summary)
-	closeErr := file.Close()
-	if decodeErr != nil || closeErr != nil {
-		return RepositorySummary{}, errors.Join(decodeErr, closeErr)
-	}
-	if (summary.SchemaVersion < 1 || summary.SchemaVersion > SchemaVersion) ||
-		summary.ID != RepositoryID(summary.Repository) {
-		return RepositorySummary{}, errors.New("invalid repository review summary")
-	}
-	return summary, nil
+	return summaries, rows.Err()
 }
 
 func (s Store) SetFindingStatus(
@@ -1465,58 +1426,31 @@ func (s Store) ClaimIssueDraftPublication(
 }
 
 func (s Store) List() ([]RepositoryState, error) {
-	if err := s.requireSafeRoot(true); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(s.root)
-	if os.IsNotExist(err) {
-		return []RepositoryState{}, nil
-	}
+	database, err := s.openDatabase(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	states := make([]RepositoryState, 0, len(entries))
-	for _, entry := range entries {
-		if entry.Type()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("repository review state %q must not be a symlink", entry.Name())
+	defer database.Close()
+	rows, err := database.Query(`
+		SELECT state_id FROM repository_review_states
+	 ORDER BY updated_at_unix_nano DESC, state_id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := make([]RepositoryState, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
 		}
-		if entry.IsDir() || !entry.Type().IsRegular() || !repositoryReviewStateFilename(entry.Name()) {
-			continue
-		}
-		state, stateErr := repositoryReviewStateFromEntry(s.root, entry)
-		if stateErr != nil {
-			return nil, stateErr
+		state, err := loadRepositoryStateRow(context.Background(), database, id)
+		if err != nil {
+			return nil, err
 		}
 		states = append(states, state)
 	}
-	sort.Slice(states, func(i, j int) bool { return states[i].UpdatedAt.After(states[j].UpdatedAt) })
-	return states, nil
-}
-
-func repositoryReviewStateFromEntry(root string, entry os.DirEntry) (RepositoryState, error) {
-	info, infoErr := entry.Info()
-	if infoErr != nil {
-		return RepositoryState{}, infoErr
-	}
-	if info.Size() > maxStateFileBytes {
-		return RepositoryState{}, errors.New("repository review state exceeds its size limit")
-	}
-	data, readErr := os.ReadFile(filepath.Join(root, entry.Name()))
-	if readErr != nil {
-		return RepositoryState{}, readErr
-	}
-	var state RepositoryState
-	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
-		return RepositoryState{}, jsonErr
-	}
-	if _, migrationErr := migrateRepositoryState(&state); migrationErr != nil {
-		return RepositoryState{}, migrationErr
-	}
-	backfillCanonicalIssueAssociations(&state)
-	if err := validateState(state); err != nil {
-		return RepositoryState{}, err
-	}
-	return state, nil
+	return states, rows.Err()
 }
 
 func (s Store) load(repository string) (RepositoryState, error) {
@@ -1543,50 +1477,34 @@ func (s Store) load(repository string) (RepositoryState, error) {
 		MappingJobs:             []RepositoryMappingJob{},
 		ValidationJobs:          []RepositoryValidationJob{},
 	}
-	if err := s.requireSafeRoot(true); err != nil {
+	database, err := s.openDatabase(context.Background())
+	if err != nil {
 		return RepositoryState{}, err
 	}
-	statePath := s.path(repository)
-	info, err := os.Lstat(statePath)
-	if os.IsNotExist(err) {
+	defer database.Close()
+	loaded, err := loadRepositoryStateRow(context.Background(), database, state.ID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return state, nil
 	}
 	if err != nil {
 		return RepositoryState{}, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return RepositoryState{}, errors.New("repository review state must be a regular file")
-	}
-	if info.Size() > maxStateFileBytes {
-		return RepositoryState{}, errors.New("repository review state exceeds its size limit")
-	}
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	if unmarshalErr := json.Unmarshal(data, &state); unmarshalErr != nil {
-		return RepositoryState{}, unmarshalErr
-	}
-	migrated, err := migrateRepositoryState(&state)
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	migrated = backfillCanonicalIssueAssociations(&state) || migrated
-	if err := validateState(state); err != nil {
-		return RepositoryState{}, err
-	}
-	if state.Repository != strings.TrimSpace(repository) {
-		return RepositoryState{}, errors.New("repository review state identity mismatch")
-	}
-	if migrated {
-		if err := s.save(&state); err != nil {
-			return RepositoryState{}, err
-		}
-	}
-	return state, nil
+	return loaded, nil
 }
 
 func (s Store) save(state *RepositoryState) error {
+	if err := prepareRepositoryStateForPersistence(state); err != nil {
+		return err
+	}
+	database, err := s.openDatabase(context.Background())
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	return saveRepositoryStateDatabase(context.Background(), database, state)
+}
+
+func prepareRepositoryStateForPersistence(state *RepositoryState) error {
 	if state == nil {
 		return errors.New("repository review state is required")
 	}
@@ -1606,71 +1524,7 @@ func (s Store) save(state *RepositoryState) error {
 	if err := validateState(*state); err != nil {
 		return err
 	}
-	if err := s.ensureSafeRoot(fileutil.MkdirAllDurable); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(s.path(state.Repository)); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return errors.New("repository review state must be a regular file")
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	data, err := json.Marshal(state)
-	if err != nil {
-		return err
-	}
-	if int64(len(data)) > maxStateFileBytes {
-		return errors.New("repository review state exceeds its size limit")
-	}
-	statePath := s.path(state.Repository)
-	summaryPath := strings.TrimSuffix(statePath, ".json") + ".summary.json"
-	if removeErr := os.Remove(summaryPath); removeErr != nil && !os.IsNotExist(removeErr) {
-		return removeErr
-	}
-	if writeErr := fileutil.WriteFileAtomic(statePath, data, 0o600); writeErr != nil {
-		return writeErr
-	}
-	// RepositorySummary contains only JSON-native scalar and time fields.
-	summaryData, _ := json.Marshal(Summarize(*state))
-	// The sidecar is a rebuildable list projection. The authoritative state is
-	// already committed, so a projection write failure must not turn a successful
-	// versioned mutation into an ambiguous failure.
-	_ = fileutil.WriteFileAtomic(summaryPath, summaryData, 0o600)
 	return nil
-}
-
-func (s Store) requireSafeRoot(allowMissing bool) error {
-	info, err := os.Lstat(s.root)
-	if os.IsNotExist(err) && allowMissing {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("repository review storage root must be a real directory")
-	}
-	return nil
-}
-
-func (s Store) ensureSafeRoot(mkdir func(string, os.FileMode) error) error {
-	if err := s.requireSafeRoot(true); err != nil {
-		return err
-	}
-	if err := mkdir(s.root, 0o700); err != nil {
-		return err
-	}
-	return s.requireSafeRoot(false)
-}
-
-func (s Store) path(repository string) string {
-	return filepath.Join(s.root, stableID("repo_", strings.TrimSpace(repository))+".json")
-}
-
-func repositoryReviewStateFilename(name string) bool {
-	return strings.HasPrefix(name, "repo_") && strings.HasSuffix(name, ".json") &&
-		!strings.HasSuffix(name, ".summary.json")
 }
 
 func validHexDigest(value string) bool {

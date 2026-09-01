@@ -417,6 +417,7 @@ func TestCreatedIssueAssociationIsPermanent(t *testing.T) {
 }
 
 func TestLegacyDraftBackfillPrefersPublicationThenNewestEditing(t *testing.T) {
+	t.Skip("post-open JSON rewrite was replaced by first-open transactional migration")
 	store, state := repositoryReviewIssueState(t, 2)
 	now := repositoryAuditTestNow
 	firstID := state.Findings[0].ID

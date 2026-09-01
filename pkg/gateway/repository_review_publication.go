@@ -114,7 +114,7 @@ func (handler *repositoryReviewPublicationHandler) ServeHTTP(w http.ResponseWrit
 	}
 	handler.publishMu.Lock()
 	defer handler.publishMu.Unlock()
-	store := repoaudit.NewStore(loop.GetConfig().WorkspacePath())
+	store := repoaudit.NewSQLiteStore(loop.GetConfig().WorkspacePath())
 	state, found, err := store.GetByID(repositoryID)
 	if err != nil || !found {
 		writeRepositoryReviewPublicationStoreError(w, err, found)

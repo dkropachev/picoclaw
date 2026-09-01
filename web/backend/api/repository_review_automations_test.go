@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,7 +94,7 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 		created.Automation.CompareModels {
 		t.Fatalf("created automation=%#v", created.Automation)
 	}
-	statePath := filepath.Join(workspace, "repository_reviews", "automation_"+created.Automation.ID+".json")
+	statePath := filepath.Join(workspace, "repository_reviews", "repository-reviews.db")
 	if info, err := os.Stat(statePath); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("automation file info=%v err=%v", info, err)
 	}
@@ -1624,30 +1623,20 @@ func TestRepositoryReviewAutomationContinuationStartsCleanCampaignAfterRuntimePr
 				); hashErr == nil {
 					t.Fatal("invalid resolved profile produced a campaign hash")
 				}
-				ledgerPaths, globErr := filepath.Glob(filepath.Join(
-					workspace, "repository_reviews", "repo_*.json",
-				))
-				ledgerPaths = slices.DeleteFunc(ledgerPaths, func(pathValue string) bool {
-					return strings.HasSuffix(pathValue, ".summary.json")
-				})
-				if globErr != nil || len(ledgerPaths) != 1 {
-					t.Fatalf("ledger paths=%v err=%v", ledgerPaths, globErr)
-				}
-				ledgerData, readErr := os.ReadFile(ledgerPaths[0])
-				if readErr != nil {
-					t.Fatal(readErr)
-				}
-				if writeErr := os.WriteFile(ledgerPaths[0], []byte("{"), 0o600); writeErr != nil {
-					t.Fatal(writeErr)
-				}
+				ledgerData := repositoryReviewStatePayloadForCoverage(t, workspace, state.ID)
+				overwriteRepositoryReviewStatePayloadForCoverage(t, workspace, state.ID)
 				if _, stateErr := controller.repositoryReviewRuntimeProfileChanged(
 					t.Context(), store, cfg, automation,
 				); stateErr == nil {
 					t.Fatal("corrupt campaign state was accepted")
 				}
-				if writeErr := os.WriteFile(ledgerPaths[0], ledgerData, 0o600); writeErr != nil {
-					t.Fatal(writeErr)
-				}
+				setRepositoryReviewPayloadForCoverage(
+					t,
+					workspace,
+					`UPDATE repository_review_states SET payload_json = ? WHERE state_id = ?`,
+					state.ID,
+					ledgerData,
+				)
 				newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
 					return workflowRuntimeRunners{
 						Agents: &repositoryReviewRecoveryProfileRunner{profile: currentProfile},

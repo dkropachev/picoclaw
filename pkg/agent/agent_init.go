@@ -109,6 +109,14 @@ func newAgentLoop(
 		}
 	}
 	al.fileMutationProtectedRoots = mustAgentRuntimeFileMutationProtectedRoots(al.configPath)
+	var protectedRootErr error
+	al.fileMutationProtectedRoots, protectedRootErr = appendAgentWorkspaceSQLiteProtectedRoots(
+		al.fileMutationProtectedRoots,
+		cfg,
+	)
+	if protectedRootErr != nil {
+		panic(fmt.Sprintf("build workspace file-mutation policy: %v", protectedRootErr))
+	}
 	if al.runtimeEvents == nil {
 		al.runtimeEvents = runtimeevents.NewBus()
 		al.ownsRuntimeEvents = true
