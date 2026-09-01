@@ -15,8 +15,20 @@ import (
 )
 
 type evolutionQueryer interface {
-	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func consumeEvolutionRows(rows *sql.Rows, next func() error) (resultErr error) {
+	defer func() {
+		resultErr = errors.Join(resultErr, rows.Close())
+	}()
+	for rows.Next() {
+		if nextErr := next(); nextErr != nil {
+			return nextErr
+		}
+	}
+	return rows.Err()
 }
 
 func validateEvolutionRecord(class string, record LearningRecord) error {
@@ -313,22 +325,31 @@ func putEvolutionRecord(
 ) (bool, error) {
 	var position, version int64
 	var existingSource sql.NullString
-	err := conn.QueryRowContext(ctx, `SELECT position, version, import_source
+	queryErr := conn.QueryRowContext(ctx, `SELECT position, version, import_source
         FROM evolution_records WHERE record_class = ? AND workspace_id = ? AND record_id = ?`,
 		class, record.WorkspaceID, record.ID).Scan(&position, &version, &existingSource)
 	switch {
-	case err == nil:
+	case queryErr == nil:
 		if importSource != "" {
-			if !existingSource.Valid || evolutionImportPriority(existingSource.String) >= evolutionImportPriority(importSource) {
+			if !existingSource.Valid ||
+				evolutionImportPriority(existingSource.String) >= evolutionImportPriority(importSource) {
 				return false, nil
 			}
 		} else if !runtimeUpdate {
 			return false, nil
 		}
-		if err := updateEvolutionRecord(ctx, conn, class, position, version, record, nullableImportSource(importSource)); err != nil {
+		if err := updateEvolutionRecord(
+			ctx,
+			conn,
+			class,
+			position,
+			version,
+			record,
+			nullableImportSource(importSource),
+		); err != nil {
 			return false, err
 		}
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(queryErr, sql.ErrNoRows):
 		if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(position), -1) + 1
             FROM evolution_records WHERE record_class = ?`, class).Scan(&position); err != nil {
 			return false, err
@@ -336,11 +357,18 @@ func putEvolutionRecord(
 		if position >= maximumEvolutionRecords {
 			return false, errors.New("evolution record count exceeds its limit")
 		}
-		if err := insertEvolutionRecord(ctx, conn, class, position, record, nullableImportSource(importSource)); err != nil {
+		if err := insertEvolutionRecord(
+			ctx,
+			conn,
+			class,
+			position,
+			record,
+			nullableImportSource(importSource),
+		); err != nil {
 			return false, err
 		}
 	default:
-		return false, err
+		return false, queryErr
 	}
 	if err := replaceEvolutionRecordChildren(ctx, conn, class, record); err != nil {
 		return false, err
@@ -672,52 +700,54 @@ func loadEvolutionToolExecutions(
 	records []LearningRecord,
 	indexes map[string]int,
 ) error {
-	rows, err := queryer.QueryContext(ctx, `SELECT e.workspace_id, e.record_id, e.position,
+	rows, queryErr := queryer.QueryContext(ctx, `SELECT e.workspace_id, e.record_id, e.position,
         e.name, e.success, e.error_summary
       FROM evolution_record_tool_executions e
       JOIN evolution_records r USING(record_class, workspace_id, record_id)
      WHERE e.record_class = ? ORDER BY r.position, e.position`, class)
-	if err != nil {
-		return err
+	if queryErr != nil {
+		return queryErr
 	}
 	executionIndexes := make(map[string]int)
-	for rows.Next() {
+	consumeErr := consumeEvolutionRows(rows, func() error {
 		var workspace, id, name, errorSummary string
 		var position, success int
-		if err := rows.Scan(&workspace, &id, &position, &name, &success, &errorSummary); err != nil {
-			rows.Close()
-			return err
+		if scanErr := rows.Scan(
+			&workspace, &id, &position, &name, &success, &errorSummary,
+		); scanErr != nil {
+			return scanErr
 		}
 		recordIndex := indexes[evolutionRecordIdentity(class, workspace, id)]
-		executionIndexes[evolutionExecutionIdentity(class, workspace, id, position)] =
-			len(records[recordIndex].ToolExecutions)
+		executionIndexes[evolutionExecutionIdentity(class, workspace, id, position)] = len(
+			records[recordIndex].ToolExecutions,
+		)
 		records[recordIndex].ToolExecutions = append(records[recordIndex].ToolExecutions,
 			ToolExecutionRecord{Name: name, Success: success == 1, ErrorSummary: errorSummary})
+		return nil
+	})
+	if consumeErr != nil {
+		return consumeErr
 	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	rows, err = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.record_id,
+	rows, queryErr = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.record_id,
         s.execution_position, s.skill_name
       FROM evolution_record_tool_execution_skills s
       JOIN evolution_records r USING(record_class, workspace_id, record_id)
      WHERE s.record_class = ? ORDER BY r.position, s.execution_position, s.position`, class)
-	if err != nil {
-		return err
+	if queryErr != nil {
+		return queryErr
 	}
-	defer rows.Close()
-	for rows.Next() {
+	return consumeEvolutionRows(rows, func() error {
 		var workspace, id, skillName string
 		var executionPosition int
-		if err := rows.Scan(&workspace, &id, &executionPosition, &skillName); err != nil {
-			return err
+		if scanErr := rows.Scan(&workspace, &id, &executionPosition, &skillName); scanErr != nil {
+			return scanErr
 		}
 		recordIndex := indexes[evolutionRecordIdentity(class, workspace, id)]
 		executionIndex := executionIndexes[evolutionExecutionIdentity(class, workspace, id, executionPosition)]
 		records[recordIndex].ToolExecutions[executionIndex].SkillNames = append(
 			records[recordIndex].ToolExecutions[executionIndex].SkillNames, skillName)
-	}
-	return rows.Err()
+		return nil
+	})
 }
 
 func evolutionExecutionIdentity(class, workspace, id string, position int) string {
@@ -731,36 +761,35 @@ func loadEvolutionAttemptTrails(
 	records []LearningRecord,
 	indexes map[string]int,
 ) error {
-	rows, err := queryer.QueryContext(ctx, `SELECT a.workspace_id, a.record_id
+	rows, queryErr := queryer.QueryContext(ctx, `SELECT a.workspace_id, a.record_id
         FROM evolution_record_attempt_trails a
         JOIN evolution_records r USING(record_class, workspace_id, record_id)
        WHERE a.record_class = ? ORDER BY r.position`, class)
-	if err != nil {
-		return err
+	if queryErr != nil {
+		return queryErr
 	}
-	for rows.Next() {
+	consumeErr := consumeEvolutionRows(rows, func() error {
 		var workspace, id string
-		if err := rows.Scan(&workspace, &id); err != nil {
-			rows.Close()
-			return err
+		if scanErr := rows.Scan(&workspace, &id); scanErr != nil {
+			return scanErr
 		}
 		records[indexes[evolutionRecordIdentity(class, workspace, id)]].AttemptTrail = &AttemptTrail{}
+		return nil
+	})
+	if consumeErr != nil {
+		return consumeErr
 	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	rows, err = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.record_id, s.field_name, s.value
+	rows, queryErr = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.record_id, s.field_name, s.value
         FROM evolution_record_attempt_strings s
         JOIN evolution_records r USING(record_class, workspace_id, record_id)
        WHERE s.record_class = ? ORDER BY r.position, s.field_name, s.position`, class)
-	if err != nil {
-		return err
+	if queryErr != nil {
+		return queryErr
 	}
-	for rows.Next() {
+	consumeErr = consumeEvolutionRows(rows, func() error {
 		var workspace, id, field, value string
-		if err := rows.Scan(&workspace, &id, &field, &value); err != nil {
-			rows.Close()
-			return err
+		if scanErr := rows.Scan(&workspace, &id, &field, &value); scanErr != nil {
+			return scanErr
 		}
 		trail := records[indexes[evolutionRecordIdentity(class, workspace, id)]].AttemptTrail
 		if field == "attempted_skills" {
@@ -768,56 +797,57 @@ func loadEvolutionAttemptTrails(
 		} else {
 			trail.FinalSuccessfulPath = append(trail.FinalSuccessfulPath, value)
 		}
+		return nil
+	})
+	if consumeErr != nil {
+		return consumeErr
 	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	rows, err = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.record_id, s.position,
+	rows, queryErr = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.record_id, s.position,
         s.sequence, s.trigger_name
       FROM evolution_record_attempt_snapshots s
       JOIN evolution_records r USING(record_class, workspace_id, record_id)
      WHERE s.record_class = ? ORDER BY r.position, s.position`, class)
-	if err != nil {
-		return err
+	if queryErr != nil {
+		return queryErr
 	}
 	snapshotIndexes := make(map[string]int)
-	for rows.Next() {
+	consumeErr = consumeEvolutionRows(rows, func() error {
 		var workspace, id, trigger string
 		var position, sequence int
-		if err := rows.Scan(&workspace, &id, &position, &sequence, &trigger); err != nil {
-			rows.Close()
-			return err
+		if scanErr := rows.Scan(&workspace, &id, &position, &sequence, &trigger); scanErr != nil {
+			return scanErr
 		}
 		recordIndex := indexes[evolutionRecordIdentity(class, workspace, id)]
-		snapshotIndexes[evolutionExecutionIdentity(class, workspace, id, position)] =
-			len(records[recordIndex].AttemptTrail.SkillContextSnapshots)
+		snapshotIndexes[evolutionExecutionIdentity(class, workspace, id, position)] = len(
+			records[recordIndex].AttemptTrail.SkillContextSnapshots,
+		)
 		records[recordIndex].AttemptTrail.SkillContextSnapshots = append(
 			records[recordIndex].AttemptTrail.SkillContextSnapshots,
 			SkillContextSnapshot{Sequence: sequence, Trigger: trigger})
+		return nil
+	})
+	if consumeErr != nil {
+		return consumeErr
 	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	rows, err = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.record_id,
+	rows, queryErr = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.record_id,
         s.snapshot_position, s.skill_name
       FROM evolution_record_attempt_snapshot_skills s
       JOIN evolution_records r USING(record_class, workspace_id, record_id)
      WHERE s.record_class = ? ORDER BY r.position, s.snapshot_position, s.position`, class)
-	if err != nil {
-		return err
+	if queryErr != nil {
+		return queryErr
 	}
-	defer rows.Close()
-	for rows.Next() {
+	return consumeEvolutionRows(rows, func() error {
 		var workspace, id, skillName string
 		var snapshotPosition int
-		if err := rows.Scan(&workspace, &id, &snapshotPosition, &skillName); err != nil {
-			return err
+		if scanErr := rows.Scan(&workspace, &id, &snapshotPosition, &skillName); scanErr != nil {
+			return scanErr
 		}
 		recordIndex := indexes[evolutionRecordIdentity(class, workspace, id)]
 		snapshotIndex := snapshotIndexes[evolutionExecutionIdentity(class, workspace, id, snapshotPosition)]
 		trail := records[recordIndex].AttemptTrail
 		trail.SkillContextSnapshots[snapshotIndex].SkillNames = append(
 			trail.SkillContextSnapshots[snapshotIndex].SkillNames, skillName)
-	}
-	return rows.Err()
+		return nil
+	})
 }

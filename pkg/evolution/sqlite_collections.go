@@ -44,11 +44,11 @@ func putEvolutionDraft(
 	importOnly bool,
 ) (bool, error) {
 	var position, version int
-	err := conn.QueryRowContext(ctx, `SELECT position, version FROM evolution_skill_drafts
+	queryErr := conn.QueryRowContext(ctx, `SELECT position, version FROM evolution_skill_drafts
         WHERE workspace_id = ? AND draft_id = ?`, draft.WorkspaceID, draft.ID).
 		Scan(&position, &version)
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(queryErr, sql.ErrNoRows):
 		if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(position), -1) + 1
             FROM evolution_skill_drafts`).Scan(&position); err != nil {
 			return false, err
@@ -57,8 +57,8 @@ func putEvolutionDraft(
 			return false, errors.New("evolution draft count exceeds its limit")
 		}
 		return true, insertEvolutionDraft(ctx, conn, position, draft)
-	case err != nil:
-		return false, err
+	case queryErr != nil:
+		return false, queryErr
 	case importOnly:
 		return false, nil
 	}
@@ -101,12 +101,12 @@ func replaceEvolutionDraftChildren(ctx context.Context, conn *sql.Conn, draft Sk
 }
 
 func loadEvolutionDrafts(ctx context.Context, queryer evolutionQueryer) ([]SkillDraft, error) {
-	rows, err := queryer.QueryContext(ctx, `SELECT workspace_id, draft_id, created_at_unix_nano,
+	rows, queryErr := queryer.QueryContext(ctx, `SELECT workspace_id, draft_id, created_at_unix_nano,
         updated_at_unix_nano, source_record_id, target_skill_name, draft_type, change_kind,
         human_summary, body_or_patch, status
       FROM evolution_skill_drafts ORDER BY position`)
-	if err != nil {
-		return nil, err
+	if queryErr != nil {
+		return nil, queryErr
 	}
 	defer rows.Close()
 	drafts := make([]SkillDraft, 0)
@@ -116,10 +116,10 @@ func loadEvolutionDrafts(ctx context.Context, queryer evolutionQueryer) ([]Skill
 		var created int64
 		var updated sql.NullInt64
 		var draftType, changeKind, status string
-		if err := rows.Scan(&draft.WorkspaceID, &draft.ID, &created, &updated,
+		if scanErr := rows.Scan(&draft.WorkspaceID, &draft.ID, &created, &updated,
 			&draft.SourceRecordID, &draft.TargetSkillName, &draftType, &changeKind,
-			&draft.HumanSummary, &draft.BodyOrPatch, &status); err != nil {
-			return nil, err
+			&draft.HumanSummary, &draft.BodyOrPatch, &status); scanErr != nil {
+			return nil, scanErr
 		}
 		draft.CreatedAt = evolutionStoredTime(created)
 		if updated.Valid {
@@ -132,21 +132,21 @@ func loadEvolutionDrafts(ctx context.Context, queryer evolutionQueryer) ([]Skill
 		indexes[draftKey(draft.WorkspaceID, draft.ID)] = len(drafts)
 		drafts = append(drafts, draft)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, rowsErr
 	}
-	rows, err = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.draft_id, s.field_name, s.value
+	rows, queryErr = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.draft_id, s.field_name, s.value
         FROM evolution_skill_draft_strings s
         JOIN evolution_skill_drafts d USING(workspace_id, draft_id)
        ORDER BY d.position, s.field_name, s.position`)
-	if err != nil {
-		return nil, err
+	if queryErr != nil {
+		return nil, queryErr
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var workspace, id, field, value string
-		if err := rows.Scan(&workspace, &id, &field, &value); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&workspace, &id, &field, &value); scanErr != nil {
+			return nil, scanErr
 		}
 		draft := &drafts[indexes[draftKey(workspace, id)]]
 		switch field {
@@ -179,15 +179,15 @@ func putEvolutionProfile(
 	importOnly bool,
 ) (bool, error) {
 	var version int64
-	err := conn.QueryRowContext(ctx, `SELECT version FROM evolution_skill_profiles
+	queryErr := conn.QueryRowContext(ctx, `SELECT version FROM evolution_skill_profiles
         WHERE workspace_id = ? AND skill_name = ?`, profile.WorkspaceID, profile.SkillName).Scan(&version)
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(queryErr, sql.ErrNoRows):
 		if err := insertEvolutionProfile(ctx, conn, profile); err != nil {
 			return false, err
 		}
-	case err != nil:
-		return false, err
+	case queryErr != nil:
+		return false, queryErr
 	case importOnly:
 		return false, nil
 	default:
@@ -300,121 +300,120 @@ func loadOneEvolutionProfileChildren(
 	queryer evolutionQueryer,
 	profile *SkillProfile,
 ) error {
-	rows, err := queryer.QueryContext(ctx, `SELECT field_name, value
+	rows, queryErr := queryer.QueryContext(ctx, `SELECT field_name, value
         FROM evolution_skill_profile_strings
        WHERE workspace_id = ? AND skill_name = ? ORDER BY field_name, position`,
 		profile.WorkspaceID, profile.SkillName)
-	if err != nil {
-		return err
+	if queryErr != nil {
+		return queryErr
 	}
-	for rows.Next() {
+	consumeErr := consumeEvolutionRows(rows, func() error {
 		var field, value string
-		if err := rows.Scan(&field, &value); err != nil {
-			rows.Close()
-			return err
+		if scanErr := rows.Scan(&field, &value); scanErr != nil {
+			return scanErr
 		}
 		appendEvolutionProfileString(profile, field, value)
+		return nil
+	})
+	if consumeErr != nil {
+		return consumeErr
 	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	rows, err = queryer.QueryContext(ctx, `SELECT version_name, action_name, timestamp_unix_nano,
+	rows, queryErr = queryer.QueryContext(ctx, `SELECT version_name, action_name, timestamp_unix_nano,
         draft_id, summary, rollback, rollback_reason
       FROM evolution_skill_profile_versions
      WHERE workspace_id = ? AND skill_name = ? ORDER BY position`,
 		profile.WorkspaceID, profile.SkillName)
-	if err != nil {
-		return err
+	if queryErr != nil {
+		return queryErr
 	}
-	defer rows.Close()
-	for rows.Next() {
+	return consumeEvolutionRows(rows, func() error {
 		var entry SkillVersionEntry
 		var timestamp int64
 		var rollback int
-		if err := rows.Scan(&entry.Version, &entry.Action, &timestamp, &entry.DraftID,
-			&entry.Summary, &rollback, &entry.RollbackReason); err != nil {
-			return err
+		if scanErr := rows.Scan(&entry.Version, &entry.Action, &timestamp, &entry.DraftID,
+			&entry.Summary, &rollback, &entry.RollbackReason); scanErr != nil {
+			return scanErr
 		}
 		entry.Timestamp = evolutionStoredTime(timestamp)
 		entry.Rollback = rollback == 1
 		profile.VersionHistory = append(profile.VersionHistory, entry)
-	}
-	return rows.Err()
+		return nil
+	})
 }
 
 func loadEvolutionProfiles(ctx context.Context, queryer evolutionQueryer) ([]SkillProfile, error) {
-	rows, err := queryer.QueryContext(ctx, `SELECT workspace_id, skill_name, current_version,
+	rows, queryErr := queryer.QueryContext(ctx, `SELECT workspace_id, skill_name, current_version,
         status, origin, human_summary, change_reason, last_used_at_unix_nano,
         use_count, retention_score
       FROM evolution_skill_profiles ORDER BY skill_name, workspace_id`)
-	if err != nil {
-		return nil, err
+	if queryErr != nil {
+		return nil, queryErr
 	}
 	profiles := make([]SkillProfile, 0)
 	indexes := make(map[string]int)
-	for rows.Next() {
+	consumeErr := consumeEvolutionRows(rows, func() error {
 		var profile SkillProfile
 		var status string
 		var lastUsed int64
-		if err := rows.Scan(&profile.WorkspaceID, &profile.SkillName, &profile.CurrentVersion,
+		if scanErr := rows.Scan(&profile.WorkspaceID, &profile.SkillName, &profile.CurrentVersion,
 			&status, &profile.Origin, &profile.HumanSummary, &profile.ChangeReason, &lastUsed,
-			&profile.UseCount, &profile.RetentionScore); err != nil {
-			rows.Close()
-			return nil, err
+			&profile.UseCount, &profile.RetentionScore); scanErr != nil {
+			return scanErr
 		}
 		profile.Status = SkillStatus(status)
 		profile.LastUsedAt = evolutionStoredTime(lastUsed)
 		indexes[draftKey(profile.WorkspaceID, profile.SkillName)] = len(profiles)
 		profiles = append(profiles, profile)
+		return nil
+	})
+	if consumeErr != nil {
+		return nil, consumeErr
 	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	rows, err = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.skill_name,
+	rows, queryErr = queryer.QueryContext(ctx, `SELECT s.workspace_id, s.skill_name,
         s.field_name, s.value
       FROM evolution_skill_profile_strings s
       JOIN evolution_skill_profiles p USING(workspace_id, skill_name)
      ORDER BY p.skill_name, p.workspace_id, s.field_name, s.position`)
-	if err != nil {
-		return nil, err
+	if queryErr != nil {
+		return nil, queryErr
 	}
-	for rows.Next() {
+	consumeErr = consumeEvolutionRows(rows, func() error {
 		var workspace, skillName, field, value string
-		if err := rows.Scan(&workspace, &skillName, &field, &value); err != nil {
-			rows.Close()
-			return nil, err
+		if scanErr := rows.Scan(&workspace, &skillName, &field, &value); scanErr != nil {
+			return scanErr
 		}
 		appendEvolutionProfileString(&profiles[indexes[draftKey(workspace, skillName)]], field, value)
+		return nil
+	})
+	if consumeErr != nil {
+		return nil, consumeErr
 	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	rows, err = queryer.QueryContext(ctx, `SELECT v.workspace_id, v.skill_name,
+	rows, queryErr = queryer.QueryContext(ctx, `SELECT v.workspace_id, v.skill_name,
         v.version_name, v.action_name, v.timestamp_unix_nano, v.draft_id,
         v.summary, v.rollback, v.rollback_reason
       FROM evolution_skill_profile_versions v
       JOIN evolution_skill_profiles p USING(workspace_id, skill_name)
      ORDER BY p.skill_name, p.workspace_id, v.position`)
-	if err != nil {
-		return nil, err
+	if queryErr != nil {
+		return nil, queryErr
 	}
-	defer rows.Close()
-	for rows.Next() {
+	consumeErr = consumeEvolutionRows(rows, func() error {
 		var workspace, skillName string
 		var entry SkillVersionEntry
 		var timestamp int64
 		var rollback int
-		if err := rows.Scan(&workspace, &skillName, &entry.Version, &entry.Action, &timestamp,
-			&entry.DraftID, &entry.Summary, &rollback, &entry.RollbackReason); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&workspace, &skillName, &entry.Version, &entry.Action, &timestamp,
+			&entry.DraftID, &entry.Summary, &rollback, &entry.RollbackReason); scanErr != nil {
+			return scanErr
 		}
 		entry.Timestamp = evolutionStoredTime(timestamp)
 		entry.Rollback = rollback == 1
 		index := indexes[draftKey(workspace, skillName)]
 		profiles[index].VersionHistory = append(profiles[index].VersionHistory, entry)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil
+	})
+	if consumeErr != nil {
+		return nil, consumeErr
 	}
 	return profiles, nil
 }

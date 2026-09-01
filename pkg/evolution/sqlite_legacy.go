@@ -27,12 +27,12 @@ func evolutionLegacySources(paths Paths) ([]sqlitestore.LegacySource, error) {
 		{ID: "skill-drafts", Relative: filepath.Base(paths.SkillDrafts)},
 	}
 	profileRoot := paths.ProfilesDir
-	_, err := os.Lstat(profileRoot)
-	if errors.Is(err, os.ErrNotExist) {
+	_, statErr := os.Lstat(profileRoot)
+	if errors.Is(statErr, os.ErrNotExist) {
 		return sources, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("inspect legacy evolution profiles: %w", err)
+	if statErr != nil {
+		return nil, fmt.Errorf("inspect legacy evolution profiles: %w", statErr)
 	}
 	if err := validateEvolutionLegacyDirectory(profileRoot); err != nil {
 		return nil, err
@@ -212,6 +212,8 @@ func importEvolutionLegacyDrafts(
 	}
 	var rawDrafts []json.RawMessage
 	if err := json.Unmarshal(trimmed, &rawDrafts); err != nil {
+		// Malformed legacy payloads are audited skips, not store-open failures.
+		//nolint:nilerr
 		return malformedEvolutionImport(input.Digest, "malformed-drafts"), nil
 	}
 	if len(rawDrafts) > maximumEvolutionDrafts {
@@ -254,6 +256,8 @@ func importEvolutionLegacyProfile(
 	if len(trimmed) == 0 || json.Unmarshal(trimmed, &profile) != nil ||
 		bytes.Equal(trimmed, []byte("null")) || validateEvolutionProfile(profile) != nil ||
 		!evolutionProfilePathConsistent(input.Relative, profile) {
+		// Invalid legacy profiles are audited skips, not store-open failures.
+		//nolint:nilerr
 		return malformedEvolutionImport(digest, "invalid-profile"), nil
 	}
 	written, err := putEvolutionProfile(ctx, conn, profile, true)

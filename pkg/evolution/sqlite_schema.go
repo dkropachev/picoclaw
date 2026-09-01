@@ -215,10 +215,13 @@ const evolutionProfileVersionsSchema = `CREATE TABLE IF NOT EXISTS evolution_ski
 
 const evolutionRecordsWorkspaceIndexSchema = `CREATE INDEX IF NOT EXISTS evolution_records_workspace_idx
     ON evolution_records(workspace_id, record_class, position);`
+
 const evolutionRecordsStatusIndexSchema = `CREATE INDEX IF NOT EXISTS evolution_records_status_idx
     ON evolution_records(record_class, status, position);`
+
 const evolutionDraftsWorkspaceIndexSchema = `CREATE INDEX IF NOT EXISTS evolution_skill_drafts_workspace_idx
     ON evolution_skill_drafts(workspace_id, position);`
+
 const evolutionProfilesStatusIndexSchema = `CREATE INDEX IF NOT EXISTS evolution_skill_profiles_status_idx
     ON evolution_skill_profiles(workspace_id, status, skill_name);`
 
@@ -281,7 +284,13 @@ func validateEvolutionSchema(ctx context.Context, conn *sql.Conn) error {
 		{"index", "evolution_skill_profiles_status_idx", evolutionProfilesStatusIndexSchema},
 	}
 	for _, object := range objects {
-		if err := sqlitestore.ValidateSchemaObject(ctx, conn, object.objectType, object.name, object.schema); err != nil {
+		if err := sqlitestore.ValidateSchemaObject(
+			ctx,
+			conn,
+			object.objectType,
+			object.name,
+			object.schema,
+		); err != nil {
 			return err
 		}
 	}

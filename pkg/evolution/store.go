@@ -192,12 +192,12 @@ func (s *Store) MarkTaskRecordsClustered(ids []string) error {
 	workspace := strings.TrimSpace(s.paths.Workspace)
 	return s.immediate(context.Background(), func(conn *sql.Conn) error {
 		for id := range target {
-			rows, err := conn.QueryContext(context.Background(), `SELECT workspace_id, version
+			rows, queryErr := conn.QueryContext(context.Background(), `SELECT workspace_id, version
                     FROM evolution_records
                    WHERE record_class = 'task' AND record_id = ?
                    ORDER BY position`, id)
-			if err != nil {
-				return err
+			if queryErr != nil {
+				return queryErr
 			}
 			type candidate struct {
 				workspace string
@@ -205,21 +205,17 @@ func (s *Store) MarkTaskRecordsClustered(ids []string) error {
 			}
 			var candidates []candidate
 			hasWorkspace := false
-			for rows.Next() {
+			consumeErr := consumeEvolutionRows(rows, func() error {
 				var value candidate
-				if err := rows.Scan(&value.workspace, &value.version); err != nil {
-					rows.Close()
-					return err
+				if scanErr := rows.Scan(&value.workspace, &value.version); scanErr != nil {
+					return scanErr
 				}
 				hasWorkspace = hasWorkspace || workspace != "" && value.workspace == workspace
 				candidates = append(candidates, value)
-			}
-			if err := rows.Err(); err != nil {
-				rows.Close()
-				return err
-			}
-			if err := rows.Close(); err != nil {
-				return err
+				return nil
+			})
+			if consumeErr != nil {
+				return consumeErr
 			}
 			for _, candidate := range candidates {
 				if hasWorkspace && candidate.workspace != workspace {
@@ -363,19 +359,19 @@ func (s *Store) UpdateProfile(
 		return err
 	}
 	return s.immediate(context.Background(), func(conn *sql.Conn) error {
-		profile, exists, err := loadEvolutionProfile(
+		profile, exists, loadErr := loadEvolutionProfile(
 			context.Background(), conn, workspaceID, skillName,
 		)
-		if err != nil {
-			return err
+		if loadErr != nil {
+			return loadErr
 		}
 		loadedFallback := false
 		if !exists && workspaceID != "" && usesDefaultWorkspaceState(s.paths, workspaceID) {
-			profile, exists, err = loadEvolutionProfile(
+			profile, exists, loadErr = loadEvolutionProfile(
 				context.Background(), conn, "", skillName,
 			)
-			if err != nil {
-				return err
+			if loadErr != nil {
+				return loadErr
 			}
 			loadedFallback = exists
 		}
@@ -395,8 +391,8 @@ func (s *Store) UpdateProfile(
 		if err := validateEvolutionProfile(profile); err != nil {
 			return err
 		}
-		_, err = putEvolutionProfile(context.Background(), conn, profile, false)
-		return err
+		_, putErr := putEvolutionProfile(context.Background(), conn, profile, false)
+		return putErr
 	})
 }
 

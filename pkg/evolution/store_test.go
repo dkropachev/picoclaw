@@ -405,9 +405,9 @@ func TestStore_LoadLearningRecordsIgnoresTruncatedTrailingLine(t *testing.T) {
 		Summary:     "weather task completed",
 		Status:      evolution.RecordStatus("new"),
 	}
-	encoded, err := json.Marshal(record)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
+	encoded, marshalErr := json.Marshal(record)
+	if marshalErr != nil {
+		t.Fatalf("Marshal: %v", marshalErr)
 	}
 	if err := os.MkdirAll(paths.RootDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -417,9 +417,9 @@ func TestStore_LoadLearningRecordsIgnoresTruncatedTrailingLine(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	loaded, err := store.LoadLearningRecords()
-	if err != nil {
-		t.Fatalf("LoadLearningRecords: %v", err)
+	loaded, loadErr := store.LoadLearningRecords()
+	if loadErr != nil {
+		t.Fatalf("LoadLearningRecords: %v", loadErr)
 	}
 	if len(loaded) != 1 {
 		t.Fatalf("len(loaded) = %d, want 1", len(loaded))
@@ -432,8 +432,8 @@ func TestStore_LoadLearningRecordsIgnoresTruncatedTrailingLine(t *testing.T) {
 		t.Fatalf("legacy source was not archived: %v", err)
 	}
 	archived := filepath.Join(paths.LegacyArchive, "task-records.jsonl")
-	data, err := os.ReadFile(archived)
-	if err != nil || !strings.Contains(string(data), "\"broken\"") {
-		t.Fatalf("archived legacy fixture = %q, %v", data, err)
+	data, readErr := os.ReadFile(archived)
+	if readErr != nil || !strings.Contains(string(data), "\"broken\"") {
+		t.Fatalf("archived legacy fixture = %q, %v", data, readErr)
 	}
 }

@@ -30,24 +30,56 @@ func TestEvolutionSQLiteCodecRejectsInvalidDomainValues(t *testing.T) {
 	}{
 		{name: "class", class: "other"},
 		{name: "kind-class", class: "pattern"},
-		{name: "workspace-space", class: "task", mutate: func(value *LearningRecord) { value.WorkspaceID = " workspace" }},
+		{
+			name:   "workspace-space",
+			class:  "task",
+			mutate: func(value *LearningRecord) { value.WorkspaceID = " workspace" },
+		},
 		{name: "empty-id", class: "task", mutate: func(value *LearningRecord) { value.ID = "" }},
 		{name: "kind", class: "task", mutate: func(value *LearningRecord) { value.Kind = "unknown" }},
 		{name: "status", class: "task", mutate: func(value *LearningRecord) { value.Status = "unknown" }},
 		{name: "created-zero", class: "task", mutate: func(value *LearningRecord) { value.CreatedAt = time.Time{} }},
-		{name: "created-range", class: "task", mutate: func(value *LearningRecord) { value.CreatedAt = invalidTimestamp }},
-		{name: "updated-range", class: "task", mutate: func(value *LearningRecord) { value.UpdatedAt = &invalidTimestamp }},
+		{
+			name:   "created-range",
+			class:  "task",
+			mutate: func(value *LearningRecord) { value.CreatedAt = invalidTimestamp },
+		},
+		{
+			name:   "updated-range",
+			class:  "task",
+			mutate: func(value *LearningRecord) { value.UpdatedAt = &invalidTimestamp },
+		},
 		{name: "text", class: "task", mutate: func(value *LearningRecord) { value.Summary = "bad\x00text" }},
 		{name: "event-count", class: "task", mutate: func(value *LearningRecord) { value.EventCount = -1 }},
-		{name: "success-rate-nan", class: "task", mutate: func(value *LearningRecord) { value.SuccessRate = math.NaN() }},
-		{name: "success-rate-inf", class: "task", mutate: func(value *LearningRecord) { value.SuccessRate = math.Inf(1) }},
+		{
+			name:   "success-rate-nan",
+			class:  "task",
+			mutate: func(value *LearningRecord) { value.SuccessRate = math.NaN() },
+		},
+		{
+			name:   "success-rate-inf",
+			class:  "task",
+			mutate: func(value *LearningRecord) { value.SuccessRate = math.Inf(1) },
+		},
 		{name: "maturity-nan", class: "task", mutate: func(value *LearningRecord) { value.MaturityScore = math.NaN() }},
-		{name: "ordered-count", class: "task", mutate: func(value *LearningRecord) { value.Signals = make([]string, maximumEvolutionChildren+1) }},
-		{name: "ordered-value", class: "task", mutate: func(value *LearningRecord) { value.ToolKinds = []string{"bad\x00kind"} }},
+		{
+			name:   "ordered-count",
+			class:  "task",
+			mutate: func(value *LearningRecord) { value.Signals = make([]string, maximumEvolutionChildren+1) },
+		},
+		{
+			name:   "ordered-value",
+			class:  "task",
+			mutate: func(value *LearningRecord) { value.ToolKinds = []string{"bad\x00kind"} },
+		},
 		{name: "execution-count", class: "task", mutate: func(value *LearningRecord) {
 			value.ToolExecutions = make([]ToolExecutionRecord, maximumEvolutionChildren+1)
 		}},
-		{name: "execution-name", class: "task", mutate: func(value *LearningRecord) { value.ToolExecutions = []ToolExecutionRecord{{Name: "bad\x00name"}} }},
+		{
+			name:   "execution-name",
+			class:  "task",
+			mutate: func(value *LearningRecord) { value.ToolExecutions = []ToolExecutionRecord{{Name: "bad\x00name"}} },
+		},
 		{name: "execution-error", class: "task", mutate: func(value *LearningRecord) {
 			value.ToolExecutions = []ToolExecutionRecord{{ErrorSummary: "bad\x00error"}}
 		}},
@@ -61,15 +93,25 @@ func TestEvolutionSQLiteCodecRejectsInvalidDomainValues(t *testing.T) {
 			value.AttemptTrail = &AttemptTrail{FinalSuccessfulPath: []string{"bad\x00skill"}}
 		}},
 		{name: "snapshot-count", class: "task", mutate: func(value *LearningRecord) {
-			value.AttemptTrail = &AttemptTrail{SkillContextSnapshots: make([]SkillContextSnapshot, maximumEvolutionChildren+1)}
+			value.AttemptTrail = &AttemptTrail{
+				SkillContextSnapshots: make([]SkillContextSnapshot, maximumEvolutionChildren+1),
+			}
 		}},
 		{name: "snapshot-trigger", class: "task", mutate: func(value *LearningRecord) {
-			value.AttemptTrail = &AttemptTrail{SkillContextSnapshots: []SkillContextSnapshot{{Trigger: "bad\x00trigger"}}}
+			value.AttemptTrail = &AttemptTrail{
+				SkillContextSnapshots: []SkillContextSnapshot{{Trigger: "bad\x00trigger"}},
+			}
 		}},
 		{name: "snapshot-skills", class: "task", mutate: func(value *LearningRecord) {
-			value.AttemptTrail = &AttemptTrail{SkillContextSnapshots: []SkillContextSnapshot{{SkillNames: []string{"bad\x00skill"}}}}
+			value.AttemptTrail = &AttemptTrail{
+				SkillContextSnapshots: []SkillContextSnapshot{{SkillNames: []string{"bad\x00skill"}}},
+			}
 		}},
-		{name: "source-json", class: "task", mutate: func(value *LearningRecord) { value.Source = map[string]any{"number": math.NaN()} }},
+		{
+			name:   "source-json",
+			class:  "task",
+			mutate: func(value *LearningRecord) { value.Source = map[string]any{"number": math.NaN()} },
+		},
 		{name: "source-size", class: "task", mutate: func(value *LearningRecord) {
 			value.Source = map[string]any{"text": strings.Repeat("x", maximumEvolutionSourceBytes)}
 		}},
@@ -103,7 +145,10 @@ func TestEvolutionSQLiteCodecRejectsInvalidDomainValues(t *testing.T) {
 		{name: "status", mutate: func(value *SkillDraft) { value.Status = "unknown" }},
 		{name: "text", mutate: func(value *SkillDraft) { value.BodyOrPatch = "bad\x00body" }},
 		{name: "ordered", mutate: func(value *SkillDraft) { value.ReviewNotes = []string{"bad\x00note"} }},
-		{name: "ordered-count", mutate: func(value *SkillDraft) { value.ScanFindings = make([]string, maximumEvolutionChildren+1) }},
+		{
+			name:   "ordered-count",
+			mutate: func(value *SkillDraft) { value.ScanFindings = make([]string, maximumEvolutionChildren+1) },
+		},
 	}
 	for _, test := range draftCases {
 		t.Run("draft/"+test.name, func(t *testing.T) {
@@ -136,8 +181,14 @@ func TestEvolutionSQLiteCodecRejectsInvalidDomainValues(t *testing.T) {
 		{name: "history-count", mutate: func(value *SkillProfile) {
 			value.VersionHistory = make([]SkillVersionEntry, maximumEvolutionChildren+1)
 		}},
-		{name: "history-time", mutate: func(value *SkillProfile) { value.VersionHistory = []SkillVersionEntry{{Timestamp: invalidTimestamp}} }},
-		{name: "history-text", mutate: func(value *SkillProfile) { value.VersionHistory = []SkillVersionEntry{{Summary: "bad\x00summary"}} }},
+		{
+			name:   "history-time",
+			mutate: func(value *SkillProfile) { value.VersionHistory = []SkillVersionEntry{{Timestamp: invalidTimestamp}} },
+		},
+		{
+			name:   "history-text",
+			mutate: func(value *SkillProfile) { value.VersionHistory = []SkillVersionEntry{{Summary: "bad\x00summary"}} },
+		},
 	}
 	for _, test := range profileCases {
 		t.Run("profile/"+test.name, func(t *testing.T) {
@@ -181,9 +232,9 @@ func TestEvolutionSQLiteTransactionsReplaceChildrenAndFenceVersions(t *testing.T
 	if err := store.AppendLearningRecord(ctx, record); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := store.LoadTaskRecords()
-	if err != nil || len(loaded) != 1 || !reflect.DeepEqual(loaded[0], record) {
-		t.Fatalf("updated record = %#v, %v", loaded, err)
+	loaded, loadErr := store.LoadTaskRecords()
+	if loadErr != nil || len(loaded) != 1 || !reflect.DeepEqual(loaded[0], record) {
+		t.Fatalf("updated record = %#v, %v", loaded, loadErr)
 	}
 
 	draftTimestamp := timestamp.Add(time.Second)
@@ -208,9 +259,9 @@ func TestEvolutionSQLiteTransactionsReplaceChildrenAndFenceVersions(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	loadedDrafts, err := store.LoadDrafts()
-	if err != nil || !reflect.DeepEqual(loadedDrafts, drafts) {
-		t.Fatalf("replaced drafts = %#v, %v", loadedDrafts, err)
+	loadedDrafts, draftLoadErr := store.LoadDrafts()
+	if draftLoadErr != nil || !reflect.DeepEqual(loadedDrafts, drafts) {
+		t.Fatalf("replaced drafts = %#v, %v", loadedDrafts, draftLoadErr)
 	}
 
 	profile := SkillProfile{
@@ -233,9 +284,9 @@ func TestEvolutionSQLiteTransactionsReplaceChildrenAndFenceVersions(t *testing.T
 	if err := store.SaveProfile(profile); err != nil {
 		t.Fatal(err)
 	}
-	profiles, err := store.LoadProfiles()
-	if err != nil || len(profiles) != 1 || !reflect.DeepEqual(profiles[0], profile) {
-		t.Fatalf("updated profiles = %#v, %v", profiles, err)
+	profiles, profileLoadErr := store.LoadProfiles()
+	if profileLoadErr != nil || len(profiles) != 1 || !reflect.DeepEqual(profiles[0], profile) {
+		t.Fatalf("updated profiles = %#v, %v", profiles, profileLoadErr)
 	}
 
 	db, conn := openEvolutionCoverageConnection(t, store)
@@ -337,9 +388,9 @@ func TestEvolutionSQLitePublicBoundariesAndProfileFallback(t *testing.T) {
 	if err := store.SaveProfile(fallback); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := store.LoadProfile("weather")
-	if err != nil || !reflect.DeepEqual(loaded, fallback) {
-		t.Fatalf("legacy workspace fallback = %#v, %v", loaded, err)
+	loaded, fallbackLoadErr := store.LoadProfile("weather")
+	if fallbackLoadErr != nil || !reflect.DeepEqual(loaded, fallback) {
+		t.Fatalf("legacy workspace fallback = %#v, %v", loaded, fallbackLoadErr)
 	}
 	if err := store.UpdateProfile(workspace, "weather", func(profile *SkillProfile, exists bool) error {
 		if !exists {
@@ -350,9 +401,9 @@ func TestEvolutionSQLitePublicBoundariesAndProfileFallback(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	localized, err := store.LoadProfile("weather")
-	if err != nil || localized.WorkspaceID != workspace || localized.UseCount != 1 {
-		t.Fatalf("localized fallback = %#v, %v", localized, err)
+	localized, localizedLoadErr := store.LoadProfile("weather")
+	if localizedLoadErr != nil || localized.WorkspaceID != workspace || localized.UseCount != 1 {
+		t.Fatalf("localized fallback = %#v, %v", localized, localizedLoadErr)
 	}
 
 	broken := NewSQLiteStore(Paths{RootDir: t.TempDir(), Database: t.TempDir()})
@@ -375,9 +426,9 @@ func TestEvolutionSQLitePublicBoundariesAndProfileFallback(t *testing.T) {
 
 	lockPaths := NewPaths(t.TempDir(), "")
 	lockStore := NewSQLiteStore(lockPaths)
-	lockPath, err := filepath.Abs(filepath.Clean(lockPaths.Database))
-	if err != nil {
-		t.Fatal(err)
+	lockPath, pathErr := filepath.Abs(filepath.Clean(lockPaths.Database))
+	if pathErr != nil {
+		t.Fatal(pathErr)
 	}
 	evolutionDatabaseWriteLocks.Store(lockPath, "invalid")
 	t.Cleanup(func() { evolutionDatabaseWriteLocks.Delete(lockPath) })
@@ -437,16 +488,19 @@ func TestEvolutionSQLiteLegacyEnumerationAndMalformedInputs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(scopeDir, "ignored.txt"), []byte("ignored"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sources, err := evolutionLegacySources(paths)
-	if err != nil {
-		t.Fatal(err)
+	sources, sourcesErr := evolutionLegacySources(paths)
+	if sourcesErr != nil {
+		t.Fatal(sourcesErr)
 	}
-	var relatives []string
+	relatives := make([]string, 0, len(sources))
 	for _, source := range sources {
 		relatives = append(relatives, source.Relative)
 	}
 	if !containsEvolutionCoverageString(relatives, "profiles/weather.json") ||
-		!containsEvolutionCoverageString(relatives, filepath.ToSlash(filepath.Join("profiles", scope, "climate.json"))) {
+		!containsEvolutionCoverageString(
+			relatives,
+			filepath.ToSlash(filepath.Join("profiles", scope, "climate.json")),
+		) {
 		t.Fatalf("legacy profile sources = %#v", relatives)
 	}
 
@@ -454,25 +508,30 @@ func TestEvolutionSQLiteLegacyEnumerationAndMalformedInputs(t *testing.T) {
 	db, conn := openEvolutionCoverageConnection(t, store)
 	defer db.Close()
 	defer conn.Close()
-	malformed, err := importEvolutionLegacyDrafts(ctx, conn, sqlitestore.LegacyInput{
+	malformed, malformedErr := importEvolutionLegacyDrafts(ctx, conn, sqlitestore.LegacyInput{
 		Relative: "skill-drafts.json", Data: []byte("{"),
 	})
-	if err != nil || malformed.Skipped != 1 || malformed.Issues[0].Code != "malformed-drafts" {
-		t.Fatalf("malformed draft import = %#v, %v", malformed, err)
+	if malformedErr != nil || malformed.Skipped != 1 || malformed.Issues[0].Code != "malformed-drafts" {
+		t.Fatalf("malformed draft import = %#v, %v", malformed, malformedErr)
 	}
-	empty, err := importEvolutionLegacyDrafts(ctx, conn, sqlitestore.LegacyInput{
+	empty, emptyErr := importEvolutionLegacyDrafts(ctx, conn, sqlitestore.LegacyInput{
 		Relative: "skill-drafts.json", Data: []byte("  \n"),
 	})
-	if err != nil || empty.Imported != 0 || empty.Skipped != 0 {
-		t.Fatalf("empty draft import = %#v, %v", empty, err)
+	if emptyErr != nil || empty.Imported != 0 || empty.Skipped != 0 {
+		t.Fatalf("empty draft import = %#v, %v", empty, emptyErr)
 	}
-	invalidProfile, err := importEvolutionLegacyProfile(ctx, conn, sqlitestore.LegacyInput{
+	invalidProfile, invalidProfileErr := importEvolutionLegacyProfile(ctx, conn, sqlitestore.LegacyInput{
 		Relative: "profiles/wrong.json", Data: []byte(`{"skill_name":"weather"}`),
 	})
-	if err != nil || invalidProfile.Skipped != 1 || invalidProfile.Issues[0].Code != "invalid-profile" {
-		t.Fatalf("invalid profile import = %#v, %v", invalidProfile, err)
+	if invalidProfileErr != nil || invalidProfile.Skipped != 1 || invalidProfile.Issues[0].Code != "invalid-profile" {
+		t.Fatalf("invalid profile import = %#v, %v", invalidProfile, invalidProfileErr)
 	}
-	if _, err := importEvolutionLegacySource(ctx, conn, sqlitestore.LegacyInput{Relative: "unknown.json"}); err == nil || !strings.Contains(err.Error(), "unknown") {
+	if _, err := importEvolutionLegacySource(
+		ctx,
+		conn,
+		sqlitestore.LegacyInput{Relative: "unknown.json"},
+	); err == nil ||
+		!strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("unknown source = %v", err)
 	}
 	if evolutionProfilePathConsistent("profiles/extra/wrong/weather.json", direct) ||
@@ -485,9 +544,9 @@ func TestEvolutionSQLiteLegacyEnumerationAndMalformedInputs(t *testing.T) {
 		ID: "legacy", Kind: RecordKindTask, WorkspaceID: workspace,
 		CreatedAt: time.Unix(1_700_000_000, 0).UTC(),
 	}
-	recordJSON, err := json.Marshal(record)
-	if err != nil {
-		t.Fatal(err)
+	recordJSON, recordMarshalErr := json.Marshal(record)
+	if recordMarshalErr != nil {
+		t.Fatal(recordMarshalErr)
 	}
 	if _, err := importEvolutionLegacyRecords(ctx, conn, sqlitestore.LegacyInput{
 		Data: bytesRepeatForEvolutionCoverage('x', maximumEvolutionLegacyLineBytes+1),
@@ -504,31 +563,38 @@ func TestEvolutionSQLiteLegacyEnumerationAndMalformedInputs(t *testing.T) {
 		ID: "legacy-draft", WorkspaceID: workspace, TargetSkillName: "weather",
 		DraftType: DraftTypeWorkflow, ChangeKind: ChangeKindCreate, Status: DraftStatusCandidate,
 	}
-	draftJSON, err := json.Marshal([]SkillDraft{validDraft, validDraft})
-	if err != nil {
-		t.Fatal(err)
+	draftJSON, draftMarshalErr := json.Marshal([]SkillDraft{validDraft, validDraft})
+	if draftMarshalErr != nil {
+		t.Fatal(draftMarshalErr)
 	}
-	duplicateDrafts, err := importEvolutionLegacyDrafts(ctx, conn, sqlitestore.LegacyInput{Data: draftJSON})
-	if err != nil || duplicateDrafts.Imported != 1 || duplicateDrafts.Skipped != 1 {
-		t.Fatalf("duplicate draft import = %#v, %v", duplicateDrafts, err)
+	duplicateDrafts, duplicateDraftErr := importEvolutionLegacyDrafts(
+		ctx, conn, sqlitestore.LegacyInput{Data: draftJSON},
+	)
+	if duplicateDraftErr != nil || duplicateDrafts.Imported != 1 || duplicateDrafts.Skipped != 1 {
+		t.Fatalf("duplicate draft import = %#v, %v", duplicateDrafts, duplicateDraftErr)
 	}
 	tooManyDrafts := "[" + strings.Repeat("{},", maximumEvolutionDrafts) + "{}]"
-	if _, err := importEvolutionLegacyDrafts(ctx, conn, sqlitestore.LegacyInput{Data: []byte(tooManyDrafts)}); err == nil || !strings.Contains(err.Error(), "count") {
+	if _, err := importEvolutionLegacyDrafts(
+		ctx,
+		conn,
+		sqlitestore.LegacyInput{Data: []byte(tooManyDrafts)},
+	); err == nil ||
+		!strings.Contains(err.Error(), "count") {
 		t.Fatalf("oversized draft count import = %v", err)
 	}
 	importedProfile := SkillProfile{SkillName: "newskill", Status: SkillStatusActive}
-	directJSON, err := json.Marshal(importedProfile)
-	if err != nil {
-		t.Fatal(err)
+	directJSON, profileMarshalErr := json.Marshal(importedProfile)
+	if profileMarshalErr != nil {
+		t.Fatal(profileMarshalErr)
 	}
 	profileInput := sqlitestore.LegacyInput{Relative: "profiles/newskill.json", Data: directJSON}
-	firstProfile, err := importEvolutionLegacyProfile(ctx, conn, profileInput)
-	if err != nil || firstProfile.Imported != 1 {
-		t.Fatalf("first profile import = %#v, %v", firstProfile, err)
+	firstProfile, firstProfileErr := importEvolutionLegacyProfile(ctx, conn, profileInput)
+	if firstProfileErr != nil || firstProfile.Imported != 1 {
+		t.Fatalf("first profile import = %#v, %v", firstProfile, firstProfileErr)
 	}
-	secondProfile, err := importEvolutionLegacyProfile(ctx, conn, profileInput)
-	if err != nil || secondProfile.Skipped != 1 || secondProfile.Issues[0].Code != "identity-conflict" {
-		t.Fatalf("duplicate profile import = %#v, %v", secondProfile, err)
+	secondProfile, secondProfileErr := importEvolutionLegacyProfile(ctx, conn, profileInput)
+	if secondProfileErr != nil || secondProfile.Skipped != 1 || secondProfile.Issues[0].Code != "identity-conflict" {
+		t.Fatalf("duplicate profile import = %#v, %v", secondProfile, secondProfileErr)
 	}
 
 	if err := conn.Close(); err != nil {
@@ -539,9 +605,9 @@ func TestEvolutionSQLiteLegacyEnumerationAndMalformedInputs(t *testing.T) {
 	}, "task-records", "task"); err == nil {
 		t.Fatal("record import ignored closed connection")
 	}
-	oneDraftJSON, err := json.Marshal([]SkillDraft{validDraft})
-	if err != nil {
-		t.Fatal(err)
+	oneDraftJSON, oneDraftMarshalErr := json.Marshal([]SkillDraft{validDraft})
+	if oneDraftMarshalErr != nil {
+		t.Fatal(oneDraftMarshalErr)
 	}
 	if _, err := importEvolutionLegacyDrafts(ctx, conn, sqlitestore.LegacyInput{Data: oneDraftJSON}); err == nil {
 		t.Fatal("draft import ignored closed connection")
@@ -666,26 +732,53 @@ func TestEvolutionSQLitePropagatesConnectionFailures(t *testing.T) {
 		name string
 		call func() error
 	}{
-		{name: "put-record", call: func() error { _, err := putEvolutionRecord(ctx, conn, "task", record, "", true); return err }},
+		{
+			name: "put-record",
+			call: func() error { _, err := putEvolutionRecord(ctx, conn, "task", record, "", true); return err },
+		},
 		{name: "insert-record", call: func() error { return insertEvolutionRecord(ctx, conn, "task", 0, record, nil) }},
-		{name: "update-record", call: func() error { return updateEvolutionRecord(ctx, conn, "task", 0, 1, record, nil) }},
-		{name: "record-children", call: func() error { return replaceEvolutionRecordChildren(ctx, conn, "task", record) }},
-		{name: "replace-records", call: func() error { return replaceEvolutionRecords(ctx, conn, "task", []LearningRecord{record}) }},
+		{
+			name: "update-record",
+			call: func() error { return updateEvolutionRecord(ctx, conn, "task", 0, 1, record, nil) },
+		},
+		{
+			name: "record-children",
+			call: func() error { return replaceEvolutionRecordChildren(ctx, conn, "task", record) },
+		},
+		{
+			name: "replace-records",
+			call: func() error { return replaceEvolutionRecords(ctx, conn, "task", []LearningRecord{record}) },
+		},
 		{name: "load-records", call: func() error { _, err := loadEvolutionRecords(ctx, conn, "task"); return err }},
-		{name: "load-record-strings", call: func() error { return loadEvolutionRecordStrings(ctx, conn, "task", nil, nil) }},
-		{name: "load-executions", call: func() error { return loadEvolutionToolExecutions(ctx, conn, "task", nil, nil) }},
+		{
+			name: "load-record-strings",
+			call: func() error { return loadEvolutionRecordStrings(ctx, conn, "task", nil, nil) },
+		},
+		{
+			name: "load-executions",
+			call: func() error { return loadEvolutionToolExecutions(ctx, conn, "task", nil, nil) },
+		},
 		{name: "load-attempts", call: func() error { return loadEvolutionAttemptTrails(ctx, conn, "task", nil, nil) }},
 		{name: "replace-drafts", call: func() error { return replaceEvolutionDrafts(ctx, conn, []SkillDraft{draft}) }},
 		{name: "insert-draft", call: func() error { return insertEvolutionDraft(ctx, conn, 0, draft) }},
 		{name: "put-draft", call: func() error { _, err := putEvolutionDraft(ctx, conn, draft, false); return err }},
 		{name: "draft-children", call: func() error { return replaceEvolutionDraftChildren(ctx, conn, draft) }},
 		{name: "load-drafts", call: func() error { _, err := loadEvolutionDrafts(ctx, conn); return err }},
-		{name: "put-profile", call: func() error { _, err := putEvolutionProfile(ctx, conn, profile, false); return err }},
+		{
+			name: "put-profile",
+			call: func() error { _, err := putEvolutionProfile(ctx, conn, profile, false); return err },
+		},
 		{name: "insert-profile", call: func() error { return insertEvolutionProfile(ctx, conn, profile) }},
 		{name: "update-profile", call: func() error { return updateEvolutionProfile(ctx, conn, profile, 1) }},
 		{name: "profile-children", call: func() error { return replaceEvolutionProfileChildren(ctx, conn, profile) }},
-		{name: "load-profile", call: func() error { _, _, err := loadEvolutionProfile(ctx, conn, paths.Workspace, "weather"); return err }},
-		{name: "load-profile-children", call: func() error { return loadOneEvolutionProfileChildren(ctx, conn, &profile) }},
+		{
+			name: "load-profile",
+			call: func() error { _, _, err := loadEvolutionProfile(ctx, conn, paths.Workspace, "weather"); return err },
+		},
+		{
+			name: "load-profile-children",
+			call: func() error { return loadOneEvolutionProfileChildren(ctx, conn, &profile) },
+		},
 		{name: "load-profiles", call: func() error { _, err := loadEvolutionProfiles(ctx, conn); return err }},
 		{name: "validate-schema", call: func() error { return validateEvolutionSchema(ctx, conn) }},
 		{name: "validate-positions", call: func() error { return validateEvolutionPositions(ctx, conn) }},
@@ -704,7 +797,14 @@ func TestEvolutionSQLiteRelationalFailureBoundaries(t *testing.T) {
 	t.Run("record-import-and-cap-boundaries", func(t *testing.T) {
 		withEvolutionCoverageConnection(t, func(paths Paths, conn *sql.Conn) {
 			record := evolutionCoverageRecord(paths)
-			if err := insertEvolutionRecord(ctx, conn, "task", maximumEvolutionRecords-1, record, "task-records"); err != nil {
+			if err := insertEvolutionRecord(
+				ctx,
+				conn,
+				"task",
+				maximumEvolutionRecords-1,
+				record,
+				"task-records",
+			); err != nil {
 				t.Fatal(err)
 			}
 			if written, err := putEvolutionRecord(ctx, conn, "task", record, "", false); err != nil || written {
@@ -867,7 +967,12 @@ func TestEvolutionSQLiteRelationalFailureBoundaries(t *testing.T) {
 		withEvolutionCoverageConnection(t, func(paths Paths, conn *sql.Conn) {
 			mustEvolutionCoverageSQL(t, conn, `CREATE TEMP TRIGGER fail_record_insert
 				BEFORE INSERT ON evolution_records BEGIN SELECT RAISE(ABORT, 'forced'); END`)
-			if err := replaceEvolutionRecords(ctx, conn, "task", []LearningRecord{evolutionCoverageRecord(paths)}); err == nil {
+			if err := replaceEvolutionRecords(
+				ctx,
+				conn,
+				"task",
+				[]LearningRecord{evolutionCoverageRecord(paths)},
+			); err == nil {
 				t.Fatal("record replacement insert failure was ignored")
 			}
 		})

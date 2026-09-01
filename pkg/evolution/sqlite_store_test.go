@@ -190,9 +190,9 @@ func TestEvolutionSQLiteMigratesArchivesAndAuditsLegacySources(t *testing.T) {
 		ChangeKind: evolution.ChangeKindAppend, HumanSummary: "draft", BodyOrPatch: "patch",
 		Status: evolution.DraftStatusCandidate,
 	}
-	draftData, err := json.Marshal([]evolution.SkillDraft{draft, {ID: "", WorkspaceID: workspace}})
-	if err != nil {
-		t.Fatal(err)
+	draftData, draftMarshalErr := json.Marshal([]evolution.SkillDraft{draft, {ID: "", WorkspaceID: workspace}})
+	if draftMarshalErr != nil {
+		t.Fatal(draftMarshalErr)
 	}
 	if err := os.WriteFile(paths.SkillDrafts, draftData, 0o600); err != nil {
 		t.Fatal(err)
@@ -201,9 +201,9 @@ func TestEvolutionSQLiteMigratesArchivesAndAuditsLegacySources(t *testing.T) {
 		SkillName: "weather", WorkspaceID: workspace, Status: evolution.SkillStatusActive,
 		Origin: "evolved", HumanSummary: "profile", LastUsedAt: time.Unix(1700000003, 0).UTC(),
 	}
-	profileData, err := json.Marshal(profile)
-	if err != nil {
-		t.Fatal(err)
+	profileData, profileMarshalErr := json.Marshal(profile)
+	if profileMarshalErr != nil {
+		t.Fatal(profileMarshalErr)
 	}
 	profilePath := filepath.Join(paths.ProfilesDir, "weather.json")
 	if err := os.WriteFile(profilePath, profileData, 0o600); err != nil {
@@ -211,21 +211,21 @@ func TestEvolutionSQLiteMigratesArchivesAndAuditsLegacySources(t *testing.T) {
 	}
 
 	store := evolution.NewSQLiteStore(paths)
-	tasks, err := store.LoadTaskRecords()
-	if err != nil {
-		t.Fatal(err)
+	tasks, tasksErr := store.LoadTaskRecords()
+	if tasksErr != nil {
+		t.Fatal(tasksErr)
 	}
-	patterns, err := store.LoadPatternRecords()
-	if err != nil {
-		t.Fatal(err)
+	patterns, patternsErr := store.LoadPatternRecords()
+	if patternsErr != nil {
+		t.Fatal(patternsErr)
 	}
-	drafts, err := store.LoadDrafts()
-	if err != nil {
-		t.Fatal(err)
+	drafts, draftsErr := store.LoadDrafts()
+	if draftsErr != nil {
+		t.Fatal(draftsErr)
 	}
-	loadedProfile, err := store.LoadProfile("weather")
-	if err != nil {
-		t.Fatal(err)
+	loadedProfile, profileErr := store.LoadProfile("weather")
+	if profileErr != nil {
+		t.Fatal(profileErr)
 	}
 	if len(tasks) != 1 || tasks[0].Summary != "split summary wins" ||
 		len(patterns) != 1 || len(drafts) != 1 || loadedProfile.HumanSummary != "profile" {
@@ -238,7 +238,12 @@ func TestEvolutionSQLiteMigratesArchivesAndAuditsLegacySources(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(paths.LegacyArchive, filepath.FromSlash(relative))); err != nil {
 			t.Fatalf("archive %s: %v", relative, err)
 		}
-		if _, err := os.Stat(filepath.Join(paths.RootDir, filepath.FromSlash(relative))); !errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(
+			filepath.Join(paths.RootDir, filepath.FromSlash(relative)),
+		); !errors.Is(
+			err,
+			os.ErrNotExist,
+		) {
 			t.Fatalf("legacy source %s remains: %v", relative, err)
 		}
 	}
@@ -257,9 +262,9 @@ func TestEvolutionSQLiteMigratesArchivesAndAuditsLegacySources(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.LoadLearningRecords()
-	if err != nil || len(second) != 2 {
-		t.Fatalf("idempotent reopen = %#v, %v", second, err)
+	second, secondLoadErr := store.LoadLearningRecords()
+	if secondLoadErr != nil || len(second) != 2 {
+		t.Fatalf("idempotent reopen = %#v, %v", second, secondLoadErr)
 	}
 }
 
