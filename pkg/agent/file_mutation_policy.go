@@ -226,33 +226,103 @@ func agentCheckpointRetainedStateFilesBounded(
 	maximumArchiveEntries,
 	maximumArchiveDepth int,
 ) ([]string, error) {
+	snapshot, err := agentCheckpointRetainedStateSnapshotBounded(
+		checkpointRoot,
+		archiveRoot,
+		maximumRootEntries,
+		maximumSources,
+		maximumArchiveEntries,
+		maximumArchiveDepth,
+	)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(snapshot))
+	for path, entry := range snapshot {
+		if entry.protect {
+			result = append(result, path)
+		}
+	}
+	slices.Sort(result)
+	return result, nil
+}
+
+type agentCheckpointStateEntry struct {
+	info    os.FileInfo
+	missing bool
+	protect bool
+}
+
+type agentCheckpointStateSnapshot map[string]agentCheckpointStateEntry
+
+// Package-test seams for deterministic namespace-race coverage. Production
+// leaves both nil.
+var (
+	agentCheckpointDuringRootEnumeration                func()
+	agentFileMutationIdentityBetweenCheckpointSnapshots func()
+)
+
+func agentCheckpointRetainedStateSnapshotBounded(
+	checkpointRoot,
+	archiveRoot string,
+	maximumRootEntries,
+	maximumSources,
+	maximumArchiveEntries,
+	maximumArchiveDepth int,
+) (agentCheckpointStateSnapshot, error) {
 	if maximumRootEntries < 1 || maximumSources < 1 || maximumArchiveEntries < 1 ||
 		maximumArchiveDepth < 1 {
 		return nil, errors.New("enumerate PR workspace checkpoint state: bounds are invalid")
 	}
-	files := make(map[string]struct{})
+	snapshot := make(agentCheckpointStateSnapshot)
 	rootInfo, err := os.Lstat(checkpointRoot)
 	switch {
 	case os.IsNotExist(err):
+		snapshot[checkpointRoot] = agentCheckpointStateEntry{missing: true}
 	case err != nil:
-		return nil, fmt.Errorf("enumerate PR workspace checkpoint state: %w", err)
+		return nil, errors.New("enumerate PR workspace checkpoint state: root cannot be inspected")
 	case !privateAgentCheckpointDirectory(checkpointRoot, rootInfo) || rootInfo.Mode()&os.ModeSymlink != 0:
 		return nil, errors.New("enumerate PR workspace checkpoint state: root is unsafe")
 	default:
-		root, openErr := os.Open(checkpointRoot)
+		root, openErr := os.OpenRoot(checkpointRoot)
 		if openErr != nil {
-			return nil, fmt.Errorf("enumerate PR workspace checkpoint state: %w", openErr)
+			return nil, errors.New("enumerate PR workspace checkpoint state: root cannot be opened")
 		}
-		openedInfo, statErr := root.Stat()
-		if statErr != nil || !os.SameFile(rootInfo, openedInfo) {
+		openedInfo, statErr := root.Stat(".")
+		if statErr != nil || !stableAgentCheckpointDirectory(rootInfo, openedInfo) {
+			_ = root.Close()
+			return nil, errors.New("enumerate PR workspace checkpoint state: root changed")
+		}
+		snapshot[checkpointRoot] = agentCheckpointStateEntry{info: openedInfo}
+		directory, directoryErr := root.Open(".")
+		if directoryErr != nil {
+			_ = root.Close()
+			return nil, errors.New("enumerate PR workspace checkpoint state: root cannot be opened")
+		}
+		directoryInfo, directoryStatErr := directory.Stat()
+		if directoryStatErr != nil || !stableAgentCheckpointDirectory(openedInfo, directoryInfo) {
+			_ = directory.Close()
 			_ = root.Close()
 			return nil, errors.New("enumerate PR workspace checkpoint state: root changed")
 		}
 		entries, sources := 0, 0
-		readErr := forEachCheckpointDirectoryEntry(root, func(entry os.DirEntry) error {
+		if agentCheckpointDuringRootEnumeration != nil {
+			agentCheckpointDuringRootEnumeration()
+		}
+		readErr := forEachCheckpointDirectoryEntry(directory, func(entry os.DirEntry) error {
 			entries++
 			if entries > maximumRootEntries {
 				return errors.New("entry limit exceeded")
+			}
+			info, infoErr := root.Lstat(entry.Name())
+			entryInfo, entryErr := entry.Info()
+			if infoErr == nil && (entry.Type()&os.ModeSymlink != 0 ||
+				info.Mode()&os.ModeSymlink != 0) {
+				return errors.New("entry is unsafe")
+			}
+			if infoErr != nil || entryErr != nil || info.Mode() != entryInfo.Mode() ||
+				!os.SameFile(info, entryInfo) {
+				return errors.New("entry changed during inspection")
 			}
 			if !strings.HasSuffix(entry.Name(), ".json") {
 				return nil
@@ -262,73 +332,137 @@ func agentCheckpointRetainedStateFilesBounded(
 				return errors.New("source limit exceeded")
 			}
 			path := filepath.Join(checkpointRoot, entry.Name())
-			info, statErr := os.Lstat(path)
-			if statErr != nil {
-				return statErr
-			}
 			if !privateAgentCheckpointFile(path, info) || info.Mode()&os.ModeSymlink != 0 {
 				return errors.New("source is unsafe")
 			}
-			files[path] = struct{}{}
-			files[filepath.Join(
+			snapshot[path] = agentCheckpointStateEntry{info: info, protect: true}
+			predictedArchive := filepath.Join(
 				archiveRoot,
 				"pr-workspace-checkpoints-v1",
 				entry.Name(),
-			)] = struct{}{}
+			)
+			predictedInfo, predictedErr := os.Lstat(predictedArchive)
+			switch {
+			case os.IsNotExist(predictedErr):
+				snapshot[predictedArchive] = agentCheckpointStateEntry{missing: true, protect: true}
+			case predictedErr != nil:
+				return errors.New("predicted archive cannot be inspected")
+			case predictedInfo.Mode()&os.ModeSymlink != 0 ||
+				!privateAgentCheckpointFile(predictedArchive, predictedInfo):
+				return errors.New("predicted archive is unsafe")
+			default:
+				snapshot[predictedArchive] = agentCheckpointStateEntry{
+					info: predictedInfo, protect: true,
+				}
+			}
 			return nil
 		})
-		closeErr := root.Close()
+		directoryCloseErr := directory.Close()
+		after, afterErr := root.Stat(".")
+		current, currentErr := os.Lstat(checkpointRoot)
+		rootCloseErr := root.Close()
 		if readErr != nil {
-			return nil, fmt.Errorf("enumerate PR workspace checkpoint state: %w", readErr)
+			return nil, safeAgentCheckpointEnumerationError(
+				"enumerate PR workspace checkpoint state",
+				readErr,
+			)
 		}
-		if closeErr != nil {
-			return nil, fmt.Errorf("enumerate PR workspace checkpoint state: %w", closeErr)
+		if directoryCloseErr != nil || rootCloseErr != nil || afterErr != nil || currentErr != nil ||
+			!stableAgentCheckpointDirectory(rootInfo, after) ||
+			!stableAgentCheckpointDirectory(rootInfo, current) {
+			return nil, errors.New("enumerate PR workspace checkpoint state: root changed")
 		}
 	}
 
 	archiveEntries := 0
-	err = enumerateCheckpointArchive(
+	err = snapshotCheckpointArchive(
 		archiveRoot,
-		archiveRoot,
-		0,
 		maximumArchiveDepth,
 		maximumArchiveEntries,
 		&archiveEntries,
-		files,
+		snapshot,
 	)
 	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("enumerate PR workspace checkpoint archives: %w", err)
+		return nil, safeAgentCheckpointEnumerationError(
+			"enumerate PR workspace checkpoint archives",
+			err,
+		)
 	}
-	result := make([]string, 0, len(files))
-	for path := range files {
-		result = append(result, path)
+	if os.IsNotExist(err) {
+		snapshot[archiveRoot] = agentCheckpointStateEntry{missing: true}
 	}
-	slices.Sort(result)
-	return result, nil
+	return snapshot, nil
 }
 
-func enumerateCheckpointArchive(
-	archiveRoot,
+func snapshotCheckpointArchive(
+	archiveRoot string,
+	maximumDepth,
+	maximumEntries int,
+	entries *int,
+	snapshot agentCheckpointStateSnapshot,
+) error {
+	info, err := os.Lstat(archiveRoot)
+	if os.IsNotExist(err) {
+		return os.ErrNotExist
+	}
+	if err != nil {
+		return errors.New("checkpoint archive cannot be inspected")
+	}
+	if !privateAgentCheckpointDirectory(archiveRoot, info) || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("checkpoint archive contains an unsafe directory")
+	}
+	root, err := os.OpenRoot(archiveRoot)
+	if err != nil {
+		return errors.New("checkpoint archive cannot be opened")
+	}
+	openedInfo, statErr := root.Stat(".")
+	if statErr != nil || !stableAgentCheckpointDirectory(info, openedInfo) {
+		_ = root.Close()
+		return errors.New("checkpoint archive directory changed during enumeration")
+	}
+	snapshot[archiveRoot] = agentCheckpointStateEntry{info: openedInfo}
+	collectErr := collectPinnedCheckpointArchive(
+		root,
+		archiveRoot,
+		0,
+		maximumDepth,
+		maximumEntries,
+		entries,
+		snapshot,
+	)
+	after, afterErr := root.Stat(".")
+	current, currentErr := os.Lstat(archiveRoot)
+	closeErr := root.Close()
+	if collectErr != nil {
+		return collectErr
+	}
+	if afterErr != nil || currentErr != nil || closeErr != nil ||
+		!stableAgentCheckpointDirectory(info, after) ||
+		!stableAgentCheckpointDirectory(info, current) {
+		return errors.New("checkpoint archive directory changed during enumeration")
+	}
+	return nil
+}
+
+func collectPinnedCheckpointArchive(
+	root *os.Root,
 	directory string,
 	depth,
 	maximumDepth,
 	maximumEntries int,
 	entries *int,
-	files map[string]struct{},
+	snapshot agentCheckpointStateSnapshot,
 ) error {
-	info, err := os.Lstat(directory)
-	if err != nil {
-		return err
-	}
-	if !privateAgentCheckpointDirectory(directory, info) || info.Mode()&os.ModeSymlink != 0 {
+	before, err := root.Stat(".")
+	if err != nil || !privateAgentCheckpointDirectory(directory, before) {
 		return errors.New("checkpoint archive contains an unsafe directory")
 	}
-	opened, err := os.Open(directory)
+	opened, err := root.Open(".")
 	if err != nil {
-		return err
+		return errors.New("checkpoint archive directory cannot be opened")
 	}
 	openedInfo, statErr := opened.Stat()
-	if statErr != nil || !os.SameFile(info, openedInfo) {
+	if statErr != nil || !stableAgentCheckpointDirectory(before, openedInfo) {
 		_ = opened.Close()
 		return errors.New("checkpoint archive directory changed during enumeration")
 	}
@@ -338,25 +472,46 @@ func enumerateCheckpointArchive(
 			return errors.New("checkpoint archive exceeds its safe entry limit")
 		}
 		path := filepath.Join(directory, entry.Name())
-		entryInfo, entryErr := os.Lstat(path)
-		if entryErr != nil {
-			return entryErr
+		entryInfo, entryErr := root.Lstat(entry.Name())
+		directoryEntryInfo, directoryEntryErr := entry.Info()
+		if entryErr != nil || directoryEntryErr != nil ||
+			entryInfo.Mode() != directoryEntryInfo.Mode() ||
+			!os.SameFile(entryInfo, directoryEntryInfo) {
+			return errors.New("checkpoint archive entry changed during inspection")
 		}
-		if entryInfo.Mode()&os.ModeSymlink != 0 {
+		if entry.Type()&os.ModeSymlink != 0 || entryInfo.Mode()&os.ModeSymlink != 0 {
 			return errors.New("checkpoint archive contains an unsafe symlink")
 		}
 		if entryInfo.IsDir() {
 			if depth >= maximumDepth {
 				return errors.New("checkpoint archive exceeds its safe depth limit")
 			}
-			return enumerateCheckpointArchive(
-				archiveRoot, path, depth+1, maximumDepth, maximumEntries, entries, files,
+			child, childErr := root.OpenRoot(entry.Name())
+			if childErr != nil {
+				return errors.New("checkpoint archive child cannot be opened")
+			}
+			childInfo, childStatErr := child.Stat(".")
+			if childStatErr != nil || !stableAgentCheckpointDirectory(entryInfo, childInfo) {
+				_ = child.Close()
+				return errors.New("checkpoint archive directory changed during enumeration")
+			}
+			snapshot[path] = agentCheckpointStateEntry{info: childInfo}
+			childCollectErr := collectPinnedCheckpointArchive(
+				child, path, depth+1, maximumDepth, maximumEntries, entries, snapshot,
 			)
+			childCloseErr := child.Close()
+			if childCollectErr != nil {
+				return childCollectErr
+			}
+			if childCloseErr != nil {
+				return errors.New("checkpoint archive child cannot be closed")
+			}
+			return nil
 		}
 		if !privateAgentCheckpointFile(path, entryInfo) {
 			return errors.New("checkpoint archive contains an unsafe file")
 		}
-		files[path] = struct{}{}
+		snapshot[path] = agentCheckpointStateEntry{info: entryInfo, protect: true}
 		return nil
 	})
 	closeErr := opened.Close()
@@ -366,7 +521,51 @@ func enumerateCheckpointArchive(
 	if closeErr != nil {
 		return closeErr
 	}
+	after, afterErr := root.Stat(".")
+	current, currentErr := os.Lstat(directory)
+	if afterErr != nil || currentErr != nil ||
+		!stableAgentCheckpointDirectory(before, after) ||
+		!stableAgentCheckpointDirectory(before, current) {
+		return errors.New("checkpoint archive directory changed during enumeration")
+	}
 	return nil
+}
+
+func safeAgentCheckpointEnumerationError(prefix string, err error) error {
+	if prefix == "" || err == nil {
+		return errors.New("checkpoint enumeration failed")
+	}
+	message := err.Error()
+	for _, safe := range []string{
+		"entry limit exceeded",
+		"source limit exceeded",
+		"entry is unsafe",
+		"entry changed during inspection",
+		"source is unsafe",
+		"predicted archive cannot be inspected",
+		"predicted archive is unsafe",
+		"checkpoint archive exceeds its safe entry limit",
+		"checkpoint archive entry changed during inspection",
+		"checkpoint archive contains an unsafe symlink",
+		"checkpoint archive exceeds its safe depth limit",
+		"checkpoint archive contains an unsafe directory",
+		"checkpoint archive contains an unsafe file",
+		"checkpoint archive directory changed during enumeration",
+		"checkpoint archive directory cannot be opened",
+		"checkpoint archive child cannot be opened",
+		"checkpoint archive child cannot be closed",
+	} {
+		if message == safe {
+			return errors.New(prefix + ": " + safe)
+		}
+	}
+	return errors.New(prefix + ": enumeration failed")
+}
+
+func stableAgentCheckpointDirectory(before, after os.FileInfo) bool {
+	return before != nil && after != nil && before.IsDir() && after.IsDir() &&
+		before.Mode() == after.Mode() && before.Size() == after.Size() &&
+		before.ModTime().Equal(after.ModTime()) && os.SameFile(before, after)
 }
 
 func forEachCheckpointDirectoryEntry(
@@ -671,7 +870,7 @@ func normalizeAgentFileMutationWorkspaces(workspaces []string) ([]string, error)
 		if err != nil {
 			return nil, fmt.Errorf("file-mutation workspace %d is invalid", index)
 		}
-		key := absolute
+		key := agentFileMutationWorkspaceKey(absolute)
 		if _, exists := seen[key]; exists {
 			continue
 		}
@@ -734,6 +933,15 @@ func agentFileMutationIdentityCatalogForWorkspaces(
 	for path := range beforeSidecars {
 		exactIdentities = append(exactIdentities, path)
 	}
+	beforeCheckpoints, err := agentCheckpointRetainedStateSnapshot(cfg)
+	if err != nil {
+		return nil, err
+	}
+	for path, entry := range beforeCheckpoints {
+		if entry.protect {
+			exactIdentities = append(exactIdentities, path)
+		}
+	}
 	catalog, err := tools.NewFileIdentityCatalog(tools.FileIdentityCatalogOptions{
 		ExactPaths:   exactIdentities,
 		TreeRoots:    trees,
@@ -756,6 +964,16 @@ func agentFileMutationIdentityCatalogForWorkspaces(
 	if !equalAgentAccountRouterLegacySidecarSnapshots(beforeSidecars, afterSidecars) {
 		return nil, errors.New("account-router legacy sidecars changed during snapshot")
 	}
+	if agentFileMutationIdentityBetweenCheckpointSnapshots != nil {
+		agentFileMutationIdentityBetweenCheckpointSnapshots()
+	}
+	afterCheckpoints, err := agentCheckpointRetainedStateSnapshot(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if !equalAgentCheckpointStateSnapshots(beforeCheckpoints, afterCheckpoints) {
+		return nil, errors.New("PR workspace checkpoint state changed during snapshot")
+	}
 	return catalog, nil
 }
 
@@ -776,6 +994,16 @@ func agentFileMutationIdentityCatalogTrees(
 		return nil, nil, fmt.Errorf("resolve file-identity config path: %w", err)
 	}
 	weixinRoot := filepath.Join(home, "channels", "weixin")
+	gitWorkspaceRoot := cfg.GitWorkspaceRootPath()
+	gitWorkspaceRoot, err = filepath.Abs(filepath.Clean(gitWorkspaceRoot))
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve file-identity Git workspace root: %w", err)
+	}
+	checkpointRoot := filepath.Join(
+		gitWorkspaceRoot,
+		".pr-workspace-implementation",
+		"active",
+	)
 	trees := []string{
 		filepath.Join(filepath.Dir(configPath), "legacy-json", "launcher-auth-v1"),
 		filepath.Join(home, "legacy-json", "auth-v1"),
@@ -785,6 +1013,8 @@ func agentFileMutationIdentityCatalogTrees(
 		filepath.Join(weixinRoot, "sync"),
 		filepath.Join(weixinRoot, "context-tokens"),
 		filepath.Join(weixinRoot, "legacy-json", "weixin-state-v1"),
+		filepath.Join(gitWorkspaceRoot, "legacy-json", "git-workspaces-v1"),
+		checkpointRoot,
 	}
 	exclusions := make([]string, 0, len(workspaces)*9)
 	evolutionStateDir := ""
@@ -843,7 +1073,63 @@ func agentFileMutationIdentityCatalogTrees(
 			)
 		}
 	}
+	for _, database := range []string{
+		filepath.Join(gitWorkspaceRoot, agentGitInventoryDatabase),
+		filepath.Join(checkpointRoot, agentCheckpointDatabase),
+	} {
+		exclusions = append(exclusions, database, database+"-wal", database+"-shm")
+	}
 	return trees, exclusions, nil
+}
+
+func agentCheckpointRetainedStateSnapshot(
+	cfg *config.Config,
+) (agentCheckpointStateSnapshot, error) {
+	gitWorkspaceRoot := cfg.GitWorkspaceRootPath()
+	gitWorkspaceRoot, err := filepath.Abs(filepath.Clean(gitWorkspaceRoot))
+	if err != nil {
+		return nil, errors.New("PR workspace checkpoint root cannot be resolved")
+	}
+	checkpointRoot := filepath.Join(
+		gitWorkspaceRoot,
+		".pr-workspace-implementation",
+		"active",
+	)
+	archiveRoot := filepath.Join(checkpointRoot, "legacy-json")
+	return agentCheckpointRetainedStateSnapshotBounded(
+		checkpointRoot,
+		archiveRoot,
+		agentCheckpointMaximumSources+4,
+		agentCheckpointMaximumSources,
+		agentCheckpointArchiveEntries,
+		agentCheckpointArchiveDepth,
+	)
+}
+
+func equalAgentCheckpointStateSnapshots(
+	left agentCheckpointStateSnapshot,
+	right agentCheckpointStateSnapshot,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for path, before := range left {
+		after, exists := right[path]
+		if !exists || before.missing != after.missing || before.protect != after.protect {
+			return false
+		}
+		if before.missing {
+			continue
+		}
+		if before.info == nil || after.info == nil ||
+			before.info.Mode() != after.info.Mode() ||
+			before.info.Size() != after.info.Size() ||
+			!before.info.ModTime().Equal(after.info.ModTime()) ||
+			!os.SameFile(before.info, after.info) {
+			return false
+		}
+	}
+	return true
 }
 
 type agentLegacySidecarSnapshot map[string]os.FileInfo

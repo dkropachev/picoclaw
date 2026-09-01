@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 func TestCheckpointArchiveRejectsSpecialFilesAndClosedEnumeration(t *testing.T) {
@@ -27,6 +29,9 @@ func TestCheckpointArchiveRejectsSpecialFilesAndClosedEnumeration(t *testing.T) 
 	if err == nil || files != nil || !strings.Contains(err.Error(), "unsafe file") {
 		t.Fatalf("special checkpoint archive = %#v, %v", files, err)
 	}
+	if strings.Contains(err.Error(), filepath.Base(fifo)) || strings.Contains(err.Error(), archiveRoot) {
+		t.Fatalf("checkpoint error disclosed private path: %v", err)
+	}
 
 	directory, err := os.Open(t.TempDir())
 	if err != nil {
@@ -37,6 +42,41 @@ func TestCheckpointArchiveRejectsSpecialFilesAndClosedEnumeration(t *testing.T) 
 	}
 	if err := forEachCheckpointDirectoryEntry(directory, func(os.DirEntry) error { return nil }); err == nil {
 		t.Fatal("closed checkpoint directory enumeration succeeded")
+	}
+}
+
+func TestCheckpointSnapshotRejectsRootReplacementDuringPinnedEnumeration(t *testing.T) {
+	parent := t.TempDir()
+	checkpointRoot := filepath.Join(parent, "private-checkpoint-root")
+	archiveRoot := filepath.Join(checkpointRoot, "legacy-json")
+	if err := os.MkdirAll(checkpointRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkpointRoot, "before.json"), []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moved := checkpointRoot + "-moved"
+	agentCheckpointDuringRootEnumeration = func() {
+		agentCheckpointDuringRootEnumeration = nil
+		if err := os.Rename(checkpointRoot, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(checkpointRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(checkpointRoot, "before.json"), []byte("replacement"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { agentCheckpointDuringRootEnumeration = nil })
+	snapshot, err := agentCheckpointRetainedStateSnapshotBounded(
+		checkpointRoot, archiveRoot, 4, 2, 4, 2,
+	)
+	if err == nil || snapshot != nil {
+		t.Fatalf("root-replaced checkpoint snapshot = %#v, %v", snapshot, err)
+	}
+	if strings.Contains(err.Error(), checkpointRoot) || strings.Contains(err.Error(), "before.json") {
+		t.Fatalf("root replacement error disclosed private path: %v", err)
 	}
 }
 
@@ -113,44 +153,70 @@ func TestSQLiteMutationPolicyFailsClosedWhenRootsCannotBeResolved(t *testing.T) 
 	}
 }
 
-func TestWeixinRetainedStateEnumerationPropagatesUnsafePathErrors(t *testing.T) {
-	invalidPath := "invalid\x00path"
-	if files, err := agentWeixinRetainedStateFiles(invalidPath, t.TempDir()); err == nil || files != nil {
-		t.Fatalf("invalid Weixin source root = %#v, %v", files, err)
-	}
-	if files, err := agentWeixinRetainedStateFiles(t.TempDir(), invalidPath); err == nil || files != nil {
-		t.Fatalf("invalid Weixin archive root = %#v, %v", files, err)
-	}
-}
-
-func TestMutationPolicyFiltersNonJSONAndPropagatesRouterEnumerationErrors(t *testing.T) {
-	weixinRoot := t.TempDir()
+func TestDynamicLegacyTreesAreValidatedByBoundedIdentityCatalog(t *testing.T) {
+	home := t.TempDir()
+	weixinRoot := filepath.Join(home, "channels", "weixin")
 	syncRoot := filepath.Join(weixinRoot, "sync")
-	if err := os.Mkdir(syncRoot, 0o700); err != nil {
+	if err := os.MkdirAll(syncRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(syncRoot, "ignored.txt"), []byte("ignored"), 0o600); err != nil {
+	nonJSON := filepath.Join(syncRoot, "retained-state.bin")
+	if err := os.WriteFile(nonJSON, []byte("retained"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if files, err := agentWeixinRetainedStateFiles(
-		weixinRoot, filepath.Join(weixinRoot, "missing-archive"),
-	); err != nil || len(files) != 0 {
-		t.Fatalf("filtered Weixin state = %#v, %v", files, err)
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+	workspace := t.TempDir()
+	roots, err := agentRuntimeFileMutationProtectedRoots("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := agentFileMutationIdentityCatalog(workspace, &config.Config{}, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(nonJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if protected, protectErr := catalog.ProtectsPath(nonJSON, info); protectErr != nil || !protected {
+		t.Fatalf("non-JSON retained state protected=%t err=%v", protected, protectErr)
 	}
 
 	workspaceFile := filepath.Join(t.TempDir(), "workspace-file")
 	if err := os.WriteFile(workspaceFile, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if roots, err := agentWorkspaceAccountRouterProtectedRoots(workspaceFile); err == nil || roots != nil {
-		t.Fatalf("regular-file router workspace = %#v, %v", roots, err)
+	if roots, rootErr := agentWorkspaceAccountRouterProtectedRoots(workspaceFile); rootErr != nil || len(roots) == 0 {
+		t.Fatalf("lexical regular-file router roots = %#v, %v", roots, rootErr)
+	}
+	if failed, catalogErr := agentFileMutationIdentityCatalog(
+		workspaceFile,
+		&config.Config{},
+		nil,
+	); catalogErr == nil || failed != nil {
+		t.Fatalf("regular-file workspace catalog = %#v, %v", failed, catalogErr)
 	}
 
-	workspace := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workspace, "state"), []byte("blocks archive traversal"), 0o600); err != nil {
+	blockedWorkspace := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(blockedWorkspace, "state"),
+		[]byte("blocks archive traversal"),
+		0o600,
+	); err != nil {
 		t.Fatal(err)
 	}
-	if roots, err := agentWorkspaceAccountRouterProtectedRoots(workspace); err == nil || roots != nil {
-		t.Fatalf("blocked router archive traversal = %#v, %v", roots, err)
+	if roots, rootErr := agentWorkspaceAccountRouterProtectedRoots(
+		blockedWorkspace,
+	); rootErr != nil ||
+		len(roots) == 0 {
+		t.Fatalf("lexical blocked router roots = %#v, %v", roots, rootErr)
+	}
+	if failed, catalogErr := agentFileMutationIdentityCatalog(
+		blockedWorkspace,
+		&config.Config{},
+		nil,
+	); catalogErr == nil || failed != nil {
+		t.Fatalf("blocked router archive catalog = %#v, %v", failed, catalogErr)
 	}
 }

@@ -105,6 +105,11 @@ func newAgentRegistryWithRuntimePolicies(
 	if protectedRootErr != nil {
 		panic(fmt.Sprintf("build workspace file-mutation policy: %v", protectedRootErr))
 	}
+	gitRoots, gitRootErr := agentGitWorkspaceFileMutationProtectedRoots(cfg)
+	if gitRootErr != nil {
+		panic(fmt.Sprintf("build Git workspace file-mutation policy: %v", gitRootErr))
+	}
+	fileMutationProtectedRoots = append(fileMutationProtectedRoots, gitRoots...)
 	agentConfigs := cfg.Agents.List
 	mutationWorkspaces, workspaceErr := agentRegistryFileMutationWorkspaces(cfg, agentConfigs)
 	if workspaceErr != nil {

@@ -2347,6 +2347,76 @@ func TestAgentFileMutationIdentityCatalogRejectsOverdeepMutableArchive(t *testin
 	}
 }
 
+func TestAgentFileMutationIdentityCatalogRejectsCheckpointSnapshotRaces(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*testing.T, string, string)
+	}{
+		{
+			name: "source-created-after-catalog",
+			run: func(t *testing.T, checkpointRoot, _ string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(checkpointRoot, "late.json"), []byte("late"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "source-migrated-after-catalog",
+			run: func(t *testing.T, checkpointRoot, archiveRoot string) {
+				t.Helper()
+				source := filepath.Join(checkpointRoot, "active.json")
+				destination := filepath.Join(
+					archiveRoot,
+					"pr-workspace-checkpoints-v1",
+					filepath.Base(source),
+				)
+				if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(source, destination); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			workspace := filepath.Join(root, "workspace")
+			gitRoot := filepath.Join(root, "git-workspaces")
+			checkpointRoot := filepath.Join(
+				gitRoot,
+				".pr-workspace-implementation",
+				"active",
+			)
+			archiveRoot := filepath.Join(checkpointRoot, "legacy-json")
+			if err := os.MkdirAll(checkpointRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(checkpointRoot, "active.json"), []byte("active"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(config.EnvHome, home)
+			t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+			cfg := agentFileMutationTestConfig(workspace)
+			cfg.GitWorkspaces.RootDir = gitRoot
+			agentFileMutationIdentityBetweenCheckpointSnapshots = func() {
+				agentFileMutationIdentityBetweenCheckpointSnapshots = nil
+				test.run(t, checkpointRoot, archiveRoot)
+			}
+			t.Cleanup(func() { agentFileMutationIdentityBetweenCheckpointSnapshots = nil })
+			catalog, err := agentFileMutationIdentityCatalog(workspace, cfg, nil)
+			if err == nil || catalog != nil || !strings.Contains(err.Error(), "checkpoint state changed") {
+				t.Fatalf("checkpoint-raced catalog = %#v, %v", catalog, err)
+			}
+			if strings.Contains(err.Error(), checkpointRoot) || strings.Contains(err.Error(), "active.json") {
+				t.Fatalf("checkpoint race error disclosed private path: %v", err)
+			}
+		})
+	}
+}
+
 func TestWorkflowProtectionLeavesDefinitionsArtifactsAndConfigEditable(t *testing.T) {
 	workspace := t.TempDir()
 	home := t.TempDir()
