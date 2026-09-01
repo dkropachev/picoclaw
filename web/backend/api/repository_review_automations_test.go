@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,10 @@ type repositoryReviewRecoveryProfileRunner struct {
 	profile workflows.RepositoryReviewModelProfile
 }
 
+type repositoryReviewErrorProfileRunner struct {
+	err error
+}
+
 func (runner *repositoryReviewRecoveryProfileRunner) RunAgent(
 	context.Context,
 	workflows.AgentRequest,
@@ -43,6 +48,22 @@ func (runner *repositoryReviewRecoveryProfileRunner) ResolveRepositoryReviewProf
 	[]string,
 ) (workflows.RepositoryReviewModelProfile, error) {
 	return runner.profile, nil
+}
+
+func (runner *repositoryReviewErrorProfileRunner) RunAgent(
+	context.Context,
+	workflows.AgentRequest,
+) (map[string]any, error) {
+	return nil, errors.New("unexpected agent call")
+}
+
+func (runner *repositoryReviewErrorProfileRunner) ResolveRepositoryReviewProfile(
+	context.Context,
+	string,
+	string,
+	[]string,
+) (workflows.RepositoryReviewModelProfile, error) {
+	return workflows.RepositoryReviewModelProfile{}, runner.err
 }
 
 func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T) {
@@ -1460,6 +1481,216 @@ func TestRepositoryReviewAutomationChangedCommitOrProfileResetStartsCleanCampaig
 			case <-time.After(time.Second):
 				t.Fatal("clean campaign did not start")
 			}
+		})
+	}
+}
+
+func TestRepositoryReviewAutomationContinuationStartsCleanCampaignAfterRuntimeProfileDrift(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		action string
+		status repoaudit.RepositoryReviewAutomationStatus
+		stage  string
+	}{
+		{name: "manual resume", action: "resume", status: repoaudit.RepositoryReviewAutomationFailed},
+		{name: "automatic handoff", action: "start", status: repoaudit.RepositoryReviewAutomationIdle, stage: "next batch queued"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
+			t.Cleanup(handler.Shutdown)
+			controller := handler.repositoryReviewControllerInstance()
+			cfg, err := config.LoadConfig(handler.configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := handler.repositoryReviewStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			previousRunners := newWorkflowRuntimeRunners
+			t.Cleanup(func() { newWorkflowRuntimeRunners = previousRunners })
+			currentProfile := workflows.RepositoryReviewModelProfile{
+				Revision: "sha256:current-model-graph", AccountRef: "api",
+				ReviewerModels: []string{"cheap"}, MaxContentBytes: 65536,
+			}
+			newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
+				return workflowRuntimeRunners{
+					Agents: &repositoryReviewRecoveryProfileRunner{profile: currentProfile},
+				}
+			}
+
+			commit := strings.Repeat("a", 40)
+			campaignID := repoaudit.NewRepositoryReviewCampaignID()
+			scopePlan := repoaudit.RepositoryReviewScopePlan{
+				CommitSHA: commit, PolicyHash: strings.Repeat("b", 64),
+				Hash: strings.Repeat("c", 64), Summary: "Frozen review scope",
+			}
+			scopeSelection := repoaudit.RepositoryReviewScopeSelection{
+				IncludePrefixes: []string{"pkg"},
+			}
+			input := testRepositoryReviewAutomation()
+			input.Status = test.status
+			if test.action == "resume" {
+				input.PauseReason = repoaudit.RepositoryReviewPauseRunFailed
+				input.PauseDetail = "repository review state changed"
+			}
+			input.CampaignID = campaignID
+			input.ResolvedCommitSHA = commit
+			input.EffectiveAccountRef = "api"
+			input.ScopePlan = scopePlan
+			input.ScopeSelection = &scopeSelection
+			input.StartedAt = time.Now().Add(-time.Hour)
+			input.RunIDs = []string{"wr_before_profile_drift"}
+			input.Progress = repoaudit.RepositoryReviewProgress{
+				Stage:            test.stage,
+				CompletedBatches: 2, TotalBatches: 3, InspectedFiles: 7, RemainingFiles: 3,
+			}
+			input.Usage = repoaudit.RepositoryReviewTokenUsage{TotalTokens: 100}
+			automation, err := store.CreateAutomation(t.Context(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			oldProfile := currentProfile
+			oldProfile.Revision = "sha256:previous-model-graph"
+			oldProfileHash, err := repositoryReviewLegacyProfileHash(
+				automation, scopePlan.Hash, oldProfile,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assignmentCatalog, err := workflows.RepositoryBugFinderAssignmentCatalog(
+				oldProfile.ReviewerModels,
+				oldProfile.IncludeDefaultReviewer,
+				workflows.RepositoryBugFinderPromptRevision,
+				oldProfileHash,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			file := repoaudit.FileRef{
+				Path: "pkg/review.go", BlobSHA: strings.Repeat("d", 40),
+				SizeBytes: 100, Category: "code", Mode: "100644",
+			}
+			state, _, err := store.Get(repoaudit.CanonicalRepositoryIdentity(automation.Repository))
+			if err != nil {
+				t.Fatal(err)
+			}
+			missingChanged, missingErr := controller.repositoryReviewRuntimeProfileChanged(
+				t.Context(), store, cfg, automation,
+			)
+			if missingErr != nil || !missingChanged {
+				t.Fatalf("missing campaign profile changed=%v err=%v", missingChanged, missingErr)
+			}
+			if _, beginErr := store.BeginCampaign(t.Context(), repoaudit.BeginCampaignRequest{
+				Repository: state.Repository, CampaignID: campaignID, CommitSHA: commit,
+				ExpectedReviewVersion: state.ReviewVersion, Exact: true,
+			}); beginErr != nil {
+				t.Fatal(beginErr)
+			}
+			if _, planErr := store.PlanAssignmentsForCampaign(
+				t.Context(), state.Repository, commit, "inventory", oldProfileHash,
+				campaignID, assignmentCatalog, []repoaudit.FileRef{file}, false, 1, true,
+			); planErr != nil {
+				t.Fatal(planErr)
+			}
+			if test.action == "resume" {
+				newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
+					return workflowRuntimeRunners{Agents: &repositoryReviewErrorProfileRunner{
+						err: errors.New("profile resolution failed"),
+					}}
+				}
+				if _, profileErr := controller.repositoryReviewRuntimeProfileChanged(
+					t.Context(), store, cfg, automation,
+				); profileErr == nil || !strings.Contains(profileErr.Error(), "profile resolution failed") {
+					t.Fatalf("profile resolution error=%v", profileErr)
+				}
+				newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
+					return workflowRuntimeRunners{Agents: &repositoryReviewRecoveryProfileRunner{
+						profile: workflows.RepositoryReviewModelProfile{
+							Revision: "sha256:invalid-content-bound", AccountRef: "api",
+							ReviewerModels: []string{"cheap"},
+						},
+					}}
+				}
+				if _, hashErr := controller.repositoryReviewRuntimeProfileChanged(
+					t.Context(), store, cfg, automation,
+				); hashErr == nil {
+					t.Fatal("invalid resolved profile produced a campaign hash")
+				}
+				ledgerPaths, globErr := filepath.Glob(filepath.Join(
+					workspace, "repository_reviews", "repo_*.json",
+				))
+				ledgerPaths = slices.DeleteFunc(ledgerPaths, func(pathValue string) bool {
+					return strings.HasSuffix(pathValue, ".summary.json")
+				})
+				if globErr != nil || len(ledgerPaths) != 1 {
+					t.Fatalf("ledger paths=%v err=%v", ledgerPaths, globErr)
+				}
+				ledgerData, readErr := os.ReadFile(ledgerPaths[0])
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if writeErr := os.WriteFile(ledgerPaths[0], []byte("{"), 0o600); writeErr != nil {
+					t.Fatal(writeErr)
+				}
+				if _, stateErr := controller.repositoryReviewRuntimeProfileChanged(
+					t.Context(), store, cfg, automation,
+				); stateErr == nil {
+					t.Fatal("corrupt campaign state was accepted")
+				}
+				if writeErr := os.WriteFile(ledgerPaths[0], ledgerData, 0o600); writeErr != nil {
+					t.Fatal(writeErr)
+				}
+				newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
+					return workflowRuntimeRunners{
+						Agents: &repositoryReviewRecoveryProfileRunner{profile: currentProfile},
+					}
+				}
+			}
+
+			started := make(chan repoaudit.RepositoryReviewAutomation, 1)
+			release := make(chan struct{})
+			controller.runBatch = func(
+				_ context.Context,
+				candidate repoaudit.RepositoryReviewAutomation,
+				runID string,
+				_ workflows.AgentUsageObserver,
+			) (*workflows.RunResult, error) {
+				started <- candidate
+				<-release
+				return &workflows.RunResult{
+					RunID: runID, Status: workflows.RunStatusSucceeded,
+					Outputs: map[string]any{"commit": commit, "remainingFiles": 0},
+				}, nil
+			}
+
+			resumed, err := controller.startAutomation(
+				t.Context(), automation.ID, automation.Version, false, test.action,
+			)
+			if err != nil {
+				close(release)
+				t.Fatal(err)
+			}
+			if resumed.CampaignID == campaignID || resumed.CampaignID == "" ||
+				resumed.ScopeSelection != nil || resumed.ScopePlan.Hash != "" ||
+				resumed.Progress.CompletedBatches != 0 || resumed.Progress.InspectedFiles != 0 ||
+				resumed.Usage != (repoaudit.RepositoryReviewTokenUsage{}) {
+				close(release)
+				t.Fatalf("runtime profile drift resume=%#v", resumed)
+			}
+			select {
+			case observed := <-started:
+				if observed.CampaignID != resumed.CampaignID || observed.ScopeSelection != nil {
+					close(release)
+					t.Fatalf("clean campaign batch=%#v", observed)
+				}
+			case <-time.After(time.Second):
+				close(release)
+				t.Fatal("clean campaign did not start")
+			}
+			close(release)
 		})
 	}
 }

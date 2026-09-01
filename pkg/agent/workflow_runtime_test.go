@@ -135,6 +135,28 @@ func TestRepositoryReviewProfileUsesDefaultFallbackChainAndRelevantDependencies(
 		!reflect.DeepEqual(exact.ReviewerModels, []string{"review-primary", "review-fallback"}) {
 		t.Fatalf("explicit review profile=%#v err=%v", exact, err)
 	}
+	agent, found := loop.GetRegistry().GetAgent("main")
+	if !found {
+		t.Fatal("main agent not found")
+	}
+	agent.Candidates = []providers.FallbackCandidate{{
+		Provider: "openai", Model: "volatile-default-selection",
+	}}
+	stableExplicit, err := runner.ResolveRepositoryReviewProfile(
+		t.Context(), "main", "", []string{"review-primary", "review-fallback"},
+	)
+	if err != nil || stableExplicit.Revision != exact.Revision {
+		t.Fatalf(
+			"default runtime selection changed explicit profile from %q to %q: %v",
+			exact.Revision,
+			stableExplicit.Revision,
+			err,
+		)
+	}
+	changedDefault, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", "", nil)
+	if err != nil || changedDefault.Revision == relevant.Revision {
+		t.Fatalf("default runtime selection did not change inherited profile=%#v err=%v", changedDefault, err)
+	}
 	cfg.ModelList[0].Provider = "codex-cli"
 	cfg.ModelList[0].Model = "codex-cli/codex"
 	if _, err := runner.ResolveRepositoryReviewProfile(
