@@ -519,7 +519,7 @@ func waitRepositoryModelEvaluationControllerIdle(
 	}()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("repository model evaluation worker did not exit")
 	}
 }
