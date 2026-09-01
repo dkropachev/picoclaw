@@ -3,7 +3,6 @@ package agent
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/accountrouter"
@@ -339,7 +338,7 @@ func buildAccountRouterWithAliases(
 			RPM:        rpm,
 		}
 	}
-	statePath := filepath.Join(workspace, "account_router_state.json")
+	statePath := accountrouter.DatabasePath(workspace)
 	return accountrouter.New(accountRef, routerCfg, accounts, statePath)
 }
 

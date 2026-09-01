@@ -247,7 +247,7 @@ func TestOAuthTokenRenewalRecoversExactAccountRouterCredential(t *testing.T) {
 
 	const target = "credential:openai:work"
 	const sibling = "credential:openai:worker"
-	statePath := filepath.Join(workspace, "account_router_state.json")
+	statePath := accountrouter.DatabasePath(workspace)
 	router := accountrouter.New("router-main", &config.AccountRouterConfig{
 		Enabled: true,
 		Entry:   "target",
@@ -367,8 +367,8 @@ func TestOAuthCredentialPersistenceTreatsRouterInvalidationAsBestEffort(t *testi
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	wantPaths := []string{
-		filepath.Join(defaultWorkspace, "account_router_state.json"),
-		filepath.Join(workerWorkspace, "account_router_state.json"),
+		accountrouter.DatabasePath(defaultWorkspace),
+		accountrouter.DatabasePath(workerWorkspace),
 	}
 	if len(invalidatedPaths) != len(wantPaths) {
 		t.Fatalf("invalidation paths = %v, want %v", invalidatedPaths, wantPaths)

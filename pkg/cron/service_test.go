@@ -26,7 +26,7 @@ func TestSaveStore_FilePermissions(t *testing.T) {
 		t.Fatalf("AddJob failed: %v", err)
 	}
 
-	info, err := os.Stat(storePath)
+	info, err := os.Stat(cs.storePath)
 	if err != nil {
 		t.Fatalf("Stat failed: %v", err)
 	}
@@ -41,14 +41,15 @@ func int64Ptr(v int64) *int64 {
 	return &v
 }
 
-func setupService(handler JobHandler) (*CronService, string) {
-	tmpFile := fmt.Sprintf("test_cron_%d.json", time.Now().UnixNano())
+func setupService(t *testing.T, handler JobHandler) (*CronService, string) {
+	t.Helper()
+	tmpFile := filepath.Join(t.TempDir(), fmt.Sprintf("test_cron_%d.json", time.Now().UnixNano()))
 	cs := NewCronService(tmpFile, handler)
-	return cs, tmpFile
+	return cs, cs.storePath
 }
 
 func TestCronService_CRUD(t *testing.T) {
-	cs, path := setupService(nil)
+	cs, path := setupService(t, nil)
 	defer os.Remove(path)
 
 	// Test AddJob
@@ -84,7 +85,7 @@ func TestCronService_CRUD(t *testing.T) {
 }
 
 func TestCronService_GetJobReturnsCopy(t *testing.T) {
-	cs, path := setupService(nil)
+	cs, path := setupService(t, nil)
 	defer os.Remove(path)
 
 	everyMS := int64(60_000)
@@ -126,7 +127,7 @@ func TestCronService_GetJobReturnsCopy(t *testing.T) {
 }
 
 func TestCronService_UpdateJobRecomputesNextRunOnScheduleOrEnabledChange(t *testing.T) {
-	cs, path := setupService(nil)
+	cs, path := setupService(t, nil)
 	defer os.Remove(path)
 
 	at := time.Now().Add(time.Hour).UnixMilli()
@@ -176,7 +177,7 @@ func TestCronService_UpdateJobRecomputesNextRunOnScheduleOrEnabledChange(t *test
 }
 
 func TestCronService_UpdateJobPreservesRunStateOnPayloadOnlyChange(t *testing.T) {
-	cs, path := setupService(nil)
+	cs, path := setupService(t, nil)
 	defer os.Remove(path)
 
 	everyMS := int64(60_000)
@@ -215,7 +216,7 @@ func TestCronService_UpdateJobPreservesRunStateOnPayloadOnlyChange(t *testing.T)
 
 // 2. Test Cron Expression Calculation Logic
 func TestCronService_ComputeNextRun(t *testing.T) {
-	cs, path := setupService(nil)
+	cs, path := setupService(t, nil)
 	defer os.Remove(path)
 
 	now := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
@@ -254,7 +255,7 @@ func TestCronService_ExecutionFlow(t *testing.T) {
 		return "ok", nil
 	}
 
-	cs, path := setupService(handler)
+	cs, path := setupService(t, handler)
 	defer os.Remove(path)
 
 	// Start the service
@@ -406,16 +407,16 @@ func TestCronService_RestartExecutesOverdueDurableOneShot(t *testing.T) {
 }
 
 func TestCronService_PersistenceIntegrity(t *testing.T) {
-	tmpFile := "persist_test.json"
-	defer os.Remove(tmpFile)
+	tmpFile := filepath.Join(t.TempDir(), "persist_test.json")
 
 	// write a job and persist
 	cs1 := NewCronService(tmpFile, nil)
+	databasePath := cs1.storePath
 	at := int64(2000000000000)
 	cs1.AddJob("PersistMe", CronSchedule{Kind: "at", AtMS: &at}, "payload", "ch1", "")
 
 	// check file exists
-	if _, err := os.Stat(tmpFile); os.IsNotExist(err) {
+	if _, err := os.Stat(databasePath); os.IsNotExist(err) {
 		t.Fatal("Store file was not created")
 	}
 
@@ -429,18 +430,26 @@ func TestCronService_PersistenceIntegrity(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].Name != "PersistMe" {
 		t.Errorf("Data corruption after reload. Got: %+v", jobs)
 	}
+	if err := cs1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs2.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-	// test loading invalid JSON
-	os.WriteFile(tmpFile, []byte("{invalid json}"), 0o644)
+	// test loading a corrupt SQLite database
+	if err := os.WriteFile(databasePath, []byte("not sqlite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cs3 := NewCronService(tmpFile, nil)
 	err := cs3.loadStore()
 	if err == nil {
-		t.Error("Should return error when loading invalid JSON")
+		t.Error("Should return error when loading invalid SQLite")
 	}
 }
 
 func TestCronService_ConcurrentAccess(t *testing.T) {
-	cs, path := setupService(nil)
+	cs, path := setupService(t, nil)
 	defer os.Remove(path)
 
 	cs.Start()

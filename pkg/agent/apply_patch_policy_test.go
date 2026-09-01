@@ -26,6 +26,13 @@ func TestAgentApplyPatchProtectedRootsUsesAuthoritativeConstructionPaths(t *test
 	want := []string{
 		filepath.Join(workspace, "sessions"),
 		filepath.Join(workspace, "account_router_state.json"),
+		filepath.Join(workspace, "state", "account-router.db"),
+		filepath.Join(workspace, "state", "account-router.db-shm"),
+		filepath.Join(workspace, "state", "account-router.db-wal"),
+		filepath.Join(workspace, "state", "account-router.db.locks"),
+		filepath.Join(workspace, "state", "account-router.db.locks", "store.lock"),
+		filepath.Join(workspace, "state", "legacy-json", "account-router-v1"),
+		filepath.Join(workspace, "state", "legacy-json", "account-router-v1", "account_router_state.json"),
 		gitRoot,
 	}
 	got := agentApplyPatchProtectedRoots(workspace, cfg)
@@ -43,6 +50,13 @@ func TestAgentApplyPatchProtectedRootsWithoutConfig(t *testing.T) {
 	want := []string{
 		filepath.Join(workspace, "sessions"),
 		filepath.Join(workspace, "account_router_state.json"),
+		filepath.Join(workspace, "state", "account-router.db"),
+		filepath.Join(workspace, "state", "account-router.db-shm"),
+		filepath.Join(workspace, "state", "account-router.db-wal"),
+		filepath.Join(workspace, "state", "account-router.db.locks"),
+		filepath.Join(workspace, "state", "account-router.db.locks", "store.lock"),
+		filepath.Join(workspace, "state", "legacy-json", "account-router-v1"),
+		filepath.Join(workspace, "state", "legacy-json", "account-router-v1", "account_router_state.json"),
 	}
 	if got := agentApplyPatchProtectedRoots(workspace, nil); !reflect.DeepEqual(got, want) {
 		t.Fatalf("nil-config protected roots = %#v, want %#v", got, want)
@@ -452,11 +466,14 @@ func TestAgentApplyPatchPolicyProtectsRootAndOwnerControlPaths(t *testing.T) {
 	t.Setenv(config.EnvHome, t.TempDir())
 	workspace := t.TempDir()
 	fixtures := map[string]string{
-		"sessions/private.jsonl":         "session\n",
-		"account_router_state.json":      "account\n",
-		".git-workspaces/inventory.json": "inventory\n",
-		"src/root-compatible.txt":        "before\n",
-		"src/owner-compatible.txt":       "before\n",
+		"sessions/private.jsonl":                                        "session\n",
+		"account_router_state.json":                                     "account\n",
+		"state/account-router.db":                                       "database\n",
+		"state/account-router.db.locks/store.lock":                      "lock\n",
+		"state/legacy-json/account-router-v1/account_router_state.json": "archive\n",
+		".git-workspaces/inventory.json":                                "inventory\n",
+		"src/root-compatible.txt":                                       "before\n",
+		"src/owner-compatible.txt":                                      "before\n",
 	}
 	for relative, content := range fixtures {
 		path := filepath.Join(workspace, filepath.FromSlash(relative))
@@ -499,6 +516,9 @@ func TestAgentApplyPatchPolicyProtectsRootAndOwnerControlPaths(t *testing.T) {
 		for _, relative := range []string{
 			"sessions/private.jsonl",
 			"account_router_state.json",
+			"state/account-router.db",
+			"state/account-router.db.locks/store.lock",
+			"state/legacy-json/account-router-v1/account_router_state.json",
 			".git-workspaces/inventory.json",
 		} {
 			before, readErr := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(relative)))

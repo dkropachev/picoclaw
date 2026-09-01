@@ -944,7 +944,9 @@ func stopRuntimeProducers(
 		runningServices.HeartbeatService.Stop()
 	}
 	if runningServices.CronService != nil {
-		runningServices.CronService.Stop()
+		if err := runningServices.CronService.Close(); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("stop cron service: %w", err))
+		}
 	}
 	return cleanupErr
 }
@@ -1852,7 +1854,7 @@ func setupCronTool(
 	cfg *config.Config,
 	executionPolicy isolation.ExecutionPolicy,
 ) (*cron.CronService, error) {
-	cronStorePath := filepath.Join(workspace, "cron", "jobs.json")
+	cronStorePath := filepath.Join(workspace, "cron", "jobs.db")
 
 	cronService := cron.NewCronService(cronStorePath, nil)
 	cronService.SetJobAdmission(func(

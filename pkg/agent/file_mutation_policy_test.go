@@ -593,6 +593,59 @@ func TestAgentFileMutationPolicyHomeInsideWorkspaceOmitsUnsafeApplyPatch(t *test
 	}
 }
 
+func TestAgentFileMutationPolicyProtectsAccountRouterStateAndHardlinks(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+	database := filepath.Join(workspace, "state", "account-router.db")
+	lockFile := filepath.Join(database+".locks", "store.lock")
+	archive := filepath.Join(
+		workspace, "state", "legacy-json", "account-router-v1", "account_router_state.json",
+	)
+	legacy := filepath.Join(workspace, "account_router_state.json")
+	sidecar := legacy + ".auth-invalidation.0123456789abcdef0123456789abcdef"
+	targets := []string{database, database + "-wal", database + "-shm", lockFile, archive, legacy, sidecar}
+	for _, path := range targets {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := agentFileMutationTestConfig(workspace)
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+	for _, target := range targets {
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			requireAgentFileMutationDenied(t, agent.Tools, toolName, workspace, target, true)
+		}
+	}
+	for label, source := range map[string]string{
+		"database": database,
+		"lock":     lockFile,
+		"archive":  archive,
+		"sidecar":  sidecar,
+	} {
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			alias := filepath.Join(workspace, label+"-"+toolName+".alias")
+			if err := os.Link(source, alias); err != nil {
+				t.Skipf("hardlinks unavailable: %v", err)
+			}
+			if toolName == "apply_patch" {
+				tool, _ := agent.Tools.Get(toolName)
+				result := executeAgentFileMutation(t, tool, toolName, workspace, alias, true)
+				if result == nil || !result.IsError {
+					t.Fatalf("apply_patch accepted %s hardlink: %#v", label, result)
+				}
+				continue
+			}
+			requireAgentFileMutationDenied(t, agent.Tools, toolName, workspace, alias, true)
+		}
+	}
+}
+
 func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")

@@ -965,7 +965,7 @@ func (h *Handler) invalidateAccountRouterCredentialAuth(credentialID string) {
 	}
 
 	for workspace := range workspaces {
-		statePath := filepath.Join(workspace, "account_router_state.json")
+		statePath := accountrouter.DatabasePath(workspace)
 		if err := oauthInvalidateCredentialAuth(statePath, credentialID); err != nil {
 			// Credential persistence is already durable. Router recovery is a
 			// best-effort follow-up and must not turn a successful renewal into

@@ -1152,7 +1152,7 @@ func TestHandleConfigReloadFencesDueCandidateCommandOnRollback(t *testing.T) {
 				entered:   commandEntered,
 			}
 			cronService := cron.NewCronService(
-				filepath.Join(newCfg.WorkspacePath(), "cron", "jobs.json"),
+				filepath.Join(newCfg.WorkspacePath(), "cron", "jobs.db"),
 				nil,
 			)
 			cronTool, setupErr := tools.NewCronTool(

@@ -88,7 +88,7 @@ PicoClaw menyimpan data dalam workspace yang dikonfigurasikan (lalai: `~/.picocl
 ~/.picoclaw/workspace/
 ├── sessions/          # Sesi perbualan dan sejarah
 ├── memory/            # Memori jangka panjang (MEMORY.md)
-├── state/             # Keadaan SQLite masa jalan (runtime.db, saluran/sembang terakhir)
+├── state/             # Keadaan SQLite masa jalan (runtime.db, account-router.db)
 ├── cron/              # Pangkalan data job berjadual
 ├── skills/            # Skill tersuai
 ├── AGENTS.md          # Panduan tingkah laku agen

@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -397,20 +396,12 @@ func TestNewControllerLocalRepairRunnerUsesBlankAccountAffinity(t *testing.T) {
 		t.Fatal("blank-affinity initial selection did not choose the first blind account")
 	}
 
-	data, err := os.ReadFile(statePath)
+	sessionKeys, err := accountrouter.SessionKeys(router.StatePath, routerConfig.Name)
 	if err != nil {
-		t.Fatalf("ReadFile(account router state) error = %v", err)
+		t.Fatalf("read account router sessions: %v", err)
 	}
-	var state struct {
-		Routers map[string]struct {
-			Sessions map[string]json.RawMessage `json:"sessions"`
-		} `json:"routers"`
-	}
-	if err := json.Unmarshal(data, &state); err != nil {
-		t.Fatalf("Unmarshal(account router state) error = %v", err)
-	}
-	if sessions := state.Routers[routerConfig.Name].Sessions; len(sessions) != 0 {
-		t.Fatalf("account router persisted session affinity = %#v, want none", sessions)
+	if len(sessionKeys) != 0 {
+		t.Fatalf("account router persisted session affinity = %#v, want none", sessionKeys)
 	}
 
 	agent.CandidateProviders = nil

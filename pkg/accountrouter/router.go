@@ -1,16 +1,12 @@
 package accountrouter
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"math"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -18,16 +14,12 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 const (
-	stateVersion     = 1
-	sessionStateTTL  = 30 * 24 * time.Hour
-	defaultStatePerm = 0o600
-
-	credentialAuthInvalidationVersion = 1
+	stateVersion    = 1
+	sessionStateTTL = 30 * 24 * time.Hour
 )
 
 var errPrivateProviderRequest = errors.New("provider request failed")
@@ -99,12 +91,6 @@ type AccountState struct {
 	AuthInvalidationGeneration string                   `json:"auth_invalidation_generation,omitempty"`
 }
 
-type credentialAuthInvalidation struct {
-	Version      int    `json:"version"`
-	CredentialID string `json:"credential_id"`
-	Generation   string `json:"generation"`
-}
-
 type SessionState struct {
 	ConfigHash string                   `json:"config_hash"`
 	Blocks     map[string]BlockAffinity `json:"blocks"`
@@ -123,16 +109,40 @@ type BlockRunState struct {
 }
 
 type Store struct {
-	path string
-	mu   sync.Mutex
-	st   State
+	path           string
+	sourceRoot     string
+	sourceRelative string
+	archiveRoot    string
+	mu             sync.Mutex
+	st             State
+	initErr        error
+	now            func() time.Time
 }
 
 var stores sync.Map
 
 func New(name string, routerConfig *config.AccountRouterConfig, accounts map[string]Account, statePath string) *Router {
-	if routerConfig == nil || strings.TrimSpace(name) == "" || strings.TrimSpace(statePath) == "" {
+	router, err := NewSQLite(name, routerConfig, accounts, statePath)
+	if err != nil {
 		return nil
+	}
+	return router
+}
+
+// NewSQLite constructs an account router using a normalized SQLite store and
+// reports path, migration, schema, or integrity failures directly.
+func NewSQLite(
+	name string,
+	routerConfig *config.AccountRouterConfig,
+	accounts map[string]Account,
+	statePath string,
+) (*Router, error) {
+	if routerConfig == nil || strings.TrimSpace(name) == "" || strings.TrimSpace(statePath) == "" {
+		return nil, errors.New("account router configuration and state path are required")
+	}
+	store, err := getStore(statePath)
+	if err != nil {
+		return nil, err
 	}
 	cfg := *routerConfig
 	cfg.Blocks = append([]config.AccountRouterBlock(nil), routerConfig.Blocks...)
@@ -153,62 +163,11 @@ func New(name string, routerConfig *config.AccountRouterConfig, accounts map[str
 		Name:       strings.TrimSpace(name),
 		Config:     cfg,
 		Accounts:   cleanAccounts,
-		StatePath:  statePath,
+		StatePath:  store.path,
 		ConfigHash: hashRouterConfig(cfg),
-		store:      getStore(statePath),
+		store:      store,
 		now:        time.Now,
-	}
-}
-
-// InvalidateCredentialAuthFailure records a durable generation change for one
-// exact auth-store credential. Account-router stores consume the change in
-// their owning process and clear only authentication-failure health for the
-// matching credential account across every router in that state file.
-//
-// The invalidation is kept in a sidecar instead of rewriting the router state
-// directly. The gateway owns and caches that state in memory, so an external
-// rewrite could otherwise be overwritten by its next persistence cycle.
-func InvalidateCredentialAuthFailure(statePath, credentialID string) error {
-	statePath = strings.TrimSpace(statePath)
-	if statePath == "" {
-		return fmt.Errorf("account router state path is required")
-	}
-	normalizedCredentialID, err := normalizeCredentialID(credentialID)
-	if err != nil {
-		return err
-	}
-
-	statePath = filepath.Clean(statePath)
-	if _, statErr := os.Stat(statePath); statErr != nil {
-		if errors.Is(statErr, os.ErrNotExist) {
-			// No persisted router health exists to invalidate. Avoid creating
-			// workspace state as a side effect of onboarding a new credential.
-			return nil
-		}
-		return fmt.Errorf("stat account router state: %w", statErr)
-	}
-
-	generationBytes := make([]byte, 16)
-	if _, randomErr := rand.Read(generationBytes); randomErr != nil {
-		return fmt.Errorf("generate account router auth invalidation: %w", randomErr)
-	}
-	marker := credentialAuthInvalidation{
-		Version:      credentialAuthInvalidationVersion,
-		CredentialID: normalizedCredentialID,
-		Generation:   hex.EncodeToString(generationBytes),
-	}
-	data, err := json.MarshalIndent(marker, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode account router auth invalidation: %w", err)
-	}
-	if err := fileutil.WriteFileAtomic(
-		credentialAuthInvalidationPath(statePath, normalizedCredentialID),
-		data,
-		defaultStatePerm,
-	); err != nil {
-		return fmt.Errorf("write account router auth invalidation: %w", err)
-	}
-	return nil
+	}, nil
 }
 
 func (r *Router) Select(sessionKey string, reason SelectReason) Selection {
@@ -273,6 +232,45 @@ func (r *Router) RecordPrivateFallbackResult(
 	err error,
 ) {
 	r.recordFallbackResult(selection, result, err, true)
+}
+
+// SessionKeys returns a detached snapshot of persisted session identities for
+// one router. It exposes no session contents and is intended for invariance
+// checks and diagnostics.
+func SessionKeys(statePath, routerName string) ([]string, error) {
+	store, err := getStore(statePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.refresh(); err != nil {
+		return nil, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	router := store.st.Routers[routerName]
+	if router == nil {
+		return nil, fmt.Errorf("account router %q is unavailable", routerName)
+	}
+	keys := make([]string, 0, len(router.Sessions))
+	for key := range router.Sessions {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// AccountStateSnapshot returns a detached health/accounting snapshot.
+func (r *Router) AccountStateSnapshot(account string) (AccountState, bool) {
+	if r == nil || r.store == nil || r.store.refresh() != nil {
+		return AccountState{}, false
+	}
+	r.store.mu.Lock()
+	defer r.store.mu.Unlock()
+	router := r.store.st.Routers[r.Name]
+	if router == nil || router.Accounts[account] == nil {
+		return AccountState{}, false
+	}
+	return *router.Accounts[account], true
 }
 
 func (r *Router) recordFallbackResult(
@@ -716,131 +714,6 @@ func normalizedCredentialIDForAccount(accountRef string) (string, bool) {
 		return "", false
 	}
 	return normalized, true
-}
-
-func credentialAuthInvalidationPath(statePath, normalizedCredentialID string) string {
-	sum := sha256.Sum256([]byte(normalizedCredentialID))
-	return fmt.Sprintf("%s.auth-invalidation.%x", statePath, sum[:16])
-}
-
-func readCredentialAuthInvalidation(
-	statePath, normalizedCredentialID string,
-) (credentialAuthInvalidation, bool) {
-	data, err := os.ReadFile(
-		credentialAuthInvalidationPath(statePath, normalizedCredentialID),
-	)
-	if err != nil {
-		return credentialAuthInvalidation{}, false
-	}
-	var marker credentialAuthInvalidation
-	if unmarshalErr := json.Unmarshal(data, &marker); unmarshalErr != nil ||
-		marker.Version != credentialAuthInvalidationVersion ||
-		strings.TrimSpace(marker.Generation) == "" {
-		return credentialAuthInvalidation{}, false
-	}
-	markerCredentialID, err := normalizeCredentialID(marker.CredentialID)
-	if err != nil || markerCredentialID != normalizedCredentialID {
-		return credentialAuthInvalidation{}, false
-	}
-	marker.CredentialID = markerCredentialID
-	return marker, true
-}
-
-func (s *Store) applyCredentialAuthInvalidations() {
-	if s == nil || s.path == "" {
-		return
-	}
-	markers := make(map[string]credentialAuthInvalidation)
-	missingMarkers := make(map[string]bool)
-	for _, router := range s.st.Routers {
-		if router == nil {
-			continue
-		}
-		for accountRef, accountState := range router.Accounts {
-			if accountState == nil {
-				continue
-			}
-			credentialID, ok := normalizedCredentialIDForAccount(accountRef)
-			if !ok {
-				continue
-			}
-			marker, found := markers[credentialID]
-			if !found && !missingMarkers[credentialID] {
-				marker, found = readCredentialAuthInvalidation(s.path, credentialID)
-				if found {
-					markers[credentialID] = marker
-				} else {
-					missingMarkers[credentialID] = true
-				}
-			}
-			if !found || accountState.AuthInvalidationGeneration == marker.Generation {
-				continue
-			}
-			if accountState.Reason == providers.FailoverAuth {
-				resetAccountAuthFailure(accountState)
-			}
-			// Advance the fence even when another health reason is active. This
-			// prevents a late result from the pre-renewal credential from
-			// introducing a new authentication failure.
-			accountState.AuthInvalidationGeneration = marker.Generation
-		}
-	}
-}
-
-func getStore(path string) *Store {
-	path = filepath.Clean(path)
-	if value, ok := stores.Load(path); ok {
-		return value.(*Store)
-	}
-	store := &Store{path: path, st: State{Version: stateVersion, Routers: map[string]*RouterState{}}}
-	store.load()
-	actual, _ := stores.LoadOrStore(path, store)
-	return actual.(*Store)
-}
-
-func (s *Store) load() {
-	if s == nil || s.path == "" {
-		return
-	}
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		return
-	}
-	var st State
-	if err := json.Unmarshal(data, &st); err != nil {
-		corruptPath := fmt.Sprintf("%s.corrupt.%d", s.path, time.Now().Unix())
-		_ = os.Rename(s.path, corruptPath)
-		return
-	}
-	if st.Version == 0 {
-		st.Version = stateVersion
-	}
-	if st.Routers == nil {
-		st.Routers = map[string]*RouterState{}
-	}
-	s.st = st
-}
-
-func (s *Store) update(fn func(*State)) error {
-	if s == nil || fn == nil {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.st.Version == 0 {
-		s.st.Version = stateVersion
-	}
-	if s.st.Routers == nil {
-		s.st.Routers = map[string]*RouterState{}
-	}
-	s.applyCredentialAuthInvalidations()
-	fn(&s.st)
-	s.applyCredentialAuthInvalidations()
-	data, err := json.MarshalIndent(s.st, "", "  ")
-	if err != nil {
-		return err
-	}
-	return fileutil.WriteFileAtomic(s.path, data, defaultStatePerm)
 }
 
 func routerState(st *State, name string, configHash string, knownAccounts map[string]bool) *RouterState {
