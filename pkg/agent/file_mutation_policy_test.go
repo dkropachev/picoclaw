@@ -1344,6 +1344,11 @@ func TestAgentGitWorkspaceProtectedRootsRejectUnsafeCheckpointState(t *testing.T
 }
 
 func TestAgentCheckpointRetainedStateEnumerationBoundsAndModes(t *testing.T) {
+	if files, err := agentCheckpointRetainedStateFilesBounded(
+		"unused", "unused", 0, 1, 1, 1,
+	); err == nil || files != nil || !strings.Contains(err.Error(), "bounds") {
+		t.Fatalf("invalid checkpoint enumeration bounds = %#v, %v", files, err)
+	}
 	newRoots := func(t *testing.T) (string, string) {
 		t.Helper()
 		checkpointRoot := filepath.Join(t.TempDir(), "active")
