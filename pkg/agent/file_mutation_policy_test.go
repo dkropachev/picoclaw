@@ -563,6 +563,71 @@ func TestAgentFileMutationPolicyProtectsIdentitySQLiteStores(t *testing.T) {
 	}
 }
 
+func TestAgentFileMutationPolicyProtectsSessionDatabaseAndArchive(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+	archive := filepath.Join(workspace, "legacy-json", "sessions-v1", "retained.json")
+	if err := os.MkdirAll(filepath.Dir(archive), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archive, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := agentFileMutationTestConfig(workspace)
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	t.Cleanup(func() { agent.Close() })
+	owned, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "session-protection-owner",
+	}, []string{"write_file", "edit_file", "append_file", "apply_patch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owned.Close()
+
+	database := filepath.Join(workspace, "sessions", "sessions.db")
+	targets := []struct {
+		path   string
+		exists bool
+	}{
+		{path: database, exists: true},
+		{path: database + "-wal", exists: pathExists(database + "-wal")},
+		{path: database + "-shm", exists: pathExists(database + "-shm")},
+		{path: archive, exists: true},
+	}
+	for registryName, registry := range map[string]*tools.ToolRegistry{
+		"root": agent.Tools, "owner": owned,
+	} {
+		for _, target := range targets {
+			for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+				t.Run(registryName+"_"+toolName+"_"+filepath.Base(target.path), func(t *testing.T) {
+					requireAgentFileMutationDenied(
+						t, registry, toolName, workspace, target.path, target.exists,
+					)
+				})
+			}
+		}
+	}
+
+	ordinary := filepath.Join(workspace, "ordinary-session-policy.txt")
+	if err := os.WriteFile(ordinary, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	patchTool, _ := agent.Tools.Get("apply_patch")
+	if result := executeAgentFileMutation(
+		t, patchTool, "apply_patch", workspace, ordinary, true,
+	); result == nil || result.IsError {
+		t.Fatalf("ordinary patch after session protection = %#v", result)
+	}
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func TestAgentFileMutationPolicyHomeInsideWorkspaceOmitsUnsafeApplyPatch(t *testing.T) {
 	workspace := t.TempDir()
 	home := filepath.Join(workspace, ".picoclaw")

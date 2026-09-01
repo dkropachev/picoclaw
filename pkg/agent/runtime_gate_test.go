@@ -1,3 +1,4 @@
+//nolint:govet // Generation assertions intentionally reuse short-lived error bindings.
 package agent
 
 import (
@@ -13,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -1604,7 +1606,12 @@ func TestInboundMessageRetainsRoutingGenerationWhileWaitingForWorker(t *testing.
 		t.Fatal("queued generation A message executed with generation B provider")
 	default:
 	}
-	if history := agentA.Sessions.GetHistory(sessionKeyA); len(history) == 0 {
+	storeA, err := memory.NewSQLiteStore(filepath.Join(agentA.Workspace, "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeA.Close()
+	if history, err := storeA.GetHistory(context.Background(), sessionKeyA); err != nil || len(history) == 0 {
 		t.Fatal("generation A routed session has no message history")
 	}
 	sessionKeyB, agentIDB, ok := al.resolveSteeringTarget(msg)
@@ -1615,7 +1622,12 @@ func TestInboundMessageRetainsRoutingGenerationWhileWaitingForWorker(t *testing.
 	if !ok {
 		t.Fatal("generation B beta agent not found")
 	}
-	if history := agentB.Sessions.GetHistory(sessionKeyB); len(history) != 0 {
+	storeB, err := memory.NewSQLiteStore(filepath.Join(agentB.Workspace, "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeB.Close()
+	if history, err := storeB.GetHistory(context.Background(), sessionKeyB); err != nil || len(history) != 0 {
 		t.Fatalf("generation B session history = %#v, want empty", history)
 	}
 	if state := al.getActiveTurnState(sessionKeyA); state != nil {

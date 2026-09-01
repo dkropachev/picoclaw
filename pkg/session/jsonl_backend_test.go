@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -1207,7 +1205,7 @@ func TestJSONLBackendReadSessionSnapshot_MissingBlankCanceledNoCreate(t *testing
 }
 
 func TestJSONLBackendReadSessionSnapshot_PropagatesCorruption(t *testing.T) {
-	t.Run("metadata", func(t *testing.T) {
+	t.Run("schema", func(t *testing.T) {
 		dir := t.TempDir()
 		store, err := memory.NewJSONLStore(dir)
 		if err != nil {
@@ -1215,19 +1213,19 @@ func TestJSONLBackendReadSessionSnapshot_PropagatesCorruption(t *testing.T) {
 		}
 		b := session.NewJSONLBackend(store)
 		b.AddMessage("corrupt-meta", "user", "hello")
-		writeErr := os.WriteFile(filepath.Join(dir, "corrupt-meta.meta.json"), []byte(`{"key":`), 0o644)
-		if writeErr != nil {
-			t.Fatal(writeErr)
+		if _, err := store.SQLDB().Exec(`CREATE INDEX unexpected_session_index
+            ON sessions(summary)`); err != nil {
+			t.Fatal(err)
 		}
-
-		_, found, err := b.ReadSessionSnapshot(context.Background(), "corrupt-meta")
-		if err == nil || found || !strings.Contains(err.Error(), "decode") ||
-			!strings.Contains(err.Error(), "meta") {
-			t.Fatalf("corrupt metadata read = (found=%v, err=%v)", found, err)
+		if err := b.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if reopened, err := memory.NewSQLiteStore(dir); err == nil || reopened != nil {
+			t.Fatalf("corrupt schema reopened as %#v, %v", reopened, err)
 		}
 	})
 
-	t.Run("history", func(t *testing.T) {
+	t.Run("nested payload", func(t *testing.T) {
 		dir := t.TempDir()
 		store, err := memory.NewJSONLStore(dir)
 		if err != nil {
@@ -1235,24 +1233,25 @@ func TestJSONLBackendReadSessionSnapshot_PropagatesCorruption(t *testing.T) {
 		}
 		b := session.NewJSONLBackend(store)
 		b.AddMessage("corrupt-history", "user", "hello")
-		path := filepath.Join(dir, "corrupt-history.jsonl")
-		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+		conn, err := store.SQLDB().Conn(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, writeErr := file.WriteString("not-json\n")
-		if writeErr != nil {
-			file.Close()
-			t.Fatal(writeErr)
+		if _, err := conn.ExecContext(context.Background(), `PRAGMA ignore_check_constraints = ON`); err != nil {
+			_ = conn.Close()
+			t.Fatal(err)
 		}
-		closeErr := file.Close()
-		if closeErr != nil {
-			t.Fatal(closeErr)
+		if _, err := conn.ExecContext(context.Background(), `UPDATE session_messages
+            SET nested_payload = x'7b' WHERE session_key = 'corrupt-history'`); err != nil {
+			_ = conn.Close()
+			t.Fatal(err)
 		}
-
-		_, found, err := b.ReadSessionSnapshot(context.Background(), "corrupt-history")
-		if err == nil || found || !strings.Contains(err.Error(), "decode jsonl line") {
-			t.Fatalf("corrupt history read = (found=%v, err=%v)", found, err)
+		_ = conn.Close()
+		if err := b.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if reopened, err := memory.NewSQLiteStore(dir); err == nil || reopened != nil {
+			t.Fatalf("corrupt payload reopened as %#v, %v", reopened, err)
 		}
 	})
 }

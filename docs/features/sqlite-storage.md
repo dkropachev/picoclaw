@@ -22,7 +22,7 @@ file-backed.
   upgrades and validates an owned schema, and imports bounded legacy sources
   exactly once.
 - Core types/functions: `sqlitestore.Open`, `Options`, `Migration`,
-  `LegacyOptions`, `LegacySource`, `LegacyImporter`, and
+  `LegacyOptions`, `LegacySource`, `LegacyImporter`, `LegacyResultFinalizer`, and
   `sqlitestore.Immediate`.
 - Runtime ordering: validate the path and migration catalog, securely prepare
   the directory and database, enable and verify PRAGMAs, reject corruption or a
@@ -40,7 +40,7 @@ file-backed.
 | --- | --- | --- | --- | --- | --- | --- |
 | `FR-SQLITE-001` | MUST | A subsystem opens a mutable database at a filesystem path. | The returned handle uses WAL, foreign keys, a five-second busy timeout, and `synchronous=FULL`; the parent is private and the database and companions are `0600`. | A missing directory/database is securely created. | Empty, URI, NUL-bearing, symlinked, irregular, or otherwise unsafe boundaries fail before domain use. | Every store needs one durable and secure baseline. |
 | `FR-SQLITE-002` | MUST | The database schema is older, current, too new, malformed, or corrupt. | Contiguous migrations reach the supported `PRAGMA user_version` and the retained schema validates exactly. | Migrations run in one explicit `BEGIN IMMEDIATE` transaction. | Failure rolls back; a future version, invalid schema, or failed integrity check returns a typed error and never falls back to JSON. | Mixed schemas and partial upgrades must fail closed. |
-| `FR-SQLITE-003` | MUST | Bounded legacy JSON/JSONL sources exist on first authoritative open. | Valid records are imported deterministically; selected malformed records are skipped with counts and safe issue codes/digests only. | Domain rows and durable import/issue rows commit in the same immediate transaction. | Unsafe enumeration, symlinks or modes, size/count bounds, SQLite errors, or importer errors abort without an import commit. | Automatic upgrade must preserve valid state without exposing secrets. |
+| `FR-SQLITE-003` | MUST | Bounded legacy JSON/JSONL sources exist on first authoritative open. | Valid records are imported deterministically; selected malformed records are skipped with counts and safe issue codes/digests only. Aggregate/dependency importers may resolve relationships in `LegacyResultFinalizer`; their returned per-source outcomes atomically replace provisional counts and issues before commit. | Domain rows and final durable import/issue rows commit in the same immediate transaction. | Unsafe enumeration, symlinks or modes, size/count bounds, incomplete/extra/invalid final accounting, SQLite errors, or importer errors abort without an import commit. | Automatic upgrade must preserve valid state and make the audit describe committed rows without exposing secrets. |
 | `FR-SQLITE-004` | MUST | A committed import has an unarchived legacy source. | The exact imported bytes move to `legacy-json/<component>-v1/` without overwriting an existing archive and with their permissions retained. | Archive completion is durably recorded after the filesystem transition. | A crash before/after the move is retried without re-import; changed bytes or a conflicting archive fail closed. | SQLite becomes authoritative immediately while rollback material remains recoverable. |
 | `FR-SQLITE-005` | MUST | Concurrent PicoClaw processes mutate a subsystem store. | Bounded lock waits and immediate write transactions serialize domain operations; version-fenced owners can reject stale updates. | Only the committed SQLite transaction becomes visible. | Busy, canceled, and stale-version operations return errors without partial domain state or JSON dual writes. | CLI, launcher, and gateway processes must share one authority. |
 
@@ -74,6 +74,7 @@ Owns: TEST pkg/sqlitestore/*
 | --- | --- | --- | --- |
 | Go API | `sqlitestore.Open(ctx, path, options)` | Opens, configures, integrity-checks, migrates, validates, and archives one subsystem database or returns an error without a JSON fallback. | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-003`, `FR-SQLITE-004` |
 | Go API | `sqlitestore.Immediate(ctx, db, callback)` | Runs one callback between explicit `BEGIN IMMEDIATE` and `COMMIT`, rolling back on callback, context, or commit failure. | `FR-SQLITE-002`, `FR-SQLITE-005` |
+| Go API | `LegacyOptions.FinalizeResults` / `LegacyResultFinalizer` | Resolve ordered multi-source relationships and return exact final `ImportResult` for every newly imported source; the helper replaces provisional ledger counts/issues inside the import transaction. | `FR-SQLITE-003` |
 | File | `<root>/*.db`, `<root>/*.db-wal`, `<root>/*.db-shm` | Private mutable SQLite authority owned by its subsystem. | `FR-SQLITE-001`, `FR-SQLITE-005` |
 | File | `<root>/legacy-json/<component>-v1/**` | Immutable retained legacy bytes, created once after their import transaction commits. | `FR-SQLITE-003`, `FR-SQLITE-004` |
 | File | `<PICOCLAW_HOME>/auth.db`, `auth.db.locks/`; `legacy-json/auth-v1/auth.json` | Typed, version-fenced credential authority, protected cross-process refresh locks, and retained legacy source. | `FR-SQLITE-001` through `FR-SQLITE-005` |
@@ -97,7 +98,8 @@ Owns: TEST pkg/sqlitestore/*
 4. Check existing integrity, acquire one connection, and enter
    `BEGIN IMMEDIATE`. Read `user_version`, reject a future version, apply each
    contiguous schema/data migration, enumerate and import deterministic legacy
-   inputs, validate domain and import schemas, and commit once.
+   inputs, finalize aggregate relationships/accounting when configured,
+   validate domain and import schemas, and commit once.
 5. Recheck integrity and permissions. For each pending import, revalidate the
    recorded relative identity and digest, complete or recover its no-overwrite
    archive transition, and mark the ledger row complete in an immediate
@@ -132,7 +134,7 @@ selecting a mutable JSON fallback.
 | Requirement IDs | Evidence |
 | --- | --- |
 | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-005` | [pkg/sqlitestore/open_test.go](../../pkg/sqlitestore/open_test.go) |
-| `FR-SQLITE-003`, `FR-SQLITE-004` | [pkg/sqlitestore/open_test.go](../../pkg/sqlitestore/open_test.go) |
+| `FR-SQLITE-003`, `FR-SQLITE-004` | [pkg/sqlitestore/open_test.go](../../pkg/sqlitestore/open_test.go), [pkg/sqlitestore/legacy_finalize_results_test.go](../../pkg/sqlitestore/legacy_finalize_results_test.go), [pkg/memory/sqlite_store_test.go](../../pkg/memory/sqlite_store_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/auth/store_sqlite_test.go](../../pkg/auth/store_sqlite_test.go), [web/backend/api/model_catalog_sqlite_test.go](../../web/backend/api/model_catalog_sqlite_test.go), [pkg/tools/adaptation_state_sqlite_test.go](../../pkg/tools/adaptation_state_sqlite_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/state/state_test.go](../../pkg/state/state_test.go), [pkg/channels/wecom/reqid_store_test.go](../../pkg/channels/wecom/reqid_store_test.go), [pkg/channels/weixin/state_sqlite_test.go](../../pkg/channels/weixin/state_sqlite_test.go) |
 

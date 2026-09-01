@@ -76,7 +76,7 @@ func TestWorkflowAuthoringCapabilitiesUsesRegistryKeysAndSanitizesShapes(t *test
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	cfg.Tools.MCP.Enabled = false
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	defaultAgent := loop.registry.GetDefaultAgent()
 
 	safe := &workflowAuthoringTestTool{
@@ -186,7 +186,7 @@ func TestWorkflowAuthoringCapabilitiesUsesFrozenFactorySchema(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	cfg.Tools.MCP.Enabled = false
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	defaultAgent := loop.registry.GetDefaultAgent()
 	registry, err := tools.NewOwnedToolRegistry(tools.ToolOwner{Scope: tools.ToolOwnerScopeAgent, AgentID: "main"})
 	if err != nil {
@@ -246,7 +246,7 @@ func TestWorkflowAuthoringCapabilitiesUsesConfiguredDefaultAheadOfMain(t *testin
 		{ID: "beta", Default: true},
 	}
 	cfg.Tools.MCP.Enabled = false
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 
 	catalog, err := loop.WorkflowAuthoringCapabilities(context.Background())
 	if err != nil {
@@ -619,7 +619,7 @@ func workflowAuthoringRawMCPTestLoop(
 		}
 	})
 
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	loop.mcp.setManager(manager)
 	loop.mcp.initOnce.Do(func() {})
 	defaultAgent := loop.registry.GetDefaultAgent()
@@ -736,7 +736,7 @@ func TestWorkflowAuthoringCapabilitiesDoesNotInitializeMCP(t *testing.T) {
 			},
 		},
 	}
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	loop.runtimeEvents = runtimeevents.NewBus()
 	loop.ownsRuntimeEvents = true
 	defer loop.Close()
@@ -831,7 +831,7 @@ func TestWorkflowAuthoringCapabilitiesHoldsRuntimeLeaseAcrossProjection(t *testi
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	cfg.Tools.MCP.Enabled = false
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	defer loop.Close()
 
 	blocking := &workflowAuthoringTestTool{
@@ -876,7 +876,7 @@ func TestWorkflowAuthoringCapabilitiesHoldsRuntimeLeaseAcrossMarshal(t *testing.
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	cfg.Tools.MCP.Enabled = false
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	defer loop.Close()
 
 	previousMarshal := marshalWorkflowAuthoringCapabilities
@@ -1038,7 +1038,7 @@ func TestProjectWorkflowAuthoringToolsUsesDeterministicBoundedSelection(t *testi
 			parameters: map[string]any{},
 		})
 	}
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	defer loop.Close()
 	defaultAgent := &AgentInstance{Tools: registry}
 
@@ -1084,7 +1084,7 @@ func TestProjectWorkflowAuthoringToolsUsesDeterministicBoundedSelection(t *testi
 func TestProjectWorkflowAuthoringToolsRejectsOverboundMCPIdentityBeforeTarget(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Tools.MCP.Enabled = true
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	defer loop.Close()
 	registry := tools.NewToolRegistry()
 	registry.Register(tools.NewMCPTool(nil, "github", &sdkmcp.Tool{
@@ -1115,7 +1115,7 @@ func TestProjectWorkflowAuthoringToolsRejectsOverboundMCPIdentityBeforeTarget(t 
 
 func TestWorkflowAuthoringBoundedSelectorsHonorCancellation(t *testing.T) {
 	cfg := config.DefaultConfig()
-	loop := workflowDependencyTestLoop(cfg)
+	loop := workflowDependencyTestLoop(t, cfg)
 	defer loop.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

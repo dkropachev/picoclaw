@@ -33,7 +33,7 @@ Handle support tickets carefully.
 	})
 	defer cleanupWorkspace(t, supportWorkspace)
 
-	cfg := testCfg([]config.AgentConfig{
+	cfg := testCfg(t, []config.AgentConfig{
 		{ID: "main", Default: true, Name: "Configured Main", Workspace: mainWorkspace},
 		{ID: "support", Workspace: supportWorkspace},
 	})
@@ -68,7 +68,7 @@ Handle support tickets carefully.
 }
 
 func TestAgentRegistry_ListSpawnableAgentsRespectsPermissions(t *testing.T) {
-	cfg := testCfg([]config.AgentConfig{
+	cfg := testCfg(t, []config.AgentConfig{
 		{
 			ID:      "parent",
 			Default: true,
@@ -96,7 +96,7 @@ func TestAgentRegistry_ListSpawnableAgentsRespectsPermissions(t *testing.T) {
 }
 
 func TestAgentRegistry_ListSpawnableAgentsRequiresSpawnTool(t *testing.T) {
-	cfg := testCfg([]config.AgentConfig{
+	cfg := testCfg(t, []config.AgentConfig{
 		{
 			ID:      "parent",
 			Default: true,
@@ -152,7 +152,7 @@ Handle restricted work.
 	})
 	defer cleanupWorkspace(t, restrictedWorkspace)
 
-	cfg := testCfg([]config.AgentConfig{
+	cfg := testCfg(t, []config.AgentConfig{
 		{
 			ID:        "main",
 			Default:   true,
@@ -236,7 +236,7 @@ Investigate deeply.
 	})
 	defer cleanupWorkspace(t, researchWorkspace)
 
-	cfg := testCfg([]config.AgentConfig{
+	cfg := testCfg(t, []config.AgentConfig{
 		{ID: "main", Default: true, Workspace: mainWorkspace},
 		{ID: "research", Workspace: researchWorkspace},
 	})
@@ -299,7 +299,7 @@ Investigate deeply.
 	})
 	defer cleanupWorkspace(t, researchWorkspace)
 
-	cfg := testCfg([]config.AgentConfig{
+	cfg := testCfg(t, []config.AgentConfig{
 		{
 			ID:        "main",
 			Default:   true,
@@ -357,7 +357,7 @@ Generalist.
 	})
 	defer cleanupWorkspace(t, mainWorkspace)
 
-	cfg := testCfg([]config.AgentConfig{
+	cfg := testCfg(t, []config.AgentConfig{
 		{ID: "main", Default: true, Workspace: mainWorkspace},
 	})
 	cfg.Tools.ReadFile.Enabled = true
@@ -405,7 +405,7 @@ Second line.
 	})
 	defer cleanupWorkspace(t, workspace)
 
-	cfg := testCfg([]config.AgentConfig{
+	cfg := testCfg(t, []config.AgentConfig{
 		{ID: "research", Default: true, Workspace: workspace},
 	})
 

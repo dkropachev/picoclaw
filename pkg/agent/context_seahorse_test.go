@@ -1671,7 +1671,7 @@ func TestSeahorseAssembleSummaryNotInMessages(t *testing.T) {
 }
 
 // TestSeahorseSteeringMessageIngested verifies that steering messages are ingested
-// into seahorse SQLite, not just session JSONL.
+// into Seahorse SQLite, not just canonical session storage.
 func TestSeahorseSteeringMessageIngested(t *testing.T) {
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{

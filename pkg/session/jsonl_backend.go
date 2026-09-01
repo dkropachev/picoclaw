@@ -15,12 +15,16 @@ import (
 	"github.com/sipeed/picoclaw/pkg/routing"
 )
 
-// JSONLBackend adapts a memory.Store into the SessionStore interface.
+// JSONLBackend is the deprecated source-compatible adapter name.
+// NewSQLiteBackend supplies its authoritative SQLite store.
 // Write errors are logged rather than returned, matching the fire-and-forget
 // contract of SessionManager that the agent loop relies on.
 type JSONLBackend struct {
 	store memory.Store
 }
+
+// SQLiteBackend is the preferred persistent session backend.
+type SQLiteBackend = JSONLBackend
 
 type metaAwareStore interface {
 	GetSessionMeta(ctx context.Context, sessionKey string) (memory.SessionMeta, error)
@@ -61,6 +65,15 @@ type MetadataAwareSessionStore interface {
 // NewJSONLBackend wraps a memory.Store for use as a SessionStore.
 func NewJSONLBackend(store memory.Store) *JSONLBackend {
 	return &JSONLBackend{store: store}
+}
+
+// NewSQLiteBackend opens the authoritative sessions database in dir.
+func NewSQLiteBackend(dir string) (*SQLiteBackend, error) {
+	store, err := memory.NewSQLiteStore(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &JSONLBackend{store: store}, nil
 }
 
 func (b *JSONLBackend) resolveSessionKey(sessionKey string) string {
@@ -121,7 +134,7 @@ func (b *JSONLBackend) EnsureSessionMetadata(sessionKey string, scope *SessionSc
 
 // AdmitSessionScope atomically arbitrates a normal live turn against a
 // protected review projection. The policy is evaluated by the adapter while
-// the lower JSONL store holds the same locks used by snapshot replacement.
+// the lower SQLite store holds the same immediate transaction boundary used by snapshot replacement.
 func (b *JSONLBackend) AdmitSessionScope(
 	ctx context.Context,
 	admission SessionScopeAdmission,
@@ -328,8 +341,8 @@ func (b *JSONLBackend) GetHistory(key string) []providers.Message {
 }
 
 // ReadSessionSnapshot performs a strict, non-mutating lookup. The underlying
-// JSONL store resolves aliases and reads history, summary, and metadata under
-// the canonical session lock, so callers cannot observe a torn session state.
+// SQLite store resolves aliases and reads history, summary, and metadata from
+// one committed state, so callers cannot observe a torn session state.
 func (b *JSONLBackend) ReadSessionSnapshot(
 	ctx context.Context,
 	key string,
@@ -540,9 +553,8 @@ func (b *JSONLBackend) TruncateHistory(key string, keepLast int) {
 	}
 }
 
-// Save persists session state. Since the JSONL store fsyncs every write
-// immediately, the data is already durable. Save runs compaction to reclaim
-// space from logically truncated messages (no-op when there are none).
+// Save is retained for compatibility. SQLite mutations commit durably before
+// their mutating method returns, so Compact is normally a no-op.
 func (b *JSONLBackend) Save(key string) error {
 	return b.store.Compact(context.Background(), key)
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -99,7 +100,8 @@ func TestP015B3ALocalRepairControllerLeaseBoundary(t *testing.T) {
 		t.Fatal("strict repair runner did not retain opaque generation identity")
 	}
 	loop.fileMutationProtectedRoots[0] = "mutated-after-runner-construction"
-	if len(runner.protectedRoots) != 1 || runner.protectedRoots[0] != protectedRoot {
+	if !slices.Contains(runner.protectedRoots, protectedRoot) ||
+		slices.Contains(runner.protectedRoots, "mutated-after-runner-construction") {
 		release()
 		t.Fatalf("strict repair protected roots = %#v", runner.protectedRoots)
 	}

@@ -90,24 +90,23 @@ func TestP015B2BCatalogInitializationFallbackAndRegexAreSealed(t *testing.T) {
 	}
 
 	var store session.SessionStore
+	var recovered any
 	var patternsCount int
 	records, raw := captureP015HookRecords(t, func() {
-		store = initSessionStore(directoryCanary)
+		func() {
+			defer func() { recovered = recover() }()
+			store = initSessionStore(directoryCanary)
+		}()
 		patternsCount = len(compilePatterns([]string{"^safe$", regexCanary}))
 	})
-	if _, ok := store.(*session.SessionManager); !ok {
-		t.Fatalf("fallback store = %T, want *session.SessionManager", store)
+	if store != nil || recovered != "open SQLite session store" {
+		t.Fatalf("failed session open = (store=%T, panic=%v)", store, recovered)
 	}
 	if patternsCount != 1 {
 		t.Fatalf("compiled patterns = %d, want one valid pattern", patternsCount)
 	}
 	assertP015CanariesAbsent(t, raw, directoryCanary, regexCanary)
 
-	fallback := p015B2BCatalogRecord(t, records,
-		"Memory JSONL store init failed; falling back to json sessions")
-	if fallback["fallback"] != true || fallback["error_class"] != "internal" {
-		t.Fatalf("fallback diagnostic = %#v", fallback)
-	}
 	regex := p015B2BCatalogRecord(t, records, "invalid path pattern in compilePatterns")
 	if regex["regex_digest"] == nil || regex["error_class"] != "validation" {
 		t.Fatalf("regex diagnostic = %#v", regex)

@@ -38,8 +38,13 @@ func TestSanitizeFilename(t *testing.T) {
 }
 
 func TestSave_WithColonInKey(t *testing.T) {
-	tmpDir := t.TempDir()
+	workspace := t.TempDir()
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmpDir := filepath.Join(workspace, "sessions")
 	sm := NewSessionManager(tmpDir)
+	t.Cleanup(func() { _ = sm.Close() })
 
 	// Create a session with a key containing colon (typical channel session key).
 	key := "telegram:123456"
@@ -51,14 +56,16 @@ func TestSave_WithColonInKey(t *testing.T) {
 		t.Fatalf("Save(%q) failed: %v", key, err)
 	}
 
-	// The file on disk should use sanitized name.
-	expectedFile := filepath.Join(tmpDir, "telegram_123456.json")
-	if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
-		t.Fatalf("expected session file %s to exist", expectedFile)
+	if _, err := os.Stat(filepath.Join(tmpDir, "sessions.db")); err != nil {
+		t.Fatalf("expected SQLite session database: %v", err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(tmpDir, "*.json*")); err != nil || len(matches) != 0 {
+		t.Fatalf("persistent SessionManager wrote JSON: %v, %v", matches, err)
 	}
 
 	// Load into a fresh manager and verify the session round-trips.
 	sm2 := NewSessionManager(tmpDir)
+	t.Cleanup(func() { _ = sm2.Close() })
 	history := sm2.GetHistory(key)
 	if len(history) != 1 {
 		t.Fatalf("expected 1 message after reload, got %d", len(history))
@@ -68,31 +75,63 @@ func TestSave_WithColonInKey(t *testing.T) {
 	}
 }
 
-func TestSave_RejectsPathTraversal(t *testing.T) {
-	tmpDir := t.TempDir()
+func TestSave_DoesNotCreateLegacyJSONPaths(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmpDir := filepath.Join(workspace, "sessions")
 	sm := NewSessionManager(tmpDir)
+	t.Cleanup(func() { _ = sm.Close() })
 
-	// Invalid names that must still be rejected.
-	badKeys := []string{"", ".", ".."}
-	for _, key := range badKeys {
-		sm.GetOrCreate(key)
-		if err := sm.Save(key); err == nil {
-			t.Errorf("Save(%q) should have failed but didn't", key)
-		}
-	}
-
-	// Keys containing path separators are sanitized (no subdirs created).
-	sm.GetOrCreate("foo/bar")
+	sm.AddMessage("foo/bar", "user", "hello")
 	if err := sm.Save("foo/bar"); err != nil {
-		t.Fatalf("Save(\"foo/bar\") after sanitize should succeed: %v", err)
+		t.Fatalf("Save(\"foo/bar\") should succeed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(tmpDir, "foo_bar.json")); os.IsNotExist(err) {
-		t.Errorf("expected foo_bar.json in storage (sanitized from foo/bar)")
+	if matches, err := filepath.Glob(filepath.Join(tmpDir, "*.json*")); err != nil || len(matches) != 0 {
+		t.Fatalf("Save created legacy JSON paths: %v, %v", matches, err)
+	}
+}
+
+func TestPersistentSessionManagerGetOrCreateMutationSavesToSQLite(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(workspace, "sessions")
+	manager := NewSessionManager(dir)
+	stored := manager.GetOrCreate("compat-session")
+	stored.Messages = append(stored.Messages, providers.Message{Role: "user", Content: "mutated"})
+	stored.Summary = "compat summary"
+	if history := manager.GetHistory("compat-session"); len(history) != 1 || history[0].Content != "mutated" {
+		t.Fatalf("cached compatibility history = %#v", history)
+	}
+	if err := manager.Save("compat-session"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := NewSessionManager(dir)
+	defer reopened.Close()
+	if history := reopened.GetHistory("compat-session"); len(history) != 1 || history[0].Content != "mutated" {
+		t.Fatalf("reopened compatibility history = %#v", history)
+	}
+	if summary := reopened.GetSummary("compat-session"); summary != "compat summary" {
+		t.Fatalf("reopened compatibility summary = %q", summary)
 	}
 }
 
 func TestLoadSessions_NormalizesMissingCreatedAt(t *testing.T) {
-	tmpDir := t.TempDir()
+	workspace := t.TempDir()
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmpDir := filepath.Join(workspace, "sessions")
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	sessionPath := filepath.Join(tmpDir, "telegram_legacy.json")
 	legacy := `{
   "key": "telegram:legacy",
@@ -111,6 +150,7 @@ func TestLoadSessions_NormalizesMissingCreatedAt(t *testing.T) {
 	}
 
 	sm := NewSessionManager(tmpDir)
+	t.Cleanup(func() { _ = sm.Close() })
 	history := sm.GetHistory("telegram:legacy")
 	if len(history) != 1 {
 		t.Fatalf("history = %d, want 1", len(history))

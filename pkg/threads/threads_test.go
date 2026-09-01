@@ -1,9 +1,11 @@
+//nolint:govet // Independent compatibility assertions intentionally use narrow error scopes.
 package threads
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -61,6 +63,56 @@ func TestCreatePicoThreadPersistsSearchableContext(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].ID != thread.ID {
 		t.Fatalf("Search() = %#v, want created thread", items)
+	}
+}
+
+func TestSQLiteSessionThreadRuntimeWritesNoMutableJSON(t *testing.T) {
+	cfg := testConfig(t)
+	workspace := cfg.Agents.Defaults.Workspace
+	store := NewStoreFromWorkspace(workspace)
+	target, err := store.CreatePicoThread(context.Background(), cfg, CreateRequest{
+		ID: "sqlite-only-target", Title: "SQLite only target",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originKey := session.BuildOpaqueSessionKey("sqlite-only-origin")
+	sessions, err := memory.NewSQLiteStore(ResolveSessionsDir(workspace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sessions.Close()
+	if err := sessions.AddMessage(context.Background(), originKey, "user", "origin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AttachCurrent(context.Background(), AttachRequest{
+		ThreadID: target.ID, SessionKey: originKey, Summary: "continue",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.UpdateThread(target.ID, UpdateRequest{Title: "updated"}); err != nil || !ok {
+		t.Fatalf("UpdateThread() = ok:%v err:%v", ok, err)
+	}
+	if _, ok, err := store.DropThread(target.ID); err != nil || !ok {
+		t.Fatalf("DropThread() = ok:%v err:%v", ok, err)
+	}
+
+	err = filepath.WalkDir(workspace, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		name := strings.ToLower(entry.Name())
+		if strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".jsonl") ||
+			strings.Contains(name, ".meta.json") {
+			return fmt.Errorf("mutable runtime JSON created at %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -250,7 +302,7 @@ func TestCreatePicoThreadPreservesActiveHistorySlot(t *testing.T) {
 	dir := ResolveSessionsDir(cfg.Agents.Defaults.Workspace)
 	allocation := AllocatePicoThread(cfg, "session-create-slotted")
 	active := []providers.Message{{Role: "user", Content: "Keep this active-slot history"}}
-	committedScope := json.RawMessage(`{"version":1,"owner":"snapshot-replacement"}`)
+	committedScope := mustMarshalScope(t, allocation.Scope)
 	committedAliases := append(
 		append([]string(nil), allocation.Aliases...),
 		"review:preserved-alias",
@@ -291,11 +343,11 @@ func TestCreatePicoThreadPreservesActiveHistorySlot(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("ReadSessionSnapshot() = (found=%v, err=%v)", found, err)
 	}
-	var storedScope map[string]any
+	var storedScope session.SessionScope
 	if err := json.Unmarshal(meta.Scope, &storedScope); err != nil {
 		t.Fatal(err)
 	}
-	if storedScope["owner"] != "snapshot-replacement" ||
+	if storedScope.Channel != allocation.Scope.Channel ||
 		!slices.Equal(meta.Aliases, committedAliases) ||
 		meta.Summary != "" || meta.ThreadTitle != "Existing slotted thread" {
 		t.Fatalf("CreatePicoThread() clobbered replacement-owned metadata: %+v", meta)
@@ -387,12 +439,11 @@ func TestListPrefersPromotedCanonicalSessionOverLegacyShadow(t *testing.T) {
 	if err != nil || !found || canonicalMeta.ThreadID != items[0].ID {
 		t.Fatalf("canonical migrated link = (found=%v, meta=%+v, err=%v)", found, canonicalMeta, err)
 	}
-	legacyMeta, err := readMeta(
-		filepath.Join(dir, sanitizeSessionKey(legacyKey)+".meta.json"),
-		legacyKey,
-	)
-	if err != nil || legacyMeta.ThreadID != "" {
-		t.Fatalf("legacy shadow link = %+v, err=%v", legacyMeta, err)
+	var legacyRows int
+	if err := sessionStore.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM sessions WHERE session_key = ?`, legacyKey,
+	).Scan(&legacyRows); err != nil || legacyRows != 0 {
+		t.Fatalf("legacy shadow rows = %d, err=%v", legacyRows, err)
 	}
 	if detachErr := threadStore.DetachCurrent(legacyKey); detachErr != nil {
 		t.Fatal(detachErr)
@@ -401,12 +452,10 @@ func TestListPrefersPromotedCanonicalSessionOverLegacyShadow(t *testing.T) {
 	if err != nil || canonicalMeta.ThreadID != "" {
 		t.Fatalf("canonical detached link = %+v, err=%v", canonicalMeta, err)
 	}
-	legacyMeta, err = readMeta(
-		filepath.Join(dir, sanitizeSessionKey(legacyKey)+".meta.json"),
-		legacyKey,
-	)
-	if err != nil || legacyMeta.ThreadID != "" {
-		t.Fatalf("detach mutated legacy shadow = %+v, err=%v", legacyMeta, err)
+	if err := sessionStore.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM sessions WHERE session_key = ?`, legacyKey,
+	).Scan(&legacyRows); err != nil || legacyRows != 0 {
+		t.Fatalf("detach recreated legacy shadow rows = %d, err=%v", legacyRows, err)
 	}
 
 	// Simulate a registry record written before canonical-key migration. A
@@ -452,17 +501,8 @@ func TestListPrefersPromotedCanonicalSessionOverLegacyShadow(t *testing.T) {
 		canonicalMeta.HistorySlot != activeSlot {
 		t.Fatalf("canonical handoff tuple = history=%+v meta=%+v err=%v", canonicalHistory, canonicalMeta, err)
 	}
-	legacyData, err := os.ReadFile(filepath.Join(dir, sanitizeSessionKey(legacyKey)+".jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var legacyMessage providers.Message
-	if decodeErr := json.Unmarshal(
-		[]byte(strings.TrimSpace(string(legacyData))),
-		&legacyMessage,
-	); decodeErr != nil ||
-		legacyMessage.Content != "stale legacy thread preview" {
-		t.Fatalf("legacy shadow changed = message=%+v err=%v", legacyMessage, decodeErr)
+	if matches, err := filepath.Glob(filepath.Join(dir, "*.json*")); err != nil || len(matches) != 0 {
+		t.Fatalf("runtime session JSON = %v, err=%v", matches, err)
 	}
 	registryMeta, err = threadStore.readThreadMeta(items[0].ID)
 	if err != nil || registryMeta.PrimarySessionKey != allocation.Key {
@@ -859,20 +899,11 @@ func TestThreadMutationsArbitrateReviewAdmissionAfterPreflight(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewJSONLStore() error = %v", err)
 		}
-		originalTargetBefore := readThreadTestSessionState(t, sessionStore, target.PrimarySessionKey)
-		reviewScope, reviewKey, reviewAlias := reviewThreadTestIdentity("attach-primary-race")
+		_ = readThreadTestSessionState(t, sessionStore, target.PrimarySessionKey)
+		reviewScope, _, _ := reviewThreadTestIdentity("attach-primary-race")
 		targetMetaBefore, err := threadStore.readThreadMeta(target.ID)
 		if err != nil {
 			t.Fatalf("readThreadMeta() error = %v", err)
-		}
-		targetMetaBefore.PrimarySessionKey = reviewAlias
-		targetMetaBefore.SessionKeys = []string{reviewAlias}
-		if writeErr := threadStore.writeThreadMeta(targetMetaBefore); writeErr != nil {
-			t.Fatalf("writeThreadMeta(stale target) error = %v", writeErr)
-		}
-		targetMetaBefore, err = threadStore.readThreadMeta(target.ID)
-		if err != nil {
-			t.Fatalf("readThreadMeta(stale target) error = %v", err)
 		}
 		originKey := session.BuildOpaqueSessionKey("attach-primary-race-origin")
 		seedSlottedSession(
@@ -902,12 +933,17 @@ func TestThreadMutationsArbitrateReviewAdmissionAfterPreflight(t *testing.T) {
 		}()
 		waitForThreadTestSignal(t, arrived, "AttachCurrent primary preflight")
 
-		reviewBefore := claimThreadTestReviewSession(
-			t,
-			sessionStore,
-			reviewScope,
-			[]providers.Message{{Role: "user", Content: "private attach-primary transcript"}},
-		)
+		if err := sessionStore.UpdateSessionMeta(
+			context.Background(),
+			target.PrimarySessionKey,
+			func(meta *memory.SessionMeta) error {
+				meta.Scope = mustMarshalScope(t, reviewScope)
+				return nil
+			},
+		); err != nil {
+			t.Fatal(err)
+		}
+		reviewBefore := readThreadTestSessionState(t, sessionStore, target.PrimarySessionKey)
 		close(release)
 		if resultErr := waitForThreadTestError(t, result, "AttachCurrent primary"); !errors.Is(
 			resultErr,
@@ -916,9 +952,8 @@ func TestThreadMutationsArbitrateReviewAdmissionAfterPreflight(t *testing.T) {
 			t.Fatalf("AttachCurrent() error = %v, want %v", resultErr, errReviewScope)
 		}
 
-		assertThreadTestSessionState(t, sessionStore, reviewKey, reviewBefore)
+		assertThreadTestSessionState(t, sessionStore, target.PrimarySessionKey, reviewBefore)
 		assertThreadTestSessionState(t, sessionStore, originKey, originBefore)
-		assertThreadTestSessionState(t, sessionStore, target.PrimarySessionKey, originalTargetBefore)
 		targetMetaAfter, err := threadStore.readThreadMeta(target.ID)
 		if err != nil {
 			t.Fatalf("readThreadMeta(after) error = %v", err)
@@ -1088,41 +1123,49 @@ func TestStrictThreadProjectionAndUpdateRejectCorruptAliasCatalog(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	registryPath := threadStore.threadPath(thread.ID)
-	registryBefore, err := os.ReadFile(registryPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if writeErr := os.WriteFile(
-		filepath.Join(threadStore.Dir, "corrupt-alias-owner.meta.json"),
-		[]byte("not-json"),
-		0o644,
-	); writeErr != nil {
-		t.Fatal(writeErr)
-	}
 	meta, err := threadStore.readThreadMeta(thread.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	sessionStore, err := memory.NewSQLiteStore(threadStore.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sessionStore.Close()
+	var titleBefore string
+	var versionBefore int64
+	if err := sessionStore.SQLDB().QueryRow(
+		`SELECT title, version FROM threads WHERE thread_id = ?`, thread.ID,
+	).Scan(&titleBefore, &versionBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessionStore.SQLDB().Exec(
+		`CREATE INDEX unexpected_thread_index ON threads(title)`,
+	); err != nil {
+		t.Fatal(err)
+	}
 	if projected, ok := threadStore.threadFromRegistryMeta(meta); ok ||
 		!reflect.DeepEqual(projected, Thread{}) {
-		t.Fatalf("corrupt-catalog projection = (%#v, %v), want hidden", projected, ok)
+		t.Fatalf("corrupt-schema projection = (%#v, %v), want hidden", projected, ok)
 	}
 	if _, ok, updateErr := threadStore.UpdateThread(
 		thread.ID,
 		UpdateRequest{Title: "must not persist"},
-	); updateErr == nil || ok || !strings.Contains(updateErr.Error(), "decode session metadata") {
-		t.Fatalf("UpdateThread(corrupt catalog) = (ok=%v, err=%v)", ok, updateErr)
+	); updateErr == nil || ok || !strings.Contains(updateErr.Error(), "unexpected SQLite schema object") {
+		t.Fatalf("UpdateThread(corrupt schema) = (ok=%v, err=%v)", ok, updateErr)
 	}
-	registryAfter, err := os.ReadFile(registryPath)
-	if err != nil {
+	var titleAfter string
+	var versionAfter int64
+	if err := sessionStore.SQLDB().QueryRow(
+		`SELECT title, version FROM threads WHERE thread_id = ?`, thread.ID,
+	).Scan(&titleAfter, &versionAfter); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(registryAfter, registryBefore) {
-		t.Fatal("rejected corrupt-catalog update changed registry")
+	if titleAfter != titleBefore || versionAfter != versionBefore {
+		t.Fatal("rejected corrupt-schema update changed thread row")
 	}
 	if _, err := threadStore.List(); err == nil {
-		t.Fatalf("List(corrupt alias catalog) error = %v", err)
+		t.Fatalf("List(corrupt schema) error = %v", err)
 	}
 }
 
@@ -1152,12 +1195,10 @@ func TestReturnToOriginRevalidatesAuthoritativeSessions(t *testing.T) {
 		},
 		{
 			name: "origin metadata corrupt",
-			corrupt: func(t *testing.T, store Store, _ *memory.JSONLStore, handoff ThreadHandoff, _ Thread) {
+			corrupt: func(t *testing.T, _ Store, sessionStore *memory.JSONLStore, _ ThreadHandoff, _ Thread) {
 				t.Helper()
-				if err := os.WriteFile(
-					filepath.Join(store.Dir, sanitizeSessionKey(handoff.OriginSessionKey)+".meta.json"),
-					[]byte("not-json"),
-					0o644,
+				if _, err := sessionStore.SQLDB().Exec(
+					`CREATE INDEX unexpected_handoff_index ON sessions(summary)`,
 				); err != nil {
 					t.Fatal(err)
 				}
@@ -1243,8 +1284,7 @@ func TestUpdateThreadRejectsStaleReviewPrimaryWithoutRegistryMutation(t *testing
 	if writeErr := threadStore.writeThreadMeta(meta); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	path := threadStore.threadPath(target.ID)
-	before, err := os.ReadFile(path)
+	before, err := threadStore.readThreadMeta(target.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1252,89 +1292,47 @@ func TestUpdateThreadRejectsStaleReviewPrimaryWithoutRegistryMutation(t *testing
 	if !errors.Is(err, errReviewScope) || ok || !reflect.DeepEqual(got, Thread{}) {
 		t.Fatalf("UpdateThread(review primary) = (%#v, %v, %v)", got, ok, err)
 	}
-	after, err := os.ReadFile(path)
+	after, err := threadStore.readThreadMeta(target.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(after, before) {
+	if !reflect.DeepEqual(after, before) {
 		t.Fatal("rejected update changed stale registry")
 	}
 	assertThreadTestSessionState(t, reviewStore, reviewKey, reviewBefore)
 }
 
-func TestAttachReviewOriginRaceWithMissingPrimaryMutatesNothing(t *testing.T) {
+func TestDeletingPrimarySessionCascadesThreadRelationships(t *testing.T) {
 	cfg := testConfig(t)
 	threadStore := NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace)
 	target, err := threadStore.CreatePicoThread(context.Background(), cfg, CreateRequest{
-		Title: "target registry made stale",
+		Title: "target removed with primary session",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	meta, err := threadStore.readThreadMeta(target.ID)
+	sessionStore, err := memory.NewSQLiteStore(threadStore.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	missingPrimary := session.BuildOpaqueSessionKey("missing-attach-primary")
-	meta.PrimarySessionKey = missingPrimary
-	meta.SessionKeys = []string{missingPrimary}
-	if writeErr := threadStore.writeThreadMeta(meta); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	registryBefore, err := os.ReadFile(threadStore.threadPath(target.ID))
-	if err != nil {
+	defer sessionStore.Close()
+	if _, err := sessionStore.SQLDB().Exec(
+		`DELETE FROM sessions WHERE session_key = ?`, target.PrimarySessionKey,
+	); err != nil {
 		t.Fatal(err)
 	}
-	reviewScope, reviewKey, _ := reviewThreadTestIdentity("missing-primary-origin-race")
-	arrived := make(chan struct{})
-	release := make(chan struct{})
-	threadStore.testHooks = &threadStoreTestHooks{afterAttachPreflight: func() {
-		close(arrived)
-		<-release
-	}}
-	result := make(chan error, 1)
-	go func() {
-		_, _, attachErr := threadStore.AttachCurrent(context.Background(), AttachRequest{
-			ThreadID:   target.ID,
-			SessionKey: reviewKey,
-			Summary:    "must not project",
-		})
-		result <- attachErr
-	}()
-	waitForThreadTestSignal(t, arrived, "AttachCurrent missing-primary race")
-	sessionStore, err := memory.NewJSONLStore(threadStore.Dir)
-	if err != nil {
-		t.Fatal(err)
+	if _, found, err := threadStore.GetMeta(target.ID); err != nil || found {
+		t.Fatalf("cascaded thread = (found=%v, err=%v)", found, err)
 	}
-	reviewBefore := claimThreadTestReviewSession(
-		t,
-		sessionStore,
-		reviewScope,
-		[]providers.Message{{Role: "user", Content: "private raced origin"}},
-	)
-	close(release)
-	if resultErr := waitForThreadTestError(
-		t,
-		result,
-		"AttachCurrent missing-primary race",
-	); !errors.Is(resultErr, errSessionMissing) {
-		t.Fatalf("AttachCurrent() error = %v, want %v", resultErr, errSessionMissing)
+	var relationships int
+	if err := sessionStore.SQLDB().QueryRow(`SELECT
+        (SELECT COUNT(*) FROM thread_sessions WHERE thread_id = ?) +
+        (SELECT COUNT(*) FROM session_thread_links WHERE thread_id = ?) +
+        (SELECT COUNT(*) FROM thread_handoffs WHERE target_thread_id = ?)`,
+		target.ID, target.ID, target.ID,
+	).Scan(&relationships); err != nil || relationships != 0 {
+		t.Fatalf("cascaded relationships = %d, err=%v", relationships, err)
 	}
-	assertThreadTestSessionState(t, sessionStore, reviewKey, reviewBefore)
-	if _, _, _, found, readErr := sessionStore.ReadSessionSnapshot(
-		context.Background(),
-		missingPrimary,
-	); readErr != nil || found {
-		t.Fatalf("missing primary snapshot = (found=%v, err=%v)", found, readErr)
-	}
-	registryAfter, err := os.ReadFile(threadStore.threadPath(target.ID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(registryAfter, registryBefore) {
-		t.Fatal("missing-primary race changed registry")
-	}
-	assertEmptyThreadTestDir(t, threadStore.HandoffsDir)
 }
 
 func TestThreadCreateAndAttachFailuresRollBackAllState(t *testing.T) {
@@ -1424,8 +1422,7 @@ func TestThreadCreateAndAttachFailuresRollBackAllState(t *testing.T) {
 			)
 			originBefore := readThreadTestSessionState(t, sessionStore, originKey)
 			targetBefore := readThreadTestSessionState(t, sessionStore, target.PrimarySessionKey)
-			registryPath := store.threadPath(target.ID)
-			registryBefore, err := os.ReadFile(registryPath)
+			registryBefore, err := store.readThreadMeta(target.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1445,11 +1442,11 @@ func TestThreadCreateAndAttachFailuresRollBackAllState(t *testing.T) {
 			}
 			assertThreadTestSessionState(t, sessionStore, originKey, originBefore)
 			assertThreadTestSessionState(t, sessionStore, target.PrimarySessionKey, targetBefore)
-			registryAfter, err := os.ReadFile(registryPath)
+			registryAfter, err := store.readThreadMeta(target.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !slices.Equal(registryAfter, registryBefore) {
+			if !reflect.DeepEqual(registryAfter, registryBefore) {
 				t.Fatal("failed attach changed registry")
 			}
 			assertEmptyThreadTestDir(t, store.HandoffsDir)
@@ -1637,6 +1634,9 @@ func assertThreadTestSessionState(
 func assertEmptyThreadTestDir(t *testing.T, dir string) {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return
+	}
 	if err != nil {
 		t.Fatalf("ReadDir(%q) error = %v", dir, err)
 	}
@@ -1700,8 +1700,8 @@ func assertSlottedSession(t *testing.T, dir, key string, want []providers.Messag
 	if err != nil {
 		t.Fatalf("ReadSessionState() error = %v", err)
 	}
-	if meta.HistorySlot != "a" {
-		t.Fatalf("meta.HistorySlot = %q, want a", meta.HistorySlot)
+	if meta.HistorySlot != "" || meta.Skip != 0 {
+		t.Fatalf("SQLite session exposed legacy history selectors: %+v", meta)
 	}
 	if len(history) != len(want) {
 		t.Fatalf("len(history) = %d, want %d", len(history), len(want))
@@ -1710,6 +1710,9 @@ func assertSlottedSession(t *testing.T, dir, key string, want []providers.Messag
 		if history[i].Role != want[i].Role || history[i].Content != want[i].Content {
 			t.Fatalf("history[%d] = %#v, want %#v", i, history[i], want[i])
 		}
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, "*.json*")); err != nil || len(matches) != 0 {
+		t.Fatalf("SQLite session wrote legacy JSON: %v, %v", matches, err)
 	}
 }
 

@@ -31,14 +31,22 @@ const (
 
 // LegacyOptions describes the legacy sources owned by one database.
 type LegacyOptions struct {
-	SourceRoot    string
-	ArchiveRoot   string
-	Sources       func() ([]LegacySource, error)
-	Import        LegacyImporter
-	MaxBytes      int64
-	MaxSources    int
-	MaxTotalBytes int64
-	Now           func() time.Time
+	SourceRoot  string
+	ArchiveRoot string
+	Sources     func() ([]LegacySource, error)
+	Import      LegacyImporter
+	// Finalize resolves relationships among sources imported by this exact
+	// transaction. It is invoked at most once, only when at least one source is
+	// newly imported, before subsystem schema validation and commit.
+	Finalize LegacyFinalizer
+	// FinalizeResults is the aggregate variant used when dependency resolution
+	// determines whether parsed records were actually imported. It replaces
+	// the provisional per-source accounting atomically before commit.
+	FinalizeResults LegacyResultFinalizer
+	MaxBytes        int64
+	MaxSources      int
+	MaxTotalBytes   int64
+	Now             func() time.Time
 }
 
 // LegacySource is one deterministic, relative source below SourceRoot.
@@ -56,6 +64,7 @@ type LegacyInput struct {
 	Digest   [sha256.Size]byte
 	Limit    int64
 	Mode     os.FileMode
+	ModTime  time.Time
 }
 
 // ImportIssue is a secret-safe description of a skipped legacy record.
@@ -73,6 +82,27 @@ type ImportResult struct {
 
 // LegacyImporter writes valid records to the new schema using conn.
 type LegacyImporter func(context.Context, *sql.Conn, LegacyInput) (ImportResult, error)
+
+// LegacyFinalizeInput contains bounded, secret-free accounting for only the
+// sources newly imported in the current transaction. SourceIDs follow the
+// deterministic source ordering and are detached from importer-owned slices.
+type LegacyFinalizeInput struct {
+	SourceIDs []string
+	Imported  int
+	Skipped   int
+}
+
+// LegacyFinalizer commits aggregate records and relationships after all new
+// legacy sources have been parsed inside the same BEGIN IMMEDIATE transaction.
+type LegacyFinalizer func(context.Context, *sql.Conn, LegacyFinalizeInput) error
+
+// LegacyResultFinalizer returns final accounting for every SourceID in its
+// input. Missing, extra, or invalid source results fail the migration.
+type LegacyResultFinalizer func(
+	context.Context,
+	*sql.Conn,
+	LegacyFinalizeInput,
+) (map[string]ImportResult, error)
 
 const storageImportsSchema = `CREATE TABLE IF NOT EXISTS storage_imports (
     component       TEXT NOT NULL,
@@ -145,6 +175,7 @@ type legacyImportSummary struct {
 	SourcesWithSkips int
 	Imported         int64
 	Skipped          int64
+	NewSourceIDs     []string
 }
 
 func logLegacyImportSummary(component string, summary legacyImportSummary) {
@@ -168,9 +199,6 @@ func importLegacySources(
 	if options.Sources == nil || options.Import == nil {
 		return legacyImportSummary{}, fmt.Errorf("%s legacy migration is incomplete", component)
 	}
-	if err := validateLegacyRoots(options); err != nil {
-		return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
-	}
 	maximumSources, maximumTotalBytes, err := legacyEnumerationBounds(options)
 	if err != nil {
 		return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
@@ -184,6 +212,12 @@ func importLegacySources(
 			"enumerate %s legacy sources: source count exceeds its limit",
 			component,
 		)
+	}
+	if len(sources) == 0 {
+		return legacyImportSummary{}, nil
+	}
+	if err := validateLegacyRoots(options); err != nil {
+		return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
 	}
 	sources = append([]LegacySource(nil), sources...)
 	sort.Slice(sources, func(left, right int) bool {
@@ -340,11 +374,125 @@ func importLegacySources(
 		}
 		summary.Imported += int64(result.Imported)
 		summary.Skipped += int64(result.Skipped)
+		summary.NewSourceIDs = append(summary.NewSourceIDs, source.ID)
 		if result.Skipped > 0 {
 			summary.SourcesWithSkips++
 		}
 	}
+	if options.Finalize != nil && options.FinalizeResults != nil {
+		return legacyImportSummary{}, fmt.Errorf(
+			"finalize %s legacy import: multiple finalizers are configured",
+			component,
+		)
+	}
+	if len(summary.NewSourceIDs) > 0 && (options.Finalize != nil || options.FinalizeResults != nil) {
+		if summary.Imported > int64(maximumLegacyRecordCount) ||
+			summary.Skipped > int64(maximumLegacyRecordCount) {
+			return legacyImportSummary{}, fmt.Errorf(
+				"finalize %s legacy import: aggregate record count exceeds its limit",
+				component,
+			)
+		}
+		input := LegacyFinalizeInput{
+			SourceIDs: append([]string(nil), summary.NewSourceIDs...),
+			Imported:  int(summary.Imported),
+			Skipped:   int(summary.Skipped),
+		}
+		if options.Finalize != nil {
+			if err := options.Finalize(ctx, conn, input); err != nil {
+				return legacyImportSummary{}, fmt.Errorf(
+					"finalize %s legacy import: %w",
+					component,
+					err,
+				)
+			}
+		} else {
+			results, err := options.FinalizeResults(ctx, conn, input)
+			if err != nil {
+				return legacyImportSummary{}, fmt.Errorf(
+					"finalize %s legacy import: %w", component, err,
+				)
+			}
+			if err := replaceFinalizedImportResults(
+				ctx, conn, component, input.SourceIDs, results, &summary,
+			); err != nil {
+				return legacyImportSummary{}, fmt.Errorf(
+					"finalize %s legacy import: %w", component, err,
+				)
+			}
+		}
+	}
 	return summary, nil
+}
+
+func replaceFinalizedImportResults(
+	ctx context.Context,
+	conn *sql.Conn,
+	component string,
+	sourceIDs []string,
+	results map[string]ImportResult,
+	summary *legacyImportSummary,
+) error {
+	if len(results) != len(sourceIDs) {
+		return errors.New("final accounting does not cover the imported source set")
+	}
+	allowed := make(map[string]struct{}, len(sourceIDs))
+	for _, sourceID := range sourceIDs {
+		allowed[sourceID] = struct{}{}
+	}
+	for sourceID := range results {
+		if _, ok := allowed[sourceID]; !ok {
+			return errors.New("final accounting contains an unknown source")
+		}
+	}
+	var imported, skipped int64
+	sourcesWithSkips := 0
+	for _, sourceID := range sourceIDs {
+		result, ok := results[sourceID]
+		if !ok {
+			return errors.New("final accounting is missing a source")
+		}
+		if err := validateImportResult(result); err != nil {
+			return err
+		}
+		imported += int64(result.Imported)
+		skipped += int64(result.Skipped)
+		if imported > maximumLegacyRecordCount || skipped > maximumLegacyRecordCount {
+			return errors.New("final aggregate record count exceeds its limit")
+		}
+		if result.Skipped > 0 {
+			sourcesWithSkips++
+		}
+		update, err := conn.ExecContext(ctx, `UPDATE storage_imports
+            SET imported_count = ?, skipped_count = ?
+            WHERE component = ? AND source_id = ?`,
+			result.Imported, result.Skipped, component, sourceID)
+		if err != nil {
+			return err
+		}
+		if changed, err := update.RowsAffected(); err != nil || changed != 1 {
+			if err != nil {
+				return err
+			}
+			return errors.New("final accounting source record is missing")
+		}
+		if _, err := conn.ExecContext(ctx, `DELETE FROM storage_import_issues
+            WHERE component = ? AND source_id = ?`, component, sourceID); err != nil {
+			return err
+		}
+		for sequence, issue := range result.Issues {
+			if _, err := conn.ExecContext(ctx, `INSERT INTO storage_import_issues (
+                component, source_id, sequence, issue_code, record_digest
+            ) VALUES (?, ?, ?, ?, ?)`, component, sourceID, sequence,
+				issue.Code, issue.RecordDigest[:]); err != nil {
+				return err
+			}
+		}
+	}
+	summary.Imported = imported
+	summary.Skipped = skipped
+	summary.SourcesWithSkips = sourcesWithSkips
+	return nil
 }
 
 func archiveImportedSources(
@@ -353,12 +501,6 @@ func archiveImportedSources(
 	component string,
 	options LegacyOptions,
 ) error {
-	if err := validateLegacyRoots(options); err != nil {
-		return fmt.Errorf("archive %s legacy sources: %w", component, err)
-	}
-	if err := ensureLegacyArchiveRoot(options.SourceRoot, options.ArchiveRoot); err != nil {
-		return fmt.Errorf("archive %s legacy sources: %w", component, err)
-	}
 	type pending struct {
 		id, relative string
 		digest       []byte
@@ -397,6 +539,15 @@ func archiveImportedSources(
 		}
 		if rowsErr != nil {
 			return fmt.Errorf("list %s pending legacy archives: %w", component, rowsErr)
+		}
+		if len(pendingSources) == 0 {
+			return nil
+		}
+		if err := validateLegacyRoots(options); err != nil {
+			return fmt.Errorf("archive %s legacy sources: %w", component, err)
+		}
+		if err := ensureLegacyArchiveRoot(options.SourceRoot, options.ArchiveRoot); err != nil {
+			return fmt.Errorf("archive %s legacy sources: %w", component, err)
 		}
 
 		for _, source := range pendingSources {
@@ -866,6 +1017,7 @@ func readLegacySource(
 		Digest:   sha256.Sum256(data),
 		Limit:    maxBytes,
 		Mode:     openedInfo.Mode().Perm(),
+		ModTime:  openedInfo.ModTime(),
 	}, true, nil
 }
 

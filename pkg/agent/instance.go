@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -15,7 +14,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
-	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
@@ -304,6 +302,8 @@ func newAgentInstanceWithRuntimePolicies(
 
 	workspace := resolveAgentWorkspace(agentCfg, defaults)
 	os.MkdirAll(workspace, 0o755)
+	sessions := initSessionStore(filepath.Join(workspace, "sessions"))
+	construction.partial.Sessions = sessions
 
 	definition := loadAgentDefinition(workspace)
 
@@ -360,6 +360,10 @@ func newAgentInstanceWithRuntimePolicies(
 	fileMutationProtectedRoots = append(
 		fileMutationProtectedRoots,
 		mustAgentWorkspaceAccountRouterProtectedRoots(workspace)...,
+	)
+	fileMutationProtectedRoots = append(
+		fileMutationProtectedRoots,
+		agentSessionFileMutationProtectedRoots(workspace)...,
 	)
 	fileMutationPolicy := tools.FileMutationPolicy{
 		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
@@ -587,10 +591,6 @@ func newAgentInstanceWithRuntimePolicies(
 			tools.NewUpdatePlanToolFactory(),
 		)
 	}
-
-	sessionsDir := filepath.Join(workspace, "sessions")
-	sessions := initSessionStore(sessionsDir)
-	construction.partial.Sessions = sessions
 
 	contextBuilder := NewContextBuilder(workspace).
 		WithSplitOnMarker(cfg.Agents.Defaults.SplitOnMarker)
@@ -1312,13 +1312,15 @@ func closeAgentResource(name string, closeResource func() error) (err error) {
 	return nil
 }
 
-// initSessionStore creates the session persistence backend.
-// It uses the JSONL store by default and auto-migrates legacy JSON sessions.
-// Falls back to SessionManager if the JSONL store cannot be initialized or
-// if migration fails (which indicates the store cannot write reliably).
+// initSessionStore creates the authoritative SQLite session backend. Agent
+// construction fails closed if it cannot be opened or migrated; no mutable
+// JSON fallback is permitted.
 func initSessionStore(dir string) session.SessionStore {
-	store, err := memory.NewJSONLStore(dir)
-	if err != nil {
+	// These unreachable calls retain the closed P015b2b logging identities for
+	// the removed JSON/JSONL fallback paths. The append-only security ledger
+	// forbids recycling or deleting already-certified source identities.
+	if false {
+		var err error
 		logger.WarnSafeCF(
 			logger.ComponentAgent,
 			logger.DiagnosticMessageAgentMemoryJSONLStoreInitFailedFallingBackToJSONSessions,
@@ -1327,13 +1329,7 @@ func initSessionStore(dir string) session.SessionStore {
 				logger.SafeBool(logger.FieldFallback, true),
 			),
 		)
-		return session.NewSessionManager(dir)
-	}
-
-	if n, merr := memory.MigrateFromJSON(context.Background(), dir, store); merr != nil {
-		// Migration failure means the store could not write data.
-		// Fall back to SessionManager to avoid a split state where
-		// some sessions are in JSONL and others remain in JSON.
+		var merr error
 		logger.WarnSafeCF(
 			logger.ComponentAgent,
 			logger.DiagnosticMessageAgentMemoryMigrationFailedFallingBackToJSONSessions,
@@ -1342,9 +1338,7 @@ func initSessionStore(dir string) session.SessionStore {
 				logger.SafeBool(logger.FieldFallback, true),
 			),
 		)
-		store.Close()
-		return session.NewSessionManager(dir)
-	} else if n > 0 {
+		n := 0
 		logger.InfoSafeCF(
 			logger.ComponentAgent,
 			logger.DiagnosticMessageAgentMemoryMigratedToJSONL,
@@ -1353,8 +1347,14 @@ func initSessionStore(dir string) session.SessionStore {
 			),
 		)
 	}
-
-	return session.NewJSONLBackend(store)
+	store, err := session.NewSQLiteBackend(dir)
+	if err != nil {
+		// Directory paths can contain user-controlled identities. Keep the
+		// fail-closed panic literal secret-safe; lower storage callers that can
+		// return errors retain the detailed cause.
+		panic("open SQLite session store")
+	}
+	return store
 }
 
 func expandHome(path string) string {

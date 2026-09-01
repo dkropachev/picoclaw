@@ -22,7 +22,7 @@ type ContextManager interface {
 	Compact(ctx context.Context, req *CompactRequest) error
 
 	// Ingest records a message into the ContextManager's own storage.
-	// Called after each message is persisted to session JSONL.
+	// Called after each message is committed to session storage.
 	Ingest(ctx context.Context, req *IngestRequest) error
 
 	// Clear removes all stored context for a session (messages, summaries, etc.).

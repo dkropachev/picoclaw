@@ -280,3 +280,15 @@ func mustAgentWorkspaceAccountRouterProtectedRoots(workspace string) []string {
 	}
 	return roots
 }
+
+func agentSessionFileMutationProtectedRoots(workspace string) []string {
+	database := filepath.Join(workspace, "sessions", "sessions.db")
+	return []string{
+		database,
+		database + "-wal",
+		database + "-shm",
+		// Protect the namespace so a model cannot pre-create the archive parent
+		// as a file before the first migration needs it.
+		filepath.Join(workspace, "legacy-json"),
+	}
+}

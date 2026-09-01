@@ -2444,6 +2444,7 @@ func workflowInboundContext(delivery workflows.Delivery, senderID string) bus.In
 
 func workflowSessionScope(agentID, sessionKey string, delivery workflows.Delivery) *session.SessionScope {
 	values := map[string]string{
+		"workflow":         sessionKey,
 		"workflow_session": sessionKey,
 	}
 	if delivery.ChatID != "" {

@@ -2,9 +2,6 @@ package session
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +9,13 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 )
+
+// sanitizeFilename is retained for legacy fixture/import compatibility.
+func sanitizeFilename(key string) string {
+	return strings.NewReplacer(":", "_", "/", "_", "\\", "_").Replace(
+		key,
+	)
+}
 
 type Session struct {
 	Key      string              `json:"key"`
@@ -21,44 +25,52 @@ type Session struct {
 	Updated  time.Time           `json:"updated"`
 }
 
+// SessionManager is an in-memory store when constructed with an empty path.
+// A nonempty legacy storage argument is a deprecated compatibility facade over
+// SQLite and never writes aggregate JSON.
 type SessionManager struct {
-	sessions map[string]*Session
-	mu       sync.RWMutex
-	storage  string
+	sessions   map[string]*Session
+	mu         sync.RWMutex
+	persistent SessionStore
 }
 
 func NewSessionManager(storage string) *SessionManager {
-	sm := &SessionManager{
-		sessions: make(map[string]*Session),
-		storage:  storage,
+	manager := &SessionManager{sessions: make(map[string]*Session)}
+	if strings.TrimSpace(storage) == "" {
+		return manager
 	}
-
-	if storage != "" {
-		os.MkdirAll(storage, 0o700)
-		sm.loadSessions()
+	backend, err := NewSQLiteBackend(storage)
+	if err != nil {
+		panic("open SQLite-backed SessionManager")
 	}
-
-	return sm
+	manager.persistent = backend
+	return manager
 }
 
 func (sm *SessionManager) GetOrCreate(key string) *Session {
+	if sm.persistent != nil {
+		sm.mu.Lock()
+		defer sm.mu.Unlock()
+		if existing, ok := sm.sessions[key]; ok {
+			return existing
+		}
+		now := time.Now()
+		created := &Session{
+			Key: key, Messages: sm.persistent.GetHistory(key),
+			Summary: sm.persistent.GetSummary(key), Created: now, Updated: now,
+		}
+		sm.sessions[key] = created
+		return created
+	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-
-	session, ok := sm.sessions[key]
-	if ok {
-		return session
+	if existing, ok := sm.sessions[key]; ok {
+		return existing
 	}
-
-	session = &Session{
-		Key:      key,
-		Messages: []providers.Message{},
-		Created:  time.Now(),
-		Updated:  time.Now(),
-	}
-	sm.sessions[key] = session
-
-	return session
+	now := time.Now()
+	created := &Session{Key: key, Messages: []providers.Message{}, Created: now, Updated: now}
+	sm.sessions[key] = created
+	return created
 }
 
 func ensureMessageCreatedAt(msg *providers.Message, fallback time.Time) {
@@ -76,284 +88,238 @@ func normalizeHistoryCreatedAt(history []providers.Message) {
 	}
 }
 
-func (sm *SessionManager) AddMessage(sessionKey, role, content string) {
-	sm.AddFullMessage(sessionKey, providers.Message{
-		Role:    role,
-		Content: content,
-	})
+func (sm *SessionManager) AddMessage(key, role, content string) {
+	sm.AddFullMessage(key, providers.Message{Role: role, Content: content})
 }
 
-// AddFullMessage adds a complete message with tool calls and tool call ID to the session.
-// This is used to save the full conversation flow including tool calls and tool results.
-func (sm *SessionManager) AddFullMessage(sessionKey string, msg providers.Message) {
-	if messageutil.IsTransientAssistantThoughtMessage(msg) {
+func (sm *SessionManager) AddFullMessage(key string, message providers.Message) {
+	if sm.persistent != nil {
+		sm.persistent.AddFullMessage(key, message)
+		sm.mu.Lock()
+		if stored, ok := sm.sessions[key]; ok && !messageutil.IsTransientAssistantThoughtMessage(message) {
+			now := time.Now()
+			ensureMessageCreatedAt(&message, now)
+			stored.Messages = append(stored.Messages, cloneSessionMessage(message))
+			stored.Updated = now
+		}
+		sm.mu.Unlock()
 		return
 	}
-
+	if messageutil.IsTransientAssistantThoughtMessage(message) {
+		return
+	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-
-	session, ok := sm.sessions[sessionKey]
-	if !ok {
-		session = &Session{
-			Key:      sessionKey,
-			Messages: []providers.Message{},
-			Created:  time.Now(),
-		}
-		sm.sessions[sessionKey] = session
-	}
-
 	now := time.Now()
-	ensureMessageCreatedAt(&msg, now)
-
-	session.Messages = append(session.Messages, msg)
-	session.Updated = now
+	ensureMessageCreatedAt(&message, now)
+	stored, ok := sm.sessions[key]
+	if !ok {
+		stored = &Session{Key: key, Messages: []providers.Message{}, Created: now}
+		sm.sessions[key] = stored
+	}
+	stored.Messages = append(stored.Messages, cloneSessionMessage(message))
+	stored.Updated = now
 }
 
 func (sm *SessionManager) GetHistory(key string) []providers.Message {
+	if sm.persistent != nil {
+		sm.mu.RLock()
+		if stored, ok := sm.sessions[key]; ok {
+			history := cloneSessionMessages(stored.Messages)
+			sm.mu.RUnlock()
+			return history
+		}
+		sm.mu.RUnlock()
+		return sm.persistent.GetHistory(key)
+	}
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-
-	session, ok := sm.sessions[key]
+	stored, ok := sm.sessions[key]
 	if !ok {
 		return []providers.Message{}
 	}
-
-	history := make([]providers.Message, len(session.Messages))
-	copy(history, session.Messages)
-	return history
+	return cloneSessionMessages(stored.Messages)
 }
 
-// ReadSessionSnapshot returns a coherent, deep-cloned view of an existing
-// exact session key. Unlike GetOrCreate and the write methods, this strict read
-// never creates a session and does not apply fallback key semantics.
 func (sm *SessionManager) ReadSessionSnapshot(
 	ctx context.Context,
 	key string,
 ) (SessionSnapshot, bool, error) {
+	if sm.persistent != nil {
+		if err := ctx.Err(); err != nil {
+			return SessionSnapshot{}, false, err
+		}
+		sm.mu.RLock()
+		if stored, ok := sm.sessions[key]; ok {
+			snapshot := SessionSnapshot{
+				Key: stored.Key, History: cloneSessionMessages(stored.Messages), Summary: stored.Summary,
+			}
+			sm.mu.RUnlock()
+			return snapshot, true, nil
+		}
+		sm.mu.RUnlock()
+	}
+	if reader, ok := sm.persistent.(SnapshotReader); ok {
+		return reader.ReadSessionSnapshot(ctx, key)
+	}
 	if err := ctx.Err(); err != nil {
 		return SessionSnapshot{}, false, err
 	}
 	if strings.TrimSpace(key) == "" {
 		return SessionSnapshot{}, false, nil
 	}
-
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-
-	if err := ctx.Err(); err != nil {
-		return SessionSnapshot{}, false, err
-	}
 	stored, ok := sm.sessions[key]
 	if !ok {
 		return SessionSnapshot{}, false, nil
 	}
-
 	return SessionSnapshot{
-		Key:     stored.Key,
-		History: cloneSessionMessages(stored.Messages),
-		Summary: stored.Summary,
+		Key: stored.Key, History: cloneSessionMessages(stored.Messages), Summary: stored.Summary,
 	}, true, nil
 }
 
 func (sm *SessionManager) GetSummary(key string) string {
+	if sm.persistent != nil {
+		sm.mu.RLock()
+		if stored, ok := sm.sessions[key]; ok {
+			summary := stored.Summary
+			sm.mu.RUnlock()
+			return summary
+		}
+		sm.mu.RUnlock()
+		return sm.persistent.GetSummary(key)
+	}
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-
-	session, ok := sm.sessions[key]
-	if !ok {
-		return ""
+	if stored, ok := sm.sessions[key]; ok {
+		return stored.Summary
 	}
-	return session.Summary
+	return ""
 }
 
-func (sm *SessionManager) SetSummary(key string, summary string) {
+func (sm *SessionManager) SetSummary(key, summary string) {
+	if sm.persistent != nil {
+		sm.persistent.SetSummary(key, summary)
+		sm.mu.Lock()
+		if stored, ok := sm.sessions[key]; ok {
+			stored.Summary = summary
+			stored.Updated = time.Now()
+		}
+		sm.mu.Unlock()
+		return
+	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if stored, ok := sm.sessions[key]; ok {
+		stored.Summary = summary
+		stored.Updated = time.Now()
+	}
+}
 
-	session, ok := sm.sessions[key]
-	if ok {
-		session.Summary = summary
-		session.Updated = time.Now()
+func (sm *SessionManager) SetHistory(key string, history []providers.Message) {
+	if sm.persistent != nil {
+		sm.persistent.SetHistory(key, history)
+		sm.mu.Lock()
+		if stored, ok := sm.sessions[key]; ok {
+			stored.Messages = cloneSessionMessages(messageutil.FilterInvalidHistoryMessages(history))
+			normalizeHistoryCreatedAt(stored.Messages)
+			stored.Updated = time.Now()
+		}
+		sm.mu.Unlock()
+		return
+	}
+	history = messageutil.FilterInvalidHistoryMessages(history)
+	history = cloneSessionMessages(history)
+	normalizeHistoryCreatedAt(history)
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if stored, ok := sm.sessions[key]; ok {
+		stored.Messages = history
+		stored.Updated = time.Now()
 	}
 }
 
 func (sm *SessionManager) TruncateHistory(key string, keepLast int) {
+	if sm.persistent != nil {
+		sm.persistent.TruncateHistory(key, keepLast)
+		sm.mu.Lock()
+		if stored, ok := sm.sessions[key]; ok {
+			switch {
+			case keepLast <= 0:
+				stored.Messages = []providers.Message{}
+			case len(stored.Messages) > keepLast:
+				stored.Messages = cloneSessionMessages(stored.Messages[len(stored.Messages)-keepLast:])
+			}
+			stored.Updated = time.Now()
+		}
+		sm.mu.Unlock()
+		return
+	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-
-	session, ok := sm.sessions[key]
+	stored, ok := sm.sessions[key]
 	if !ok {
 		return
 	}
-
 	if keepLast <= 0 {
-		session.Messages = []providers.Message{}
-		session.Updated = time.Now()
+		stored.Messages = []providers.Message{}
+	} else if len(stored.Messages) > keepLast {
+		stored.Messages = cloneSessionMessages(stored.Messages[len(stored.Messages)-keepLast:])
+	} else {
 		return
 	}
+	stored.Updated = time.Now()
+}
 
-	if len(session.Messages) <= keepLast {
-		return
+func (sm *SessionManager) Save(key string) error {
+	if sm.persistent != nil {
+		sm.mu.RLock()
+		stored, ok := sm.sessions[key]
+		var history []providers.Message
+		var summary string
+		if ok {
+			history = cloneSessionMessages(stored.Messages)
+			summary = stored.Summary
+		}
+		sm.mu.RUnlock()
+		if ok {
+			sm.persistent.SetHistory(key, history)
+			sm.persistent.SetSummary(key, summary)
+		}
+		return sm.persistent.Save(key)
 	}
-
-	session.Messages = session.Messages[len(session.Messages)-keepLast:]
-	session.Updated = time.Now()
+	return nil
 }
 
 func (sm *SessionManager) ListSessions() []string {
+	if sm.persistent != nil {
+		keys := sm.persistent.ListSessions()
+		seen := make(map[string]struct{}, len(keys))
+		for _, key := range keys {
+			seen[key] = struct{}{}
+		}
+		sm.mu.RLock()
+		for key := range sm.sessions {
+			if _, ok := seen[key]; !ok {
+				keys = append(keys, key)
+			}
+		}
+		sm.mu.RUnlock()
+		return keys
+	}
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	keys := make([]string, 0, len(sm.sessions))
-	for k := range sm.sessions {
-		keys = append(keys, k)
+	for key := range sm.sessions {
+		keys = append(keys, key)
 	}
 	return keys
 }
 
-// sanitizeFilename converts a session key into a cross-platform safe filename.
-// Replaces ':' with '_' (session key separator) and '/' and '\' with '_' so
-// composite IDs (e.g. Telegram forum "chatID/threadID") do not create
-// subdirectories or break on Windows. The original key is preserved inside
-// the JSON file, so loadSessions still maps back to the right in-memory key.
-func sanitizeFilename(key string) string {
-	s := strings.ReplaceAll(key, ":", "_")
-	s = strings.ReplaceAll(s, "/", "_")
-	s = strings.ReplaceAll(s, "\\", "_")
-	return s
-}
-
-func (sm *SessionManager) Save(key string) error {
-	if sm.storage == "" {
-		return nil
-	}
-
-	filename := sanitizeFilename(key)
-
-	// filepath.IsLocal rejects empty names, "..", absolute paths, and
-	// OS-reserved device names (NUL, COM1 … on Windows). sanitizeFilename
-	// already replaced '/' and '\' with '_', so no subdirs are created.
-	if filename == "." || !filepath.IsLocal(filename) {
-		return os.ErrInvalid
-	}
-
-	// Snapshot under read lock, then perform slow file I/O after unlock.
-	sm.mu.RLock()
-	stored, ok := sm.sessions[key]
-	if !ok {
-		sm.mu.RUnlock()
-		return nil
-	}
-
-	snapshot := Session{
-		Key:     stored.Key,
-		Summary: stored.Summary,
-		Created: stored.Created,
-		Updated: stored.Updated,
-	}
-	if len(stored.Messages) > 0 {
-		snapshot.Messages = messageutil.FilterInvalidHistoryMessages(stored.Messages)
-	} else {
-		snapshot.Messages = []providers.Message{}
-	}
-	sm.mu.RUnlock()
-
-	data, err := json.MarshalIndent(snapshot, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	sessionPath := filepath.Join(sm.storage, filename+".json")
-	tmpFile, err := os.CreateTemp(sm.storage, "session-*.tmp")
-	if err != nil {
-		return err
-	}
-
-	tmpPath := tmpFile.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		return err
-	}
-	if err := tmpFile.Chmod(0o600); err != nil {
-		_ = tmpFile.Close()
-		return err
-	}
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		return err
-	}
-	if err := tmpFile.Close(); err != nil {
-		return err
-	}
-
-	if err := os.Rename(tmpPath, sessionPath); err != nil {
-		return err
-	}
-	cleanup = false
-	return nil
-}
-
-func (sm *SessionManager) loadSessions() error {
-	files, err := os.ReadDir(sm.storage)
-	if err != nil {
-		return err
-	}
-
-	for _, file := range files {
-		if file.IsDir() {
-			continue
-		}
-
-		if filepath.Ext(file.Name()) != ".json" {
-			continue
-		}
-
-		sessionPath := filepath.Join(sm.storage, file.Name())
-		data, err := os.ReadFile(sessionPath)
-		if err != nil {
-			continue
-		}
-
-		var session Session
-		if err := json.Unmarshal(data, &session); err != nil {
-			continue
-		}
-		session.Messages = messageutil.FilterInvalidHistoryMessages(session.Messages)
-		normalizeHistoryCreatedAt(session.Messages)
-
-		sm.sessions[session.Key] = &session
-	}
-
-	return nil
-}
-
-// Close is a no-op for the in-memory SessionManager; it satisfies the
-// SessionStore interface so callers can release resources uniformly.
 func (sm *SessionManager) Close() error {
-	return nil
-}
-
-// SetHistory updates the messages of a session.
-func (sm *SessionManager) SetHistory(key string, history []providers.Message) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	session, ok := sm.sessions[key]
-	if ok {
-		history = messageutil.FilterInvalidHistoryMessages(history)
-		// Create a deep copy to strictly isolate internal state
-		// from the caller's slice.
-		msgs := make([]providers.Message, len(history))
-		copy(msgs, history)
-		normalizeHistoryCreatedAt(msgs)
-		session.Messages = msgs
-		session.Updated = time.Now()
+	if sm.persistent != nil {
+		return sm.persistent.Close()
 	}
+	return nil
 }
