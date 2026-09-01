@@ -62,6 +62,22 @@ It does three things:
 
 That suite complements [`TestIntegration_StreamableHTTPCompatibility`](../pkg/mcp/manager_integration_test.go), which exercises the same area in-process. Together they cover both protocol behavior and real service wiring.
 
+## Runtime storage JSON allowlist suite
+
+[`integration/suites/storage-json/`](suites/storage-json/) runs the
+integration-tagged runtime storage gate without an external dependency. The
+test initializes every migrated store represented on the current branch under
+one disposable PicoClaw home/workspace, reopens the public owners, verifies the
+exact private SQLite database inventory, and scans the complete generated root.
+
+JSON and JSONL are default-denied. The scanner admits only exact human-authored
+config and PID paths, retained `legacy-json` archives, workflow publish/template
+journals and explicitly requested artifacts, skill-origin sidecars in skill
+roots, authenticated apply-patch journals, and content-addressed immutable
+local-CI evidence. It includes allowlist near-miss cases and a live rejected
+canary, and requires the JSON path set to remain unchanged after the second
+startup.
+
 ## Coding-agent benchmark fixture
 
 The deterministic transfer-idempotency smoke fixture is tracked under

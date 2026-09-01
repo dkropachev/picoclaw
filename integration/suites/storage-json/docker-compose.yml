@@ -1,0 +1,4 @@
+services:
+  integration-runner:
+    environment:
+      PICOCLAW_STORAGE_JSON_ALLOWLIST_SUITE: "1"

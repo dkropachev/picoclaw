@@ -43,6 +43,7 @@ file-backed.
 | `FR-SQLITE-003` | MUST | A subsystem performs its first complete bounded legacy JSON/JSONL enumeration, including an enumeration with no present source. | Valid records are imported deterministically by dependency order and relative path; selected malformed records are skipped with counts and safe issue codes/digests only. Aggregate/dependency importers may resolve relationships in `LegacyResultFinalizer`; their returned per-source outcomes atomically replace provisional counts and issues before commit. An optional idempotent `LegacySealer` then durably closes the subsystem's import horizon before validation. | Domain rows, final durable import/issue rows, and the subsystem import-horizon marker commit in the same immediate transaction. A source first appearing after that marker is audited as SQLite-authoritative rather than imported. | Unsafe enumeration, symlinks or modes, size/count bounds, incomplete/extra/invalid final accounting, SQLite errors, importer errors, or seal failure abort without an import commit or closed marker. | Automatic upgrade must preserve valid state and relationships, become authoritative even after an empty first open, and make the audit describe committed rows without exposing secrets. |
 | `FR-SQLITE-004` | MUST | A committed import has an unarchived legacy source. | The exact imported bytes move to `legacy-json/<component>-v1/` without overwriting an existing archive and with their permissions retained. | Archive completion is durably recorded after the filesystem transition. | A crash before/after the move is retried without re-import; changed bytes or a conflicting archive fail closed. | SQLite becomes authoritative immediately while rollback material remains recoverable. |
 | `FR-SQLITE-005` | MUST | Concurrent PicoClaw processes mutate a subsystem store. | Bounded lock waits and immediate write transactions serialize domain operations; version-fenced owners can reject stale updates. | Only the committed SQLite transaction becomes visible. | Busy, canceled, and stale-version operations return errors without partial domain state or JSON dual writes. | CLI, launcher, and gateway processes must share one authority. |
+| `FR-SQLITE-006` | MUST | A clean integration runtime exercises persistent subsystems and then starts their owners a second time. | The exact expected private database inventory is present, every surviving JSON/JSONL path matches the intentional configuration, recovery, archive, sidecar, or immutable-artifact allowlist, and the second startup creates no additional JSON path. | The test writes representative typed rows and immutable evidence only; a deliberate non-allowlisted JSON canary is rejected without reading or reporting its payload. | An unexpected JSON/JSONL file, unsafe matching entry, missing/extra database, non-private database mode, allowlist near miss, traversal failure, or changed second-start inventory fails the merge-gating suite. | A subsystem must not silently reintroduce mutable JSON persistence after its focused tests pass. |
 
 Shared helpers `RequireOneRow` and `ScanStrings` retain exact driver errors and
 provide bounded typed row/result validation without turning subsystem schemas
@@ -79,7 +80,10 @@ definition replacement when database state is unavailable.
 ## Surface Ownership
 
 Owns: CODE pkg/sqlitestore/**
+Owns: CODE integration/suites/storage-json/**
 Owns: TEST pkg/sqlitestore/*
+Owns: TEST pkg/gateway/runtime_storage_json_allowlist_integration_test.go TestIntegrationRuntimeOwnedJSONAllowlist
+Owns: INTEGRATION storage-json
 
 ## Auxiliary Interfaces
 
@@ -174,6 +178,7 @@ selecting a mutable JSON fallback.
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/evolution/sqlite_store_test.go](../../pkg/evolution/sqlite_store_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/prworkspace/localci/store_cache_sqlite_test.go](../../pkg/prworkspace/localci/store_cache_sqlite_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/gitworkspace/inventory_sqlite_test.go](../../pkg/gitworkspace/inventory_sqlite_test.go), [pkg/gateway/pr_workspace_candidate_checkpoint_test.go](../../pkg/gateway/pr_workspace_candidate_checkpoint_test.go) |
+| `FR-SQLITE-006` | [pkg/gateway/runtime_storage_json_allowlist_integration_test.go](../../pkg/gateway/runtime_storage_json_allowlist_integration_test.go), [integration/suites/storage-json](../../integration/suites/storage-json) |
 
 ## Implementation Anchors
 
@@ -183,3 +188,5 @@ selecting a mutable JSON fallback.
 - [pkg/state/state_sqlite.go](../../pkg/state/state_sqlite.go)
 - [pkg/channels/wecom/reqid_store.go](../../pkg/channels/wecom/reqid_store.go)
 - [pkg/channels/weixin/state_sqlite.go](../../pkg/channels/weixin/state_sqlite.go)
+- [pkg/gateway/runtime_storage_json_allowlist_integration_test.go](../../pkg/gateway/runtime_storage_json_allowlist_integration_test.go)
+- [integration/suites/storage-json](../../integration/suites/storage-json)
