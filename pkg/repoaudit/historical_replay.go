@@ -1985,8 +1985,8 @@ func (s Store) RestartHistoricalDeduplicationReplay(
 		}
 		state.Version++
 		state.UpdatedAt = now
-		if err := s.save(&state); err != nil {
-			return RepositoryState{}, HistoricalDeduplicationReplay{}, err
+		if saveErr := s.save(&state); saveErr != nil {
+			return RepositoryState{}, HistoricalDeduplicationReplay{}, saveErr
 		}
 		return state, state.HistoricalDeduplication, nil
 	}
