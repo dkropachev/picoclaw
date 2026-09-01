@@ -227,7 +227,13 @@ maintenance never substitute for that lifecycle.
 The manager root contains typed relational `inventory.db`, its private WAL/SHM
 companions, the persistent kernel-lock target `inventory.lock`, `checkouts/`,
 private reservation-operation locks below `.locks/`, and retained legacy bytes
-below `legacy-json/git-workspaces-v1/`. Repository,
+below `legacy-json/git-workspaces-v1/`. The model-facing mutation policy also
+freezes the active `inventory.json`, database companions and locks, the
+checkpoint root before it exists, every selected active checkpoint JSON, and
+every retained checkpoint archive file. Safe bounded enumeration records exact
+file identities so hardlink aliases outside those namespaces remain denied;
+unsafe roots, selected sources, archive entries, or enumeration failures abort
+agent construction. Repository,
 workspace, lock, line, suspension, reservation-rotation, ordered ownership, and
 independently bounded generic/controller-private history rows share one
 generation-fenced transaction. Legacy inventory version 4 used a canonical
