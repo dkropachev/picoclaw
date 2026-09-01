@@ -1160,6 +1160,47 @@ func TestAgentFileMutationPolicyFailureBoundaries(t *testing.T) {
 	if roots, rootErr := prepareLocalRepairProtectedRoots([]string{"relative-root"}); rootErr == nil || roots != nil {
 		t.Fatalf("relative local-repair roots = %#v, %v", roots, rootErr)
 	}
+
+	// Workspace-scoped SQLite protection must fail closed at every public
+	// construction boundary when a relative workspace cannot be resolved.
+	t.Setenv(config.EnvConfig, filepath.Join(originalWorkingDirectory, "config.json"))
+	cfg := agentFileMutationTestConfig("relative-workspace")
+	if roots, rootErr := appendAgentWorkspaceSQLiteProtectedRoots(nil, cfg); rootErr == nil || roots != nil {
+		t.Fatalf("relative workspace SQLite roots = %#v, %v", roots, rootErr)
+	}
+	executionPolicy := isolation.NewExecutionPolicy(config.IsolationConfig{})
+	diagnosticPolicy := logger.DiagnosticPolicy{}
+	absoluteDefaults := cfg.Agents.Defaults
+	absoluteDefaults.Workspace = filepath.Join(originalWorkingDirectory, "absolute-workspace")
+	constructors := map[string]func(){
+		"loop": func() {
+			_ = newAgentLoop(cfg, nil, &mockProvider{}, executionPolicy, diagnosticPolicy)
+		},
+		"registry": func() {
+			_ = newAgentRegistryWithRuntimePolicies(
+				cfg, &mockProvider{}, executionPolicy, diagnosticPolicy, nil, nil,
+			)
+		},
+		"instance": func() {
+			instance := newAgentInstanceWithRuntimePolicies(
+				nil, &absoluteDefaults, cfg, &mockProvider{}, executionPolicy,
+				diagnosticPolicy, nil, nil,
+			)
+			if instance != nil {
+				instance.Close()
+			}
+		},
+	}
+	for name, construct := range constructors {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("%s accepted unresolved workspace SQLite protection", name)
+				}
+			}()
+			construct()
+		})
+	}
 }
 
 func TestAgentInstanceRejectsInvalidMutationPolicyForEveryFileTool(t *testing.T) {
