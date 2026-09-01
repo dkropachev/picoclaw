@@ -561,6 +561,12 @@ func (t *ApplyPatchTool) resolveApplyPatchCandidate(
 		if canonicalInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(currentInfo, canonicalInfo) {
 			return applyPatchCandidate{}, fmt.Errorf("patch path %q changed during preflight", label)
 		}
+		if canonicalInfo.Mode().IsRegular() && t.protectedIdentities != nil {
+			protected, identityErr := t.protectedIdentities.ProtectsPath(canonical, canonicalInfo)
+			if identityErr != nil || protected {
+				return applyPatchCandidate{}, fmt.Errorf("patch path is protected")
+			}
+		}
 		info = canonicalInfo
 	} else {
 		parentInfo, statErr := statApplyPatchExistingAncestor(filepath.Dir(canonical))

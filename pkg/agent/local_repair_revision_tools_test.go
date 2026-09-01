@@ -123,6 +123,52 @@ func TestLocalRepairFileToolsDenyRuntimeProtectedRoots(t *testing.T) {
 	}
 }
 
+func TestLocalRepairIdentityCatalogDeniesAliasAfterArchiveRename(t *testing.T) {
+	pin, workspace, checkout := newLocalRepairTestWorkspace(t)
+	activeRoot := filepath.Join(t.TempDir(), "workflow_runs")
+	source := filepath.Join(activeRoot, "wr_fixture", "run.json")
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := tools.NewFileIdentityCatalog(tools.FileIdentityCatalogOptions{
+		TreeRoots: []string{activeRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(checkout, "runtime-alias.json")
+	if linkErr := os.Link(source, alias); linkErr != nil {
+		t.Skipf("hardlinks unavailable: %v", linkErr)
+	}
+	archive := filepath.Join(filepath.Dir(activeRoot), "legacy-json", "workflows-v1", "run.json")
+	if mkdirErr := os.MkdirAll(filepath.Dir(archive), 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	if renameErr := os.Rename(source, archive); renameErr != nil {
+		t.Fatal(renameErr)
+	}
+	guard, err := newLocalRepairPathGuardWithPolicy(workspace, pin, nil, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guard.validate(filepath.Base(alias), false); err == nil {
+		t.Fatal("local repair read accepted an archived runtime hardlink alias")
+	}
+	if _, err := guard.validate(filepath.Base(alias), true); err == nil {
+		t.Fatal("local repair mutation accepted an archived runtime hardlink alias")
+	}
+	ordinary := filepath.Join(checkout, "ordinary.txt")
+	if err := os.WriteFile(ordinary, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guard.validate(filepath.Base(ordinary), true); err != nil {
+		t.Fatalf("local repair denied ordinary file: %v", err)
+	}
+}
+
 func TestLocalRepairProtectedRootValidationAndDrift(t *testing.T) {
 	for _, configured := range [][]string{
 		{""},

@@ -64,13 +64,14 @@ type AgentInstance struct {
 	// keys to per-candidate LLMProvider instances. Stable identities let account
 	// routers keep separate credentials even when accounts use the same provider
 	// and model.
-	CandidateProviders map[string]providers.LLMProvider
-	AccountRouter      *accountrouter.Router
-	ImageAccountRouter *accountrouter.Router
-	LightAccountRouter *accountrouter.Router
-	ModelRouter        *modelrouter.Router
-	ConfigurationError error
-	executionPolicy    isolation.ExecutionPolicy
+	CandidateProviders          map[string]providers.LLMProvider
+	AccountRouter               *accountrouter.Router
+	ImageAccountRouter          *accountrouter.Router
+	LightAccountRouter          *accountrouter.Router
+	ModelRouter                 *modelrouter.Router
+	ConfigurationError          error
+	executionPolicy             isolation.ExecutionPolicy
+	fileMutationIdentityCatalog *tools.FileIdentityCatalog
 
 	managedCalibrationCache map[string]workflowManagedCalibrationCacheEntry
 }
@@ -296,6 +297,7 @@ func newAgentInstanceWithRuntimePolicies(
 	diagnosticPolicy logger.DiagnosticPolicy,
 	initialCandidateProviders map[string]providers.LLMProvider,
 	fileMutationProtectedRoots []string,
+	identityGenerations ...*agentFileMutationIdentityGeneration,
 ) *AgentInstance {
 	construction := &agentInstanceConstructionGuard{}
 	defer construction.cleanupPanic()
@@ -394,10 +396,26 @@ func newAgentInstanceWithRuntimePolicies(
 	if protectedRootErr != nil {
 		panic(fmt.Sprintf("build workspace file-mutation policy: %v", protectedRootErr))
 	}
+	if len(identityGenerations) > 1 {
+		panic("build file-mutation identity catalog: multiple generations")
+	}
+	var identityGeneration *agentFileMutationIdentityGeneration
+	if len(identityGenerations) == 1 {
+		identityGeneration = identityGenerations[0]
+	}
+	fileMutationIdentityCatalog, identityCatalogErr := identityGeneration.catalog(
+		workspace,
+		cfg,
+		fileMutationProtectedRoots,
+	)
+	if identityCatalogErr != nil {
+		panic(fmt.Sprintf("build file-mutation identity catalog: %v", identityCatalogErr))
+	}
 	fileMutationPolicy := tools.FileMutationPolicy{
 		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
 			fileMutationProtectedRoots,
 		),
+		ProtectedIdentities: fileMutationIdentityCatalog,
 	}
 	applyPatchCandidate := mayUseCodexCompatibleTools &&
 		(cfg.Tools.IsToolEnabled("edit_file") || cfg.Tools.IsToolEnabled("write_file"))
@@ -459,9 +477,10 @@ func newAgentInstanceWithRuntimePolicies(
 			return tools.NewEditFileToolWithPolicy(
 				workspace,
 				restrict,
-				tools.FileMutationPolicy{ProtectedRoots: append(
-					[]string(nil), fileMutationPolicy.ProtectedRoots...,
-				)},
+				tools.FileMutationPolicy{
+					ProtectedRoots:      append([]string(nil), fileMutationPolicy.ProtectedRoots...),
+					ProtectedIdentities: fileMutationPolicy.ProtectedIdentities,
+				},
 				cloneToolPathPatterns(writePathPatterns),
 			)
 		}
@@ -482,9 +501,10 @@ func newAgentInstanceWithRuntimePolicies(
 			return tools.NewAppendFileToolWithPolicy(
 				workspace,
 				restrict,
-				tools.FileMutationPolicy{ProtectedRoots: append(
-					[]string(nil), fileMutationPolicy.ProtectedRoots...,
-				)},
+				tools.FileMutationPolicy{
+					ProtectedRoots:      append([]string(nil), fileMutationPolicy.ProtectedRoots...),
+					ProtectedIdentities: fileMutationPolicy.ProtectedIdentities,
+				},
 				cloneToolPathPatterns(writePathPatterns),
 			)
 		}
@@ -514,9 +534,10 @@ func newAgentInstanceWithRuntimePolicies(
 			writeTool, err := tools.NewWriteFileToolWithPolicy(
 				workspace,
 				restrict,
-				tools.FileMutationPolicy{ProtectedRoots: append(
-					[]string(nil), fileMutationPolicy.ProtectedRoots...,
-				)},
+				tools.FileMutationPolicy{
+					ProtectedRoots:      append([]string(nil), fileMutationPolicy.ProtectedRoots...),
+					ProtectedIdentities: fileMutationPolicy.ProtectedIdentities,
+				},
 				cloneToolPathPatterns(writePathPatterns),
 			)
 			if err != nil {
@@ -557,6 +578,7 @@ func newAgentInstanceWithRuntimePolicies(
 					VolatileProtectedRoots: append(
 						[]string(nil), fileMutationProtectedRoots...,
 					),
+					ProtectedIdentities:  fileMutationIdentityCatalog,
 					TransactionStateRoot: applyPatchTransactionRoot,
 				},
 				cloneToolPathPatterns(writePathPatterns),
@@ -861,42 +883,43 @@ func newAgentInstanceWithRuntimePolicies(
 	}
 
 	return &AgentInstance{
-		ID:                        agentID,
-		Name:                      agentName,
-		AccountRef:                accountRef,
-		Model:                     model,
-		Fallbacks:                 fallbacks,
-		ToolAdaptation:            toolAdaptation,
-		Workspace:                 workspace,
-		MaxIterations:             maxIter,
-		MaxTokens:                 maxTokens,
-		Temperature:               temperature,
-		ThinkingLevel:             thinkingLevel,
-		ThinkingLevelConfigured:   thinkingLevelConfigured,
-		ContextWindow:             contextWindow,
-		SummarizeMessageThreshold: summarizeMessageThreshold,
-		SummarizeTokenPercent:     summarizeTokenPercent,
-		Provider:                  provider,
-		Sessions:                  sessions,
-		ContextBuilder:            contextBuilder,
-		Tools:                     toolsRegistry,
-		Definition:                definition,
-		Subagents:                 subagents,
-		SkillsFilter:              skillsFilter,
-		MCPServerAllowlist:        agentMCPServerAllowlist,
-		Candidates:                candidates,
-		ImageCandidates:           imageCandidates,
-		Router:                    router,
-		LightCandidates:           lightCandidates,
-		LightProvider:             lightProvider,
-		CandidateProviders:        candidateProviders,
-		AccountRouter:             accountRouter,
-		ImageAccountRouter:        imageAccountRouter,
-		LightAccountRouter:        lightAccountRouter,
-		ModelRouter:               modelRouter,
-		ConfigurationError:        configurationErr,
-		executionPolicy:           executionPolicy,
-		managedCalibrationCache:   make(map[string]workflowManagedCalibrationCacheEntry),
+		ID:                          agentID,
+		Name:                        agentName,
+		AccountRef:                  accountRef,
+		Model:                       model,
+		Fallbacks:                   fallbacks,
+		ToolAdaptation:              toolAdaptation,
+		Workspace:                   workspace,
+		MaxIterations:               maxIter,
+		MaxTokens:                   maxTokens,
+		Temperature:                 temperature,
+		ThinkingLevel:               thinkingLevel,
+		ThinkingLevelConfigured:     thinkingLevelConfigured,
+		ContextWindow:               contextWindow,
+		SummarizeMessageThreshold:   summarizeMessageThreshold,
+		SummarizeTokenPercent:       summarizeTokenPercent,
+		Provider:                    provider,
+		Sessions:                    sessions,
+		ContextBuilder:              contextBuilder,
+		Tools:                       toolsRegistry,
+		Definition:                  definition,
+		Subagents:                   subagents,
+		SkillsFilter:                skillsFilter,
+		MCPServerAllowlist:          agentMCPServerAllowlist,
+		Candidates:                  candidates,
+		ImageCandidates:             imageCandidates,
+		Router:                      router,
+		LightCandidates:             lightCandidates,
+		LightProvider:               lightProvider,
+		CandidateProviders:          candidateProviders,
+		AccountRouter:               accountRouter,
+		ImageAccountRouter:          imageAccountRouter,
+		LightAccountRouter:          lightAccountRouter,
+		ModelRouter:                 modelRouter,
+		ConfigurationError:          configurationErr,
+		executionPolicy:             executionPolicy,
+		fileMutationIdentityCatalog: fileMutationIdentityCatalog,
+		managedCalibrationCache:     make(map[string]workflowManagedCalibrationCacheEntry),
 	}
 }
 

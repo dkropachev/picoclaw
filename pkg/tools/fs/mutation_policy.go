@@ -15,7 +15,8 @@ import (
 // descendants. Roots are detached and resolved when the tool is constructed;
 // existing filesystem aliases are revalidated before every write.
 type FileMutationPolicy struct {
-	ProtectedRoots []string
+	ProtectedRoots      []string
+	ProtectedIdentities *FileIdentityCatalog
 }
 
 type fileMutationProtectedRoot struct {
@@ -27,11 +28,12 @@ type fileMutationProtectedRoot struct {
 // append_file. This keeps every mutation path on one policy boundary while
 // leaving reads and directory listings unchanged.
 type protectedMutationFS struct {
-	delegate  fileSystem
-	workspace string
-	restrict  bool
-	patterns  []*regexp.Regexp
-	roots     []fileMutationProtectedRoot
+	delegate   fileSystem
+	workspace  string
+	restrict   bool
+	patterns   []*regexp.Regexp
+	roots      []fileMutationProtectedRoot
+	identities *FileIdentityCatalog
 
 	// Package-test seam executed after the destination parent is pinned and
 	// before namespace/root revalidation.
@@ -58,15 +60,16 @@ func buildMutationFS(
 	if err != nil {
 		return nil, err
 	}
-	if len(roots) == 0 {
+	if len(roots) == 0 && policy.ProtectedIdentities == nil {
 		return delegate, nil
 	}
 	return &protectedMutationFS{
-		delegate:  delegate,
-		workspace: workspace,
-		restrict:  restrict,
-		patterns:  append([]*regexp.Regexp(nil), patterns...),
-		roots:     roots,
+		delegate:   delegate,
+		workspace:  workspace,
+		restrict:   restrict,
+		patterns:   append([]*regexp.Regexp(nil), patterns...),
+		roots:      roots,
+		identities: policy.ProtectedIdentities,
 	}, nil
 }
 
@@ -305,6 +308,18 @@ func (p *protectedMutationFS) validateAccess(path string) error {
 	canonicalCandidate, err := resolvePathAgainstExistingAncestor(candidate)
 	if err != nil {
 		return fileMutationPolicyDenied()
+	}
+	if p.identities != nil {
+		candidateInfo, statErr := os.Stat(canonicalCandidate)
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return fileMutationPolicyDenied()
+		}
+		if statErr == nil && candidateInfo.Mode().IsRegular() {
+			protected, identityErr := p.identities.ProtectsPath(canonicalCandidate, candidateInfo)
+			if identityErr != nil || protected {
+				return fileMutationPolicyDenied()
+			}
+		}
 	}
 
 	for _, root := range p.roots {

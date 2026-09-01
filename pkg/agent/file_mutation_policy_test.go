@@ -477,7 +477,12 @@ func TestAgentFileMutationPolicyProtectsIdentitySQLiteStores(t *testing.T) {
 	t.Setenv(config.EnvHome, home)
 	t.Setenv(config.EnvConfig, configPath)
 
-	targets := make([]string, 0, 13)
+	targets := make([]string, 0, 16)
+	targets = append(targets,
+		filepath.Join(home, "auth.json"),
+		filepath.Join(home, "model_catalogs.json"),
+		filepath.Join(home, "tool_adaptation_state.json"),
+	)
 	for _, databaseName := range []string{
 		"auth.db", "model-catalogs.db", "tool-adaptation.db",
 	} {
@@ -960,12 +965,16 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := filepath.Join(home, "launcher-auth.db")
 	wecomDatabase := filepath.Join(home, "channels", "wecom", "reqid-store.db")
 	weixinDatabase := filepath.Join(home, "channels", "weixin", "state.db")
 	wecomArchiveRoot := filepath.Join(home, "legacy-json", "wecom-reqid-v1")
 	weixinArchiveRoot := filepath.Join(home, "channels", "weixin", "legacy-json", "weixin-state-v1")
 	want := make([]string, 0, 40)
+	want = append(want,
+		filepath.Join(home, "auth.json"),
+		filepath.Join(home, "model_catalogs.json"),
+		filepath.Join(home, "tool_adaptation_state.json"),
+	)
 	for _, databaseName := range []string{
 		"launcher-auth.db", "auth.db", "model-catalogs.db", "tool-adaptation.db",
 	} {
@@ -1040,7 +1049,7 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 	}
 	roots[0] = "mutated"
 	again, err := agentRuntimeFileMutationProtectedRoots("")
-	if err != nil || again[0] != database {
+	if err != nil || again[0] != filepath.Join(home, "auth.json") {
 		t.Fatalf("protected roots retained caller mutation: %#v, %v", again, err)
 	}
 }
@@ -1084,6 +1093,7 @@ func TestAgentEvolutionFileMutationProtectedRootsCoverDatabaseAndLegacySources(t
 				filepath.Join(test.root, "pattern-records.jsonl"),
 				filepath.Join(test.root, "skill-drafts.json"),
 				filepath.Join(test.root, "profiles"),
+				filepath.Join(test.root, "backups"),
 			}
 			if len(roots) != len(want) {
 				t.Fatalf("roots = %#v, want %#v", roots, want)
@@ -1663,6 +1673,10 @@ func TestWorkflowRuntimeMutationRootsProtectDatabaseAndRecoveryState(t *testing.
 		database + "-wal",
 		database + "-shm",
 		filepath.Join(workspace, "legacy-json"),
+		filepath.Join(workspace, "workflow_runs"),
+		filepath.Join(workspace, "workflow_validations"),
+		filepath.Join(workspace, "workflow_dev"),
+		filepath.Join(workspace, "workflow_state"),
 		filepath.Join(workspace, "workflow_state", "mutation.lock"),
 		filepath.Join(workspace, "workflow_state", "publish-transaction.json"),
 		filepath.Join(workspace, "workflow_state", "template-transaction.json"),
@@ -1673,6 +1687,257 @@ func TestWorkflowRuntimeMutationRootsProtectDatabaseAndRecoveryState(t *testing.
 	for index := range want {
 		if roots[index] != want[index] {
 			t.Fatalf("root %d = %q, want %q", index, roots[index], want[index])
+		}
+	}
+}
+
+func TestAgentDynamicRuntimeIdentityCatalogIsSharedByRootAndOwnerAfterArchiveRename(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+	source := filepath.Join(workspace, "workflow_runs", "wr_fixture", "run.json")
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := agentFileMutationTestConfig(workspace)
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+	if agent.fileMutationIdentityCatalog == nil || agent.fileMutationIdentityCatalog.Len() == 0 {
+		t.Fatal("agent generation did not retain the dynamic identity catalog")
+	}
+	owned, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "dynamic-identity-owner",
+	}, []string{"write_file", "edit_file", "append_file", "apply_patch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owned.Close()
+	alias := filepath.Join(workspace, "runtime-alias.json")
+	if err := os.Link(source, alias); err != nil {
+		t.Skipf("hardlinks unavailable: %v", err)
+	}
+	archive := filepath.Join(
+		workspace,
+		"legacy-json",
+		"workflows-v1",
+		"workflow_runs",
+		"wr_fixture",
+		"run.json",
+	)
+	if err := os.MkdirAll(filepath.Dir(archive), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(source, archive); err != nil {
+		t.Fatal(err)
+	}
+	for registryName, registry := range map[string]*tools.ToolRegistry{
+		"root":  agent.Tools,
+		"owner": owned,
+	} {
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			t.Run(registryName+"_"+toolName, func(t *testing.T) {
+				requireAgentFileMutationDenied(t, registry, toolName, workspace, alias, true)
+			})
+		}
+	}
+	content, readErr := os.ReadFile(archive)
+	if readErr != nil || string(content) != "before" {
+		t.Fatalf("archived workflow identity = %q, %v", content, readErr)
+	}
+}
+
+func TestAgentFileMutationIdentityGenerationReusesOneImmutableCatalog(t *testing.T) {
+	workspace := t.TempDir()
+	source := filepath.Join(workspace, "workflow_runs", "wr_fixture", "run.json")
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	generation := &agentFileMutationIdentityGeneration{}
+	roots, err := agentWorkflowRuntimeFileMutationProtectedRoots(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := generation.catalog(workspace, &config.Config{}, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := generation.catalog(workspace, &config.Config{}, append([]string(nil), roots...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil || second != first || first.Len() == 0 {
+		t.Fatalf("generation catalogs = %#v / %#v", first, second)
+	}
+}
+
+func TestAgentDynamicIdentityCatalogCoversEveryMutableLegacyTreeAcrossRename(t *testing.T) {
+	workspace := t.TempDir()
+	evolutionRoot := filepath.Join(workspace, "custom-evolution")
+	cfg := agentFileMutationTestConfig(workspace)
+	cfg.Evolution.StateDir = evolutionRoot
+	cfg.Events.Ingress.Enabled = true
+	cfg.Events.Ingress.DatabasePath = filepath.Join(workspace, "eventing", "events.db")
+	evidenceRoot := filepath.Join(workspace, "eventing", "pr-workspace-local-ci", "evidence")
+	fixtures := []struct {
+		name, source, archive string
+	}{
+		{
+			name:   "sessions",
+			source: filepath.Join(workspace, "sessions", "legacy.json"),
+			archive: filepath.Join(
+				workspace, "legacy-json", "sessions-v1", "sessions", "legacy.json",
+			),
+		},
+		{
+			name:   "workflows",
+			source: filepath.Join(workspace, "workflow_runs", "wr_fixture", "run.json"),
+			archive: filepath.Join(
+				workspace, "legacy-json", "workflows-v1", "workflow_runs", "wr_fixture", "run.json",
+			),
+		},
+		{
+			name:   "evolution",
+			source: filepath.Join(evolutionRoot, "profiles", "profile.json"),
+			archive: filepath.Join(
+				evolutionRoot, "legacy-json", "evolution-v1", "profiles", "profile.json",
+			),
+		},
+		{
+			name:   "evolution-backup",
+			source: filepath.Join(evolutionRoot, "backups", "scope", "skill", "revision", "SKILL.md"),
+			archive: filepath.Join(
+				evolutionRoot, "legacy-json", "evolution-v1", "backups", "SKILL.md",
+			),
+		},
+		{
+			name:   "local-ci",
+			source: filepath.Join(evidenceRoot, "cache", "aa", "legacy.json"),
+			archive: filepath.Join(
+				evidenceRoot, "legacy-json", "local-ci-cache-v1", "cache", "aa", "legacy.json",
+			),
+		},
+		{
+			name:   "review",
+			source: filepath.Join(workspace, "repository_reviews", "repo_legacy.json"),
+			archive: filepath.Join(
+				workspace,
+				"repository_reviews",
+				"legacy-json",
+				"repository-reviews-v1",
+				"repo_legacy.json",
+			),
+		},
+		{
+			name:   "evaluation",
+			source: filepath.Join(workspace, "repository_evaluations", "evaluation_legacy.json"),
+			archive: filepath.Join(
+				workspace,
+				"repository_evaluations",
+				"legacy-json",
+				"repository-evaluations-v1",
+				"evaluation_legacy.json",
+			),
+		},
+	}
+	for _, fixture := range fixtures {
+		if err := os.MkdirAll(filepath.Dir(fixture.source), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fixture.source, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exact, err := agentEvolutionFileMutationProtectedRoots(workspace, evolutionRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := agentFileMutationIdentityCatalog(workspace, cfg, exact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(workspace, "ordinary-aliases")
+	if err := os.MkdirAll(aliasRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			alias := filepath.Join(aliasRoot, fixture.name+".alias")
+			if err := os.Link(fixture.source, alias); err != nil {
+				t.Skipf("hardlinks unavailable: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Dir(fixture.archive), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(fixture.source, fixture.archive); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(alias)
+			if err != nil {
+				t.Fatal(err)
+			}
+			protected, err := catalog.ProtectsPath(alias, info)
+			if err != nil || !protected {
+				t.Fatalf("renamed %s identity protected=%v err=%v", fixture.name, protected, err)
+			}
+		})
+	}
+}
+
+func TestWorkflowProtectionLeavesDefinitionsArtifactsAndConfigEditable(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+	cfg := agentFileMutationTestConfig(workspace)
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+	owned, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "workflow-editable-owner",
+	}, []string{"write_file", "edit_file", "append_file", "apply_patch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owned.Close()
+	for registryName, registry := range map[string]*tools.ToolRegistry{"root": agent.Tools, "owner": owned} {
+		for _, relativeRoot := range []string{"workflows", "workflow_artifacts"} {
+			for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+				path := filepath.Join(workspace, relativeRoot, registryName+"-"+toolName+".txt")
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("before\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				tool, ok := registry.Get(toolName)
+				if !ok {
+					t.Fatalf("%s is not registered", toolName)
+				}
+				result := executeAgentFileMutation(t, tool, toolName, workspace, path, true)
+				if result == nil || result.IsError {
+					t.Fatalf("%s %s denied editable workflow exception: %#v", registryName, toolName, result)
+				}
+			}
+		}
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			path := filepath.Join(workspace, registryName+"-"+toolName+"-config.json")
+			if err := os.WriteFile(path, []byte("before\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tool, ok := registry.Get(toolName)
+			if !ok {
+				t.Fatalf("%s is not registered", toolName)
+			}
+			result := executeAgentFileMutation(t, tool, toolName, workspace, path, true)
+			if result == nil || result.IsError {
+				t.Fatalf("%s %s denied editable config: %#v", registryName, toolName, result)
+			}
 		}
 	}
 }

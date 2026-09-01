@@ -8,18 +8,24 @@ import (
 )
 
 type (
-	ReadFileTool       = fstools.ReadFileTool
-	ReadFileLinesTool  = fstools.ReadFileLinesTool
-	WriteFileTool      = fstools.WriteFileTool
-	ListDirTool        = fstools.ListDirTool
-	EditFileTool       = fstools.EditFileTool
-	AppendFileTool     = fstools.AppendFileTool
-	LoadImageTool      = fstools.LoadImageTool
-	SendFileTool       = fstools.SendFileTool
-	FileMutationPolicy = fstools.FileMutationPolicy
+	ReadFileTool               = fstools.ReadFileTool
+	ReadFileLinesTool          = fstools.ReadFileLinesTool
+	WriteFileTool              = fstools.WriteFileTool
+	ListDirTool                = fstools.ListDirTool
+	EditFileTool               = fstools.EditFileTool
+	AppendFileTool             = fstools.AppendFileTool
+	LoadImageTool              = fstools.LoadImageTool
+	SendFileTool               = fstools.SendFileTool
+	FileMutationPolicy         = fstools.FileMutationPolicy
+	FileIdentityCatalog        = fstools.FileIdentityCatalog
+	FileIdentityCatalogOptions = fstools.FileIdentityCatalogOptions
 )
 
 const MaxReadFileSize = fstools.MaxReadFileSize
+
+func NewFileIdentityCatalog(options FileIdentityCatalogOptions) (*FileIdentityCatalog, error) {
+	return fstools.NewFileIdentityCatalog(options)
+}
 
 func NewReadFileTool(
 	workspace string,

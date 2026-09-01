@@ -21,6 +21,9 @@ const (
 // detached by NewApplyPatchToolWithPermissionsAndPolicy.
 type ApplyPatchPreflightPolicy struct {
 	ProtectedRoots []string
+	// ProtectedIdentities is one immutable generation-shared snapshot used to
+	// reject hardlink aliases of dynamic runtime files outside lexical roots.
+	ProtectedIdentities *FileIdentityCatalog
 	// VolatileProtectedRoots are strict runtime-owned namespaces. Unlike
 	// ProtectedRoots, they never exempt a workspace nested beneath the root,
 	// and their leaf inode may be created or replaced between executions.
@@ -31,13 +34,14 @@ type ApplyPatchPreflightPolicy struct {
 }
 
 type ApplyPatchTool struct {
-	workspace      string
-	restrict       bool
-	allowPaths     []*regexp.Regexp
-	allowCreate    bool
-	allowUpdate    bool
-	pathGuard      func(string) error
-	protectedRoots []applyPatchProtectedRoot
+	workspace           string
+	restrict            bool
+	allowPaths          []*regexp.Regexp
+	allowCreate         bool
+	allowUpdate         bool
+	pathGuard           func(string) error
+	protectedRoots      []applyPatchProtectedRoot
+	protectedIdentities *FileIdentityCatalog
 
 	transactionStateRoot applyPatchTransactionStateRoot
 	transactionStateErr  error
@@ -135,6 +139,7 @@ func NewApplyPatchToolWithPermissionsAndPolicy(
 		allowUpdate:          allowUpdate,
 		pathGuard:            policy.PathGuard,
 		protectedRoots:       protected,
+		protectedIdentities:  policy.ProtectedIdentities,
 		transactionStateRoot: transactionState,
 	}, nil
 }

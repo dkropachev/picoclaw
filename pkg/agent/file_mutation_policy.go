@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 const (
@@ -46,6 +48,10 @@ func agentWorkflowRuntimeFileMutationProtectedRoots(workspace string) ([]string,
 		database + "-wal",
 		database + "-shm",
 		filepath.Join(workspace, "legacy-json"),
+		filepath.Join(workspace, "workflow_runs"),
+		filepath.Join(workspace, "workflow_validations"),
+		filepath.Join(workspace, "workflow_dev"),
+		filepath.Join(workspace, "workflow_state"),
 		filepath.Join(workspace, "workflow_state", "mutation.lock"),
 		filepath.Join(workspace, "workflow_state", "publish-transaction.json"),
 		filepath.Join(workspace, "workflow_state", "template-transaction.json"),
@@ -77,6 +83,11 @@ func agentRuntimeFileMutationProtectedRoots(
 	}
 
 	protected := make([]string, 0, 64)
+	protected = append(protected,
+		filepath.Join(home, "auth.json"),
+		filepath.Join(home, "model_catalogs.json"),
+		filepath.Join(home, "tool_adaptation_state.json"),
+	)
 	for _, databaseName := range []string{
 		agentLauncherAuthDatabaseName,
 		agentAuthDatabaseName,
@@ -493,6 +504,7 @@ func agentEvolutionFileMutationProtectedRoots(workspace, stateDir string) ([]str
 		filepath.Join(root, "pattern-records.jsonl"),
 		filepath.Join(root, "skill-drafts.json"),
 		filepath.Join(root, "profiles"),
+		filepath.Join(root, "backups"),
 	}, nil
 }
 
@@ -615,6 +627,8 @@ func mustAgentWorkspaceAccountRouterProtectedRoots(workspace string) []string {
 func agentSessionFileMutationProtectedRoots(workspace string) []string {
 	database := filepath.Join(workspace, "sessions", "sessions.db")
 	return []string{
+		filepath.Join(workspace, "sessions"),
+		filepath.Join(workspace, "threads"),
 		database,
 		database + "-wal",
 		database + "-shm",
@@ -650,10 +664,11 @@ func appendAgentWorkspaceSQLiteProtectedRoots(
 	if err != nil {
 		return nil, fmt.Errorf("resolve PicoClaw workspace: %w", err)
 	}
-	for _, directory := range []string{
-		agentRepositoryReviewStateDir,
-		agentRepositoryEvalStateDir,
-	} {
+	return appendAgentRepositoryFileMutationProtectedRoots(roots, workspace), nil
+}
+
+func appendAgentRepositoryFileMutationProtectedRoots(roots []string, workspace string) []string {
+	for _, directory := range []string{agentRepositoryReviewStateDir, agentRepositoryEvalStateDir} {
 		candidate := filepath.Join(workspace, directory)
 		duplicate := false
 		for _, existing := range roots {
@@ -666,5 +681,120 @@ func appendAgentWorkspaceSQLiteProtectedRoots(
 			roots = append(roots, candidate)
 		}
 	}
-	return roots, nil
+	return roots
+}
+
+// agentFileMutationIdentityCatalog snapshots physical identities for mutable
+// legacy trees whose files may be renamed into archives after agent
+// construction. The immutable catalog is shared by every factory product in
+// this AgentInstance generation rather than copying up to millions of entries
+// into each owner.
+func agentFileMutationIdentityCatalog(
+	workspace string,
+	cfg *config.Config,
+	exactRoots []string,
+) (*tools.FileIdentityCatalog, error) {
+	workspace, err := filepath.Abs(filepath.Clean(workspace))
+	if err != nil {
+		return nil, fmt.Errorf("resolve file-identity workspace: %w", err)
+	}
+	trees := []string{
+		filepath.Join(workspace, "sessions"),
+		filepath.Join(workspace, "threads"),
+		filepath.Join(workspace, "legacy-json", "sessions-v1"),
+		filepath.Join(workspace, "workflow_runs"),
+		filepath.Join(workspace, "workflow_validations"),
+		filepath.Join(workspace, "workflow_dev"),
+		filepath.Join(workspace, "workflow_state"),
+		filepath.Join(workspace, "legacy-json", "workflows-v1"),
+		filepath.Join(workspace, agentRepositoryReviewStateDir),
+		filepath.Join(workspace, agentRepositoryEvalStateDir),
+	}
+	evolutionRoots, err := agentEvolutionFileMutationProtectedRoots(
+		workspace,
+		func() string {
+			if cfg == nil {
+				return ""
+			}
+			return cfg.Evolution.StateDir
+		}(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(evolutionRoots) != 0 {
+		evolutionRoot := filepath.Dir(evolutionRoots[0])
+		trees = append(trees,
+			filepath.Join(evolutionRoot, "profiles"),
+			filepath.Join(evolutionRoot, "backups"),
+			filepath.Join(evolutionRoot, "legacy-json", "evolution-v1"),
+		)
+	}
+	if cfg != nil {
+		localCIRoots, localCIErr := agentLocalCIEvidenceFileMutationProtectedRoots(cfg)
+		if localCIErr != nil {
+			return nil, localCIErr
+		}
+		if len(localCIRoots) != 0 {
+			evidenceRoot := localCIRoots[0]
+			trees = append(trees,
+				filepath.Join(evidenceRoot, "cache"),
+				filepath.Join(evidenceRoot, "legacy-json", "local-ci-cache-v1"),
+			)
+		}
+	}
+	exactIdentities := make([]string, 0, len(exactRoots))
+	for _, candidate := range exactRoots {
+		base := strings.ToLower(filepath.Base(candidate))
+		if strings.Contains(base, ".json") || strings.HasSuffix(base, ".jsonl") ||
+			strings.HasSuffix(base, ".history-a") || strings.HasSuffix(base, ".history-b") {
+			exactIdentities = append(exactIdentities, candidate)
+		}
+	}
+	excludePaths := make([]string, 0, 9)
+	for _, database := range []string{
+		filepath.Join(workspace, "sessions", "sessions.db"),
+		filepath.Join(workspace, agentRepositoryReviewStateDir, "repository-reviews.db"),
+		filepath.Join(workspace, agentRepositoryEvalStateDir, "evaluations.db"),
+	} {
+		excludePaths = append(excludePaths, database, database+"-wal", database+"-shm")
+	}
+	return tools.NewFileIdentityCatalog(tools.FileIdentityCatalogOptions{
+		ExactPaths:   exactIdentities,
+		TreeRoots:    trees,
+		ExcludePaths: excludePaths,
+	})
+}
+
+type agentFileMutationIdentityGeneration struct {
+	mu       sync.Mutex
+	catalogs map[string]*tools.FileIdentityCatalog
+}
+
+func (generation *agentFileMutationIdentityGeneration) catalog(
+	workspace string,
+	cfg *config.Config,
+	exactRoots []string,
+) (*tools.FileIdentityCatalog, error) {
+	if generation == nil {
+		return agentFileMutationIdentityCatalog(workspace, cfg, exactRoots)
+	}
+	key := workspace + "\x00" + strings.Join(exactRoots, "\x00")
+	if cfg != nil {
+		key += "\x00" + cfg.Evolution.StateDir + "\x00" + cfg.Events.Ingress.DatabasePath
+	}
+	generation.mu.Lock()
+	defer generation.mu.Unlock()
+	if catalog := generation.catalogs[key]; catalog != nil {
+		return catalog, nil
+	}
+	catalog, err := agentFileMutationIdentityCatalog(workspace, cfg, exactRoots)
+	if err != nil {
+		return nil, err
+	}
+	if generation.catalogs == nil {
+		generation.catalogs = make(map[string]*tools.FileIdentityCatalog)
+	}
+	generation.catalogs[key] = catalog
+	return catalog, nil
 }

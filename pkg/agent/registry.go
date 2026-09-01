@@ -117,6 +117,7 @@ func newAgentRegistryWithRuntimePolicies(
 		registry.borrowedProviders = providerGeneration.providerSet()
 	}
 	defer (&agentRegistryConstructionGuard{registry: registry}).cleanupPanic()
+	identityGeneration := &agentFileMutationIdentityGeneration{}
 
 	agentConfigs := cfg.Agents.List
 	if len(agentConfigs) == 0 {
@@ -133,6 +134,7 @@ func newAgentRegistryWithRuntimePolicies(
 			diagnosticPolicy,
 			providerGeneration.bindingsForAgent("main"),
 			cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots),
+			identityGeneration,
 		)
 		if providerGeneration != nil {
 			direct := providerGeneration.directForAgent("main")
@@ -158,6 +160,7 @@ func newAgentRegistryWithRuntimePolicies(
 				diagnosticPolicy,
 				providerGeneration.bindingsForAgent(id),
 				cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots),
+				identityGeneration,
 			)
 			if providerGeneration != nil {
 				direct := providerGeneration.directForAgent(id)

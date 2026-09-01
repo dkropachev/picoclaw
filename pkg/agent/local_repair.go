@@ -114,6 +114,9 @@ type LocalRepairRunnerConfig struct {
 	// ProtectedRoots are runtime-owned namespaces that repair file tools may
 	// neither inspect nor mutate when a managed checkout overlaps them.
 	ProtectedRoots []string
+	// ProtectedIdentities is the immutable runtime-generation snapshot shared
+	// with ordinary file tools and apply_patch.
+	ProtectedIdentities *tools.FileIdentityCatalog
 }
 
 // LocalRepairRequest contains no raw workspace path. The exact pin is resolved
@@ -139,18 +142,19 @@ type LocalRepairResult struct {
 // LocalRepairRunner runs an isolated edit-only model loop over an exact pinned
 // checkout. It owns neither durable conversation state nor publication.
 type LocalRepairRunner struct {
-	workspaces      PinnedWorkspaceAcquirer
-	provider        providers.LLMProvider
-	model           string
-	maxIterations   int
-	maxTokens       int
-	temperature     float64
-	reasoningEffort string
-	providerSlot    chan struct{}
-	runtimeLoop     *AgentLoop
-	generationID    uint64
-	strictRuntime   bool
-	protectedRoots  []string
+	workspaces          PinnedWorkspaceAcquirer
+	provider            providers.LLMProvider
+	model               string
+	maxIterations       int
+	maxTokens           int
+	temperature         float64
+	reasoningEffort     string
+	providerSlot        chan struct{}
+	runtimeLoop         *AgentLoop
+	generationID        uint64
+	strictRuntime       bool
+	protectedRoots      []string
+	protectedIdentities *tools.FileIdentityCatalog
 }
 
 func NewLocalRepairRunner(config LocalRepairRunnerConfig) (*LocalRepairRunner, error) {
@@ -187,15 +191,16 @@ func NewLocalRepairRunner(config LocalRepairRunnerConfig) (*LocalRepairRunner, e
 		return nil, err
 	}
 	return &LocalRepairRunner{
-		workspaces:      config.Workspaces,
-		provider:        config.Provider,
-		model:           model,
-		maxIterations:   maxIterations,
-		maxTokens:       maxTokens,
-		temperature:     config.Temperature,
-		reasoningEffort: reasoningEffort,
-		providerSlot:    make(chan struct{}, 1),
-		protectedRoots:  append([]string(nil), config.ProtectedRoots...),
+		workspaces:          config.Workspaces,
+		provider:            config.Provider,
+		model:               model,
+		maxIterations:       maxIterations,
+		maxTokens:           maxTokens,
+		temperature:         config.Temperature,
+		reasoningEffort:     reasoningEffort,
+		providerSlot:        make(chan struct{}, 1),
+		protectedRoots:      append([]string(nil), config.ProtectedRoots...),
+		protectedIdentities: config.ProtectedIdentities,
 	}, nil
 }
 
@@ -302,7 +307,12 @@ func (runner *LocalRepairRunner) runPinned(
 		}
 	}()
 
-	guard, err := newLocalRepairPathGuard(before, request.Pin, runner.protectedRoots)
+	guard, err := newLocalRepairPathGuardWithPolicy(
+		before,
+		request.Pin,
+		runner.protectedRoots,
+		runner.protectedIdentities,
+	)
 	if err != nil {
 		return LocalRepairResult{}, fmt.Errorf("%w: %v", ErrLocalRepairPin, err)
 	}
@@ -483,9 +493,10 @@ func compareLocalRepairWorkspace(
 }
 
 type localRepairPathGuard struct {
-	root           string
-	gitRoot        string
-	protectedRoots []localRepairProtectedRoot
+	root                string
+	gitRoot             string
+	protectedRoots      []localRepairProtectedRoot
+	protectedIdentities *tools.FileIdentityCatalog
 }
 
 type localRepairProtectedRoot struct {
@@ -497,6 +508,19 @@ func newLocalRepairPathGuard(
 	workspace gitworkspace.WorkspaceInfo,
 	pin gitworkspace.PinnedAcquireRequest,
 	protectedRootSets ...[]string,
+) (*localRepairPathGuard, error) {
+	var configured []string
+	if len(protectedRootSets) > 0 {
+		configured = protectedRootSets[0]
+	}
+	return newLocalRepairPathGuardWithPolicy(workspace, pin, configured, nil)
+}
+
+func newLocalRepairPathGuardWithPolicy(
+	workspace gitworkspace.WorkspaceInfo,
+	pin gitworkspace.PinnedAcquireRequest,
+	configured []string,
+	protectedIdentities *tools.FileIdentityCatalog,
 ) (*localRepairPathGuard, error) {
 	if err := validateLocalRepairWorkspaceInfo(workspace, pin); err != nil {
 		return nil, err
@@ -518,11 +542,7 @@ func newLocalRepairPathGuard(
 	if err != nil || filepath.Clean(gitRoot) != filepath.Clean(gitPath) {
 		return nil, errors.New("pinned checkout Git directory is substituted")
 	}
-	var configured []string
-	if len(protectedRootSets) > 0 {
-		configured = append([]string(nil), protectedRootSets[0]...)
-	}
-	protectedRoots, err := prepareLocalRepairProtectedRoots(configured)
+	protectedRoots, err := prepareLocalRepairProtectedRoots(append([]string(nil), configured...))
 	if err != nil {
 		return nil, err
 	}
@@ -536,6 +556,7 @@ func newLocalRepairPathGuard(
 	}
 	return &localRepairPathGuard{
 		root: root, gitRoot: filepath.Clean(gitRoot), protectedRoots: protectedRoots,
+		protectedIdentities: protectedIdentities,
 	}, nil
 }
 
@@ -640,6 +661,21 @@ func (guard *localRepairPathGuard) validate(path string, mutation bool) (string,
 }
 
 func (guard *localRepairPathGuard) protected(candidate, resolved string) (bool, error) {
+	if guard.protectedIdentities != nil {
+		candidateInfo, candidateErr := os.Stat(resolved)
+		if candidateErr != nil && !os.IsNotExist(candidateErr) {
+			return false, candidateErr
+		}
+		if candidateErr == nil && candidateInfo.Mode().IsRegular() {
+			protected, identityErr := guard.protectedIdentities.ProtectsPath(
+				resolved,
+				candidateInfo,
+			)
+			if identityErr != nil || protected {
+				return protected, identityErr
+			}
+		}
+	}
 	for _, root := range guard.protectedRoots {
 		current, err := resolveLocalRepairPath(root.lexical)
 		if err != nil || filepath.Clean(current) != filepath.Clean(root.canonical) {

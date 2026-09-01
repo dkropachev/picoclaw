@@ -136,11 +136,14 @@ archive layout, and removing or restoring `sessions.db` together with matching
 
 ## Runtime File Protection
 
-Agent write/edit/append/apply-patch tools protect `sessions.db`, its WAL/SHM
-companions, and the workspace `legacy-json` namespace. Protection is frozen into root and
-owner tool factories and local-repair policy. Session storage opens before
-apply-patch captures volatile roots, preventing database creation or archival
-from invalidating ordinary source-file patches.
+Agent write/edit/append/apply-patch tools protect the active `sessions` and
+`threads` runtime namespaces, `sessions.db`, its WAL/SHM companions, and the
+workspace `legacy-json` namespace. A bounded two-pass physical-identity catalog
+captures legacy and archived session files and is shared by root/owner tool
+factories and local repair. Renaming an imported source into `sessions-v1`
+therefore does not make a hardlink alias outside those namespaces writable.
+Session storage opens before apply-patch captures volatile roots, preventing
+database creation or archival from invalidating ordinary source-file patches.
 
 ## Compatibility
 
