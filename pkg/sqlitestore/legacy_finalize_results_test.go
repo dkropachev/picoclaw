@@ -130,3 +130,72 @@ func TestLegacyFinalizeResultsRejectsIncompleteAndCompetingFinalizers(t *testing
 		})
 	}
 }
+
+//nolint:govet // Independent storage assertions intentionally use narrow error scopes.
+func TestReplaceFinalizedImportResultsRejectsUnknownInvalidMissingAndAggregateOverflow(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := createImportSchema(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(id string) {
+		t.Helper()
+		_, err := conn.ExecContext(ctx, `INSERT INTO storage_imports (
+            component,source_id,source_relative,source_digest,source_size,source_limit,
+            source_mode,imported_count,skipped_count,archive_status,imported_at
+        ) VALUES ('component',?,?,?,1,1,384,0,0,'pending',1)`,
+			id, id+".json", make([]byte, sha256.Size))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("source")
+
+	for name, test := range map[string]struct {
+		sourceIDs []string
+		results   map[string]ImportResult
+		want      string
+	}{
+		"unknown": {
+			[]string{"source"}, map[string]ImportResult{"other": {}}, "unknown source",
+		},
+		"invalid": {
+			[]string{"source"}, map[string]ImportResult{"source": {
+				Skipped: 1, Issues: []ImportIssue{{Code: "bad code"}},
+			}}, "issue code is invalid",
+		},
+		"missing row": {
+			[]string{"absent"}, map[string]ImportResult{"absent": {}}, "record is missing",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			summary := legacyImportSummary{}
+			err := replaceFinalizedImportResults(
+				ctx, conn, "component", test.sourceIDs, test.results, &summary,
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("replaceFinalizedImportResults() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+
+	insert("second")
+	summary := legacyImportSummary{}
+	err = replaceFinalizedImportResults(ctx, conn, "component", []string{"source", "second"},
+		map[string]ImportResult{
+			"source": {Imported: maximumLegacyRecordCount},
+			"second": {Imported: maximumLegacyRecordCount},
+		}, &summary)
+	if err == nil || !strings.Contains(err.Error(), "aggregate record count") {
+		t.Fatalf("aggregate overflow error = %v", err)
+	}
+}
