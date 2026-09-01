@@ -571,6 +571,7 @@ jobs:
 		al.Stop()
 		_ = al.WaitStopped(context.Background())
 		al.Close()
+		waitForWorkflowAutomationSQLiteIdle(t, workspaceA)
 	}()
 	waitForWorkflowRuntimeEventSubscribers(t, al, 1)
 
@@ -756,4 +757,24 @@ func waitForWorkflowRunCompletion(t *testing.T, workspace string) *workflows.Run
 	}
 	t.Fatal("timed out waiting for workflow run completion")
 	return nil
+}
+
+func waitForWorkflowAutomationSQLiteIdle(t *testing.T, workspace string) {
+	t.Helper()
+	database := filepath.Join(workspace, "state", "workflows.db")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		idle := true
+		for _, companion := range []string{database + "-wal", database + "-shm"} {
+			if _, err := os.Stat(companion); err == nil || !os.IsNotExist(err) {
+				idle = false
+				break
+			}
+		}
+		if idle {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("workflow SQLite pool did not become idle")
 }
