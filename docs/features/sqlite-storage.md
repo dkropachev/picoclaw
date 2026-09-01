@@ -141,7 +141,11 @@ writable. Reads, listings, edit/append read-before-write, and apply-patch source
 reads authorize the actual opened handle with `fstat`/`SameFile` and the catalog
 before consuming bytes or names. Unsafe tree entries, aggregate entry/path/depth
 bounds, or a changing two-pass snapshot fail agent construction without
-disclosing a protected path. Portability excludes
+disclosing a protected path. Git-inventory and PR-checkpoint inputs participate
+in the same catalog; checkpoints also use pinned private-mode snapshots before
+and after catalog construction under their tighter 10,000-source/depth-4
+bounds. Each reload adds the current configured Git-state roots while retaining
+the prior generation's frozen roots. Portability excludes
 targets on which the required SQLite implementation is unsupported instead of
 selecting a mutable JSON fallback.
 

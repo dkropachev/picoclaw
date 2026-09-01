@@ -1363,6 +1363,103 @@ func TestAgentGitWorkspaceProtectedRootsRejectUnsafeCheckpointState(t *testing.T
 	}
 }
 
+func TestAgentRegistryRefreshesGitRuntimeRootsForReloadGeneration(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	workspace := filepath.Join(root, "workspace")
+	oldGitRoot := filepath.Join(root, "old-git-workspaces")
+	newGitRoot := filepath.Join(root, "new-git-workspaces")
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
+	oldConfig := agentFileMutationTestConfig(workspace)
+	oldConfig.GitWorkspaces.RootDir = oldGitRoot
+	newConfig := agentFileMutationTestConfig(workspace)
+	newConfig.GitWorkspaces.RootDir = newGitRoot
+	newConfig.Tools.AllowWritePaths = []string{
+		"^" + regexp.QuoteMeta(oldGitRoot) + "(?:" + regexp.QuoteMeta(string(os.PathSeparator)) + "|$)",
+		"^" + regexp.QuoteMeta(newGitRoot) + "(?:" + regexp.QuoteMeta(string(os.PathSeparator)) + "|$)",
+	}
+	oldRoots, err := agentRuntimeFileMutationProtectedRoots("", oldConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := []string{
+		filepath.Join(oldGitRoot, agentGitInventoryDatabase),
+		filepath.Join(newGitRoot, agentGitInventoryDatabase),
+		filepath.Join(
+			newGitRoot,
+			".pr-workspace-implementation",
+			"active",
+			"future-checkpoint.json",
+		),
+	}
+	for _, target := range targets {
+		newConfig.Tools.AllowWritePaths = append(
+			newConfig.Tools.AllowWritePaths,
+			"^"+regexp.QuoteMeta(target)+"$",
+		)
+	}
+	for _, target := range targets[:2] {
+		if mkdirErr := os.MkdirAll(filepath.Dir(target), 0o700); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+		if writeErr := os.WriteFile(target, []byte("before"), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	registry := newAgentRegistryWithRuntimePolicies(
+		newConfig,
+		&mockProvider{},
+		isolation.NewExecutionPolicy(config.IsolationConfig{}),
+		logger.DiagnosticPolicy{},
+		nil,
+		oldRoots,
+	)
+	t.Cleanup(registry.Close)
+	agent := registry.GetDefaultAgent()
+	if agent == nil || agent.preparedFileMutationPolicy == nil {
+		t.Fatal("reload generation has no prepared mutation policy")
+	}
+	owner, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "git-root-reload-owner",
+	}, []string{"write_file", "edit_file", "append_file", "apply_patch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+	for registryName, toolRegistry := range map[string]*tools.ToolRegistry{
+		"root": agent.Tools, "owner": owner,
+	} {
+		for _, target := range targets {
+			exists := target != targets[2]
+			for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+				t.Run(registryName+"_"+toolName+"_"+filepath.Base(target), func(t *testing.T) {
+					requireAgentFileMutationDenied(
+						t, toolRegistry, toolName, workspace, target, exists,
+					)
+				})
+			}
+		}
+	}
+	hardlink := filepath.Join(workspace, "new-inventory-hardlink.db")
+	if err := os.Link(targets[1], hardlink); err == nil {
+		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+			requireAgentFileMutationDenied(t, agent.Tools, toolName, workspace, hardlink, true)
+		}
+	}
+	for _, target := range targets {
+		protected, protectErr := agent.preparedFileMutationPolicy.ProtectsPath(target)
+		if protectErr != nil || !protected {
+			t.Fatalf(
+				"reload prepared policy target %q protected=%t err=%v",
+				filepath.Base(target),
+				protected,
+				protectErr,
+			)
+		}
+	}
+}
+
 func TestAgentCheckpointRetainedStateEnumerationBoundsAndModes(t *testing.T) {
 	if files, err := agentCheckpointRetainedStateFilesBounded(
 		"unused", "unused", 0, 1, 1, 1,
