@@ -18,8 +18,6 @@ var errRepositoryReviewHistoricalCampaignRecovery = errors.New(
 	"exact historical campaign recovery is unavailable",
 )
 
-var recoverRepositoryReviewHistoricalCampaignForRetry = recoverRepositoryReviewHistoricalCampaign
-
 var resolveRepositoryReviewHistoricalCampaignProfile = resolveRepositoryReviewCampaignProfile
 
 var prepareRepositoryReviewHistoricalCampaignBackfill = prepareRepositoryReviewLegacyCampaignBackfill
@@ -70,6 +68,37 @@ var failHistoricalDeduplicationReplay = func(
 	repository, leaseID string,
 ) (repoaudit.RepositoryState, repoaudit.HistoricalDeduplicationReplay, error) {
 	return store.FailHistoricalDeduplicationReplay(repository, leaseID)
+}
+
+var recoverHistoricalDeduplicationMerge = func(
+	store repoaudit.Store,
+	repository, leaseID string,
+) (repoaudit.RepositoryState, repoaudit.HistoricalDeduplicationReplay, error) {
+	return store.RecoverHistoricalDeduplicationMerge(repository, leaseID)
+}
+
+var resumeHistoricalDeduplicationReplay = func(
+	store repoaudit.Store,
+	repository string,
+	snapshot repoaudit.HistoricalDeduplicationProfileSnapshot,
+	dependencies []repoaudit.HistoricalDeduplicationDependency,
+) (repoaudit.RepositoryState, repoaudit.HistoricalDeduplicationReplay, error) {
+	return store.ResumeHistoricalDeduplicationReplay(repository, snapshot, dependencies)
+}
+
+var restartHistoricalDeduplicationReplay = func(
+	store repoaudit.Store,
+	repository string,
+	request repoaudit.HistoricalDeduplicationRestartRequest,
+) (repoaudit.RepositoryState, repoaudit.HistoricalDeduplicationReplay, error) {
+	return store.RestartHistoricalDeduplicationReplay(repository, request)
+}
+
+type repositoryReviewHistoricalRetryPlan struct {
+	Snapshot         repoaudit.HistoricalDeduplicationProfileSnapshot
+	Dependencies     []repoaudit.HistoricalDeduplicationDependency
+	PreparedRecovery repositoryReviewLegacyCampaignBackfill
+	NeedsRecovery    bool
 }
 
 func (h *Handler) handleGetRepositoryReviewHistoricalDeduplication(
@@ -134,39 +163,39 @@ func (h *Handler) handleRetryRepositoryReviewHistoricalDeduplication(
 		writeRepositoryReviewAutomationError(w, repoaudit.ErrConflict)
 		return
 	}
-	controller := h.repositoryReviewControllerInstance()
-	if ledger.State.HistoricalDeduplication.Required &&
-		ledger.State.HistoricalDeduplication.Status != repoaudit.HistoricalDeduplicationCompleted &&
-		!repositoryReviewHistoricalCampaignRecovered(ledger.Automation, ledger.State) {
-		cfg, configErr := config.LoadConfig(h.configPath)
-		if configErr != nil {
-			writeRepositoryReviewAutomationError(w, configErr)
-			return
-		}
-		resolvedProfile, profileErr := resolveRepositoryReviewHistoricalCampaignProfile(
-			r.Context(), h.configPath, cfg, ledger.Automation,
+	if !ledger.State.HistoricalDeduplication.Required ||
+		ledger.State.HistoricalDeduplication.Status == repoaudit.HistoricalDeduplicationCompleted {
+		state, replay, retryErr := ledger.Store.RetryHistoricalDeduplicationReplay(
+			ledger.State.Repository,
 		)
-		if profileErr != nil {
-			writeRepositoryReviewAutomationError(w, profileErr)
+		if retryErr != nil {
+			writeRepositoryReviewAutomationError(w, retryErr)
 			return
 		}
-		ledger.Automation, ledger.State, err = recoverRepositoryReviewHistoricalCampaignForRetry(
-			r.Context(), ledger.Store, cfg.WorkspacePath(), ledger.Automation,
-			ledger.State, resolvedProfile,
-		)
-		if errors.Is(err, errRepositoryReviewHistoricalCampaignRecovery) {
-			writeRepositoryReviewJSON(w, http.StatusConflict, map[string]string{
-				"code":    "historical_deduplication_campaign_recovery_required",
-				"message": "Historical deduplication cannot be retried because the exact retained review campaign could not be recovered. Restore the automation's workflow run history, then retry.",
-			})
-			return
-		}
-		if err != nil {
-			writeRepositoryReviewAutomationError(w, err)
-			return
-		}
+		writeRepositoryReviewJSON(w, http.StatusAccepted, map[string]any{
+			"automation":               projectRepositoryReviewAutomation(ledger.Automation),
+			"repository":               repoaudit.Summarize(state),
+			"historical_deduplication": replay,
+		})
+		return
 	}
-	state, replay, err := ledger.Store.RetryHistoricalDeduplicationReplay(ledger.State.Repository)
+	controller := h.repositoryReviewControllerInstance()
+	plan, planErr := h.repositoryReviewHistoricalRetryPlan(r.Context(), controller, ledger)
+	if errors.Is(planErr, errRepositoryReviewHistoricalCampaignRecovery) {
+		writeRepositoryReviewHistoricalCampaignRecoveryRequired(w)
+		return
+	}
+	if planErr != nil {
+		writeRepositoryReviewAutomationError(w, planErr)
+		return
+	}
+	state, replay, err := resumeHistoricalDeduplicationReplay(
+		ledger.Store, ledger.State.Repository, plan.Snapshot, plan.Dependencies,
+	)
+	if errors.Is(err, repoaudit.ErrHistoricalDeduplicationRestartRequired) {
+		writeRepositoryReviewHistoricalRestartRequired(w)
+		return
+	}
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
 		return
@@ -177,6 +206,299 @@ func (h *Handler) handleRetryRepositoryReviewHistoricalDeduplication(
 		"repository":               repoaudit.Summarize(state),
 		"historical_deduplication": replay,
 	})
+}
+
+func (h *Handler) handleRestartRepositoryReviewHistoricalDeduplication(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	if err := validateRepositoryReviewMutation(r); err != nil || r.URL == nil || r.URL.RawQuery != "" {
+		writeRepositoryReviewError(w, errors.New("invalid historical deduplication restart request"))
+		return
+	}
+	var request struct {
+		Confirmed bool `json:"confirmed"`
+	}
+	if err := decodeRepositoryReviewRequest(r, &request); err != nil {
+		writeRepositoryReviewError(w, err)
+		return
+	}
+	if !request.Confirmed {
+		writeRepositoryReviewError(w, errors.New(
+			"confirmed true is required to restart incompatible historical deduplication work",
+		))
+		return
+	}
+	ledger, err := h.repositoryReviewAutomationLedger(r.Context(), r.PathValue("automation_id"))
+	if err != nil {
+		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
+	replay := ledger.State.HistoricalDeduplication
+	if !replay.Required || replay.Status == repoaudit.HistoricalDeduplicationCompleted {
+		writeRepositoryReviewAutomationError(w, repoaudit.ErrConflict)
+		return
+	}
+	controller := h.repositoryReviewControllerInstance()
+	plan, planErr := h.repositoryReviewHistoricalRetryPlan(r.Context(), controller, ledger)
+	if errors.Is(planErr, errRepositoryReviewHistoricalCampaignRecovery) {
+		writeRepositoryReviewHistoricalCampaignRecoveryRequired(w)
+		return
+	}
+	if planErr != nil {
+		writeRepositoryReviewAutomationError(w, planErr)
+		return
+	}
+	if plan.NeedsRecovery {
+		// Exact campaign recovery spans automation and repository CAS writes.
+		// Fence the only worker that can start historical model work, then
+		// reload and re-plan under that process-wide controller boundary. A
+		// running worker keeps the request non-mutating and retryable.
+		if controller == nil || !controller.deduplicationMu.TryLock() {
+			writeRepositoryReviewAutomationError(
+				w, repoaudit.ErrHistoricalDeduplicationNotQuiescent,
+			)
+			return
+		}
+		defer controller.deduplicationMu.Unlock()
+		ledger, err = h.repositoryReviewAutomationLedger(
+			r.Context(), r.PathValue("automation_id"),
+		)
+		if err != nil {
+			writeRepositoryReviewAutomationError(w, err)
+			return
+		}
+		plan, planErr = h.repositoryReviewHistoricalRetryPlan(
+			r.Context(), controller, ledger,
+		)
+		if errors.Is(planErr, errRepositoryReviewHistoricalCampaignRecovery) {
+			writeRepositoryReviewHistoricalCampaignRecoveryRequired(w)
+			return
+		}
+		if planErr != nil {
+			writeRepositoryReviewAutomationError(w, planErr)
+			return
+		}
+		replay = ledger.State.HistoricalDeduplication
+	}
+	if replay.Status != repoaudit.HistoricalDeduplicationFailed && plan.NeedsRecovery {
+		writeRepositoryReviewAutomationError(w, repoaudit.ErrConflict)
+		return
+	}
+	// Exact campaign recovery is a separate durable CAS sequence. Avoid
+	// starting it while the subsequent selective reset is known to be unable
+	// to acquire its quiescent boundary. For already-recovered campaigns the
+	// store performs this check atomically with the reset; compatible repeated
+	// requests remain idempotent even if workers have since started.
+	if plan.NeedsRecovery &&
+		(!repoaudit.HistoricalDeduplicationQuiescenceForState(ledger.State).Ready() ||
+			!repoaudit.HistoricalDeduplicationModelWorkQuiescent(ledger.State)) {
+		writeRepositoryReviewAutomationError(
+			w, repoaudit.ErrHistoricalDeduplicationNotQuiescent,
+		)
+		return
+	}
+	if plan.NeedsRecovery {
+		ledger.Automation, ledger.State, err = applyRepositoryReviewHistoricalCampaignRecovery(
+			r.Context(), ledger.Store, plan.PreparedRecovery,
+		)
+		if err != nil {
+			writeRepositoryReviewAutomationError(w, err)
+			return
+		}
+	}
+	state, restarted, err := restartHistoricalDeduplicationReplay(
+		ledger.Store,
+		ledger.State.Repository,
+		repoaudit.HistoricalDeduplicationRestartRequest{
+			ProfileSnapshot: plan.Snapshot,
+			Dependencies:    plan.Dependencies,
+		},
+	)
+	if err != nil {
+		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
+	controller.wakeHistoricalFindingDeduplication()
+	writeRepositoryReviewJSON(w, http.StatusAccepted, map[string]any{
+		"automation":               projectRepositoryReviewAutomation(ledger.Automation),
+		"repository":               repoaudit.Summarize(state),
+		"historical_deduplication": restarted,
+	})
+}
+
+func writeRepositoryReviewHistoricalCampaignRecoveryRequired(w http.ResponseWriter) {
+	writeRepositoryReviewJSON(w, http.StatusConflict, map[string]string{
+		"code":    "historical_deduplication_campaign_recovery_required",
+		"message": "Historical deduplication cannot be resumed because the exact retained review campaign could not be recovered. Restore the automation's workflow run history, then resume.",
+	})
+}
+
+func writeRepositoryReviewHistoricalRestartRequired(w http.ResponseWriter) {
+	writeRepositoryReviewJSON(w, http.StatusConflict, map[string]string{
+		"code":    "historical_consolidation_restart_required",
+		"message": "The historical consolidation profile or campaign identity changed. Confirm a restart to reprocess only the incompatible work; unrelated completed work will be preserved.",
+	})
+}
+
+func (h *Handler) repositoryReviewHistoricalRetryPlan(
+	ctx context.Context,
+	controller *repositoryReviewController,
+	ledger repositoryReviewAutomationLedger,
+) (repositoryReviewHistoricalRetryPlan, error) {
+	replay := ledger.State.HistoricalDeduplication
+	if !replay.Required || replay.Status == repoaudit.HistoricalDeduplicationCompleted {
+		return repositoryReviewHistoricalRetryPlan{Snapshot: replay.ProfileSnapshot}, nil
+	}
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		return repositoryReviewHistoricalRetryPlan{}, err
+	}
+	materialized, snapshot, err := repositoryReviewHistoricalProfileSnapshot(
+		ctx, controller, ledger.Store, cfg, ledger.Automation,
+	)
+	if err != nil {
+		return repositoryReviewHistoricalRetryPlan{}, err
+	}
+	plan := repositoryReviewHistoricalRetryPlan{Snapshot: snapshot}
+	if repositoryReviewHistoricalCampaignRecovered(materialized, ledger.State) {
+		plan.Dependencies, err = repoaudit.HistoricalDeduplicationDependencies(
+			ledger.State, "", nil,
+		)
+		return plan, err
+	}
+	resolvedProfile, err := resolveRepositoryReviewHistoricalCampaignProfile(
+		ctx, h.configPath, cfg, materialized,
+	)
+	if err != nil {
+		return repositoryReviewHistoricalRetryPlan{}, err
+	}
+	prepared, err := prepareRepositoryReviewHistoricalCampaignRecovery(
+		ctx, cfg.WorkspacePath(), materialized, ledger.State, resolvedProfile,
+	)
+	if err != nil {
+		return repositoryReviewHistoricalRetryPlan{}, err
+	}
+	plan.PreparedRecovery = prepared
+	plan.NeedsRecovery = true
+	plan.Dependencies, err = repoaudit.HistoricalDeduplicationDependencies(
+		ledger.State, prepared.Request.Coverage.ID, prepared.Request.FindingIDs,
+	)
+	return plan, err
+}
+
+func repositoryReviewHistoricalProfileSnapshot(
+	ctx context.Context,
+	controller *repositoryReviewController,
+	store repoaudit.Store,
+	cfg *config.Config,
+	automation repoaudit.RepositoryReviewAutomation,
+) (
+	repoaudit.RepositoryReviewAutomation,
+	repoaudit.HistoricalDeduplicationProfileSnapshot,
+	error,
+) {
+	if controller == nil || cfg == nil {
+		return repoaudit.RepositoryReviewAutomation{},
+			repoaudit.HistoricalDeduplicationProfileSnapshot{},
+			errors.New("historical deduplication profile resolver is unavailable")
+	}
+	materialized := automation
+	if strings.TrimSpace(automation.ProfileID) != "" {
+		profile, found, err := store.GetProfile(ctx, automation.ProfileID)
+		if err != nil {
+			return repoaudit.RepositoryReviewAutomation{},
+				repoaudit.HistoricalDeduplicationProfileSnapshot{}, err
+		}
+		if !found {
+			return repoaudit.RepositoryReviewAutomation{},
+				repoaudit.HistoricalDeduplicationProfileSnapshot{},
+				errors.New("historical deduplication profile was not found")
+		}
+		materialized, err = repoaudit.MaterializeRepositoryReviewAutomation(
+			profile, automation,
+		)
+		if err != nil {
+			return repoaudit.RepositoryReviewAutomation{},
+				repoaudit.HistoricalDeduplicationProfileSnapshot{}, err
+		}
+	}
+	materialized.EffectiveAccountRef = repositoryReviewEffectiveAccountRef(
+		cfg, materialized.AccountRef,
+	)
+	snapshot, err := controller.repositoryReviewDeduplicationSnapshot(materialized)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{},
+			repoaudit.HistoricalDeduplicationProfileSnapshot{}, err
+	}
+	return materialized, snapshot, nil
+}
+
+func prepareRepositoryReviewHistoricalCampaignRecovery(
+	ctx context.Context,
+	workspace string,
+	automation repoaudit.RepositoryReviewAutomation,
+	state repoaudit.RepositoryState,
+	resolvedProfile workflows.RepositoryReviewModelProfile,
+) (repositoryReviewLegacyCampaignBackfill, error) {
+	if err := ctx.Err(); err != nil {
+		return repositoryReviewLegacyCampaignBackfill{}, err
+	}
+	if strings.TrimSpace(workspace) == "" || automation.ActiveRunID != "" ||
+		automation.Status == repoaudit.RepositoryReviewAutomationRunning ||
+		automation.Status == repoaudit.RepositoryReviewAutomationStopping {
+		return repositoryReviewLegacyCampaignBackfill{},
+			errRepositoryReviewHistoricalCampaignRecovery
+	}
+	campaignID := automation.CampaignID
+	if campaignID == "" {
+		campaignID = repoaudit.NewRepositoryReviewCampaignID()
+	} else if !repoaudit.ValidRepositoryReviewCampaignID(campaignID) {
+		return repositoryReviewLegacyCampaignBackfill{},
+			errRepositoryReviewHistoricalCampaignRecovery
+	}
+	prepared, err := prepareRepositoryReviewHistoricalCampaignBackfill(
+		ctx, automation, repositoryReviewHistoricalRecoveryProjection(state), campaignID,
+		workflows.NewFileRunStore(workspace), resolvedProfile,
+	)
+	if err != nil {
+		if errors.Is(err, repoaudit.ErrInvalidAutomation) ||
+			errors.Is(err, repoaudit.ErrInvalidPlan) || errors.Is(err, os.ErrNotExist) {
+			return repositoryReviewLegacyCampaignBackfill{},
+				errRepositoryReviewHistoricalCampaignRecovery
+		}
+		return repositoryReviewLegacyCampaignBackfill{}, err
+	}
+	if !prepared.Available || !prepared.Exact || !prepared.Request.Coverage.Exact ||
+		prepared.Request.Coverage.CommitSHA == "" {
+		return repositoryReviewLegacyCampaignBackfill{},
+			errRepositoryReviewHistoricalCampaignRecovery
+	}
+	return prepared, nil
+}
+
+func applyRepositoryReviewHistoricalCampaignRecovery(
+	ctx context.Context,
+	store repoaudit.Store,
+	prepared repositoryReviewLegacyCampaignBackfill,
+) (repoaudit.RepositoryReviewAutomation, repoaudit.RepositoryState, error) {
+	installed, prepared, err := installRepositoryReviewLegacyCampaignAuthority(
+		ctx, store, prepared,
+	)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
+	}
+	reconciled, err := applyRepositoryReviewLegacyCampaignBackfill(ctx, store, prepared)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
+	}
+	final, err := updateRepositoryReviewHistoricalAutomation(
+		ctx, store, installed, prepared, reconciled,
+	)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
+	}
+	return final, reconciled, nil
 }
 
 func repositoryReviewHistoricalCampaignRecovered(
@@ -218,10 +540,10 @@ func repositoryReviewHistoricalCampaignRecovered(
 	return true
 }
 
-// recoverRepositoryReviewHistoricalCampaign runs the existing exact legacy
-// recovery adapter before replay is made pending. Its staged automation marker,
-// BeginCampaign, ReconcileCampaign, and final CAS are deliberately reused so a
-// crash or lost response at any phase is safe to repeat.
+// recoverRepositoryReviewHistoricalCampaign runs the exact legacy recovery
+// adapter used by confirmed incompatible-work restart. Its staged automation
+// marker, BeginCampaign, ReconcileCampaign, and final CAS are deliberately
+// reused so a crash or lost response at any phase is safe to repeat.
 func recoverRepositoryReviewHistoricalCampaign(
 	ctx context.Context,
 	store repoaudit.Store,
@@ -236,54 +558,13 @@ func recoverRepositoryReviewHistoricalCampaign(
 	if repositoryReviewHistoricalCampaignRecovered(automation, state) {
 		return automation, state, nil
 	}
-	if strings.TrimSpace(workspace) == "" || automation.ActiveRunID != "" ||
-		automation.Status == repoaudit.RepositoryReviewAutomationRunning ||
-		automation.Status == repoaudit.RepositoryReviewAutomationStopping {
-		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
-			errRepositoryReviewHistoricalCampaignRecovery
-	}
-	campaignID := automation.CampaignID
-	if campaignID == "" {
-		campaignID = repoaudit.NewRepositoryReviewCampaignID()
-	} else if !repoaudit.ValidRepositoryReviewCampaignID(campaignID) {
-		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
-			errRepositoryReviewHistoricalCampaignRecovery
-	}
-	prepared, err := prepareRepositoryReviewHistoricalCampaignBackfill(
-		ctx, automation, repositoryReviewHistoricalRecoveryProjection(state), campaignID,
-		workflows.NewFileRunStore(workspace), resolvedProfile,
-	)
-	if err != nil {
-		if errors.Is(err, repoaudit.ErrInvalidAutomation) ||
-			errors.Is(err, repoaudit.ErrInvalidPlan) || errors.Is(err, os.ErrNotExist) {
-			return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
-				errRepositoryReviewHistoricalCampaignRecovery
-		}
-		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
-			err
-	}
-	if !prepared.Available || !prepared.Exact || !prepared.Request.Coverage.Exact ||
-		prepared.Request.Coverage.CommitSHA == "" {
-		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
-			errRepositoryReviewHistoricalCampaignRecovery
-	}
-	installed, prepared, err := installRepositoryReviewLegacyCampaignAuthority(
-		ctx, store, prepared,
+	prepared, err := prepareRepositoryReviewHistoricalCampaignRecovery(
+		ctx, workspace, automation, state, resolvedProfile,
 	)
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
 	}
-	reconciled, err := applyRepositoryReviewLegacyCampaignBackfill(ctx, store, prepared)
-	if err != nil {
-		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
-	}
-	final, err := updateRepositoryReviewHistoricalAutomation(
-		ctx, store, installed, prepared, reconciled,
-	)
-	if err != nil {
-		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, err
-	}
-	return final, reconciled, nil
+	return applyRepositoryReviewHistoricalCampaignRecovery(ctx, store, prepared)
 }
 
 // repositoryReviewHistoricalRecoveryProjection removes only replay-created
@@ -401,20 +682,22 @@ func (c *repositoryReviewController) advanceHistoricalFindingDeduplication(
 	var err error
 	switch replay.Status {
 	case repoaudit.HistoricalDeduplicationFailed:
-		// Terminal replay failures require an explicit retry so operators can
-		// inspect conflicts. Retry re-snapshots the then-current profile.
+		// Terminal replay failures require an explicit resume so operators can
+		// inspect conflicts. Completed checkpoints and their frozen identities
+		// remain durable until that request is accepted.
 		return nil
 	case repoaudit.HistoricalDeduplicationMerging:
-		_, _, mergeErr := c.leasedStore.CompleteHistoricalDeduplicationMerge(
+		// A process may stop after acquiring the narrow lease but before its
+		// completion is durable. Atomically clear the interrupted lease, then
+		// fall through to recompute groups from current repository-finding
+		// versions. This recovery path performs no model work.
+		state, replay, err = recoverHistoricalDeduplicationMerge(
+			c.leasedStore,
 			state.Repository, replay.MergeLease.ID,
 		)
-		if mergeErr != nil {
-			_, _, failErr := c.leasedStore.FailHistoricalDeduplicationReplay(
-				state.Repository, replay.MergeLease.ID,
-			)
-			return errors.Join(mergeErr, failErr)
+		if err != nil {
+			return err
 		}
-		return nil
 	case repoaudit.HistoricalDeduplicationPending:
 		automation, found := repositoryAutomationForLedger(
 			c.leasedStore, automations, state,
@@ -422,26 +705,9 @@ func (c *repositoryReviewController) advanceHistoricalFindingDeduplication(
 		if !found {
 			automation = repositoryFallbackAutomation(c.leasedConfig, state)
 		}
-		materialized := automation
-		if strings.TrimSpace(automation.ProfileID) != "" {
-			profile, profileFound, profileErr := c.leasedStore.GetProfile(ctx, automation.ProfileID)
-			if profileErr != nil {
-				return profileErr
-			}
-			if !profileFound {
-				return errors.New("historical deduplication profile was not found")
-			}
-			materialized, profileErr = repoaudit.MaterializeRepositoryReviewAutomation(
-				profile, automation,
-			)
-			if profileErr != nil {
-				return profileErr
-			}
-		}
-		materialized.EffectiveAccountRef = repositoryReviewEffectiveAccountRef(
-			c.leasedConfig, materialized.AccountRef,
+		_, snapshot, snapshotErr := repositoryReviewHistoricalProfileSnapshot(
+			ctx, c, c.leasedStore, c.leasedConfig, automation,
 		)
-		snapshot, snapshotErr := c.repositoryReviewDeduplicationSnapshot(materialized)
 		if snapshotErr != nil {
 			return snapshotErr
 		}

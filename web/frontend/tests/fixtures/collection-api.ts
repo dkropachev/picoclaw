@@ -2269,6 +2269,36 @@ export async function installCollectionVisualMocks(
             202,
           )
         }
+        if (path === `${reviewRoot}/historical-deduplication/restart`) {
+          if (body?.confirmed !== true) {
+            return json(
+              route,
+              {
+                code: "confirmation_required",
+                message: "Historical restart requires explicit confirmation.",
+              },
+              400,
+            )
+          }
+          findingHealth.historical_consolidation = {
+            required: true,
+            status: "pending",
+            retryable: false,
+          }
+          findingHealth.updated_at = "2026-08-25T14:23:00Z"
+          return json(
+            route,
+            {
+              automation: repositoryReviewAutomation,
+              repository: repositoryReviewSummary,
+              historical_deduplication: {
+                required: true,
+                status: "pending",
+              },
+            },
+            202,
+          )
+        }
         if (path === "/api/event-sources/bulk-delete") {
           return json(route, {
             deleted_ids: [],

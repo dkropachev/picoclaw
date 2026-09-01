@@ -380,27 +380,24 @@ func TestRepositoryReviewHistoricalRetryNewProfileAndStoreErrors(t *testing.T) {
 		setRepositoryReviewMutationHeaders(request)
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, request)
-		if response.Code != http.StatusAccepted || !strings.Contains(
-			response.Body.String(), `"status":"pending"`,
+		if response.Code != http.StatusConflict || !strings.Contains(
+			response.Body.String(), `"code":"historical_consolidation_restart_required"`,
 		) {
 			t.Fatalf("drifted recovery status=%d body=%s", response.Code, response.Body.String())
 		}
-		recoveredAutomation, found, err := fixture.store.GetAutomation(
+		unchangedAutomation, found, err := fixture.store.GetAutomation(
 			t.Context(), fixture.automation.ID,
 		)
-		if err != nil || !found || recoveredAutomation.CampaignID == "" ||
-			recoveredAutomation.CampaignRecoveryPending {
-			t.Fatalf("drifted recovery automation=%#v found=%v err=%v",
-				recoveredAutomation, found, err)
+		if err != nil || !found || unchangedAutomation.CampaignID != fixture.automation.CampaignID ||
+			unchangedAutomation.Version != fixture.automation.Version {
+			t.Fatalf("drifted recovery mutated automation=%#v found=%v err=%v",
+				unchangedAutomation, found, err)
 		}
-		recoveredState, found, err := fixture.store.Get(state.Repository)
-		if err != nil || !found || recoveredState.CurrentCampaign == nil ||
-			!recoveredState.CurrentCampaign.Exact ||
-			len(recoveredState.CurrentCampaign.Paths) != 0 ||
-			len(recoveredState.Findings) != 1 ||
-			recoveredState.Findings[0].CampaignID != recoveredAutomation.CampaignID {
-			t.Fatalf("drifted recovery campaign=%#v findings=%#v found=%v err=%v",
-				recoveredState.CurrentCampaign, recoveredState.Findings, found, err)
+		unchangedState, found, err := fixture.store.Get(state.Repository)
+		if err != nil || !found || unchangedState.Version != state.Version ||
+			unchangedState.HistoricalDeduplication.Status != repoaudit.HistoricalDeduplicationFailed {
+			t.Fatalf("drifted recovery mutated replay=%#v found=%v err=%v",
+				unchangedState.HistoricalDeduplication, found, err)
 		}
 	})
 
@@ -550,10 +547,10 @@ func TestRepositoryReviewHistoricalRetryGenericRecoveryErrorCoverage(t *testing.
 	)
 
 	originalResolver := resolveRepositoryReviewHistoricalCampaignProfile
-	originalRecovery := recoverRepositoryReviewHistoricalCampaignForRetry
+	originalPrepare := prepareRepositoryReviewHistoricalCampaignBackfill
 	t.Cleanup(func() {
 		resolveRepositoryReviewHistoricalCampaignProfile = originalResolver
-		recoverRepositoryReviewHistoricalCampaignForRetry = originalRecovery
+		prepareRepositoryReviewHistoricalCampaignBackfill = originalPrepare
 	})
 	resolveRepositoryReviewHistoricalCampaignProfile = func(
 		context.Context,
@@ -564,15 +561,15 @@ func TestRepositoryReviewHistoricalRetryGenericRecoveryErrorCoverage(t *testing.
 		return workflows.RepositoryReviewModelProfile{Revision: "coverage"}, nil
 	}
 	recoveryErr := errors.New("historical recovery persistence failed")
-	recoverRepositoryReviewHistoricalCampaignForRetry = func(
+	prepareRepositoryReviewHistoricalCampaignBackfill = func(
 		context.Context,
-		repoaudit.Store,
-		string,
 		repoaudit.RepositoryReviewAutomation,
 		repoaudit.RepositoryState,
-		workflows.RepositoryReviewModelProfile,
-	) (repoaudit.RepositoryReviewAutomation, repoaudit.RepositoryState, error) {
-		return repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{}, recoveryErr
+		string,
+		repositoryReviewWorkflowRunLoader,
+		...workflows.RepositoryReviewModelProfile,
+	) (repositoryReviewLegacyCampaignBackfill, error) {
+		return repositoryReviewLegacyCampaignBackfill{}, recoveryErr
 	}
 
 	request := httptest.NewRequest(

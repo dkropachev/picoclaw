@@ -7134,6 +7134,30 @@ async function mockRepositoryReviewAutomationRequest(
     path === `${automationRoot}/historical-deduplication/retry` &&
     method === "POST"
   ) {
+    return json(
+      route,
+      {
+        code: "historical_consolidation_restart_required",
+        message: "The saved profile no longer matches this historical replay.",
+      },
+      409,
+    )
+  }
+
+  if (
+    path === `${automationRoot}/historical-deduplication/restart` &&
+    method === "POST"
+  ) {
+    if (body?.confirmed !== true) {
+      return json(
+        route,
+        {
+          code: "confirmation_required",
+          message: "Historical restart requires explicit confirmation.",
+        },
+        400,
+      )
+    }
     state.historicalConsolidation = {
       required: true,
       status: "pending",
@@ -7851,11 +7875,12 @@ test("findings processing selects only failures and preserves partial bulk retry
   await expect(
     page.getByRole("heading", { name: "Historical consolidation" }),
   ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Restart incompatible work" }),
+  ).toHaveCount(0)
   await page
-    .getByRole("button", { name: "Retry historical consolidation" })
+    .getByRole("button", { name: "Resume historical consolidation" })
     .click()
-  const historicalToast = page.getByText("Historical consolidation queued.")
-  await expect(historicalToast).toBeVisible()
   await expect
     .poll(() =>
       requests.find((request) =>
@@ -7863,6 +7888,41 @@ test("findings processing selects only failures and preserves partial bulk retry
       ),
     )
     .toMatchObject({ method: "POST", body: {} })
+  const restart = page.getByRole("button", {
+    name: "Restart incompatible work",
+  })
+  await expect(restart).toBeVisible()
+  await restart.click()
+  const restartDialog = page.getByRole("alertdialog")
+  await expect(
+    restartDialog.getByText(
+      /Completed results in affected historical buckets will be reprocessed/u,
+    ),
+  ).toBeVisible()
+  await expect(
+    restartDialog.getByText(
+      /Completed work in unrelated buckets will remain preserved/u,
+    ),
+  ).toBeVisible()
+  expect(
+    requests.find((request) =>
+      request.path.endsWith("/historical-deduplication/restart"),
+    ),
+  ).toBeUndefined()
+  await restartDialog
+    .getByRole("button", { name: "Restart incompatible work" })
+    .click()
+  const historicalToast = page.getByText(
+    "Incompatible historical work restarted.",
+  )
+  await expect(historicalToast).toBeVisible()
+  await expect
+    .poll(() =>
+      requests.find((request) =>
+        request.path.endsWith("/historical-deduplication/restart"),
+      ),
+    )
+    .toMatchObject({ method: "POST", body: { confirmed: true } })
   const pending = page.locator(
     `[data-item-id="${repositoryReviewProcessingPendingID}"]`,
   )
@@ -7928,7 +7988,14 @@ test("findings processing selects only failures and preserves partial bulk retry
   await expect(partialToast).toBeHidden({ timeout: 10_000 })
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
-  expect(errors).toEqual([])
+  expect(
+    errors.filter(
+      (message) =>
+        !message.includes(
+          "Failed to load resource: the server responded with a status of 409",
+        ),
+    ),
+  ).toEqual([])
 })
 
 test("findings processing detail exposes safe failure, immutable provenance, links, and retry", async ({

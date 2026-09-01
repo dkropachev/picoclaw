@@ -1866,6 +1866,34 @@ export async function retryRepositoryReviewHistoricalDeduplication(
   }
 }
 
+export async function restartRepositoryReviewHistoricalDeduplication(
+  automationID: string,
+  signal?: AbortSignal,
+): Promise<{
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  historical_deduplication: RepositoryReviewHistoricalDeduplication
+}> {
+  const value = await requestJSON<{
+    automation: RepositoryReviewAutomation
+    repository?: RepositoryReviewSummary
+    historical_deduplication: RepositoryReviewHistoricalDeduplication
+  }>(
+    `${automationPath(automationID)}/historical-deduplication/restart`,
+    jsonMutation("POST", { confirmed: true }),
+    signal,
+  )
+  return {
+    automation: normalizeAutomation(value.automation),
+    repository: value.repository
+      ? normalizeRepositoryReviewSummary(value.repository)
+      : undefined,
+    historical_deduplication: normalizeHistoricalDeduplication(
+      value.historical_deduplication,
+    ),
+  }
+}
+
 export async function retryRepositoryReviewRunFindingStatuses(
   automationID: string,
   findingIDs: string[],

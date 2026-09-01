@@ -184,6 +184,12 @@ func migrateRepositoryState(state *RepositoryState) (bool, error) {
 		state.HistoricalDeduplication.UpdatedAt = state.UpdatedAt.UTC()
 		migrated = true
 	}
+	if state.HistoricalDeduplication.Status == HistoricalDeduplicationFailed &&
+		state.HistoricalDeduplication.FailurePhase == "" {
+		state.HistoricalDeduplication.FailurePhase =
+			HistoricalDeduplicationFailurePhaseForState(*state)
+		migrated = true
+	}
 	if state.Contexts == nil {
 		state.Contexts = []FindingContext{}
 		migrated = true
@@ -691,11 +697,12 @@ func (s Store) reconcileRepositoryJobs(repository string) (int, int, int, error)
 	historicalMergeReleased := false
 	if HistoricalDeduplicationMergeInProgress(state) {
 		// The controller lease proves that no previous replay process remains
-		// live. A crash between narrow-lease acquisition and completion is a
-		// terminal attempt failure; release the fence and require an explicit
-		// retry to take a fresh snapshot.
-		state.HistoricalDeduplication.Status = HistoricalDeduplicationFailed
-		state.HistoricalDeduplication.Error = "Historical deduplication was interrupted."
+		// live. Preserve all model checkpoints, release only the stale merge
+		// fence, and let the controller recompute groups and current versions.
+		state.HistoricalDeduplication.Status = HistoricalDeduplicationReplaying
+		state.HistoricalDeduplication.Attempts++
+		state.HistoricalDeduplication.Error = ""
+		state.HistoricalDeduplication.FailurePhase = ""
 		state.HistoricalDeduplication.MergeLease = HistoricalDeduplicationMergeLease{}
 		state.HistoricalDeduplication.UpdatedAt = now
 		historicalMergeReleased = true

@@ -101,18 +101,19 @@ func TestHistoricalReplayRetryMigratesProcessingIdentityAndMergesWorkflowDuplica
 			}
 		}
 	}
+	now = now.Add(time.Minute)
 	stuckRaw := &state.RawFindings[0]
 	stuckJob := &state.DeduplicationJobs[0]
-	stuckRaw.State = RawFindingDeduplicationRunning
-	stuckRaw.Version++
-	stuckRaw.UpdatedAt = now
-	stuckJob.State = DeduplicationJobRunning
-	stuckJob.Attempts = 2
-	stuckJob.LeaseID = "rdl_stuck"
-	stuckJob.LeaseExpiresAt = now.Add(time.Hour)
-	stuckJob.UpdatedAt = now
+	stuckJob.Attempts = DeduplicationAttemptLimit
+	markDeduplicationFailed(stuckRaw, stuckJob, "processing_failed", now)
+	state.DeduplicationJobs[1].Attempts = DeduplicationAttemptLimit
+	markDeduplicationFailed(
+		&state.RawFindings[1], &state.DeduplicationJobs[1], "processing_failed",
+		state.RawFindings[1].CreatedAt,
+	)
 	state.HistoricalDeduplication.Status = HistoricalDeduplicationFailed
 	state.HistoricalDeduplication.Error = "Historical deduplication failed."
+	state.HistoricalDeduplication.FailurePhase = HistoricalDeduplicationFailureProcessing
 	state.HistoricalDeduplication.UpdatedAt = now
 	state.Version++
 	state.UpdatedAt = now
@@ -121,17 +122,28 @@ func TestHistoricalReplayRetryMigratesProcessingIdentityAndMergesWorkflowDuplica
 		t.Fatal(saveErr)
 	}
 
-	pendingState, pending, err := store.RetryHistoricalDeduplicationReplay(state.Repository)
-	if err != nil || pending.Status != HistoricalDeduplicationPending {
-		t.Fatalf("retry state=%#v replay=%#v err=%v", pendingState, pending, err)
+	dependencies, err := HistoricalDeduplicationDependencies(state, "", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	repeatedState, repeated, err := store.RetryHistoricalDeduplicationReplay(state.Repository)
-	if err != nil || repeated.Status != HistoricalDeduplicationPending ||
-		repeatedState.Version != pendingState.Version {
-		t.Fatalf("idempotent retry state=%#v replay=%#v err=%v", repeatedState, repeated, err)
+	beforeVersion := state.Version
+	_, _, err = store.ResumeHistoricalDeduplicationReplay(
+		state.Repository, snapshot, dependencies,
+	)
+	if !errors.Is(err, ErrHistoricalDeduplicationRestartRequired) {
+		t.Fatalf("incompatible resume error=%v", err)
+	}
+	unchanged, _, err := store.Get(state.Repository)
+	if err != nil || unchanged.Version != beforeVersion {
+		t.Fatalf("incompatible resume mutated state=%#v err=%v", unchanged, err)
 	}
 	now = now.Add(time.Minute)
-	state, _, err = store.FreezeHistoricalDeduplicationReplay(state.Repository, snapshot)
+	state, _, err = store.RestartHistoricalDeduplicationReplay(
+		state.Repository,
+		HistoricalDeduplicationRestartRequest{
+			ProfileSnapshot: snapshot, Dependencies: dependencies,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,23 +781,12 @@ func TestHistoricalDeduplicationNarrowMergeFenceAndRetry(t *testing.T) {
 		t.Fatal("intervening issue snapshot did not advance the target version")
 	}
 	retried, pending, err := store.RetryHistoricalDeduplicationReplay(state.Repository)
-	if err != nil || pending.Status != HistoricalDeduplicationPending ||
-		pending.ProfileSnapshot != (RepositoryReviewDeduplicationSnapshot{}) {
+	if err != nil || pending.Status != HistoricalDeduplicationReplaying ||
+		pending.ProfileSnapshot.ProfileVersion != 3 {
 		t.Fatalf("retry=%#v err=%v", pending, err)
 	}
-	retried, replay, err = store.FreezeHistoricalDeduplicationReplay(
-		retried.Repository,
-		RepositoryReviewDeduplicationSnapshot{
-			ProfileID: "rrpf_history", ProfileVersion: 4,
-			ReviewerModel: "reviewer-v2", DeduplicationModel: "reviewer-v2",
-			SimilarityThreshold: 90, CandidateLimit: 4,
-		},
-	)
-	if err != nil || replay.ProfileSnapshot.ProfileVersion != 4 {
-		t.Fatalf("fresh snapshot=%#v err=%v", replay, err)
-	}
-	// The retry re-snapshotted the profile, but the first attempt's merge
-	// versions are stale after the intervening issue synchronization.
+	// Merge resume preserves the frozen profile and every model result, while
+	// the first attempt's merge versions are stale after issue synchronization.
 	if _, _, _, acquireErr := store.AcquireHistoricalDeduplicationMerge(
 		state.Repository, "merge-stale", groups,
 	); !errors.Is(acquireErr, ErrConflict) {

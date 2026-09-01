@@ -69,11 +69,12 @@ type DeduplicationRetryResult struct {
 }
 
 type deduplicationProcessOutcome struct {
-	created   bool
-	duplicate bool
-	failed    bool
-	deferred  bool
-	err       error
+	created    bool
+	duplicate  bool
+	failed     bool
+	deferred   bool
+	historical bool
+	err        error
 }
 
 // ClaimDeduplicationJob atomically freezes the complete existing candidate
@@ -143,6 +144,9 @@ func (s Store) ClaimDeduplicationJob(
 		raw.Disposition != RawFindingDispositionUndecided {
 		return RepositoryState{}, DeduplicationClaim{}, false, ErrConflict
 	}
+	if historicalDeduplicationFailedFence(state, *job) {
+		return state, DeduplicationClaim{Job: *job, RawFinding: *raw}, false, nil
+	}
 	if job.Attempts >= DeduplicationAttemptLimit {
 		markDeduplicationFailed(raw, job, "attempt_limit", now)
 		state.Version++
@@ -157,8 +161,10 @@ func (s Store) ClaimDeduplicationJob(
 	for index := range state.DeduplicationJobs {
 		other := state.DeduplicationJobs[index]
 		if other.ID == job.ID || other.AdmissionBucket != job.AdmissionBucket ||
-			other.InsertionOrdinal >= job.InsertionOrdinal ||
-			(other.State != DeduplicationJobPending && other.State != DeduplicationJobRunning) {
+			other.InsertionOrdinal >= job.InsertionOrdinal {
+			continue
+		}
+		if other.State != DeduplicationJobPending && other.State != DeduplicationJobRunning {
 			continue
 		}
 		return state, DeduplicationClaim{Job: *job, RawFinding: *raw}, false, nil
@@ -206,6 +212,29 @@ func (s Store) ClaimDeduplicationJob(
 		Job: *job, RawFinding: *raw, Candidates: candidates, UniverseDigest: digest,
 	}
 	return state, claim, true, nil
+}
+
+func historicalDeduplicationFailedFence(
+	state RepositoryState,
+	job DeduplicationJob,
+) bool {
+	rawIndex := rawFindingIndexByID(state.RawFindings, job.RawFindingID)
+	if rawIndex < 0 || !HistoricalDeduplicationRawFinding(state.RawFindings[rawIndex]) {
+		return false
+	}
+	for _, earlier := range state.DeduplicationJobs {
+		if earlier.ID == job.ID || earlier.AdmissionBucket != job.AdmissionBucket ||
+			earlier.InsertionOrdinal >= job.InsertionOrdinal ||
+			earlier.State != DeduplicationJobFailed {
+			continue
+		}
+		earlierRawIndex := rawFindingIndexByID(state.RawFindings, earlier.RawFindingID)
+		if earlierRawIndex >= 0 &&
+			HistoricalDeduplicationRawFinding(state.RawFindings[earlierRawIndex]) {
+			return true
+		}
+	}
+	return false
 }
 
 func deduplicationCandidateSnapshots(
@@ -594,6 +623,11 @@ func (s Store) ProcessPendingDeduplicationJobs(
 				for _, queuedJob := range queue.jobs {
 					item := s.processOneDeduplicationJob(ctx, repository, queuedJob.ID, options)
 					outcomes <- item
+					if item.historical && item.failed {
+						// A terminal historical failure is a durable bucket
+						// checkpoint fence. Other buckets remain independent.
+						break
+					}
 					if item.err != nil || item.failed || item.deferred {
 						// A pending earlier job must continue to fence later jobs in
 						// this bucket until a later processor pass.
@@ -654,11 +688,13 @@ func (s Store) processOneDeduplicationJob(
 		return result
 	}
 	if !claimed {
+		result.historical = HistoricalDeduplicationRawFinding(claim.RawFinding)
 		result.deferred = claim.Job.State == DeduplicationJobPending ||
 			claim.Job.State == DeduplicationJobRunning
 		result.failed = claim.Job.State == DeduplicationJobFailed
 		return result
 	}
+	result.historical = HistoricalDeduplicationRawFinding(claim.RawFinding)
 	needsModel := claim.Job.ModelSnapshot.CandidateLimit > 0 && len(claim.Candidates) > 0
 	var releaseSlot func()
 	if needsModel {

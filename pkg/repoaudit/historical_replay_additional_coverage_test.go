@@ -511,12 +511,13 @@ func TestHistoricalReplayAdditionalStoreStateMachine(t *testing.T) {
 		t.Fatalf("freeze failed replay error=%v", failedFreezeErr)
 	}
 	_, pending, err := second.RetryHistoricalDeduplicationReplay(repository)
-	if err != nil || pending.Status != HistoricalDeduplicationPending {
-		t.Fatalf("retry replay=%#v err=%v", pending, err)
+	if err != nil || pending.Status != HistoricalDeduplicationReplaying ||
+		pending.ProfileSnapshot != snapshot {
+		t.Fatalf("merge resume replay=%#v err=%v", pending, err)
 	}
 	if _, repeated, err := second.RetryHistoricalDeduplicationReplay(repository); err != nil ||
-		repeated.Status != HistoricalDeduplicationPending {
-		t.Fatalf("idempotent retry pending replay=%#v error=%v", repeated, err)
+		repeated.Status != HistoricalDeduplicationReplaying {
+		t.Fatalf("idempotent merge resume replay=%#v error=%v", repeated, err)
 	}
 }
 

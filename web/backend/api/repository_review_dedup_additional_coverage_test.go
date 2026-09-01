@@ -371,27 +371,41 @@ func TestRepositoryReviewHistoricalRetryRecoversOneCampaignAcrossAutomationRuns(
 		return response
 	}
 	firstRetry := retry()
-	if firstRetry.Code != http.StatusAccepted ||
-		!strings.Contains(firstRetry.Body.String(), `"status":"pending"`) {
+	if firstRetry.Code != http.StatusConflict || !strings.Contains(
+		firstRetry.Body.String(), `"code":"historical_consolidation_restart_required"`,
+	) {
 		t.Fatalf("recovered retry status=%d body=%s", firstRetry.Code, firstRetry.Body.String())
 	}
-	afterFirstRetry, _, err := fixture.store.Get(state.Repository)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondRetry := retry()
-	afterSecondRetry, _, err := fixture.store.Get(state.Repository)
-	if err != nil || secondRetry.Code != http.StatusAccepted ||
-		afterSecondRetry.Version != afterFirstRetry.Version {
-		t.Fatalf(
-			"idempotent API retry status=%d first=%d second=%d err=%v body=%s",
-			secondRetry.Code, afterFirstRetry.Version, afterSecondRetry.Version, err,
-			secondRetry.Body.String(),
+	restartPath := "/api/repository-reviews/automations/" + final.ID +
+		"/historical-deduplication/restart"
+	restart := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(
+			http.MethodPost, restartPath, strings.NewReader(`{"confirmed":true}`),
 		)
+		setRepositoryReviewMutationHeaders(request)
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		return response
 	}
-	_, _, err = fixture.store.FreezeHistoricalDeduplicationReplay(state.Repository, snapshot)
+	firstRestart := restart()
+	if firstRestart.Code != http.StatusAccepted || !strings.Contains(
+		firstRestart.Body.String(), `"status":"replaying"`,
+	) {
+		t.Fatalf("recovered restart status=%d body=%s", firstRestart.Code, firstRestart.Body.String())
+	}
+	afterFirstRestart, _, err := fixture.store.Get(state.Repository)
 	if err != nil {
 		t.Fatal(err)
+	}
+	secondRestart := restart()
+	afterSecondRestart, _, err := fixture.store.Get(state.Repository)
+	if err != nil || secondRestart.Code != http.StatusAccepted ||
+		afterSecondRestart.Version != afterFirstRestart.Version {
+		t.Fatalf(
+			"idempotent API restart status=%d first=%d second=%d err=%v body=%s",
+			secondRestart.Code, afterFirstRestart.Version, afterSecondRestart.Version, err,
+			secondRestart.Body.String(),
+		)
 	}
 	reset, nextAdmission, err := fixture.store.AdmitNextHistoricalDeduplicationBatch(state.Repository)
 	if err != nil || nextAdmission.Admitted != 1 || len(reset.RawFindings) != 2 {
@@ -732,6 +746,11 @@ func TestRepositoryReviewHistoricalDedupAdditionalErrorCoverage(t *testing.T) {
 
 	missingProfile := state
 	missingProfile.HistoricalDeduplication.Status = repoaudit.HistoricalDeduplicationPending
+	missingProfile.HistoricalDeduplication.ProfileSnapshot = repoaudit.HistoricalDeduplicationProfileSnapshot{}
+	missingProfile.HistoricalDeduplication.UpdatedAt = time.Now().UTC()
+	missingProfile.Version++
+	missingProfile.UpdatedAt = missingProfile.HistoricalDeduplication.UpdatedAt
+	persistRepositoryReviewAdditionalCoverageState(t, workspace, missingProfile)
 	profileAutomation := testRepositoryReviewAutomation()
 	profileAutomation.ID = "rra_historical_process_error"
 	profileAutomation.Repository = state.Repository
@@ -743,16 +762,31 @@ func TestRepositoryReviewHistoricalDedupAdditionalErrorCoverage(t *testing.T) {
 		t.Fatalf("historical fatal processing err=%v", processErr)
 	}
 
-	merging := state
-	merging.HistoricalDeduplication = repoaudit.HistoricalDeduplicationReplay{
-		Required: true, Status: repoaudit.HistoricalDeduplicationMerging,
-		MergeLease: repoaudit.HistoricalDeduplicationMergeLease{ID: "rhl_missing"}, UpdatedAt: now,
+	// Install a real durable merge with a different lease so the stale input
+	// exercises the lease fence rather than the failed-merge resume path.
+	persistRepositoryReviewAdditionalCoverageState(t, workspace, missingProfile)
+	mergeSnapshot := repoaudit.RepositoryReviewDeduplicationSnapshot{
+		ReviewerModel: "cheap", DeduplicationModel: "cheap", AccountRef: "api",
+		SimilarityThreshold: 90, CandidateLimit: 0,
 	}
+	if _, _, freezeErr := store.FreezeHistoricalDeduplicationReplay(
+		state.Repository, mergeSnapshot,
+	); freezeErr != nil {
+		t.Fatal(freezeErr)
+	}
+	merging, _, _, acquireErr := store.AcquireHistoricalDeduplicationMerge(
+		state.Repository, "rhl_durable", nil,
+	)
+	if acquireErr != nil {
+		t.Fatal(acquireErr)
+	}
+	merging.HistoricalDeduplication.MergeLease.ID = "rhl_missing"
 	if advanceErr := controller.advanceHistoricalFindingDeduplication(
 		t.Context(), merging, nil,
 	); advanceErr == nil {
 		t.Fatal("mismatched historical merge unexpectedly completed")
 	}
+	persistRepositoryReviewAdditionalCoverageState(t, workspace, missingProfile)
 
 	invalidRefProfile := repoaudit.RepositoryReviewProfile{
 		ID: "rrpf_historical_invalid_ref", Name: "Historical invalid ref",
@@ -784,11 +818,7 @@ func TestRepositoryReviewHistoricalDedupAdditionalErrorCoverage(t *testing.T) {
 		t.Fatal(retryErr)
 	}
 	_, _, freezeErr := store.FreezeHistoricalDeduplicationReplay(
-		state.Repository,
-		repoaudit.RepositoryReviewDeduplicationSnapshot{
-			ReviewerModel: "cheap", DeduplicationModel: "cheap", AccountRef: "api",
-			SimilarityThreshold: 90, CandidateLimit: 0,
-		},
+		state.Repository, mergeSnapshot,
 	)
 	if freezeErr != nil {
 		t.Fatal(freezeErr)

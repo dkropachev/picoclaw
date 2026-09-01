@@ -11,7 +11,6 @@ import {
   type RepositoryReviewRawFinding,
   listRepositoryReviewFindingsProcessingPage,
   retryRepositoryReviewFindingsProcessingSources,
-  retryRepositoryReviewHistoricalDeduplication,
 } from "@/api/repository-reviews"
 import {
   type CollectionDefinition,
@@ -134,22 +133,6 @@ export function RepositoryReviewFindingsProcessingPage({
           : "Selected findings could not be retried.",
       )
       void query.refetch()
-    },
-  })
-  const retryHistorical = useMutation({
-    mutationFn: () =>
-      retryRepositoryReviewHistoricalDeduplication(automationID),
-    onSuccess: async () => {
-      await Promise.all([query.refetch(), healthQuery.refetch()])
-      toast.success("Historical consolidation queued.")
-    },
-    onError: (error) => {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Historical consolidation could not be retried.",
-      )
-      void healthQuery.refetch()
     },
   })
   const definition = useMemo<CollectionDefinition<RepositoryReviewRawFinding>>(
@@ -356,9 +339,11 @@ export function RepositoryReviewFindingsProcessingPage({
       }}
       beforeResults={
         <RepositoryReviewHistoricalConsolidationNotice
+          automationID={automationID}
           consolidation={consolidation}
-          retrying={retryHistorical.isPending}
-          onRetry={() => retryHistorical.mutate()}
+          onRefresh={() =>
+            Promise.all([query.refetch(), healthQuery.refetch()])
+          }
         />
       }
       emptyTitle={
