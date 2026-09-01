@@ -30,6 +30,7 @@ const (
 	prWorkspaceCheckpointComponent        = "pr-workspace-checkpoints"
 	prWorkspaceCheckpointArchiveLabel     = "pr-workspace-checkpoints-v1"
 	prWorkspaceCheckpointMaximumRecords   = 10_000
+	prWorkspaceCheckpointLegacyReadBatch  = 128
 )
 
 type prWorkspaceCandidateCheckpoint struct {
@@ -311,6 +312,19 @@ func sealPRWorkspaceCheckpointImport(ctx context.Context, conn *sql.Conn, fresh 
 }
 
 func (store *prWorkspaceCandidateCheckpointStore) legacySources() ([]sqlitestore.LegacySource, error) {
+	return store.legacySourcesBounded(
+		prWorkspaceCheckpointMaximumRecords+4,
+		prWorkspaceCheckpointLegacyReadBatch,
+	)
+}
+
+func (store *prWorkspaceCandidateCheckpointStore) legacySourcesBounded(
+	maximumEntries,
+	readBatch int,
+) ([]sqlitestore.LegacySource, error) {
+	if maximumEntries < 1 || readBatch < 1 {
+		return nil, errors.New("PR workspace checkpoint legacy enumeration bounds are invalid")
+	}
 	for _, directory := range []string{
 		filepath.Join(store.root, "legacy-json"),
 		filepath.Join(store.root, "legacy-json", prWorkspaceCheckpointArchiveLabel),
@@ -326,32 +340,64 @@ func (store *prWorkspaceCandidateCheckpointStore) legacySources() ([]sqlitestore
 			return nil, errors.New("PR workspace checkpoint legacy archive ancestor is unsafe")
 		}
 	}
-	entries, err := os.ReadDir(store.root)
+	rootInfo, err := os.Lstat(store.root)
 	if err != nil {
 		return nil, err
 	}
-	if len(entries) > prWorkspaceCheckpointMaximumRecords+4 {
-		return nil, errors.New("PR workspace checkpoint directory exceeds its entry limit")
+	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || rootInfo.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("PR workspace checkpoint directory is unsafe")
+	}
+	directory, err := os.Open(store.root)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(cause error) ([]sqlitestore.LegacySource, error) {
+		return nil, errors.Join(cause, directory.Close())
+	}
+	openedInfo, err := directory.Stat()
+	if err != nil || !os.SameFile(rootInfo, openedInfo) {
+		return fail(errors.Join(errors.New("PR workspace checkpoint directory changed"), err))
 	}
 	sources := make([]sqlitestore.LegacySource, 0)
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".json") {
-			continue
+	entryCount := 0
+	for {
+		entries, readErr := directory.ReadDir(readBatch)
+		for _, entry := range entries {
+			entryCount++
+			if entryCount > maximumEntries {
+				return fail(errors.New("PR workspace checkpoint directory exceeds its entry limit"))
+			}
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".json") {
+				continue
+			}
+			info, statErr := os.Lstat(filepath.Join(store.root, name))
+			if statErr != nil {
+				return fail(statErr)
+			}
+			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+				return fail(errors.New("PR workspace checkpoint legacy source is unsafe"))
+			}
+			digest := sha256.Sum256([]byte(name))
+			sources = append(sources, sqlitestore.LegacySource{
+				ID:       "checkpoint-" + hex.EncodeToString(digest[:16]),
+				Relative: name,
+				MaxBytes: prWorkspaceCandidateCheckpointMaxSize,
+			})
 		}
-		info, err := os.Lstat(filepath.Join(store.root, name))
-		if err != nil {
-			return nil, err
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-			return nil, errors.New("PR workspace checkpoint legacy source is unsafe")
+		if readErr != nil {
+			return fail(readErr)
 		}
-		digest := sha256.Sum256([]byte(name))
-		sources = append(sources, sqlitestore.LegacySource{
-			ID:       "checkpoint-" + hex.EncodeToString(digest[:16]),
-			Relative: name,
-			MaxBytes: prWorkspaceCandidateCheckpointMaxSize,
-		})
+	}
+	if closeErr := directory.Close(); closeErr != nil {
+		return nil, closeErr
+	}
+	currentRoot, err := os.Lstat(store.root)
+	if err != nil || !os.SameFile(rootInfo, currentRoot) || currentRoot.Mode().Perm()&0o077 != 0 {
+		return nil, errors.Join(errors.New("PR workspace checkpoint directory changed"), err)
 	}
 	sort.Slice(sources, func(left, right int) bool { return sources[left].Relative < sources[right].Relative })
 	return sources, nil
@@ -536,7 +582,7 @@ func (store *prWorkspaceCandidateCheckpointStore) Save(
 			return loadErr
 		}
 		currentRevision, revisionErr := revisionForPRWorkspaceCheckpoint(
-			current, version, found, checkpoint.WorkspaceID,
+			context.Background(), conn, current, version, found, checkpoint.WorkspaceID,
 		)
 		if revisionErr != nil {
 			return revisionErr
@@ -629,7 +675,9 @@ func (store *prWorkspaceCandidateCheckpointStore) Load(
 			"PR workspace candidate checkpoint identity is invalid",
 		)
 	}
-	revision, err := revisionForPRWorkspaceCheckpoint(checkpoint, sequence, found, workspaceID)
+	revision, err := revisionForPRWorkspaceCheckpoint(
+		context.Background(), database, checkpoint, sequence, found, workspaceID,
+	)
 	if err != nil {
 		return prWorkspaceCandidateCheckpoint{}, prWorkspaceCandidateCheckpointRevision{}, false, err
 	}
@@ -659,7 +707,7 @@ func (store *prWorkspaceCandidateCheckpointStore) Remove(
 			return err
 		}
 		currentRevision, err := revisionForPRWorkspaceCheckpoint(
-			checkpoint, sequence, found, workspaceID,
+			context.Background(), conn, checkpoint, sequence, found, workspaceID,
 		)
 		if err != nil {
 			return err
@@ -680,6 +728,11 @@ func (store *prWorkspaceCandidateCheckpointStore) Remove(
 		changed, err := result.RowsAffected()
 		if err != nil || changed != 1 {
 			return errPRWorkspaceCandidateCheckpointConflict
+		}
+		if _, allocateErr := allocatePRWorkspaceCheckpointRevision(
+			context.Background(), conn,
+		); allocateErr != nil {
+			return allocateErr
 		}
 		return nil
 	})
@@ -704,13 +757,24 @@ func allocatePRWorkspaceCheckpointRevision(ctx context.Context, conn *sql.Conn) 
 }
 
 func revisionForPRWorkspaceCheckpoint(
+	ctx context.Context,
+	queryer interface {
+		QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	},
 	checkpoint prWorkspaceCandidateCheckpoint,
 	sequence int64,
 	found bool,
 	workspaceID string,
 ) (prWorkspaceCandidateCheckpointRevision, error) {
 	if !found {
-		return prWorkspaceCandidateCheckpointRevision{workspaceID: workspaceID}, nil
+		if err := queryer.QueryRowContext(ctx, `SELECT next_revision
+		    FROM checkpoint_metadata WHERE singleton = 1`).Scan(&sequence); err != nil {
+			return prWorkspaceCandidateCheckpointRevision{}, err
+		}
+		return prWorkspaceCandidateCheckpointRevision{
+			workspaceID: workspaceID,
+			sequence:    sequence,
+		}, nil
 	}
 	encoded, err := encodePRWorkspaceCheckpoint(checkpoint)
 	if err != nil {
@@ -745,7 +809,7 @@ func validPRWorkspaceCheckpointRevision(
 	if revision.exists {
 		return revision.sequence > 0 && revision.stateDigest != [sha256.Size]byte{}
 	}
-	return revision.sequence == 0 && revision.stateDigest == [sha256.Size]byte{}
+	return revision.sequence > 0 && revision.stateDigest == [sha256.Size]byte{}
 }
 
 func encodePRWorkspaceCheckpoint(checkpoint prWorkspaceCandidateCheckpoint) ([]byte, error) {

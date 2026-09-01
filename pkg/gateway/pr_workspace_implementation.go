@@ -584,7 +584,7 @@ func (runtime *prWorkspaceImplementationRuntime) AcknowledgeFinalizedRepair(
 		}
 		return fmt.Errorf("verify finalized PR workspace acknowledgement: %w", err)
 	}
-	if err := runtime.checkpoints.Remove(workspaceID, revision); err != nil {
+	if err := runtime.removeAcknowledgedCandidateCheckpoint(workspaceID, revision); err != nil {
 		return err
 	}
 	runtime.mu.Lock()
@@ -612,7 +612,7 @@ func (runtime *prWorkspaceImplementationRuntime) saveCandidateCheckpoint(
 	if runtime == nil || runtime.checkpoints == nil || candidate == nil {
 		return errors.New("PR workspace candidate checkpoint store is unavailable")
 	}
-	revision, err := runtime.checkpoints.Save(prWorkspaceCandidateCheckpoint{
+	checkpoint := prWorkspaceCandidateCheckpoint{
 		Version: prWorkspaceCandidateCheckpointVersion, State: prWorkspaceCandidateCheckpointActive,
 		WorkspaceID: workspaceID,
 		Repository:  candidate.pin.Repository, SourceRef: candidate.pin.SourceRef,
@@ -620,12 +620,8 @@ func (runtime *prWorkspaceImplementationRuntime) saveCandidateCheckpoint(
 		CharterHeadSHA: candidate.charter.HeadSHA,
 		GitWorkspaceID: candidate.candidate.WorkspaceID, LineID: candidate.lineID,
 		Lease: candidate.lease, Candidate: candidate.candidate,
-	}, candidate.checkpointRevision)
-	if err != nil {
-		return err
 	}
-	candidate.checkpointRevision = revision
-	return nil
+	return runtime.saveCandidateCheckpointRevision(checkpoint, candidate)
 }
 
 func (runtime *prWorkspaceImplementationRuntime) saveFinalizedCandidateCheckpoint(
@@ -637,7 +633,7 @@ func (runtime *prWorkspaceImplementationRuntime) saveFinalizedCandidateCheckpoin
 		return errors.New("PR workspace finalized candidate checkpoint is unavailable")
 	}
 	fenceCopy := *fence
-	revision, err := runtime.checkpoints.Save(prWorkspaceCandidateCheckpoint{
+	checkpoint := prWorkspaceCandidateCheckpoint{
 		Version: prWorkspaceCandidateCheckpointVersion, State: prWorkspaceCandidateCheckpointParked,
 		WorkspaceID: workspaceID,
 		Repository:  candidate.pin.Repository, SourceRef: candidate.pin.SourceRef,
@@ -645,12 +641,48 @@ func (runtime *prWorkspaceImplementationRuntime) saveFinalizedCandidateCheckpoin
 		CharterHeadSHA: candidate.charter.HeadSHA,
 		GitWorkspaceID: candidate.candidate.WorkspaceID, LineID: candidate.lineID,
 		Lease: candidate.lease, Candidate: candidate.candidate, Fence: &fenceCopy,
-	}, candidate.checkpointRevision)
+	}
+	return runtime.saveCandidateCheckpointRevision(checkpoint, candidate)
+}
+
+func (runtime *prWorkspaceImplementationRuntime) saveCandidateCheckpointRevision(
+	checkpoint prWorkspaceCandidateCheckpoint,
+	candidate *prWorkspaceCandidate,
+) error {
+	revision, err := runtime.checkpoints.Save(checkpoint, candidate.checkpointRevision)
+	if errors.Is(err, errPRWorkspaceCandidateCheckpointConflict) {
+		current, currentRevision, found, loadErr := runtime.checkpoints.Load(checkpoint.WorkspaceID)
+		if loadErr != nil {
+			return loadErr
+		}
+		if !found || !equivalentPRWorkspaceCheckpoint(current, checkpoint) {
+			return err
+		}
+		revision, err = currentRevision, nil
+	}
 	if err != nil {
 		return err
 	}
 	candidate.checkpointRevision = revision
 	return nil
+}
+
+func (runtime *prWorkspaceImplementationRuntime) removeAcknowledgedCandidateCheckpoint(
+	workspaceID string,
+	revision prWorkspaceCandidateCheckpointRevision,
+) error {
+	err := runtime.checkpoints.Remove(workspaceID, revision)
+	if !errors.Is(err, errPRWorkspaceCandidateCheckpointConflict) {
+		return err
+	}
+	_, _, found, loadErr := runtime.checkpoints.Load(workspaceID)
+	if loadErr != nil {
+		return loadErr
+	}
+	if !found {
+		return nil
+	}
+	return err
 }
 
 func (runtime *prWorkspaceImplementationRuntime) restoreCheckpointedCandidate(
