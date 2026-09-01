@@ -777,10 +777,32 @@ const workflowRunSelectSQL = `SELECT
  EXISTS(SELECT 1 FROM workflow_private_run_markers m WHERE m.run_id=r.run_id)
  FROM workflow_runs r JOIN workflow_run_payloads p ON p.run_id=r.run_id WHERE r.run_id=?`
 
+func rejectWorkflowRunKeyAliasConn(ctx context.Context, conn *sql.Conn, runID string) error {
+	canonical := safeID(runID)
+	if canonical == runID {
+		return nil
+	}
+	var private int
+	err := conn.QueryRowContext(ctx, `SELECT is_private FROM workflow_runs WHERE run_id=?`, canonical).Scan(&private)
+	if errors.Is(err, sql.ErrNoRows) {
+		return os.ErrNotExist
+	}
+	if err != nil {
+		return err
+	}
+	if private != 0 {
+		return ErrPrivateWorkflowContext
+	}
+	return os.ErrNotExist
+}
+
 //nolint:govet // Decode errors stay scoped to the exact payload or relation.
 func getWorkflowRunConn(ctx context.Context, conn *sql.Conn, runID string) (*Run, int64, error) {
 	if runID == "" {
 		return nil, 0, os.ErrNotExist
+	}
+	if err := rejectWorkflowRunKeyAliasConn(ctx, conn, runID); err != nil {
+		return nil, 0, err
 	}
 	run := &Run{ID: runID}
 	var parent, retry sql.NullString
@@ -1498,6 +1520,9 @@ func (s *FileRunStore) DeleteRun(ctx context.Context, runID string) error {
 	}
 	_, err := withWorkflowDB(ctx, s, "delete run", func(db *sql.DB) (struct{}, error) {
 		return workflowImmediate(ctx, db, func(conn *sql.Conn) (struct{}, error) {
+			if err := rejectWorkflowRunKeyAliasConn(ctx, conn, runID); err != nil {
+				return struct{}{}, err
+			}
 			result, err := conn.ExecContext(ctx, `DELETE FROM workflow_runs WHERE run_id=?`, runID)
 			if err != nil {
 				return struct{}{}, err

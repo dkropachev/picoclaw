@@ -3,8 +3,6 @@ package workflows
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -226,14 +224,22 @@ func TestNativeStoragePathValidationAndCorruption(t *testing.T) {
 		t.Fatal("escaping confined path was accepted")
 	}
 
-	statePath, err := nativeStatePath(exec, "namespace", "corrupt")
+	_, err := nativeWorkflowState(context.Background(), map[string]any{
+		"action": "set", "namespace": "namespace", "key": "corrupt", "value": "valid",
+	}, exec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+	db, err := openWorkflowDatabase(context.Background(), exec.WorkspaceDir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(statePath, []byte("not-json"), 0o600); err != nil {
+	if _, err := db.Exec(`UPDATE workflow_native_state SET value_json = ?
+		WHERE namespace_id = ? AND key_text = ?`, []byte("not-json"),
+		safeStorageSegment("namespace"), "corrupt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := readNativeStateValue(exec, "namespace", "corrupt"); err == nil {

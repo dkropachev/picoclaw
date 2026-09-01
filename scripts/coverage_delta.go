@@ -58,7 +58,7 @@ type coveragePlan struct {
 
 const (
 	featureCoverageRegressionToleranceStatements = 10
-	coverageNestedBenchmarkSkipPattern           = `^Test(GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath)$`
+	coverageNestedBenchmarkSkipPattern           = `^Test(GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath|WorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig)$`
 	coverageGoTestParallelism                    = 1
 )
 

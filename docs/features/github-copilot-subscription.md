@@ -267,6 +267,9 @@ to its base model or concrete Copilot-account override.
 
 ## Implementation Anchors
 
+- Agent-instance construction composes subsystem-owned SQLite, legacy-archive,
+  lock, and workflow-journal exclusions into the same model-facing filesystem
+  mutation policy; provider and account selection behavior is unchanged.
 - [pkg/providers/cli/github_copilot_provider.go](../../pkg/providers/cli/github_copilot_provider.go)
 - [pkg/providers/cli_facade.go](../../pkg/providers/cli_facade.go)
 - [pkg/providers/factory.go](../../pkg/providers/factory.go)

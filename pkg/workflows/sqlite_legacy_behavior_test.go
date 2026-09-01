@@ -36,6 +36,7 @@ func overwritePersistedWorkflowExecutionForTest(
 	}
 }
 
+//nolint:govet // Independent storage assertions intentionally use narrow error scopes.
 func persistedWorkflowPrivatePayloadForTest(
 	t *testing.T,
 	workspace, runID string,
@@ -86,6 +87,7 @@ func persistedWorkflowPrivatePayloadForTest(
 	return payload
 }
 
+//nolint:govet // Independent storage assertions intentionally use narrow error scopes.
 func persistedWorkflowClaimSnapshotForTest(
 	t *testing.T,
 	workspace, runID, taskID string,
@@ -97,15 +99,15 @@ func persistedWorkflowClaimSnapshotForTest(
 	}
 	defer db.Close()
 	var snapshot struct {
-		RunStatus       string
-		RunVersion      int64
-		Execution       []byte
-		TaskStatus      string
-		TaskRevision    int64
-		ResponseID      string
-		Response        []byte
-		RetrySeconds    sql.NullInt64
-		RetryNanosecond sql.NullInt64
+		RunStatus       string        `json:"run_status"`
+		RunVersion      int64         `json:"run_version"`
+		Execution       []byte        `json:"execution"`
+		TaskStatus      string        `json:"task_status"`
+		TaskRevision    int64         `json:"task_revision"`
+		ResponseID      string        `json:"response_id"`
+		Response        []byte        `json:"response"`
+		RetrySeconds    sql.NullInt64 `json:"retry_seconds"`
+		RetryNanosecond sql.NullInt64 `json:"retry_nanosecond"`
 	}
 	if err := db.QueryRowContext(
 		t.Context(),

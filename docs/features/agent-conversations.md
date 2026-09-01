@@ -833,6 +833,7 @@ metadata but does not persist or reinterpret those trust facts.
 
 | Requirement IDs | Evidence |
 | --- | --- |
+| `FR-AGENT-042` | Workflow-owned SQLite databases, retained legacy archives, mutation locks, and publish/template recovery journals are included in the immutable agent filesystem policy; [pkg/agent/file_mutation_policy_test.go](../../pkg/agent/file_mutation_policy_test.go) verifies exact database and journal paths and denies model-facing writes. |
 | `FR-AGENT-024` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/workflows/repository_model_evaluation_workflows_test.go](../../pkg/workflows/repository_model_evaluation_workflows_test.go) |
 | `FR-AGENT-025` | [pkg/agent/controller_local_review_test.go](../../pkg/agent/controller_local_review_test.go), [pkg/agent/controller_local_review.go](../../pkg/agent/controller_local_review.go) |
 | `FR-AGENT-001`, `FR-AGENT-002`, `FR-AGENT-006`, `FR-AGENT-008` | [pkg/agent/agent.go](../../pkg/agent/agent.go), [pkg/agent/prompt_turn.go](../../pkg/agent/prompt_turn.go), [pkg/agent/context_test.go](../../pkg/agent/context_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/pipeline_streaming_test.go](../../pkg/agent/pipeline_streaming_test.go), [pkg/agent/thinking_test.go](../../pkg/agent/thinking_test.go) |

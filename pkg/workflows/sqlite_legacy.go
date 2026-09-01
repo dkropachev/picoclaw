@@ -250,11 +250,14 @@ func importWorkflowLegacyMarker(
 	}
 	var private int
 	err := conn.QueryRowContext(ctx, `SELECT is_private FROM workflow_runs WHERE run_id=?`, parts[1]).Scan(&private)
-	if errors.Is(err, sql.ErrNoRows) || private != 1 {
+	if errors.Is(err, sql.ErrNoRows) {
 		return sqlitestore.ImportResult{}, fmt.Errorf("legacy private marker has no matching private run")
 	}
 	if err != nil {
 		return sqlitestore.ImportResult{}, err
+	}
+	if private != 1 {
+		return sqlitestore.ImportResult{}, fmt.Errorf("legacy private marker has no matching private run")
 	}
 	return sqlitestore.ImportResult{Imported: 1}, nil
 }

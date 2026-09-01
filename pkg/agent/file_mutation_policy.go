@@ -37,8 +37,8 @@ func agentWorkflowRuntimeFileMutationProtectedRoots(workspace string) ([]string,
 		database + "-shm",
 		filepath.Join(workspace, "legacy-json"),
 		filepath.Join(workspace, "workflow_state", "mutation.lock"),
-		filepath.Join(workspace, "workflow_state", "workflow_state", "publish-transaction.json"),
-		filepath.Join(workspace, "workflow_state", "workflow_state", "template-transaction.json"),
+		filepath.Join(workspace, "workflow_state", "publish-transaction.json"),
+		filepath.Join(workspace, "workflow_state", "template-transaction.json"),
 	}, nil
 }
 

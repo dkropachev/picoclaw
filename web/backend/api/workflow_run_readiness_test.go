@@ -832,7 +832,6 @@ func TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesC
 		runWorkflowAdmissionConfigGuardSaveChild(t)
 		return
 	}
-
 	ctx := context.Background()
 	workspace := t.TempDir()
 	configPath := writeWorkflowDependencyTestConfig(t, workspace, true)
@@ -893,6 +892,10 @@ func TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesC
 		os.Args[0],
 		"-test.run=^TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig$",
 	)
+	command.Dir = filepath.Dir(configPath)
+	var helperOutput strings.Builder
+	command.Stdout = &helperOutput
+	command.Stderr = &helperOutput
 	command.Env = append(
 		os.Environ(),
 		workflowConfigGuardChildEnv+"=1",
@@ -982,7 +985,7 @@ func TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesC
 		t.Fatal("cross-process SaveConfig helper did not start inside config guard")
 	}
 	if waitErr := command.Wait(); waitErr != nil {
-		t.Fatalf("cross-process SaveConfig helper error = %v", waitErr)
+		t.Fatalf("cross-process SaveConfig helper error = %v\n%s", waitErr, helperOutput.String())
 	}
 	helperWaited = true
 	completed, err := os.ReadFile(completedPath)

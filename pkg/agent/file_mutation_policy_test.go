@@ -1012,8 +1012,8 @@ func TestWorkflowRuntimeMutationRootsProtectDatabaseAndRecoveryState(t *testing.
 		database + "-shm",
 		filepath.Join(workspace, "legacy-json"),
 		filepath.Join(workspace, "workflow_state", "mutation.lock"),
-		filepath.Join(workspace, "workflow_state", "workflow_state", "publish-transaction.json"),
-		filepath.Join(workspace, "workflow_state", "workflow_state", "template-transaction.json"),
+		filepath.Join(workspace, "workflow_state", "publish-transaction.json"),
+		filepath.Join(workspace, "workflow_state", "template-transaction.json"),
 	}
 	if len(roots) != len(want) {
 		t.Fatalf("roots = %#v", roots)
@@ -1030,21 +1030,29 @@ func TestAgentFileToolsDenyWorkflowSQLiteRuntimeState(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv(config.EnvHome, home)
 	t.Setenv(config.EnvConfig, filepath.Join(home, "config.json"))
-	database := filepath.Join(workspace, "state", "workflows.db")
-	if err := os.MkdirAll(filepath.Dir(database), 0o700); err != nil {
-		t.Fatal(err)
+	protectedFiles := []string{
+		filepath.Join(workspace, "state", "workflows.db"),
+		filepath.Join(workspace, "workflow_state", "publish-transaction.json"),
+		filepath.Join(workspace, "workflow_state", "template-transaction.json"),
 	}
-	if err := os.WriteFile(database, []byte("before"), 0o600); err != nil {
-		t.Fatal(err)
+	for _, path := range protectedFiles {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cfg := agentFileMutationTestConfig(workspace)
 	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
 	defer agent.Close()
-	for _, toolName := range []string{"write_file", "edit_file", "append_file"} {
-		requireAgentFileMutationDenied(t, agent.Tools, toolName, workspace, database, true)
-	}
-	data, err := os.ReadFile(database)
-	if err != nil || string(data) != "before" {
-		t.Fatalf("workflow database changed = %q, %v", data, err)
+	for _, path := range protectedFiles {
+		for _, toolName := range []string{"write_file", "edit_file", "append_file"} {
+			requireAgentFileMutationDenied(t, agent.Tools, toolName, workspace, path, true)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != "before" {
+			t.Fatalf("protected workflow file %q changed = %q, %v", path, data, err)
+		}
 	}
 }
