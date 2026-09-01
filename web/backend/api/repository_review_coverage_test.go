@@ -1433,6 +1433,9 @@ func TestRepositoryReviewCoverageAutomationTransitionsAndUtilities(t *testing.T)
 	}
 
 	root := filepath.Join(workspace, "repository_reviews")
+	// Stop background review workers before replacing the SQLite directory;
+	// otherwise a late WAL or lock-file open can race RemoveAll.
+	handler.Shutdown()
 	if removeErr := os.RemoveAll(root); removeErr != nil {
 		t.Fatal(removeErr)
 	}

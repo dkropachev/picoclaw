@@ -3,7 +3,6 @@ package repoaudit
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"

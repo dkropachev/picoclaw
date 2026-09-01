@@ -186,13 +186,13 @@ func validateEvaluationAggregateRows(ctx context.Context, conn *sql.Conn) error 
 		    OR (SELECT COALESCE(MIN(position), 0) FROM repository_evaluation_models AS model
 		         WHERE model.evaluation_id = evaluation.evaluation_id) <> 0
 		    OR (SELECT COALESCE(MAX(position), -1) FROM repository_evaluation_models AS model
-		         WHERE model.evaluation_id = evaluation.evaluation_id) <> 
+		         WHERE model.evaluation_id = evaluation.evaluation_id) <>
 		       (SELECT COUNT(*) - 1 FROM repository_evaluation_models AS model
 		         WHERE model.evaluation_id = evaluation.evaluation_id)
 		    OR (SELECT COALESCE(MIN(position), 0) FROM repository_evaluation_runs AS run
 		         WHERE run.evaluation_id = evaluation.evaluation_id) <> 0
 		    OR (SELECT COALESCE(MAX(position), -1) FROM repository_evaluation_runs AS run
-		         WHERE run.evaluation_id = evaluation.evaluation_id) <> 
+		         WHERE run.evaluation_id = evaluation.evaluation_id) <>
 		       (SELECT COUNT(*) - 1 FROM repository_evaluation_runs AS run
 		         WHERE run.evaluation_id = evaluation.evaluation_id)
 		    OR json_valid(CAST(payload_json AS TEXT)) <> 1`).Scan(&invalid); err != nil {
