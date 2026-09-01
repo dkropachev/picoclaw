@@ -24,6 +24,7 @@ const (
 	inventoryLegacyArchive     = "git-workspaces-v1"
 	inventoryLegacyMaxBytes    = int64(64 << 20)
 	inventoryMaximumRows       = 1_000_000
+	inventorySchemaVersion     = 2
 )
 
 var errDuplicateLegacyInventoryIdentity = errors.New(
@@ -341,7 +342,7 @@ func (m *Manager) openInventoryDatabase(ctx context.Context) (*sql.DB, error) {
 				},
 			},
 			{
-				Version: 2,
+				Version: inventorySchemaVersion,
 				Statements: []string{
 					inventoryLegacyImportStateSchema,
 					inventoryWorkspacesDevelopmentLineIndexSchema,

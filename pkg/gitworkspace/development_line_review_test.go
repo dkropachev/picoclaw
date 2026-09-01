@@ -648,7 +648,8 @@ func TestManagerInventoryVersionFourFencesOlderDecoders(t *testing.T) {
 	}
 	defer database.Close()
 	var schemaVersion int
-	if err := database.QueryRow(`PRAGMA user_version`).Scan(&schemaVersion); err != nil || schemaVersion != 1 {
+	if err := database.QueryRow(`PRAGMA user_version`).Scan(&schemaVersion); err != nil ||
+		schemaVersion != inventorySchemaVersion {
 		t.Fatalf("inventory schema version = %d, %v", schemaVersion, err)
 	}
 	state := adversarialCloneInventory(t, fixture.manager)
