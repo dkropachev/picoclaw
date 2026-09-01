@@ -3294,7 +3294,6 @@ func TestRepositoryReviewCampaignRecoveryAdmissionBoundaries(t *testing.T) {
 
 func TestRepositoryReviewCampaignAdmissionReadsLedgerAndFencesFinalCAS(t *testing.T) {
 	t.Run("ledger read failure", func(t *testing.T) {
-		t.Skip("per-ledger JSON corruption was replaced by SQLite integrity coverage")
 		handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
 		t.Cleanup(handler.Shutdown)
 		store, err := handler.repositoryReviewStore()
@@ -3310,23 +3309,6 @@ func TestRepositoryReviewCampaignAdmissionReadsLedgerAndFencesFinalCAS(t *testin
 		}); beginErr != nil {
 			t.Fatal(beginErr)
 		}
-		paths, err := filepath.Glob(filepath.Join(workspace, "repository_reviews", "repo_*.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		statePath := ""
-		for _, candidate := range paths {
-			if !strings.HasSuffix(candidate, ".summary.json") {
-				statePath = candidate
-				break
-			}
-		}
-		if statePath == "" {
-			t.Fatal("repository state path was not created")
-		}
-		if writeErr := os.WriteFile(statePath, []byte("{"), 0o600); writeErr != nil {
-			t.Fatal(writeErr)
-		}
 		automation, err := store.CreateAutomation(t.Context(), input)
 		if err != nil {
 			t.Fatal(err)
@@ -3338,11 +3320,20 @@ func TestRepositoryReviewCampaignAdmissionReadsLedgerAndFencesFinalCAS(t *testin
 			repoaudit.RepositoryReviewAutomation,
 			string,
 		) (string, error) {
+			if writeErr := os.WriteFile(
+				filepath.Join(
+					workspace, "repository_reviews", "repository-reviews.db",
+				),
+				[]byte("not-sqlite"),
+				0o600,
+			); writeErr != nil {
+				return "", writeErr
+			}
 			return commit, nil
 		}
 		if _, startErr := controller.startAutomation(
 			t.Context(), automation.ID, automation.Version, false, "start",
-		); startErr == nil || !strings.Contains(startErr.Error(), "unexpected end of JSON") {
+		); startErr == nil {
 			t.Fatalf("corrupt repository ledger error=%v", startErr)
 		}
 	})

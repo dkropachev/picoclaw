@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -534,9 +533,6 @@ func TestRepositoryReviewLegacyAdapterRemainingErrorsCoverage(t *testing.T) {
 }
 
 func TestRepositoryReviewLegacyPersistenceFailureCoverage(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory mode enforcement is POSIX-specific")
-	}
 	prepare := func(t *testing.T) (repositoryReviewBackfillFixture, repositoryReviewLegacyCampaignBackfill) {
 		t.Helper()
 		fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
@@ -552,19 +548,20 @@ func TestRepositoryReviewLegacyPersistenceFailureCoverage(t *testing.T) {
 		}
 		return fixture, prepared
 	}
-	lockWrites := func(t *testing.T, workspace string) {
+	corruptDatabase := func(t *testing.T, workspace string) {
 		t.Helper()
-		directory := filepath.Join(workspace, "repository_reviews")
-		if err := os.Chmod(directory, 0o500); err != nil {
+		if err := os.WriteFile(
+			filepath.Join(workspace, "repository_reviews", "repository-reviews.db"),
+			[]byte("not-sqlite"),
+			0o600,
+		); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
 	}
 
 	t.Run("install save", func(t *testing.T) {
-		t.Skip("per-record JSON permission failure was replaced by SQLite transaction coverage")
 		fixture, prepared := prepare(t)
-		lockWrites(t, fixture.workspace)
+		corruptDatabase(t, fixture.workspace)
 		if _, _, err := installRepositoryReviewLegacyCampaignAuthority(
 			t.Context(), fixture.store, prepared,
 		); err == nil {
@@ -573,7 +570,6 @@ func TestRepositoryReviewLegacyPersistenceFailureCoverage(t *testing.T) {
 	})
 
 	t.Run("adapter apply save", func(t *testing.T) {
-		t.Skip("per-record JSON permission failure was replaced by SQLite transaction coverage")
 		fixture, prepared := prepare(t)
 		installed, _, err := installRepositoryReviewLegacyCampaignAuthority(
 			t.Context(), fixture.store, prepared,
@@ -581,7 +577,7 @@ func TestRepositoryReviewLegacyPersistenceFailureCoverage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		lockWrites(t, fixture.workspace)
+		corruptDatabase(t, fixture.workspace)
 		if _, err := (&repositoryReviewController{}).recoverLegacyRepositoryReviewCampaign(
 			t.Context(), fixture.store, fixture.workspace, installed,
 			fixture.automation.ResolvedCommitSHA, repositoryReviewRecoveryProfileForEdges(fixture),
