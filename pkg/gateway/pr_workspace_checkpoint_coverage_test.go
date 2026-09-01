@@ -3,12 +3,16 @@ package gateway
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
+	"github.com/sipeed/picoclaw/pkg/prworkspace"
+	"github.com/sipeed/picoclaw/pkg/prworkspace/localci"
 	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
@@ -203,5 +207,316 @@ func TestCheckpointMetadataInitializationRejectsExhaustedV1Revision(t *testing.T
 	if err := initializePRWorkspaceCheckpointMeta(t.Context(), conn, false); err == nil ||
 		!strings.Contains(err.Error(), "exhausted") {
 		t.Fatalf("exhausted v1 metadata initialization = %v", err)
+	}
+}
+
+func TestCheckpointSchemaMigrationAndImportFaultBoundaries(t *testing.T) {
+	openMemoryConnection := func(t *testing.T, statements ...string) (*sql.DB, *sql.Conn) {
+		t.Helper()
+		database, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = database.Close() })
+		for _, statement := range statements {
+			if _, execErr := database.Exec(statement); execErr != nil {
+				t.Fatal(execErr)
+			}
+		}
+		conn, err := database.Conn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return database, conn
+	}
+	openStoreConnection := func(t *testing.T) (*prWorkspaceCandidateCheckpointStore, *sql.DB, *sql.Conn) {
+		t.Helper()
+		store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		database, err := store.open(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = database.Close() })
+		conn, err := database.Conn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return store, database, conn
+	}
+
+	t.Run("v1 query", func(t *testing.T) {
+		_, conn := openMemoryConnection(t)
+		if err := initializePRWorkspaceCheckpointMeta(t.Context(), conn, false); err == nil {
+			t.Fatal("metadata initialization without the v1 table succeeded")
+		}
+	})
+	t.Run("metadata insert", func(t *testing.T) {
+		_, conn := openMemoryConnection(t, prWorkspaceCheckpointsSchema)
+		if err := initializePRWorkspaceCheckpointMeta(t.Context(), conn, false); err == nil {
+			t.Fatal("metadata initialization without its target table succeeded")
+		}
+	})
+	t.Run("seal query and missing horizon", func(t *testing.T) {
+		_, missingConn := openMemoryConnection(t)
+		if err := sealPRWorkspaceCheckpointImport(t.Context(), missingConn, false); err == nil {
+			t.Fatal("seal without its import table succeeded")
+		}
+		_, emptyConn := openMemoryConnection(t, prWorkspaceCheckpointImportStateSchema)
+		if err := sealPRWorkspaceCheckpointImport(t.Context(), emptyConn, false); err == nil {
+			t.Fatal("seal without a durable import horizon succeeded")
+		}
+	})
+	t.Run("invalid metadata", func(t *testing.T) {
+		_, _, conn := openStoreConnection(t)
+		if _, err := conn.ExecContext(t.Context(), `PRAGMA ignore_check_constraints = ON`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.ExecContext(t.Context(), `UPDATE checkpoint_metadata
+		    SET next_revision = 0 WHERE singleton = 1`); err != nil {
+			t.Fatal(err)
+		}
+		if err := validatePRWorkspaceCheckpointSchema(t.Context(), conn); err == nil {
+			t.Fatal("invalid checkpoint revision metadata passed schema validation")
+		}
+	})
+
+	checkpoint := prWorkspaceCandidateCheckpointFixture()
+	encoded, err := json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := sqlitestore.LegacyInput{
+		Relative: legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID),
+		Data:     encoded,
+	}
+	t.Run("import horizon query", func(t *testing.T) {
+		_, _, conn := openStoreConnection(t)
+		if _, err := conn.ExecContext(t.Context(), `DROP TABLE checkpoint_legacy_import_state`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := importLegacyPRWorkspaceCheckpoint(t.Context(), conn, input); err == nil {
+			t.Fatal("legacy import without its horizon table succeeded")
+		}
+	})
+	t.Run("invalid import horizon", func(t *testing.T) {
+		_, _, conn := openStoreConnection(t)
+		for _, statement := range []string{
+			`DROP TABLE checkpoint_legacy_import_state`,
+			`CREATE TABLE checkpoint_legacy_import_state(singleton INTEGER, import_closed INTEGER)`,
+			`INSERT INTO checkpoint_legacy_import_state VALUES (1, 1), (1, 1)`,
+		} {
+			if _, err := conn.ExecContext(t.Context(), statement); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := importLegacyPRWorkspaceCheckpoint(t.Context(), conn, input); err == nil ||
+			!strings.Contains(err.Error(), "horizon") {
+			t.Fatalf("invalid import horizon error = %v", err)
+		}
+	})
+	t.Run("revision allocation", func(t *testing.T) {
+		_, _, conn := openStoreConnection(t)
+		if _, err := conn.ExecContext(t.Context(), `DELETE FROM checkpoint_legacy_import_state`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.ExecContext(t.Context(), `DROP TABLE checkpoint_metadata`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := importLegacyPRWorkspaceCheckpoint(t.Context(), conn, input); err == nil {
+			t.Fatal("legacy import without revision metadata succeeded")
+		}
+	})
+	t.Run("row insert", func(t *testing.T) {
+		_, _, conn := openStoreConnection(t)
+		for _, statement := range []string{
+			`DELETE FROM checkpoint_legacy_import_state`,
+			`CREATE TRIGGER reject_checkpoint_insert BEFORE INSERT ON candidate_checkpoints
+			 BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END`,
+		} {
+			if _, err := conn.ExecContext(t.Context(), statement); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := importLegacyPRWorkspaceCheckpoint(t.Context(), conn, input); err == nil {
+			t.Fatal("legacy import ignored its row insertion failure")
+		}
+	})
+}
+
+func TestCheckpointAggregateParserReportsUnterminatedValues(t *testing.T) {
+	for name, input := range map[string]string{
+		"object": `{"value":1`,
+		"array":  `[1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := rejectDuplicatePRWorkspaceCheckpointJSONNames([]byte(input)); err == nil {
+				t.Fatal("unterminated aggregate was accepted")
+			}
+		})
+	}
+}
+
+func TestCheckpointLegacyEnumerationRejectsUnreadableAndNonDirectoryRoots(t *testing.T) {
+	invalid := &prWorkspaceCandidateCheckpointStore{root: "invalid\x00root"}
+	if sources, err := invalid.legacySourcesBounded(1, 1); err == nil || sources != nil {
+		t.Fatalf("invalid legacy root = %#v, %v", sources, err)
+	}
+	regularRoot := filepath.Join(t.TempDir(), "checkpoint-root")
+	if err := os.WriteFile(regularRoot, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	regular := &prWorkspaceCandidateCheckpointStore{root: regularRoot}
+	if sources, err := regular.legacySourcesBounded(1, 1); err == nil || sources != nil {
+		t.Fatalf("regular-file legacy root = %#v, %v", sources, err)
+	}
+}
+
+func TestCheckpointRevisionAndInternalOperationFaultBoundaries(t *testing.T) {
+	t.Run("invalid allocated revision", func(t *testing.T) {
+		database, err := sql.Open("sqlite", ":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		if _, execErr := database.Exec(`CREATE TABLE checkpoint_metadata(
+		    singleton INTEGER PRIMARY KEY, next_revision INTEGER NOT NULL
+		); INSERT INTO checkpoint_metadata VALUES (1, 0)`); execErr != nil {
+			t.Fatal(execErr)
+		}
+		conn, err := database.Conn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		if revision, err := allocatePRWorkspaceCheckpointRevision(t.Context(), conn); err == nil || revision != 0 {
+			t.Fatalf("invalid allocated revision = %d, %v", revision, err)
+		}
+	})
+
+	for _, operation := range []string{"removal match", "finalized reconciliation"} {
+		t.Run(operation, func(t *testing.T) {
+			store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkpoint := prWorkspaceCandidateCheckpointFixture()
+			revision, err := store.Save(
+				checkpoint,
+				requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(store.databasePath()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(store.databasePath(), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if operation == "removal match" {
+				if matched, err := store.removalMatches(checkpoint.WorkspaceID, revision); err == nil || matched {
+					t.Fatalf("unsafe removal match = %v, %v", matched, err)
+				}
+				return
+			}
+			parked, _ := parkedPRWorkspaceCheckpoint(checkpoint)
+			if _, matched, err := store.reconcileFinalized(parked, revision); err == nil || matched {
+				t.Fatalf("unsafe finalized reconciliation = %v, %v", matched, err)
+			}
+		})
+	}
+
+	t.Run("remove rolls back exhausted deletion sequence", func(t *testing.T) {
+		store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkpoint := prWorkspaceCandidateCheckpointFixture()
+		revision, err := store.Save(
+			checkpoint,
+			requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		database, err := store.open(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, execErr := database.Exec(`UPDATE checkpoint_metadata
+		    SET next_revision = 9223372036854775807 WHERE singleton = 1`); execErr != nil {
+			_ = database.Close()
+			t.Fatal(execErr)
+		}
+		if closeErr := database.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		if removeErr := store.Remove(checkpoint.WorkspaceID, revision); removeErr == nil ||
+			!strings.Contains(removeErr.Error(), "exhausted") {
+			t.Fatalf("remove at exhausted revision = %v", removeErr)
+		}
+		loaded, retainedRevision, found, err := store.Load(checkpoint.WorkspaceID)
+		if err != nil || !found || loaded != checkpoint || retainedRevision != revision {
+			t.Fatalf("rolled-back removal = %#v, %#v, %v, %v", loaded, retainedRevision, found, err)
+		}
+	})
+
+	if validPRWorkspaceCheckpointRevision(
+		prWorkspaceCandidateCheckpointRevision{workspaceID: "one"}, "two",
+	) {
+		t.Fatal("cross-workspace checkpoint revision was accepted")
+	}
+}
+
+func TestImplementationValidateProjectsUnavailableLocalCI(t *testing.T) {
+	workspaceID := "devw_11111111111111111111111111111111"
+	tree := strings.Repeat("a", 40)
+	candidate := prWorkspaceCandidate{
+		pin: gitworkspace.PinnedAcquireRequest{
+			Repository: "https://example.invalid/repository.git",
+			SourceRef:  "main", ExpectedCommit: strings.Repeat("b", 40),
+			ReservationKey: "validation-reservation", AgentID: "validation-agent",
+		},
+		candidate: gitworkspace.PinnedCandidate{
+			WorkspaceID: "gw-validation", ParentCommit: strings.Repeat("b", 40), Tree: tree,
+			CandidateDigest: strings.Repeat("c", 64), ChangedFiles: 1,
+		},
+	}
+	runtime := &prWorkspaceImplementationRuntime{
+		manager: &gitworkspace.Manager{},
+		ci:      &localci.Runner{},
+		candidates: map[prWorkspaceCandidateKey]prWorkspaceCandidate{
+			{workspaceID: workspaceID, tree: tree}: candidate,
+		},
+	}
+	run, err := runtime.Validate(t.Context(), prworkspace.ValidationRequest{
+		ID: "validation-unavailable", WorkspaceID: workspaceID, CandidateSHA: tree,
+	})
+	if err == nil || run.State != prworkspace.ExecutionFailed || run.StartedAt.IsZero() ||
+		run.FinishedAt == nil || len(run.Checks) != 1 || run.Checks[0].ID != "local-ci" ||
+		run.Checks[0].Status != "failed" {
+		t.Fatalf("unavailable local CI projection = %#v, %v", run, err)
+	}
+}
+
+func TestImplementationValidationAndSummaryDefensiveBranches(t *testing.T) {
+	var nilRuntime *prWorkspaceImplementationRuntime
+	if run, err := nilRuntime.Validate(t.Context(), prworkspace.ValidationRequest{}); err == nil ||
+		run.ID != "" || run.State != "" || len(run.Checks) != 0 {
+		t.Fatalf("nil validation runtime = %#v, %v", run, err)
+	}
+
+	value := strings.Repeat("x", (4<<10)-1) + "é" + strings.Repeat("y", 16)
+	summary := publicLocalCISummary(value, localci.StatusInfrastructureError)
+	if !strings.HasSuffix(summary, "… output truncated …") || !strings.Contains(summary, "x") {
+		t.Fatalf("UTF-8 bounded infrastructure summary = %q", summary)
+	}
+	if index := publicLocalCIStackStart("ordinary output without a stack marker"); index != -1 {
+		t.Fatalf("ordinary output stack index = %d", index)
 	}
 }
