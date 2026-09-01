@@ -365,6 +365,14 @@ func newAgentInstanceWithRuntimePolicies(
 		fileMutationProtectedRoots,
 		agentSessionFileMutationProtectedRoots(workspace)...,
 	)
+	evolutionProtectedRoots, evolutionRootsErr := agentEvolutionFileMutationProtectedRoots(
+		workspace,
+		cfg.Evolution.StateDir,
+	)
+	if evolutionRootsErr != nil {
+		panic(fmt.Sprintf("build evolution file-mutation policy: %v", evolutionRootsErr))
+	}
+	fileMutationProtectedRoots = append(fileMutationProtectedRoots, evolutionProtectedRoots...)
 	fileMutationPolicy := tools.FileMutationPolicy{
 		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
 			fileMutationProtectedRoots,

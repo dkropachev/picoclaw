@@ -764,6 +764,10 @@ Use `apply` only when automatic workspace skill updates are acceptable.
 Notes:
 
 - `cold_path_trigger: manual` has no general user-facing CLI/API trigger yet.
+- Mutable state lives in `<state_dir>/evolution.db` (or
+  `<workspace>/state/evolution/evolution.db` by default). Legacy JSON/JSONL is
+  imported once and retained in `legacy-json/evolution-v1/`; do not edit the
+  database or its WAL/SHM companions with agent file tools.
 
 ## Debugging Workflow
 

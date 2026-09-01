@@ -2,7 +2,6 @@ package evolution_test
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,20 +133,11 @@ func TestRuntime_FinalizeTurnWritesRecordWithOverride(t *testing.T) {
 	}
 
 	paths := evolution.NewPaths(workspace, override)
-	data, err := os.ReadFile(paths.TaskRecords)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+	records := loadEvolutionTaskRecords(t, paths)
+	if len(records) != 2 {
+		t.Fatalf("record count = %d, want 2", len(records))
 	}
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("record file line count = %d, want 2", len(lines))
-	}
-
-	var first evolution.LearningRecord
-	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
-		t.Fatalf("Unmarshal first record: %v", err)
-	}
+	first := records[0]
 	if first.WorkspaceID != workspace {
 		t.Fatalf("first WorkspaceID = %q, want %q", first.WorkspaceID, workspace)
 	}
@@ -179,10 +169,7 @@ func TestRuntime_FinalizeTurnWritesRecordWithOverride(t *testing.T) {
 		t.Fatalf("first record should not persist task_hash/signals: %+v", first)
 	}
 
-	var second evolution.LearningRecord
-	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
-		t.Fatalf("Unmarshal second record: %v", err)
-	}
+	second := records[1]
 	if second.WorkspaceID != workspace {
 		t.Fatalf("second WorkspaceID = %q, want %q", second.WorkspaceID, workspace)
 	}
@@ -368,20 +355,11 @@ func TestRuntime_FinalizeTurnWritesPotentiallyLearnableSignal(t *testing.T) {
 	}
 
 	paths := evolution.NewPaths(workspace, "")
-	data, err := os.ReadFile(paths.TaskRecords)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+	records := loadEvolutionTaskRecords(t, paths)
+	if len(records) != 1 {
+		t.Fatalf("record count = %d, want 1", len(records))
 	}
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("record file line count = %d, want 1", len(lines))
-	}
-
-	var record evolution.LearningRecord
-	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
-		t.Fatalf("Unmarshal record: %v", err)
-	}
+	record := records[0]
 	if len(record.Signals) != 0 {
 		t.Fatalf("Signals = %v, want empty", record.Signals)
 	}
@@ -429,20 +407,11 @@ func TestRuntime_FinalizeTurnUsesSkillNamesFromToolExecutions(t *testing.T) {
 	}
 
 	paths := evolution.NewPaths(workspace, "")
-	data, err := os.ReadFile(paths.TaskRecords)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+	records := loadEvolutionTaskRecords(t, paths)
+	if len(records) != 1 {
+		t.Fatalf("record count = %d, want 1", len(records))
 	}
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("record file line count = %d, want 1", len(lines))
-	}
-
-	var record evolution.LearningRecord
-	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
-		t.Fatalf("Unmarshal record: %v", err)
-	}
+	record := records[0]
 	if got := record.AddedSkillNames; len(got) != 0 {
 		t.Fatalf("AddedSkillNames = %v, want empty", got)
 	}
@@ -478,20 +447,11 @@ func TestRuntime_FinalizeTurnPreservesUTF8WhenTruncatingChineseOutput(t *testing
 	}
 
 	paths := evolution.NewPaths(workspace, "")
-	data, err := os.ReadFile(paths.TaskRecords)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+	records := loadEvolutionTaskRecords(t, paths)
+	if len(records) != 1 {
+		t.Fatalf("record count = %d, want 1", len(records))
 	}
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("record file line count = %d, want 1", len(lines))
-	}
-
-	var record evolution.LearningRecord
-	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
-		t.Fatalf("Unmarshal record: %v", err)
-	}
+	record := records[0]
 	if !utf8.ValidString(record.FinalOutput) {
 		t.Fatalf("FinalOutput is not valid UTF-8: %q", record.FinalOutput)
 	}
@@ -534,20 +494,11 @@ func TestRuntime_FinalizeTurnPrefersExplicitAttemptTrail(t *testing.T) {
 	}
 
 	paths := evolution.NewPaths(workspace, "")
-	data, err := os.ReadFile(paths.TaskRecords)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+	records := loadEvolutionTaskRecords(t, paths)
+	if len(records) != 1 {
+		t.Fatalf("record count = %d, want 1", len(records))
 	}
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("record file line count = %d, want 1", len(lines))
-	}
-
-	var record evolution.LearningRecord
-	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
-		t.Fatalf("Unmarshal record: %v", err)
-	}
+	record := records[0]
 	if record.AttemptTrail != nil {
 		t.Fatalf("AttemptTrail = %+v, want nil", record.AttemptTrail)
 	}
@@ -563,6 +514,15 @@ func TestRuntime_FinalizeTurnPrefersExplicitAttemptTrail(t *testing.T) {
 	if len(record.Signals) != 0 {
 		t.Fatalf("Signals = %v, want empty", record.Signals)
 	}
+}
+
+func loadEvolutionTaskRecords(t *testing.T, paths evolution.Paths) []evolution.LearningRecord {
+	t.Helper()
+	records, err := evolution.NewSQLiteStore(paths).LoadTaskRecords()
+	if err != nil {
+		t.Fatalf("LoadTaskRecords: %v", err)
+	}
+	return records
 }
 
 func TestRuntime_FinalizeTurnUpdatesSkillProfileUsage(t *testing.T) {

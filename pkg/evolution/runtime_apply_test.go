@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -932,10 +931,6 @@ func TestRuntime_RunColdPathOnce_FirstApplyFailureDoesNotCreateGhostProfile(t *t
 }
 
 func TestRuntime_RunColdPathOnce_DraftSaveFailureRollsBackAppliedSkill(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory permission behavior differs on Windows")
-	}
-
 	root := t.TempDir()
 	paths := evolution.NewPaths(root, "")
 	store := evolution.NewStore(paths)
@@ -953,13 +948,6 @@ func TestRuntime_RunColdPathOnce_DraftSaveFailureRollsBackAppliedSkill(t *testin
 		t.Fatalf("AppendLearningRecords: %v", err)
 	}
 
-	if err := os.Chmod(paths.RootDir, 0o555); err != nil {
-		t.Fatalf("Chmod(root read-only): %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chmod(paths.RootDir, 0o755)
-	})
-
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
 		Config: config.EvolutionConfig{Enabled: true, Mode: "apply"},
 		Now:    func() time.Time { return time.Unix(1700001000, 0).UTC() },
@@ -975,7 +963,7 @@ func TestRuntime_RunColdPathOnce_DraftSaveFailureRollsBackAppliedSkill(t *testin
 				TargetSkillName: "weather",
 				DraftType:       evolution.DraftTypeShortcut,
 				ChangeKind:      evolution.ChangeKindCreate,
-				HumanSummary:    "weather helper",
+				HumanSummary:    "weather\x00helper",
 				BodyOrPatch:     "---\nname: weather\ndescription: weather helper\n---\n# Weather\n## Start Here\nUse native-name query first.\n",
 			},
 		},
@@ -1108,11 +1096,13 @@ func TestRuntime_RunColdPathOnce_ProfileSaveFailureRollsBackSkillAndQuarantinesD
 		t.Fatalf("AppendLearningRecords: %v", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(paths.ProfilesDir), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(paths.ProfilesDir, []byte("not-a-directory"), 0o644); err != nil {
-		t.Fatalf("WriteFile(profiles): %v", err)
+	fullHistory := make([]evolution.SkillVersionEntry, 10_000)
+	if err := store.SaveProfile(evolution.SkillProfile{
+		SkillName: "weather", WorkspaceID: root, Status: evolution.SkillStatusActive,
+		Origin: "evolved", HumanSummary: "weather helper",
+		VersionHistory: fullHistory,
+	}); err != nil {
+		t.Fatalf("SaveProfile(full history): %v", err)
 	}
 
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{

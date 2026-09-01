@@ -153,6 +153,14 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 			agentSessionFileMutationProtectedRoots(agent.Workspace)...,
 		)
 	}
+	evolutionRoots, rootsErr := agentEvolutionFileMutationProtectedRoots(
+		agent.Workspace,
+		cfg.Evolution.StateDir,
+	)
+	if rootsErr != nil {
+		return nil, errors.New("controller local repair evolution state is invalid")
+	}
+	protectedRoots = append(protectedRoots, evolutionRoots...)
 	runner, err := NewLocalRepairRunner(LocalRepairRunnerConfig{
 		Workspaces:      workspaces,
 		Provider:        provider,

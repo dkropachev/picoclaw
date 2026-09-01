@@ -1,57 +1,99 @@
 package evolution
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
-	"encoding/json"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 
-	"github.com/sipeed/picoclaw/pkg/fileutil"
-	"github.com/sipeed/picoclaw/pkg/skills"
+	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 type Store struct {
 	paths Paths
 }
 
-func NewStore(paths Paths) *Store {
-	return &Store{paths: paths}
+var evolutionDatabaseWriteLocks sync.Map
+
+// NewSQLiteStore constructs the authoritative evolution SQLite store. Schema
+// creation and legacy migration occur on the first operation so construction
+// remains source-compatible with the historical no-error constructor.
+func NewSQLiteStore(paths Paths) *Store {
+	return &Store{paths: normalizedEvolutionPaths(paths)}
 }
 
-var storeFileLocks sync.Map
+// NewStore is retained for one compatibility cycle. It is backed exclusively
+// by evolution.db and never writes the legacy JSON or JSONL sources.
+// Deprecated: use NewSQLiteStore.
+func NewStore(paths Paths) *Store { return NewSQLiteStore(paths) }
+
+// Close is provided for constructor symmetry. Store operations use bounded
+// database handles and do not retain a process-local connection.
+func (s *Store) Close() error { return nil }
+
+func (s *Store) open(ctx context.Context) (*sql.DB, error) {
+	if s == nil {
+		return nil, errors.New("evolution store is nil")
+	}
+	paths := normalizedEvolutionPaths(s.paths)
+	return sqlitestore.Open(ctx, paths.Database, evolutionStoreOptions(paths))
+}
+
+func (s *Store) immediate(ctx context.Context, callback func(*sql.Conn) error) error {
+	if s == nil {
+		return errors.New("evolution store is nil")
+	}
+	paths := normalizedEvolutionPaths(s.paths)
+	databasePath, err := filepath.Abs(filepath.Clean(paths.Database))
+	if err != nil {
+		return err
+	}
+	actual, _ := evolutionDatabaseWriteLocks.LoadOrStore(databasePath, &sync.Mutex{})
+	mutex, ok := actual.(*sync.Mutex)
+	if !ok || mutex == nil {
+		return errors.New("evolution database write lock is invalid")
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
+	db, err := s.open(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return sqlitestore.Immediate(ctx, db, callback)
+}
 
 func (s *Store) AppendLearningRecord(ctx context.Context, record LearningRecord) error {
-	switch record.Kind {
-	case RecordKindPattern, legacyRecordKindRule:
-		return s.AppendPatternRecords([]LearningRecord{record})
-	default:
-		return s.AppendTaskRecord(ctx, record)
-	}
+	return s.AppendTaskOrPatternRecords(ctx, []LearningRecord{record})
 }
 
 func (s *Store) AppendLearningRecords(records []LearningRecord) error {
-	taskRecords := make([]LearningRecord, 0, len(records))
-	patternRecords := make([]LearningRecord, 0, len(records))
+	return s.AppendTaskOrPatternRecords(context.Background(), records)
+}
+
+func (s *Store) AppendTaskOrPatternRecords(ctx context.Context, records []LearningRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
 	for _, record := range records {
-		switch record.Kind {
-		case RecordKindPattern, legacyRecordKindRule:
-			patternRecords = append(patternRecords, record)
-		default:
-			taskRecords = append(taskRecords, record)
+		class := evolutionRecordClass(record)
+		if err := validateEvolutionRecord(class, record); err != nil {
+			return err
 		}
 	}
-	if err := s.AppendTaskRecords(context.Background(), taskRecords); err != nil {
-		return err
-	}
-	return s.AppendPatternRecords(patternRecords)
+	return s.immediate(ctx, func(conn *sql.Conn) error {
+		for _, record := range records {
+			if _, err := putEvolutionRecord(
+				ctx, conn, evolutionRecordClass(record), record, "", true,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Store) AppendTaskRecord(ctx context.Context, record LearningRecord) error {
@@ -59,260 +101,173 @@ func (s *Store) AppendTaskRecord(ctx context.Context, record LearningRecord) err
 }
 
 func (s *Store) AppendTaskRecords(ctx context.Context, records []LearningRecord) error {
-	return s.appendJSONLRecords(ctx, s.paths.TaskRecords, records)
+	return s.appendRecords(ctx, "task", records)
 }
 
 func (s *Store) AppendPatternRecords(records []LearningRecord) error {
-	return s.appendJSONLRecords(context.Background(), s.paths.PatternRecords, records)
+	return s.appendRecords(context.Background(), "pattern", records)
 }
 
-func (s *Store) appendJSONLRecords(ctx context.Context, path string, records []LearningRecord) error {
+func (s *Store) appendRecords(ctx context.Context, class string, records []LearningRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	unlock := lockStoreFile(path)
-	defer unlock()
-
-	if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o755); mkdirErr != nil {
-		return mkdirErr
-	}
-
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := f.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}()
-
-	enc := json.NewEncoder(f)
 	for _, record := range records {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		if err := enc.Encode(record); err != nil {
+		if err := validateEvolutionRecord(class, record); err != nil {
 			return err
 		}
 	}
-	return nil
+	return s.immediate(ctx, func(conn *sql.Conn) error {
+		for _, record := range records {
+			if _, err := putEvolutionRecord(ctx, conn, class, record, "", true); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Store) LoadLearningRecords() ([]LearningRecord, error) {
-	taskRecords, err := s.LoadTaskRecords()
+	tasks, err := s.LoadTaskRecords()
 	if err != nil {
 		return nil, err
 	}
-	patternRecords, err := s.LoadPatternRecords()
+	patterns, err := s.LoadPatternRecords()
 	if err != nil {
 		return nil, err
 	}
-	return append(taskRecords, patternRecords...), nil
+	return append(tasks, patterns...), nil
 }
 
 func (s *Store) LoadTaskRecords() ([]LearningRecord, error) {
-	records, err := s.loadRecordsFromPath(s.paths.TaskRecords)
-	if err != nil {
-		return nil, err
-	}
-	legacy, err := s.loadLegacyTaskRecords()
-	if err != nil {
-		return nil, err
-	}
-	return mergeLearningRecordsByID(legacy, records), nil
+	return s.loadRecords(context.Background(), "task")
 }
 
 func (s *Store) LoadPatternRecords() ([]LearningRecord, error) {
-	records, err := s.loadRecordsFromPath(s.paths.PatternRecords)
-	if err != nil {
-		return nil, err
-	}
-	legacy, err := s.loadLegacyPatternRecords()
-	if err != nil {
-		return nil, err
-	}
-	return mergeLearningRecordsByID(legacy, records), nil
+	return s.loadRecords(context.Background(), "pattern")
 }
 
-func (s *Store) loadRecordsFromPath(path string) ([]LearningRecord, error) {
-	var records []LearningRecord
-	if err := decodeJSONLLines(path, func(line []byte) error {
-		var record LearningRecord
-		if err := json.Unmarshal(line, &record); err != nil {
-			return err
-		}
-		records = append(records, record)
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return records, nil
-}
-
-func (s *Store) loadLegacyTaskRecords() ([]LearningRecord, error) {
-	records, err := s.loadRecordsFromPath(s.paths.LearningRecords)
+func (s *Store) loadRecords(ctx context.Context, class string) ([]LearningRecord, error) {
+	db, err := s.open(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]LearningRecord, 0, len(records))
-	for _, record := range records {
-		if isTaskRecordKind(record.Kind) {
-			out = append(out, record)
-		}
-	}
-	return out, nil
-}
-
-func (s *Store) loadLegacyPatternRecords() ([]LearningRecord, error) {
-	records, err := s.loadRecordsFromPath(s.paths.LearningRecords)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]LearningRecord, 0, len(records))
-	for _, record := range records {
-		if isPatternRecordKind(record.Kind) {
-			out = append(out, record)
-		}
-	}
-	return out, nil
+	defer db.Close()
+	return loadEvolutionRecords(ctx, db, class)
 }
 
 func (s *Store) SaveTaskRecords(records []LearningRecord) error {
-	return s.saveJSONLRecords(s.paths.TaskRecords, records)
+	return s.saveRecords(context.Background(), "task", records)
+}
+
+func (s *Store) SavePatternRecords(records []LearningRecord) error {
+	return s.saveRecords(context.Background(), "pattern", records)
+}
+
+func (s *Store) saveRecords(ctx context.Context, class string, records []LearningRecord) error {
+	if len(records) > maximumEvolutionRecords {
+		return errors.New("evolution record count exceeds its limit")
+	}
+	for _, record := range records {
+		if err := validateEvolutionRecord(class, record); err != nil {
+			return err
+		}
+	}
+	return s.immediate(ctx, func(conn *sql.Conn) error {
+		return replaceEvolutionRecords(ctx, conn, class, records)
+	})
 }
 
 func (s *Store) MarkTaskRecordsClustered(ids []string) error {
-	if len(ids) == 0 {
-		return nil
-	}
 	target := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
+		if id != "" {
+			target[id] = struct{}{}
 		}
-		target[id] = struct{}{}
 	}
 	if len(target) == 0 {
 		return nil
 	}
-
-	unlock := lockStoreFile(s.paths.TaskRecords)
-	defer unlock()
-
-	current, err := s.loadRecordsFromPath(s.paths.TaskRecords)
-	if err != nil {
-		return err
-	}
-	legacy, err := s.loadLegacyTaskRecords()
-	if err != nil {
-		return err
-	}
-	records := mergeLearningRecordsByID(legacy, current)
-
-	hasTargetRecordInWorkspace := make(map[string]bool, len(target))
-	if strings.TrimSpace(s.paths.Workspace) != "" {
-		for _, record := range records {
-			if _, ok := target[record.ID]; !ok {
-				continue
+	workspace := strings.TrimSpace(s.paths.Workspace)
+	return s.immediate(context.Background(), func(conn *sql.Conn) error {
+		for id := range target {
+			rows, queryErr := conn.QueryContext(context.Background(), `SELECT workspace_id, version
+                    FROM evolution_records
+                   WHERE record_class = 'task' AND record_id = ?
+                   ORDER BY position`, id)
+			if queryErr != nil {
+				return queryErr
 			}
-			if record.WorkspaceID == s.paths.Workspace {
-				hasTargetRecordInWorkspace[record.ID] = true
+			type candidate struct {
+				workspace string
+				version   int64
+			}
+			var candidates []candidate
+			hasWorkspace := false
+			consumeErr := consumeEvolutionRows(rows, func() error {
+				var value candidate
+				if scanErr := rows.Scan(&value.workspace, &value.version); scanErr != nil {
+					return scanErr
+				}
+				hasWorkspace = hasWorkspace || workspace != "" && value.workspace == workspace
+				candidates = append(candidates, value)
+				return nil
+			})
+			if consumeErr != nil {
+				return consumeErr
+			}
+			for _, candidate := range candidates {
+				if hasWorkspace && candidate.workspace != workspace {
+					continue
+				}
+				result, err := conn.ExecContext(context.Background(), `UPDATE evolution_records
+                        SET status = 'clustered', version = version + 1, import_source = NULL
+                      WHERE record_class = 'task' AND workspace_id = ? AND record_id = ? AND version = ?`,
+					candidate.workspace, id, candidate.version)
+				if err != nil {
+					return err
+				}
+				changed, err := result.RowsAffected()
+				if err != nil || changed != 1 {
+					return errors.New("evolution task record changed during clustered update")
+				}
 			}
 		}
-	}
-
-	changed := false
-	for i := range records {
-		if _, ok := target[records[i].ID]; !ok {
-			continue
-		}
-		if hasTargetRecordInWorkspace[records[i].ID] && records[i].WorkspaceID != s.paths.Workspace {
-			continue
-		}
-		records[i].Status = RecordStatus("clustered")
-		changed = true
-	}
-	if !changed {
 		return nil
-	}
-	return s.saveJSONLRecordsLocked(s.paths.TaskRecords, records)
-}
-
-func (s *Store) SavePatternRecords(records []LearningRecord) error {
-	return s.saveJSONLRecords(s.paths.PatternRecords, records)
+	})
 }
 
 func (s *Store) MergePatternRecords(records []LearningRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
-
-	unlock := lockStoreFile(s.paths.PatternRecords)
-	defer unlock()
-
-	current, err := s.loadRecordsFromPath(s.paths.PatternRecords)
-	if err != nil {
-		return err
-	}
-	legacy, err := s.loadLegacyPatternRecords()
-	if err != nil {
-		return err
-	}
-	merged := mergeLearningRecordsByID(mergeLearningRecordsByID(legacy, current), records)
-	return s.saveJSONLRecordsLocked(s.paths.PatternRecords, merged)
-}
-
-func (s *Store) saveJSONLRecords(path string, records []LearningRecord) error {
-	unlock := lockStoreFile(path)
-	defer unlock()
-
-	return s.saveJSONLRecordsLocked(path, records)
-}
-
-func (s *Store) saveJSONLRecordsLocked(path string, records []LearningRecord) error {
-	if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o755); mkdirErr != nil {
-		return mkdirErr
-	}
-
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
 	for _, record := range records {
-		if err := enc.Encode(record); err != nil {
+		if err := validateEvolutionRecord("pattern", record); err != nil {
 			return err
 		}
 	}
-	return fileutil.WriteFileAtomic(path, buf.Bytes(), 0o644)
+	return s.immediate(context.Background(), func(conn *sql.Conn) error {
+		current, err := loadEvolutionRecords(context.Background(), conn, "pattern")
+		if err != nil {
+			return err
+		}
+		return replaceEvolutionRecords(
+			context.Background(), conn, "pattern", mergeLearningRecordsByID(current, records),
+		)
+	})
 }
 
 func mergeLearningRecordsByID(base, updates []LearningRecord) []LearningRecord {
 	out := append([]LearningRecord(nil), base...)
 	indexByID := make(map[string]int, len(out)+len(updates))
-	for i, record := range out {
-		key := learningRecordMergeKey(record)
-		if key == "" {
-			continue
-		}
-		indexByID[key] = i
+	for index, record := range out {
+		indexByID[learningRecordMergeKey(record)] = index
 	}
 	for _, record := range updates {
 		key := learningRecordMergeKey(record)
-		if key == "" {
-			out = append(out, record)
-			continue
-		}
-		if idx, ok := indexByID[key]; ok {
-			out[idx] = record
+		if index, found := indexByID[key]; found {
+			out[index] = record
 			continue
 		}
 		indexByID[key] = len(out)
@@ -322,365 +277,150 @@ func mergeLearningRecordsByID(base, updates []LearningRecord) []LearningRecord {
 }
 
 func learningRecordMergeKey(record LearningRecord) string {
-	id := strings.TrimSpace(record.ID)
-	if id == "" {
-		return ""
-	}
-	return strings.TrimSpace(record.WorkspaceID) + "\x00" + id
+	return strings.TrimSpace(record.WorkspaceID) + "\x00" + strings.TrimSpace(record.ID)
 }
 
 func (s *Store) SaveDrafts(drafts []SkillDraft) error {
-	unlock := lockStoreFile(s.paths.SkillDrafts)
-	defer unlock()
-
-	existing, err := s.LoadDrafts()
-	if err != nil {
-		return err
+	if len(drafts) == 0 {
+		return nil
 	}
-
-	indexByKey := make(map[string]int, len(existing))
-	for i, draft := range existing {
-		indexByKey[draftKey(draft.WorkspaceID, draft.ID)] = i
-	}
-
 	for _, draft := range drafts {
-		key := draftKey(draft.WorkspaceID, draft.ID)
-		if idx, ok := indexByKey[key]; ok {
-			existing[idx] = draft
-			continue
+		if err := validateEvolutionDraft(draft); err != nil {
+			return err
 		}
-		indexByKey[key] = len(existing)
-		existing = append(existing, draft)
 	}
-
-	data, err := json.MarshalIndent(existing, "", "  ")
-	if err != nil {
-		return err
-	}
-	return fileutil.WriteFileAtomic(s.paths.SkillDrafts, data, 0o644)
+	return s.immediate(context.Background(), func(conn *sql.Conn) error {
+		for _, draft := range drafts {
+			if _, err := putEvolutionDraft(context.Background(), conn, draft, false); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Store) LoadDrafts() ([]SkillDraft, error) {
-	data, err := os.ReadFile(s.paths.SkillDrafts)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	db, err := s.open(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	if len(bytes.TrimSpace(data)) == 0 {
-		return nil, nil
-	}
-
-	var drafts []SkillDraft
-	if err := json.Unmarshal(data, &drafts); err != nil {
-		return nil, err
-	}
-	return drafts, nil
+	defer db.Close()
+	return loadEvolutionDrafts(context.Background(), db)
 }
 
 func (s *Store) SaveProfile(profile SkillProfile) error {
-	path, err := s.profilePath(profile.WorkspaceID, profile.SkillName)
-	if err != nil {
+	if err := validateEvolutionProfile(profile); err != nil {
 		return err
 	}
-	unlock := lockStoreFile(path)
-	defer unlock()
-
-	if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o755); mkdirErr != nil {
-		return mkdirErr
-	}
-
-	data, err := json.MarshalIndent(profile, "", "  ")
-	if err != nil {
+	return s.immediate(context.Background(), func(conn *sql.Conn) error {
+		_, err := putEvolutionProfile(context.Background(), conn, profile, false)
 		return err
-	}
-	return fileutil.WriteFileAtomic(path, data, 0o644)
+	})
 }
 
 func (s *Store) LoadProfile(skillName string) (SkillProfile, error) {
-	return s.loadProfileForWorkspace(strings.TrimSpace(s.paths.Workspace), skillName)
+	if err := validateEvolutionSkillName(skillName); err != nil {
+		return SkillProfile{}, err
+	}
+	db, err := s.open(context.Background())
+	if err != nil {
+		return SkillProfile{}, err
+	}
+	defer db.Close()
+	workspace := strings.TrimSpace(s.paths.Workspace)
+	profile, found, err := loadEvolutionProfile(context.Background(), db, workspace, skillName)
+	if err != nil {
+		return SkillProfile{}, err
+	}
+	if found {
+		return profile, nil
+	}
+	if workspace != "" && usesDefaultWorkspaceState(s.paths, workspace) {
+		profile, found, err = loadEvolutionProfile(context.Background(), db, "", skillName)
+		if err != nil {
+			return SkillProfile{}, err
+		}
+		if found {
+			return profile, nil
+		}
+	}
+	return SkillProfile{}, os.ErrNotExist
 }
 
 func (s *Store) UpdateProfile(
 	workspaceID, skillName string,
 	update func(profile *SkillProfile, exists bool) error,
 ) error {
-	targetPath, err := s.profilePath(workspaceID, skillName)
-	if err != nil {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if update == nil {
+		return errors.New("evolution profile update is nil")
+	}
+	if err := validateEvolutionSkillName(skillName); err != nil {
 		return err
 	}
-
-	unlock := lockStoreFile(targetPath)
-	defer unlock()
-
-	profile, err := s.loadProfileForWorkspace(workspaceID, skillName)
-	exists := err == nil
-	if errors.Is(err, os.ErrNotExist) {
-		profile = SkillProfile{}
-	} else if err != nil {
-		return err
-	}
-
-	if updateErr := update(&profile, exists); updateErr != nil {
-		return updateErr
-	}
-	if !exists && isZeroSkillProfile(profile) {
-		return nil
-	}
-	if mkdirErr := os.MkdirAll(filepath.Dir(targetPath), 0o755); mkdirErr != nil {
-		return mkdirErr
-	}
-
-	data, err := json.MarshalIndent(profile, "", "  ")
-	if err != nil {
-		return err
-	}
-	return fileutil.WriteFileAtomic(targetPath, data, 0o644)
-}
-
-func (s *Store) loadProfileForWorkspace(workspaceID, skillName string) (SkillProfile, error) {
-	paths, err := s.profileLookupPaths(workspaceID, skillName)
-	if err != nil {
-		return SkillProfile{}, err
-	}
-	for _, path := range paths {
-		profile, loadErr := s.loadProfileFromPath(path)
-		if errors.Is(loadErr, os.ErrNotExist) {
-			continue
-		}
+	return s.immediate(context.Background(), func(conn *sql.Conn) error {
+		profile, exists, loadErr := loadEvolutionProfile(
+			context.Background(), conn, workspaceID, skillName,
+		)
 		if loadErr != nil {
-			return SkillProfile{}, loadErr
+			return loadErr
 		}
-		return profile, nil
-	}
-	return SkillProfile{}, os.ErrNotExist
-}
-
-func isZeroSkillProfile(profile SkillProfile) bool {
-	return profile.SkillName == "" &&
-		profile.WorkspaceID == "" &&
-		profile.CurrentVersion == "" &&
-		profile.Status == "" &&
-		profile.Origin == "" &&
-		profile.HumanSummary == "" &&
-		profile.ChangeReason == "" &&
-		len(profile.IntendedUseCases) == 0 &&
-		len(profile.PreferredEntryPath) == 0 &&
-		len(profile.AvoidPatterns) == 0 &&
-		profile.LastUsedAt.IsZero() &&
-		profile.UseCount == 0 &&
-		profile.RetentionScore == 0 &&
-		len(profile.VersionHistory) == 0
+		loadedFallback := false
+		if !exists && workspaceID != "" && usesDefaultWorkspaceState(s.paths, workspaceID) {
+			profile, exists, loadErr = loadEvolutionProfile(
+				context.Background(), conn, "", skillName,
+			)
+			if loadErr != nil {
+				return loadErr
+			}
+			loadedFallback = exists
+		}
+		if err := update(&profile, exists); err != nil {
+			return err
+		}
+		if !exists && isZeroSkillProfile(profile) {
+			return nil
+		}
+		if loadedFallback {
+			profile.WorkspaceID = workspaceID
+			profile.SkillName = skillName
+		}
+		if profile.WorkspaceID != workspaceID || profile.SkillName != skillName {
+			return errors.New("evolution profile update changed its identity")
+		}
+		if err := validateEvolutionProfile(profile); err != nil {
+			return err
+		}
+		_, putErr := putEvolutionProfile(context.Background(), conn, profile, false)
+		return putErr
+	})
 }
 
 func (s *Store) LoadProfiles() ([]SkillProfile, error) {
-	entries, err := os.ReadDir(s.paths.ProfilesDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	db, err := s.open(context.Background())
 	if err != nil {
 		return nil, err
 	}
-
-	profiles := make([]SkillProfile, 0, len(entries))
-	for _, entry := range entries {
-		entryPath := filepath.Join(s.paths.ProfilesDir, entry.Name())
-		if entry.IsDir() {
-			nestedProfiles, loadErr := s.loadProfilesFromDir(entryPath)
-			if loadErr != nil {
-				return nil, loadErr
-			}
-			profiles = append(profiles, nestedProfiles...)
-			continue
-		}
-		if filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		profile, err := s.loadProfileFromPath(entryPath)
-		if err != nil {
-			return nil, err
-		}
-		profiles = append(profiles, profile)
-	}
-
-	sort.Slice(profiles, func(i, j int) bool {
-		if profiles[i].SkillName != profiles[j].SkillName {
-			return profiles[i].SkillName < profiles[j].SkillName
-		}
-		return profiles[i].WorkspaceID < profiles[j].WorkspaceID
-	})
-	return profiles, nil
+	defer db.Close()
+	return loadEvolutionProfiles(context.Background(), db)
 }
 
-func decodeJSONLLines(path string, decode func(line []byte) error) error {
-	f, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var lines [][]byte
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		lines = append(lines, append([]byte(nil), line...))
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-
-	for i, line := range lines {
-		if err := decode(line); err != nil {
-			if i == len(lines)-1 && isInvalidJSON(err) {
-				return nil
-			}
-			return err
-		}
-	}
-	return nil
+func isZeroSkillProfile(profile SkillProfile) bool {
+	return profile.SkillName == "" && profile.WorkspaceID == "" && profile.CurrentVersion == "" &&
+		profile.Status == "" && profile.Origin == "" && profile.HumanSummary == "" &&
+		profile.ChangeReason == "" && len(profile.IntendedUseCases) == 0 &&
+		len(profile.PreferredEntryPath) == 0 && len(profile.AvoidPatterns) == 0 &&
+		profile.LastUsedAt.IsZero() && profile.UseCount == 0 && profile.RetentionScore == 0 &&
+		len(profile.VersionHistory) == 0
 }
 
-func draftKey(workspaceID, id string) string {
-	return workspaceID + "\x00" + id
-}
+func draftKey(workspaceID, id string) string { return workspaceID + "\x00" + id }
 
-func isInvalidJSON(err error) bool {
-	var syntaxErr *json.SyntaxError
-	return errors.As(err, &syntaxErr)
-}
-
-func lockStoreFile(path string) func() {
-	for {
-		actual, _ := storeFileLocks.LoadOrStore(path, &sync.Mutex{})
-		mu, ok := actual.(*sync.Mutex)
-		if !ok || mu == nil {
-			// Corrupted entry (wrong type or nil *sync.Mutex).
-			// Atomically swap in a fresh mutex via CompareAndSwap.
-			// If CAS fails, another goroutine already replaced it —
-			// just retry the loop to pick up the valid entry.
-			storeFileLocks.CompareAndSwap(path, actual, &sync.Mutex{})
-			continue
-		}
-		mu.Lock()
-		return mu.Unlock
+func evolutionRecordClass(record LearningRecord) string {
+	switch record.Kind {
+	case RecordKindPattern, legacyRecordKindRule:
+		return "pattern"
+	default:
+		return "task"
 	}
-}
-
-func (s *Store) profilePath(workspaceID, skillName string) (string, error) {
-	if err := skills.ValidateSkillName(skillName); err != nil {
-		return "", err
-	}
-	workspaceID = strings.TrimSpace(workspaceID)
-	if workspaceID == "" {
-		return filepath.Join(s.paths.ProfilesDir, skillName+".json"), nil
-	}
-	return filepath.Join(s.paths.ProfilesDir, workspaceScopeDir(workspaceID), skillName+".json"), nil
-}
-
-func (s *Store) loadProfilesFromDir(dir string) ([]SkillProfile, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	profiles := make([]SkillProfile, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		profile, err := s.loadProfileFromPath(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return nil, err
-		}
-		profiles = append(profiles, profile)
-	}
-	return profiles, nil
-}
-
-func (s *Store) loadProfileFromPath(path string) (SkillProfile, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return SkillProfile{}, err
-	}
-
-	var profile SkillProfile
-	if err := json.Unmarshal(data, &profile); err != nil {
-		return SkillProfile{}, err
-	}
-	return profile, nil
-}
-
-func (s *Store) profileLookupPaths(workspaceID, skillName string) ([]string, error) {
-	if err := skills.ValidateSkillName(skillName); err != nil {
-		return nil, err
-	}
-
-	paths := make([]string, 0, 4)
-	seen := make(map[string]struct{}, 4)
-	appendPath := func(path string) {
-		if path == "" {
-			return
-		}
-		if _, ok := seen[path]; ok {
-			return
-		}
-		paths = append(paths, path)
-		seen[path] = struct{}{}
-	}
-
-	workspaceID = strings.TrimSpace(workspaceID)
-	if workspaceID != "" {
-		path, err := s.profilePath(workspaceID, skillName)
-		if err != nil {
-			return nil, err
-		}
-		appendPath(path)
-		if !usesDefaultWorkspaceState(s.paths, workspaceID) {
-			return paths, nil
-		}
-	}
-
-	legacyPath, err := s.profilePath("", skillName)
-	if err != nil {
-		return nil, err
-	}
-	appendPath(legacyPath)
-	return paths, nil
-}
-
-func workspaceScopeDir(workspaceID string) string {
-	sum := sha1.Sum([]byte(workspaceID))
-	base := filepath.Base(filepath.Clean(workspaceID))
-	base = sanitizeWorkspaceComponent(base)
-	if base == "" || base == "." {
-		base = "workspace"
-	}
-	return base + "-" + hex.EncodeToString(sum[:6])
-}
-
-func sanitizeWorkspaceComponent(value string) string {
-	var b strings.Builder
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '-' || r == '_' || r == '.':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	return strings.Trim(b.String(), "-")
 }

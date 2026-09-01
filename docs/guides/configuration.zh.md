@@ -95,7 +95,7 @@ PicoClaw 运行期间请勿编辑这些数据库、其 WAL/SHM 或锁文件，�
 |------|--------|------|
 | `enabled` | `false` | 启用已完成 Agent 回合的学习记录采集。Heartbeat 回合会被忽略。 |
 | `mode` | `observe` | `observe` 只记录数据；`draft` 可生成候选技能草稿；`apply` 可将已接受草稿应用到工作区技能。 |
-| `state_dir` | `""` | 自进化状态的可选目录。留空时使用工作区下的默认位置。 |
+| `state_dir` | `""` | 可选的自进化状态目录。数据库位于 `<state_dir>/evolution.db`；留空时使用 `<workspace>/state/evolution/evolution.db`。 |
 | `min_task_count` | `2` | 一个模式具备生成草稿资格前所需的最小相关任务记录数。 |
 | `min_success_ratio` | `0.7` | 任务聚类所需的最小成功率，取值需大于 `0`，且不超过 `1`。 |
 | `cold_path_trigger` | `after_turn` | 草稿生成可在 `after_turn` 后运行、按 `scheduled` 定时运行；设置为 `manual` 时会关闭自动冷路径运行。目前还没有用户可用的手动触发入口。仅在 `draft` 和 `apply` 模式下生效。 |
