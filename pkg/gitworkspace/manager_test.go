@@ -1600,7 +1600,7 @@ func TestManagerAcquirePinnedRejectsPathTampering(t *testing.T) {
 			!strings.Contains(err.Error(), "checkout root") {
 			t.Fatalf("NewManager() with checkout symlink error = %v", err)
 		}
-		if info, err := os.Lstat(root); err != nil || !managedDirectoryModePrivate(info) {
+		if info, err := os.Lstat(root); err != nil || !managedDirectoryModePrivate(root, info) {
 			t.Fatalf("failed constructor root mode = %v, %v", info.Mode(), err)
 		}
 	})
@@ -1617,7 +1617,7 @@ func TestManagerAcquirePinnedRejectsPathTampering(t *testing.T) {
 			!strings.Contains(err.Error(), "operation lock root") {
 			t.Fatalf("NewManager() with operation lock symlink error = %v", err)
 		}
-		if info, err := os.Lstat(root); err != nil || !managedDirectoryModePrivate(info) {
+		if info, err := os.Lstat(root); err != nil || !managedDirectoryModePrivate(root, info) {
 			t.Fatalf("failed constructor root mode = %v, %v", info.Mode(), err)
 		}
 	})
@@ -1666,7 +1666,7 @@ func TestManagerAcquirePinnedRejectsPathTampering(t *testing.T) {
 			manager.lockRoot,
 			pinnedOperationLockFilenamePrefix+hex.EncodeToString(digest[:])+".lock",
 		)
-		if info, err := os.Lstat(path); err != nil || !managedFileModePrivate(info) {
+		if info, err := os.Lstat(path); err != nil || !managedFileModePrivate(path, info) {
 			t.Fatalf("operation lock file mode = %v, %v", info.Mode(), err)
 		}
 	})

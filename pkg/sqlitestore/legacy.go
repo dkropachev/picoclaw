@@ -776,7 +776,7 @@ func syncLegacySourceFile(
 		return nil, err
 	}
 	pathInfo, err := os.Lstat(path)
-	if err != nil || !safeLegacyRegularFile(openedInfo) || !safeLegacyRegularFile(pathInfo) ||
+	if err != nil || !safeLegacyRegularFile(path, openedInfo) || !safeLegacyRegularFile(path, pathInfo) ||
 		!os.SameFile(expected.info, openedInfo) || !os.SameFile(openedInfo, pathInfo) ||
 		openedInfo.Size() > maximumBytes || openedInfo.Mode().Perm() != expectedMode.Perm() {
 		return nil, errors.New("legacy source changed before archive sync")
@@ -866,7 +866,7 @@ func validateLegacyArchiveAncestors(sourceRoot, archiveRoot string) error {
 		if statErr != nil {
 			return statErr
 		}
-		if err := requireSafeLegacyDirectoryInfo(info, "legacy archive ancestor"); err != nil {
+		if err := requireSafeLegacyDirectoryInfo(current, info, "legacy archive ancestor"); err != nil {
 			return err
 		}
 	}
@@ -903,11 +903,14 @@ func ensureLegacyArchiveRoot(sourceRoot, archiveRoot string) error {
 		if statErr != nil {
 			return statErr
 		}
-		if err := requireSafeLegacyDirectoryInfo(info, "legacy archive ancestor"); err != nil {
+		if err := requireSafeLegacyDirectoryInfo(current, info, "legacy archive ancestor"); err != nil {
 			return err
 		}
 		if chmodErr := legacyArchiveChmod(current, 0o700); chmodErr != nil {
 			return chmodErr
+		}
+		if _, secureErr := fileutil.SecurePrivateDirectory(current); secureErr != nil {
+			return secureErr
 		}
 	}
 	return nil
@@ -918,13 +921,11 @@ func requireSafeLegacyDirectory(path, label string) error {
 	if err != nil {
 		return err
 	}
-	return requireSafeLegacyDirectoryInfo(info, label)
+	return requireSafeLegacyDirectoryInfo(path, info, label)
 }
 
-func requireSafeLegacyDirectoryInfo(info os.FileInfo, label string) error {
-	if info == nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 ||
-		info.Mode().Perm()&0o022 != 0 {
+func requireSafeLegacyDirectoryInfo(path string, info os.FileInfo, label string) error {
+	if !safeLegacyDirectory(path, info) {
 		mode := os.FileMode(0)
 		if info != nil {
 			mode = info.Mode()
@@ -1001,9 +1002,7 @@ func readLegacySource(
 	if err != nil {
 		return LegacyInput{}, false, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 ||
-		info.Mode().Perm()&0o022 != 0 {
+	if !safeLegacyRegularFile(path, info) {
 		return LegacyInput{}, false, errors.New("legacy source has an unsafe type or mode")
 	}
 	if info.Size() > maxBytes {
@@ -1019,8 +1018,8 @@ func readLegacySource(
 		return LegacyInput{}, false, err
 	}
 	currentInfo, err := os.Lstat(path)
-	if err != nil || !safeLegacyRegularFile(openedInfo) ||
-		!safeLegacyRegularFile(currentInfo) || !os.SameFile(info, openedInfo) ||
+	if err != nil || !safeLegacyRegularFile(path, openedInfo) ||
+		!safeLegacyRegularFile(path, currentInfo) || !os.SameFile(info, openedInfo) ||
 		!os.SameFile(openedInfo, currentInfo) {
 		return LegacyInput{}, false, errors.New("legacy source changed while opening")
 	}
@@ -1053,7 +1052,7 @@ func inspectLegacyRegularFile(
 	if err != nil {
 		return legacyFileSnapshot{}, false, err
 	}
-	if maxBytes < 1 || !safeLegacyRegularFile(info) || info.Size() > maxBytes {
+	if maxBytes < 1 || !safeLegacyRegularFile(path, info) || info.Size() > maxBytes {
 		return legacyFileSnapshot{}, false, errors.New("path is not a safe bounded regular file")
 	}
 	file, err := legacyInspectOpen(path)
@@ -1066,8 +1065,8 @@ func inspectLegacyRegularFile(
 		return legacyFileSnapshot{}, false, err
 	}
 	currentInfo, err := os.Lstat(path)
-	if err != nil || !safeLegacyRegularFile(openedInfo) ||
-		!safeLegacyRegularFile(currentInfo) || !os.SameFile(info, openedInfo) ||
+	if err != nil || !safeLegacyRegularFile(path, openedInfo) ||
+		!safeLegacyRegularFile(path, currentInfo) || !os.SameFile(info, openedInfo) ||
 		!os.SameFile(openedInfo, currentInfo) {
 		return legacyFileSnapshot{}, false, errors.New("path changed while opening")
 	}
@@ -1119,6 +1118,9 @@ func ensureArchiveParent(root, destination string) error {
 			if err := legacyArchiveChmod(current, 0o700); err != nil {
 				return err
 			}
+			if _, err := fileutil.SecurePrivateDirectory(current); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1129,7 +1131,7 @@ func rejectSymlinkPath(root, relative string) error {
 	if err != nil {
 		return err
 	}
-	if err := requireSafeLegacyDirectoryInfo(rootInfo, "legacy source root"); err != nil {
+	if err := requireSafeLegacyDirectoryInfo(root, rootInfo, "legacy source root"); err != nil {
 		return err
 	}
 	current := root
@@ -1140,7 +1142,7 @@ func rejectSymlinkPath(root, relative string) error {
 		if err != nil {
 			return err
 		}
-		if err := requireSafeLegacyDirectoryInfo(info, "legacy source directory"); err != nil {
+		if err := requireSafeLegacyDirectoryInfo(current, info, "legacy source directory"); err != nil {
 			return err
 		}
 	}
@@ -1194,12 +1196,6 @@ func pathsEqual(left, right string) bool {
 		return false
 	}
 	return strings.EqualFold(filepath.Clean(leftAbs), filepath.Clean(rightAbs))
-}
-
-func safeLegacyRegularFile(info os.FileInfo) bool {
-	return info != nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 &&
-		info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) == 0 &&
-		info.Mode().Perm()&0o022 == 0
 }
 
 func equalDigest(left, right []byte) bool {

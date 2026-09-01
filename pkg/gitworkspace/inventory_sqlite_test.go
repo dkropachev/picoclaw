@@ -23,12 +23,13 @@ func TestGitWorkspaceInventorySQLiteFreshSchemaDurabilityAndPermissions(t *testi
 	}
 	for _, path := range []string{root, manager.checkoutRoot, manager.lockRoot} {
 		info, statErr := os.Lstat(path)
-		if statErr != nil || !managedDirectoryModePrivate(info) || info.Mode()&os.ModeSymlink != 0 {
+		if statErr != nil || !managedDirectoryModePrivate(path, info) || info.Mode()&os.ModeSymlink != 0 {
 			t.Fatalf("%s mode = %v, %v", path, info.Mode(), statErr)
 		}
 	}
 	databaseInfo, statErr := os.Lstat(manager.databasePath())
-	if statErr != nil || !managedFileModePrivate(databaseInfo) || databaseInfo.Mode()&os.ModeSymlink != 0 {
+	if statErr != nil || !managedFileModePrivate(manager.databasePath(), databaseInfo) ||
+		databaseInfo.Mode()&os.ModeSymlink != 0 {
 		t.Fatalf("%s mode = %v, %v", manager.databasePath(), databaseInfo.Mode(), statErr)
 	}
 	database, err := manager.openInventoryDatabase(t.Context())

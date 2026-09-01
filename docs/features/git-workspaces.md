@@ -236,8 +236,8 @@ so hardlink aliases outside those namespaces remain denied; unsafe roots,
 selected sources, archive directories/files, or enumeration failures abort
 agent construction. Where POSIX modes are meaningful, the root, `checkouts/`,
 and `.locks/` are created as `0700` before database open and operation lock
-files are `0600`; Windows uses canonical handle/identity checks because
-`os.FileMode` does not represent ACL privacy. Pinned operation lock files are
+files are `0600`; Windows applies and validates a protected owner-only DACL
+because `os.FileMode` does not represent ACL privacy. Pinned operation lock files are
 opened relative to the verified directory handle, and its identity is checked
 before and after acquisition. Repository,
 workspace, lock, line, suspension, reservation-rotation, ordered ownership, and

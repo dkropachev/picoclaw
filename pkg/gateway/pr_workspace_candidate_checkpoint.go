@@ -61,8 +61,9 @@ type prWorkspaceCandidateCheckpointRevision struct {
 }
 
 type prWorkspaceCandidateCheckpointStore struct {
-	root string
-	mu   sync.Mutex
+	root           string
+	maximumRecords int
+	mu             sync.Mutex
 }
 
 const prWorkspaceCheckpointsSchema = `CREATE TABLE candidate_checkpoints (
@@ -159,6 +160,14 @@ func (store *prWorkspaceCandidateCheckpointStore) databasePath() string {
 	return filepath.Join(store.root, prWorkspaceCheckpointDatabaseFilename)
 }
 
+func (store *prWorkspaceCandidateCheckpointStore) recordLimit() int {
+	if store != nil && store.maximumRecords > 0 &&
+		store.maximumRecords <= prWorkspaceCheckpointMaximumRecords {
+		return store.maximumRecords
+	}
+	return prWorkspaceCheckpointMaximumRecords
+}
+
 func (store *prWorkspaceCandidateCheckpointStore) open(ctx context.Context) (*sql.DB, error) {
 	if store == nil {
 		return nil, errors.New("PR workspace candidate checkpoint store is unavailable")
@@ -251,6 +260,15 @@ func validatePRWorkspaceCheckpointSchema(ctx context.Context, conn *sql.Conn) er
 	}
 	if count > prWorkspaceCheckpointMaximumRecords {
 		return errors.New("PR workspace checkpoint count exceeds its limit")
+	}
+	var deletionCount int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM checkpoint_deletions`).Scan(
+		&deletionCount,
+	); err != nil {
+		return err
+	}
+	if deletionCount > prWorkspaceCheckpointMaximumRecords {
+		return errors.New("PR workspace checkpoint deletion history exceeds its limit")
 	}
 	var nextRevision, maximumRevision int64
 	if err := conn.QueryRowContext(ctx, `SELECT next_revision
@@ -360,7 +378,7 @@ func (store *prWorkspaceCandidateCheckpointStore) legacySourcesBounded(
 		if statErr != nil {
 			return nil, statErr
 		}
-		if !privatePRWorkspaceCheckpointDirectory(info) || info.Mode()&os.ModeSymlink != 0 {
+		if !privatePRWorkspaceCheckpointDirectory(directory, info) || info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("PR workspace checkpoint legacy archive ancestor is unsafe")
 		}
 	}
@@ -368,7 +386,7 @@ func (store *prWorkspaceCandidateCheckpointStore) legacySourcesBounded(
 	if err != nil {
 		return nil, err
 	}
-	if !privatePRWorkspaceCheckpointDirectory(rootInfo) || rootInfo.Mode()&os.ModeSymlink != 0 {
+	if !privatePRWorkspaceCheckpointDirectory(store.root, rootInfo) || rootInfo.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("PR workspace checkpoint directory is unsafe")
 	}
 	directory, err := os.Open(store.root)
@@ -399,7 +417,8 @@ func (store *prWorkspaceCandidateCheckpointStore) legacySourcesBounded(
 			if statErr != nil {
 				return fail(statErr)
 			}
-			if !privatePRWorkspaceCheckpointFile(info) || info.Mode()&os.ModeSymlink != 0 {
+			path := filepath.Join(store.root, name)
+			if !privatePRWorkspaceCheckpointFile(path, info) || info.Mode()&os.ModeSymlink != 0 {
 				return fail(errors.New("PR workspace checkpoint legacy source is unsafe"))
 			}
 			digest := sha256.Sum256([]byte(name))
@@ -421,7 +440,7 @@ func (store *prWorkspaceCandidateCheckpointStore) legacySourcesBounded(
 	}
 	currentRoot, err := os.Lstat(store.root)
 	if err != nil || !os.SameFile(rootInfo, currentRoot) ||
-		!privatePRWorkspaceCheckpointDirectory(currentRoot) {
+		!privatePRWorkspaceCheckpointDirectory(store.root, currentRoot) {
 		return nil, errors.Join(errors.New("PR workspace checkpoint directory changed"), err)
 	}
 	sort.Slice(sources, func(left, right int) bool { return sources[left].Relative < sources[right].Relative })
@@ -622,7 +641,7 @@ func (store *prWorkspaceCandidateCheckpointStore) Save(
 			    FROM candidate_checkpoints`).Scan(&count); queryErr != nil {
 				return queryErr
 			}
-			if count >= prWorkspaceCheckpointMaximumRecords {
+			if count >= store.recordLimit() {
 				return errPRWorkspaceCheckpointCapacity
 			}
 			allocated, allocateErr := allocatePRWorkspaceCheckpointRevision(context.Background(), conn)
@@ -743,6 +762,17 @@ func (store *prWorkspaceCandidateCheckpointStore) Remove(
 		if !found {
 			return nil
 		}
+		var existingDeletion, deletionCount int
+		if queryErr := conn.QueryRowContext(context.Background(), `SELECT
+		        EXISTS(SELECT 1 FROM checkpoint_deletions WHERE workspace_id = ?),
+		        (SELECT COUNT(*) FROM checkpoint_deletions)`, workspaceID).Scan(
+			&existingDeletion, &deletionCount,
+		); queryErr != nil {
+			return queryErr
+		}
+		if existingDeletion == 0 && deletionCount >= store.recordLimit() {
+			return errPRWorkspaceCheckpointCapacity
+		}
 		result, err := conn.ExecContext(context.Background(),
 			`DELETE FROM candidate_checkpoints WHERE workspace_id = ? AND row_version = ?`,
 			workspaceID, sequence,
@@ -804,6 +834,56 @@ func (store *prWorkspaceCandidateCheckpointStore) removalMatches(
 		return false, err
 	}
 	return matches == 1, nil
+}
+
+func (store *prWorkspaceCandidateCheckpointStore) reconcileFinalized(
+	checkpoint prWorkspaceCandidateCheckpoint,
+	expected prWorkspaceCandidateCheckpointRevision,
+) (prWorkspaceCandidateCheckpointRevision, bool, error) {
+	if store == nil || checkpoint.State != prWorkspaceCandidateCheckpointParked || checkpoint.Fence == nil ||
+		!expected.exists || !validPRWorkspaceCheckpointRevision(expected, checkpoint.WorkspaceID) {
+		return prWorkspaceCandidateCheckpointRevision{}, false, errors.New(
+			"PR workspace finalized checkpoint reconciliation is invalid",
+		)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	database, err := store.open(context.Background())
+	if err != nil {
+		return prWorkspaceCandidateCheckpointRevision{}, false, err
+	}
+	defer database.Close()
+	var revision prWorkspaceCandidateCheckpointRevision
+	matched := false
+	err = sqlitestore.Immediate(context.Background(), database, func(conn *sql.Conn) error {
+		current, sequence, found, loadErr := loadPRWorkspaceCheckpoint(
+			context.Background(), conn, checkpoint.WorkspaceID,
+		)
+		if loadErr != nil || !found || !equivalentPRWorkspaceCheckpoint(current, checkpoint) {
+			return loadErr
+		}
+		var interveningDeletion int
+		if queryErr := conn.QueryRowContext(context.Background(), `SELECT COUNT(*)
+		    FROM checkpoint_deletions
+		    WHERE workspace_id = ? AND deletion_sequence > ?`,
+			checkpoint.WorkspaceID, expected.sequence,
+		).Scan(&interveningDeletion); queryErr != nil {
+			return queryErr
+		}
+		if interveningDeletion != 0 {
+			return nil
+		}
+		var revisionErr error
+		revision, revisionErr = revisionForPRWorkspaceCheckpoint(
+			context.Background(), conn, current, sequence, true, checkpoint.WorkspaceID,
+		)
+		matched = revisionErr == nil
+		return revisionErr
+	})
+	if err != nil {
+		return prWorkspaceCandidateCheckpointRevision{}, false, err
+	}
+	return revision, matched, nil
 }
 
 func allocatePRWorkspaceCheckpointRevision(ctx context.Context, conn *sql.Conn) (int64, error) {

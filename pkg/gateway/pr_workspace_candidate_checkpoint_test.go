@@ -35,7 +35,7 @@ func TestPRWorkspaceCandidateCheckpointStoreRoundTripAndRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !privatePRWorkspaceCheckpointFile(info) {
+	if !privatePRWorkspaceCheckpointFile(store.databasePath(), info) {
 		t.Fatalf("checkpoint mode = %v", info.Mode())
 	}
 	loaded, loadedRevision, found, err := store.Load(checkpoint.WorkspaceID)
@@ -247,7 +247,7 @@ func TestPRWorkspaceCandidateCheckpointSQLiteMigratesArchivesAndReopens(t *testi
 	if _, statErr := os.Stat(legacy); !os.IsNotExist(statErr) {
 		t.Fatalf("legacy checkpoint remains: %v", statErr)
 	}
-	if info, statErr := os.Stat(archive); statErr != nil || !privatePRWorkspaceCheckpointFile(info) {
+	if info, statErr := os.Stat(archive); statErr != nil || !privatePRWorkspaceCheckpointFile(archive, info) {
 		t.Fatalf("legacy checkpoint archive = %#v, %v", info, statErr)
 	}
 	database, err := store.open(t.Context())
@@ -694,6 +694,75 @@ func TestPRWorkspaceCheckpointAbsenceRevisionsAreWorkspaceScoped(t *testing.T) {
 	}
 }
 
+func TestPRWorkspaceCheckpointDeletionHistoryCapacityIsBounded(t *testing.T) {
+	t.Run("new identity removal fails without deleting", func(t *testing.T) {
+		store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		store.maximumRecords = 1
+		checkpointA := prWorkspaceCandidateCheckpointFixture()
+		checkpointA.WorkspaceID = "devw-deletion-cap-a"
+		revisionA, err := store.Save(
+			checkpointA,
+			requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpointA.WorkspaceID),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if removeErr := store.Remove(checkpointA.WorkspaceID, revisionA); removeErr != nil {
+			t.Fatal(removeErr)
+		}
+		checkpointB := checkpointA
+		checkpointB.WorkspaceID = "devw-deletion-cap-b"
+		revisionB, err := store.Save(
+			checkpointB,
+			requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpointB.WorkspaceID),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Remove(checkpointB.WorkspaceID, revisionB); !errors.Is(
+			err,
+			errPRWorkspaceCheckpointCapacity,
+		) {
+			t.Fatalf("new deletion at history capacity error = %v", err)
+		}
+		if _, _, found, err := store.Load(checkpointB.WorkspaceID); err != nil || !found {
+			t.Fatalf("capacity-rejected deletion removed checkpoint: found:%v error:%v", found, err)
+		}
+	})
+
+	t.Run("existing identity tombstone updates", func(t *testing.T) {
+		store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		store.maximumRecords = 1
+		checkpoint := prWorkspaceCandidateCheckpointFixture()
+		revision, err := store.Save(
+			checkpoint,
+			requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if removeErr := store.Remove(checkpoint.WorkspaceID, revision); removeErr != nil {
+			t.Fatal(removeErr)
+		}
+		revision, err = store.Save(
+			checkpoint,
+			requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Remove(checkpoint.WorkspaceID, revision); err != nil {
+			t.Fatalf("existing deletion tombstone update at capacity: %v", err)
+		}
+	})
+}
+
 //nolint:govet // Narrow test assertions intentionally use independent error scopes.
 func TestPRWorkspaceRuntimeCarriesCheckpointRevisionAcrossSaves(t *testing.T) {
 	store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
@@ -861,8 +930,9 @@ func TestPRWorkspaceCheckpointIdempotentTerminalReplayAcrossProcesses(t *testing
 		}
 		waitForPRWorkspaceCheckpointProcessFile(t, release)
 		runtime := &prWorkspaceImplementationRuntime{checkpoints: store}
-		switch os.Getenv("PICOCLAW_CHECKPOINT_REPLAY_OPERATION") {
-		case "finalize":
+		operation := os.Getenv("PICOCLAW_CHECKPOINT_REPLAY_OPERATION")
+		switch operation {
+		case "finalize", "finalize_aba":
 			candidate := prWorkspaceCandidateFromCheckpoint(checkpoint, revision)
 			candidate.parked = &gitworkspace.PinnedLineParkResult{}
 			_, fence := parkedPRWorkspaceCheckpoint(checkpoint)
@@ -874,13 +944,19 @@ func TestPRWorkspaceCheckpointIdempotentTerminalReplayAcrossProcesses(t *testing
 		default:
 			t.Fatal("terminal replay helper operation is invalid")
 		}
+		if operation == "finalize_aba" {
+			if !errors.Is(err, errPRWorkspaceCandidateCheckpointConflict) {
+				t.Fatalf("terminal ABA replay helper error = %v", err)
+			}
+			return
+		}
 		if err != nil {
 			t.Fatalf("terminal replay helper error = %v", err)
 		}
 		return
 	}
 
-	for _, operation := range []string{"finalize", "acknowledge"} {
+	for _, operation := range []string{"finalize", "finalize_aba", "acknowledge"} {
 		t.Run(operation, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "active")
 			store, err := newPRWorkspaceCandidateCheckpointStore(root)
@@ -932,6 +1008,24 @@ func TestPRWorkspaceCheckpointIdempotentTerminalReplayAcrossProcesses(t *testing
 				if _, err := store.Save(checkpoint, revision); err != nil {
 					t.Fatal(err)
 				}
+			} else if operation == "finalize_aba" {
+				parked, _ := parkedPRWorkspaceCheckpoint(checkpoint)
+				parkedRevision, saveErr := store.Save(parked, revision)
+				if saveErr != nil {
+					t.Fatal(saveErr)
+				}
+				if err := store.Remove(checkpoint.WorkspaceID, parkedRevision); err != nil {
+					t.Fatal(err)
+				}
+				absent = requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
+				recreatedRevision, saveErr := store.Save(checkpoint, absent)
+				if saveErr != nil {
+					t.Fatal(saveErr)
+				}
+				checkpoint, _ = parkedPRWorkspaceCheckpoint(checkpoint)
+				if _, saveErr := store.Save(checkpoint, recreatedRevision); saveErr != nil {
+					t.Fatal(saveErr)
+				}
 			} else if err := store.Remove(checkpoint.WorkspaceID, revision); err != nil {
 				t.Fatal(err)
 			}
@@ -942,7 +1036,7 @@ func TestPRWorkspaceCheckpointIdempotentTerminalReplayAcrossProcesses(t *testing
 				t.Fatalf("terminal replay helper failed: %v\n%s", err, output.String())
 			}
 			loaded, _, found, err := store.Load(checkpoint.WorkspaceID)
-			if operation == "finalize" {
+			if operation == "finalize" || operation == "finalize_aba" {
 				if err != nil || !found || !equivalentPRWorkspaceCheckpoint(loaded, checkpoint) {
 					t.Fatalf("terminal finalization replay = %#v, found:%v error:%v", loaded, found, err)
 				}
@@ -1190,6 +1284,23 @@ func TestPRWorkspaceCandidateCheckpointSQLiteRejectsSchemaAndRowTampering(t *tes
 			tamper: func(t *testing.T, database *sql.DB) {
 				if _, err := database.Exec(`UPDATE candidate_checkpoints
                     SET candidate_parent_commit = 'different-parent'`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "excess deletion history",
+			tamper: func(t *testing.T, database *sql.DB) {
+				if _, err := database.Exec(`WITH RECURSIVE sequence(value) AS (
+				    SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value <= 10000
+				) INSERT INTO checkpoint_deletions(
+				    workspace_id, deleted_row_version, deleted_state_digest, deletion_sequence
+				) SELECT printf('devw-deleted-%05d', value), 1, zeroblob(32), value + 1
+				FROM sequence`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.Exec(`UPDATE checkpoint_metadata
+				    SET next_revision = 20000 WHERE singleton = 1`); err != nil {
 					t.Fatal(err)
 				}
 			},

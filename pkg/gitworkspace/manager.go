@@ -313,11 +313,8 @@ func NewManager(opts Options) (*Manager, error) {
 	if err != nil || rootIdentity.Mode()&os.ModeSymlink != 0 || !rootIdentity.IsDir() {
 		return nil, errors.New("git workspace root is not a real directory")
 	}
-	if chmodErr := os.Chmod(root, 0o700); chmodErr != nil {
-		return nil, fmt.Errorf("secure git workspace root: %w", chmodErr)
-	}
-	rootIdentity, err = os.Lstat(root)
-	if err != nil || !managedDirectoryModePrivate(rootIdentity) {
+	rootIdentity, err = fileutil.SecurePrivateDirectory(root)
+	if err != nil || !managedDirectoryModePrivate(root, rootIdentity) {
 		return nil, errors.New("git workspace root is not private")
 	}
 	checkoutRoot := filepath.Join(root, "checkouts")
@@ -377,11 +374,8 @@ func preparePrivateManagedDirectory(path, label string) (fs.FileInfo, error) {
 	if filepath.Clean(canonical) != filepath.Clean(path) {
 		return nil, fmt.Errorf("%s is not canonical", label)
 	}
-	if chmodErr := os.Chmod(path, 0o700); chmodErr != nil {
-		return nil, fmt.Errorf("secure %s: %w", label, chmodErr)
-	}
-	secured, err := os.Lstat(path)
-	if err != nil || !os.SameFile(identity, secured) || !managedDirectoryModePrivate(secured) {
+	secured, err := fileutil.SecurePrivateDirectory(path)
+	if err != nil || !os.SameFile(identity, secured) || !managedDirectoryModePrivate(path, secured) {
 		return nil, fmt.Errorf("%s changed while being secured", label)
 	}
 	return secured, nil
@@ -1740,7 +1734,7 @@ func validatePrivateManagedDirectory(path string, identity fs.FileInfo, label st
 	if err != nil {
 		return fmt.Errorf("inspect %s permissions: %w", label, err)
 	}
-	if !managedDirectoryModePrivate(info) {
+	if !managedDirectoryModePrivate(path, info) {
 		return fmt.Errorf("%s is not private", label)
 	}
 	return nil

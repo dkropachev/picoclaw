@@ -659,11 +659,13 @@ func (runtime *prWorkspaceImplementationRuntime) saveCandidateCheckpointRevision
 	}
 	revision, err := runtime.checkpoints.Save(checkpoint, candidate.checkpointRevision)
 	if errors.Is(err, errPRWorkspaceCandidateCheckpointConflict) {
-		current, currentRevision, found, loadErr := runtime.checkpoints.Load(checkpoint.WorkspaceID)
-		if loadErr != nil {
-			return loadErr
+		currentRevision, matched, reconcileErr := runtime.checkpoints.reconcileFinalized(
+			checkpoint, candidate.checkpointRevision,
+		)
+		if reconcileErr != nil {
+			return reconcileErr
 		}
-		if !found || !equivalentPRWorkspaceCheckpoint(current, checkpoint) {
+		if !matched {
 			return err
 		}
 		revision, err = currentRevision, nil

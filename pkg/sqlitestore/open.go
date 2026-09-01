@@ -250,10 +250,11 @@ func ensurePrivateDir(path string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("database directory must be a real directory")
 	}
-	if err := chmodSQLitePath(path, 0o700); err != nil {
-		return err
+	if chmodErr := chmodSQLitePath(path, 0o700); chmodErr != nil {
+		return chmodErr
 	}
-	return nil
+	_, err = fileutil.SecurePrivateDirectory(path)
+	return err
 }
 
 func sqliteDSN(path string, busyTimeout time.Duration) (string, error) {
@@ -600,6 +601,9 @@ func secureSQLiteFiles(path string) error {
 			return err
 		}
 		if err := file.Close(); err != nil {
+			return err
+		}
+		if _, err := fileutil.SecurePrivateFile(candidate); err != nil {
 			return err
 		}
 	}
