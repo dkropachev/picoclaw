@@ -317,7 +317,7 @@ func NewManager(opts Options) (*Manager, error) {
 		return nil, fmt.Errorf("secure git workspace root: %w", chmodErr)
 	}
 	rootIdentity, err = os.Lstat(root)
-	if err != nil || rootIdentity.Mode().Perm() != 0o700 {
+	if err != nil || !managedDirectoryModePrivate(rootIdentity) {
 		return nil, errors.New("git workspace root is not private")
 	}
 	checkoutRoot := filepath.Join(root, "checkouts")
@@ -381,7 +381,7 @@ func preparePrivateManagedDirectory(path, label string) (fs.FileInfo, error) {
 		return nil, fmt.Errorf("secure %s: %w", label, chmodErr)
 	}
 	secured, err := os.Lstat(path)
-	if err != nil || !os.SameFile(identity, secured) || secured.Mode().Perm() != 0o700 {
+	if err != nil || !os.SameFile(identity, secured) || !managedDirectoryModePrivate(secured) {
 		return nil, fmt.Errorf("%s changed while being secured", label)
 	}
 	return secured, nil
@@ -1740,7 +1740,7 @@ func validatePrivateManagedDirectory(path string, identity fs.FileInfo, label st
 	if err != nil {
 		return fmt.Errorf("inspect %s permissions: %w", label, err)
 	}
-	if info.Mode().Perm() != 0o700 {
+	if !managedDirectoryModePrivate(info) {
 		return fmt.Errorf("%s is not private", label)
 	}
 	return nil

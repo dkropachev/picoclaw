@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1599,7 +1600,7 @@ func TestManagerAcquirePinnedRejectsPathTampering(t *testing.T) {
 			!strings.Contains(err.Error(), "checkout root") {
 			t.Fatalf("NewManager() with checkout symlink error = %v", err)
 		}
-		if info, err := os.Lstat(root); err != nil || info.Mode().Perm() != 0o700 {
+		if info, err := os.Lstat(root); err != nil || !managedDirectoryModePrivate(info) {
 			t.Fatalf("failed constructor root mode = %v, %v", info.Mode(), err)
 		}
 	})
@@ -1616,7 +1617,7 @@ func TestManagerAcquirePinnedRejectsPathTampering(t *testing.T) {
 			!strings.Contains(err.Error(), "operation lock root") {
 			t.Fatalf("NewManager() with operation lock symlink error = %v", err)
 		}
-		if info, err := os.Lstat(root); err != nil || info.Mode().Perm() != 0o700 {
+		if info, err := os.Lstat(root); err != nil || !managedDirectoryModePrivate(info) {
 			t.Fatalf("failed constructor root mode = %v, %v", info.Mode(), err)
 		}
 	})
@@ -1624,16 +1625,18 @@ func TestManagerAcquirePinnedRejectsPathTampering(t *testing.T) {
 	t.Run("operation lock root replacement and mode", func(t *testing.T) {
 		now := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
 		manager := newTestManager(t, &now)
-		if err := os.Chmod(manager.lockRoot, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if _, _, release, err := manager.acquirePinnedOperation(
-			context.Background(), "operation-lock-mode",
-		); err == nil || release != nil || !strings.Contains(err.Error(), "not private") {
-			t.Fatalf("public operation lock root acquisition = release:%v error:%v", release != nil, err)
-		}
-		if err := os.Chmod(manager.lockRoot, 0o700); err != nil {
-			t.Fatal(err)
+		if runtime.GOOS != "windows" {
+			if err := os.Chmod(manager.lockRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, release, err := manager.acquirePinnedOperation(
+				context.Background(), "operation-lock-mode",
+			); err == nil || release != nil || !strings.Contains(err.Error(), "not private") {
+				t.Fatalf("public operation lock root acquisition = release:%v error:%v", release != nil, err)
+			}
+			if err := os.Chmod(manager.lockRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
 		}
 		moved := manager.lockRoot + "-moved"
 		if err := os.Rename(manager.lockRoot, moved); err != nil {
@@ -1663,7 +1666,7 @@ func TestManagerAcquirePinnedRejectsPathTampering(t *testing.T) {
 			manager.lockRoot,
 			pinnedOperationLockFilenamePrefix+hex.EncodeToString(digest[:])+".lock",
 		)
-		if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		if info, err := os.Lstat(path); err != nil || !managedFileModePrivate(info) {
 			t.Fatalf("operation lock file mode = %v, %v", info.Mode(), err)
 		}
 	})

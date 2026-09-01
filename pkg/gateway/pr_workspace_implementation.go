@@ -621,7 +621,12 @@ func (runtime *prWorkspaceImplementationRuntime) saveCandidateCheckpoint(
 		GitWorkspaceID: candidate.candidate.WorkspaceID, LineID: candidate.lineID,
 		Lease: candidate.lease, Candidate: candidate.candidate,
 	}
-	return runtime.saveCandidateCheckpointRevision(checkpoint, candidate)
+	revision, err := runtime.checkpoints.Save(checkpoint, candidate.checkpointRevision)
+	if err != nil {
+		return err
+	}
+	candidate.checkpointRevision = revision
+	return nil
 }
 
 func (runtime *prWorkspaceImplementationRuntime) saveFinalizedCandidateCheckpoint(
@@ -649,6 +654,9 @@ func (runtime *prWorkspaceImplementationRuntime) saveCandidateCheckpointRevision
 	checkpoint prWorkspaceCandidateCheckpoint,
 	candidate *prWorkspaceCandidate,
 ) error {
+	if checkpoint.State != prWorkspaceCandidateCheckpointParked || checkpoint.Fence == nil {
+		return errors.New("PR workspace finalized candidate checkpoint is invalid")
+	}
 	revision, err := runtime.checkpoints.Save(checkpoint, candidate.checkpointRevision)
 	if errors.Is(err, errPRWorkspaceCandidateCheckpointConflict) {
 		current, currentRevision, found, loadErr := runtime.checkpoints.Load(checkpoint.WorkspaceID)
@@ -675,11 +683,11 @@ func (runtime *prWorkspaceImplementationRuntime) removeAcknowledgedCandidateChec
 	if !errors.Is(err, errPRWorkspaceCandidateCheckpointConflict) {
 		return err
 	}
-	_, _, found, loadErr := runtime.checkpoints.Load(workspaceID)
-	if loadErr != nil {
-		return loadErr
+	matches, matchErr := runtime.checkpoints.removalMatches(workspaceID, revision)
+	if matchErr != nil {
+		return matchErr
 	}
-	if !found {
+	if matches {
 		return nil
 	}
 	return err

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestPRWorkspaceCandidateCheckpointStoreRoundTripAndRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 || !info.Mode().IsRegular() {
+	if !privatePRWorkspaceCheckpointFile(info) {
 		t.Fatalf("checkpoint mode = %v", info.Mode())
 	}
 	loaded, loadedRevision, found, err := store.Load(checkpoint.WorkspaceID)
@@ -49,7 +50,36 @@ func TestPRWorkspaceCandidateCheckpointStoreRoundTripAndRemove(t *testing.T) {
 		t.Fatalf("Load(after remove) found = %v, error = %v", found, err)
 	}
 	if absent.sequence <= loadedRevision.sequence {
-		t.Fatalf("deletion did not advance absence horizon: before=%d after=%d", loadedRevision.sequence, absent.sequence)
+		t.Fatalf(
+			"deletion did not advance absence horizon: before=%d after=%d",
+			loadedRevision.sequence,
+			absent.sequence,
+		)
+	}
+	database, err := store.open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deletedVersion, deletionSequence int64
+	var deletedDigest []byte
+	if queryErr := database.QueryRow(`SELECT deleted_row_version, deleted_state_digest, deletion_sequence
+	    FROM checkpoint_deletions WHERE workspace_id = ?`, checkpoint.WorkspaceID).Scan(
+		&deletedVersion, &deletedDigest, &deletionSequence,
+	); queryErr != nil {
+		_ = database.Close()
+		t.Fatal(queryErr)
+	}
+	if closeErr := database.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if deletedVersion != loadedRevision.sequence ||
+		!bytes.Equal(deletedDigest, loadedRevision.stateDigest[:]) || deletionSequence != absent.sequence {
+		t.Fatalf(
+			"deletion tombstone = version:%d digest:%x sequence:%d",
+			deletedVersion,
+			deletedDigest,
+			deletionSequence,
+		)
 	}
 	if err = store.Remove(checkpoint.WorkspaceID, absent); err != nil {
 		t.Fatalf("idempotent Remove() error = %v", err)
@@ -86,6 +116,9 @@ func TestPRWorkspaceCandidateCheckpointStoreRejectsUnsafeOrMalformedFiles(t *tes
 	})
 
 	t.Run("public mode", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows FileMode permission bits do not represent ACL privacy")
+		}
 		root := filepath.Join(t.TempDir(), "active")
 		if err := os.MkdirAll(root, 0o700); err != nil {
 			t.Fatal(err)
@@ -214,7 +247,7 @@ func TestPRWorkspaceCandidateCheckpointSQLiteMigratesArchivesAndReopens(t *testi
 	if _, statErr := os.Stat(legacy); !os.IsNotExist(statErr) {
 		t.Fatalf("legacy checkpoint remains: %v", statErr)
 	}
-	if info, statErr := os.Stat(archive); statErr != nil || info.Mode().Perm() != 0o600 {
+	if info, statErr := os.Stat(archive); statErr != nil || !privatePRWorkspaceCheckpointFile(info) {
 		t.Fatalf("legacy checkpoint archive = %#v, %v", info, statErr)
 	}
 	database, err := store.open(t.Context())
@@ -374,7 +407,7 @@ func TestPRWorkspaceCheckpointSchemaV1UpgradeClosesImportAndSeedsRevision(t *tes
 	if err := database.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
 		t.Fatal(err)
 	}
-	if userVersion != 2 {
+	if userVersion != 3 {
 		t.Fatalf("upgraded checkpoint user_version = %d", userVersion)
 	}
 }
@@ -434,7 +467,7 @@ func TestPRWorkspaceCandidateCheckpointSQLiteCASAndSchemaFences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`PRAGMA user_version = 3`); err != nil {
+	if _, err := raw.Exec(`PRAGMA user_version = 4`); err != nil {
 		t.Fatal(err)
 	}
 	_ = raw.Close()
@@ -638,6 +671,29 @@ func TestPRWorkspaceCheckpointCapacityGuardDoesNotWedgeStore(t *testing.T) {
 	}
 }
 
+func TestPRWorkspaceCheckpointAbsenceRevisionsAreWorkspaceScoped(t *testing.T) {
+	store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointA := prWorkspaceCandidateCheckpointFixture()
+	checkpointA.WorkspaceID = "devw-absence-a"
+	checkpointB := checkpointA
+	checkpointB.WorkspaceID = "devw-absence-b"
+	absentA := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpointA.WorkspaceID)
+	absentB := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpointB.WorkspaceID)
+	revisionB, err := store.Save(checkpointB, absentB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Remove(checkpointB.WorkspaceID, revisionB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Save(checkpointA, absentA); err != nil {
+		t.Fatalf("unrelated checkpoint invalidated absence revision: %v", err)
+	}
+}
+
 //nolint:govet // Narrow test assertions intentionally use independent error scopes.
 func TestPRWorkspaceRuntimeCarriesCheckpointRevisionAcrossSaves(t *testing.T) {
 	store, err := newPRWorkspaceCandidateCheckpointStore(filepath.Join(t.TempDir(), "active"))
@@ -681,6 +737,27 @@ func TestPRWorkspaceRuntimeCarriesCheckpointRevisionAcrossSaves(t *testing.T) {
 		errPRWorkspaceCandidateCheckpointConflict,
 	) {
 		t.Fatalf("runtime stale checkpoint save error = %v", err)
+	}
+	current, currentRevision, found, err := store.Load(checkpoint.WorkspaceID)
+	if err != nil || !found {
+		t.Fatalf("updated runtime checkpoint load = found:%v error:%v", found, err)
+	}
+	if err := store.Remove(checkpoint.WorkspaceID, currentRevision); err != nil {
+		t.Fatal(err)
+	}
+	absent := requireAbsentPRWorkspaceCheckpointRevision(t, store, checkpoint.WorkspaceID)
+	original := prWorkspaceCandidateCheckpointFixture()
+	if _, err := store.Save(original, absent); err != nil {
+		t.Fatal(err)
+	}
+	if current.Candidate.CandidateDigest == original.Candidate.CandidateDigest {
+		t.Fatal("runtime ABA fixture did not change state before replacement")
+	}
+	if err := runtime.saveCandidateCheckpoint(checkpoint.WorkspaceID, &stale); !errors.Is(
+		err,
+		errPRWorkspaceCandidateCheckpointConflict,
+	) {
+		t.Fatalf("runtime accepted exact-payload ABA replacement: %v", err)
 	}
 }
 
@@ -1079,6 +1156,14 @@ func TestPRWorkspaceCandidateCheckpointSQLiteRejectsSchemaAndRowTampering(t *tes
 			name: "missing index",
 			tamper: func(t *testing.T, database *sql.DB) {
 				if _, err := database.Exec(`DROP INDEX candidate_checkpoints_state_idx`); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing deletion index",
+			tamper: func(t *testing.T, database *sql.DB) {
+				if _, err := database.Exec(`DROP INDEX checkpoint_deletions_sequence_idx`); err != nil {
 					t.Fatal(err)
 				}
 			},

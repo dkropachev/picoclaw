@@ -227,7 +227,7 @@ func agentCheckpointRetainedStateFilesBounded(
 	case os.IsNotExist(err):
 	case err != nil:
 		return nil, fmt.Errorf("enumerate PR workspace checkpoint state: %w", err)
-	case !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || rootInfo.Mode().Perm()&0o077 != 0:
+	case !privateAgentCheckpointDirectory(rootInfo) || rootInfo.Mode()&os.ModeSymlink != 0:
 		return nil, errors.New("enumerate PR workspace checkpoint state: root is unsafe")
 	default:
 		root, openErr := os.Open(checkpointRoot)
@@ -257,7 +257,7 @@ func agentCheckpointRetainedStateFilesBounded(
 			if statErr != nil {
 				return statErr
 			}
-			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+			if !privateAgentCheckpointFile(info) || info.Mode()&os.ModeSymlink != 0 {
 				return errors.New("source is unsafe")
 			}
 			files[path] = struct{}{}
@@ -311,7 +311,7 @@ func enumerateCheckpointArchive(
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+	if !privateAgentCheckpointDirectory(info) || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("checkpoint archive contains an unsafe directory")
 	}
 	opened, err := os.Open(directory)
@@ -344,7 +344,7 @@ func enumerateCheckpointArchive(
 				archiveRoot, path, depth+1, maximumDepth, maximumEntries, entries, files,
 			)
 		}
-		if !entryInfo.Mode().IsRegular() || entryInfo.Mode().Perm()&0o077 != 0 {
+		if !privateAgentCheckpointFile(entryInfo) {
 			return errors.New("checkpoint archive contains an unsafe file")
 		}
 		files[path] = struct{}{}

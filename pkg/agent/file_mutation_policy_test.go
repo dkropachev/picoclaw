@@ -1424,6 +1424,9 @@ func TestAgentCheckpointRetainedStateEnumerationBoundsAndModes(t *testing.T) {
 		{
 			name: "public archive directory", rootLimit: 2, sources: 1, entries: 4, depth: 2,
 			setup: func(t *testing.T, _, archiveRoot string) {
+				if runtime.GOOS == "windows" {
+					t.Skip("Windows FileMode permission bits do not represent ACL privacy")
+				}
 				path := filepath.Join(archiveRoot, "public")
 				if err := os.MkdirAll(path, 0o700); err != nil {
 					t.Fatal(err)

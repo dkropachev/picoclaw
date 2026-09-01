@@ -123,6 +123,16 @@ const prWorkspaceCheckpointImportStateSchema = `CREATE TABLE checkpoint_legacy_i
     import_closed  INTEGER NOT NULL CHECK(import_closed = 1)
 ) STRICT`
 
+const prWorkspaceCheckpointDeletionsSchema = `CREATE TABLE checkpoint_deletions (
+    workspace_id         TEXT PRIMARY KEY CHECK(length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 256),
+    deleted_row_version  INTEGER NOT NULL CHECK(deleted_row_version > 0),
+    deleted_state_digest BLOB NOT NULL CHECK(length(deleted_state_digest) = 32),
+    deletion_sequence    INTEGER NOT NULL CHECK(deletion_sequence > deleted_row_version)
+) STRICT`
+
+const prWorkspaceCheckpointDeletionsSequenceIndexSchema = `CREATE INDEX checkpoint_deletions_sequence_idx
+    ON checkpoint_deletions(deletion_sequence, workspace_id)`
+
 const prWorkspaceCheckpointsStateIndexSchema = `CREATE INDEX candidate_checkpoints_state_idx
     ON candidate_checkpoints(state, workspace_id)`
 
@@ -178,6 +188,13 @@ func (store *prWorkspaceCandidateCheckpointStore) open(ctx context.Context) (*sq
 					return initializePRWorkspaceCheckpointMeta(ctx, conn, freshDatabase)
 				},
 			},
+			{
+				Version: 3,
+				Statements: []string{
+					prWorkspaceCheckpointDeletionsSchema,
+					prWorkspaceCheckpointDeletionsSequenceIndexSchema,
+				},
+			},
 		},
 		Validate: validatePRWorkspaceCheckpointSchema,
 		Legacy: &sqlitestore.LegacyOptions{
@@ -199,15 +216,18 @@ func validatePRWorkspaceCheckpointSchema(ctx context.Context, conn *sql.Conn) er
 	for _, object := range []struct{ typ, name, ddl string }{
 		{"table", "checkpoint_metadata", prWorkspaceCheckpointMetaSchema},
 		{"table", "checkpoint_legacy_import_state", prWorkspaceCheckpointImportStateSchema},
+		{"table", "checkpoint_deletions", prWorkspaceCheckpointDeletionsSchema},
 		{"table", "candidate_checkpoints", prWorkspaceCheckpointsSchema},
 		{"index", "candidate_checkpoints_state_idx", prWorkspaceCheckpointsStateIndexSchema},
+		{"index", "checkpoint_deletions_sequence_idx", prWorkspaceCheckpointDeletionsSequenceIndexSchema},
 	} {
 		if err := sqlitestore.ValidateSchemaObject(ctx, conn, object.typ, object.name, object.ddl); err != nil {
 			return err
 		}
 	}
 	for _, table := range []string{
-		"checkpoint_metadata", "checkpoint_legacy_import_state", "candidate_checkpoints",
+		"checkpoint_metadata", "checkpoint_legacy_import_state", "checkpoint_deletions",
+		"candidate_checkpoints",
 	} {
 		if err := sqlitestore.ValidateUniqueIndexSet(ctx, conn, table); err != nil {
 			return err
@@ -216,8 +236,9 @@ func validatePRWorkspaceCheckpointSchema(ctx context.Context, conn *sql.Conn) er
 	var unexpected, count int
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema
         WHERE name NOT LIKE 'sqlite_%' AND name NOT IN (
-	            'checkpoint_metadata', 'checkpoint_legacy_import_state',
-	            'candidate_checkpoints', 'candidate_checkpoints_state_idx',
+		            'checkpoint_metadata', 'checkpoint_legacy_import_state', 'checkpoint_deletions',
+		            'candidate_checkpoints', 'candidate_checkpoints_state_idx',
+		            'checkpoint_deletions_sequence_idx',
             'storage_imports', 'storage_import_issues', 'storage_imports_archive_status_idx'
         )`).Scan(&unexpected); err != nil {
 		return err
@@ -236,8 +257,11 @@ func validatePRWorkspaceCheckpointSchema(ctx context.Context, conn *sql.Conn) er
 	    FROM checkpoint_metadata WHERE singleton = 1`).Scan(&nextRevision); err != nil {
 		return err
 	}
-	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(row_version), 0)
-	    FROM candidate_checkpoints`).Scan(&maximumRevision); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT MAX(revision) FROM (
+	        SELECT COALESCE(MAX(row_version), 0) AS revision FROM candidate_checkpoints
+	        UNION ALL
+	        SELECT COALESCE(MAX(deletion_sequence), 0) AS revision FROM checkpoint_deletions
+	    )`).Scan(&maximumRevision); err != nil {
 		return err
 	}
 	var importStateRows int
@@ -336,7 +360,7 @@ func (store *prWorkspaceCandidateCheckpointStore) legacySourcesBounded(
 		if statErr != nil {
 			return nil, statErr
 		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		if !privatePRWorkspaceCheckpointDirectory(info) || info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("PR workspace checkpoint legacy archive ancestor is unsafe")
 		}
 	}
@@ -344,7 +368,7 @@ func (store *prWorkspaceCandidateCheckpointStore) legacySourcesBounded(
 	if err != nil {
 		return nil, err
 	}
-	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || rootInfo.Mode().Perm()&0o077 != 0 {
+	if !privatePRWorkspaceCheckpointDirectory(rootInfo) || rootInfo.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("PR workspace checkpoint directory is unsafe")
 	}
 	directory, err := os.Open(store.root)
@@ -375,7 +399,7 @@ func (store *prWorkspaceCandidateCheckpointStore) legacySourcesBounded(
 			if statErr != nil {
 				return fail(statErr)
 			}
-			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+			if !privatePRWorkspaceCheckpointFile(info) || info.Mode()&os.ModeSymlink != 0 {
 				return fail(errors.New("PR workspace checkpoint legacy source is unsafe"))
 			}
 			digest := sha256.Sum256([]byte(name))
@@ -396,7 +420,8 @@ func (store *prWorkspaceCandidateCheckpointStore) legacySourcesBounded(
 		return nil, closeErr
 	}
 	currentRoot, err := os.Lstat(store.root)
-	if err != nil || !os.SameFile(rootInfo, currentRoot) || currentRoot.Mode().Perm()&0o077 != 0 {
+	if err != nil || !os.SameFile(rootInfo, currentRoot) ||
+		!privatePRWorkspaceCheckpointDirectory(currentRoot) {
 		return nil, errors.Join(errors.New("PR workspace checkpoint directory changed"), err)
 	}
 	sort.Slice(sources, func(left, right int) bool { return sources[left].Relative < sources[right].Relative })
@@ -729,13 +754,56 @@ func (store *prWorkspaceCandidateCheckpointStore) Remove(
 		if err != nil || changed != 1 {
 			return errPRWorkspaceCandidateCheckpointConflict
 		}
-		if _, allocateErr := allocatePRWorkspaceCheckpointRevision(
+		deletionSequence, allocateErr := allocatePRWorkspaceCheckpointRevision(
 			context.Background(), conn,
-		); allocateErr != nil {
+		)
+		if allocateErr != nil {
 			return allocateErr
+		}
+		if _, execErr := conn.ExecContext(context.Background(), `INSERT INTO checkpoint_deletions(
+		    workspace_id, deleted_row_version, deleted_state_digest, deletion_sequence
+		) VALUES (?, ?, ?, ?)
+		ON CONFLICT(workspace_id) DO UPDATE SET
+		    deleted_row_version = excluded.deleted_row_version,
+		    deleted_state_digest = excluded.deleted_state_digest,
+		    deletion_sequence = excluded.deletion_sequence`,
+			workspaceID, expected.sequence, expected.stateDigest[:], deletionSequence,
+		); execErr != nil {
+			return fmt.Errorf("record PR workspace candidate checkpoint deletion: %w", execErr)
 		}
 		return nil
 	})
+}
+
+func (store *prWorkspaceCandidateCheckpointStore) removalMatches(
+	workspaceID string,
+	expected prWorkspaceCandidateCheckpointRevision,
+) (bool, error) {
+	if store == nil || !expected.exists ||
+		!validPRWorkspaceCheckpointRevision(expected, workspaceID) {
+		return false, errors.New("PR workspace candidate checkpoint removal match is invalid")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	database, err := store.open(context.Background())
+	if err != nil {
+		return false, err
+	}
+	defer database.Close()
+	var matches int
+	err = database.QueryRowContext(context.Background(), `SELECT COUNT(*)
+	    FROM checkpoint_deletions AS deletion
+	    WHERE deletion.workspace_id = ?
+	      AND deletion.deleted_row_version = ?
+	      AND deletion.deleted_state_digest = ?
+	      AND NOT EXISTS (
+	          SELECT 1 FROM candidate_checkpoints AS checkpoint
+	          WHERE checkpoint.workspace_id = deletion.workspace_id
+	      )`, workspaceID, expected.sequence, expected.stateDigest[:]).Scan(&matches)
+	if err != nil {
+		return false, err
+	}
+	return matches == 1, nil
 }
 
 func allocatePRWorkspaceCheckpointRevision(ctx context.Context, conn *sql.Conn) (int64, error) {
@@ -767,8 +835,11 @@ func revisionForPRWorkspaceCheckpoint(
 	workspaceID string,
 ) (prWorkspaceCandidateCheckpointRevision, error) {
 	if !found {
-		if err := queryer.QueryRowContext(ctx, `SELECT next_revision
-		    FROM checkpoint_metadata WHERE singleton = 1`).Scan(&sequence); err != nil {
+		err := queryer.QueryRowContext(ctx, `SELECT deletion_sequence
+		    FROM checkpoint_deletions WHERE workspace_id = ?`, workspaceID).Scan(&sequence)
+		if errors.Is(err, sql.ErrNoRows) {
+			sequence = 0
+		} else if err != nil {
 			return prWorkspaceCandidateCheckpointRevision{}, err
 		}
 		return prWorkspaceCandidateCheckpointRevision{
@@ -809,7 +880,7 @@ func validPRWorkspaceCheckpointRevision(
 	if revision.exists {
 		return revision.sequence > 0 && revision.stateDigest != [sha256.Size]byte{}
 	}
-	return revision.sequence > 0 && revision.stateDigest == [sha256.Size]byte{}
+	return revision.sequence >= 0 && revision.stateDigest == [sha256.Size]byte{}
 }
 
 func encodePRWorkspaceCheckpoint(checkpoint prWorkspaceCandidateCheckpoint) ([]byte, error) {

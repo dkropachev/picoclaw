@@ -64,8 +64,8 @@ func lockInventoryFileInDirectory(
 	}
 	defer directoryFile.Close()
 	openedIdentity, err := directoryFile.Stat()
-	if err != nil || expected == nil || !openedIdentity.IsDir() ||
-		openedIdentity.Mode().Perm() != 0o700 || !os.SameFile(openedIdentity, expected) {
+	if err != nil || expected == nil || !managedDirectoryModePrivate(openedIdentity) ||
+		!os.SameFile(openedIdentity, expected) {
 		return nil, errors.Join(
 			errors.New("git workspace operation lock root changed while opening"),
 			err,
