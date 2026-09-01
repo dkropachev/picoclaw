@@ -1844,29 +1844,24 @@ func TestWorkflowSQLitePrivateWorkingGateFreezesBeforeCreateAndRetry(t *testing.
 			subjectCanary, liveReferenceCanary, canonicalCanary, newLiveCanary, summaryCanary, outputCanary)
 	}
 
-	db, err := openWorkflowDatabase(t.Context(), workspace)
+	db, releaseDatabase, err := borrowWorkflowDatabase(t.Context(), workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer releaseDatabase()
 	var privateJSON []byte
 	if err := db.QueryRowContext(t.Context(), `SELECT private_context_json FROM workflow_run_payloads
 		WHERE run_id=?`, first.RunID).Scan(&privateJSON); err != nil {
-		db.Close()
 		t.Fatal(err)
 	}
 	needle := []byte(`"read_only_session":{`)
 	if !bytes.Contains(privateJSON, needle) {
-		db.Close()
 		t.Fatalf("private continuation has no frozen session: %s", privateJSON)
 	}
 	malformed := bytes.Replace(privateJSON, needle,
 		[]byte(`"read_only_session":{"unknown_sqlite_private_field":true,`), 1)
 	if _, err := db.ExecContext(t.Context(), `UPDATE workflow_run_payloads SET private_context_json=?
 		WHERE run_id=?`, malformed, first.RunID); err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.GetRun(t.Context(), first.RunID); !errors.Is(err, ErrPrivateWorkflowContext) {
