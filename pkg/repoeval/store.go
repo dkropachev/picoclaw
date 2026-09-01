@@ -365,8 +365,8 @@ func (s Store) Delete(ctx context.Context, id string, expectedVersion int64) err
 	if evaluation.Status != StatusDraft {
 		return ErrInvalidTransition
 	}
-	if err := ctx.Err(); err != nil {
-		return err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
 	}
 	database, err := s.open(ctx)
 	if err != nil {
