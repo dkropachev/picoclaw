@@ -48,6 +48,7 @@ var (
 	migrateOpenedSQLiteDatabase    = migrate
 	checkOpenedSQLiteIntegrity     = integrityCheck
 	archiveOpenedSQLiteLegacyFiles = archiveImportedSources
+	securePrivateSQLiteFile        = fileutil.SecurePrivateFile
 	openSQLiteFile                 = func(path string, flag int, mode os.FileMode) (sqliteFile, error) {
 		return os.OpenFile(path, flag, mode)
 	}
@@ -250,10 +251,11 @@ func ensurePrivateDir(path string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("database directory must be a real directory")
 	}
-	if err := chmodSQLitePath(path, 0o700); err != nil {
-		return err
+	if chmodErr := chmodSQLitePath(path, 0o700); chmodErr != nil {
+		return chmodErr
 	}
-	return nil
+	_, err = fileutil.SecurePrivateDirectory(path)
+	return err
 }
 
 func sqliteDSN(path string, busyTimeout time.Duration) (string, error) {
@@ -568,7 +570,7 @@ func foreignKeyCheckQuery(ctx context.Context, queryer contextQueryer, component
 }
 
 func secureSQLiteFiles(path string) error {
-	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
+	for index, candidate := range []string{path, path + "-wal", path + "-shm"} {
 		info, err := lstatSQLitePath(candidate)
 		if os.IsNotExist(err) {
 			continue
@@ -600,6 +602,15 @@ func secureSQLiteFiles(path string) error {
 			return err
 		}
 		if err := file.Close(); err != nil {
+			return err
+		}
+		if _, err := securePrivateSQLiteFile(candidate); err != nil {
+			// SQLite may remove an unused WAL or SHM companion after its opened
+			// handle is hardened and closed. A vanished companion no longer has an
+			// ACL to validate; the primary database must always remain strict.
+			if index > 0 && os.IsNotExist(err) {
+				continue
+			}
 			return err
 		}
 	}

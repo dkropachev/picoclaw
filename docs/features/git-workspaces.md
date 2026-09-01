@@ -50,8 +50,9 @@ never the caller's raw repository spelling.
 
 ## Reconstruction Notes
 
-- Similarity target: recreate a durable manager around a root directory with an
-  `inventory.json` file and checkout subdirectories.
+- Similarity target: recreate a durable manager around a root directory with a
+  relational `inventory.db`, retained legacy archives, and checkout
+  subdirectories.
 - Core types/functions: `gitworkspace.Manager`, `Options`, acquire/release/stat
   request/result structs, `PinnedAcquireRequest`, `PinnedReleaseRequest`,
   `PinnedCandidateRequest`, `PinnedCommitRequest`, `Manager.AcquirePinned`,
@@ -157,6 +158,7 @@ never the caller's raw repository spelling.
 | `FR-GITWS-019` | MUST | A generic acquire supplies `fresh: true` with one repository, optional validated ref, and session key. | The manager clones a new checkout or reuses only an unlocked clean fresh snapshot after fetching/pruning the exact origin and resolving the currently available requested ref. A local source repository may project its single safe network origin as `upstream_url` and a fixed `picoclaw-upstream` remote for later immutable reads. | Inventory records the fresh-snapshot marker and safe upstream identity. Clean release keeps the snapshot reusable; changed release preserves work and removes it from the fresh pool. | A dirty cached snapshot is preserved and skipped. A missing/deleted ref, option-like or changed same-session ref, credential-bearing repository URL, changed origin, unsafe control state, or refresh failure fails without silently using stale cached `HEAD`. | Repository review needs a current immutable source snapshot without converting the generic agent tool into pinned-controller authority. |
 | `FR-GITWS-020` | MUST | The trusted development controller lists a tree or reads one blob using the complete parked-line version/base/tip/tree fence, one `base`, `candidate`, or exact matching object revision, and a canonical relative path. | `ListPinnedLineTree` returns at most 500 sorted safe paths plus a continuation cursor. `ReadPinnedLineBlob` returns at most 1 MiB of valid UTF-8 regular-file content for the exact object. Both revalidate the retained workspace, private ref, detached checkout, origin, cleanliness, and control plane before and after reading. | Reads change no inventory, ref, checkout, index, ordinary file, reservation, publication, or provider state and expose no checkout path, internal ref, bearer, or Git metadata. | Stale or partial fences, another revision, traversal, absolute or control-bearing paths, symlinks, submodules, non-files, binary/NUL content, oversized output, cancellation, or pre/postflight drift fails without a partial result. The generic `git_workspace` tool and generic Git-workspace launcher API cannot invoke these methods. | A launcher may inspect one exact development candidate without granting browser code execution, filesystem traversal, mutation, or private-line discovery. |
 | `FR-GITWS-021` | MUST | `GET /api/git-workspaces` or `GET /api/git-workspaces/history` receives only the shared bounded `query`, opaque `cursor`, and `limit` parameters; an authenticated client directly reads `/api/git-workspaces/{id}`; or it reads or updates `/api/git-workspaces/settings`. | Inventory returns `workspaces` plus `total`, `next_cursor`, `canonical_query`, and typed `query_schema`, defaults to `ORDER BY updated DESC`, and exposes stable ID, repository, branch, status, locked, dirty, size, ignored, and updated fields. History returns the same envelope around `history`, defaults to `ORDER BY time DESC`, and exposes action, workspace, repository, agent, and time. Direct detail returns only one generic workspace. Settings returns configured and effective generic size/cleanup/drop limits and delays, the exact config revision, and restart effects. | Collection, detail, history, and settings reads mutate nothing. Settings PUT is same-origin, strictly decoded, validates all bounded values, requires the exact expected config revision, preserves unrelated configuration, and performs one fenced save before returning the new revision/effects. | Invalid queries return bounded structured errors with zero-based UTF-8 byte positions; cursors are bound to the canonical query; unsupported parameters, invalid IDs, stale/missing generic items, and unavailable manager/config state fail closed. Cross-origin, unknown/trailing/oversized settings input or a stale revision fails with no partial save. Controller-pinned resources remain indistinguishable from missing and never affect totals, suggestions, cursors, direct detail, history, or settings. | Server paging, backend-issued identities, and revision-fenced policy keep browser navigation and limits stable without declassifying private controller inventory or trusting client-side filtering. |
+| `FR-GITWS-022` | MUST | A manager first opens its configured root, reopens it, or concurrent manager processes mutate repository, workspace, development-line, rotation, or history state. | `inventory.db` uses the shared private WAL/FULL/foreign-key/busy-timeout contract and an exact strict schema with typed identities, states, versions, booleans, full-range second/nanosecond timestamps, normalized ordered child rows, explicit bounds, and indexes. Each save is one `BEGIN IMMEDIATE` generation compare-and-swap that replaces all relational rows without a transient foreign-key violation. | Valid bounded `inventory.json` is imported once before SQLite becomes authoritative, with the existing version/identity migration rules, a safe digest ledger, and a retained mode-preserving `legacy-json/git-workspaces-v1/inventory.json`; runtime never dual-writes JSON. | Malformed aggregate JSON, invalid causal/domain state, unsafe source path/type/mode, oversized input, schema drift, corruption, a future `user_version`, or a stale generation aborts without partial rows or archive. A committed archive transition retries without re-import. | Repository and controller-private lifecycle evidence must remain atomic across gateway and CLI processes without making a whole mutable JSON document the authority. |
 
 Event Automation's durable repair-controller composition extends these requirements only
 through the following Git Workspaces primitives; it grants this feature no CI,
@@ -222,14 +224,31 @@ maintenance never substitute for that lifecycle.
 
 ## Data And State Model
 
-The manager root contains `inventory.json`, the persistent kernel-lock target
-`inventory.lock`, and `checkouts/`. The inventory stores repository records,
-workspace records, generic refs, optional pinned source refs and commits, lock
-metadata, preserved branch names, drop timestamps, and independently bounded
-generic and controller-private event histories.
-Inventory version 4 uses a canonical string-valued version discriminator. It
-retains version 3's private development-line map, reservation-rotation chain,
-and one
+The manager root contains typed relational `inventory.db`, its private WAL/SHM
+companions, the persistent kernel-lock target `inventory.lock`, `checkouts/`,
+private canonical reservation-operation locks below owner-only `.locks/`, and retained legacy bytes
+below `legacy-json/git-workspaces-v1/`. The model-facing mutation policy also
+freezes the active `inventory.json`, database companions and locks, the
+checkpoint root before it exists, every selected active checkpoint JSON, and
+every retained checkpoint archive file. Batched safe enumeration bounds active
+entries, archive entries, depth, and modes while recording exact file identities
+so hardlink aliases outside those namespaces remain denied; unsafe roots,
+selected sources, archive directories/files, or enumeration failures abort
+agent construction. Where POSIX modes are meaningful, the root, `checkouts/`,
+and `.locks/` are created as `0700` before database open and operation lock
+files are `0600`; Windows applies and validates a protected owner-only DACL
+because `os.FileMode` does not represent ACL privacy. Pinned operation lock files are
+opened relative to the verified directory handle, and its identity is checked
+before and after acquisition. Repository,
+workspace, lock, line, suspension, reservation-rotation, ordered ownership, and
+independently bounded generic/controller-private history rows share one
+generation-fenced transaction. Explicit child-key indexes bound cascading
+repository/workspace/line rewrites. A durable import-horizon singleton makes
+SQLite authoritative after the first complete enumeration even when no
+`inventory.json` existed; later sources are audited and archived without
+changing inventory. Legacy inventory version 4 used a canonical
+string-valued version discriminator. Its import retains version 3's private
+development-line map, reservation-rotation chain, and one
 optional line-owner ID on its retained workspace. A line record binds its
 opaque identity to exactly one workspace/repository, original source ref and
 commit, deterministic internal `picoclaw/development/...` branch, current
@@ -769,10 +788,12 @@ contract.
 | `FR-GITWS-018` | [pkg/gitworkspace/development_line_push.go](../../pkg/gitworkspace/development_line_push.go), [pkg/gitworkspace/development_line_push_test.go](../../pkg/gitworkspace/development_line_push_test.go) |
 | `FR-GITWS-019` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go), [pkg/tools/integration/git_workspace_test.go](../../pkg/tools/integration/git_workspace_test.go), [pkg/workflows/repository_bug_finder_workflow_test.go](../../pkg/workflows/repository_bug_finder_workflow_test.go) |
 | `FR-GITWS-020` | [pkg/gitworkspace/development_line_browse.go](../../pkg/gitworkspace/development_line_browse.go), [pkg/gateway/pr_workspace_implementation.go](../../pkg/gateway/pr_workspace_implementation.go), [web/frontend/src/api/development-workspaces.test.ts](../../web/frontend/src/api/development-workspaces.test.ts), [web/frontend/src/components/development-workspaces/development-code-browser.test.tsx](../../web/frontend/src/components/development-workspaces/development-code-browser.test.tsx) |
+| `FR-GITWS-022` | [pkg/gitworkspace/inventory_sqlite.go](../../pkg/gitworkspace/inventory_sqlite.go), [pkg/gitworkspace/inventory_sqlite_test.go](../../pkg/gitworkspace/inventory_sqlite_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/gitworkspace/manager.go](../../pkg/gitworkspace/manager.go)
+- [pkg/gitworkspace/inventory_sqlite.go](../../pkg/gitworkspace/inventory_sqlite.go)
 - [pkg/gitworkspace/pinned_commit.go](../../pkg/gitworkspace/pinned_commit.go)
 - [pkg/gitworkspace/pinned_validation_roots.go](../../pkg/gitworkspace/pinned_validation_roots.go)
 - [pkg/gitworkspace/development_line.go](../../pkg/gitworkspace/development_line.go)

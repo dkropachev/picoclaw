@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 )
@@ -334,11 +333,7 @@ func installPinnedRecoveryRotationHistory(
 
 func readPinnedRecoveryCapacityInventory(t *testing.T, manager *Manager) string {
 	t.Helper()
-	data, err := os.ReadFile(manager.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(data)
+	return string(adversarialInventorySnapshot(t, manager))
 }
 
 func assertPinnedRecoveryCapacityInventoryUnchanged(

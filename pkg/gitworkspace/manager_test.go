@@ -2,9 +2,11 @@ package gitworkspace
 
 import (
 	"context"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1597,6 +1599,75 @@ func TestManagerAcquirePinnedRejectsPathTampering(t *testing.T) {
 		if _, err := NewManager(Options{RootDir: root}); err == nil ||
 			!strings.Contains(err.Error(), "checkout root") {
 			t.Fatalf("NewManager() with checkout symlink error = %v", err)
+		}
+		if info, err := os.Lstat(root); err != nil || !managedDirectoryModePrivate(root, info) {
+			t.Fatalf("failed constructor root mode = %v, %v", info.Mode(), err)
+		}
+	})
+
+	t.Run("preexisting operation lock root symlink", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "git-workspaces")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), filepath.Join(root, pinnedOperationLockDirectory)); err != nil {
+			t.Skipf("symlink creation unavailable: %v", err)
+		}
+		if _, err := NewManager(Options{RootDir: root}); err == nil ||
+			!strings.Contains(err.Error(), "operation lock root") {
+			t.Fatalf("NewManager() with operation lock symlink error = %v", err)
+		}
+		if info, err := os.Lstat(root); err != nil || !managedDirectoryModePrivate(root, info) {
+			t.Fatalf("failed constructor root mode = %v, %v", info.Mode(), err)
+		}
+	})
+
+	t.Run("operation lock root replacement and mode", func(t *testing.T) {
+		now := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
+		manager := newTestManager(t, &now)
+		if runtime.GOOS != "windows" {
+			if err := os.Chmod(manager.lockRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, release, err := manager.acquirePinnedOperation(
+				context.Background(), "operation-lock-mode",
+			); err == nil || release != nil || !strings.Contains(err.Error(), "not private") {
+				t.Fatalf("public operation lock root acquisition = release:%v error:%v", release != nil, err)
+			}
+			if err := os.Chmod(manager.lockRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		moved := manager.lockRoot + "-moved"
+		if err := os.Rename(manager.lockRoot, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), manager.lockRoot); err != nil {
+			t.Skipf("symlink creation unavailable: %v", err)
+		}
+		if _, _, release, err := manager.acquirePinnedOperation(
+			context.Background(), "operation-lock-replaced",
+		); err == nil || release != nil || !strings.Contains(err.Error(), "operation lock root") {
+			t.Fatalf("replaced operation lock root acquisition = release:%v error:%v", release != nil, err)
+		}
+	})
+
+	t.Run("operation lock file is private", func(t *testing.T) {
+		now := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
+		manager := newTestManager(t, &now)
+		reservation := "operation-lock-private-file"
+		_, _, release, err := manager.acquirePinnedOperation(context.Background(), reservation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		digest := pinnedOperationLockDigest(reservation)
+		path := filepath.Join(
+			manager.lockRoot,
+			pinnedOperationLockFilenamePrefix+hex.EncodeToString(digest[:])+".lock",
+		)
+		if info, err := os.Lstat(path); err != nil || !managedFileModePrivate(path, info) {
+			t.Fatalf("operation lock file mode = %v, %v", info.Mode(), err)
 		}
 	})
 

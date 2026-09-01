@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/prworkspace/localci"
 )
 
@@ -104,7 +105,7 @@ func ensurePrivatePRWorkspaceDirectory(path string) error {
 	if err != nil || resolved != absolute {
 		return fmt.Errorf("PR workspace local CI directory must be canonical")
 	}
-	if err = os.Chmod(absolute, 0o700); err != nil {
+	if _, err = fileutil.SecurePrivateDirectory(absolute); err != nil {
 		return fmt.Errorf("secure PR workspace local CI directory: %w", err)
 	}
 	return nil

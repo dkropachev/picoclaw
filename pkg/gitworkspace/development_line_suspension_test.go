@@ -387,8 +387,11 @@ func TestManagerDevelopmentLineSuspensionMigratesVersionThreeAndRejectsRollback(
 	line.SuspensionCount = 0
 	line.SuspensionTailHash = ""
 	line.Suspensions = nil
-	writeDevelopmentLineSuspensionInventoryForTest(t, fixture.manager, versionThree)
-	migrated, err := loadDevelopmentLineSuspensionInventoryForTest(fixture.manager)
+	legacy, err := json.Marshal(versionThree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := fixture.manager.decodeLegacyInventory(legacy)
 	if err != nil {
 		t.Fatalf("load version-3 inventory error = %v", err)
 	}
@@ -398,15 +401,8 @@ func TestManagerDevelopmentLineSuspensionMigratesVersionThreeAndRejectsRollback(
 		len(migratedLine.Suspensions) != 0 {
 		t.Fatalf("migrated suspension anchor = %#v", migratedLine)
 	}
-	if saveErr := adversarialSaveInventory(fixture.manager, migrated); saveErr != nil {
-		t.Fatal(saveErr)
-	}
-	data, err := os.ReadFile(fixture.manager.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), `"version": "4"`) {
-		t.Fatalf("migrated inventory lacks version-4 fence: %s", data)
+	if _, statErr := os.Stat(fixture.manager.statePath()); !os.IsNotExist(statErr) {
+		t.Fatalf("SQLite migration retained mutable inventory JSON: %v", statErr)
 	}
 
 	for _, test := range []struct {
@@ -435,8 +431,11 @@ func TestManagerDevelopmentLineSuspensionMigratesVersionThreeAndRejectsRollback(
 		t.Run(test.name, func(t *testing.T) {
 			rollback := adversarialCloneState(t, versionThree)
 			test.mutate(rollback.DevelopmentLines[pinnedLineTestID])
-			writeDevelopmentLineSuspensionInventoryForTest(t, fixture.manager, rollback)
-			if _, err := loadDevelopmentLineSuspensionInventoryForTest(fixture.manager); err == nil ||
+			legacy, marshalErr := json.Marshal(rollback)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if _, err := fixture.manager.decodeLegacyInventory(legacy); err == nil ||
 				!strings.Contains(err.Error(), "pre-version-4") {
 				t.Fatalf("mislabeled version-3 suspension error = %v", err)
 			}
@@ -514,30 +513,4 @@ func rehashDevelopmentLineSuspensionsForTest(line *developmentLineRecord) {
 	}
 	line.SuspensionCount = len(line.Suspensions)
 	line.SuspensionTailHash = previous
-}
-
-func writeDevelopmentLineSuspensionInventoryForTest(
-	t *testing.T,
-	manager *Manager,
-	state *storeState,
-) {
-	t.Helper()
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(manager.statePath(), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func loadDevelopmentLineSuspensionInventoryForTest(manager *Manager) (*storeState, error) {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	unlock, err := manager.lockInventory(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-	return manager.loadLocked()
 }

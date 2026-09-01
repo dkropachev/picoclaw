@@ -171,10 +171,7 @@ func TestManagerRotatePinnedReservationRejectsUnboundRequestAfterAdoption(
 	}); err != nil {
 		t.Fatalf("AdoptPinnedLine() error = %v", err)
 	}
-	before, err := os.ReadFile(fixture.manager.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := adversarialInventorySnapshot(t, fixture.manager)
 	_, rotateErr := fixture.manager.RotatePinnedReservation(
 		ctx,
 		unboundPinnedReservationRotationRequest(
@@ -187,10 +184,7 @@ func TestManagerRotatePinnedReservationRejectsUnboundRequestAfterAdoption(
 		!strings.Contains(rotateErr.Error(), "bound to a development line") {
 		t.Fatalf("unbound rotation after adoption error = %v", rotateErr)
 	}
-	after, err := os.ReadFile(fixture.manager.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	after := adversarialInventorySnapshot(t, fixture.manager)
 	if string(after) != string(before) {
 		t.Fatal("rejected unbound rotation changed the adopted-line inventory")
 	}
@@ -233,10 +227,7 @@ func TestManagerRotatePinnedReservationCapacityFailsWithoutInventoryMutation(t *
 		workspace.PinnedReservationRotationTailHash = previousRecordHash
 	})
 
-	before, err := os.ReadFile(fixture.manager.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := adversarialInventorySnapshot(t, fixture.manager)
 	request := unboundPinnedReservationRotationRequest(
 		fixture,
 		"pdrr_capacity_rejected",
@@ -248,10 +239,7 @@ func TestManagerRotatePinnedReservationCapacityFailsWithoutInventoryMutation(t *
 		!strings.Contains(rotateErr.Error(), "history is full") {
 		t.Fatalf("capacity RotatePinnedReservation() error = %v", rotateErr)
 	}
-	after, err := os.ReadFile(fixture.manager.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	after := adversarialInventorySnapshot(t, fixture.manager)
 	if string(after) != string(before) {
 		t.Fatal("capacity rejection changed the inventory")
 	}
@@ -629,30 +617,38 @@ func TestManagerPinnedReservationRotationMigratesVersionTwoAndRejectsRollback(t 
 	versionTwo.Version = 2
 	versionTwo.Workspaces[fixture.workspace.ID].PinnedReservationRotationCount = 0
 	versionTwo.Workspaces[fixture.workspace.ID].PinnedReservationRotationTailHash = ""
-	writePinnedReservationRotationInventory(t, fixture.manager, versionTwo)
-	if _, err := fixture.manager.Stats(ctx); err != nil {
+	legacy, err := json.Marshal(versionTwo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := fixture.manager.decodeLegacyInventory(legacy)
+	if err != nil {
 		t.Fatalf("load version-2 inventory error = %v", err)
+	}
+	if migrated.Version != stateVersion ||
+		migrated.Workspaces[fixture.workspace.ID].PinnedReservationRotationTailHash !=
+			emptyPinnedReservationRotationDigest() {
+		t.Fatalf("migrated version-2 rotation anchor = %#v", migrated.Workspaces[fixture.workspace.ID])
 	}
 	request := unboundPinnedReservationRotationRequest(
 		fixture,
 		"pdrr_migration",
 		"pr-development/rotation-migration-new",
 	)
-	if _, err := fixture.manager.RotatePinnedReservation(ctx, request); err != nil {
-		t.Fatalf("rotate migrated version-2 inventory error = %v", err)
+	if _, rotateErr := fixture.manager.RotatePinnedReservation(ctx, request); rotateErr != nil {
+		t.Fatalf("rotate migrated version-2 inventory error = %v", rotateErr)
 	}
-	data, err := os.ReadFile(fixture.manager.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), `"version": "4"`) {
-		t.Fatalf("migrated inventory lacks version-4 fence: %s", data)
+	if _, statErr := os.Stat(fixture.manager.statePath()); !os.IsNotExist(statErr) {
+		t.Fatalf("SQLite inventory retained mutable JSON: %v", statErr)
 	}
 
 	rollback := adversarialCloneInventory(t, fixture.manager)
 	rollback.Version = 2
-	writePinnedReservationRotationInventory(t, fixture.manager, rollback)
-	if err := adversarialLoadInventory(fixture.manager); err == nil ||
+	legacy, err = json.Marshal(rollback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.manager.decodeLegacyInventory(legacy); err == nil ||
 		!strings.Contains(err.Error(), "rollback-fenced reservation rotations") {
 		t.Fatalf("mislabeled version-2 rotation inventory error = %v", err)
 	}
@@ -821,11 +817,5 @@ func writePinnedReservationRotationInventory(
 	state *storeState,
 ) {
 	t.Helper()
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(manager.statePath(), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	adversarialForceInventory(t, manager, state)
 }

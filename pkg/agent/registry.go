@@ -84,7 +84,7 @@ func NewAgentRegistryWithRuntimePolicies(
 		executionPolicy,
 		diagnosticPolicy,
 		nil,
-		mustAgentRuntimeFileMutationProtectedRoots(""),
+		mustAgentRuntimeFileMutationProtectedRoots("", cfg),
 	)
 }
 

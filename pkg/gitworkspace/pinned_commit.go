@@ -32,7 +32,8 @@ const (
 	pinnedCommitPostflightTimeout     = 30 * time.Second
 	pinnedCommitIntentPrefix          = "pdcmt_"
 	pinnedCommitIntentHexBytes        = 16
-	pinnedOperationLockFilenamePrefix = ".pinned-operation-"
+	pinnedOperationLockDirectory      = ".locks"
+	pinnedOperationLockFilenamePrefix = "pinned-operation-"
 )
 
 var (
@@ -205,6 +206,9 @@ func (m *Manager) acquirePinnedOperation(
 	if err := m.validateRoot(); err != nil {
 		return nil, false, nil, err
 	}
+	if err := m.validatePinnedOperationLockRoot(); err != nil {
+		return nil, false, nil, err
+	}
 	digest := pinnedOperationLockDigest(reservationKey)
 	if existing, ok := ctx.Value(pinnedOperationContextKey{}).(*pinnedOperationToken); ok &&
 		existing != nil && existing.active.Load() {
@@ -215,15 +219,21 @@ func (m *Manager) acquirePinnedOperation(
 		}
 		return existing, true, func() {}, nil
 	}
-	path := filepath.Join(
-		m.rootDir,
-		pinnedOperationLockFilenamePrefix+hex.EncodeToString(digest[:])+".lock",
+	filename := pinnedOperationLockFilenamePrefix + hex.EncodeToString(digest[:]) + ".lock"
+	unlock, err := lockInventoryFileInDirectory(
+		ctx,
+		m.lockRoot,
+		filename,
+		m.lockIdentity,
 	)
-	unlock, err := lockInventoryFile(ctx, path)
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("lock pinned workspace operation: %w", err)
 	}
 	if err := m.validateRoot(); err != nil {
+		unlock()
+		return nil, false, nil, err
+	}
+	if err := m.validatePinnedOperationLockRoot(); err != nil {
 		unlock()
 		return nil, false, nil, err
 	}

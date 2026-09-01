@@ -90,10 +90,7 @@ func TestManagerPushPinnedLineCASReplayAndNoInventoryMutation(t *testing.T) {
 		t,
 		"pr-development/push-success",
 	)
-	inventoryBefore, readErr := os.ReadFile(fixture.manager.statePath())
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
+	inventoryBefore := adversarialInventorySnapshot(t, fixture.manager)
 	result, pushErr := fixture.manager.PushPinnedLine(ctx, fixture.request)
 	if pushErr != nil {
 		t.Fatalf("PushPinnedLine() error = %v", pushErr)
@@ -132,10 +129,7 @@ func TestManagerPushPinnedLineCASReplayAndNoInventoryMutation(t *testing.T) {
 	if _, markerErr := os.Stat(replayMarker); !os.IsNotExist(markerErr) {
 		t.Fatalf("exact replay invoked a second push: %v", markerErr)
 	}
-	inventoryAfter, readErr := os.ReadFile(fixture.manager.statePath())
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
+	inventoryAfter := adversarialInventorySnapshot(t, fixture.manager)
 	if !bytes.Equal(inventoryBefore, inventoryAfter) {
 		t.Fatal("PushPinnedLine() mutated manager inventory")
 	}

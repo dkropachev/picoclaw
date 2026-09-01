@@ -1,7 +1,6 @@
 package gitworkspace
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -50,8 +49,10 @@ type Options struct {
 type Manager struct {
 	rootDir          string
 	checkoutRoot     string
+	lockRoot         string
 	rootIdentity     fs.FileInfo
 	checkoutIdentity fs.FileInfo
+	lockIdentity     fs.FileInfo
 	opts             Options
 	now              func() time.Time
 	mu               sync.Mutex
@@ -209,6 +210,7 @@ type storeState struct {
 	PinnedReservationRotations map[string][]pinnedReservationRotationRecord `json:"pinned_reservation_rotations,omitempty"`
 	History                    []HistoryEntry                               `json:"history,omitempty"`
 	DevelopmentLineHistory     []HistoryEntry                               `json:"development_line_history,omitempty"`
+	generation                 int64                                        `json:"-"`
 }
 
 // Version 2 and later use a string discriminator on disk. Older binaries
@@ -299,7 +301,7 @@ func NewManager(opts Options) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve absolute git workspace root: %w", err)
 	}
-	if mkdirErr := os.MkdirAll(root, 0o755); mkdirErr != nil {
+	if mkdirErr := os.MkdirAll(root, 0o700); mkdirErr != nil {
 		return nil, fmt.Errorf("create git workspace root: %w", mkdirErr)
 	}
 	root, err = filepath.EvalSymlinks(root)
@@ -307,42 +309,76 @@ func NewManager(opts Options) (*Manager, error) {
 		return nil, fmt.Errorf("resolve git workspace root: %w", err)
 	}
 	root = filepath.Clean(root)
+	rootIdentity, err := os.Lstat(root)
+	if err != nil || rootIdentity.Mode()&os.ModeSymlink != 0 || !rootIdentity.IsDir() {
+		return nil, errors.New("git workspace root is not a real directory")
+	}
+	rootIdentity, err = fileutil.SecurePrivateDirectory(root)
+	if err != nil || !managedDirectoryModePrivate(root, rootIdentity) {
+		return nil, errors.New("git workspace root is not private")
+	}
 	checkoutRoot := filepath.Join(root, "checkouts")
-	if mkdirErr := os.MkdirAll(checkoutRoot, 0o755); mkdirErr != nil {
-		return nil, fmt.Errorf("create git workspace root: %w", mkdirErr)
-	}
-	checkoutRootIdentity, err := os.Lstat(checkoutRoot)
-	if err != nil || checkoutRootIdentity.Mode()&os.ModeSymlink != 0 ||
-		!checkoutRootIdentity.IsDir() {
-		return nil, errors.New("git workspace checkout root is not a real directory")
-	}
-	canonicalCheckoutRoot, err := filepath.EvalSymlinks(checkoutRoot)
+	checkoutRootIdentity, err := preparePrivateManagedDirectory(
+		checkoutRoot, "git workspace checkout root",
+	)
 	if err != nil {
-		return nil, fmt.Errorf("resolve git workspace checkout root: %w", err)
+		return nil, err
 	}
-	canonicalCheckoutRoot, err = filepath.Abs(canonicalCheckoutRoot)
+	lockRoot := filepath.Join(root, pinnedOperationLockDirectory)
+	lockRootIdentity, err := preparePrivateManagedDirectory(
+		lockRoot, "git workspace operation lock root",
+	)
 	if err != nil {
-		return nil, fmt.Errorf("resolve absolute git workspace checkout root: %w", err)
-	}
-	if filepath.Clean(canonicalCheckoutRoot) != filepath.Clean(checkoutRoot) {
-		return nil, errors.New("git workspace checkout root escapes the manager root")
+		return nil, err
 	}
 	now := opts.Now
 	if now == nil {
 		now = time.Now
 	}
-	rootIdentity, err := os.Lstat(root)
-	if err != nil || rootIdentity.Mode()&os.ModeSymlink != 0 || !rootIdentity.IsDir() {
-		return nil, errors.New("git workspace root is not a real directory")
-	}
-	return &Manager{
+	manager := &Manager{
 		rootDir:          root,
-		checkoutRoot:     filepath.Clean(canonicalCheckoutRoot),
+		checkoutRoot:     checkoutRoot,
+		lockRoot:         lockRoot,
 		rootIdentity:     rootIdentity,
 		checkoutIdentity: checkoutRootIdentity,
+		lockIdentity:     lockRootIdentity,
 		opts:             opts,
 		now:              now,
-	}, nil
+	}
+	database, openErr := manager.openInventoryDatabase(context.Background())
+	if openErr != nil {
+		return nil, openErr
+	}
+	if closeErr := database.Close(); closeErr != nil {
+		return nil, fmt.Errorf("close git workspace inventory: %w", closeErr)
+	}
+	return manager, nil
+}
+
+func preparePrivateManagedDirectory(path, label string) (fs.FileInfo, error) {
+	if err := os.Mkdir(path, 0o700); err != nil && !os.IsExist(err) {
+		return nil, fmt.Errorf("create %s: %w", label, err)
+	}
+	identity, err := os.Lstat(path)
+	if err != nil || identity.Mode()&os.ModeSymlink != 0 || !identity.IsDir() {
+		return nil, fmt.Errorf("%s is not a real directory", label)
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", label, err)
+	}
+	canonical, err = filepath.Abs(canonical)
+	if err != nil {
+		return nil, fmt.Errorf("resolve absolute %s: %w", label, err)
+	}
+	if filepath.Clean(canonical) != filepath.Clean(path) {
+		return nil, fmt.Errorf("%s is not canonical", label)
+	}
+	secured, err := fileutil.SecurePrivateDirectory(path)
+	if err != nil || !os.SameFile(identity, secured) || !managedDirectoryModePrivate(path, secured) {
+		return nil, fmt.Errorf("%s changed while being secured", label)
+	}
+	return secured, nil
 }
 
 func (m *Manager) RootDir() string {
@@ -1012,6 +1048,10 @@ func (m *Manager) statePath() string {
 	return filepath.Join(m.rootDir, "inventory.json")
 }
 
+func (m *Manager) databasePath() string {
+	return filepath.Join(m.rootDir, "inventory.db")
+}
+
 func (m *Manager) lockInventory(ctx context.Context) (func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1027,78 +1067,12 @@ func (m *Manager) lockInventory(ctx context.Context) (func(), error) {
 }
 
 func (m *Manager) loadLocked() (*storeState, error) {
-	st := &storeState{
-		Version:                    stateVersion,
-		Repositories:               map[string]*RepositoryRecord{},
-		Workspaces:                 map[string]*WorkspaceRecord{},
-		DevelopmentLines:           map[string]*developmentLineRecord{},
-		PinnedReservationRotations: map[string][]pinnedReservationRotationRecord{},
-	}
-	data, err := os.ReadFile(m.statePath())
+	database, err := m.openInventoryDatabase(context.Background())
 	if err != nil {
-		if os.IsNotExist(err) {
-			return st, nil
-		}
-		return nil, fmt.Errorf("read git workspace inventory: %w", err)
-	}
-	if len(bytes.TrimSpace(data)) == 0 {
-		return st, nil
-	}
-	if err := json.Unmarshal(data, st); err != nil {
-		return nil, fmt.Errorf("parse git workspace inventory: %w", err)
-	}
-	if st.Repositories == nil {
-		st.Repositories = map[string]*RepositoryRecord{}
-	}
-	if st.Workspaces == nil {
-		st.Workspaces = map[string]*WorkspaceRecord{}
-	}
-	if st.DevelopmentLines == nil {
-		st.DevelopmentLines = map[string]*developmentLineRecord{}
-	}
-	if st.PinnedReservationRotations == nil {
-		st.PinnedReservationRotations = map[string][]pinnedReservationRotationRecord{}
-	}
-	if versionErr := validateGitWorkspaceInventoryVersion(st.Version, stateVersion); versionErr != nil {
-		return nil, versionErr
-	}
-	if st.Version < 3 && len(st.PinnedReservationRotations) != 0 {
-		return nil, errors.New(
-			"pre-version-3 inventory contains rollback-fenced reservation rotations",
-		)
-	}
-	if st.Version < 3 && hasPinnedReservationRotationAnchors(st) {
-		return nil, errors.New(
-			"pre-version-3 inventory contains rollback-fenced reservation rotation anchors",
-		)
-	}
-	if st.Version < 4 && hasDevelopmentLineSuspensionEvidence(st) {
-		return nil, errors.New(
-			"pre-version-4 inventory contains rollback-fenced development line suspension evidence",
-		)
-	}
-	if st.Version == 0 || st.Version == 1 {
-		if len(st.DevelopmentLines) != 0 || len(st.DevelopmentLineHistory) != 0 {
-			return nil, errors.New(
-				"legacy numeric inventory contains rollback-fenced controller state",
-			)
-		}
-		if migrationErr := m.migrateLegacyPinnedWorkspaces(st); migrationErr != nil {
-			return nil, migrationErr
-		}
-	}
-	if st.Version < 3 {
-		initializePinnedReservationRotationAnchors(st)
-	}
-	if st.Version < 4 {
-		initializeDevelopmentLineSuspensionAnchors(st)
-	}
-	st.Version = stateVersion
-	partitionDevelopmentLineHistory(st)
-	if err := validateDevelopmentLineInventory(st); err != nil {
 		return nil, err
 	}
-	return st, nil
+	defer database.Close()
+	return loadInventoryState(context.Background(), database)
 }
 
 func validateGitWorkspaceInventoryVersion(version, maximum int) error {
@@ -1209,14 +1183,12 @@ func (m *Manager) saveLocked(st *storeState) error {
 	if len(st.DevelopmentLineHistory) > historyLimit {
 		st.DevelopmentLineHistory = st.DevelopmentLineHistory[len(st.DevelopmentLineHistory)-historyLimit:]
 	}
-	data, err := json.MarshalIndent(st, "", "  ")
+	database, err := m.openInventoryDatabase(context.Background())
 	if err != nil {
-		return fmt.Errorf("encode git workspace inventory: %w", err)
+		return err
 	}
-	if err := os.MkdirAll(m.rootDir, 0o755); err != nil {
-		return fmt.Errorf("create git workspace root: %w", err)
-	}
-	return fileutil.WriteFileAtomic(m.statePath(), data, 0o600)
+	defer database.Close()
+	return saveInventoryState(context.Background(), database, st)
 }
 
 func (m *Manager) findSessionWorkspaceLocked(
@@ -1704,10 +1676,21 @@ func (m *Manager) validatePinnedCheckoutRoot() error {
 	if m == nil {
 		return errors.New("git workspace manager is not configured")
 	}
-	return validateManagedDirectory(
+	return validatePrivateManagedDirectory(
 		m.checkoutRoot,
 		m.checkoutIdentity,
 		"git workspace checkout root",
+	)
+}
+
+func (m *Manager) validatePinnedOperationLockRoot() error {
+	if m == nil {
+		return errors.New("git workspace manager is not configured")
+	}
+	return validatePrivateManagedDirectory(
+		m.lockRoot,
+		m.lockIdentity,
+		"git workspace operation lock root",
 	)
 }
 
@@ -1715,7 +1698,7 @@ func (m *Manager) validateRoot() error {
 	if m == nil {
 		return errors.New("git workspace manager is not configured")
 	}
-	return validateManagedDirectory(m.rootDir, m.rootIdentity, "git workspace root")
+	return validatePrivateManagedDirectory(m.rootDir, m.rootIdentity, "git workspace root")
 }
 
 func validateManagedDirectory(path string, identity fs.FileInfo, label string) error {
@@ -1739,6 +1722,20 @@ func validateManagedDirectory(path string, identity fs.FileInfo, label string) e
 	}
 	if filepath.Clean(canonicalPath) != filepath.Clean(path) {
 		return fmt.Errorf("%s resolves outside its initialized path", label)
+	}
+	return nil
+}
+
+func validatePrivateManagedDirectory(path string, identity fs.FileInfo, label string) error {
+	if err := validateManagedDirectory(path, identity, label); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect %s permissions: %w", label, err)
+	}
+	if !managedDirectoryModePrivate(path, info) {
+		return fmt.Errorf("%s is not private", label)
 	}
 	return nil
 }

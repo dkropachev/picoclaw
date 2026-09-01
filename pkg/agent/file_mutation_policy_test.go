@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1013,6 +1014,22 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 		filepath.Join(home, "channels", "weixin", "context-tokens"),
 		weixinArchiveRoot,
 	)
+	var defaultConfig *config.Config
+	gitRoot := defaultConfig.GitWorkspaceRootPath()
+	gitInventory := filepath.Join(gitRoot, "inventory.db")
+	checkpointRoot := filepath.Join(gitRoot, ".pr-workspace-implementation", "active")
+	checkpointDatabase := filepath.Join(checkpointRoot, "checkpoints.db")
+	want = append(want,
+		gitInventory, gitInventory+"-wal", gitInventory+"-shm",
+		checkpointDatabase, checkpointDatabase+"-wal", checkpointDatabase+"-shm",
+		filepath.Join(gitRoot, "inventory.json"),
+		filepath.Join(gitRoot, "inventory.lock"),
+		filepath.Join(gitRoot, ".locks"),
+		filepath.Join(gitRoot, "legacy-json"),
+		filepath.Join(gitRoot, "legacy-json", "git-workspaces-v1", "inventory.json"),
+		checkpointRoot,
+		filepath.Join(checkpointRoot, "legacy-json"),
+	)
 	if len(roots) != len(want) {
 		t.Fatalf("protected roots = %#v, want %#v", roots, want)
 	}
@@ -1103,6 +1120,359 @@ func TestAgentFileMutationPolicyProtectsConfiguredEvolutionDatabase(t *testing.T
 	}
 }
 
+func TestAgentFileMutationPolicyProtectsGitInventoryAndCandidateCheckpoints(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	gitRoot := filepath.Join(workspace, "custom-git-state")
+	t.Setenv(config.EnvHome, home)
+	cfg := agentFileMutationTestConfig(workspace)
+	cfg.GitWorkspaces.RootDir = gitRoot
+	inventory := filepath.Join(gitRoot, "inventory.db")
+	activeInventory := filepath.Join(gitRoot, "inventory.json")
+	checkpointRoot := filepath.Join(gitRoot, ".pr-workspace-implementation", "active")
+	checkpoint := filepath.Join(checkpointRoot, "checkpoints.db")
+	inventoryArchive := filepath.Join(gitRoot, "legacy-json", "git-workspaces-v1", "inventory.json")
+	activeCheckpoint := filepath.Join(checkpointRoot, "active-checkpoint.json")
+	checkpointArchive := filepath.Join(
+		checkpointRoot,
+		"legacy-json",
+		"pr-workspace-checkpoints-v1",
+		"archived-checkpoint.json",
+	)
+	migratedCheckpoint := filepath.Join(
+		checkpointRoot,
+		"legacy-json",
+		"pr-workspace-checkpoints-v1",
+		filepath.Base(activeCheckpoint),
+	)
+	for _, target := range []string{inventoryArchive, activeCheckpoint, checkpointArchive} {
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	messageBus := bus.NewMessageBus()
+	loop := NewAgentLoop(cfg, messageBus, &mockProvider{})
+	t.Cleanup(func() {
+		loop.Close()
+		messageBus.Close()
+	})
+	agent := loop.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is missing")
+	}
+
+	registries := map[string]*tools.ToolRegistry{"root": agent.Tools}
+	owned, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "git-state-protection-owner",
+	}, []string{"write_file", "edit_file", "append_file", "apply_patch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owned.Close()
+	registries["owner"] = owned
+	requireHardlinkDenied := func(
+		t *testing.T,
+		registry *tools.ToolRegistry,
+		toolName string,
+		path string,
+	) {
+		t.Helper()
+		if toolName != "apply_patch" {
+			requireAgentFileMutationDenied(t, registry, toolName, workspace, path, true)
+			return
+		}
+		tool, ok := registry.Get(toolName)
+		if !ok {
+			t.Fatalf("%s is not registered", toolName)
+		}
+		result := executeAgentFileMutation(t, tool, toolName, workspace, path, true)
+		if result == nil || !result.IsError {
+			t.Fatalf("apply_patch accepted hardlink: %#v", result)
+		}
+	}
+
+	for _, target := range []struct {
+		path   string
+		exists bool
+	}{
+		{inventory, true},
+		{inventory + "-wal", false},
+		{inventory + "-shm", false},
+		{activeInventory, false},
+		{checkpoint, false},
+		{checkpoint + "-wal", false},
+		{checkpoint + "-shm", false},
+		{filepath.Join(checkpointRoot, "future-checkpoint.json"), false},
+		{migratedCheckpoint, false},
+		{filepath.Join(gitRoot, "inventory.lock"), false},
+		{filepath.Join(gitRoot, ".locks", "pinned-operation-example.lock"), false},
+		{inventoryArchive, true},
+		{activeCheckpoint, true},
+		{checkpointArchive, true},
+	} {
+		for registryName, registry := range registries {
+			for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+				t.Run(registryName+"_"+toolName+"_"+filepath.Base(target.path), func(t *testing.T) {
+					requireAgentFileMutationDenied(
+						t, registry, toolName, workspace, target.path, target.exists,
+					)
+				})
+			}
+		}
+	}
+	for _, target := range []string{inventoryArchive, activeCheckpoint, checkpointArchive} {
+		if content, err := os.ReadFile(target); err != nil || string(content) != "before" {
+			t.Fatalf("protected Git state %q = %q, %v", target, content, err)
+		}
+	}
+
+	for label, target := range map[string]string{
+		"inventory_archive":   inventoryArchive,
+		"active_checkpoint":   activeCheckpoint,
+		"archived_checkpoint": checkpointArchive,
+	} {
+		hardlink := filepath.Join(workspace, label+"-hardlink.json")
+		if err := os.Link(target, hardlink); err != nil {
+			continue
+		}
+		for registryName, registry := range registries {
+			for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+				t.Run(registryName+"_"+toolName+"_"+label+"_hardlink", func(t *testing.T) {
+					requireHardlinkDenied(t, registry, toolName, hardlink)
+				})
+			}
+		}
+	}
+
+	if err := os.Rename(activeCheckpoint, migratedCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+	migratedHardlink := filepath.Join(workspace, "migrated-checkpoint-hardlink.json")
+	if err := os.Link(migratedCheckpoint, migratedHardlink); err == nil {
+		for registryName, registry := range registries {
+			for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+				t.Run(registryName+"_"+toolName+"_migrated_checkpoint_hardlink", func(t *testing.T) {
+					requireHardlinkDenied(t, registry, toolName, migratedHardlink)
+				})
+			}
+		}
+	}
+}
+
+func TestAgentGitWorkspaceProtectedRootsRejectUnsafeCheckpointState(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{
+			name: "checkpoint root file",
+			setup: func(t *testing.T, checkpointRoot string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(checkpointRoot), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(checkpointRoot, []byte("unsafe"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "selected source symlink",
+			setup: func(t *testing.T, checkpointRoot string) {
+				t.Helper()
+				if err := os.MkdirAll(checkpointRoot, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(t.TempDir(), filepath.Join(checkpointRoot, "unsafe.json")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+		},
+		{
+			name: "selected source directory",
+			setup: func(t *testing.T, checkpointRoot string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(checkpointRoot, "unsafe.json"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "archive root file",
+			setup: func(t *testing.T, checkpointRoot string) {
+				t.Helper()
+				if err := os.MkdirAll(checkpointRoot, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(
+					filepath.Join(checkpointRoot, "legacy-json"),
+					[]byte("unsafe"),
+					0o600,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "archive symlink",
+			setup: func(t *testing.T, checkpointRoot string) {
+				t.Helper()
+				if err := os.MkdirAll(checkpointRoot, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(t.TempDir(), filepath.Join(checkpointRoot, "legacy-json")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gitRoot := filepath.Join(t.TempDir(), "git-state")
+			checkpointRoot := filepath.Join(gitRoot, ".pr-workspace-implementation", "active")
+			test.setup(t, checkpointRoot)
+			cfg := agentFileMutationTestConfig(t.TempDir())
+			cfg.GitWorkspaces.RootDir = gitRoot
+			roots, err := agentGitWorkspaceFileMutationProtectedRoots(cfg)
+			if err == nil || roots != nil || !strings.Contains(err.Error(), "unsafe") {
+				t.Fatalf("unsafe checkpoint roots = %#v, %v", roots, err)
+			}
+		})
+	}
+}
+
+func TestAgentCheckpointRetainedStateEnumerationBoundsAndModes(t *testing.T) {
+	if files, err := agentCheckpointRetainedStateFilesBounded(
+		"unused", "unused", 0, 1, 1, 1,
+	); err == nil || files != nil || !strings.Contains(err.Error(), "bounds") {
+		t.Fatalf("invalid checkpoint enumeration bounds = %#v, %v", files, err)
+	}
+	newRoots := func(t *testing.T) (string, string) {
+		t.Helper()
+		checkpointRoot := filepath.Join(t.TempDir(), "active")
+		if err := os.MkdirAll(checkpointRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return checkpointRoot, filepath.Join(checkpointRoot, "legacy-json")
+	}
+
+	t.Run("exact bounded state", func(t *testing.T) {
+		checkpointRoot, archiveRoot := newRoots(t)
+		archive := filepath.Join(archiveRoot, "pr-workspace-checkpoints-v1", "retained.json")
+		if err := os.MkdirAll(filepath.Dir(archive), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(archive, []byte("retained\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		files, err := agentCheckpointRetainedStateFilesBounded(
+			checkpointRoot, archiveRoot, 1, 1, 2, 1,
+		)
+		if err != nil || !slices.Contains(files, archive) {
+			t.Fatalf("bounded checkpoint state = %#v, %v", files, err)
+		}
+	})
+
+	for _, test := range []struct {
+		name      string
+		setup     func(*testing.T, string, string)
+		rootLimit int
+		sources   int
+		entries   int
+		depth     int
+		want      string
+	}{
+		{
+			name: "active entry limit", rootLimit: 1, sources: 1, entries: 4, depth: 2,
+			setup: func(t *testing.T, checkpointRoot, _ string) {
+				for _, name := range []string{"one.txt", "two.txt"} {
+					if err := os.WriteFile(filepath.Join(checkpointRoot, name), []byte("x"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			want: "entry limit",
+		},
+		{
+			name: "active source limit", rootLimit: 3, sources: 1, entries: 4, depth: 2,
+			setup: func(t *testing.T, checkpointRoot, _ string) {
+				for _, name := range []string{"one.json", "two.json"} {
+					if err := os.WriteFile(filepath.Join(checkpointRoot, name), []byte("{}"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			want: "source limit",
+		},
+		{
+			name: "archive entry limit", rootLimit: 2, sources: 1, entries: 1, depth: 2,
+			setup: func(t *testing.T, _, archiveRoot string) {
+				for _, name := range []string{"one", "two"} {
+					if err := os.MkdirAll(filepath.Join(archiveRoot, name), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			want: "entry limit",
+		},
+		{
+			name: "archive depth limit", rootLimit: 2, sources: 1, entries: 4, depth: 1,
+			setup: func(t *testing.T, _, archiveRoot string) {
+				if err := os.MkdirAll(filepath.Join(archiveRoot, "one", "two"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "depth limit",
+		},
+		{
+			name: "public archive directory", rootLimit: 2, sources: 1, entries: 4, depth: 2,
+			setup: func(t *testing.T, _, archiveRoot string) {
+				if runtime.GOOS == "windows" {
+					t.Skip("Windows FileMode permission bits do not represent ACL privacy")
+				}
+				path := filepath.Join(archiveRoot, "public")
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "unsafe directory",
+		},
+		{
+			name: "nested archive symlink", rootLimit: 2, sources: 1, entries: 4, depth: 2,
+			setup: func(t *testing.T, _, archiveRoot string) {
+				if err := os.MkdirAll(archiveRoot, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(t.TempDir(), filepath.Join(archiveRoot, "linked")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+			want: "unsafe symlink",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			checkpointRoot, archiveRoot := newRoots(t)
+			test.setup(t, checkpointRoot, archiveRoot)
+			files, err := agentCheckpointRetainedStateFilesBounded(
+				checkpointRoot,
+				archiveRoot,
+				test.rootLimit,
+				test.sources,
+				test.entries,
+				test.depth,
+			)
+			if err == nil || files != nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("bounded unsafe checkpoint state = %#v, %v", files, err)
+			}
+		})
+	}
+}
+
 func TestAgentFileMutationPolicyFailureBoundaries(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not permit removing the process working directory")
@@ -1111,6 +1481,9 @@ func TestAgentFileMutationPolicyFailureBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	absoluteStateRoot := t.TempDir()
+	absoluteHome := filepath.Join(absoluteStateRoot, "home")
+	absoluteWorkspace := filepath.Join(absoluteStateRoot, "workspace")
 	unavailableWorkingDirectory := t.TempDir()
 	if err = os.Chdir(unavailableWorkingDirectory); err != nil {
 		t.Fatal(err)
@@ -1138,7 +1511,7 @@ func TestAgentFileMutationPolicyFailureBoundaries(t *testing.T) {
 		_ = mustAgentRuntimeFileMutationProtectedRoots("")
 	}()
 
-	t.Setenv(config.EnvHome, filepath.Join(originalWorkingDirectory, "absolute-home"))
+	t.Setenv(config.EnvHome, absoluteHome)
 	if roots, rootErr := agentRuntimeFileMutationProtectedRoots(
 		"relative-config.json",
 	); rootErr == nil ||
@@ -1171,7 +1544,7 @@ func TestAgentFileMutationPolicyFailureBoundaries(t *testing.T) {
 	executionPolicy := isolation.NewExecutionPolicy(config.IsolationConfig{})
 	diagnosticPolicy := logger.DiagnosticPolicy{}
 	absoluteDefaults := cfg.Agents.Defaults
-	absoluteDefaults.Workspace = filepath.Join(originalWorkingDirectory, "absolute-workspace")
+	absoluteDefaults.Workspace = absoluteWorkspace
 	constructors := map[string]func(){
 		"loop": func() {
 			_ = newAgentLoop(cfg, nil, &mockProvider{}, executionPolicy, diagnosticPolicy)

@@ -2277,7 +2277,7 @@ func p015B3StrictConstructorIssues(files map[string]*p015B3ParsedFile) []string 
 			callee: "newAgentRegistryWithRuntimePolicies",
 			arguments: [][]string{{
 				"cfg", "provider", "executionPolicy", "diagnosticPolicy", "nil",
-				"mustAgentRuntimeFileMutationProtectedRoots(\"\")",
+				"mustAgentRuntimeFileMutationProtectedRoots(\"\", cfg)",
 			}},
 		},
 		{
@@ -2333,7 +2333,7 @@ func p015B3StrictConstructorIssues(files map[string]*p015B3ParsedFile) []string 
 			callee: "newAgentInstanceWithRuntimePolicies",
 			arguments: [][]string{{
 				"agentCfg", "defaults", "cfg", "provider", "executionPolicy",
-				"diagnosticPolicy", "nil", "mustAgentRuntimeFileMutationProtectedRoots(\"\")",
+				"diagnosticPolicy", "nil", "mustAgentRuntimeFileMutationProtectedRoots(\"\", cfg)",
 			}},
 		},
 		{

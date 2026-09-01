@@ -22,8 +22,8 @@ file-backed.
   upgrades and validates an owned schema, and imports bounded legacy sources
   exactly once.
 - Core types/functions: `sqlitestore.Open`, `Options`, `Migration`,
-  `LegacyOptions`, `LegacySource`, `LegacyImporter`, `LegacyResultFinalizer`, and
-  `sqlitestore.Immediate`.
+  `LegacyOptions`, `LegacySource`, `LegacyImporter`, `LegacyResultFinalizer`,
+  `LegacySealer`, and `sqlitestore.Immediate`.
 - Runtime ordering: validate the path and migration catalog, securely prepare
   the directory and database, enable and verify PRAGMAs, reject corruption or a
   future schema, run upgrades and legacy import in `BEGIN IMMEDIATE`, validate
@@ -38,9 +38,9 @@ file-backed.
 
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
-| `FR-SQLITE-001` | MUST | A subsystem opens a mutable database at a filesystem path. | The returned handle uses WAL, foreign keys, a five-second busy timeout, and `synchronous=FULL`; the parent is private and the database and companions are `0600`. | A missing directory/database is securely created. | Empty, URI, NUL-bearing, symlinked, irregular, or otherwise unsafe boundaries fail before domain use. | Every store needs one durable and secure baseline. |
+| `FR-SQLITE-001` | MUST | A subsystem opens a mutable database at a filesystem path. | The returned handle uses WAL, foreign keys, a five-second busy timeout, and `synchronous=FULL`; the parent is private and the database and companions are `0600` on POSIX hosts or carry a protected owner-only DACL on Windows. | A missing directory/database is securely created. | Empty, URI, NUL-bearing, symlinked/reparse, irregular, publicly writable/accessible, or otherwise unsafe boundaries fail before domain use. | Every store needs one durable and secure baseline. |
 | `FR-SQLITE-002` | MUST | The database schema is older, current, too new, malformed, or corrupt. | Contiguous migrations reach the supported `PRAGMA user_version` and the retained schema validates exactly. | Migrations run in one explicit `BEGIN IMMEDIATE` transaction. | Failure rolls back; a future version, invalid schema, or failed integrity check returns a typed error and never falls back to JSON. | Mixed schemas and partial upgrades must fail closed. |
-| `FR-SQLITE-003` | MUST | Bounded legacy JSON/JSONL sources exist on first authoritative open. | Valid records are imported deterministically by dependency order and relative path; selected malformed records are skipped with counts and safe issue codes/digests only. Aggregate/dependency importers may resolve relationships in `LegacyResultFinalizer`; their returned per-source outcomes atomically replace provisional counts and issues before commit. | Domain rows and final durable import/issue rows commit in the same immediate transaction. | Unsafe enumeration, symlinks or modes, size/count bounds, incomplete/extra/invalid final accounting, SQLite errors, or importer errors abort without an import commit. | Automatic upgrade must preserve valid state and relationships while making the audit describe committed rows without exposing secrets. |
+| `FR-SQLITE-003` | MUST | A subsystem performs its first complete bounded legacy JSON/JSONL enumeration, including an enumeration with no present source. | Valid records are imported deterministically by dependency order and relative path; selected malformed records are skipped with counts and safe issue codes/digests only. Aggregate/dependency importers may resolve relationships in `LegacyResultFinalizer`; their returned per-source outcomes atomically replace provisional counts and issues before commit. An optional idempotent `LegacySealer` then durably closes the subsystem's import horizon before validation. | Domain rows, final durable import/issue rows, and the subsystem import-horizon marker commit in the same immediate transaction. A source first appearing after that marker is audited as SQLite-authoritative rather than imported. | Unsafe enumeration, symlinks or modes, size/count bounds, incomplete/extra/invalid final accounting, SQLite errors, importer errors, or seal failure abort without an import commit or closed marker. | Automatic upgrade must preserve valid state and relationships, become authoritative even after an empty first open, and make the audit describe committed rows without exposing secrets. |
 | `FR-SQLITE-004` | MUST | A committed import has an unarchived legacy source. | The exact imported bytes move to `legacy-json/<component>-v1/` without overwriting an existing archive and with their permissions retained. | Archive completion is durably recorded after the filesystem transition. | A crash before/after the move is retried without re-import; changed bytes or a conflicting archive fail closed. | SQLite becomes authoritative immediately while rollback material remains recoverable. |
 | `FR-SQLITE-005` | MUST | Concurrent PicoClaw processes mutate a subsystem store. | Bounded lock waits and immediate write transactions serialize domain operations; version-fenced owners can reject stale updates. | Only the committed SQLite transaction becomes visible. | Busy, canceled, and stale-version operations return errors without partial domain state or JSON dual writes. | CLI, launcher, and gateway processes must share one authority. |
 
@@ -88,6 +88,7 @@ Owns: TEST pkg/sqlitestore/*
 | Go API | `sqlitestore.Open(ctx, path, options)` | Opens, configures, integrity-checks, migrates, validates, and archives one subsystem database or returns an error without a JSON fallback. | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-003`, `FR-SQLITE-004` |
 | Go API | `sqlitestore.Immediate(ctx, db, callback)` | Runs one callback between explicit `BEGIN IMMEDIATE` and `COMMIT`, rolling back on callback, context, or commit failure. | `FR-SQLITE-002`, `FR-SQLITE-005` |
 | Go API | `LegacyOptions.FinalizeResults` / `LegacyResultFinalizer` | Resolve ordered multi-source relationships and return exact final `ImportResult` for every newly imported source; the helper replaces provisional ledger counts/issues inside the import transaction. | `FR-SQLITE-003` |
+| Go API | `LegacyOptions.Seal` / `LegacySealer` | Idempotently closes a subsystem import horizon after every successful deterministic enumeration, including zero-source opens, inside the migration transaction and before validation. | `FR-SQLITE-003` |
 | File | `<root>/*.db`, `<root>/*.db-wal`, `<root>/*.db-shm` | Private mutable SQLite authority owned by its subsystem. | `FR-SQLITE-001`, `FR-SQLITE-005` |
 | File | `<root>/legacy-json/<component>-v1/**` | Immutable retained legacy bytes, created once after their import transaction commits. | `FR-SQLITE-003`, `FR-SQLITE-004` |
 | File | `<PICOCLAW_HOME>/auth.db`, `auth.db.locks/`; `legacy-json/auth-v1/auth.json` | Typed, version-fenced credential authority, protected cross-process refresh locks, and retained legacy source. | `FR-SQLITE-001` through `FR-SQLITE-005` |
@@ -100,6 +101,8 @@ Owns: TEST pkg/sqlitestore/*
 | File | `<workspace>/state/account-router.db`; `state/legacy-json/account-router-v1/**` | Typed router/account/session/affinity/cursor/invalidation state with transactional cross-process updates and retained legacy state/sidecars. | `FR-SQLITE-001` through `FR-SQLITE-005` |
 | File | `<evolution-state-dir>/evolution.db`; `legacy-json/evolution-v1/**` | Typed learning/pattern records, ordered evidence, skill drafts, profiles, version history, and retained JSON/JSONL migration sources. | `FR-SQLITE-001` through `FR-SQLITE-005` |
 | File | `<event-state>/pr-workspace-local-ci/evidence/cache.db`; `legacy-json/local-ci-cache-v1/cache/**` | Typed, version-fenced passing-result cache rows and retained legacy cache indexes; immutable plans, executions, attestations, and discovery records remain content-addressed JSON evidence. | `FR-SQLITE-001` through `FR-SQLITE-005` |
+| File | `<workspace>/.git-workspaces/inventory.db`; `legacy-json/git-workspaces-v1/inventory.json` | Typed repository/workspace inventory, ordered development-line and rotation evidence, histories, and retained legacy aggregate. | `FR-SQLITE-001` through `FR-SQLITE-005` |
+| File | `<workspace>/.git-workspaces/.pr-workspace-implementation/active/checkpoints.db`; `legacy-json/pr-workspace-checkpoints-v1/*.json` | Typed mutable candidate checkpoints and retained individually audited legacy checkpoint files. | `FR-SQLITE-001` through `FR-SQLITE-005` |
 
 ## Algorithms And Ordering
 
@@ -113,8 +116,9 @@ Owns: TEST pkg/sqlitestore/*
 4. Check existing integrity, acquire one connection, and enter
    `BEGIN IMMEDIATE`. Read `user_version`, reject a future version, apply each
    contiguous schema/data migration, enumerate and import deterministic legacy
-   inputs, finalize aggregate relationships/accounting when configured,
-   validate domain and import schemas, and commit once.
+   inputs, finalize aggregate relationships/accounting when configured, seal
+   the subsystem import horizon when configured, validate domain and import
+   schemas, and commit once.
 5. Recheck integrity and permissions. For each pending import, revalidate the
    recorded relative identity and digest, complete or recover its no-overwrite
    archive transition, and mark the ledger row complete in an immediate
@@ -133,7 +137,8 @@ selecting a mutable JSON fallback.
 
 ## Failure And Edge Cases
 
-- Missing legacy sources are a no-op; enumeration errors are not.
+- Missing legacy sources invoke no importer; a subsystem sealer may still close
+  the first-open import horizon. Enumeration or seal errors are not no-ops.
 - Inputs are bounded per source, in aggregate, and by source count.
 - Malformed records may be skipped only when the domain importer explicitly
   classifies them; structural filesystem or SQLite failures abort.
@@ -154,6 +159,7 @@ selecting a mutable JSON fallback.
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/state/state_test.go](../../pkg/state/state_test.go), [pkg/channels/wecom/reqid_store_test.go](../../pkg/channels/wecom/reqid_store_test.go), [pkg/channels/weixin/state_sqlite_test.go](../../pkg/channels/weixin/state_sqlite_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/evolution/sqlite_store_test.go](../../pkg/evolution/sqlite_store_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/prworkspace/localci/store_cache_sqlite_test.go](../../pkg/prworkspace/localci/store_cache_sqlite_test.go) |
+| `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/gitworkspace/inventory_sqlite_test.go](../../pkg/gitworkspace/inventory_sqlite_test.go), [pkg/gateway/pr_workspace_candidate_checkpoint_test.go](../../pkg/gateway/pr_workspace_candidate_checkpoint_test.go) |
 
 ## Implementation Anchors
 

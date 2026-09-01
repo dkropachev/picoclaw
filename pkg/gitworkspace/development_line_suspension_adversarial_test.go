@@ -51,19 +51,13 @@ func TestDevelopmentLineSuspensionRejectsCrossLineEvidenceReuse(t *testing.T) {
 		ExpectedTip:           secondLease.Tip,
 		ExpectedTree:          secondLease.Tree,
 	}
-	beforeDuplicate, err := os.ReadFile(fixture.manager.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	beforeDuplicate := adversarialInventorySnapshot(t, fixture.manager)
 	if _, duplicateErr := fixture.manager.SuspendPinnedLine(ctx, secondRequest); duplicateErr == nil ||
 		!errors.Is(duplicateErr, ErrPinnedLineConflict) ||
 		!strings.Contains(duplicateErr.Error(), "intent was already used") {
 		t.Fatalf("cross-line duplicate intent error = %v", duplicateErr)
 	}
-	afterDuplicate, err := os.ReadFile(fixture.manager.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	afterDuplicate := adversarialInventorySnapshot(t, fixture.manager)
 	if string(afterDuplicate) != string(beforeDuplicate) {
 		t.Fatal("rejected cross-line duplicate intent changed the inventory")
 	}
@@ -287,10 +281,7 @@ func TestManagerSuspendPinnedLineCommitRecoveryReplayIsPayloadExact(t *testing.T
 		t.Fatalf("commit suspension replay = %#v, first = %#v", replayed, first)
 	}
 
-	beforeMismatch, err := os.ReadFile(restarted.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	beforeMismatch := adversarialInventorySnapshot(t, restarted)
 	mismatched := request
 	mismatched.Commit.Message = "Prepare a different review repair"
 	result, mismatchErr := restarted.SuspendPinnedLineCommitRecovery(ctx, mismatched)
@@ -298,10 +289,7 @@ func TestManagerSuspendPinnedLineCommitRecoveryReplayIsPayloadExact(t *testing.T
 		result != (PinnedLineSuspendResult{}) {
 		t.Fatalf("mismatched commit suspension replay = %#v, %v", result, mismatchErr)
 	}
-	afterMismatch, err := os.ReadFile(restarted.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	afterMismatch := adversarialInventorySnapshot(t, restarted)
 	if string(afterMismatch) != string(beforeMismatch) {
 		t.Fatal("mismatched commit suspension replay changed the inventory")
 	}
@@ -342,10 +330,7 @@ func TestManagerSuspendPinnedLineReservesResumeRotationCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AdoptPinnedLine() at rotation capacity error = %v", err)
 	}
-	before, err := os.ReadFile(fixture.manager.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := adversarialInventorySnapshot(t, fixture.manager)
 	_, err = fixture.manager.SuspendPinnedLine(ctx, PinnedLineSuspendRequest{
 		Pin:                   tailPin,
 		WorkspaceID:           fixture.workspace.ID,
@@ -360,10 +345,7 @@ func TestManagerSuspendPinnedLineReservesResumeRotationCapacity(t *testing.T) {
 		!strings.Contains(err.Error(), "has no resume capacity") {
 		t.Fatalf("SuspendPinnedLine() at rotation capacity error = %v", err)
 	}
-	after, err := os.ReadFile(fixture.manager.statePath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	after := adversarialInventorySnapshot(t, fixture.manager)
 	if string(after) != string(before) {
 		t.Fatal("capacity-rejected suspension changed the inventory")
 	}

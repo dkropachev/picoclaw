@@ -877,6 +877,13 @@ func TestEvolutionBridge_DraftModeKeepsCandidateDraft(t *testing.T) {
 		response: `{"target_skill_name":"weather","draft_type":"shortcut","change_kind":"create","human_summary":"Create weather helper","body_or_patch":"---\nname: weather\ndescription: weather helper\n---\n# Weather\n## Start Here\nUse native-name query first.\n"}`,
 	})
 	defer al.Close()
+	bridge := al.currentEvolutionBridge()
+	if bridge == nil || bridge.coldPathRunner == nil {
+		t.Fatal("draft evolution cold-path runner is unavailable")
+	}
+	if err := bridge.coldPathRunner.Close(); err != nil {
+		t.Fatalf("close automatic cold-path runner: %v", err)
+	}
 
 	if _, err := al.ProcessDirectWithChannel(
 		context.Background(),
@@ -886,6 +893,9 @@ func TestEvolutionBridge_DraftModeKeepsCandidateDraft(t *testing.T) {
 		"direct",
 	); err != nil {
 		t.Fatalf("ProcessDirectWithChannel failed: %v", err)
+	}
+	if err := bridge.RunColdPathOnce(context.Background(), tmpDir); err != nil {
+		t.Fatalf("draft cold path failed: %v", err)
 	}
 
 	waitForEvolutionRecord(t, filepath.Join(tmpDir, "state", "evolution", "task-records.jsonl"))
