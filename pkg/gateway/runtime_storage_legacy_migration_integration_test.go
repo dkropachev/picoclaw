@@ -64,6 +64,7 @@ type runtimeLegacyMigrationFixture struct {
 	legacyCheckpoint         prWorkspaceCandidateCheckpoint
 	legacyLocalCIResultKey   string
 	legacyLocalCIExecutionID string
+	expectedIssueDigests     map[string][]runtimeLegacyImportIssue
 }
 
 // TestIntegrationRuntimeOwnedJSONLegacyMigration is the aggregate upgrade
@@ -156,6 +157,23 @@ func (fixture *runtimeLegacyMigrationFixture) writeLegacy(
 	})
 }
 
+func (fixture *runtimeLegacyMigrationFixture) expectIssue(
+	component,
+	relative,
+	code string,
+	raw []byte,
+) {
+	if fixture.expectedIssueDigests == nil {
+		fixture.expectedIssueDigests = make(map[string][]runtimeLegacyImportIssue)
+	}
+	fixture.expectedIssueDigests[component] = append(
+		fixture.expectedIssueDigests[component],
+		runtimeLegacyImportIssue{
+			relative: filepath.ToSlash(relative), code: code, digest: runtimeLegacyDigestHex(raw),
+		},
+	)
+}
+
 func seedLegacyLauncherAuth(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
 	t.Helper()
 	body := []byte(fmt.Sprintf(`{
@@ -181,6 +199,10 @@ func seedLegacyAuth(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
   "openai:bad/name":{"access_token":"` + legacyMigrationSecretCanary + `","provider":"openai"},
   "anthropic:invalid":"not-an-object"
 }}`)
+	fixture.expectIssue("auth", "auth.json", "invalid-credential",
+		runtimeLegacyObjectValue(t, data, "credentials", "anthropic:invalid"))
+	fixture.expectIssue("auth", "auth.json", "invalid-identity",
+		runtimeLegacyObjectValue(t, data, "credentials", "openai:bad/name"))
 	fixture.writeLegacy(t,
 		filepath.Join(fixture.home, "auth.json"),
 		filepath.Join(fixture.home, "legacy-json", "auth-v1", "auth.json"),
@@ -194,6 +216,8 @@ func seedLegacyModelCatalog(t *testing.T, fixture *runtimeLegacyMigrationFixture
   "legacy-catalog":{"id":"legacy-catalog","provider":"openai","api_base":"https://legacy.example.invalid/v1","api_key_mask":"****","models":[{"id":"model-b","owned_by":"fixture","extra":{"exact":9007199254740993}},{"id":"model-a"}],"fetched_at":"2025-03-04T05:06:07.123456789Z"},
   "invalid-catalog":{"id":"invalid-catalog","provider":"openai","models":[{"id":""}],"fetched_at":"2025-03-04T05:06:07Z"}
 }}`)
+	fixture.expectIssue("model-catalogs", "model_catalogs.json", "invalid-catalog",
+		runtimeLegacyObjectValue(t, data, "entries", "invalid-catalog"))
 	fixture.writeLegacy(t,
 		filepath.Join(fixture.home, "model_catalogs.json"),
 		filepath.Join(fixture.home, "legacy-json", "model-catalogs-v1", "model_catalogs.json"),
@@ -214,6 +238,10 @@ func seedLegacyToolAdaptation(t *testing.T, fixture *runtimeLegacyMigrationFixtu
     "invalid":{"profile":{"provider":"openai","model":"gpt"},"tool_name":"","last_error":"` + legacyMigrationSecretCanary + `","updated_at":"2026-01-02T04:04:05Z"}
   }
 }`)
+	fixture.expectIssue("tool-adaptation", "tool_adaptation_state.json", "invalid-observation",
+		runtimeLegacyObjectValue(t, data, "observations", "invalid"))
+	fixture.expectIssue("tool-adaptation", "tool_adaptation_state.json", "invalid-outcome",
+		runtimeLegacyObjectValue(t, data, "outcomes", "invalid"))
 	fixture.writeLegacy(t,
 		filepath.Join(fixture.home, "tool_adaptation_state.json"),
 		filepath.Join(fixture.home, "legacy-json", "tool-adaptation-v1", "tool_adaptation_state.json"),
@@ -228,6 +256,8 @@ func seedLegacyChannels(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
   "legacy-chat":{"req_id":"legacy-request","chat_id":"legacy-chat","chat_type":7,"expires_at":"` + future + `"},
   "invalid-chat":{"req_id":"","chat_id":"invalid-chat","chat_type":1,"private":"` + legacyMigrationSecretCanary + `"}
 }`)
+	fixture.expectIssue("wecom-reqid", "wecom/reqid-store.json", "invalid-route",
+		runtimeLegacyObjectValue(t, wecom, "invalid-chat"))
 	fixture.writeLegacy(t,
 		filepath.Join(fixture.home, "wecom", "reqid-store.json"),
 		filepath.Join(fixture.home, "legacy-json", "wecom-reqid-v1", "wecom", "reqid-store.json"),
@@ -237,6 +267,10 @@ func seedLegacyChannels(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
 	weixinRoot := filepath.Join(fixture.home, "channels", "weixin")
 	cursor := []byte(`{"get_updates_buf":"legacy-cursor"}`)
 	tokens := []byte(`{"tokens":{"user-a":"token-a","":"` + legacyMigrationSecretCanary + `","user-b":4}}`)
+	fixture.expectIssue("weixin-state", "context-tokens/"+account+".json", "invalid-token",
+		runtimeLegacyObjectValue(t, tokens, "tokens", ""))
+	fixture.expectIssue("weixin-state", "context-tokens/"+account+".json", "invalid-token",
+		runtimeLegacyObjectValue(t, tokens, "tokens", "user-b"))
 	fixture.writeLegacy(t,
 		filepath.Join(weixinRoot, "sync", account+".json"),
 		filepath.Join(weixinRoot, "legacy-json", "weixin-state-v1", "sync", account+".json"),
@@ -284,6 +318,10 @@ func seedLegacySessions(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
 	})
 	root := fixture.workspace
 	archiveRoot := filepath.Join(root, "legacy-json", "sessions-v1")
+	brokenSession := []byte(`{"key":"` + legacyMigrationSecretCanary)
+	invalidHistoryLine := bytes.Split(history, []byte{'\n'})[2]
+	fixture.expectIssue("sessions", "sessions/broken.json", "invalid-session-json", brokenSession)
+	fixture.expectIssue("sessions", "sessions/legacy.history-a", "invalid-message-json", invalidHistoryLine)
 	for _, source := range []struct {
 		relative string
 		data     []byte
@@ -291,7 +329,7 @@ func seedLegacySessions(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
 		{"sessions/legacy.meta.json", metaData},
 		{"sessions/legacy.history-a", history},
 		{"sessions/other.json", other},
-		{"sessions/broken.json", []byte(`{"key":"` + legacyMigrationSecretCanary)},
+		{"sessions/broken.json", brokenSession},
 		{"threads/thread-two.json", thread},
 		{"threads/handoffs/handoff-one.json", handoff},
 	} {
@@ -307,6 +345,8 @@ func seedLegacyCron(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
   {"id":"","name":"` + legacyMigrationSecretCanary + `","enabled":true,"schedule":{"kind":"every","everyMs":60000},"payload":{"kind":"agent_turn"},"state":{},"createdAtMs":1,"updatedAtMs":2,"deleteAfterRun":false},
   {"id":"legacy-second","name":"second valid","enabled":false,"schedule":{"kind":"at","atMs":2000000000000},"payload":{"kind":"agent_turn","message":"two"},"state":{},"createdAtMs":1003,"updatedAtMs":1004,"deleteAfterRun":true}
 ]}`)
+	fixture.expectIssue("cron-jobs", "jobs.json", "invalid-job",
+		runtimeLegacyArrayValue(t, data, "jobs", 1))
 	root := filepath.Join(fixture.workspace, "cron")
 	fixture.writeLegacy(t, filepath.Join(root, "jobs.json"),
 		filepath.Join(root, "legacy-json", "cron-jobs-v1", "jobs.json"), data, 0o600)
@@ -322,6 +362,7 @@ func seedLegacyRuntimeState(t *testing.T, fixture *runtimeLegacyMigrationFixture
 		LastChannel: "legacy-new:user", LastChatID: "new-chat",
 		Timestamp: time.Date(2026, 8, 31, 10, 0, 0, 123, time.UTC),
 	})
+	fixture.expectIssue("runtime-state", "state/state.json", "source-conflict", latest)
 	archiveRoot := filepath.Join(fixture.workspace, "state", "legacy-json", "runtime-state-v1")
 	fixture.writeLegacy(t, filepath.Join(fixture.workspace, "state.json"),
 		filepath.Join(archiveRoot, "state.json"), old, 0o600)
@@ -359,6 +400,8 @@ func seedLegacyAccountRouter(t *testing.T, fixture *runtimeLegacyMigrationFixtur
 	data := []byte(fmt.Sprintf(
 		`{"version":1,"routers":{"legacy-router":%s,"bad":null}}`, validRaw,
 	))
+	fixture.expectIssue("account-router", "account_router_state.json", "invalid-router",
+		runtimeLegacyObjectValue(t, data, "routers", "bad"))
 	source := filepath.Join(fixture.workspace, "account_router_state.json")
 	archive := filepath.Join(
 		fixture.workspace, "state", "legacy-json", "account-router-v1", "account_router_state.json",
@@ -385,7 +428,13 @@ func seedLegacyWorkflows(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
 		"payload": map[string]any{"order": json.Number("2")},
 	})...)
 	eventData = append(eventData, '\n')
-	eventData = append(eventData, []byte(`{"private":"`+legacyMigrationSecretCanary+`"`+"\n")...)
+	invalidEventLine := []byte(`{"private":"` + legacyMigrationSecretCanary + `"`)
+	eventData = append(eventData, invalidEventLine...)
+	eventData = append(eventData, '\n')
+	fixture.expectIssue(
+		"workflows", "workflow_runs/wr_legacy_fixture/events.jsonl", "invalid_event_line",
+		invalidEventLine,
+	)
 	namespace, key := "legacy-space", "legacy-key"
 	nativeData := runtimeLegacyJSON(t, map[string]any{
 		"key": key, "value": map[string]any{"n": json.Number("42")},
@@ -481,6 +530,9 @@ func seedLegacyRepositoryReview(t *testing.T, fixture *runtimeLegacyMigrationFix
 		"profile_rrpf_malformed.json":                            []byte(`{"secret":"` + legacyMigrationSecretCanary),
 	}
 	for name, data := range sources {
+		if name == "profile_rrpf_malformed.json" {
+			fixture.expectIssue("repository-reviews", name, "invalid_profile", data)
+		}
 		fixture.writeLegacy(t, filepath.Join(root, name),
 			filepath.Join(root, "legacy-json", "repository-reviews-v1", name), data, 0o600)
 	}
@@ -507,9 +559,11 @@ func seedLegacyRepositoryEvaluation(t *testing.T, fixture *runtimeLegacyMigratio
 		filepath.Join(root, "legacy-json", "repository-evaluations-v1", name),
 		runtimeLegacyJSON(t, evaluation), 0o600)
 	badName := "evaluation_rme_ffffffffffffffffffffffffffffffff.json"
+	badData := []byte(`{"secret":"` + legacyMigrationSecretCanary)
+	fixture.expectIssue("repository-evaluations", badName, "malformed_json", badData)
 	fixture.writeLegacy(t, filepath.Join(root, badName),
 		filepath.Join(root, "legacy-json", "repository-evaluations-v1", badName),
-		[]byte(`{"secret":"`+legacyMigrationSecretCanary), 0o600)
+		badData, 0o600)
 }
 
 func seedLegacyEvolution(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
@@ -541,12 +595,18 @@ func seedLegacyEvolution(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
 	learning = append(learning, runtimeLegacyJSON(t, pattern)...)
 	learning = append(learning, '\n')
 	tasks := append(runtimeLegacyJSON(t, task), '\n')
-	tasks = append(tasks, []byte(`{"secret":"`+legacyMigrationSecretCanary+`"`+"\n")...)
+	invalidTaskLine := []byte(`{"secret":"` + legacyMigrationSecretCanary + `"`)
+	tasks = append(tasks, invalidTaskLine...)
+	tasks = append(tasks, '\n')
+	draftsData := runtimeLegacyJSON(t, []evolution.SkillDraft{draft, {}})
+	fixture.expectIssue("evolution", "skill-drafts.json", "invalid-draft",
+		runtimeLegacyArrayValue(t, draftsData, "", 1))
+	fixture.expectIssue("evolution", "task-records.jsonl", "malformed-record", invalidTaskLine)
 	root := fixture.evolutionRoot
 	sources := map[string][]byte{
 		"learning-records.jsonl": learning,
 		"task-records.jsonl":     tasks,
-		"skill-drafts.json":      runtimeLegacyJSON(t, []evolution.SkillDraft{draft, {}}),
+		"skill-drafts.json":      draftsData,
 		"profiles/weather.json":  runtimeLegacyJSON(t, profile),
 	}
 	for relative, data := range sources {
@@ -587,9 +647,11 @@ func seedLegacyCheckpoint(t *testing.T, fixture *runtimeLegacyMigrationFixture) 
 	malformed := checkpoint
 	malformed.WorkspaceID = "devw_88888888888888888888888888888888"
 	badName := legacyPRWorkspaceCheckpointFilename(malformed.WorkspaceID)
+	badData := []byte(`{"secret":"` + legacyMigrationSecretCanary)
+	fixture.expectIssue("pr-workspace-checkpoints", badName, "malformed-checkpoint", badData)
 	fixture.writeLegacy(t, filepath.Join(fixture.checkpointRoot, badName),
 		filepath.Join(fixture.checkpointRoot, "legacy-json", prWorkspaceCheckpointArchiveLabel, badName),
-		[]byte(`{"secret":"`+legacyMigrationSecretCanary), 0o600)
+		badData, 0o600)
 }
 
 func seedLegacyLocalCI(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
@@ -626,9 +688,11 @@ func seedLegacyLocalCI(t *testing.T, fixture *runtimeLegacyMigrationFixture) {
 		append(runtimeLegacyJSON(t, record), '\n'), 0o600)
 	badKey := strings.Repeat("a", 64)
 	badRelative := filepath.Join("cache", badKey[:2], badKey+".json")
+	badData := []byte(`{"secret":"` + legacyMigrationSecretCanary)
+	fixture.expectIssue("local_ci_cache", badRelative, "malformed-index", badData)
 	fixture.writeLegacy(t, filepath.Join(fixture.evidenceRoot, badRelative),
 		filepath.Join(fixture.evidenceRoot, "legacy-json", "local-ci-cache-v1", badRelative),
-		[]byte(`{"secret":"`+legacyMigrationSecretCanary), 0o600)
+		badData, 0o600)
 }
 
 type runtimeLegacyCacheIndex struct {
@@ -647,6 +711,39 @@ func runtimeLegacyJSON(t *testing.T, value any) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func runtimeLegacyObjectValue(t *testing.T, data []byte, keys ...string) []byte {
+	t.Helper()
+	current := append([]byte(nil), data...)
+	for _, key := range keys {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(current, &object); err != nil {
+			t.Fatal(err)
+		}
+		value, found := object[key]
+		if !found {
+			t.Fatalf("legacy JSON key %q is missing", key)
+		}
+		current = append([]byte(nil), value...)
+	}
+	return current
+}
+
+func runtimeLegacyArrayValue(t *testing.T, data []byte, key string, index int) []byte {
+	t.Helper()
+	arrayData := data
+	if key != "" {
+		arrayData = runtimeLegacyObjectValue(t, data, key)
+	}
+	var values []json.RawMessage
+	if err := json.Unmarshal(arrayData, &values); err != nil {
+		t.Fatal(err)
+	}
+	if index < 0 || index >= len(values) {
+		t.Fatalf("legacy JSON array index %d is out of bounds", index)
+	}
+	return append([]byte(nil), values[index]...)
 }
 
 //nolint:govet // Integration setup keeps independent subsystem errors locally scoped.
@@ -1131,8 +1228,7 @@ func runtimeLegacyIssuesMatch(got, want []runtimeLegacyImportIssue) bool {
 		return false
 	}
 	for index := range want {
-		if got[index].relative != want[index].relative || got[index].code != want[index].code ||
-			(want[index].digest != "" && got[index].digest != want[index].digest) {
+		if got[index] != want[index] {
 			return false
 		}
 	}
@@ -1351,24 +1447,20 @@ func runtimeLegacyAuditExpectations(
 				panic("legacy audit expectation has no seeded source: " + relative)
 			}
 		}
+		seededIssues := fixture.expectedIssueDigests[expectation.component]
+		if len(seededIssues) != len(expectation.issues) {
+			panic("legacy audit expectation has incomplete issue digests: " + expectation.component)
+		}
 		for index := range expectation.issues {
-			issue := &expectation.issues[index]
-			if runtimeLegacyIssueUsesSourceDigest(expectation.component, issue.code) {
-				issue.digest = expectation.sources[issue.relative].digest
+			if expectation.issues[index].relative != seededIssues[index].relative ||
+				expectation.issues[index].code != seededIssues[index].code {
+				panic("legacy audit issue order differs from seeded records: " + expectation.component)
 			}
+			expectation.issues[index].digest = seededIssues[index].digest
 		}
 		expectations[path] = expectation
 	}
 	return expectations
-}
-
-func runtimeLegacyIssueUsesSourceDigest(component, code string) bool {
-	return component == "runtime-state" && code == "source-conflict" ||
-		component == "sessions" && code == "invalid-session-json" ||
-		component == "repository-reviews" && code == "invalid_profile" ||
-		component == "repository-evaluations" && code == "malformed_json" ||
-		component == "pr-workspace-checkpoints" && code == "malformed-checkpoint" ||
-		component == "local_ci_cache" && code == "malformed-index"
 }
 
 func runtimeLegacySourceRoot(fixture *runtimeLegacyMigrationFixture, component string) string {
