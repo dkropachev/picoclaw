@@ -619,39 +619,36 @@ func isKnownCoverageBaselineFlake(out []byte) bool {
 		isKnownRepositoryModelEvaluationCancellationRace(out) ||
 		isKnownEvolutionDraftPersistenceTimeout(out) ||
 		isKnownRepositoryReviewAutoContinueCompletionTimeout(out) ||
-		isKnownRepositoryReviewLateControllerShutdownCompanionRace(out)
+		isKnownRepositoryReviewSQLiteCompanionDisappearance(out)
 }
 
-func isKnownRepositoryReviewLateControllerShutdownCompanionRace(out []byte) bool {
+// isKnownRepositoryReviewSQLiteCompanionDisappearance recognizes the one
+// shared immutable-base sqlitestore race rather than any assertion callsite.
+// Binding the sole diagnostic to its failed test's Go TempDir prevents the
+// same low-level text in unrelated output from authorizing a retry.
+func isKnownRepositoryReviewSQLiteCompanionDisappearance(out []byte) bool {
 	const (
-		parentTest    = "TestRepositoryReviewAssignmentAdmissionFailureBranches"
-		subtest       = parentTest + "/late_controller_shutdown"
 		failedPackage = "github.com/sipeed/picoclaw/web/backend/api"
-		diagnostic    = "repository_review_assignment_coverage_test.go:409: " +
-			"late controller shutdown error = secure repository-reviews database files: " +
-			"private file changed while securing"
-		continuationPrefix = "lstat "
-		continuationSuffix = ": no such file or directory"
 	)
 	var (
-		failureMarkers        []string
-		diagnostics           []string
-		continuations         []string
-		packageFailures       int
-		failurePackage        string
-		previousWasDiagnostic bool
+		failureMarkers   []string
+		diagnostics      []string
+		diagnosticLines  []int
+		lstatLines       []string
+		lstatLineIndexes []int
+		packageFailures  int
+		failurePackage   string
+		lineIndex        int
 	)
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.Contains(line, "_test.go:") && line != diagnostic {
+		if strings.Contains(line, "_test.go:") && !coverageGoTestDiagnostic(line) {
 			return false
 		}
-		if strings.HasPrefix(line, continuationPrefix) {
-			if !previousWasDiagnostic {
-				return false
-			}
-			continuations = append(continuations, line)
+		if strings.HasPrefix(line, "lstat ") {
+			lstatLines = append(lstatLines, line)
+			lstatLineIndexes = append(lstatLineIndexes, lineIndex)
 		}
 		if strings.HasPrefix(line, "--- FAIL:") {
 			name, ok := coverageFailedTestName(line)
@@ -665,58 +662,235 @@ func isKnownRepositoryReviewLateControllerShutdownCompanionRace(out []byte) bool
 			packageFailures++
 			failurePackage = fields[1]
 		}
-		isDiagnostic := coverageGoTestDiagnostic(line)
-		if isDiagnostic {
+		if coverageGoTestDiagnostic(line) {
 			diagnostics = append(diagnostics, line)
+			diagnosticLines = append(diagnosticLines, lineIndex)
 		}
 		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") ||
 			strings.Contains(line, "[build failed]") || strings.Contains(line, "[setup failed]") {
 			return false
 		}
-		previousWasDiagnostic = isDiagnostic && line == diagnostic
+		lineIndex++
 	}
-	if scanner.Err() != nil || len(failureMarkers) != 2 || failureMarkers[0] != parentTest ||
-		failureMarkers[1] != subtest || packageFailures != 1 || failurePackage != failedPackage ||
-		len(diagnostics) != 1 || diagnostics[0] != diagnostic || len(continuations) != 1 ||
-		!strings.HasPrefix(continuations[0], continuationPrefix) ||
-		!strings.HasSuffix(continuations[0], continuationSuffix) {
+	if scanner.Err() != nil || packageFailures != 1 || failurePackage != failedPackage ||
+		len(diagnostics) != 1 || len(diagnosticLines) != 1 {
 		return false
 	}
-	path := strings.TrimSuffix(
-		strings.TrimPrefix(continuations[0], continuationPrefix),
-		continuationSuffix,
-	)
-	return isSafeRepositoryReviewLateControllerShutdownCompanionPath(path)
+	failedTest, ok := repositoryReviewCoverageFailureLeaf(failureMarkers)
+	if !ok {
+		return false
+	}
+	diagnostic, ok := repositoryReviewSQLiteCompanionDiagnostic(diagnostics[0])
+	if !ok {
+		return false
+	}
+	path, diagnosticCompanion, needsContinuation, ok := repositoryReviewSQLiteCompanionErrorPath(diagnostic)
+	if !ok {
+		return false
+	}
+	if needsContinuation {
+		if len(lstatLines) != 1 || len(lstatLineIndexes) != 1 ||
+			lstatLineIndexes[0] != diagnosticLines[0]+1 {
+			return false
+		}
+		const (
+			continuationPrefix = "lstat "
+			continuationSuffix = ": no such file or directory"
+		)
+		if !strings.HasPrefix(lstatLines[0], continuationPrefix) ||
+			!strings.HasSuffix(lstatLines[0], continuationSuffix) {
+			return false
+		}
+		path = strings.TrimSuffix(
+			strings.TrimPrefix(lstatLines[0], continuationPrefix),
+			continuationSuffix,
+		)
+	} else if len(lstatLines) != 0 || len(lstatLineIndexes) != 0 {
+		return false
+	}
+	pathCompanion, ok := safeRepositoryReviewSQLiteCompanionPath(path, failedTest)
+	return ok && (diagnosticCompanion == "" || diagnosticCompanion == pathCompanion)
 }
 
-func isSafeRepositoryReviewLateControllerShutdownCompanionPath(path string) bool {
+func repositoryReviewCoverageFailureLeaf(failureMarkers []string) (string, bool) {
+	if len(failureMarkers) == 0 || len(failureMarkers) > 4 {
+		return "", false
+	}
+	for index, name := range failureMarkers {
+		if !safeRepositoryReviewCoverageTestName(name) {
+			return "", false
+		}
+		if index == 0 {
+			if strings.Contains(name, "/") {
+				return "", false
+			}
+			continue
+		}
+		prefix := failureMarkers[index-1] + "/"
+		if !strings.HasPrefix(name, prefix) ||
+			strings.Contains(strings.TrimPrefix(name, prefix), "/") {
+			return "", false
+		}
+	}
+	return failureMarkers[len(failureMarkers)-1], true
+}
+
+func safeRepositoryReviewCoverageTestName(name string) bool {
+	if !strings.HasPrefix(name, "TestRepositoryReview") || len(name) > 256 {
+		return false
+	}
+	for _, character := range name {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '_' || character == '/' {
+			continue
+		}
+		return false
+	}
+	for _, segment := range strings.Split(name, "/") {
+		if segment == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func repositoryReviewSQLiteCompanionDiagnostic(line string) (string, bool) {
+	const (
+		filePrefix = "repository_review_"
+		fileSuffix = "_test.go"
+	)
+	goSuffix := strings.Index(line, ".go:")
+	if goSuffix < 0 {
+		return "", false
+	}
+	file := line[:goSuffix+len(".go")]
+	if !strings.HasPrefix(file, filePrefix) || !strings.HasSuffix(file, fileSuffix) ||
+		strings.ContainsAny(file, `/\`) {
+		return "", false
+	}
+	stem := strings.TrimSuffix(strings.TrimPrefix(file, filePrefix), fileSuffix)
+	if stem == "" {
+		return "", false
+	}
+	for _, character := range stem {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' ||
+			character == '_' {
+			continue
+		}
+		return "", false
+	}
+	lineAndDiagnostic := line[goSuffix+len(".go:"):]
+	separator := strings.Index(lineAndDiagnostic, ": ")
+	if separator <= 0 {
+		return "", false
+	}
+	lineNumber := lineAndDiagnostic[:separator]
+	if lineNumber == "0" || !coverageCanonicalUint32Decimal(lineNumber) {
+		return "", false
+	}
+	diagnostic := lineAndDiagnostic[separator+2:]
+	const securePrefix = "secure repository-reviews database files: "
+	if strings.HasPrefix(diagnostic, securePrefix) {
+		return diagnostic, true
+	}
+	preamble, diagnostic, found := strings.Cut(diagnostic, " = ")
+	if !found || !safeRepositoryReviewSQLiteAssertionPreamble(preamble) ||
+		!strings.HasPrefix(diagnostic, securePrefix) {
+		return "", false
+	}
+	return diagnostic, true
+}
+
+func safeRepositoryReviewSQLiteAssertionPreamble(preamble string) bool {
+	if len(preamble) == 0 || len(preamble) > 96 || preamble != strings.TrimSpace(preamble) ||
+		!strings.HasSuffix(preamble, " error") {
+		return false
+	}
+	for _, character := range preamble {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' ||
+			character == ' ' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func repositoryReviewSQLiteCompanionErrorPath(
+	diagnostic string,
+) (path, companion string, needsContinuation, ok bool) {
+	const (
+		securePrefix = "secure repository-reviews database files: "
+		notExist     = ": no such file or directory"
+	)
+	errorText := strings.TrimPrefix(diagnostic, securePrefix)
+	if errorText == diagnostic || errorText == "" {
+		return "", "", false, false
+	}
+	if strings.HasPrefix(errorText, "open ") && strings.HasSuffix(errorText, notExist) {
+		path = strings.TrimSuffix(strings.TrimPrefix(errorText, "open "), notExist)
+		return path, "", false, path != ""
+	}
+	if errorText == "private file changed while securing" {
+		return "", "", true, true
+	}
+	const changedWhileOpening = " changed while opening"
+	if strings.HasSuffix(errorText, changedWhileOpening) {
+		companion = strings.TrimSuffix(errorText, changedWhileOpening)
+		if companion == "repository-reviews.db-wal" || companion == "repository-reviews.db-shm" {
+			return "", companion, true, true
+		}
+	}
+	return "", "", false, false
+}
+
+func safeRepositoryReviewSQLiteCompanionPath(path, failedTest string) (string, bool) {
 	if path == "" || strings.ContainsRune(path, '\x00') || !filepath.IsAbs(path) ||
 		filepath.Clean(path) != path {
-		return false
+		return "", false
 	}
 	tempRoot := filepath.Clean(os.TempDir())
 	relative, err := filepath.Rel(tempRoot, path)
 	if err != nil || relative == "." || relative == ".." ||
 		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return false
+		return "", false
 	}
 	parts := strings.Split(relative, string(filepath.Separator))
 	if len(parts) != 9 || parts[1] != "base-picoclaw-home" || parts[2] != ".tmp" ||
 		parts[4] != "tmp" || parts[6] != "001" || parts[7] != "repository_reviews" ||
 		(parts[8] != "repository-reviews.db-wal" && parts[8] != "repository-reviews.db-shm") {
-		return false
+		return "", false
 	}
 	const (
 		coveragePrefix   = "picoclaw-coverage-delta-"
 		apiRuntimePrefix = "picoclaw-api-test-runtime-"
-		testPrefix       = "TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_cont"
 	)
-	return strings.HasPrefix(parts[0], coveragePrefix) &&
+	testPrefix, ok := repositoryReviewCoverageTempDirPrefix(failedTest)
+	if !ok {
+		return "", false
+	}
+	valid := strings.HasPrefix(parts[0], coveragePrefix) &&
 		coverageCanonicalUint32Decimal(strings.TrimPrefix(parts[0], coveragePrefix)) &&
 		strings.HasPrefix(parts[3], apiRuntimePrefix) &&
 		coverageCanonicalUint32Decimal(strings.TrimPrefix(parts[3], apiRuntimePrefix)) &&
 		strings.HasPrefix(parts[5], testPrefix) &&
 		coverageCanonicalUint32Decimal(strings.TrimPrefix(parts[5], testPrefix))
+	return parts[8], valid
+}
+
+func repositoryReviewCoverageTempDirPrefix(failedTest string) (string, bool) {
+	if !safeRepositoryReviewCoverageTestName(failedTest) {
+		return "", false
+	}
+	// testing.T.TempDir truncates the test name to 64 bytes before dropping
+	// path separators, then os.MkdirTemp appends one uint32 decimal suffix.
+	// Test identities admitted above are ASCII, so byte truncation is exact.
+	pattern := failedTest
+	if len(pattern) > 64 {
+		pattern = pattern[:64]
+	}
+	return strings.ReplaceAll(pattern, "/", ""), true
 }
 
 func isKnownRepositoryReviewAutoContinueCompletionTimeout(out []byte) bool {
