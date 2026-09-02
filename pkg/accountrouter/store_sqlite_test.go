@@ -143,6 +143,114 @@ func TestAccountRouterSQLiteSchemaPragmasPermissionsAndFacade(t *testing.T) {
 	}
 }
 
+//nolint:govet // Narrow storage assertions intentionally use independent error scopes.
+func TestAccountRouterEmptyFirstOpenClosesLegacyHorizonWithoutRootModeCheck(t *testing.T) {
+	for _, mode := range []os.FileMode{0o755, 0o775} {
+		t.Run(fmt.Sprintf("mode-%o", mode), func(t *testing.T) {
+			workspace := t.TempDir()
+			if runtime.GOOS != "windows" {
+				if err := os.Chmod(workspace, mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			databasePath := DatabasePath(workspace)
+			if _, err := NewSQLite(
+				"runtime-router",
+				testAccountRouterConfig(),
+				testAccountRouterAccounts(),
+				databasePath,
+			); err != nil {
+				t.Fatalf("empty first open = %v", err)
+			}
+			database := openRawAccountRouterDB(t, databasePath)
+			var horizons int
+			if err := database.QueryRow(`SELECT COUNT(*) FROM storage_import_horizons
+			    WHERE component = ?`, accountRouterDatabaseComponent).Scan(&horizons); err != nil ||
+				horizons != 1 {
+				_ = database.Close()
+				t.Fatalf("empty first-open horizon = %d, %v", horizons, err)
+			}
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if runtime.GOOS != "windows" {
+				if err := os.Chmod(workspace, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lateState := State{Version: stateVersion, Routers: map[string]*RouterState{
+				"late-router": {
+					ConfigHash: "late-config", Accounts: map[string]*AccountState{},
+					Sessions: map[string]*SessionState{}, Blocks: map[string]*BlockRunState{},
+				},
+			}}
+			lateData, err := json.Marshal(lateState)
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacyPath := filepath.Join(workspace, accountRouterLegacyFilename)
+			if err := os.WriteFile(legacyPath, lateData, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stores.Delete(databasePath)
+			reopened, err := NewSQLite(
+				"runtime-router",
+				testAccountRouterConfig(),
+				testAccountRouterAccounts(),
+				databasePath,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reopened.store.st.Routers["late-router"] != nil {
+				t.Fatal("late legacy router reached the domain importer")
+			}
+			database = openRawAccountRouterDB(t, databasePath)
+			defer database.Close()
+			var imported, skipped, issues int
+			if err := database.QueryRow(`SELECT imported_count, skipped_count,
+			    (SELECT COUNT(*) FROM storage_import_issues AS issue
+			      WHERE issue.component = storage_imports.component
+			        AND issue.source_id = storage_imports.source_id
+			        AND issue.issue_code = 'late-source')
+			    FROM storage_imports WHERE component = ? AND source_id = ?`,
+				accountRouterDatabaseComponent, accountRouterLegacySourceID,
+			).Scan(&imported, &skipped, &issues); err != nil ||
+				imported != 0 || skipped != 1 || issues != 1 {
+				t.Fatalf("late legacy audit = %d/%d/%d, %v", imported, skipped, issues, err)
+			}
+			if _, err := os.Lstat(legacyPath); !os.IsNotExist(err) {
+				t.Fatalf("late legacy source remains: %v", err)
+			}
+			archive := filepath.Join(
+				workspace, "state", "legacy-json", accountRouterLegacyArchiveLabel,
+				accountRouterLegacyFilename,
+			)
+			if archived, err := os.ReadFile(archive); err != nil || !bytes.Equal(archived, lateData) {
+				t.Fatalf("late legacy archive = %q, %v", archived, err)
+			}
+		})
+	}
+}
+
+func TestAccountRouterLegacyEnumerationFindsSidecarWithoutPrimary(t *testing.T) {
+	root := privateAccountRouterWorkspace(t)
+	sidecarName := legacyInvalidationFilename(accountRouterLegacyFilename, "openai:work")
+	if err := os.WriteFile(filepath.Join(root, sidecarName), []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &Store{sourceRoot: root, sourceRelative: accountRouterLegacyFilename}
+	sources, err := store.legacySources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || sources[0].Relative != sidecarName ||
+		!strings.HasPrefix(sources[0].ID, accountRouterLegacySidecarPrefix) || sources[0].Order != 1 {
+		t.Fatalf("sidecar-only sources = %#v", sources)
+	}
+}
+
 //nolint:govet // Narrow test assertions intentionally use independent error scopes.
 func TestAccountRouterLegacyStateAndInvalidationMigration(t *testing.T) {
 	root := privateAccountRouterWorkspace(t)
