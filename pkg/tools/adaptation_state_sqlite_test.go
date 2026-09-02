@@ -578,6 +578,41 @@ func TestToolAdaptationSQLiteRejectsTooNewCorruptAndUnsafeState(t *testing.T) {
 	})
 }
 
+func TestToolAdaptationSQLiteRejectsUnrelatedSchemaObjects(t *testing.T) {
+	for name, statement := range map[string]string{
+		"table": `CREATE TABLE rogue_adaptation_state(id INTEGER PRIMARY KEY) STRICT`,
+		"view": `CREATE VIEW rogue_adaptation_view AS
+			SELECT provider, model FROM tool_adaptation_observations`,
+		"index": `CREATE INDEX rogue_adaptation_import_idx ON storage_imports(source_id)`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, store := useToolAdaptationSQLiteHome(t)
+			store.mu.Lock()
+			database, err := store.openLocked(t.Context())
+			store.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, execErr := database.ExecContext(t.Context(), statement); execErr != nil {
+				_ = database.Close()
+				t.Fatal(execErr)
+			}
+			if closeErr := database.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			store.mu.Lock()
+			reopened, err := store.openLocked(t.Context())
+			store.mu.Unlock()
+			if reopened != nil {
+				_ = reopened.Close()
+			}
+			if !errors.Is(err, sqlitestore.ErrInvalidSchema) {
+				t.Fatalf("openLocked() error = %v, want ErrInvalidSchema", err)
+			}
+		})
+	}
+}
+
 func TestToolAdaptationSQLiteConstraintsAndBestEffortAPIs(t *testing.T) {
 	_, store := useToolAdaptationSQLiteHome(t)
 	store.mu.Lock()
