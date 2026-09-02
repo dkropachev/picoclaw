@@ -23,11 +23,13 @@ import (
 	"maunium.net/go/mautrix/crypto/cryptohelper"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
-	_ "modernc.org/sqlite"
 
+	"github.com/sipeed/picoclaw/internal/sqlbridge"
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/identity"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
@@ -36,9 +38,6 @@ import (
 const typingCleanupTimeout = 5 * time.Second
 
 const (
-	sqliteDriver = "sqlite"
-	dbName       = "store.db"
-
 	typingRefreshInterval      = 20 * time.Second
 	typingServerTTL            = 30 * time.Second
 	roomKindCacheTTL           = 5 * time.Minute
@@ -206,16 +205,19 @@ type MatrixChannel struct {
 	localpartMentionR *regexp.Regexp
 
 	cryptoHelper *cryptohelper.CryptoHelper
-	cryptoDbPath string
+	cryptoStore  database.StoreID
 	progress     *channels.ToolFeedbackAnimator
 }
 
-func NewMatrixChannel(
+func newMatrixChannel(
 	bc *config.Channel,
 	cfg *config.MatrixSettings,
 	messageBus *bus.MessageBus,
-	cryptoDatabasePath string,
+	cryptoStoreID database.StoreID,
 ) (*MatrixChannel, error) {
+	if !cryptoStoreID.Valid() {
+		return nil, database.NewError(database.CodeInvalid, "Matrix crypto StoreID is invalid")
+	}
 	homeserver := strings.TrimSpace(cfg.Homeserver)
 	userID := strings.TrimSpace(cfg.UserID)
 	accessToken := strings.TrimSpace(cfg.AccessToken.String())
@@ -263,7 +265,7 @@ func NewMatrixChannel(
 		roomKindCache:     newRoomKindCache(roomKindCacheMaxEntries, roomKindCacheTTL),
 		localpartMentionR: localpartMentionRegexp(matrixLocalpart(client.UserID)),
 		typingMu:          sync.Mutex{},
-		cryptoDbPath:      cryptoDatabasePath,
+		cryptoStore:       cryptoStoreID,
 	}
 	ch.progress = channels.NewToolFeedbackAnimator(ch.EditMessage)
 	return ch, nil
@@ -276,15 +278,17 @@ func (c *MatrixChannel) Start(ctx context.Context) error {
 	c.startTime = time.Now()
 
 	// Initialize crypto helper if database and passphrase are configured
-	if c.cryptoDbPath != "" && c.config.CryptoPassphrase != "" {
-		if err := c.initCrypto(ctx); err != nil {
-			logger.WarnCF(
-				"matrix",
-				"Failed to initialize crypto, continuing without encryption support",
-				map[string]any{
-					"error": err.Error(),
-				},
+	if c.config.CryptoPassphrase != "" {
+		if !c.cryptoStore.Valid() {
+			c.cancel()
+			return database.NewError(
+				database.CodeInvalid,
+				"Matrix crypto StoreID is invalid",
 			)
+		}
+		if err := c.initCrypto(ctx); err != nil {
+			c.cancel()
+			return fmt.Errorf("initialize required Matrix encryption storage: %w", err)
 		}
 	}
 
@@ -333,39 +337,27 @@ func (c *MatrixChannel) Stop(ctx context.Context) error {
 func (c *MatrixChannel) initCrypto(ctx context.Context) error {
 	logger.InfoC("matrix", "Initializing crypto helper")
 
-	// Ensure the crypto database directory exists
-	if err := os.MkdirAll(c.cryptoDbPath, 0o700); err != nil {
-		return fmt.Errorf("create crypto database directory: %w", err)
+	client := database.RuntimeClient()
+	if client == nil {
+		return database.NewError(
+			database.CodeUnavailable,
+			"Matrix database broker client is unavailable",
+		)
 	}
-
-	// Create database with sqlite driver (modernc.org/sqlite)
-	dbPath := filepath.Join(c.cryptoDbPath, dbName)
-	connStr := "file:" + dbPath + "?_foreign_keys=on"
-
-	db, err := sql.Open(sqliteDriver, connStr)
+	dsn, err := sqlbridge.EncodeDSN(c.cryptoStore, sqlbridge.ModeRuntime)
 	if err != nil {
-		return fmt.Errorf("open crypto database: %w", err)
+		return fmt.Errorf("resolve Matrix crypto store: %w", err)
 	}
+	connector, err := sqlbridge.NewDriver(sqlbridge.NewBrokerRPC(client)).OpenConnector(dsn)
+	if err != nil {
+		return fmt.Errorf("connect Matrix crypto store: %w", err)
+	}
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	// Execute PRAGMA statements
-	// This is equivalent to the "sqlite3-fk-wal" dialect used by cryptohelper
-	pragmaStmts := []string{
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA synchronous = NORMAL",
-		"PRAGMA busy_timeout = 5000",
-	}
-	for _, pragma := range pragmaStmts {
-		if _, err = db.ExecContext(ctx, pragma); err != nil {
-			_ = db.Close()
-			return fmt.Errorf("execute %s: %w", pragma, err)
-		}
-	}
-
 	// Wrap with dbutil for dialect support
-	wrappedDB, err := dbutil.NewWithDB(db, sqliteDriver)
+	wrappedDB, err := dbutil.NewWithDB(db, sqliteprovider.DriverName())
 	if err != nil {
 		_ = db.Close()
 		return fmt.Errorf("wrap database: %w", err)

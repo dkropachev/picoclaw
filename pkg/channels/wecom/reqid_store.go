@@ -13,12 +13,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
@@ -80,6 +82,16 @@ type reqIDStore struct {
 	archiveRoot    string
 	now            func() time.Time
 	initErr        error
+	broker         *database.Client
+	storeID        database.StoreID
+	retained       *retainedWecomDatabase
+}
+
+type retainedWecomDatabase struct {
+	mu     sync.RWMutex
+	db     *sql.DB
+	unlock func()
+	closed bool
 }
 
 type wecomLegacyRoute struct {
@@ -89,7 +101,31 @@ type wecomLegacyRoute struct {
 
 var wecomReqIDLocks [wecomReqIDLockShards]sync.Mutex
 
+var allowUnfencedWeComProviderForTests atomic.Bool
+
 func newReqIDStore(path string) *reqIDStore {
+	if client := wecomBrokerClient(); client != nil {
+		store := &reqIDStore{
+			now: time.Now, broker: client, storeID: WeComStoreID,
+		}
+		store.initErr = store.brokerPreflight(context.Background())
+		return store
+	}
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedWeComProviderForTests.Load() {
+		return &reqIDStore{
+			now: time.Now,
+			initErr: database.NewError(
+				database.CodeUnavailable,
+				"WeCom database broker client is unavailable",
+			),
+		}
+	}
+	return newReqIDStoreLocal(path)
+}
+
+func newReqIDStoreLocal(path string) *reqIDStore {
 	databasePath, sourceRoot, sourceRelative, archiveRoot, err := resolveReqIDStorePaths(path)
 	store := &reqIDStore{
 		path:           databasePath,
@@ -108,6 +144,34 @@ func newReqIDStore(path string) *reqIDStore {
 		store.initErr = openErr
 	}
 	return store
+}
+
+func newLocalReqIDStoreForHome(home string) (*reqIDStore, error) {
+	home, err := filepath.Abs(filepath.Clean(home))
+	if err != nil || strings.TrimSpace(home) == "" {
+		return nil, errors.New("WeCom request-route home is invalid")
+	}
+	return &reqIDStore{
+		path:           filepath.Join(home, "channels", "wecom", wecomReqIDDatabaseFilename),
+		sourceRoot:     home,
+		sourceRelative: filepath.ToSlash(filepath.Join("wecom", wecomReqIDLegacyFilename)),
+		archiveRoot:    filepath.Join(home, "legacy-json", wecomReqIDLegacyArchiveLabel),
+		now:            time.Now,
+		storeID:        WeComStoreID,
+	}, nil
+}
+
+func newRetainedReqIDStore(home string) (*reqIDStore, error) {
+	store, err := newLocalReqIDStoreForHome(home)
+	if err != nil {
+		return nil, err
+	}
+	db, unlock, err := store.open(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	store.retained = &retainedWecomDatabase{db: db, unlock: unlock}
+	return store, nil
 }
 
 func defaultReqIDStorePath() string {
@@ -170,24 +234,40 @@ func (s *reqIDStore) Put(chatID, reqID string, chatType uint32, ttl time.Duratio
 		return nil
 	}
 	if err := validateWecomRouteValue(chatID); err != nil {
+		if s != nil && s.broker != nil {
+			return database.NewError(database.CodeInvalid, "WeCom route value is invalid")
+		}
 		return err
 	}
 	if err := validateWecomRouteValue(reqID); err != nil {
+		if s != nil && s.broker != nil {
+			return database.NewError(database.CodeInvalid, "WeCom route value is invalid")
+		}
 		return err
 	}
+	if s != nil && s.broker != nil {
+		return s.brokerPut(context.Background(), chatID, reqID, chatType, ttl)
+	}
+	return s.putLocal(context.Background(), chatID, reqID, chatType, ttl)
+}
+
+func (s *reqIDStore) putLocal(
+	ctx context.Context,
+	chatID, reqID string,
+	chatType uint32,
+	ttl time.Duration,
+) error {
 	now := s.now().UTC()
 	expiresAt := now.Add(ttl)
 	seconds, nanoseconds, err := wecomTimestampValues(expiresAt)
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
-	db, unlock, err := s.open(ctx)
+	db, release, err := s.acquire(ctx)
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	defer db.Close()
+	defer release()
 	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
 		if pruneErr := deleteExpiredWecomRoutes(ctx, conn, now); pruneErr != nil {
 			return pruneErr
@@ -220,35 +300,64 @@ func (s *reqIDStore) Get(chatID string) (wecomRoute, bool) {
 		return wecomRoute{}, false
 	}
 	ctx := context.Background()
-	db, unlock, err := s.open(ctx)
-	if err != nil {
-		s.logError("Failed to open WeCom request-route store", err)
-		return wecomRoute{}, false
-	}
-	defer unlock()
-	defer db.Close()
-	var route wecomRoute
-	err = sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
-		now := s.now().UTC()
-		if pruneErr := deleteExpiredWecomRoutes(ctx, conn, now); pruneErr != nil {
-			return pruneErr
+	if s.broker != nil {
+		route, found, err := s.brokerGet(ctx, chatID)
+		if err != nil {
+			s.logError("Failed to load WeCom request route", err)
+			return wecomRoute{}, false
 		}
-		var scanErr error
-		route, _, scanErr = scanWecomRoute(conn.QueryRowContext(
-			ctx,
-			selectWecomRouteSQL+" WHERE chat_id = ?",
-			chatID,
-		))
-		return scanErr
-	})
-	if errors.Is(err, sql.ErrNoRows) {
-		return wecomRoute{}, false
+		return route, found
 	}
+	route, found, err := s.getLocal(ctx, chatID, true)
 	if err != nil {
 		s.logError("Failed to load WeCom request route", err)
 		return wecomRoute{}, false
 	}
-	return route, true
+	return route, found
+}
+
+func (s *reqIDStore) getLocal(
+	ctx context.Context,
+	chatID string,
+	prune bool,
+) (wecomRoute, bool, error) {
+	db, release, err := s.acquire(ctx)
+	if err != nil {
+		return wecomRoute{}, false, err
+	}
+	defer release()
+	var route wecomRoute
+	if prune {
+		err = sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+			now := s.now().UTC()
+			if pruneErr := deleteExpiredWecomRoutes(ctx, conn, now); pruneErr != nil {
+				return pruneErr
+			}
+			var scanErr error
+			route, _, scanErr = scanWecomRoute(conn.QueryRowContext(
+				ctx,
+				selectWecomRouteSQL+" WHERE chat_id = ?",
+				chatID,
+			))
+			return scanErr
+		})
+	} else {
+		route, _, err = scanWecomRoute(db.QueryRowContext(
+			ctx,
+			selectWecomRouteSQL+" WHERE chat_id = ?",
+			chatID,
+		))
+		if err == nil && !route.ExpiresAt.IsZero() && s.now().UTC().After(route.ExpiresAt) {
+			return wecomRoute{}, false, nil
+		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return wecomRoute{}, false, nil
+	}
+	if err != nil {
+		return wecomRoute{}, false, err
+	}
+	return route, true, nil
 }
 
 func (s *reqIDStore) Delete(chatID string) error {
@@ -256,15 +365,23 @@ func (s *reqIDStore) Delete(chatID string) error {
 		return nil
 	}
 	if err := validateWecomRouteValue(chatID); err != nil {
+		if s != nil && s.broker != nil {
+			return database.NewError(database.CodeInvalid, "WeCom route value is invalid")
+		}
 		return err
 	}
-	ctx := context.Background()
-	db, unlock, err := s.open(ctx)
+	if s != nil && s.broker != nil {
+		return s.brokerDelete(context.Background(), chatID)
+	}
+	return s.deleteLocal(context.Background(), chatID)
+}
+
+func (s *reqIDStore) deleteLocal(ctx context.Context, chatID string) error {
+	db, release, err := s.acquire(ctx)
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	defer db.Close()
+	defer release()
 	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
 		_, err := conn.ExecContext(
 			ctx,
@@ -278,6 +395,9 @@ func (s *reqIDStore) Delete(chatID string) error {
 // load remains a source-compatible facade. Opening validates, imports, and
 // archives legacy state; individual reads remain query based.
 func (s *reqIDStore) load() error {
+	if s != nil && s.broker != nil {
+		return s.brokerPreflight(context.Background())
+	}
 	db, unlock, err := s.open(context.Background())
 	if err != nil {
 		return err
@@ -286,7 +406,80 @@ func (s *reqIDStore) load() error {
 	return db.Close()
 }
 
+func (s *reqIDStore) acquire(ctx context.Context) (*sql.DB, func(), error) {
+	if s != nil && s.retained != nil {
+		return s.retained.acquire()
+	}
+	db, unlock, err := s.open(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return db, func() {
+		_ = db.Close()
+		unlock()
+	}, nil
+}
+
+func (retained *retainedWecomDatabase) acquire() (*sql.DB, func(), error) {
+	if retained == nil {
+		return nil, nil, errors.New("WeCom request-route store is unavailable")
+	}
+	retained.mu.RLock()
+	if retained.closed || retained.db == nil {
+		retained.mu.RUnlock()
+		return nil, nil, errors.New("WeCom request-route store is closed")
+	}
+	return retained.db, retained.mu.RUnlock, nil
+}
+
+func (retained *retainedWecomDatabase) close() error {
+	if retained == nil {
+		return nil
+	}
+	retained.mu.Lock()
+	defer retained.mu.Unlock()
+	if retained.closed {
+		return nil
+	}
+	retained.closed = true
+	var closeErr error
+	if retained.db != nil {
+		closeErr = retained.db.Close()
+		retained.db = nil
+	}
+	if retained.unlock != nil {
+		retained.unlock()
+		retained.unlock = nil
+	}
+	return closeErr
+}
+
+func (s *reqIDStore) Close() error {
+	if s == nil || s.retained == nil {
+		return nil
+	}
+	return s.retained.close()
+}
+
+func (s *reqIDStore) StoreID() database.StoreID {
+	if s == nil {
+		return ""
+	}
+	if s.storeID != "" {
+		return s.storeID
+	}
+	return WeComStoreID
+}
+
 func (s *reqIDStore) open(ctx context.Context) (*sql.DB, func(), error) {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedWeComProviderForTests.Load() {
+		return nil, nil, database.NewError(
+			database.CodeUnauthorized,
+			"WeCom provider access requires database owner authority",
+		)
+	}
 	if s == nil || s.initErr != nil {
 		if s != nil && s.initErr != nil {
 			return nil, nil, s.initErr

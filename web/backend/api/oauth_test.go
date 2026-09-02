@@ -247,8 +247,7 @@ func TestOAuthTokenRenewalRecoversExactAccountRouterCredential(t *testing.T) {
 
 	const target = "credential:openai:work"
 	const sibling = "credential:openai:worker"
-	statePath := accountrouter.DatabasePath(workspace)
-	router := accountrouter.New("router-main", &config.AccountRouterConfig{
+	router := accountrouter.NewForWorkspace("router-main", &config.AccountRouterConfig{
 		Enabled: true,
 		Entry:   "target",
 		Blocks: []config.AccountRouterBlock{
@@ -279,7 +278,7 @@ func TestOAuthTokenRenewalRecoversExactAccountRouterCredential(t *testing.T) {
 				IdentityKey: "account:" + sibling,
 			}},
 		},
-	}, statePath)
+	}, workspace)
 	if router == nil {
 		t.Fatal("accountrouter.New() returned nil")
 	}
@@ -341,9 +340,9 @@ func TestOAuthCredentialPersistenceTreatsRouterInvalidationAsBestEffort(t *testi
 		t.Fatalf("SaveConfig error: %v", saveErr)
 	}
 
-	invalidatedPaths := make(map[string]bool)
-	oauthInvalidateCredentialAuth = func(statePath, credentialID string) error {
-		invalidatedPaths[filepath.Clean(statePath)] = true
+	invalidatedWorkspaces := make(map[string]bool)
+	oauthInvalidateCredentialAuth = func(workspace, credentialID string) error {
+		invalidatedWorkspaces[filepath.Clean(workspace)] = true
 		if credentialID != "openai:work" {
 			t.Fatalf("invalidation credential ID = %q, want openai:work", credentialID)
 		}
@@ -366,16 +365,16 @@ func TestOAuthCredentialPersistenceTreatsRouterInvalidationAsBestEffort(t *testi
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	wantPaths := []string{
-		accountrouter.DatabasePath(defaultWorkspace),
-		accountrouter.DatabasePath(workerWorkspace),
+	wantWorkspaces := []string{
+		defaultWorkspace,
+		workerWorkspace,
 	}
-	if len(invalidatedPaths) != len(wantPaths) {
-		t.Fatalf("invalidation paths = %v, want %v", invalidatedPaths, wantPaths)
+	if len(invalidatedWorkspaces) != len(wantWorkspaces) {
+		t.Fatalf("invalidation workspaces = %v, want %v", invalidatedWorkspaces, wantWorkspaces)
 	}
-	for _, wantPath := range wantPaths {
-		if !invalidatedPaths[filepath.Clean(wantPath)] {
-			t.Fatalf("invalidation paths = %v, missing %q", invalidatedPaths, wantPath)
+	for _, wantWorkspace := range wantWorkspaces {
+		if !invalidatedWorkspaces[filepath.Clean(wantWorkspace)] {
+			t.Fatalf("invalidation workspaces = %v, missing %q", invalidatedWorkspaces, wantWorkspace)
 		}
 	}
 	credential, err := auth.GetCredential("openai:work")

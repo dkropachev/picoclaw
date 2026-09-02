@@ -18,6 +18,12 @@ const issueGenerationSlotRetryInterval = 25 * time.Millisecond
 func (s Store) TryLockIssueGenerationAttempt(
 	repository, draftID, generationID string,
 ) (func(), bool, error) {
+	if s.broker != nil {
+		return s.brokerTryIssueAttempt(repository, draftID, generationID)
+	}
+	if err := s.localProviderError(); err != nil {
+		return nil, false, err
+	}
 	if !validBoundedText(repository, maxRepositoryIdentityBytes) ||
 		!validBoundedText(draftID, 256) ||
 		!validBoundedText(generationID, maxIssueGenerationIDBytes) {
@@ -37,6 +43,12 @@ func (s Store) AcquireIssueGenerationSlot(
 	ctx context.Context,
 	maximum int,
 ) (func(), error) {
+	if s.broker != nil {
+		return s.brokerAcquireNamedLease(ctx, reviewLeaseIssueSlot, reviewNamedLeaseRequest{Maximum: maximum})
+	}
+	if err := s.localProviderError(); err != nil {
+		return nil, err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -71,6 +83,9 @@ func (s Store) AcquireIssueGenerationSlot(
 }
 
 func tryLockRepositoryReviewIssueFile(lockPath string) (func(), bool, error) {
+	if err := reviewProviderAuthorityError(); err != nil {
+		return nil, false, err
+	}
 	if info, err := os.Lstat(lockPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return nil, false, errors.New("repository review issue lock must be a regular file")

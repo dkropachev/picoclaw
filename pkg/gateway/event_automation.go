@@ -12,6 +12,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/eventing"
 	eventchannel "github.com/sipeed/picoclaw/pkg/eventing/channelmessage"
 	eventgithubpoll "github.com/sipeed/picoclaw/pkg/eventing/githubpoll"
@@ -935,15 +936,20 @@ func openEventAutomationStore(ctx context.Context, cfg *config.Config) (*eventin
 	}
 	workspace := cfg.WorkspacePath()
 	ingress := config.EffectiveEventIngressConfig(cfg, workspace)
-	store, err := eventing.Open(
-		ctx,
-		ingress.DatabasePath,
+	options := []eventing.Option{
 		eventing.WithMaxPayloadBytes(ingress.MaxPayloadBytes),
 		eventing.WithRedaction(
 			ingress.RedactFields,
 			eventRedactionSecretValues(cfg, ingress),
 		),
-	)
+	}
+	var store *eventing.Store
+	var err error
+	if database.RuntimeClient() == nil && database.ProviderTestAuthorityHeld() {
+		store, err = eventing.Open(ctx, ingress.DatabasePath, options...)
+	} else {
+		store, err = eventing.OpenForWorkspace(ctx, workspace, options...)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open durable event inbox: %w", err)
 	}

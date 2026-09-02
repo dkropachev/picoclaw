@@ -364,8 +364,8 @@ func TestToolAdaptationStateHelpers(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv(config.EnvHome, home)
 
-	if got := ToolAdaptationStatePath(); got != filepath.Join(home, "tool-adaptation.db") {
-		t.Fatalf("ToolAdaptationStatePath() = %q, want path under configured home", got)
+	if got := toolAdaptationStatePath(); got != filepath.Join(home, "tool-adaptation.db") {
+		t.Fatalf("toolAdaptationStatePath() = %q, want path under configured home", got)
 	}
 	if got := ToolSchemaHash(nil); got != "" {
 		t.Fatalf("ToolSchemaHash(nil) = %q, want empty hash", got)

@@ -18,7 +18,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 )
 
 //nolint:govet // Narrow test assertions intentionally use independent error scopes.
@@ -557,7 +557,8 @@ func TestRuntimeStateRejectsUnsafeLegacyAndDatabaseBoundaries(t *testing.T) {
 		if err := os.Symlink(outside, filepath.Join(stateDirectory, runtimeDatabaseFilename)); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		if _, err := NewSQLiteManager(workspace); err == nil || !strings.Contains(err.Error(), "regular file") {
+		if _, err := NewSQLiteManager(workspace); err == nil ||
+			(!strings.Contains(err.Error(), "regular file") && !strings.Contains(err.Error(), "unsafe member")) {
 			t.Fatalf("database symlink error = %v", err)
 		}
 	})

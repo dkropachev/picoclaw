@@ -12,10 +12,18 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
+
+type retainedEvaluationDatabase struct {
+	mu     sync.RWMutex
+	db     *sql.DB
+	closed bool
+}
 
 const (
 	evaluationDatabaseFilename   = "evaluations.db"
@@ -111,6 +119,12 @@ type evaluationPayload struct {
 }
 
 func (s Store) open(ctx context.Context) (*sql.DB, error) {
+	if err := s.localProviderError(); err != nil {
+		return nil, err
+	}
+	if s.broker != nil {
+		return nil, database.NewError(database.CodeUnsupported, "repository evaluation operation is not broker-routed")
+	}
 	if s.openForTest != nil {
 		return s.openForTest(ctx)
 	}
@@ -120,6 +134,61 @@ func (s Store) open(ctx context.Context) (*sql.DB, error) {
 		return nil, fmt.Errorf("resolve repository evaluation database: %w", err)
 	}
 	return sqlitestore.Open(ctx, databasePath, evaluationStoreOptions(filepath.Dir(databasePath)))
+}
+
+func (s Store) acquire(ctx context.Context) (*sql.DB, func(), error) {
+	if err := s.localProviderError(); err != nil {
+		return nil, nil, err
+	}
+	if s.retained != nil {
+		s.retained.mu.RLock()
+		if s.retained.closed || s.retained.db == nil {
+			s.retained.mu.RUnlock()
+			return nil, nil, errors.New("repository evaluation database is closed")
+		}
+		return s.retained.db, s.retained.mu.RUnlock, nil
+	}
+	db, err := s.open(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return db, func() { _ = db.Close() }, nil
+}
+
+func newRetainedEvaluationStore(workspace string) (Store, error) {
+	if !database.BrokerAuthorityHeld() && !database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedEvaluationProviderForTests.Load() {
+		return Store{}, database.NewError(
+			database.CodeUnauthorized,
+			"repository evaluation retained store requires online database fencing",
+		)
+	}
+	store := newSQLiteStoreLocal(workspace)
+	store.brokerOwned = true
+	db, err := store.open(context.Background())
+	if err != nil {
+		return Store{}, err
+	}
+	store.retained = &retainedEvaluationDatabase{db: db}
+	return store, nil
+}
+
+func (s Store) Close() error {
+	if s.retained == nil {
+		return nil
+	}
+	s.retained.mu.Lock()
+	defer s.retained.mu.Unlock()
+	if s.retained.closed {
+		return nil
+	}
+	s.retained.closed = true
+	if s.retained.db == nil {
+		return nil
+	}
+	err := s.retained.db.Close()
+	s.retained.db = nil
+	return err
 }
 
 func evaluationStoreOptions(root string) sqlitestore.Options {
@@ -295,11 +364,11 @@ func importLegacyEvaluation(
 }
 
 func (s Store) exists(ctx context.Context, id string) (bool, error) {
-	database, err := s.open(ctx)
+	database, release, err := s.acquire(ctx)
 	if err != nil {
 		return false, err
 	}
-	defer database.Close()
+	defer release()
 	var one int
 	err = database.QueryRowContext(ctx,
 		`SELECT 1 FROM repository_evaluations WHERE evaluation_id = ?`, id,

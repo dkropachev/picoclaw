@@ -14,7 +14,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -179,25 +180,36 @@ func importWorkflowLegacySource(
 	ctx context.Context,
 	conn *sql.Conn,
 	input sqlitestore.LegacyInput,
-) (sqlitestore.ImportResult, error) {
+) (result sqlitestore.ImportResult, resultErr error) {
 	relative := filepath.ToSlash(input.Relative)
 	switch {
 	case strings.HasPrefix(relative, "workflow_runs/") && strings.HasSuffix(relative, "/run.json"):
-		return importWorkflowLegacyRun(ctx, conn, input)
+		result, resultErr = importWorkflowLegacyRun(ctx, conn, input)
 	case strings.HasPrefix(relative, "workflow_runs/") && strings.HasSuffix(relative, "/events.jsonl"):
-		return importWorkflowLegacyEvents(ctx, conn, input)
+		result, resultErr = importWorkflowLegacyEvents(ctx, conn, input)
 	case strings.HasPrefix(relative, "workflow_runs/") && strings.HasSuffix(relative, "/"+privateRunMarkerFilename):
-		return importWorkflowLegacyMarker(ctx, conn, input)
+		result, resultErr = importWorkflowLegacyMarker(ctx, conn, input)
 	case strings.HasPrefix(relative, workflowStateDir+"/"):
-		return importWorkflowLegacyNativeState(ctx, conn, input)
+		result, resultErr = importWorkflowLegacyNativeState(ctx, conn, input)
 	case relative == compatibilityManifestDir+"/"+compatibilityManifest:
-		return importWorkflowLegacyManifest(ctx, conn, input)
+		result, resultErr = importWorkflowLegacyManifest(ctx, conn, input)
 	case relative == workflowDevelopmentDir+"/"+workflowDevelopmentActive ||
 		strings.HasPrefix(relative, workflowDevelopmentDir+"/archive/"):
-		return importWorkflowLegacyDevelopment(ctx, conn, input)
+		result, resultErr = importWorkflowLegacyDevelopment(ctx, conn, input)
 	default:
 		return sqlitestore.ImportResult{}, errors.New("unknown workflow legacy source")
 	}
+	if resultErr != nil {
+		return sqlitestore.ImportResult{}, resultErr
+	}
+	if database.MigrationFenceHeld() && result.Skipped != 0 {
+		return sqlitestore.ImportResult{}, fmt.Errorf(
+			"workflow legacy verification failed for %s: %d record(s) were not imported",
+			relative,
+			result.Skipped,
+		)
+	}
+	return result, nil
 }
 
 func workflowImportIssue(code string, data []byte) sqlitestore.ImportIssue {

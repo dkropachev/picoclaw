@@ -282,63 +282,6 @@ func TestSeahorseCatalogDependencyAndSnapshotFailuresPrecedeEngineIO(t *testing.
 		}
 	})
 
-	t.Run("database path alias", func(t *testing.T) {
-		workspace := t.TempDir()
-		aliased := newSeahorseCatalogFixture(t,
-			seahorseCatalogAgentSpec{
-				id: "alpha", workspace: workspace, defaultID: true,
-			},
-			seahorseCatalogAgentSpec{id: "beta", workspace: workspace},
-		)
-		calls := 0
-		deps := valid
-		deps.newEngine = func(seahorse.Config, seahorse.CompleteFn) (*seahorse.Engine, error) {
-			calls++
-			return nil, errors.New("must not create")
-		}
-		manager, err := newSeahorseContextManagerWithDependencies(
-			context.Background(), nil, aliased.loop, deps,
-		)
-		if err == nil || manager != nil || calls != 0 ||
-			!strings.Contains(err.Error(), "alias Seahorse database") {
-			t.Fatalf("path alias = %T, %v, calls=%d", manager, err, calls)
-		}
-		if _, statErr := os.Stat(filepath.Join(workspace, "sessions")); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("path preflight performed engine I/O: %v", statErr)
-		}
-	})
-
-	t.Run("symlinked workspace alias", func(t *testing.T) {
-		root := t.TempDir()
-		realWorkspace := filepath.Join(root, "real")
-		if err := os.MkdirAll(realWorkspace, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		aliasWorkspace := filepath.Join(root, "alias")
-		if err := os.Symlink(realWorkspace, aliasWorkspace); err != nil {
-			t.Skipf("symlink unavailable: %v", err)
-		}
-		aliased := newSeahorseCatalogFixture(t,
-			seahorseCatalogAgentSpec{
-				id: "alpha", workspace: realWorkspace, defaultID: true,
-			},
-			seahorseCatalogAgentSpec{id: "beta", workspace: aliasWorkspace},
-		)
-		calls := 0
-		deps := valid
-		deps.newEngine = func(seahorse.Config, seahorse.CompleteFn) (*seahorse.Engine, error) {
-			calls++
-			return nil, errors.New("must not create")
-		}
-		manager, err := newSeahorseContextManagerWithDependencies(
-			context.Background(), nil, aliased.loop, deps,
-		)
-		if err == nil || manager != nil || calls != 0 ||
-			!strings.Contains(err.Error(), "alias Seahorse database") {
-			t.Fatalf("symlink alias = %T, %v, calls=%d", manager, err, calls)
-		}
-	})
-
 	t.Run("aliased registries", func(t *testing.T) {
 		aliased := newSeahorseCatalogFixture(t,
 			seahorseCatalogAgentSpec{id: "alpha", defaultID: true},
@@ -360,171 +303,6 @@ func TestSeahorseCatalogDependencyAndSnapshotFailuresPrecedeEngineIO(t *testing.
 	})
 }
 
-func TestSeahorseCatalogRejectsCaseAliasedDatabaseAnchorBeforeEngineIO(t *testing.T) {
-	parent := t.TempDir()
-	canonicalWorkspace := filepath.Join(parent, "CaseSensitiveProbe")
-	if err := os.MkdirAll(canonicalWorkspace, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	caseVariant := filepath.Join(parent, "casesensitiveprobe")
-	canonicalInfo, err := os.Stat(canonicalWorkspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	variantInfo, err := os.Stat(caseVariant)
-	if err != nil || !os.SameFile(canonicalInfo, variantInfo) {
-		t.Skip("test filesystem is case-sensitive")
-	}
-
-	fixture := newSeahorseCatalogFixture(t,
-		seahorseCatalogAgentSpec{
-			id: "alpha", workspace: canonicalWorkspace, defaultID: true,
-		},
-		seahorseCatalogAgentSpec{id: "beta", workspace: caseVariant},
-	)
-	engineCalls := 0
-	dependencies := defaultSeahorseContextDependencies()
-	dependencies.newEngine = func(
-		seahorse.Config,
-		seahorse.CompleteFn,
-	) (*seahorse.Engine, error) {
-		engineCalls++
-		return nil, errors.New("must reject before engine creation")
-	}
-	manager, err := newSeahorseContextManagerWithDependencies(
-		context.Background(),
-		nil,
-		fixture.loop,
-		dependencies,
-	)
-	if err == nil || manager != nil || engineCalls != 0 ||
-		!strings.Contains(err.Error(), "alias Seahorse database") {
-		t.Fatalf("case alias = %T, %v, engine calls=%d", manager, err, engineCalls)
-	}
-}
-
-func TestSeahorseCatalogRevalidatesDatabaseIdentityBeforeBootstrap(t *testing.T) {
-	for _, mode := range []string{"parent symlink", "hard link"} {
-		t.Run(mode, func(t *testing.T) {
-			root := t.TempDir()
-			workspaceA := filepath.Join(root, "workspace-a")
-			workspaceBReal := filepath.Join(root, "workspace-b-real")
-			workspaceB := workspaceBReal
-			for _, path := range []string{workspaceA, workspaceBReal} {
-				if err := os.MkdirAll(path, 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if mode == "parent symlink" {
-				workspaceB = filepath.Join(root, "workspace-b-link")
-				if err := os.Symlink(workspaceBReal, workspaceB); err != nil {
-					t.Skipf("symlink unavailable: %v", err)
-				}
-			}
-
-			fixture := newSeahorseCatalogFixture(t,
-				seahorseCatalogAgentSpec{
-					id: "alpha", workspace: workspaceA, defaultID: true,
-				},
-				seahorseCatalogAgentSpec{id: "beta", workspace: workspaceB},
-			)
-			base := defaultSeahorseContextDependencies()
-			created := make([]*seahorse.Engine, 0, 2)
-			closed := make(map[*seahorse.Engine]int)
-			engineCalls := 0
-			bootstrapCalls := 0
-			installCalls := 0
-			dependencies := base
-			dependencies.newEngine = func(
-				cfg seahorse.Config,
-				complete seahorse.CompleteFn,
-			) (*seahorse.Engine, error) {
-				engineCalls++
-				engineConfig := cfg
-				if mode == "hard link" && engineCalls == 2 {
-					// SQLite itself refuses a second WAL owner through another
-					// hard-link spelling. Return a healthy decoy engine so the
-					// post-open path fence directly proves SameFile rejection.
-					engineConfig.DBPath = filepath.Join(root, "decoy", "seahorse.db")
-				}
-				engine, engineErr := base.newEngine(engineConfig, complete)
-				if engineErr != nil {
-					return nil, engineErr
-				}
-				created = append(created, engine)
-				if engineCalls == 1 {
-					switch mode {
-					case "parent symlink":
-						if err := os.Remove(workspaceB); err != nil {
-							t.Fatal(err)
-						}
-						if err := os.Symlink(workspaceA, workspaceB); err != nil {
-							t.Fatal(err)
-						}
-					case "hard link":
-						sessionsB := filepath.Join(workspaceB, "sessions")
-						if err := os.MkdirAll(sessionsB, 0o755); err != nil {
-							t.Fatal(err)
-						}
-						if err := os.Link(
-							filepath.Join(workspaceA, "sessions", "seahorse.db"),
-							filepath.Join(sessionsB, "seahorse.db"),
-						); err != nil {
-							t.Skipf("hard link unavailable: %v", err)
-						}
-					}
-				}
-				return engine, nil
-			}
-			dependencies.closeEngine = func(engine *seahorse.Engine) error {
-				closed[engine]++
-				return base.closeEngine(engine)
-			}
-			dependencies.bootstrap = func(
-				context.Context,
-				*seahorseContextManager,
-				*AgentInstance,
-				*seahorse.Engine,
-				string,
-			) error {
-				bootstrapCalls++
-				return nil
-			}
-			dependencies.install = func(
-				[]tools.FactoryBackedBatch,
-			) ([]tools.FactoryBackedAdmission, error) {
-				installCalls++
-				return nil, nil
-			}
-
-			manager, err := newSeahorseContextManagerWithDependencies(
-				context.Background(),
-				nil,
-				fixture.loop,
-				dependencies,
-			)
-			if err == nil || manager != nil || len(created) != 2 ||
-				bootstrapCalls != 0 || installCalls != 0 {
-				t.Fatalf(
-					"%s revalidation = %T, %v created=%d bootstrap=%d install=%d",
-					mode,
-					manager,
-					err,
-					len(created),
-					bootstrapCalls,
-					installCalls,
-				)
-			}
-			for _, engine := range created {
-				if closed[engine] != 1 {
-					t.Fatalf("%s engine %p close calls = %d", mode, engine, closed[engine])
-				}
-			}
-			fixture.noShortRoots(t)
-		})
-	}
-}
-
 func TestSeahorseCatalogCreatesAllEnginesBeforeSortedBootstrapAndInstall(t *testing.T) {
 	fixture := newSeahorseCatalogFixture(t,
 		seahorseCatalogAgentSpec{
@@ -536,11 +314,7 @@ func TestSeahorseCatalogCreatesAllEnginesBeforeSortedBootstrapAndInstall(t *test
 	)
 	workspaceOwners := map[string]string{}
 	for id, agent := range fixture.agents {
-		path, _, _, err := canonicalSeahorseDatabasePath(agent.Workspace)
-		if err != nil {
-			t.Fatal(err)
-		}
-		workspaceOwners[path] = id
+		workspaceOwners[agent.Workspace] = id
 	}
 	events := make([]string, 0, 7)
 	deps := defaultSeahorseContextDependencies()
@@ -548,8 +322,8 @@ func TestSeahorseCatalogCreatesAllEnginesBeforeSortedBootstrapAndInstall(t *test
 		cfg seahorse.Config,
 		complete seahorse.CompleteFn,
 	) (*seahorse.Engine, error) {
-		events = append(events, "engine:"+workspaceOwners[cfg.DBPath])
-		return seahorse.NewEngine(cfg, complete)
+		events = append(events, "engine:"+workspaceOwners[cfg.Workspace])
+		return newRuntimeSeahorseEngine(cfg, complete)
 	}
 	deps.bootstrap = func(
 		_ context.Context,
@@ -639,81 +413,32 @@ func TestSeahorseCatalogDefaultAdaptersAndNilContext(t *testing.T) {
 	})
 }
 
-func TestSeahorseCatalogPathHelperAndRevalidationEdges(t *testing.T) {
-	t.Run("path obstruction", func(t *testing.T) {
-		root := t.TempDir()
-		obstruction := filepath.Join(root, "not-a-directory")
-		if err := os.WriteFile(obstruction, []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		blockedPath := filepath.Join(obstruction, "sessions", "seahorse.db")
-		if _, _, err := seahorseDatabasePathAnchor(blockedPath); err == nil {
-			t.Fatal("database anchor accepted a non-directory ancestor")
-		}
-		if _, _, _, err := canonicalSeahorseDatabasePath(
-			filepath.Join(obstruction, "workspace"),
-		); err == nil {
-			t.Fatal("canonical database path accepted a non-directory ancestor")
-		}
-	})
+func TestSeahorseCatalogValidatesOpaqueStoreIdentitiesWithoutProviderPaths(t *testing.T) {
+	if err := validateSeahorseStoreIdentities([]seahorseAgentCandidate{{
+		id: "missing-engine",
+	}}); err == nil || !strings.Contains(err.Error(), "engine is unavailable") {
+		t.Fatalf("missing engine validation = %v", err)
+	}
 
-	t.Run("symlink cycle and depth", func(t *testing.T) {
-		root := t.TempDir()
-		cycleA := filepath.Join(root, "cycle-a")
-		cycleB := filepath.Join(root, "cycle-b")
-		if err := os.Symlink(filepath.Base(cycleB), cycleA); err != nil {
-			t.Skipf("symlink unavailable: %v", err)
-		}
-		if err := os.Symlink(filepath.Base(cycleA), cycleB); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := resolveSeahorseDatabaseIdentity(cycleA); err == nil {
-			t.Fatal("database identity accepted a symlink cycle")
-		}
-
-		links := make([]string, 66)
-		for index := range links {
-			links[index] = filepath.Join(root, fmt.Sprintf("depth-%02d", index))
-		}
-		for index := 0; index < len(links)-1; index++ {
-			if err := os.Symlink(filepath.Base(links[index+1]), links[index]); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := os.WriteFile(links[len(links)-1], []byte("target"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := resolveSeahorseDatabaseIdentity(links[0]); err == nil ||
-			!strings.Contains(err.Error(), "too many symlink") {
-			t.Fatalf("deep identity error = %v", err)
-		}
-	})
-
-	t.Run("revalidation rejects missing and nonregular paths", func(t *testing.T) {
-		missing := filepath.Join(t.TempDir(), "missing.db")
-		if err := revalidateSeahorseDatabaseIdentities([]seahorseAgentCandidate{{
-			id: "nil-retrieval", dbPath: missing,
-		}}); err != nil {
-			t.Fatalf("nil retrieval should be skipped: %v", err)
-		}
-		if err := revalidateSeahorseDatabaseIdentities([]seahorseAgentCandidate{{
-			id: "missing", dbPath: missing, dbIdentity: missing,
-			retrieval: &seahorse.RetrievalEngine{},
-		}}); err == nil || !strings.Contains(err.Error(), "opened database") {
-			t.Fatalf("missing revalidation error = %v", err)
-		}
-		directory := t.TempDir()
-		identity, err := resolveSeahorseDatabaseIdentity(directory)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := revalidateSeahorseDatabaseIdentities([]seahorseAgentCandidate{{
-			id: "directory", dbPath: directory, dbIdentity: identity,
-			retrieval: &seahorse.RetrievalEngine{},
-		}}); err == nil || !strings.Contains(err.Error(), "not a regular file") {
-			t.Fatalf("nonregular revalidation error = %v", err)
-		}
-	})
+	first, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{DatabasePath: ":memory:"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{DatabasePath: ":memory:"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if first.StoreID().Valid() || second.StoreID().Valid() {
+		t.Fatal("offline test engines unexpectedly exposed a broker StoreID")
+	}
+	if err := validateSeahorseStoreIdentities([]seahorseAgentCandidate{
+		{id: "alpha", engine: first},
+		{id: "beta", engine: second},
+	}); err != nil {
+		t.Fatalf("offline injected engine validation = %v", err)
+	}
 }
 
 func TestSeahorseContextManagerOperationAndCloseEdges(t *testing.T) {
@@ -800,7 +525,7 @@ func TestSeahorseCatalogLaterEngineFailuresCloseEveryPrivateEngine(t *testing.T)
 						return nil, nil
 					}
 				}
-				engine, err := seahorse.NewEngine(cfg, complete)
+				engine, err := newRuntimeSeahorseEngine(cfg, complete)
 				if err == nil {
 					created = append(created, engine)
 				}
@@ -904,7 +629,7 @@ func TestSeahorseCatalogBootstrapFailuresAndCancellationRollBack(t *testing.T) {
 				cfg seahorse.Config,
 				complete seahorse.CompleteFn,
 			) (*seahorse.Engine, error) {
-				engine, err := seahorse.NewEngine(cfg, complete)
+				engine, err := newRuntimeSeahorseEngine(cfg, complete)
 				if err == nil {
 					created = append(created, engine)
 				}
@@ -1198,8 +923,8 @@ func TestSeahorseCatalogPostCommitMalformedAdmissionsRetainManager(t *testing.T)
 func TestSeahorseVerifyAdmissionsRejectsMalformedProjection(t *testing.T) {
 	registry := tools.NewToolRegistry()
 	t.Cleanup(func() { _ = registry.Close() })
-	engine, err := seahorse.NewEngine(seahorse.Config{
-		DBPath: filepath.Join(t.TempDir(), "verify.db"),
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: filepath.Join(t.TempDir(), "verify.db"),
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1275,8 +1000,8 @@ func TestSeahorseContextManagerCloseIsDeterministicPanicSafeAndIdempotent(t *tes
 	engines := make(map[string]*seahorse.Engine)
 	engineName := make(map[*seahorse.Engine]string)
 	for _, id := range []string{"gamma", "alpha", "beta"} {
-		engine, err := seahorse.NewEngine(seahorse.Config{
-			DBPath: filepath.Join(t.TempDir(), id+".db"),
+		engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+			DatabasePath: filepath.Join(t.TempDir(), id+".db"),
 		}, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -1321,8 +1046,8 @@ func TestSeahorseContextManagerCloseIsDeterministicPanicSafeAndIdempotent(t *tes
 	if nilEngineErr := closeSeahorseEngine(nil, nil); nilEngineErr != nil {
 		t.Fatalf("nil engine Close = %v", nilEngineErr)
 	}
-	defaultEngine, defaultErr := seahorse.NewEngine(seahorse.Config{
-		DBPath: filepath.Join(t.TempDir(), "default-close.db"),
+	defaultEngine, defaultErr := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: filepath.Join(t.TempDir(), "default-close.db"),
 	}, nil)
 	if defaultErr != nil {
 		t.Fatal(defaultErr)
@@ -1332,7 +1057,7 @@ func TestSeahorseContextManagerCloseIsDeterministicPanicSafeAndIdempotent(t *tes
 	}
 }
 
-func TestSeahorseCatalogOwnerProductsAndAgentDatabasesAreIsolated(t *testing.T) {
+func TestSeahorseCatalogOwnerProductsAndAgentStoresAreIsolated(t *testing.T) {
 	fixture := newSeahorseCatalogFixture(t,
 		seahorseCatalogAgentSpec{id: "alpha", defaultID: true},
 		seahorseCatalogAgentSpec{id: "beta"},
@@ -1351,8 +1076,13 @@ func TestSeahorseCatalogOwnerProductsAndAgentDatabasesAreIsolated(t *testing.T) 
 		t.Fatal("agents share a Seahorse engine or retrieval")
 	}
 	for _, agent := range fixture.agents {
-		if _, statErr := os.Stat(filepath.Join(agent.Workspace, "sessions", "seahorse.db")); statErr != nil {
-			t.Fatalf("agent %q database: %v", agent.ID, statErr)
+		if _, statErr := os.Lstat(
+			filepath.Join(agent.Workspace, "sessions", "seahorse.db"),
+		); !errors.Is(
+			statErr,
+			os.ErrNotExist,
+		) {
+			t.Fatalf("agent %q reconstructed a Seahorse database path: %v", agent.ID, statErr)
 		}
 	}
 	_, err = manager.engines["alpha"].Ingest(

@@ -115,8 +115,8 @@ func TestAgentLoopSelectCandidatesUsesBuiltAccountRouter(t *testing.T) {
 	if router == nil {
 		t.Fatal("buildAccountRouterWithAliases() = nil")
 	}
-	if got := router.StatePath; got != accountrouter.DatabasePath(workspace) {
-		t.Fatalf("state path = %q, want workspace account-router.db", got)
+	if router.StoreID().Valid() {
+		t.Fatalf("standalone test router unexpectedly exposed StoreID %q", router.StoreID())
 	}
 
 	loop := &AgentLoop{}

@@ -16,9 +16,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/sipeed/picoclaw/pkg/prworkspace"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
@@ -63,6 +64,9 @@ type prWorkspaceCandidateCheckpointRevision struct {
 type prWorkspaceCandidateCheckpointStore struct {
 	root           string
 	maximumRecords int
+	broker         *database.Client
+	storeID        database.StoreID
+	db             *sql.DB
 	mu             sync.Mutex
 }
 
@@ -138,6 +142,29 @@ const prWorkspaceCheckpointsStateIndexSchema = `CREATE INDEX candidate_checkpoin
     ON candidate_checkpoints(state, workspace_id)`
 
 func newPRWorkspaceCandidateCheckpointStore(root string) (*prWorkspaceCandidateCheckpointStore, error) {
+	if client := database.RuntimeClient(); client != nil {
+		// The runtime-side store is a typed client only. In particular, do not
+		// validate, clean, join, stat, create, or otherwise inspect root here:
+		// it belongs exclusively to the broker-side trusted catalog.
+		return &prWorkspaceCandidateCheckpointStore{
+			broker:  client,
+			storeID: PRWorkspaceCheckpointStoreID,
+		}, nil
+	}
+	return newLocalPRWorkspaceCandidateCheckpointStore(root, false)
+}
+
+func newLocalPRWorkspaceCandidateCheckpointStore(
+	root string,
+	retainDatabase bool,
+) (*prWorkspaceCandidateCheckpointStore, error) {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"PR workspace checkpoint provider access requires database owner fencing",
+		)
+	}
 	if stringsTrimmed(root) == "" || !filepath.IsAbs(root) {
 		return nil, errors.New("PR workspace candidate checkpoint root must be absolute")
 	}
@@ -150,6 +177,10 @@ func newPRWorkspaceCandidateCheckpointStore(root string) (*prWorkspaceCandidateC
 	if err != nil {
 		return nil, err
 	}
+	if retainDatabase {
+		store.db = database
+		return store, nil
+	}
 	if err = database.Close(); err != nil {
 		return nil, fmt.Errorf("close PR workspace candidate checkpoints: %w", err)
 	}
@@ -157,6 +188,9 @@ func newPRWorkspaceCandidateCheckpointStore(root string) (*prWorkspaceCandidateC
 }
 
 func (store *prWorkspaceCandidateCheckpointStore) databasePath() string {
+	if store == nil || store.broker != nil {
+		return ""
+	}
 	return filepath.Join(store.root, prWorkspaceCheckpointDatabaseFilename)
 }
 
@@ -169,7 +203,7 @@ func (store *prWorkspaceCandidateCheckpointStore) recordLimit() int {
 }
 
 func (store *prWorkspaceCandidateCheckpointStore) open(ctx context.Context) (*sql.DB, error) {
-	if store == nil {
+	if store == nil || store.broker != nil || stringsTrimmed(store.root) == "" {
 		return nil, errors.New("PR workspace candidate checkpoint store is unavailable")
 	}
 	freshDatabase := false
@@ -219,6 +253,36 @@ func (store *prWorkspaceCandidateCheckpointStore) open(ctx context.Context) (*sq
 			MaxTotalBytes: prWorkspaceCheckpointMaximumRecords * prWorkspaceCandidateCheckpointMaxSize,
 		},
 	})
+}
+
+func (store *prWorkspaceCandidateCheckpointStore) operationDatabase(
+	ctx context.Context,
+) (*sql.DB, func() error, error) {
+	if store == nil || store.broker != nil {
+		return nil, nil, errors.New("PR workspace candidate checkpoint store is unavailable")
+	}
+	if store.db != nil {
+		return store.db, func() error { return nil }, nil
+	}
+	database, err := store.open(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return database, database.Close, nil
+}
+
+func (store *prWorkspaceCandidateCheckpointStore) close() error {
+	if store == nil {
+		return nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.db == nil {
+		return nil
+	}
+	err := store.db.Close()
+	store.db = nil
+	return err
 }
 
 func validatePRWorkspaceCheckpointSchema(ctx context.Context, conn *sql.Conn) error {
@@ -596,6 +660,14 @@ func (store *prWorkspaceCandidateCheckpointStore) Save(
 	checkpoint prWorkspaceCandidateCheckpoint,
 	expected prWorkspaceCandidateCheckpointRevision,
 ) (prWorkspaceCandidateCheckpointRevision, error) {
+	return store.save(context.Background(), checkpoint, expected)
+}
+
+func (store *prWorkspaceCandidateCheckpointStore) save(
+	ctx context.Context,
+	checkpoint prWorkspaceCandidateCheckpoint,
+	expected prWorkspaceCandidateCheckpointRevision,
+) (prWorkspaceCandidateCheckpointRevision, error) {
 	if store == nil || !validPRWorkspaceCandidateCheckpointShape(checkpoint) ||
 		!validPRWorkspaceCheckpointRevision(expected, checkpoint.WorkspaceID) {
 		return prWorkspaceCandidateCheckpointRevision{}, errors.New(
@@ -611,23 +683,26 @@ func (store *prWorkspaceCandidateCheckpointStore) Save(
 			"PR workspace candidate checkpoint is too large",
 		)
 	}
+	if store.broker != nil {
+		return store.saveBroker(ctx, checkpoint, expected)
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	database, err := store.open(context.Background())
+	database, closeDatabase, err := store.operationDatabase(ctx)
 	if err != nil {
 		return prWorkspaceCandidateCheckpointRevision{}, err
 	}
-	defer database.Close()
+	defer closeDatabase()
 	var committed prWorkspaceCandidateCheckpointRevision
-	err = sqlitestore.Immediate(context.Background(), database, func(conn *sql.Conn) error {
+	err = sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
 		current, version, found, loadErr := loadPRWorkspaceCheckpoint(
-			context.Background(), conn, checkpoint.WorkspaceID,
+			ctx, conn, checkpoint.WorkspaceID,
 		)
 		if loadErr != nil {
 			return loadErr
 		}
 		currentRevision, revisionErr := revisionForPRWorkspaceCheckpoint(
-			context.Background(), conn, current, version, found, checkpoint.WorkspaceID,
+			ctx, conn, current, version, found, checkpoint.WorkspaceID,
 		)
 		if revisionErr != nil {
 			return revisionErr
@@ -638,21 +713,21 @@ func (store *prWorkspaceCandidateCheckpointStore) Save(
 		arguments := prWorkspaceCheckpointArguments(checkpoint)
 		if !found {
 			var count int
-			if queryErr := conn.QueryRowContext(context.Background(), `SELECT COUNT(*)
+			if queryErr := conn.QueryRowContext(ctx, `SELECT COUNT(*)
 			    FROM candidate_checkpoints`).Scan(&count); queryErr != nil {
 				return queryErr
 			}
 			if count >= store.recordLimit() {
 				return errPRWorkspaceCheckpointCapacity
 			}
-			allocated, allocateErr := allocatePRWorkspaceCheckpointRevision(context.Background(), conn)
+			allocated, allocateErr := allocatePRWorkspaceCheckpointRevision(ctx, conn)
 			if allocateErr != nil {
 				return allocateErr
 			}
 			version = allocated
 			arguments = append(arguments, version)
 			if _, execErr := conn.ExecContext(
-				context.Background(),
+				ctx,
 				prWorkspaceCheckpointInsertSQL,
 				arguments...,
 			); execErr != nil {
@@ -672,12 +747,12 @@ func (store *prWorkspaceCandidateCheckpointStore) Save(
 			current.GitWorkspaceID != checkpoint.GitWorkspaceID || current.LineID != checkpoint.LineID {
 			return errPRWorkspaceCandidateCheckpointConflict
 		}
-		newVersion, allocateErr := allocatePRWorkspaceCheckpointRevision(context.Background(), conn)
+		newVersion, allocateErr := allocatePRWorkspaceCheckpointRevision(ctx, conn)
 		if allocateErr != nil {
 			return allocateErr
 		}
 		arguments = append(arguments[1:], newVersion, checkpoint.WorkspaceID, version)
-		result, execErr := conn.ExecContext(context.Background(), prWorkspaceCheckpointUpdateSQL, arguments...)
+		result, execErr := conn.ExecContext(ctx, prWorkspaceCheckpointUpdateSQL, arguments...)
 		if execErr != nil {
 			return fmt.Errorf("write PR workspace candidate checkpoint: %w", execErr)
 		}
@@ -697,20 +772,30 @@ func (store *prWorkspaceCandidateCheckpointStore) Save(
 func (store *prWorkspaceCandidateCheckpointStore) Load(
 	workspaceID string,
 ) (prWorkspaceCandidateCheckpoint, prWorkspaceCandidateCheckpointRevision, bool, error) {
+	return store.load(context.Background(), workspaceID)
+}
+
+func (store *prWorkspaceCandidateCheckpointStore) load(
+	ctx context.Context,
+	workspaceID string,
+) (prWorkspaceCandidateCheckpoint, prWorkspaceCandidateCheckpointRevision, bool, error) {
 	if store == nil || stringsTrimmed(workspaceID) == "" {
 		return prWorkspaceCandidateCheckpoint{}, prWorkspaceCandidateCheckpointRevision{}, false, errors.New(
 			"PR workspace candidate checkpoint lookup is invalid",
 		)
 	}
+	if store.broker != nil {
+		return store.loadBroker(ctx, workspaceID)
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	database, err := store.open(context.Background())
+	database, closeDatabase, err := store.operationDatabase(ctx)
 	if err != nil {
 		return prWorkspaceCandidateCheckpoint{}, prWorkspaceCandidateCheckpointRevision{}, false, err
 	}
-	defer database.Close()
+	defer closeDatabase()
 	checkpoint, sequence, found, err := loadPRWorkspaceCheckpoint(
-		context.Background(), database, workspaceID,
+		ctx, database, workspaceID,
 	)
 	if err != nil {
 		return prWorkspaceCandidateCheckpoint{}, prWorkspaceCandidateCheckpointRevision{}, false, err
@@ -721,7 +806,7 @@ func (store *prWorkspaceCandidateCheckpointStore) Load(
 		)
 	}
 	revision, err := revisionForPRWorkspaceCheckpoint(
-		context.Background(), database, checkpoint, sequence, found, workspaceID,
+		ctx, database, checkpoint, sequence, found, workspaceID,
 	)
 	if err != nil {
 		return prWorkspaceCandidateCheckpoint{}, prWorkspaceCandidateCheckpointRevision{}, false, err
@@ -733,26 +818,37 @@ func (store *prWorkspaceCandidateCheckpointStore) Remove(
 	workspaceID string,
 	expected prWorkspaceCandidateCheckpointRevision,
 ) error {
+	return store.remove(context.Background(), workspaceID, expected)
+}
+
+func (store *prWorkspaceCandidateCheckpointStore) remove(
+	ctx context.Context,
+	workspaceID string,
+	expected prWorkspaceCandidateCheckpointRevision,
+) error {
 	if store == nil || stringsTrimmed(workspaceID) == "" ||
 		!validPRWorkspaceCheckpointRevision(expected, workspaceID) {
 		return errors.New("PR workspace candidate checkpoint removal is invalid")
 	}
+	if store.broker != nil {
+		return store.removeBroker(ctx, workspaceID, expected)
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	database, err := store.open(context.Background())
+	database, closeDatabase, err := store.operationDatabase(ctx)
 	if err != nil {
 		return err
 	}
-	defer database.Close()
-	return sqlitestore.Immediate(context.Background(), database, func(conn *sql.Conn) error {
+	defer closeDatabase()
+	return sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
 		checkpoint, sequence, found, err := loadPRWorkspaceCheckpoint(
-			context.Background(), conn, workspaceID,
+			ctx, conn, workspaceID,
 		)
 		if err != nil {
 			return err
 		}
 		currentRevision, err := revisionForPRWorkspaceCheckpoint(
-			context.Background(), conn, checkpoint, sequence, found, workspaceID,
+			ctx, conn, checkpoint, sequence, found, workspaceID,
 		)
 		if err != nil {
 			return err
@@ -764,7 +860,7 @@ func (store *prWorkspaceCandidateCheckpointStore) Remove(
 			return nil
 		}
 		var existingDeletion, deletionCount int
-		if queryErr := conn.QueryRowContext(context.Background(), `SELECT
+		if queryErr := conn.QueryRowContext(ctx, `SELECT
 		        EXISTS(SELECT 1 FROM checkpoint_deletions WHERE workspace_id = ?),
 		        (SELECT COUNT(*) FROM checkpoint_deletions)`, workspaceID).Scan(
 			&existingDeletion, &deletionCount,
@@ -774,7 +870,7 @@ func (store *prWorkspaceCandidateCheckpointStore) Remove(
 		if existingDeletion == 0 && deletionCount >= store.recordLimit() {
 			return errPRWorkspaceCheckpointCapacity
 		}
-		result, err := conn.ExecContext(context.Background(),
+		result, err := conn.ExecContext(ctx,
 			`DELETE FROM candidate_checkpoints WHERE workspace_id = ? AND row_version = ?`,
 			workspaceID, sequence,
 		)
@@ -786,12 +882,12 @@ func (store *prWorkspaceCandidateCheckpointStore) Remove(
 			return errPRWorkspaceCandidateCheckpointConflict
 		}
 		deletionSequence, allocateErr := allocatePRWorkspaceCheckpointRevision(
-			context.Background(), conn,
+			ctx, conn,
 		)
 		if allocateErr != nil {
 			return allocateErr
 		}
-		if _, execErr := conn.ExecContext(context.Background(), `INSERT INTO checkpoint_deletions(
+		if _, execErr := conn.ExecContext(ctx, `INSERT INTO checkpoint_deletions(
 		    workspace_id, deleted_row_version, deleted_state_digest, deletion_sequence
 		) VALUES (?, ?, ?, ?)
 		ON CONFLICT(workspace_id) DO UPDATE SET
@@ -810,19 +906,30 @@ func (store *prWorkspaceCandidateCheckpointStore) removalMatches(
 	workspaceID string,
 	expected prWorkspaceCandidateCheckpointRevision,
 ) (bool, error) {
+	return store.removalMatchesContext(context.Background(), workspaceID, expected)
+}
+
+func (store *prWorkspaceCandidateCheckpointStore) removalMatchesContext(
+	ctx context.Context,
+	workspaceID string,
+	expected prWorkspaceCandidateCheckpointRevision,
+) (bool, error) {
 	if store == nil || !expected.exists ||
 		!validPRWorkspaceCheckpointRevision(expected, workspaceID) {
 		return false, errors.New("PR workspace candidate checkpoint removal match is invalid")
 	}
+	if store.broker != nil {
+		return store.removalMatchesBroker(ctx, workspaceID, expected)
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	database, err := store.open(context.Background())
+	database, closeDatabase, err := store.operationDatabase(ctx)
 	if err != nil {
 		return false, err
 	}
-	defer database.Close()
+	defer closeDatabase()
 	var matches int
-	err = database.QueryRowContext(context.Background(), `SELECT COUNT(*)
+	err = database.QueryRowContext(ctx, `SELECT COUNT(*)
 	    FROM checkpoint_deletions AS deletion
 	    WHERE deletion.workspace_id = ?
 	      AND deletion.deleted_row_version = ?
@@ -841,30 +948,41 @@ func (store *prWorkspaceCandidateCheckpointStore) reconcileFinalized(
 	checkpoint prWorkspaceCandidateCheckpoint,
 	expected prWorkspaceCandidateCheckpointRevision,
 ) (prWorkspaceCandidateCheckpointRevision, bool, error) {
+	return store.reconcileFinalizedContext(context.Background(), checkpoint, expected)
+}
+
+func (store *prWorkspaceCandidateCheckpointStore) reconcileFinalizedContext(
+	ctx context.Context,
+	checkpoint prWorkspaceCandidateCheckpoint,
+	expected prWorkspaceCandidateCheckpointRevision,
+) (prWorkspaceCandidateCheckpointRevision, bool, error) {
 	if store == nil || checkpoint.State != prWorkspaceCandidateCheckpointParked || checkpoint.Fence == nil ||
 		!expected.exists || !validPRWorkspaceCheckpointRevision(expected, checkpoint.WorkspaceID) {
 		return prWorkspaceCandidateCheckpointRevision{}, false, errors.New(
 			"PR workspace finalized checkpoint reconciliation is invalid",
 		)
 	}
+	if store.broker != nil {
+		return store.reconcileFinalizedBroker(ctx, checkpoint, expected)
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	database, err := store.open(context.Background())
+	database, closeDatabase, err := store.operationDatabase(ctx)
 	if err != nil {
 		return prWorkspaceCandidateCheckpointRevision{}, false, err
 	}
-	defer database.Close()
+	defer closeDatabase()
 	var revision prWorkspaceCandidateCheckpointRevision
 	matched := false
-	err = sqlitestore.Immediate(context.Background(), database, func(conn *sql.Conn) error {
+	err = sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
 		current, sequence, found, loadErr := loadPRWorkspaceCheckpoint(
-			context.Background(), conn, checkpoint.WorkspaceID,
+			ctx, conn, checkpoint.WorkspaceID,
 		)
 		if loadErr != nil || !found || !equivalentPRWorkspaceCheckpoint(current, checkpoint) {
 			return loadErr
 		}
 		var interveningDeletion int
-		if queryErr := conn.QueryRowContext(context.Background(), `SELECT COUNT(*)
+		if queryErr := conn.QueryRowContext(ctx, `SELECT COUNT(*)
 		    FROM checkpoint_deletions
 		    WHERE workspace_id = ? AND deletion_sequence > ?`,
 			checkpoint.WorkspaceID, expected.sequence,
@@ -876,7 +994,7 @@ func (store *prWorkspaceCandidateCheckpointStore) reconcileFinalized(
 		}
 		var revisionErr error
 		revision, revisionErr = revisionForPRWorkspaceCheckpoint(
-			context.Background(), conn, current, sequence, true, checkpoint.WorkspaceID,
+			ctx, conn, current, sequence, true, checkpoint.WorkspaceID,
 		)
 		matched = revisionErr == nil
 		return revisionErr

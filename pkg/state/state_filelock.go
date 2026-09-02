@@ -3,9 +3,17 @@ package state
 import (
 	"errors"
 	"os"
+
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 func openRuntimeStateLockFile(path string) (*os.File, error) {
+	if !runtimeStateLocalProviderAuthorized() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"runtime-state lock access requires database owner fencing",
+		)
+	}
 	lockPath := path + ".lock"
 	if info, err := os.Lstat(lockPath); err == nil {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {

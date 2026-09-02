@@ -3,6 +3,7 @@
 package repoaudit
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,16 @@ import (
 )
 
 func (s Store) LockAutomationController() (func(), error) {
+	if s.broker != nil {
+		return s.brokerAcquireNamedLease(
+			context.Background(),
+			reviewLeaseAutomationController,
+			reviewNamedLeaseRequest{},
+		)
+	}
+	if err := s.localProviderError(); err != nil {
+		return nil, err
+	}
 	lockPath, err := repositoryReviewLockPath(s.root, "controller.lock")
 	if err != nil {
 		return nil, err

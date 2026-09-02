@@ -11,16 +11,16 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 )
 
 //nolint:govet // Independent assertions intentionally reuse short declarations.
 func TestCronSQLiteSchemaConfigurationPermissionsAndReopen(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "cron")
 	databasePath := filepath.Join(root, cronDatabaseFilename)
-	service, err := NewSQLiteCronService(databasePath, nil)
+	service, err := newLocalCronService(databasePath, nil)
 	if err != nil {
-		t.Fatalf("NewSQLiteCronService() error = %v", err)
+		t.Fatalf("NewOfflineService() error = %v", err)
 	}
 	every := int64(60_000)
 	if _, err := service.AddJob(
@@ -79,7 +79,7 @@ func TestCronSQLiteSchemaConfigurationPermissionsAndReopen(t *testing.T) {
 		assertCronMode(t, root, 0o700)
 		assertCronMode(t, databasePath, 0o600)
 	}
-	reopened, err := NewSQLiteCronService(databasePath, nil)
+	reopened, err := newLocalCronService(databasePath, nil)
 	if err != nil {
 		t.Fatalf("reopen error = %v", err)
 	}
@@ -112,7 +112,7 @@ func TestCronSQLiteLegacyImportAuditArchiveAndIdempotence(t *testing.T) {
 	if err := os.Chmod(legacyPath, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	service := NewCronService(legacyPath, nil)
+	service := NewForWorkspace(legacyPath, nil)
 	if service.initErr != nil {
 		t.Fatalf("legacy migration error = %v", service.initErr)
 	}
@@ -156,7 +156,7 @@ func TestCronSQLiteLegacyImportAuditArchiveAndIdempotence(t *testing.T) {
 	if imported != 2 || skipped != 2 || issues != 2 {
 		t.Fatalf("audit = imported:%d skipped:%d issues:%d", imported, skipped, issues)
 	}
-	reopened := NewCronService(legacyPath, nil)
+	reopened := NewForWorkspace(legacyPath, nil)
 	if reopened.initErr != nil || len(reopened.ListJobs(true)) != 2 {
 		t.Fatalf("idempotent reopen = %#v, %v", reopened.ListJobs(true), reopened.initErr)
 	}
@@ -164,11 +164,11 @@ func TestCronSQLiteLegacyImportAuditArchiveAndIdempotence(t *testing.T) {
 
 func TestCronSQLiteConcurrentServicesDoNotLoseJobs(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "cron", cronDatabaseFilename)
-	first, err := NewSQLiteCronService(databasePath, nil)
+	first, err := newLocalCronService(databasePath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := NewSQLiteCronService(databasePath, nil)
+	second, err := newLocalCronService(databasePath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestCronSQLiteConcurrentServicesDoNotLoseJobs(t *testing.T) {
 			t.Fatalf("concurrent AddJob() error = %v", err)
 		}
 	}
-	jobs := NewCronService(databasePath, nil).ListJobs(true)
+	jobs := NewForWorkspace(databasePath, nil).ListJobs(true)
 	if len(jobs) != writers {
 		t.Fatalf("job count = %d, want %d", len(jobs), writers)
 	}
@@ -226,7 +226,7 @@ func TestCronSQLiteRejectsUnsafeLegacyCorruptionAndFutureSchema(t *testing.T) {
 		if err := os.Chmod(legacyPath, 0o666); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := NewSQLiteCronService(filepath.Join(root, cronDatabaseFilename), nil); err == nil {
+		if _, err := newLocalCronService(filepath.Join(root, cronDatabaseFilename), nil); err == nil {
 			t.Fatal("unsafe legacy mode was accepted")
 		}
 		assertCronNotArchived(t, root, legacyPath)
@@ -241,14 +241,14 @@ func TestCronSQLiteRejectsUnsafeLegacyCorruptionAndFutureSchema(t *testing.T) {
 		if err := os.WriteFile(path, []byte("not sqlite"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := NewSQLiteCronService(path, nil); err == nil {
+		if _, err := newLocalCronService(path, nil); err == nil {
 			t.Fatal("corrupt SQLite database was accepted")
 		}
 	})
 
 	t.Run("future schema", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "cron", cronDatabaseFilename)
-		service, err := NewSQLiteCronService(path, nil)
+		service, err := newLocalCronService(path, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -263,7 +263,7 @@ func TestCronSQLiteRejectsUnsafeLegacyCorruptionAndFutureSchema(t *testing.T) {
 		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := NewSQLiteCronService(path, nil); !errors.Is(err, sqlitestore.ErrTooNew) {
+		if _, err := newLocalCronService(path, nil); !errors.Is(err, sqlitestore.ErrTooNew) {
 			t.Fatalf("future schema error = %v", err)
 		}
 	})
@@ -272,7 +272,7 @@ func TestCronSQLiteRejectsUnsafeLegacyCorruptionAndFutureSchema(t *testing.T) {
 //nolint:govet // Independent assertions intentionally reuse short declarations.
 func TestCronSQLiteTransactionRollbackPreservesExistingJobs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cron", cronDatabaseFilename)
-	service, err := NewSQLiteCronService(path, nil)
+	service, err := newLocalCronService(path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

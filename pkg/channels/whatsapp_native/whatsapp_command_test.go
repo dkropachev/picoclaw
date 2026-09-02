@@ -15,7 +15,28 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
+
+func TestWhatsAppStartRequiresBroker(t *testing.T) {
+	previous := database.RuntimeClient()
+	database.InstallProcessClient(nil)
+	t.Cleanup(func() { database.InstallProcessClient(previous) })
+	created, err := NewWhatsAppNativeChannel(
+		&config.Channel{},
+		config.ChannelWhatsAppNative,
+		&config.WhatsAppSettings{},
+		nil,
+		database.StoreID("channel.whatsapp.default"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel := created.(*WhatsAppNativeChannel)
+	if err := channel.Start(t.Context()); database.CodeOf(err) != database.CodeUnavailable {
+		t.Fatalf("Start() error = %v", err)
+	}
+}
 
 func TestHandleIncoming_DoesNotConsumeGenericCommandsLocally(t *testing.T) {
 	messageBus := bus.NewMessageBus()

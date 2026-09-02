@@ -227,6 +227,7 @@ func TestGatewayDirectBinaryUsesOnlyTestRuntime(t *testing.T) {
 		done <- command.Wait()
 	}()
 	stopped := false
+	brokerStopped := false
 	stop := func() {
 		if stopped {
 			return
@@ -244,7 +245,22 @@ func TestGatewayDirectBinaryUsesOnlyTestRuntime(t *testing.T) {
 			<-done
 		}
 	}
-	t.Cleanup(stop)
+	shutdownBroker := func() {
+		if brokerStopped {
+			return
+		}
+		brokerStopped = true
+		shutdown := exec.Command(harness.Binary, "database", "shutdown")
+		shutdown.Dir = harness.Root
+		shutdown.Env = isolatedAPITestCommandEnvironment(harness)
+		if output, shutdownErr := shutdown.CombinedOutput(); shutdownErr != nil {
+			t.Logf("database supervisor cleanup failed: %v\n%s", shutdownErr, output)
+		}
+	}
+	t.Cleanup(func() {
+		stop()
+		shutdownBroker()
+	})
 
 	healthURL := "http://127.0.0.1:" + strconv.Itoa(port) + "/health"
 	client := &http.Client{
@@ -326,4 +342,5 @@ func TestGatewayDirectBinaryUsesOnlyTestRuntime(t *testing.T) {
 			t.Fatalf("test-owned gateway PID file remains after cleanup: %v", err)
 		}
 	}
+	shutdownBroker()
 }

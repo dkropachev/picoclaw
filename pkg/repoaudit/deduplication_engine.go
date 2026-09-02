@@ -32,6 +32,12 @@ const (
 // AcquireDeduplicationSlot waits for one of four workspace-wide model-call
 // slots. The OS lock is released on process loss as well as explicit release.
 func (s Store) AcquireDeduplicationSlot(ctx context.Context) (func(), error) {
+	if s.broker != nil {
+		return s.brokerAcquireNamedLease(ctx, reviewLeaseDeduplicationSlot, reviewNamedLeaseRequest{})
+	}
+	if err := s.localProviderError(); err != nil {
+		return nil, err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

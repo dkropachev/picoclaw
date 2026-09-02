@@ -2,26 +2,34 @@ package seahorse
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite"
-
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
+	dblayer "github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 // Config holds engine configuration.
 type Config struct {
-	DBPath                   string   `json:"dbPath"`
+	Workspace                string   `json:"workspace,omitempty"`
 	IgnoreSessionPatterns    []string `json:"ignoreSessionPatterns,omitempty"`
 	StatelessSessionPatterns []string `json:"statelessSessionPatterns,omitempty"`
+	databasePath             string
 }
+
+// OfflineConfig identifies a trusted provider store used only by migration,
+// benchmark, and standalone utilities.
+type OfflineConfig struct {
+	DatabasePath string
+	Config       Config
+}
+
+var allowUnfencedSeahorseProviderForTests atomic.Bool
 
 // CompleteFn is the LLM completion function type.
 type CompleteFn func(ctx context.Context, prompt string, opts CompleteOptions) (string, error)
@@ -99,39 +107,91 @@ func (r *RetrievalEngine) Store() *Store {
 
 // NewEngine creates a new short-term memory engine.
 func NewEngine(config Config, completeFn CompleteFn) (*Engine, error) {
-	dir := filepath.Dir(config.DBPath)
-	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("create db directory: %w", err)
+	if client := dblayer.RuntimeClient(); client != nil {
+		storeID, err := resolveSeahorseBrokerStoreID(context.Background(), client, config.Workspace)
+		if err != nil {
+			return nil, err
 		}
+		return newEngineWithStore(config, completeFn, &Store{broker: client, storeID: storeID}), nil
 	}
+	return nil, dblayer.NewError(
+		dblayer.CodeUnavailable,
+		"seahorse database broker client is unavailable",
+	)
+}
 
-	db, err := sql.Open("sqlite", config.DBPath)
+// NewOfflineEngine opens a physical store only for explicit offline tools.
+func NewOfflineEngine(offline OfflineConfig, completeFn CompleteFn) (*Engine, error) {
+	config := offline.Config
+	config.databasePath = offline.DatabasePath
+	return newLocalEngine(config, completeFn)
+}
+
+func newLocalEngine(config Config, completeFn CompleteFn) (*Engine, error) {
+	if config.databasePath != ":memory:" &&
+		!dblayer.BrokerAuthorityHeld() && !dblayer.MigrationFenceHeld() &&
+		!dblayer.ProviderTestAuthorityHeld() &&
+		!allowUnfencedSeahorseProviderForTests.Load() {
+		return nil, dblayer.NewError(
+			dblayer.CodeUnauthorized,
+			"seahorse provider access requires database owner fencing",
+		)
+	}
+	inspection, inspectErr := sqliteprovider.Inspect(
+		context.Background(),
+		config.databasePath,
+		5*time.Second,
+	)
+	if inspectErr != nil && dblayer.OnlineFenceHeld() {
+		return nil, fmt.Errorf("inspect db: %w", inspectErr)
+	}
+	db, err := sqliteprovider.OpenStore(config.databasePath, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
+	if dblayer.MigrationFenceHeld() && config.databasePath != ":memory:" {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		err = sqliteprovider.ConfigureOffline(context.Background(), db, 5*time.Second)
+	} else {
+		err = sqliteprovider.Configure(
+			context.Background(), db, 5*time.Second, config.databasePath == ":memory:",
+		)
+	}
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("configure db: %w", err)
+	}
 
-	// Configure SQLite for concurrent access
-	if _, err := db.Exec("PRAGMA journal_mode = WAL;"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("enable WAL: %w", err)
+	initialize := !inspection.Exists || inspection.Empty || !dblayer.OnlineFenceHeld()
+	if initialize {
+		if dblayer.MigrationFenceHeld() && config.databasePath != ":memory:" {
+			err = runOfflineSchemaTransaction(db)
+		} else {
+			err = runSchema(db)
+			if err == nil {
+				err = sqliteprovider.SetSchemaVersion(context.Background(), db, 1)
+			}
+		}
+	} else {
+		err = validateCurrentSchema(db)
 	}
-	if _, err := db.Exec("PRAGMA busy_timeout = 5000;"); err != nil {
+	if err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("set busy_timeout: %w", err)
-	}
-	if _, err := db.Exec("PRAGMA synchronous = NORMAL;"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("set synchronous: %w", err)
-	}
-
-	if err := runSchema(db); err != nil {
-		_ = db.Close()
+		if dblayer.OnlineFenceHeld() && !initialize {
+			return nil, dblayer.NewError(
+				dblayer.CodeMigrationRequired,
+				"offline database migration is required",
+			)
+		}
 		return nil, fmt.Errorf("migrations: %w", err)
 	}
 
 	store := &Store{db: db}
+	return newEngineWithStore(config, completeFn, store), nil
+}
 
+func newEngineWithStore(config Config, completeFn CompleteFn, store *Store) *Engine {
 	// Prepend hardcoded ignore patterns (spec lines 1326-1328)
 	ignorePatterns := make([]string, 0, 1+len(config.IgnoreSessionPatterns))
 	ignorePatterns = append(ignorePatterns, "heartbeat")
@@ -148,7 +208,16 @@ func NewEngine(config Config, completeFn CompleteFn) (*Engine, error) {
 		complete:          completeFn,
 		ignorePatterns:    compileSessionPatterns(ignorePatterns),
 		statelessPatterns: compileSessionPatterns(config.StatelessSessionPatterns),
-	}, nil
+	}
+}
+
+// StoreID returns the engine's opaque broker catalog identity. Offline engines
+// intentionally return the zero identity and never expose their provider path.
+func (e *Engine) StoreID() dblayer.StoreID {
+	if e == nil || e.store == nil {
+		return ""
+	}
+	return e.store.StoreID()
 }
 
 // compileSessionPattern converts a glob pattern to a compiled regex.

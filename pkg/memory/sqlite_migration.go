@@ -18,9 +18,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
@@ -200,8 +200,8 @@ func validateLegacyEnumerationDirectory(info os.FileInfo) error {
 
 func isLegacySessionRelative(relative string) bool {
 	base := filepath.Base(filepath.FromSlash(relative))
-	if relative == "sessions/"+SessionsDatabaseFilename ||
-		strings.HasPrefix(relative, "sessions/"+SessionsDatabaseFilename+"-") {
+	if relative == "sessions/"+sessionsDatabaseFilename ||
+		strings.HasPrefix(relative, "sessions/"+sessionsDatabaseFilename+"-") {
 		return false
 	}
 	if strings.HasPrefix(relative, "sessions/") {

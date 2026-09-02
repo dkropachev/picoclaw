@@ -91,7 +91,7 @@ func TestPersistentSessionManagerConstructorFailsClosed(t *testing.T) {
 }
 
 func TestSQLiteBackendCompatibilityDelegates(t *testing.T) {
-	backend, err := NewSQLiteBackend(t.TempDir())
+	backend, err := NewPersistentBackend(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

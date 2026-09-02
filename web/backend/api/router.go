@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/web/backend/launcherconfig"
 )
 
@@ -22,6 +23,7 @@ type Handler struct {
 	serverAllowLocalhostBypass                  bool
 	serverTrustedProxyCIDRs                     []string
 	debug                                       bool
+	databaseClient                              *database.Client
 	oauthMu                                     sync.Mutex
 	oauthFlows                                  map[string]*oauthFlow
 	oauthState                                  map[string]string
@@ -64,6 +66,10 @@ type Handler struct {
 	savePRLifecycleCollectionCandidate          prLifecycleCollectionCandidateSaver
 	loadGitWorkspaceManager                     func() (gitWorkspaceManagerAPI, error)
 }
+
+// SetDatabaseClient installs the typed broker client used for synchronous
+// maintenance preflights before accepting durable automation work.
+func (h *Handler) SetDatabaseClient(client *database.Client) { h.databaseClient = client }
 
 // NewHandler creates an instance of the API handler.
 func NewHandler(configPath string) *Handler {

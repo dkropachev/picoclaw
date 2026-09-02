@@ -22,8 +22,10 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 type repositoryReviewAutomationConfigRequest struct {
@@ -656,6 +658,10 @@ func (h *Handler) handleRepositoryReviewAutomationStartAction(
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
+	if err := h.preflightRepositoryReviewDatabases(r.Context()); err != nil {
+		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
 	reset := false
 	action := "start"
 	if restart {
@@ -684,6 +690,46 @@ func (h *Handler) handleRepositoryReviewAutomationStartAction(
 		"automation": projected,
 		"outcome":    "started",
 	})
+}
+
+func (h *Handler) preflightRepositoryReviewDatabases(ctx context.Context) error {
+	if h == nil || h.databaseClient == nil {
+		return nil
+	}
+	status, err := h.databaseClient.Status(ctx)
+	if err != nil {
+		return err
+	}
+	required := map[database.StoreID]struct{}{
+		"workspace.workflows":          {},
+		"workspace.repository-reviews": {},
+	}
+	for _, store := range status.Stores {
+		if _, needed := required[store.ID]; !needed {
+			continue
+		}
+		delete(required, store.ID)
+		if store.Readiness != database.StoreReady {
+			if store.Error != nil {
+				return database.NewError(store.Error.Code, store.Error.Message)
+			}
+			return database.NewError(database.CodeUnavailable, "repository review database is not ready")
+		}
+	}
+	if len(required) != 0 {
+		return database.NewError(database.CodeUnavailable, "repository review database readiness is unavailable")
+	}
+	cfg, err := h.workflowConfig()
+	if err != nil {
+		return err
+	}
+	workflowStore := workflows.NewFileRunStore(cfg.WorkspacePath())
+	if err := workflowStore.Preflight(ctx); err != nil {
+		return err
+	}
+	reviewStore := repoaudit.NewSQLiteStore(cfg.WorkspacePath())
+	defer reviewStore.Close()
+	return reviewStore.Preflight(ctx)
 }
 
 func (h *Handler) handleRepositoryReviewAutomationCommitOptions(
@@ -1896,6 +1942,10 @@ func repositoryReviewAccountOptions(
 func writeRepositoryReviewAutomationError(w http.ResponseWriter, err error) {
 	status, code := http.StatusInternalServerError, "repository_review_automation_unavailable"
 	switch {
+	case database.CodeOf(err) == database.CodeMigrationRequired,
+		database.CodeOf(err) == database.CodeIntegrity,
+		database.CodeOf(err) == database.CodeUnavailable:
+		status, code = http.StatusServiceUnavailable, "database_maintenance_required"
 	case errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(err.Error()), "not found"):
 		status, code = http.StatusNotFound, "not_found"
 	case errors.Is(err, repoaudit.ErrHistoricalDeduplicationRestartRequired):

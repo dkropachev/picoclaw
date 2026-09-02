@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/database"
 	developmentnotifications "github.com/sipeed/picoclaw/pkg/developmentnotifications"
 )
 
@@ -176,6 +177,17 @@ func (s *Store) UpsertDevelopmentNotification(
 	ctx context.Context,
 	draft developmentnotifications.Draft,
 ) (developmentnotifications.UpsertResult, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpUpsertNotification,
+			eventingBrokerRequest{NotificationDraft: draft},
+			&out,
+			true,
+		)
+		return out.NotificationUpsert, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return developmentnotifications.UpsertResult{}, err
 	}
@@ -242,6 +254,27 @@ func writeDevelopmentNotificationTx(
 }
 
 func (s *Store) ListDevelopmentNotifications(ctx context.Context) ([]developmentnotifications.Notification, error) {
+	if s.usesEventingBroker() {
+		var result []developmentnotifications.Notification
+		for offset := 0; ; offset += eventingNotificationPageSize {
+			var out eventingBrokerResponse
+			err := s.brokerCall(ctx, eventingOpListNotifications, eventingBrokerRequest{Offset: offset}, &out, false)
+			if err != nil {
+				return nil, err
+			}
+			if len(out.Notifications) > eventingNotificationPageSize ||
+				(out.More && len(out.Notifications) != eventingNotificationPageSize) {
+				return nil, database.NewError(
+					database.CodeIntegrity,
+					"eventing notification pagination response is invalid",
+				)
+			}
+			result = append(result, out.Notifications...)
+			if !out.More {
+				return result, nil
+			}
+		}
+	}
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
@@ -269,6 +302,11 @@ func (s *Store) ListDevelopmentNotifications(ctx context.Context) ([]development
 func (s *Store) ListRecentDevelopmentPushNotifications(
 	ctx context.Context, limit int,
 ) ([]developmentnotifications.Notification, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpListPushNotifications, eventingBrokerRequest{Limit: limit}, &out, false)
+		return out.Notifications, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
@@ -303,6 +341,11 @@ func (s *Store) ListRecentDevelopmentPushNotifications(
 func (s *Store) GetDevelopmentNotification(
 	ctx context.Context, id string,
 ) (developmentnotifications.Notification, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpGetNotification, eventingBrokerRequest{ID: id}, &out, false)
+		return out.Notification, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return developmentnotifications.Notification{}, err
 	}
@@ -329,6 +372,17 @@ func (s *Store) MutateDevelopmentNotification(
 	action string,
 	snoozedUntil *time.Time,
 ) (developmentnotifications.Notification, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpMutateNotification,
+			eventingBrokerRequest{ID: id, ExpectedVersion: expectedVersion, Action: action, SnoozedUntil: snoozedUntil},
+			&out,
+			true,
+		)
+		return out.Notification, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return developmentnotifications.Notification{}, err
 	}
@@ -357,6 +411,17 @@ func (s *Store) MutateDevelopmentNotifications(
 	ctx context.Context,
 	input DevelopmentNotificationBulkMutation,
 ) (DevelopmentNotificationBulkMutationResult, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpMutateNotifications,
+			eventingBrokerRequest{NotificationBulk: input},
+			&out,
+			true,
+		)
+		return out.NotificationBulk, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return DevelopmentNotificationBulkMutationResult{}, err
 	}
@@ -523,6 +588,11 @@ func validDevelopmentNotificationAction(action string) bool {
 }
 
 func (s *Store) GetDevelopmentNotificationViews(ctx context.Context) (DevelopmentNotificationViewsDocument, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpGetNotificationViews, eventingBrokerRequest{}, &out, false)
+		return out.NotificationViews, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return DevelopmentNotificationViewsDocument{}, err
 	}
@@ -549,6 +619,17 @@ func (s *Store) PutDevelopmentNotificationViews(
 	views []developmentnotifications.SavedView,
 	expectedVersion uint64,
 ) (DevelopmentNotificationViewsDocument, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpPutNotificationViews,
+			eventingBrokerRequest{Views: views, ExpectedVersion: expectedVersion},
+			&out,
+			true,
+		)
+		return out.NotificationViews, err
+	}
 	views, err := developmentnotifications.ValidateSavedViews(views)
 	if err != nil || expectedVersion == 0 {
 		return DevelopmentNotificationViewsDocument{}, developmentnotifications.ErrInvalidSavedView
@@ -592,6 +673,11 @@ func (s *Store) PutDevelopmentNotificationViews(
 }
 
 func (s *Store) GetDevelopmentPushState(ctx context.Context) (DevelopmentPushStateDocument, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpGetPushState, eventingBrokerRequest{}, &out, false)
+		return out.PushState, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return DevelopmentPushStateDocument{}, err
 	}
@@ -614,6 +700,17 @@ func (s *Store) GetDevelopmentPushState(ctx context.Context) (DevelopmentPushSta
 func (s *Store) PutDevelopmentPushState(
 	ctx context.Context, state json.RawMessage, expectedVersion uint64,
 ) (DevelopmentPushStateDocument, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpPutPushState,
+			eventingBrokerRequest{PushState: state, ExpectedVersion: expectedVersion},
+			&out,
+			true,
+		)
+		return out.PushState, err
+	}
 	if expectedVersion == 0 || len(state) < 2 || len(state) > MaxPRWorkspaceRecordBytes || !json.Valid(state) {
 		return DevelopmentPushStateDocument{}, ErrInvalidPRWorkspace
 	}
@@ -648,6 +745,17 @@ func (s *Store) PutDevelopmentPushState(
 func (s *Store) PruneDevelopmentNotifications(
 	ctx context.Context, before time.Time, limit int,
 ) (int64, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpPruneNotifications,
+			eventingBrokerRequest{Before: before, Limit: limit},
+			&out,
+			true,
+		)
+		return out.Count, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return 0, err
 	}

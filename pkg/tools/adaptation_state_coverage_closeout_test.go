@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 )
 
 func TestAdaptationStateCoverageCloseoutBoundaries(t *testing.T) {
@@ -107,7 +107,7 @@ func TestAdaptationStateCoverageCloseoutBoundaries(t *testing.T) {
 	if _, _, _, err := store.storagePathsLocked(); err == nil {
 		t.Fatal("storagePathsLocked() ignored absolute-path failure")
 	}
-	if got := store.statePathLocked(); got != ToolAdaptationStatePath() {
+	if got := store.statePathLocked(); got != toolAdaptationStatePath() {
 		t.Fatalf("statePathLocked() fallback = %q", got)
 	}
 }

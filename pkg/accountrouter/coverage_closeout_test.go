@@ -11,11 +11,11 @@ import (
 
 func TestAccountRouterSQLiteSnapshotsExposeDetachedTypedState(t *testing.T) {
 	workspace := privateAccountRouterWorkspace(t)
-	router, err := NewSQLite(
+	router, err := newSQLiteRouter(
 		"router-main",
 		testAccountRouterConfig(),
 		testAccountRouterAccounts(),
-		DatabasePath(workspace),
+		databasePath(workspace),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -26,7 +26,7 @@ func TestAccountRouterSQLiteSnapshotsExposeDetachedTypedState(t *testing.T) {
 			t.Fatalf("Select(%q) returned no candidate", session)
 		}
 	}
-	keys, err := SessionKeys(router.StatePath, router.Name)
+	keys, err := SessionKeys(router.store.path, router.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,11 +34,11 @@ func TestAccountRouterSQLiteSnapshotsExposeDetachedTypedState(t *testing.T) {
 		t.Fatalf("SessionKeys() = %v", keys)
 	}
 	keys[0] = "caller-mutated"
-	again, err := SessionKeys(router.StatePath, router.Name)
+	again, err := SessionKeys(router.store.path, router.Name)
 	if err != nil || strings.Join(again, ",") != "a-session,z-session" {
 		t.Fatalf("detached SessionKeys() = %v, %v", again, err)
 	}
-	if _, err := SessionKeys(router.StatePath, "missing"); err == nil {
+	if _, err := SessionKeys(router.store.path, "missing"); err == nil {
 		t.Fatal("SessionKeys(missing router) error = nil")
 	}
 	if _, err := SessionKeys("", router.Name); err == nil {

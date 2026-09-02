@@ -114,7 +114,7 @@ type toolAdaptationConfigRequest struct {
 type toolAdaptationResolvedState struct {
 	Provider            string `json:"provider"`
 	Model               string `json:"model"`
-	StatePath           string `json:"state_path"`
+	StoreID             string `json:"store_id"`
 	VisibleToolSurface  string `json:"visible_tool_surface"`
 	PinnedToolSurface   string `json:"pinned_tool_surface"`
 	SurfaceEvidence     string `json:"surface_evidence"`
@@ -751,7 +751,7 @@ func buildToolAdaptationResolvedState(
 	return &toolAdaptationResolvedState{
 		Provider:            provider,
 		Model:               model,
-		StatePath:           picotools.ToolAdaptationStatePath(),
+		StoreID:             picotools.ToolAdaptationStoreID.String(),
 		VisibleToolSurface:  decision.VisibleToolSurface,
 		PinnedToolSurface:   decision.PinnedToolSurface,
 		SurfaceEvidence:     decision.SurfaceEvidence,

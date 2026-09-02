@@ -15,6 +15,12 @@ import (
 // controller lease. Store file locks protect individual CAS operations; this
 // lease prevents two launcher processes from recovering the same durable run.
 func (s Store) LockController() (func(), error) {
+	if s.broker != nil {
+		return s.brokerLockController()
+	}
+	if err := s.localProviderError(); err != nil {
+		return nil, err
+	}
 	lockPath, lockPathErr := repositoryEvaluationLockPath(s.root, "controller.lock")
 	if lockPathErr != nil {
 		return nil, lockPathErr

@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/evolution"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 func TestEvolutionSQLiteFreshSchemaConfigurationAndReopen(t *testing.T) {

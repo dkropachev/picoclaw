@@ -61,14 +61,14 @@ func (systemGatewayProcessOperations) Signal(cmd *exec.Cmd, signal os.Signal) er
 	if cmd == nil || cmd.Process == nil {
 		return os.ErrInvalid
 	}
-	return cmd.Process.Signal(signal)
+	return signalManagedGatewayProcess(cmd, signal)
 }
 
 func (systemGatewayProcessOperations) Kill(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return os.ErrInvalid
 	}
-	return cmd.Process.Kill()
+	return killManagedGatewayProcess(cmd)
 }
 
 func (systemGatewayProcessOperations) Track(*exec.Cmd)  {}

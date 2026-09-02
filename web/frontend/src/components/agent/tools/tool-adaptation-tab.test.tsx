@@ -22,7 +22,7 @@ const profile: ToolAdaptationProfileState = {
   resolved: {
     provider: "openai",
     model: "gpt-5.4",
-    state_path: "/tmp/tool-adaptation.json",
+    store_id: "global.tool-adaptation",
     visible_tool_surface: "codex",
     pinned_tool_surface: "codex",
     surface_evidence: "heuristic",

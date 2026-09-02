@@ -7,11 +7,11 @@
 ## Behavior Summary
 
 PicoClaw threads are discoverable, full-window work contexts backed by typed
-SQLite session relationships. They let a normal chat become a named thread, attach to an existing
+relationships in the logical session broker store. They let a normal chat become a named thread, attach to an existing
 thread, switch the UI to thread work, return to the origin session, and hide
 dropped threads from discovery while preserving durable records.
 Thread discovery and previews read committed session/message rows, and thread
-identity, membership, links, and handoffs mutate in the same database transaction.
+identity, membership, links, and handoffs mutate in the same broker-side atomic command.
 
 ## Reconstruction Notes
 
@@ -40,11 +40,11 @@ identity, membership, links, and handoffs mutate in the same database transactio
 | `FR-THREADS-004` | SHOULD | Thread UI provides a search workspace and an open-thread chat view, thread cards route directly to `/threads/open/{thread-id}` while search lives under `/threads/search`, and all thread UI surfaces expose thread-native creation/drop actions instead of normal chat history actions. | Search, active thread work, and thread lifecycle actions are distinct user workflows. |
 | `FR-THREADS-005` | MUST | When a model/tool-created auto-switch card opens a newly created empty thread from a user request, the UI seeds that thread exactly once with the concrete requested task, using the card query or thread source query; blank UI-created threads store non-empty metadata but must not fabricate a generic first chat message. | A user asking to start a thread expects the requested work to begin there, while a blank New Thread action should not pollute the thread with generic filler. |
 | `FR-THREADS-006` | MUST | The `threads` tool and thread policy prompt are available by default only to the root/default user-facing agent, never inherited by subturn/spawn child agents, and available to non-default configured agents only when explicitly listed in that agent's `AGENT.md` tools allowlist. | Thread lifecycle changes are UI/session control-plane actions and should not be exposed to background agents accidentally. |
-| `FR-THREADS-007` | MUST | Thread identity, context, aliases, ordered memberships, reciprocal session links, and handoffs live in `sessions.db`. Exactly one contiguous membership is primary and matches `threads.primary_session_key`. Discovery/migration resolves promoted aliases and reads committed session/message rows. Create/update/drop/register/attach/detach/handoff operations use `BEGIN IMMEDIATE` and version-fenced updates where applicable; attach publishes membership, link, handoff, and continuation summary in one transaction except an explicitly best-effort summary hook. Every mutation rejects a structured `review` origin/primary before and inside the transaction. Legacy registry/link/handoff JSON imports after sessions in deterministic order, safely skips invalid/broken/conflicting records, and archives with the session migration. | Thread surfaces must not expose protected history, tear relationships, clobber a snapshot, or leave half a handoff. |
+| `FR-THREADS-007` | MUST | Thread identity, context, aliases, ordered memberships, reciprocal session links, and handoffs live in the logical `sessions` store. Exactly one contiguous membership is primary and matches `threads.primary_session_key`. Discovery resolves promoted aliases and reads committed session/message records. Create/update/drop/register/attach/detach/handoff operations are version-fenced broker-side domain commands; attach atomically publishes membership, link, handoff, and continuation summary except an explicitly best-effort summary hook. Every mutation rejects a structured `review` origin/primary before and inside the broker command. Legacy registry/link/handoff JSON makes startup return `MigrationRequired`; offline migration imports it after sessions in deterministic order, safely skips invalid/broken/conflicting records, and archives it with the session migration. | Thread surfaces must not expose protected history, tear relationships, clobber a snapshot, or leave half a handoff. |
 
 ## Data And State Model
 
-Thread state is stored in `<workspace>/sessions/sessions.db`. Typed records contain
+Thread state is stored in the workspace's logical `sessions` store. Typed records contain
 thread ID, type, title, discoverability, searchable context, primary UI/session
 linkage, source query, agent ID, registration source, timestamps, and optional
 handoff records that connect origin sessions to target threads. Ordered child
@@ -91,7 +91,7 @@ Owns: TOOL threads
 | Tool registration | Agent tool registry and prompts | Registers `threads` and its policy prompt by default only on the root/default user-facing agent; non-default agents must explicitly opt in through `AGENT.md`; subturn child registries and prompts remove inherited `threads`. | `FR-THREADS-006` |
 | Config | `tools.threads.*` | Enables the tool and defines routing policy, rule thresholds, attach behavior, and per-agent overrides. | `FR-THREADS-003` |
 | HTTP | `/api/threads*`, `/api/tools/thread-policy` | Launcher management and policy endpoints return JSON records and persist normalized config. | `FR-THREADS-002`, `FR-THREADS-003` |
-| Storage | `sessions.db` thread/session relationship tables and `memory.SQLiteStore` | Read one committed session tuple and transact thread membership, links, handoffs, and version fences. | `FR-THREADS-002`, `FR-THREADS-007` |
+| Broker store | Logical `sessions` thread/session relationship domain | Read one committed session tuple and atomically mutate thread membership, links, handoffs, and version fences without exposing the provider. | `FR-THREADS-002`, `FR-THREADS-007` |
 | UI | `/threads/search`, `/threads/open`, `/threads/open/{thread-id}` | Search renders thread tiles; empty open renders the Thread workspace empty state; open by ID renders the chat window bound to a selected thread session, hides normal chat history, labels primary creation as New Thread, and exposes trash/drop for active or listed threads. | `FR-THREADS-004` |
 | UI | Thread cards in chat messages | Switch cards may move the active chat session and, for empty newly created threads, seed the original task into the opened thread; rendered thread tiles expose the same trash/drop affordance as the search UI. | `FR-THREADS-004`, `FR-THREADS-005` |
 
@@ -176,8 +176,8 @@ from the current result list.
    `AGENT.md`; when cloning tools for a subturn/spawn child, remove `threads`
    from the child registry and filter prompt contributors against the child's
    actual registered tools.
-10. When building or migrating a session-backed thread, resolve retained aliases
-    inside the SQLite transaction, read committed ordered messages, persist the
+10. When building a session-backed thread, resolve retained aliases inside one
+    typed broker command, read committed ordered messages, persist the
     canonical primary key, exactly one primary membership, and reciprocal links.
     Initialize session identity/default summary only for genuinely new state;
     preserve scope, aliases, summary, messages, and session version otherwise.
@@ -238,8 +238,9 @@ or have its commit selector overwritten by a thread link update.
 - A sequence gap, missing/multiple primary membership, mismatched primary key,
   nonreciprocal link, broken foreign key, or unknown schema object rejects the
   database on reopen.
-- Thread writers must use the shared SQLite transaction API; independent
-  sidecar rewrites and mutable runtime registry/handoff JSON are not permitted.
+- Thread writers must use the typed session/thread domain client; raw SQL,
+  independent sidecar rewrites, and mutable runtime registry/handoff JSON are
+  not permitted.
 
 ## Acceptance Evidence
 

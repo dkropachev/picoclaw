@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -328,8 +329,8 @@ func TestSeahorseToProviderMessagesWithToolCalls(t *testing.T) {
 }
 
 func TestSeahorseAssemblePreservesActiveToolTurnAcrossSanitization(t *testing.T) {
-	engine, err := seahorse.NewEngine(seahorse.Config{
-		DBPath: t.TempDir() + "/seahorse.db",
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: t.TempDir() + "/seahorse.db",
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -677,8 +678,8 @@ func TestReloadRebuildsSeahorseEnginesForAgentTopologyAndWorkspace(t *testing.T)
 	if engineA == nil || managerA.engine != engineA {
 		t.Fatal("generation A default engine is not alpha's engine")
 	}
-	if _, err := os.Stat(filepath.Join(workspaceA, "sessions", "seahorse.db")); err != nil {
-		t.Fatalf("generation A Seahorse DB: %v", err)
+	if _, err := os.Lstat(filepath.Join(workspaceA, "sessions", "seahorse.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("generation A reconstructed Seahorse DB path: %v", err)
 	}
 
 	workspaceB := filepath.Join(root, "workspace-b")
@@ -716,8 +717,8 @@ func TestReloadRebuildsSeahorseEnginesForAgentTopologyAndWorkspace(t *testing.T)
 	if managerB.engine == engineA {
 		t.Fatal("generation B reused the old workspace engine")
 	}
-	if _, err := os.Stat(filepath.Join(workspaceB, "sessions", "seahorse.db")); err != nil {
-		t.Fatalf("generation B Seahorse DB: %v", err)
+	if _, err := os.Lstat(filepath.Join(workspaceB, "sessions", "seahorse.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("generation B reconstructed Seahorse DB path: %v", err)
 	}
 	engine, owner := managerB.engineForSession("generation-b-session")
 	if engine != managerB.engines["beta"] || owner == nil || owner.ID != "beta" {
@@ -880,8 +881,8 @@ func TestSeahorseNonDefaultAgentSessionUsesOwningAgentCompletion(t *testing.T) {
 func TestSeahorseIgnoreHeartbeat(t *testing.T) {
 	// Verify that "heartbeat" sessions are ignored by default
 	// This tests the hardcoded ignore pattern from spec lines 1326-1328
-	engine, err := seahorse.NewEngine(seahorse.Config{
-		DBPath: t.TempDir() + "/test.db",
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: t.TempDir() + "/test.db",
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -958,8 +959,8 @@ func TestSeahorseStartupBootstrapSkipsReviewAndCorruptSnapshots(t *testing.T) {
 		rejectedKey:  corruptKey,
 	}
 
-	engine, err := seahorse.NewEngine(seahorse.Config{
-		DBPath: filepath.Join(t.TempDir(), "seahorse.db"),
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: filepath.Join(t.TempDir(), "seahorse.db"),
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -1020,8 +1021,8 @@ func TestSeahorseIngestSkipsReviewScopedSession(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	sessions := session.NewJSONLBackend(store)
-	engine, err := seahorse.NewEngine(seahorse.Config{
-		DBPath: filepath.Join(t.TempDir(), "seahorse.db"),
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: filepath.Join(t.TempDir(), "seahorse.db"),
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -1204,8 +1205,8 @@ func TestProviderToCompleteFnError(t *testing.T) {
 
 func TestSeahorseAdapterAssembleSubtractsMaxTokens(t *testing.T) {
 	// Create a real seahorse engine with temp DB
-	engine, err := seahorse.NewEngine(seahorse.Config{
-		DBPath: t.TempDir() + "/test.db",
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: t.TempDir() + "/test.db",
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -1262,8 +1263,8 @@ func TestSeahorseCompactRetryUsesCompactUntilUnder(t *testing.T) {
 	// Track which engine method was called
 	var compactCalled, compactUntilCalled bool
 
-	engine, err := seahorse.NewEngine(seahorse.Config{
-		DBPath: t.TempDir() + "/test.db",
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: t.TempDir() + "/test.db",
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -1409,8 +1410,8 @@ func TestSeahorseRealLoopNoDuplicateMessages(t *testing.T) {
 // conversation history at different points in time.
 func TestSeahorseAssembleReturnsAllSummaries(t *testing.T) {
 	// Create a real seahorse engine with temp DB
-	engine, err := seahorse.NewEngine(seahorse.Config{
-		DBPath: t.TempDir() + "/test.db",
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: t.TempDir() + "/test.db",
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -1597,8 +1598,8 @@ func TestSeahorseToProviderMessagesRebuildsContentFromParts(t *testing.T) {
 }
 
 func TestSeahorseAssembleSummaryNotInMessages(t *testing.T) {
-	engine, err := seahorse.NewEngine(seahorse.Config{
-		DBPath: t.TempDir() + "/test.db",
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: t.TempDir() + "/test.db",
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)

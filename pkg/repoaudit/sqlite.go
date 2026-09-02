@@ -12,10 +12,18 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
+
+type retainedReviewDatabase struct {
+	mu     sync.RWMutex
+	db     *sql.DB
+	closed bool
+}
 
 const (
 	repositoryReviewDatabaseFilename   = "repository-reviews.db"
@@ -178,6 +186,12 @@ const repositoryReviewAutomationsCanonicalIndexSchema = `CREATE UNIQUE INDEX rep
     ON repository_review_automations(canonical_repository) WHERE profile_id IS NOT NULL`
 
 func (s Store) openDatabase(ctx context.Context) (*sql.DB, error) {
+	if err := s.localProviderError(); err != nil {
+		return nil, err
+	}
+	if s.broker != nil {
+		return nil, database.NewError(database.CodeUnsupported, "repository review operation is not broker-routed")
+	}
 	if s.openForTest != nil {
 		return s.openForTest(ctx)
 	}
@@ -188,6 +202,61 @@ func (s Store) openDatabase(ctx context.Context) (*sql.DB, error) {
 	}
 	root := filepath.Dir(databasePath)
 	return sqlitestore.Open(ctx, databasePath, repositoryReviewStoreOptions(root))
+}
+
+func (s Store) acquireDatabase(ctx context.Context) (*sql.DB, func(), error) {
+	if err := s.localProviderError(); err != nil {
+		return nil, nil, err
+	}
+	if s.retained != nil {
+		s.retained.mu.RLock()
+		if s.retained.closed || s.retained.db == nil {
+			s.retained.mu.RUnlock()
+			return nil, nil, errors.New("repository review database is closed")
+		}
+		return s.retained.db, s.retained.mu.RUnlock, nil
+	}
+	db, err := s.openDatabase(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return db, func() { _ = db.Close() }, nil
+}
+
+func newRetainedReviewStore(workspace string) (Store, error) {
+	if !database.BrokerAuthorityHeld() && !database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedReviewProviderForTests.Load() {
+		return Store{}, database.NewError(
+			database.CodeUnauthorized,
+			"repository review retained store requires online database fencing",
+		)
+	}
+	store := newSQLiteStoreLocal(workspace)
+	store.brokerOwned = true
+	db, err := store.openDatabase(context.Background())
+	if err != nil {
+		return Store{}, err
+	}
+	store.retained = &retainedReviewDatabase{db: db}
+	return store, nil
+}
+
+func (s Store) Close() error {
+	if s.retained == nil {
+		return nil
+	}
+	s.retained.mu.Lock()
+	defer s.retained.mu.Unlock()
+	if s.retained.closed {
+		return nil
+	}
+	s.retained.closed = true
+	if s.retained.db == nil {
+		return nil
+	}
+	err := s.retained.db.Close()
+	s.retained.db = nil
+	return err
 }
 
 func repositoryReviewStoreOptions(root string) sqlitestore.Options {
@@ -1233,6 +1302,9 @@ func (s Store) RewriteStateForMigration(
 	ctx context.Context,
 	state RepositoryState,
 ) (RepositoryState, error) {
+	if s.broker != nil {
+		return s.brokerRewriteState(ctx, state)
+	}
 	reconcileFindingsProcessingCounters(&state)
 	if err := prepareRepositoryStateForMigrationRewrite(&state); err != nil {
 		return RepositoryState{}, err
@@ -1277,6 +1349,9 @@ func (s Store) RewriteProfileForMigration(
 	ctx context.Context,
 	profile RepositoryReviewProfile,
 ) (RepositoryReviewProfile, error) {
+	if s.broker != nil {
+		return s.brokerRewriteProfile(ctx, profile)
+	}
 	if err := normalizeProfile(&profile); err != nil {
 		return RepositoryReviewProfile{}, err
 	}
@@ -1302,6 +1377,9 @@ func (s Store) RewriteAutomationForMigration(
 	ctx context.Context,
 	automation RepositoryReviewAutomation,
 ) (RepositoryReviewAutomation, error) {
+	if s.broker != nil {
+		return s.brokerRewriteAutomation(ctx, automation)
+	}
 	if err := normalizeAutomation(&automation); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
@@ -1343,11 +1421,11 @@ func (s Store) rewriteMigrationRow(
 		return err
 	}
 	defer unlock()
-	database, err := s.openDatabase(ctx)
+	database, release, err := s.acquireDatabase(ctx)
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer release()
 	return sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
 		var current int64
 		if queryErr := conn.QueryRowContext(ctx, versionQuery, id).Scan(&current); queryErr != nil {

@@ -8,20 +8,58 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 type Store struct {
-	paths Paths
+	paths     Paths
+	broker    *database.Client
+	storeID   database.StoreID
+	brokerErr error
+	retained  *sql.DB
+	retainMu  sync.Mutex
 }
 
 var evolutionDatabaseWriteLocks sync.Map
+
+var allowUnfencedEvolutionProviderForTests atomic.Bool
 
 // NewSQLiteStore constructs the authoritative evolution SQLite store. Schema
 // creation and legacy migration occur on the first operation so construction
 // remains source-compatible with the historical no-error constructor.
 func NewSQLiteStore(paths Paths) *Store {
+	paths = normalizedEvolutionPaths(paths)
+	if client := database.RuntimeClient(); client != nil {
+		storeID, err := resolveEvolutionBrokerStoreID(paths)
+		return &Store{paths: Paths{Workspace: paths.Workspace}, broker: client, storeID: storeID, brokerErr: err}
+	}
+	if database.ProviderTestAuthorityHeld() || allowUnfencedEvolutionProviderForTests.Load() {
+		return newLocalStore(paths)
+	}
+	return &Store{
+		paths: Paths{Workspace: paths.Workspace},
+		brokerErr: database.NewError(
+			database.CodeUnavailable,
+			"evolution database broker client is unavailable",
+		),
+	}
+}
+
+func newLocalStore(paths Paths) *Store {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedEvolutionProviderForTests.Load() {
+		return &Store{
+			paths: Paths{Workspace: paths.Workspace},
+			brokerErr: database.NewError(
+				database.CodeUnauthorized,
+				"evolution local store requires database owner fencing",
+			),
+		}
+	}
 	return &Store{paths: normalizedEvolutionPaths(paths)}
 }
 
@@ -32,14 +70,73 @@ func NewStore(paths Paths) *Store { return NewSQLiteStore(paths) }
 
 // Close is provided for constructor symmetry. Store operations use bounded
 // database handles and do not retain a process-local connection.
-func (s *Store) Close() error { return nil }
+func (s *Store) Close() error {
+	if s == nil || s.broker != nil {
+		return nil
+	}
+	s.retainMu.Lock()
+	defer s.retainMu.Unlock()
+	if s.retained == nil {
+		return nil
+	}
+	err := s.retained.Close()
+	s.retained = nil
+	return err
+}
+
+func (s *Store) StoreID() database.StoreID {
+	if s == nil {
+		return ""
+	}
+	return s.storeID
+}
 
 func (s *Store) open(ctx context.Context) (*sql.DB, error) {
 	if s == nil {
 		return nil, errors.New("evolution store is nil")
 	}
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedEvolutionProviderForTests.Load() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"evolution provider access requires database owner fencing",
+		)
+	}
+	if s.retained != nil {
+		return s.retained, nil
+	}
 	paths := normalizedEvolutionPaths(s.paths)
 	return sqlitestore.Open(ctx, paths.Database, evolutionStoreOptions(paths))
+}
+
+func (s *Store) retain() error {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedEvolutionProviderForTests.Load() {
+		return database.NewError(
+			database.CodeUnauthorized,
+			"evolution provider access requires database owner fencing",
+		)
+	}
+	s.retainMu.Lock()
+	defer s.retainMu.Unlock()
+	if s.retained != nil {
+		return nil
+	}
+	paths := normalizedEvolutionPaths(s.paths)
+	db, err := sqlitestore.Open(context.Background(), paths.Database, evolutionStoreOptions(paths))
+	if err != nil {
+		return err
+	}
+	s.retained = db
+	return nil
+}
+
+func (s *Store) closeOpened(db *sql.DB) {
+	if db != nil && db != s.retained {
+		_ = db.Close()
+	}
 }
 
 func (s *Store) immediate(ctx context.Context, callback func(*sql.Conn) error) error {
@@ -62,7 +159,7 @@ func (s *Store) immediate(ctx context.Context, callback func(*sql.Conn) error) e
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer s.closeOpened(db)
 	return sqlitestore.Immediate(ctx, db, callback)
 }
 
@@ -75,6 +172,9 @@ func (s *Store) AppendLearningRecords(records []LearningRecord) error {
 }
 
 func (s *Store) AppendTaskOrPatternRecords(ctx context.Context, records []LearningRecord) error {
+	if s.usesEvolutionBroker() {
+		return s.brokerRecords(ctx, evolutionOpAppendRecords, "", records)
+	}
 	if len(records) == 0 {
 		return nil
 	}
@@ -109,6 +209,9 @@ func (s *Store) AppendPatternRecords(records []LearningRecord) error {
 }
 
 func (s *Store) appendRecords(ctx context.Context, class string, records []LearningRecord) error {
+	if s.usesEvolutionBroker() {
+		return s.brokerRecords(ctx, evolutionOpAppendRecords, class, records)
+	}
 	if len(records) == 0 {
 		return nil
 	}
@@ -140,10 +243,16 @@ func (s *Store) LoadLearningRecords() ([]LearningRecord, error) {
 }
 
 func (s *Store) LoadTaskRecords() ([]LearningRecord, error) {
+	if s.usesEvolutionBroker() {
+		return s.brokerLoadRecords("task")
+	}
 	return s.loadRecords(context.Background(), "task")
 }
 
 func (s *Store) LoadPatternRecords() ([]LearningRecord, error) {
+	if s.usesEvolutionBroker() {
+		return s.brokerLoadRecords("pattern")
+	}
 	return s.loadRecords(context.Background(), "pattern")
 }
 
@@ -152,15 +261,21 @@ func (s *Store) loadRecords(ctx context.Context, class string) ([]LearningRecord
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
+	defer s.closeOpened(db)
 	return loadEvolutionRecords(ctx, db, class)
 }
 
 func (s *Store) SaveTaskRecords(records []LearningRecord) error {
+	if s.usesEvolutionBroker() {
+		return s.brokerRecords(context.Background(), evolutionOpSaveRecords, "task", records)
+	}
 	return s.saveRecords(context.Background(), "task", records)
 }
 
 func (s *Store) SavePatternRecords(records []LearningRecord) error {
+	if s.usesEvolutionBroker() {
+		return s.brokerRecords(context.Background(), evolutionOpSaveRecords, "pattern", records)
+	}
 	return s.saveRecords(context.Background(), "pattern", records)
 }
 
@@ -179,6 +294,9 @@ func (s *Store) saveRecords(ctx context.Context, class string, records []Learnin
 }
 
 func (s *Store) MarkTaskRecordsClustered(ids []string) error {
+	if s.usesEvolutionBroker() {
+		return s.brokerIDs(evolutionOpMarkClustered, ids)
+	}
 	target := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
@@ -239,6 +357,9 @@ func (s *Store) MarkTaskRecordsClustered(ids []string) error {
 }
 
 func (s *Store) MergePatternRecords(records []LearningRecord) error {
+	if s.usesEvolutionBroker() {
+		return s.brokerRecords(context.Background(), evolutionOpMergePatterns, "pattern", records)
+	}
 	if len(records) == 0 {
 		return nil
 	}
@@ -281,6 +402,9 @@ func learningRecordMergeKey(record LearningRecord) string {
 }
 
 func (s *Store) SaveDrafts(drafts []SkillDraft) error {
+	if s.usesEvolutionBroker() {
+		return s.brokerDrafts(evolutionOpSaveDrafts, drafts)
+	}
 	if len(drafts) == 0 {
 		return nil
 	}
@@ -300,15 +424,21 @@ func (s *Store) SaveDrafts(drafts []SkillDraft) error {
 }
 
 func (s *Store) LoadDrafts() ([]SkillDraft, error) {
+	if s.usesEvolutionBroker() {
+		return s.brokerLoadDrafts()
+	}
 	db, err := s.open(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
+	defer s.closeOpened(db)
 	return loadEvolutionDrafts(context.Background(), db)
 }
 
 func (s *Store) SaveProfile(profile SkillProfile) error {
+	if s.usesEvolutionBroker() {
+		return s.brokerSaveProfile(profile, "", false)
+	}
 	if err := validateEvolutionProfile(profile); err != nil {
 		return err
 	}
@@ -319,6 +449,9 @@ func (s *Store) SaveProfile(profile SkillProfile) error {
 }
 
 func (s *Store) LoadProfile(skillName string) (SkillProfile, error) {
+	if s.usesEvolutionBroker() {
+		return s.brokerLoadProfile(skillName)
+	}
 	if err := validateEvolutionSkillName(skillName); err != nil {
 		return SkillProfile{}, err
 	}
@@ -326,7 +459,7 @@ func (s *Store) LoadProfile(skillName string) (SkillProfile, error) {
 	if err != nil {
 		return SkillProfile{}, err
 	}
-	defer db.Close()
+	defer s.closeOpened(db)
 	workspace := strings.TrimSpace(s.paths.Workspace)
 	profile, found, err := loadEvolutionProfile(context.Background(), db, workspace, skillName)
 	if err != nil {
@@ -351,6 +484,9 @@ func (s *Store) UpdateProfile(
 	workspaceID, skillName string,
 	update func(profile *SkillProfile, exists bool) error,
 ) error {
+	if s.usesEvolutionBroker() {
+		return s.brokerUpdateProfile(workspaceID, skillName, update)
+	}
 	workspaceID = strings.TrimSpace(workspaceID)
 	if update == nil {
 		return errors.New("evolution profile update is nil")
@@ -397,11 +533,14 @@ func (s *Store) UpdateProfile(
 }
 
 func (s *Store) LoadProfiles() ([]SkillProfile, error) {
+	if s.usesEvolutionBroker() {
+		return s.brokerLoadProfiles()
+	}
 	db, err := s.open(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
+	defer s.closeOpened(db)
 	return loadEvolutionProfiles(context.Background(), db)
 }
 
