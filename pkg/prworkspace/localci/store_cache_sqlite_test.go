@@ -529,7 +529,7 @@ func TestLocalCIPassingCacheCapacityPrunesOnlyExpiredRows(t *testing.T) {
 
 func TestLocalCIPassingCacheMigratesValidIndexesAndAuditsSkips(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "evidence")
-	store, plan, execution, now := prepareLegacyCacheEvidence(t, root)
+	store, plan, execution, now := prepareUnopenedLegacyCacheEvidence(t, root)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +670,7 @@ func TestLocalCIPassingCacheMigratesValidIndexesAndAuditsSkips(t *testing.T) {
 
 func TestLocalCIPassingCacheArchiveRetryDoesNotReimport(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "evidence")
-	store, _, execution, now := prepareLegacyCacheEvidence(t, root)
+	store, _, execution, now := prepareUnopenedLegacyCacheEvidence(t, root)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1092,7 +1092,7 @@ func TestLocalCIPassingCacheMigrationClassifiesInvalidEvidence(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "evidence")
-			store, plan, execution, now := prepareLegacyCacheEvidence(t, root)
+			store, plan, execution, now := prepareUnopenedLegacyCacheEvidence(t, root)
 			record := test.mutate(t, root, store, plan, execution, now)
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
@@ -1119,7 +1119,7 @@ func TestLocalCIPassingCacheMigrationRejectsUnsafeImmutableEvidence(t *testing.T
 		t.Skip("POSIX private-mode assertion")
 	}
 	root := filepath.Join(t.TempDir(), "evidence")
-	store, _, execution, now := prepareLegacyCacheEvidence(t, root)
+	store, _, execution, now := prepareUnopenedLegacyCacheEvidence(t, root)
 	record := mustLegacyCacheRecord(t, cacheIndexRecord{
 		ResultKey: execution.ResultKey, ExecutionDigest: execution.Digest,
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
@@ -1144,7 +1144,7 @@ func TestLocalCIPassingCacheMigrationRejectsUnsafePlanEvidence(t *testing.T) {
 		t.Skip("POSIX private-mode assertion")
 	}
 	root := filepath.Join(t.TempDir(), "evidence")
-	store, plan, execution, now := prepareLegacyCacheEvidence(t, root)
+	store, plan, execution, now := prepareUnopenedLegacyCacheEvidence(t, root)
 	record := mustLegacyCacheRecord(t, cacheIndexRecord{
 		ResultKey: execution.ResultKey, ExecutionDigest: execution.Digest,
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
@@ -1404,6 +1404,52 @@ func prepareLegacyCacheEvidence(
 	}
 	execution := validTestExecution(t, plan, now, StatusPassed)
 	if err = store.PutExecution(context.Background(), execution); err != nil {
+		t.Fatal(err)
+	}
+	return store, plan, execution, now
+}
+
+func prepareUnopenedLegacyCacheEvidence(
+	t *testing.T,
+	root string,
+) (*FileEvidenceStore, Plan, Execution, time.Time) {
+	t.Helper()
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mkdirErr := os.MkdirAll(absolute, 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	if chmodErr := os.Chmod(absolute, 0o700); chmodErr != nil {
+		t.Fatal(chmodErr)
+	}
+	rootHandle, err := os.OpenRoot(absolute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &FileEvidenceStore{
+		rootPath: absolute,
+		root:     rootHandle,
+		now:      func() time.Time { return time.Now().UTC() },
+		cacheTTL: 24 * time.Hour,
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for _, directory := range []string{"plans", "executions", "attestations", "cache", "discovery"} {
+		if err := rootHandle.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.validateDirectory(directory); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 8, 31, 12, 0, 0, 123456789, time.UTC)
+	plan := validTestPlan(t)
+	if err := store.PutPlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	execution := validTestExecution(t, plan, now, StatusPassed)
+	if err := store.PutExecution(context.Background(), execution); err != nil {
 		t.Fatal(err)
 	}
 	return store, plan, execution, now
