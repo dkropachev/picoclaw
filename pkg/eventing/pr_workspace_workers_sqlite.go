@@ -29,6 +29,11 @@ func (s *Store) ClaimPRWorkspaceOperations(
 	ctx context.Context,
 	input PRWorkspaceClaimRequest,
 ) ([]PRClaimedOperationIntent, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpClaimPROperations, eventingBrokerRequest{PRClaim: input}, &out, true)
+		return out.PROperations, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
@@ -111,6 +116,17 @@ func (s *Store) FinishPRWorkspaceOperation(
 	ctx context.Context,
 	input PRWorkspaceOperationFinish,
 ) (PRClaimedOperationIntent, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpFinishPROperation,
+			eventingBrokerRequest{PROperationFinish: input},
+			&out,
+			true,
+		)
+		return out.PROperation, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return PRClaimedOperationIntent{}, err
 	}
@@ -202,6 +218,11 @@ func (s *Store) ClaimPRWorkspacePublications(
 	ctx context.Context,
 	input PRWorkspaceClaimRequest,
 ) ([]PRClaimedPublication, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpClaimPRPublications, eventingBrokerRequest{PRClaim: input}, &out, true)
+		return out.PRPublications, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
@@ -286,6 +307,17 @@ func (s *Store) FinishPRWorkspacePublication(
 	ctx context.Context,
 	input PRWorkspacePublicationFinish,
 ) (PRClaimedPublication, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpFinishPRPublication,
+			eventingBrokerRequest{PRPublicationFinish: input},
+			&out,
+			true,
+		)
+		return out.PRPublication, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return PRClaimedPublication{}, err
 	}

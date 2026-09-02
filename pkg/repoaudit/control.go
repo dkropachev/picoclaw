@@ -16,7 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -311,6 +312,9 @@ type RepositoryReviewAutomation struct {
 }
 
 func (s Store) ListAutomations(ctx context.Context) ([]RepositoryReviewAutomation, error) {
+	if s.broker != nil {
+		return s.brokerListAutomations(ctx)
+	}
 	return s.listAutomations(ctx, maxAutomationCount)
 }
 
@@ -345,7 +349,7 @@ func (s Store) listAutomationsUnlockedWithLoader(
 	maximum int,
 	load func(string) (RepositoryReviewAutomation, bool, error),
 ) ([]RepositoryReviewAutomation, error) {
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -355,11 +359,11 @@ func (s Store) listAutomationsUnlockedWithLoader(
 	 ORDER BY updated_at_unix_nano DESC, automation_id ASC
 	 LIMIT ?`, maximum+1)
 	if err != nil {
-		database.Close()
+		release()
 		return nil, err
 	}
 	ids, err := sqlitestore.ScanStrings(rows)
-	_ = database.Close()
+	release()
 	if err != nil {
 		return nil, err
 	}
@@ -381,6 +385,9 @@ func (s Store) listAutomationsUnlockedWithLoader(
 }
 
 func (s Store) GetAutomation(ctx context.Context, id string) (RepositoryReviewAutomation, bool, error) {
+	if s.broker != nil {
+		return s.brokerGetAutomation(ctx, id)
+	}
 	if err := ctx.Err(); err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
@@ -403,6 +410,9 @@ func (s Store) CreateAutomation(
 	ctx context.Context,
 	automation RepositoryReviewAutomation,
 ) (RepositoryReviewAutomation, error) {
+	if s.broker != nil {
+		return s.brokerCreateAutomation(ctx, automation)
+	}
 	if err := ctx.Err(); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
@@ -458,6 +468,9 @@ func (s Store) UpdateAutomation(
 	expectedVersion int64,
 	mutate func(*RepositoryReviewAutomation) error,
 ) (RepositoryReviewAutomation, error) {
+	if s.broker != nil {
+		return s.brokerUpdateAutomation(ctx, id, expectedVersion, mutate)
+	}
 	if err := ctx.Err(); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
@@ -524,6 +537,9 @@ func (s Store) UpdateAutomation(
 }
 
 func (s Store) DeleteAutomation(ctx context.Context, id string, expectedVersion int64) error {
+	if s.broker != nil {
+		return s.brokerDeleteAutomation(ctx, id, expectedVersion)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -553,11 +569,11 @@ func (s Store) DeleteAutomation(ctx context.Context, id string, expectedVersion 
 		automation.Status == RepositoryReviewAutomationStopping {
 		return ErrAutomationActive
 	}
-	database, err := s.openDatabase(ctx)
+	database, release, err := s.acquireDatabase(ctx)
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer release()
 	return sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
 		result, deleteErr := conn.ExecContext(ctx, `
 			DELETE FROM repository_review_automations
@@ -570,14 +586,17 @@ func (s Store) DeleteAutomation(ctx context.Context, id string, expectedVersion 
 }
 
 func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, error) {
+	if s.broker != nil {
+		return s.brokerGetAutomation(context.Background(), id)
+	}
 	if !validAutomationID(id) {
 		return RepositoryReviewAutomation{}, false, fmt.Errorf("%w: invalid ID", ErrInvalidAutomation)
 	}
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
-	defer database.Close()
+	defer release()
 	automation, err := loadRepositoryReviewAutomationRow(context.Background(), database, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RepositoryReviewAutomation{}, false, nil
@@ -589,14 +608,17 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 }
 
 func (s Store) saveAutomation(automation RepositoryReviewAutomation) error {
+	if s.broker != nil {
+		return database.NewError(database.CodeUnsupported, "repository review automation save is not broker-routed")
+	}
 	if err := normalizeAutomation(&automation); err != nil {
 		return err
 	}
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer release()
 	return saveRepositoryReviewAutomationDatabase(context.Background(), database, automation)
 }
 

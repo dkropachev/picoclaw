@@ -28,6 +28,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/channels/weixin"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/cron"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/evolution"
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/sipeed/picoclaw/pkg/memory"
@@ -186,17 +187,11 @@ func exerciseRuntimeStorageFirstStartup(t *testing.T, fixture *runtimeStorageInt
 		t.Fatalf("auth credential = %#v, %v", loadedCredential, loadCredentialErr)
 	}
 
-	dashboard, err := dashboardauth.New(fixture.home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := dashboard.SetPassword(ctx, runtimeStoragePassword); err != nil {
-		_ = dashboard.Close()
-		t.Fatal(err)
-	}
-	if err := dashboard.Close(); err != nil {
-		t.Fatal(err)
-	}
+	withRuntimeDashboardBroker(t, fixture, func(dashboard *dashboardauth.Store) {
+		if err := dashboard.SetPassword(ctx, runtimeStoragePassword); err != nil {
+			t.Fatal(err)
+		}
+	})
 
 	if err := api.SaveCatalog(
 		"openai",
@@ -219,7 +214,7 @@ func exerciseRuntimeStorageFirstStartup(t *testing.T, fixture *runtimeStorageInt
 	exerciseChannelStorage(t, ctx)
 
 	sessionsDir := filepath.Join(fixture.workspace, "sessions")
-	sessionStore, err := memory.NewSQLiteStore(sessionsDir)
+	sessionStore, err := memory.NewStore(sessionsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,11 +242,7 @@ func exerciseRuntimeStorageFirstStartup(t *testing.T, fixture *runtimeStorageInt
 	}
 	fixture.threadID, fixture.handoffID = thread.ID, handoff.ID
 
-	cronPath := filepath.Join(fixture.workspace, "cron", "jobs.db")
-	cronService, err := cron.NewSQLiteCronService(cronPath, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cronService := cron.NewForWorkspace(filepath.Join(fixture.workspace, "cron"), nil)
 	every := int64(time.Hour / time.Millisecond)
 	job, err := cronService.AddJob(
 		"runtime storage", cron.CronSchedule{Kind: "every", EveryMS: &every},
@@ -546,12 +537,12 @@ func exerciseAccountRouterStorage(t *testing.T, fixture *runtimeStorageIntegrati
 			Candidates: []providers.FallbackCandidate{{Provider: "openai", Model: "runtime-model"}},
 		},
 	}
-	router, err := accountrouter.NewSQLite(
+	router := accountrouter.NewForWorkspace(
 		routerConfig.Name, routerConfig, accounts,
-		filepath.Join(fixture.workspace, "state", "account-router.db"),
+		fixture.workspace,
 	)
-	if err != nil {
-		t.Fatal(err)
+	if router == nil {
+		t.Fatal("account router construction failed")
 	}
 	selection := router.Select("runtime-storage-session", accountrouter.SelectReasonInitial)
 	if len(selection.Candidates) != 1 {
@@ -674,21 +665,14 @@ func exerciseRuntimeStorageSecondStartup(t *testing.T, fixture *runtimeStorageIn
 		loadedCredential.AccessToken != "integration-token" {
 		t.Fatalf("reopened auth credential = %#v, %v", loadedCredential, loadCredentialErr)
 	}
-	dashboard, err := dashboardauth.New(fixture.home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if initialized, err := dashboard.IsInitialized(ctx); err != nil || !initialized {
-		_ = dashboard.Close()
-		t.Fatalf("reopened dashboard initialized = %v, %v", initialized, err)
-	}
-	if valid, err := dashboard.VerifyPassword(ctx, runtimeStoragePassword); err != nil || !valid {
-		_ = dashboard.Close()
-		t.Fatalf("reopened dashboard password = %v, %v", valid, err)
-	}
-	if err := dashboard.Close(); err != nil {
-		t.Fatal(err)
-	}
+	withRuntimeDashboardBroker(t, fixture, func(dashboard *dashboardauth.Store) {
+		if initialized, err := dashboard.IsInitialized(ctx); err != nil || !initialized {
+			t.Fatalf("reopened dashboard initialized = %v, %v", initialized, err)
+		}
+		if valid, err := dashboard.VerifyPassword(ctx, runtimeStoragePassword); err != nil || !valid {
+			t.Fatalf("reopened dashboard password = %v, %v", valid, err)
+		}
+	})
 	if err := api.SaveCatalog(
 		"openai",
 		"https://api.example.invalid/v1",
@@ -706,7 +690,7 @@ func exerciseRuntimeStorageSecondStartup(t *testing.T, fixture *runtimeStorageIn
 	}
 	exerciseChannelStorage(t, ctx)
 
-	sessionStore, err := memory.NewSQLiteStore(filepath.Join(fixture.workspace, "sessions"))
+	sessionStore, err := memory.NewStore(filepath.Join(fixture.workspace, "sessions"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -728,11 +712,7 @@ func exerciseRuntimeStorageSecondStartup(t *testing.T, fixture *runtimeStorageIn
 		t.Fatalf("reopened handoff = %#v, %v, %v", handoff, handoffFound, handoffErr)
 	}
 
-	cronPath := filepath.Join(fixture.workspace, "cron", "jobs.db")
-	cronService, err := cron.NewSQLiteCronService(cronPath, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cronService := cron.NewForWorkspace(filepath.Join(fixture.workspace, "cron"), nil)
 	job, jobFound := cronService.GetJob(fixture.cronJobID)
 	if !jobFound || job == nil || job.ID != fixture.cronJobID {
 		_ = cronService.Close()
@@ -855,6 +835,46 @@ func exerciseRuntimeStorageSecondStartup(t *testing.T, fixture *runtimeStorageIn
 		t.Fatalf("reopened PID metadata = %#v", metadata)
 	}
 	time.Sleep(150 * time.Millisecond)
+}
+
+func withRuntimeDashboardBroker(
+	t *testing.T,
+	fixture *runtimeStorageIntegrationFixture,
+	use func(*dashboardauth.Store),
+) {
+	t.Helper()
+	handler := dashboardauth.NewBrokerHandler(fixture.home, fixture.launcherPath)
+	server, err := database.StartServer(t.Context(), database.ServerOptions{
+		Home: fixture.home, Handler: handler, CloseHandler: handler.Close,
+	})
+	if err != nil {
+		t.Fatalf("start launcher-auth test broker: %v", err)
+	}
+	client, err := database.Connect(fixture.home)
+	if err != nil {
+		closeRuntimeDashboardBroker(t, server)
+		t.Fatalf("connect launcher-auth test broker: %v", err)
+	}
+	store, err := dashboardauth.NewBroker(client)
+	if err != nil {
+		closeRuntimeDashboardBroker(t, server)
+		t.Fatalf("construct launcher-auth broker client: %v", err)
+	}
+	use(store)
+	if err := store.Close(); err != nil {
+		closeRuntimeDashboardBroker(t, server)
+		t.Fatalf("close launcher-auth broker client: %v", err)
+	}
+	closeRuntimeDashboardBroker(t, server)
+}
+
+func closeRuntimeDashboardBroker(t *testing.T, server *database.Server) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Close(ctx); err != nil {
+		t.Fatalf("close launcher-auth test broker: %v", err)
+	}
 }
 
 type runtimeStorageJSONAllowlist struct {

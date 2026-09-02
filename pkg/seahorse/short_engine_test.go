@@ -159,7 +159,7 @@ func TestNewEngine(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "short.db")
 
-	eng, err := NewEngine(Config{DBPath: dbPath}, nil)
+	eng, err := NewOfflineEngine(OfflineConfig{DatabasePath: dbPath}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -191,10 +191,12 @@ func TestNewEngineWithPatterns(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "short.db")
 
-	eng, err := NewEngine(Config{
-		DBPath:                   dbPath,
-		IgnoreSessionPatterns:    []string{"cron:**"},
-		StatelessSessionPatterns: []string{"agent:*:sub:**"},
+	eng, err := NewOfflineEngine(OfflineConfig{
+		DatabasePath: dbPath,
+		Config: Config{
+			IgnoreSessionPatterns:    []string{"cron:**"},
+			StatelessSessionPatterns: []string{"agent:*:sub:**"},
+		},
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
@@ -1365,7 +1367,7 @@ func TestAssemblerSummaryRoleNotUser(t *testing.T) {
 func newTestEngineForConcurrency(t *testing.T) *Engine {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "race_test.db")
-	eng, err := NewEngine(Config{DBPath: dbPath}, nil)
+	eng, err := NewOfflineEngine(OfflineConfig{DatabasePath: dbPath}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}

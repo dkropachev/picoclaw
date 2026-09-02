@@ -2689,13 +2689,13 @@ func TestSubTurnCoverageExercisesConcurrencyPromptAndRouterEdges(t *testing.T) {
 			ID: "account", Type: config.AccountRouterBlockTypeAccount, Account: "one",
 		}},
 	}
-	router := accountrouter.New(
+	router := accountrouter.NewForWorkspace(
 		routerConfig.Name,
 		&routerConfig,
 		map[string]accountrouter.Account{
 			"one": {Candidates: []providers.FallbackCandidate{candidate}},
 		},
-		t.TempDir()+"/router-state.json",
+		t.TempDir(),
 	)
 	ts := &turnState{agent: agent, sessionKey: "coverage-compression"}
 	exec := &turnExecution{accountRouter: router}

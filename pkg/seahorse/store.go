@@ -6,14 +6,26 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const sqliteTimeLayout = "2006-01-02 15:04:05"
 
 // Store provides SQLite storage for seahorse.
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	broker  *database.Client
+	storeID database.StoreID
 }
+
+func (s *Store) StoreID() database.StoreID {
+	if s == nil {
+		return ""
+	}
+	return s.storeID
+}
+func (s *Store) usesBroker() bool { return s != nil && s.broker != nil }
 
 // CreateSummaryInput holds parameters for creating a summary.
 type CreateSummaryInput struct {
@@ -35,6 +47,11 @@ type CreateSummaryInput struct {
 
 // GetOrCreateConversation returns the conversation for a sessionKey, creating if needed.
 func (s *Store) GetOrCreateConversation(ctx context.Context, sessionKey string) (*Conversation, error) {
+	if s.usesBroker() {
+		var out seahorseResponse
+		err := s.call(ctx, opGetOrCreate, seahorseRequest{SessionKey: sessionKey}, &out, true)
+		return out.Conversation, err
+	}
 	// Try to get first
 	conv, err := s.GetConversationBySessionKey(ctx, sessionKey)
 	if err != nil {
@@ -68,6 +85,11 @@ func (s *Store) GetOrCreateConversation(ctx context.Context, sessionKey string) 
 
 // GetConversationBySessionKey retrieves a conversation by session key.
 func (s *Store) GetConversationBySessionKey(ctx context.Context, sessionKey string) (*Conversation, error) {
+	if s.usesBroker() {
+		var out seahorseResponse
+		err := s.call(ctx, opGetConversation, seahorseRequest{SessionKey: sessionKey}, &out, false)
+		return out.Conversation, err
+	}
 	var conv Conversation
 	var createdAt, updatedAt string
 	err := s.db.QueryRowContext(ctx,
@@ -87,6 +109,11 @@ func (s *Store) GetConversationBySessionKey(ctx context.Context, sessionKey stri
 
 // GetSessionStatus returns status for a specific session.
 func (s *Store) GetSessionStatus(ctx context.Context, sessionKey string) (*SessionStatus, error) {
+	if s.usesBroker() {
+		var out seahorseResponse
+		err := s.call(ctx, opGetSessionStatus, seahorseRequest{SessionKey: sessionKey}, &out, false)
+		return out.Status, err
+	}
 	conv, err := s.GetConversationBySessionKey(ctx, sessionKey)
 	if err != nil {
 		return nil, err
@@ -114,6 +141,13 @@ func (s *Store) GetSessionStatus(ctx context.Context, sessionKey string) (*Sessi
 
 // GetAllSessionStatuses returns status for all sessions.
 func (s *Store) GetAllSessionStatuses(ctx context.Context) ([]SessionStatus, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]SessionStatus, bool, error) {
+			var out seahorseResponse
+			err := s.call(ctx, opGetStatuses, seahorseRequest{Offset: offset}, &out, false)
+			return out.Statuses, out.More, err
+		})
+	}
 	rows, err := s.db.QueryContext(ctx, "SELECT session_key FROM conversations")
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
@@ -178,6 +212,25 @@ func (s *Store) AddMessageWithReasoning(
 	tokenCount int,
 	createdAt time.Time,
 ) (*Message, error) {
+	if s.usesBroker() {
+		var out seahorseResponse
+		err := s.call(
+			ctx,
+			opAddMessage,
+			seahorseRequest{
+				ConvID:     convID,
+				Role:       role,
+				Content:    content,
+				ModelName:  modelName,
+				Reasoning:  reasoningContent,
+				TokenCount: tokenCount,
+				CreatedAt:  createdAt,
+			},
+			&out,
+			true,
+		)
+		return out.Message, err
+	}
 	storedCreatedAt := normalizeMessageCreatedAt(createdAt)
 	if storedCreatedAt.IsZero() {
 		storedCreatedAt = normalizeMessageCreatedAt(time.Now())
@@ -260,6 +313,25 @@ func (s *Store) AddMessageWithPartsAndReasoning(
 	tokenCount int,
 	createdAt time.Time,
 ) (*Message, error) {
+	if s.usesBroker() {
+		var out seahorseResponse
+		err := s.call(
+			ctx,
+			opAddMessageParts,
+			seahorseRequest{
+				ConvID:     convID,
+				Role:       role,
+				Parts:      parts,
+				ModelName:  modelName,
+				Reasoning:  reasoningContent,
+				TokenCount: tokenCount,
+				CreatedAt:  createdAt,
+			},
+			&out,
+			true,
+		)
+		return out.Message, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -336,6 +408,19 @@ func (s *Store) AddMessageWithPartsAndReasoning(
 
 // GetMessages retrieves messages for a conversation.
 func (s *Store) GetMessages(ctx context.Context, convID int64, limit int, beforeID int64) ([]Message, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]Message, bool, error) {
+			var out seahorseResponse
+			err := s.call(
+				ctx,
+				opGetMessages,
+				seahorseRequest{ConvID: convID, Limit: limit, BeforeID: beforeID, Offset: offset},
+				&out,
+				false,
+			)
+			return out.Messages, out.More, err
+		})
+	}
 	query := "SELECT message_id, conversation_id, role, content, model_name, reasoning_content, token_count, created_at FROM messages WHERE conversation_id = ?"
 	args := []any{convID}
 	if beforeID > 0 {
@@ -391,6 +476,11 @@ func (s *Store) GetMessages(ctx context.Context, convID int64, limit int, before
 
 // GetMessageCount returns total message count for a conversation.
 func (s *Store) GetMessageCount(ctx context.Context, convID int64) (int, error) {
+	if s.usesBroker() {
+		var out seahorseResponse
+		err := s.call(ctx, opGetMessageCount, seahorseRequest{ConvID: convID}, &out, false)
+		return out.Count, err
+	}
 	var count int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT count(*) FROM messages WHERE conversation_id = ?", convID,
@@ -400,6 +490,11 @@ func (s *Store) GetMessageCount(ctx context.Context, convID int64) (int, error) 
 
 // GetMessageByID retrieves a single message by ID.
 func (s *Store) GetMessageByID(ctx context.Context, messageID int64) (*Message, error) {
+	if s.usesBroker() {
+		var out seahorseResponse
+		err := s.call(ctx, opGetMessage, seahorseRequest{MessageID: messageID}, &out, false)
+		return out.Message, err
+	}
 	var msg Message
 	var createdAt string
 	err := s.db.QueryRowContext(
@@ -420,6 +515,16 @@ func (s *Store) GetMessageByID(ctx context.Context, messageID int64) (*Message, 
 
 // UpdateMessageReasoningContent updates reasoning_content for an existing message.
 func (s *Store) UpdateMessageReasoningContent(ctx context.Context, messageID int64, reasoningContent string) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(
+			ctx,
+			opUpdateReasoning,
+			seahorseRequest{MessageID: messageID, Reasoning: reasoningContent},
+			&out,
+			true,
+		)
+	}
 	result, err := s.db.ExecContext(
 		ctx,
 		"UPDATE messages SET reasoning_content = ? WHERE message_id = ?",
@@ -441,6 +546,10 @@ func (s *Store) UpdateMessageReasoningContent(ctx context.Context, messageID int
 }
 
 func (s *Store) UpdateMessageModelName(ctx context.Context, messageID int64, modelName string) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(ctx, opUpdateModel, seahorseRequest{MessageID: messageID, ModelName: modelName}, &out, true)
+	}
 	result, err := s.db.ExecContext(
 		ctx,
 		"UPDATE messages SET model_name = ? WHERE message_id = ?",
@@ -462,6 +571,10 @@ func (s *Store) UpdateMessageModelName(ctx context.Context, messageID int64, mod
 }
 
 func (s *Store) UpdateMessageCreatedAt(ctx context.Context, messageID int64, createdAt time.Time) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(ctx, opUpdateCreated, seahorseRequest{MessageID: messageID, CreatedAt: createdAt}, &out, true)
+	}
 	storedCreatedAt := normalizeMessageCreatedAt(createdAt)
 	if storedCreatedAt.IsZero() {
 		return fmt.Errorf("message %d created_at cannot be zero", messageID)
@@ -517,6 +630,11 @@ func (s *Store) loadMessageParts(ctx context.Context, msgID int64) ([]MessagePar
 
 // CreateSummary creates a new summary and indexes it in FTS5.
 func (s *Store) CreateSummary(ctx context.Context, input CreateSummaryInput) (*Summary, error) {
+	if s.usesBroker() {
+		var out seahorseResponse
+		err := s.call(ctx, opCreateSummary, seahorseRequest{SummaryInput: input}, &out, true)
+		return out.Summary, err
+	}
 	// Generate summary ID
 	now := time.Now().UTC()
 	summaryID := generateSummaryID(input.Content, now)
@@ -586,11 +704,23 @@ func (s *Store) CreateSummary(ctx context.Context, input CreateSummaryInput) (*S
 
 // GetSummary retrieves a summary by ID.
 func (s *Store) GetSummary(ctx context.Context, summaryID string) (*Summary, error) {
+	if s.usesBroker() {
+		var out seahorseResponse
+		err := s.call(ctx, opGetSummary, seahorseRequest{SummaryID: summaryID}, &out, false)
+		return out.Summary, err
+	}
 	return s.scanSummary(ctx, "WHERE summary_id = ?", summaryID)
 }
 
 // GetSummariesByConversation retrieves all summaries for a conversation.
 func (s *Store) GetSummariesByConversation(ctx context.Context, convID int64) ([]Summary, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]Summary, bool, error) {
+			var out seahorseResponse
+			err := s.call(ctx, opGetSummaries, seahorseRequest{ConvID: convID, Offset: offset}, &out, false)
+			return out.Summaries, out.More, err
+		})
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT summary_id, conversation_id, kind, depth, content, token_count,
 			earliest_at, latest_at, descendant_count, descendant_token_count,
@@ -607,6 +737,13 @@ func (s *Store) GetSummariesByConversation(ctx context.Context, convID int64) ([
 
 // GetSummaryChildren retrieves child summary IDs (summaries that list this summary as parent).
 func (s *Store) GetSummaryChildren(ctx context.Context, summaryID string) ([]string, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]string, bool, error) {
+			var out seahorseResponse
+			err := s.call(ctx, opGetSummaryChildren, seahorseRequest{SummaryID: summaryID, Offset: offset}, &out, false)
+			return out.Strings, out.More, err
+		})
+	}
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT summary_id FROM summary_parents WHERE parent_summary_id = ?",
 		summaryID,
@@ -632,6 +769,13 @@ func (s *Store) GetSummaryChildren(ctx context.Context, summaryID string) ([]str
 
 // GetSummaryParents retrieves parent summaries (full objects) for a summary.
 func (s *Store) GetSummaryParents(ctx context.Context, summaryID string) ([]Summary, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]Summary, bool, error) {
+			var out seahorseResponse
+			err := s.call(ctx, opGetSummaryParents, seahorseRequest{SummaryID: summaryID, Offset: offset}, &out, false)
+			return out.Summaries, out.More, err
+		})
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT s.summary_id, s.conversation_id, s.kind, s.depth, s.content, s.token_count,
 			s.earliest_at, s.latest_at, s.descendant_count, s.descendant_token_count,
@@ -650,6 +794,16 @@ func (s *Store) GetSummaryParents(ctx context.Context, summaryID string) ([]Summ
 
 // LinkSummaryToMessages links a leaf summary to its source messages.
 func (s *Store) LinkSummaryToMessages(ctx context.Context, summaryID string, messageIDs []int64) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(
+			ctx,
+			opLinkSummaryMessages,
+			seahorseRequest{SummaryID: summaryID, MessageIDs: messageIDs},
+			&out,
+			true,
+		)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -670,6 +824,13 @@ func (s *Store) LinkSummaryToMessages(ctx context.Context, summaryID string, mes
 
 // GetSummarySourceMessages retrieves source messages for a summary.
 func (s *Store) GetSummarySourceMessages(ctx context.Context, summaryID string) ([]Message, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]Message, bool, error) {
+			var out seahorseResponse
+			err := s.call(ctx, opGetSummaryMessages, seahorseRequest{SummaryID: summaryID, Offset: offset}, &out, false)
+			return out.Messages, out.More, err
+		})
+	}
 	rows, err := s.db.QueryContext(
 		ctx,
 		`SELECT m.message_id, m.conversation_id, m.role, m.content, m.model_name, m.reasoning_content, m.token_count, m.created_at
@@ -711,6 +872,13 @@ func (s *Store) GetSummarySourceMessages(ctx context.Context, summaryID string) 
 
 // GetRootSummaries retrieves root summaries (not children of any other summary).
 func (s *Store) GetRootSummaries(ctx context.Context, convID int64) ([]Summary, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]Summary, bool, error) {
+			var out seahorseResponse
+			err := s.call(ctx, opGetRoots, seahorseRequest{ConvID: convID, Offset: offset}, &out, false)
+			return out.Summaries, out.More, err
+		})
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT s.summary_id, s.conversation_id, s.kind, s.depth, s.content, s.token_count,
 			s.earliest_at, s.latest_at, s.descendant_count, s.descendant_token_count,
@@ -732,6 +900,13 @@ func (s *Store) GetRootSummaries(ctx context.Context, convID int64) ([]Summary, 
 
 // GetContextItems retrieves context items for a conversation, ordered by ordinal.
 func (s *Store) GetContextItems(ctx context.Context, convID int64) ([]ContextItem, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]ContextItem, bool, error) {
+			var out seahorseResponse
+			err := s.call(ctx, opGetContext, seahorseRequest{ConvID: convID, Offset: offset}, &out, false)
+			return out.Context, out.More, err
+		})
+	}
 	rows, err := s.db.QueryContext(
 		ctx,
 		"SELECT ordinal, item_type, summary_id, message_id, token_count, created_at FROM context_items WHERE conversation_id = ? ORDER BY ordinal",
@@ -778,6 +953,10 @@ func (s *Store) GetContextItems(ctx context.Context, convID int64) ([]ContextIte
 
 // UpsertContextItems replaces all context items for a conversation.
 func (s *Store) UpsertContextItems(ctx context.Context, convID int64, items []ContextItem) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(ctx, opUpsertContext, seahorseRequest{ConvID: convID, ContextItems: items}, &out, true)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -806,6 +985,10 @@ func (s *Store) UpsertContextItems(ctx context.Context, convID int64, items []Co
 
 // ClearContextItems removes all context items for a conversation.
 func (s *Store) ClearContextItems(ctx context.Context, convID int64) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(ctx, opClearContext, seahorseRequest{ConvID: convID}, &out, true)
+	}
 	_, err := s.db.ExecContext(ctx, "DELETE FROM context_items WHERE conversation_id = ?", convID)
 	return err
 }
@@ -814,6 +997,10 @@ func (s *Store) ClearContextItems(ctx context.Context, convID int64) error {
 // Also clears related context_items, message_parts, summary_messages, and FTS entries.
 // Uses transaction to ensure atomicity of the delete cascade.
 func (s *Store) DeleteMessagesAfterID(ctx context.Context, convID int64, afterID int64) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(ctx, opDeleteMessagesAfter, seahorseRequest{ConvID: convID, MessageID: afterID}, &out, true)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -872,6 +1059,10 @@ func (s *Store) DeleteMessagesAfterID(ctx context.Context, convID int64, afterID
 // message_parts, and messages. FTS entries are handled automatically by triggers.
 // Uses a transaction for atomicity.
 func (s *Store) ClearConversation(ctx context.Context, convID int64) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(ctx, opClearConversation, seahorseRequest{ConvID: convID}, &out, true)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -927,6 +1118,10 @@ func (s *Store) AppendContextMessage(ctx context.Context, convID int64, messageI
 
 // AppendContextMessages bulk-appends messages to context_items.
 func (s *Store) AppendContextMessages(ctx context.Context, convID int64, messageIDs []int64) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(ctx, opAppendContextMessages, seahorseRequest{ConvID: convID, MessageIDs: messageIDs}, &out, true)
+	}
 	items := make([]ContextItem, len(messageIDs))
 	for i, id := range messageIDs {
 		items[i] = ContextItem{ItemType: "message", MessageID: id}
@@ -936,6 +1131,10 @@ func (s *Store) AppendContextMessages(ctx context.Context, convID int64, message
 
 // AppendContextSummary appends a summary to context_items at next ordinal.
 func (s *Store) AppendContextSummary(ctx context.Context, convID int64, summaryID string) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(ctx, opAppendContextSummary, seahorseRequest{ConvID: convID, SummaryID: summaryID}, &out, true)
+	}
 	return s.appendContextItems(ctx, convID, []ContextItem{
 		{ItemType: "summary", SummaryID: summaryID},
 	})
@@ -948,7 +1147,7 @@ func (s *Store) appendContextItems(ctx context.Context, convID int64, items []Co
 	}
 	defer tx.Rollback()
 
-	maxOrd, err := s.GetMaxOrdinalTx(ctx, tx, convID)
+	maxOrd, err := s.getMaxOrdinalTx(ctx, tx, convID)
 	if err != nil {
 		return err
 	}
@@ -1010,6 +1209,16 @@ func (s *Store) ReplaceContextRangeWithSummary(
 	startOrdinal, endOrdinal int,
 	summaryID string,
 ) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(
+			ctx,
+			opReplaceRange,
+			seahorseRequest{ConvID: convID, StartOrdinal: startOrdinal, EndOrdinal: endOrdinal, SummaryID: summaryID},
+			&out,
+			true,
+		)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1068,6 +1277,16 @@ func (s *Store) ReplaceContextItemsWithSummary(
 	summaryIDs []string,
 	newSummaryID string,
 ) error {
+	if s.usesBroker() {
+		var out seahorseResponse
+		return s.call(
+			ctx,
+			opReplaceItems,
+			seahorseRequest{ConvID: convID, SummaryIDs: summaryIDs, SummaryID: newSummaryID},
+			&out,
+			true,
+		)
+	}
 	if len(summaryIDs) == 0 {
 		return nil
 	}
@@ -1245,6 +1464,11 @@ func (s *Store) resequenceContextItemsTx(ctx context.Context, tx *sql.Tx, convID
 
 // GetContextTokenCount returns total token count for all items in context.
 func (s *Store) GetContextTokenCount(ctx context.Context, convID int64) (int, error) {
+	if s.usesBroker() {
+		var out seahorseResponse
+		err := s.call(ctx, opGetContextTokens, seahorseRequest{ConvID: convID}, &out, false)
+		return out.Count, err
+	}
 	var count int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT COALESCE(SUM(token_count), 0) FROM context_items WHERE conversation_id = ?",
@@ -1255,6 +1479,11 @@ func (s *Store) GetContextTokenCount(ctx context.Context, convID int64) (int, er
 
 // GetMaxOrdinal returns the highest ordinal in context_items for a conversation.
 func (s *Store) GetMaxOrdinal(ctx context.Context, convID int64) (int, error) {
+	if s.usesBroker() {
+		var out seahorseResponse
+		err := s.call(ctx, opGetMaxOrdinal, seahorseRequest{ConvID: convID}, &out, false)
+		return out.Count, err
+	}
 	var maxOrd sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
 		"SELECT MAX(ordinal) FROM context_items WHERE conversation_id = ?",
@@ -1270,7 +1499,7 @@ func (s *Store) GetMaxOrdinal(ctx context.Context, convID int64) (int, error) {
 }
 
 // GetMaxOrdinalTx returns the highest ordinal within a transaction.
-func (s *Store) GetMaxOrdinalTx(ctx context.Context, tx *sql.Tx, convID int64) (int, error) {
+func (s *Store) getMaxOrdinalTx(ctx context.Context, tx *sql.Tx, convID int64) (int, error) {
 	var maxOrd sql.NullInt64
 	err := tx.QueryRowContext(ctx,
 		"SELECT MAX(ordinal) FROM context_items WHERE conversation_id = ?",
@@ -1288,6 +1517,19 @@ func (s *Store) GetMaxOrdinalTx(ctx context.Context, tx *sql.Tx, convID int64) (
 // GetDistinctDepthsInContext returns distinct depth levels of summaries currently in context.
 // maxOrdinalExclusive filters out summaries with ordinal >= this value (0 = no filter).
 func (s *Store) GetDistinctDepthsInContext(ctx context.Context, convID int64, maxOrdinalExclusive int) ([]int, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]int, bool, error) {
+			var out seahorseResponse
+			err := s.call(
+				ctx,
+				opGetDepths,
+				seahorseRequest{ConvID: convID, MaxOrdinalExclusive: maxOrdinalExclusive, Offset: offset},
+				&out,
+				false,
+			)
+			return out.Depths, out.More, err
+		})
+	}
 	query := `SELECT DISTINCT s.depth
 		FROM context_items ci
 		JOIN summaries s ON s.summary_id = ci.summary_id
@@ -1324,6 +1566,13 @@ func (s *Store) GetDistinctDepthsInContext(ctx context.Context, convID int64, ma
 // GetSummarySubtree returns all summaries in the subtree rooted at summaryID,
 // including summaryID itself. Uses a recursive CTE to traverse the DAG.
 func (s *Store) GetSummarySubtree(ctx context.Context, summaryID string) ([]SummarySubtreeNode, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]SummarySubtreeNode, bool, error) {
+			var out seahorseResponse
+			err := s.call(ctx, opGetSubtree, seahorseRequest{SummaryID: summaryID, Offset: offset}, &out, false)
+			return out.Subtree, out.More, err
+		})
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		WITH RECURSIVE subtree AS (
 			SELECT summary_id, 0 AS depth_from_root
@@ -1360,6 +1609,13 @@ func (s *Store) GetSummarySubtree(ctx context.Context, summaryID string) ([]Summ
 
 // SearchSummaries performs full-text search on summaries.
 func (s *Store) SearchSummaries(ctx context.Context, input SearchInput) ([]SearchResult, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]SearchResult, bool, error) {
+			var out seahorseResponse
+			err := s.call(ctx, opSearchSummaries, seahorseRequest{Search: input, Offset: offset}, &out, false)
+			return out.Search, out.More, err
+		})
+	}
 	// "like" → LIKE search, anything else (including "full_text" or empty) → FTS5
 	if input.Mode == "like" {
 		return s.searchSummariesLike(ctx, input)
@@ -1508,6 +1764,13 @@ func (s *Store) scanSearchResults(rows *sql.Rows, withRank bool) ([]SearchResult
 
 // SearchMessages performs full-text or regex search on messages.
 func (s *Store) SearchMessages(ctx context.Context, input SearchInput) ([]SearchResult, error) {
+	if s.usesBroker() {
+		return collect(func(offset int) ([]SearchResult, bool, error) {
+			var out seahorseResponse
+			err := s.call(ctx, opSearchMessages, seahorseRequest{Search: input, Offset: offset}, &out, false)
+			return out.Search, out.More, err
+		})
+	}
 	// Try FTS5 first for full-text mode
 	if input.Mode == "" || input.Mode == "full_text" {
 		results, err := s.searchMessagesFTS(ctx, input)

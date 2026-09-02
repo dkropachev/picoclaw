@@ -18,17 +18,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/cron"
+	dblayer "github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/evolution"
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
+	"github.com/sipeed/picoclaw/pkg/internal/sessiondb"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/prworkspace/localci"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
 	"github.com/sipeed/picoclaw/pkg/repoeval"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -753,6 +755,17 @@ func exerciseRuntimeLegacyMigrationFirstStartup(
 ) {
 	t.Helper()
 	ctx := t.Context()
+	fence, err := dblayer.AcquireMigrationFence(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dashboardauth.RunOfflineDatabaseMigration(fixture.home, fixture.launcherPath); err != nil {
+		_ = fence.Close()
+		t.Fatal(err)
+	}
+	if err := fence.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	loadedAuth, err := auth.LoadStore()
 	if err != nil {
@@ -769,17 +782,11 @@ func exerciseRuntimeLegacyMigrationFirstStartup(
 		t.Fatalf("legacy auth credential = %#v", credential)
 	}
 
-	dashboard, err := dashboardauth.NewWithLauncherConfig(fixture.home, fixture.launcherPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if valid, verifyErr := dashboard.VerifyPassword(ctx, fixture.launcherPassword); verifyErr != nil || !valid {
-		_ = dashboard.Close()
-		t.Fatalf("legacy launcher password valid=%v err=%v", valid, verifyErr)
-	}
-	if err := dashboard.Close(); err != nil {
-		t.Fatal(err)
-	}
+	withRuntimeDashboardBroker(t, fixture.runtimeStorageIntegrationFixture, func(dashboard *dashboardauth.Store) {
+		if valid, verifyErr := dashboard.VerifyPassword(ctx, fixture.launcherPassword); verifyErr != nil || !valid {
+			t.Fatalf("legacy launcher password valid=%v err=%v", valid, verifyErr)
+		}
+	})
 
 	// SaveCatalog is the exported owner boundary. Opening imports legacy rows
 	// before this unrelated live catalog is transactionally replaced.
@@ -810,7 +817,7 @@ func exerciseRuntimeLegacyMigrationFirstStartup(
 
 	exerciseChannelStorage(t, ctx)
 
-	sessions, err := memory.NewSQLiteStore(filepath.Join(fixture.workspace, "sessions"))
+	sessions, err := memory.NewStore(filepath.Join(fixture.workspace, "sessions"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -826,10 +833,7 @@ func exerciseRuntimeLegacyMigrationFirstStartup(
 		t.Fatal(err)
 	}
 
-	cronService, err := cron.NewSQLiteCronService(filepath.Join(fixture.workspace, "cron", "jobs.db"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cronService := cron.NewForWorkspace(filepath.Join(fixture.workspace, "cron"), nil)
 	jobs := cronService.ListJobs(true)
 	if len(jobs) != 2 || jobs[0].ID != "legacy-first" || jobs[1].ID != "legacy-second" ||
 		!jobs[0].Enabled || jobs[1].Enabled || jobs[0].Schedule.Kind != "every" ||
@@ -1161,7 +1165,7 @@ func assertRuntimeLegacyMigrationAuditSafety(t *testing.T, fixture *runtimeLegac
 	databasePaths := runtimeStorageExpectedDatabasePaths(fixture.runtimeStorageIntegrationFixture)
 	for _, path := range databasePaths {
 		database := openRuntimeLegacyDatabase(t, path)
-		if filepath.Base(path) == dashboardauth.DBFilename {
+		if filepath.Base(path) == "launcher-auth.db" {
 			var ledgerRows int
 			if err := database.QueryRow(`SELECT COUNT(*) FROM launcher_auth_legacy_imports`).Scan(
 				&ledgerRows,
@@ -1621,7 +1625,7 @@ func runtimeLegacyMigrationInventory(
 			}
 			entry.Tables = append(entry.Tables, fmt.Sprintf("%s=%d", name, count))
 		}
-		if filepath.Base(path) == dashboardauth.DBFilename {
+		if filepath.Base(path) == "launcher-auth.db" {
 			entry.Imports, err = runtimeLegacyLauncherImportInventory(database)
 		} else {
 			entry.Imports, err = runtimeLegacyImportInventory(database)
@@ -1971,7 +1975,7 @@ func testRuntimeLegacyLateSourcesStayNonAuthoritative(t *testing.T) {
 	t.Helper()
 	workspace := filepath.Join(t.TempDir(), "late-session-authority")
 	sessionsDir := filepath.Join(workspace, "sessions")
-	store, err := memory.NewSQLiteStore(sessionsDir)
+	store, err := memory.NewStore(sessionsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1995,7 +1999,7 @@ func testRuntimeLegacyLateSourcesStayNonAuthoritative(t *testing.T) {
 	}), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := memory.NewSQLiteStore(sessionsDir)
+	reopened, err := memory.NewStore(sessionsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2022,13 +2026,14 @@ func testRuntimeLegacyLateSourcesStayNonAuthoritative(t *testing.T) {
 		}
 	}
 	var imported, skipped, lateIssues int
-	if err := reopened.SQLDB().QueryRow(`SELECT COALESCE(SUM(imported_count),0),
+	sessionDatabase := sessiondb.Bind(reopened.ThreadStore()).Database()
+	if err := sessionDatabase.QueryRow(`SELECT COALESCE(SUM(imported_count),0),
 		COALESCE(SUM(skipped_count),0) FROM storage_imports WHERE component='sessions'`).Scan(
 		&imported, &skipped,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.SQLDB().QueryRow(`SELECT COUNT(*) FROM storage_import_issues
+	if err := sessionDatabase.QueryRow(`SELECT COUNT(*) FROM storage_import_issues
 		WHERE component='sessions' AND issue_code='late-source'`).Scan(&lateIssues); err != nil {
 		t.Fatal(err)
 	}

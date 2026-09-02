@@ -15,9 +15,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -30,8 +32,9 @@ const (
 )
 
 var (
-	evaluationStoreLocks         sync.Map
-	repositoryEvaluationRandRead = rand.Read
+	evaluationStoreLocks                    sync.Map
+	repositoryEvaluationRandRead            = rand.Read
+	allowUnfencedEvaluationProviderForTests atomic.Bool
 )
 
 type Store struct {
@@ -41,6 +44,12 @@ type Store struct {
 	now         func() time.Time
 	newID       func() (string, error)
 	openForTest func(context.Context) (*sql.DB, error)
+	broker      *database.Client
+	brokerErr   error
+	storeID     database.StoreID
+	brokerState *evaluationBrokerClientState
+	retained    *retainedEvaluationDatabase
+	brokerOwned bool
 }
 
 // BulkDeleteItem identifies one explicitly selected evaluation version.
@@ -65,6 +74,40 @@ type BulkDeleteResult struct {
 // NewSQLiteStore constructs the durable repository model-evaluation store.
 // Schema creation and legacy import happen on the first operation.
 func NewSQLiteStore(workspace string) Store {
+	if client := evaluationBrokerClient(); client != nil {
+		storeID, err := resolveEvaluationBrokerStoreID(context.Background(), client, workspace)
+		return Store{
+			workspace: workspace, now: time.Now, newID: randomEvaluationID,
+			broker: client, storeID: storeID, brokerErr: err,
+			brokerState: &evaluationBrokerClientState{},
+		}
+	}
+	if !database.ProviderTestAuthorityHeld() && !allowUnfencedEvaluationProviderForTests.Load() {
+		return Store{
+			workspace: workspace,
+			now:       time.Now,
+			newID:     randomEvaluationID,
+			brokerErr: database.NewError(
+				database.CodeUnavailable,
+				"repository evaluation database broker client is unavailable",
+			),
+		}
+	}
+	return newSQLiteStoreLocal(workspace)
+}
+
+func newSQLiteStoreLocal(workspace string) Store {
+	if !evaluationLocalProviderAuthorized() {
+		return Store{
+			workspace: workspace,
+			now:       time.Now,
+			newID:     randomEvaluationID,
+			brokerErr: database.NewError(
+				database.CodeUnauthorized,
+				"repository evaluation provider access requires database owner fencing",
+			),
+		}
+	}
 	root := filepath.Join(workspace, storeDirectory)
 	return Store{
 		workspace: workspace,
@@ -72,7 +115,30 @@ func NewSQLiteStore(workspace string) Store {
 		database:  filepath.Join(root, evaluationDatabaseFilename),
 		now:       time.Now,
 		newID:     randomEvaluationID,
+		storeID:   EvaluationStoreID,
 	}
+}
+
+func evaluationLocalProviderAuthorized() bool {
+	return database.BrokerAuthorityHeld() || database.MigrationFenceHeld() ||
+		database.ProviderTestAuthorityHeld() || allowUnfencedEvaluationProviderForTests.Load()
+}
+
+func (s Store) localProviderError() error {
+	if s.brokerErr != nil {
+		return s.brokerErr
+	}
+	return evaluationProviderAuthorityError()
+}
+
+func evaluationProviderAuthorityError() error {
+	if !evaluationLocalProviderAuthorized() {
+		return database.NewError(
+			database.CodeUnauthorized,
+			"repository evaluation provider access requires database owner fencing",
+		)
+	}
+	return nil
 }
 
 // NewStore is retained for source compatibility and no longer writes JSON.
@@ -80,6 +146,9 @@ func NewSQLiteStore(workspace string) Store {
 func NewStore(workspace string) Store { return NewSQLiteStore(workspace) }
 
 func (s Store) Create(ctx context.Context, request CreateRequest) (Evaluation, error) {
+	if s.broker != nil {
+		return s.brokerCreate(ctx, request)
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return Evaluation{}, ctxErr
 	}
@@ -164,6 +233,9 @@ func (s Store) Create(ctx context.Context, request CreateRequest) (Evaluation, e
 }
 
 func (s Store) Get(ctx context.Context, id string) (Evaluation, bool, error) {
+	if s.broker != nil {
+		return s.brokerGet(ctx, id)
+	}
 	if err := ctx.Err(); err != nil {
 		return Evaluation{}, false, err
 	}
@@ -186,6 +258,9 @@ func (s Store) Get(ctx context.Context, id string) (Evaluation, bool, error) {
 }
 
 func (s Store) List(ctx context.Context) ([]Evaluation, error) {
+	if s.broker != nil {
+		return s.brokerList(ctx)
+	}
 	return s.list(ctx, maxEvaluations)
 }
 
@@ -198,11 +273,11 @@ func (s Store) list(ctx context.Context, maximum int) ([]Evaluation, error) {
 		return nil, err
 	}
 	defer unlock()
-	database, err := s.open(ctx)
+	database, release, err := s.acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer database.Close()
+	defer release()
 	rows, err := database.QueryContext(ctx, `
 		SELECT evaluation_id
 		  FROM repository_evaluations
@@ -239,6 +314,9 @@ func (s Store) Update(
 	expectedVersion int64,
 	mutate func(*Evaluation) error,
 ) (Evaluation, error) {
+	if s.broker != nil {
+		return s.brokerUpdate(ctx, id, expectedVersion, mutate)
+	}
 	if err := ctx.Err(); err != nil {
 		return Evaluation{}, err
 	}
@@ -343,6 +421,9 @@ func (s Store) Update(
 }
 
 func (s Store) Delete(ctx context.Context, id string, expectedVersion int64) error {
+	if s.broker != nil {
+		return s.brokerDelete(ctx, id, expectedVersion)
+	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		return contextErr
 	}
@@ -368,11 +449,11 @@ func (s Store) Delete(ctx context.Context, id string, expectedVersion int64) err
 	if contextErr := ctx.Err(); contextErr != nil {
 		return contextErr
 	}
-	database, err := s.open(ctx)
+	database, release, err := s.acquire(ctx)
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer release()
 	return sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
 		result, deleteErr := conn.ExecContext(ctx, `
 			DELETE FROM repository_evaluations
@@ -389,6 +470,9 @@ func (s Store) Delete(ctx context.Context, id string, expectedVersion int64) err
 // 200 explicitly selected evaluations. Only version-matching drafts are
 // removed; every other item remains durable with a stable failure code.
 func (s Store) BulkDelete(ctx context.Context, items []BulkDeleteItem) (BulkDeleteResult, error) {
+	if s.broker != nil {
+		return s.brokerBulkDelete(ctx, items)
+	}
 	if err := ctx.Err(); err != nil {
 		return BulkDeleteResult{}, err
 	}
@@ -400,11 +484,11 @@ func (s Store) BulkDelete(ctx context.Context, items []BulkDeleteItem) (BulkDele
 		return BulkDeleteResult{}, err
 	}
 	defer unlock()
-	database, err := s.open(ctx)
+	database, release, err := s.acquire(ctx)
 	if err != nil {
 		return BulkDeleteResult{}, err
 	}
-	defer database.Close()
+	defer release()
 
 	counts := make(map[string]int, len(items))
 	versions := make(map[string]int64, len(items))
@@ -489,11 +573,11 @@ func (s Store) load(id string) (Evaluation, error) {
 	if !validEvaluationID(id) {
 		return Evaluation{}, os.ErrNotExist
 	}
-	database, err := s.open(context.Background())
+	database, release, err := s.acquire(context.Background())
 	if err != nil {
 		return Evaluation{}, err
 	}
-	defer database.Close()
+	defer release()
 	evaluation, err := loadEvaluation(context.Background(), database, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Evaluation{}, os.ErrNotExist
@@ -505,20 +589,20 @@ func (s Store) save(evaluation Evaluation, exclusive bool) error {
 	if err := validateEvaluation(evaluation); err != nil {
 		return err
 	}
-	database, err := s.open(context.Background())
+	database, release, err := s.acquire(context.Background())
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer release()
 	return saveEvaluation(context.Background(), database, evaluation, exclusive)
 }
 
 func (s Store) stateCount() (int, error) {
-	database, err := s.open(context.Background())
+	database, release, err := s.acquire(context.Background())
 	if err != nil {
 		return 0, err
 	}
-	defer database.Close()
+	defer release()
 	var count int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM repository_evaluations`).Scan(&count); err != nil {
 		return 0, err
@@ -527,10 +611,25 @@ func (s Store) stateCount() (int, error) {
 }
 
 func (s Store) lock() (func(), error) {
+	if err := s.localProviderError(); err != nil {
+		return nil, err
+	}
 	value, _ := evaluationStoreLocks.LoadOrStore(s.root, &sync.Mutex{})
 	mutex := value.(*sync.Mutex)
-	mutex.Lock()
-	unlockFile, err := lockRepositoryEvaluationStore(s.root)
+	if s.brokerOwned {
+		if !mutex.TryLock() {
+			return nil, ErrConflict
+		}
+	} else {
+		mutex.Lock()
+	}
+	var unlockFile func()
+	var err error
+	if s.brokerOwned {
+		unlockFile, err = tryLockRepositoryEvaluationStore(s.root)
+	} else {
+		unlockFile, err = lockRepositoryEvaluationStore(s.root)
+	}
 	if err != nil {
 		mutex.Unlock()
 		return nil, err
@@ -553,6 +652,19 @@ func (s Store) idGenerator() func() (string, error) {
 		return randomEvaluationID
 	}
 	return s.newID
+}
+
+func (s Store) StoreID() database.StoreID {
+	if s.brokerErr != nil {
+		return ""
+	}
+	if s.broker != nil {
+		return s.storeID
+	}
+	if s.storeID != "" {
+		return s.storeID
+	}
+	return EvaluationStoreID
 }
 
 func randomEvaluationID() (string, error) {

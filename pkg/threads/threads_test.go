@@ -77,7 +77,7 @@ func TestSQLiteSessionThreadRuntimeWritesNoMutableJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	originKey := session.BuildOpaqueSessionKey("sqlite-only-origin")
-	sessions, err := memory.NewSQLiteStore(ResolveSessionsDir(workspace))
+	sessions, err := memory.NewStore(ResolveSessionsDir(workspace))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +440,7 @@ func TestListPrefersPromotedCanonicalSessionOverLegacyShadow(t *testing.T) {
 		t.Fatalf("canonical migrated link = (found=%v, meta=%+v, err=%v)", found, canonicalMeta, err)
 	}
 	var legacyRows int
-	if err := sessionStore.SQLDB().QueryRow(
+	if err := threadSessionDatabase(sessionStore).QueryRow(
 		`SELECT COUNT(*) FROM sessions WHERE session_key = ?`, legacyKey,
 	).Scan(&legacyRows); err != nil || legacyRows != 0 {
 		t.Fatalf("legacy shadow rows = %d, err=%v", legacyRows, err)
@@ -452,7 +452,7 @@ func TestListPrefersPromotedCanonicalSessionOverLegacyShadow(t *testing.T) {
 	if err != nil || canonicalMeta.ThreadID != "" {
 		t.Fatalf("canonical detached link = %+v, err=%v", canonicalMeta, err)
 	}
-	if err := sessionStore.SQLDB().QueryRow(
+	if err := threadSessionDatabase(sessionStore).QueryRow(
 		`SELECT COUNT(*) FROM sessions WHERE session_key = ?`, legacyKey,
 	).Scan(&legacyRows); err != nil || legacyRows != 0 {
 		t.Fatalf("detach recreated legacy shadow rows = %d, err=%v", legacyRows, err)
@@ -1127,19 +1127,19 @@ func TestStrictThreadProjectionAndUpdateRejectCorruptAliasCatalog(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessionStore, err := memory.NewSQLiteStore(threadStore.Dir)
+	sessionStore, err := memory.NewStore(threadStore.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sessionStore.Close()
 	var titleBefore string
 	var versionBefore int64
-	if err := sessionStore.SQLDB().QueryRow(
+	if err := threadSessionDatabase(sessionStore).QueryRow(
 		`SELECT title, version FROM threads WHERE thread_id = ?`, thread.ID,
 	).Scan(&titleBefore, &versionBefore); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sessionStore.SQLDB().Exec(
+	if _, err := threadSessionDatabase(sessionStore).Exec(
 		`CREATE INDEX unexpected_thread_index ON threads(title)`,
 	); err != nil {
 		t.Fatal(err)
@@ -1156,7 +1156,7 @@ func TestStrictThreadProjectionAndUpdateRejectCorruptAliasCatalog(t *testing.T) 
 	}
 	var titleAfter string
 	var versionAfter int64
-	if err := sessionStore.SQLDB().QueryRow(
+	if err := threadSessionDatabase(sessionStore).QueryRow(
 		`SELECT title, version FROM threads WHERE thread_id = ?`, thread.ID,
 	).Scan(&titleAfter, &versionAfter); err != nil {
 		t.Fatal(err)
@@ -1197,7 +1197,7 @@ func TestReturnToOriginRevalidatesAuthoritativeSessions(t *testing.T) {
 			name: "origin metadata corrupt",
 			corrupt: func(t *testing.T, _ Store, sessionStore *memory.JSONLStore, _ ThreadHandoff, _ Thread) {
 				t.Helper()
-				if _, err := sessionStore.SQLDB().Exec(
+				if _, err := threadSessionDatabase(sessionStore).Exec(
 					`CREATE INDEX unexpected_handoff_index ON sessions(summary)`,
 				); err != nil {
 					t.Fatal(err)
@@ -1311,12 +1311,12 @@ func TestDeletingPrimarySessionCascadesThreadRelationships(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessionStore, err := memory.NewSQLiteStore(threadStore.Dir)
+	sessionStore, err := memory.NewStore(threadStore.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sessionStore.Close()
-	if _, err := sessionStore.SQLDB().Exec(
+	if _, err := threadSessionDatabase(sessionStore).Exec(
 		`DELETE FROM sessions WHERE session_key = ?`, target.PrimarySessionKey,
 	); err != nil {
 		t.Fatal(err)
@@ -1325,7 +1325,7 @@ func TestDeletingPrimarySessionCascadesThreadRelationships(t *testing.T) {
 		t.Fatalf("cascaded thread = (found=%v, err=%v)", found, err)
 	}
 	var relationships int
-	if err := sessionStore.SQLDB().QueryRow(`SELECT
+	if err := threadSessionDatabase(sessionStore).QueryRow(`SELECT
         (SELECT COUNT(*) FROM thread_sessions WHERE thread_id = ?) +
         (SELECT COUNT(*) FROM session_thread_links WHERE thread_id = ?) +
         (SELECT COUNT(*) FROM thread_handoffs WHERE target_thread_id = ?)`,

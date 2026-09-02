@@ -408,8 +408,8 @@ func TestRetrievalToolFactoryConcurrentProductsAndExecution(t *testing.T) {
 }
 
 func TestRetrievalToolFactoriesDoNotOwnEngine(t *testing.T) {
-	engine, err := NewEngine(Config{
-		DBPath: filepath.Join(t.TempDir(), "seahorse.db"),
+	engine, err := NewOfflineEngine(OfflineConfig{
+		DatabasePath: filepath.Join(t.TempDir(), "seahorse.db"),
 	}, nil)
 	if err != nil {
 		t.Fatal(err)

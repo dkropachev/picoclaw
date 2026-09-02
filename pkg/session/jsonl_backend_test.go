@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/internal/sessiondb"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
@@ -1213,14 +1214,14 @@ func TestJSONLBackendReadSessionSnapshot_PropagatesCorruption(t *testing.T) {
 		}
 		b := session.NewJSONLBackend(store)
 		b.AddMessage("corrupt-meta", "user", "hello")
-		if _, err := store.SQLDB().Exec(`CREATE INDEX unexpected_session_index
+		if _, err := sessiondb.Bind(store.ThreadStore()).Database().Exec(`CREATE INDEX unexpected_session_index
             ON sessions(summary)`); err != nil {
 			t.Fatal(err)
 		}
 		if err := b.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if reopened, err := memory.NewSQLiteStore(dir); err == nil || reopened != nil {
+		if reopened, err := memory.NewStore(dir); err == nil || reopened != nil {
 			t.Fatalf("corrupt schema reopened as %#v, %v", reopened, err)
 		}
 	})
@@ -1233,7 +1234,7 @@ func TestJSONLBackendReadSessionSnapshot_PropagatesCorruption(t *testing.T) {
 		}
 		b := session.NewJSONLBackend(store)
 		b.AddMessage("corrupt-history", "user", "hello")
-		conn, err := store.SQLDB().Conn(context.Background())
+		conn, err := sessiondb.Bind(store.ThreadStore()).Database().Conn(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1250,7 +1251,7 @@ func TestJSONLBackendReadSessionSnapshot_PropagatesCorruption(t *testing.T) {
 		if err := b.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if reopened, err := memory.NewSQLiteStore(dir); err == nil || reopened != nil {
+		if reopened, err := memory.NewStore(dir); err == nil || reopened != nil {
 			t.Fatalf("corrupt payload reopened as %#v, %v", reopened, err)
 		}
 	})

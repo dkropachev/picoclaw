@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 )
 
 const maximumEvolutionLegacyLineBytes = 16 << 20

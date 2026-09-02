@@ -122,7 +122,7 @@ func TestChangedLauncherConfigRecoveryFailsClosed(t *testing.T) {
 func pendingLauncherMigration(t *testing.T) (dir, dbPath, configPath, archivePath string, original []byte) {
 	t.Helper()
 	dir = t.TempDir()
-	dbPath = filepath.Join(dir, DBFilename)
+	dbPath = filepath.Join(dir, databaseFilename)
 	configPath = filepath.Join(dir, launcherconfig.FileName)
 	original = []byte(`{"port":18800,"dashboard_password_hash":"` + testHash(t, "legacy") + `"}` + "\n")
 	if err := os.WriteFile(configPath, original, 0o600); err != nil {
@@ -284,7 +284,7 @@ func TestUnsafeLauncherConfigParentFailsClosed(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`{"port":18800,"launcher_token":"secret"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if store, err := OpenWithLauncherConfig(filepath.Join(t.TempDir(), DBFilename), configPath); err == nil {
+	if store, err := OpenWithLauncherConfig(filepath.Join(t.TempDir(), databaseFilename), configPath); err == nil {
 		store.Close()
 		t.Fatal("unsafe launcher-config parent succeeded")
 	} else if !strings.Contains(err.Error(), "safe real directory") {
@@ -739,7 +739,7 @@ func TestLegacyImportValueFailures(t *testing.T) {
 			if err := os.WriteFile(configPath, []byte(test.body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			store, err := OpenWithLauncherConfig(filepath.Join(dir, DBFilename), configPath)
+			store, err := OpenWithLauncherConfig(filepath.Join(dir, databaseFilename), configPath)
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					if store != nil {
@@ -765,7 +765,7 @@ func TestUnversionedCredentialMigrationFailures(t *testing.T) {
 	for _, failure := range []string{"ddl", "index", "rename", "copy"} {
 		t.Run(failure, func(t *testing.T) {
 			dir := privateDashboardTestDir(t)
-			dbPath := filepath.Join(dir, DBFilename)
+			dbPath := filepath.Join(dir, databaseFilename)
 			db := openLauncherTestDB(t, dbPath)
 			if failure == "ddl" {
 				if _, err := db.Exec(`CREATE TABLE dashboard_credentials (
@@ -964,7 +964,7 @@ func TestLegacyImportRecordInvalidState(t *testing.T) {
 
 func TestRemainingMigrationSecurityFailures(t *testing.T) {
 	t.Run("schema unique index", func(t *testing.T) {
-		path := filepath.Join(privateDashboardTestDir(t), DBFilename)
+		path := filepath.Join(privateDashboardTestDir(t), databaseFilename)
 		store, err := Open(path)
 		if err != nil {
 			t.Fatal(err)
@@ -981,7 +981,7 @@ func TestRemainingMigrationSecurityFailures(t *testing.T) {
 		}
 	})
 	t.Run("schema trigger", func(t *testing.T) {
-		path := filepath.Join(privateDashboardTestDir(t), DBFilename)
+		path := filepath.Join(privateDashboardTestDir(t), databaseFilename)
 		store, err := Open(path)
 		if err != nil {
 			t.Fatal(err)

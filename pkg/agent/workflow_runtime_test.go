@@ -2818,7 +2818,7 @@ func TestWorkflowAgentRunnerEphemeralDisablesAccountRouterSessionAffinity(t *tes
 	if agent == nil || agent.AccountRouter == nil {
 		t.Fatalf("account-routed agent = %#v, want active router", agent)
 	}
-	statePath := accountrouter.DatabasePath(workspace)
+	statePath := filepath.Join(workspace, "state", "account-router.db")
 	beforeRouterSessions := workflowRawMessageKeySet(
 		workflowAccountRouterSessionState(t, statePath, "decision-router"),
 	)

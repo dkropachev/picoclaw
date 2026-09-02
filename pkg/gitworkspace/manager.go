@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
@@ -56,6 +57,11 @@ type Manager struct {
 	opts             Options
 	now              func() time.Time
 	mu               sync.Mutex
+	broker           *database.Client
+	storeID          database.StoreID
+	brokerLeaseMu    sync.Mutex
+	brokerLease      *inventoryBrokerClientLease
+	brokerLeaseErr   error
 
 	// pinnedLinePushTransport is an internal transport seam for hermetic tests.
 	// Production constructors leave it nil, so push targets remain the exact
@@ -293,6 +299,32 @@ func (state *storeState) UnmarshalJSON(data []byte) error {
 }
 
 func NewManager(opts Options) (*Manager, error) {
+	client := database.RuntimeClient()
+	if client == nil && !inventoryProviderAuthorityHeld() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"git workspace inventory provider requires database fencing",
+		)
+	}
+	manager, err := prepareManager(opts)
+	if err != nil {
+		return nil, err
+	}
+	if client != nil {
+		manager.broker = client
+		manager.storeID = InventoryStoreID
+		if err := manager.brokerPreflight(context.Background()); err != nil {
+			return nil, err
+		}
+		return manager, nil
+	}
+	if err := manager.initializeLocalInventory(context.Background()); err != nil {
+		return nil, err
+	}
+	return manager, nil
+}
+
+func prepareManager(opts Options) (*Manager, error) {
 	root := strings.TrimSpace(opts.RootDir)
 	if root == "" {
 		return nil, errors.New("git workspace root is required")
@@ -345,14 +377,26 @@ func NewManager(opts Options) (*Manager, error) {
 		opts:             opts,
 		now:              now,
 	}
-	database, openErr := manager.openInventoryDatabase(context.Background())
-	if openErr != nil {
-		return nil, openErr
-	}
-	if closeErr := database.Close(); closeErr != nil {
-		return nil, fmt.Errorf("close git workspace inventory: %w", closeErr)
-	}
 	return manager, nil
+}
+
+func (m *Manager) initializeLocalInventory(ctx context.Context) error {
+	databaseHandle, openErr := m.openInventoryDatabase(ctx)
+	if openErr != nil {
+		return openErr
+	}
+	if closeErr := databaseHandle.Close(); closeErr != nil {
+		return fmt.Errorf("close git workspace inventory: %w", closeErr)
+	}
+	return nil
+}
+
+// StoreID returns the opaque inventory identity used by runtime managers.
+func (m *Manager) StoreID() database.StoreID {
+	if m == nil {
+		return ""
+	}
+	return m.storeID
 }
 
 func preparePrivateManagedDirectory(path, label string) (fs.FileInfo, error) {
@@ -1059,6 +1103,15 @@ func (m *Manager) lockInventory(ctx context.Context) (func(), error) {
 	if err := m.validateRoot(); err != nil {
 		return nil, err
 	}
+	if m.broker != nil {
+		return m.lockBrokerInventory(ctx)
+	}
+	if !inventoryProviderAuthorityHeld() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"git workspace inventory provider requires database fencing",
+		)
+	}
 	unlock, err := lockInventoryFile(ctx, filepath.Join(m.rootDir, inventoryLockFile))
 	if err != nil {
 		return nil, fmt.Errorf("lock git workspace inventory: %w", err)
@@ -1067,6 +1120,15 @@ func (m *Manager) lockInventory(ctx context.Context) (func(), error) {
 }
 
 func (m *Manager) loadLocked() (*storeState, error) {
+	if m != nil && m.broker != nil {
+		return m.loadBrokerInventory(context.Background())
+	}
+	if !inventoryProviderAuthorityHeld() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"git workspace inventory provider requires database fencing",
+		)
+	}
 	database, err := m.openInventoryDatabase(context.Background())
 	if err != nil {
 		return nil, err
@@ -1182,6 +1244,15 @@ func (m *Manager) saveLocked(st *storeState) error {
 	}
 	if len(st.DevelopmentLineHistory) > historyLimit {
 		st.DevelopmentLineHistory = st.DevelopmentLineHistory[len(st.DevelopmentLineHistory)-historyLimit:]
+	}
+	if m.broker != nil {
+		return m.saveBrokerInventory(context.Background(), st)
+	}
+	if !inventoryProviderAuthorityHeld() {
+		return database.NewError(
+			database.CodeUnauthorized,
+			"git workspace inventory provider requires database fencing",
+		)
 	}
 	database, err := m.openInventoryDatabase(context.Background())
 	if err != nil {

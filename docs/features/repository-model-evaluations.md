@@ -24,6 +24,14 @@ and the launcher persists progress, requested and observed provider-call sizing,
 score statistics, objective usage, cached-weighted token efficiency, and an
 explicitly AI-judged comparison report that survives process restarts.
 
+Evaluation state is addressed only through its opaque catalog `StoreID` and
+typed repository-evaluation broker operations. The supervisor retains one pool
+across controller/runtime restart; controller leases, versioned mutations, and
+preflight errors remain backend-neutral. A missing broker never causes local
+SQLite fallback, and schema or retained-source migration requires the
+exclusively fenced, backed-up database migration command before a Run can
+persist its active transition.
+
 ## Reconstruction Notes
 
 - Similarity target: rebuild a durable repository corpus benchmark, not a

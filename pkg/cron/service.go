@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/adhocore/gronx"
+
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 type CronSchedule struct {
@@ -67,6 +70,9 @@ type JobAdmission func(
 type CronService struct {
 	storePath    string
 	storage      *cronSQLiteStorage
+	brokerClient *database.Client
+	storeID      database.StoreID
+	brokerErr    error
 	store        *CronStore
 	initErr      error
 	onJob        JobHandler
@@ -81,25 +87,74 @@ type CronService struct {
 	gronx        *gronx.Gronx
 }
 
-func NewCronService(storePath string, onJob JobHandler) *CronService {
-	service, err := newCronService(storePath, onJob)
+var allowUnfencedCronProviderForTests atomic.Bool
+
+// NewForWorkspace returns the typed cron client for an opaque configured
+// workspace selector. Production callers never construct a database filename.
+func NewForWorkspace(workspace string, onJob JobHandler) *CronService {
+	service, err := newCronService(workspace, onJob)
 	service.initErr = err
 	return service
 }
 
-// NewSQLiteCronService opens a primary SQLite cron service and reports schema
-// or legacy-migration failure directly.
-func NewSQLiteCronService(databasePath string, onJob JobHandler) (*CronService, error) {
-	return newCronService(databasePath, onJob)
+// NewOfflineService opens a trusted cron store for the exclusively fenced
+// migration adapter. Runtime callers use NewForWorkspace and opaque StoreIDs.
+func NewOfflineService(databasePath string, onJob JobHandler) (*CronService, error) {
+	if !database.MigrationFenceHeld() {
+		return nil, database.NewError(
+			database.CodeConflict,
+			"cron migration requires the exclusive database fence",
+		)
+	}
+	return newLocalCronService(databasePath, onJob)
 }
 
 func newCronService(storePath string, onJob JobHandler) (*CronService, error) {
+	return newCronServiceWithClient(storePath, onJob, database.RuntimeClient())
+}
+
+func newLocalCronService(storePath string, onJob JobHandler) (*CronService, error) {
+	if !cronLocalProviderAuthorized() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"cron local store requires database owner fencing",
+		)
+	}
+	return newCronServiceWithClient(storePath, onJob, nil)
+}
+
+func newCronServiceWithClient(
+	storePath string,
+	onJob JobHandler,
+	brokerClient *database.Client,
+) (*CronService, error) {
 	cs := &CronService{
-		storePath: storePath,
-		store:     &CronStore{Version: 1, Jobs: []CronJob{}},
-		onJob:     onJob,
-		gronx:     gronx.New(),
-		wakeChan:  make(chan struct{}),
+		storePath: storePath, brokerClient: brokerClient,
+		storeID: BrokerStoreID,
+		store:   &CronStore{Version: 1, Jobs: []CronJob{}}, onJob: onJob,
+		gronx: gronx.New(), wakeChan: make(chan struct{}),
+	}
+	if brokerClient != nil {
+		storeID, resolveErr := resolveCronBrokerStoreID(
+			context.Background(), brokerClient, storePath,
+		)
+		if resolveErr != nil {
+			cs.brokerErr = resolveErr
+			return cs, resolveErr
+		}
+		cs.storeID = storeID
+		if err := cs.loadStore(); err != nil {
+			return cs, err
+		}
+		return cs, nil
+	}
+	if !cronLocalProviderAuthorized() {
+		err := database.NewError(
+			database.CodeUnavailable,
+			"cron database broker client is unavailable",
+		)
+		cs.brokerErr = err
+		return cs, err
 	}
 	storage, err := newCronSQLiteStorage(storePath)
 	if err != nil {
@@ -113,6 +168,20 @@ func newCronService(storePath string, onJob JobHandler) (*CronService, error) {
 	return cs, nil
 }
 
+func cronLocalProviderAuthorized() bool {
+	return database.BrokerAuthorityHeld() || database.MigrationFenceHeld() ||
+		database.ProviderTestAuthorityHeld() || allowUnfencedCronProviderForTests.Load()
+}
+
+// StoreID returns the opaque broker target. Standalone/offline services retain
+// the primary logical identity without consulting the runtime broker.
+func (cs *CronService) StoreID() database.StoreID {
+	if cs == nil {
+		return ""
+	}
+	return cs.storeID
+}
+
 func (cs *CronService) Start() error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -121,11 +190,7 @@ func (cs *CronService) Start() error {
 		return nil
 	}
 
-	if err := cs.mutateStoreUnsafe(func(store *CronStore) error {
-		cs.store = store
-		cs.recomputeNextRuns()
-		return nil
-	}); err != nil {
+	if err := cs.initializeSchedulerStoreUnsafe(); err != nil {
 		return fmt.Errorf("failed to initialize cron store: %w", err)
 	}
 
@@ -169,7 +234,8 @@ func (cs *CronService) Stop() {
 	}
 }
 
-// Close stops scheduling and releases the SQLite handle. Stop remains the
+// Close stops scheduling and releases a locally owned SQLite handle. A broker
+// client never owns or closes the supervisor's pool. Stop remains the
 // source-compatible lifecycle call for gateway-owned services.
 func (cs *CronService) Close() error {
 	cs.Stop()
@@ -306,23 +372,10 @@ func (cs *CronService) executeDueJob(ctx context.Context, jobID string) {
 		cs.mu.Unlock()
 		return
 	}
-	claimed := false
-	if err := cs.mutateStoreUnsafe(func(store *CronStore) error {
-		for i := range store.Jobs {
-			job := &store.Jobs[i]
-			if job.ID == jobID &&
-				job.Enabled &&
-				job.State.NextRunAtMS != nil &&
-				*job.State.NextRunAtMS <= time.Now().UnixMilli() {
-				job.State.NextRunAtMS = nil
-				claimed = true
-				break
-			}
-		}
-		return nil
-	}); err != nil {
+	claimed, claimErr := cs.claimDueJobUnsafe(jobID, time.Now().UnixMilli())
+	if claimErr != nil {
 		cs.mu.Unlock()
-		log.Printf("[cron] failed to persist job %s claim: %v", jobID, err)
+		log.Printf("[cron] failed to persist job %s claim: %v", jobID, claimErr)
 		return
 	}
 	cs.mu.Unlock()
@@ -370,65 +423,29 @@ func (cs *CronService) executeJobByID(ctx context.Context, jobID string) {
 
 	// Now acquire lock to update state
 	cs.mu.Lock()
-	var jobName, nextRunStr string
-	found := false
-	persistErr := cs.mutateStoreUnsafe(func(store *CronStore) error {
-		var job *CronJob
-		for i := range store.Jobs {
-			if store.Jobs[i].ID == jobID {
-				job = &store.Jobs[i]
-				break
-			}
-		}
-		if job == nil {
-			return nil
-		}
-		found = true
-		jobName = job.Name
-		job.State.LastRunAtMS = &startTime
-		job.UpdatedAtMS = time.Now().UnixMilli()
-		if err != nil {
-			job.State.LastStatus = "error"
-			job.State.LastError = err.Error()
-		} else {
-			job.State.LastStatus = "ok"
-			job.State.LastError = ""
-		}
-
-		if job.Schedule.Kind == "at" {
-			if job.DeleteAfterRun {
-				removeJobFromStore(store, job.ID)
-				nextRunStr = "(deleted)"
-			} else {
-				job.Enabled = false
-				job.State.NextRunAtMS = nil
-				nextRunStr = "(disabled)"
-			}
-			return nil
-		}
-		nextRun := cs.computeNextRun(&job.Schedule, time.Now().UnixMilli())
-		job.State.NextRunAtMS = nextRun
-		if nextRun != nil {
-			nextRunStr = time.UnixMilli(*nextRun).Format("2006-01-02 15:04:05")
-		} else {
-			nextRunStr = "(none)"
-		}
-		return nil
-	})
+	finishedMS := time.Now().UnixMilli()
+	completion := cronCompleteRequest{
+		StoreID: cs.storeID, JobID: jobID, StartedMS: startTime,
+		FinishedMS: finishedMS, Succeeded: err == nil,
+	}
+	if err != nil {
+		completion.Failure = err.Error()
+	}
+	result, persistErr := cs.completeJobUnsafe(completion)
 	cs.mu.Unlock()
 	if persistErr != nil {
 		log.Printf("[cron] failed to save store: %v", persistErr)
 		return
 	}
-	if !found {
+	if !result.found {
 		log.Printf("[cron] job %s disappeared before state update", jobID)
 		return
 	}
 	if err != nil {
-		log.Printf("[cron] ✗ job '%s' failed after %dms: %v", jobName, execDuration, err)
+		log.Printf("[cron] ✗ job '%s' failed after %dms: %v", result.jobName, execDuration, err)
 	}
 	if err == nil {
-		log.Printf("[cron] ✓ job '%s' completed in %dms, next run: %s", jobName, execDuration, nextRunStr)
+		log.Printf("[cron] ✓ job '%s' completed in %dms, next run: %s", result.jobName, execDuration, result.nextRun)
 	}
 }
 
@@ -503,6 +520,22 @@ func (cs *CronService) getNextWakeMS() *int64 {
 	return nextWake
 }
 
+func (cs *CronService) statusSnapshot(running bool) (cronStatusResponse, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if err := cs.loadStore(); err != nil {
+		return cronStatusResponse{}, err
+	}
+	nextWake := cs.getNextWakeMS()
+	if nextWake != nil {
+		nextWakeCopy := *nextWake
+		nextWake = &nextWakeCopy
+	}
+	return cronStatusResponse{
+		Enabled: running, Jobs: len(cs.store.Jobs), NextWakeAtMS: nextWake,
+	}, nil
+}
+
 func (cs *CronService) Load() error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -528,6 +561,16 @@ func (cs *CronService) SetJobAdmission(admission JobAdmission) {
 }
 
 func (cs *CronService) loadStore() error {
+	if cs != nil && cs.brokerClient != nil {
+		jobs, err := cs.loadBrokerJobs(context.Background())
+		if err != nil {
+			cs.initErr = err
+			return err
+		}
+		cs.store = &CronStore{Version: 1, Jobs: jobs}
+		cs.initErr = nil
+		return nil
+	}
 	if cs == nil || cs.storage == nil {
 		if cs != nil && cs.initErr != nil {
 			return cs.initErr
@@ -536,11 +579,51 @@ func (cs *CronService) loadStore() error {
 	}
 	store, err := cs.storage.load(context.Background())
 	if err != nil {
+		cs.initErr = err
 		return err
 	}
 	cs.store = store
 	cs.initErr = nil
 	return nil
+}
+
+func (cs *CronService) loadBrokerJobs(ctx context.Context) ([]CronJob, error) {
+	if cs == nil || cs.brokerClient == nil {
+		return nil, database.NewError(database.CodeUnavailable, "cron broker client is unavailable")
+	}
+	jobs := make([]CronJob, 0)
+	cursor := 0
+	for {
+		var response cronBrokerResponse
+		err := cs.callBroker(
+			ctx,
+			cronOperationList,
+			cronListRequest{
+				StoreID: cs.storeID, IncludeDisabled: true, Cursor: cursor,
+			},
+			&response,
+			false,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if len(response.Jobs) > cronBrokerPageItems ||
+			response.NextCursor != cursor+len(response.Jobs) ||
+			(!response.Done && response.NextCursor <= cursor) ||
+			response.NextCursor > maximumCronJobs || len(jobs) > maximumCronJobs-len(response.Jobs) {
+			return nil, database.NewError(database.CodeIntegrity, "cron list pagination is invalid")
+		}
+		for index := range response.Jobs {
+			if validateCronJob(&response.Jobs[index]) != nil {
+				return nil, database.NewError(database.CodeIntegrity, "cron broker response is invalid")
+			}
+			jobs = append(jobs, cloneCronJob(response.Jobs[index]))
+		}
+		if response.Done {
+			return jobs, nil
+		}
+		cursor = response.NextCursor
+	}
 }
 
 func (cs *CronService) mutateStoreUnsafe(mutation func(*CronStore) error) error {
@@ -552,10 +635,154 @@ func (cs *CronService) mutateStoreUnsafe(mutation func(*CronStore) error) error 
 	}
 	committed, err := cs.storage.mutate(context.Background(), mutation)
 	if err != nil {
+		cs.initErr = err
 		return err
 	}
 	cs.store = committed
+	cs.initErr = nil
 	return nil
+}
+
+func (cs *CronService) initializeSchedulerStore() error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.initializeSchedulerStoreUnsafe()
+}
+
+func (cs *CronService) initializeSchedulerStoreUnsafe() error {
+	if cs != nil && cs.brokerClient != nil {
+		var response cronBrokerResponse
+		err := cs.callBroker(
+			context.Background(), cronOperationInitialize,
+			cronStoreRequest{StoreID: cs.storeID}, &response, true,
+		)
+		if err != nil {
+			cs.initErr = err
+			return err
+		}
+		return cs.acceptBrokerResponse(response)
+	}
+	return cs.mutateStoreUnsafe(func(store *CronStore) error {
+		cs.store = store
+		cs.recomputeNextRuns()
+		return nil
+	})
+}
+
+func (cs *CronService) claimDueJob(jobID string, nowMS int64) (bool, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.claimDueJobUnsafe(jobID, nowMS)
+}
+
+func (cs *CronService) claimDueJobUnsafe(jobID string, nowMS int64) (bool, error) {
+	if cs != nil && cs.brokerClient != nil {
+		var response cronBrokerResponse
+		err := cs.callBroker(
+			context.Background(), cronOperationClaim,
+			cronClaimRequest{StoreID: cs.storeID, JobID: jobID, NowMS: nowMS},
+			&response, true,
+		)
+		if err != nil {
+			cs.initErr = err
+			return false, err
+		}
+		if err := cs.acceptBrokerResponse(response); err != nil {
+			return false, err
+		}
+		return response.Claimed, nil
+	}
+	claimed := false
+	err := cs.mutateStoreUnsafe(func(store *CronStore) error {
+		for index := range store.Jobs {
+			job := &store.Jobs[index]
+			if job.ID == jobID && job.Enabled && job.State.NextRunAtMS != nil &&
+				*job.State.NextRunAtMS <= nowMS {
+				job.State.NextRunAtMS = nil
+				claimed = true
+				break
+			}
+		}
+		return nil
+	})
+	return claimed, err
+}
+
+type cronCompletionResult struct {
+	found   bool
+	jobName string
+	nextRun string
+}
+
+func (cs *CronService) completeJob(input cronCompleteRequest) (cronCompletionResult, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.completeJobUnsafe(input)
+}
+
+func (cs *CronService) completeJobUnsafe(
+	input cronCompleteRequest,
+) (cronCompletionResult, error) {
+	if cs != nil && cs.brokerClient != nil {
+		var response cronBrokerResponse
+		err := cs.callBroker(
+			context.Background(), cronOperationComplete, input, &response, true,
+		)
+		if err != nil {
+			cs.initErr = err
+			return cronCompletionResult{}, err
+		}
+		if err := cs.acceptBrokerResponse(response); err != nil {
+			return cronCompletionResult{}, err
+		}
+		return cronCompletionResult{
+			found: response.Found, jobName: response.JobName, nextRun: response.NextRun,
+		}, nil
+	}
+	result := cronCompletionResult{}
+	err := cs.mutateStoreUnsafe(func(store *CronStore) error {
+		var job *CronJob
+		for index := range store.Jobs {
+			if store.Jobs[index].ID == input.JobID {
+				job = &store.Jobs[index]
+				break
+			}
+		}
+		if job == nil {
+			return nil
+		}
+		result.found = true
+		result.jobName = job.Name
+		job.State.LastRunAtMS = &input.StartedMS
+		job.UpdatedAtMS = input.FinishedMS
+		if input.Succeeded {
+			job.State.LastStatus = "ok"
+			job.State.LastError = ""
+		} else {
+			job.State.LastStatus = "error"
+			job.State.LastError = input.Failure
+		}
+		if job.Schedule.Kind == "at" {
+			if job.DeleteAfterRun {
+				removeJobFromStore(store, job.ID)
+				result.nextRun = "(deleted)"
+			} else {
+				job.Enabled = false
+				job.State.NextRunAtMS = nil
+				result.nextRun = "(disabled)"
+			}
+			return nil
+		}
+		nextRun := cs.computeNextRun(&job.Schedule, input.FinishedMS)
+		job.State.NextRunAtMS = nextRun
+		if nextRun == nil {
+			result.nextRun = "(none)"
+		} else {
+			result.nextRun = time.UnixMilli(*nextRun).Format("2006-01-02 15:04:05")
+		}
+		return nil
+	})
+	return result, err
 }
 
 func (cs *CronService) AddJob(
@@ -566,6 +793,33 @@ func (cs *CronService) AddJob(
 ) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	if cs.brokerClient != nil {
+		var response cronBrokerResponse
+		err := cs.callBroker(
+			context.Background(), cronOperationAdd,
+			cronAddRequest{
+				StoreID: cs.storeID, Name: name, Schedule: schedule,
+				Message: message, Channel: channel, To: to,
+			},
+			&response,
+			true,
+		)
+		if err != nil {
+			cs.initErr = err
+			return nil, err
+		}
+		if err := cs.acceptBrokerResponse(response); err != nil {
+			return nil, err
+		}
+		if response.Job == nil || validateCronJob(response.Job) != nil {
+			err := database.NewError(database.CodeIntegrity, "cron broker response is invalid")
+			cs.initErr = err
+			return nil, err
+		}
+		cs.notify()
+		result := cloneCronJob(*response.Job)
+		return &result, nil
+	}
 
 	now := time.Now().UnixMilli()
 
@@ -607,6 +861,35 @@ func (cs *CronService) AddJob(
 func (cs *CronService) GetJob(jobID string) (*CronJob, bool) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	if cs.brokerClient != nil {
+		var response cronBrokerResponse
+		err := cs.callBroker(
+			context.Background(), cronOperationGet,
+			cronJobRequest{StoreID: cs.storeID, JobID: jobID},
+			&response,
+			false,
+		)
+		if err != nil {
+			cs.initErr = err
+			return nil, false
+		}
+		if err := cs.acceptBrokerResponse(response); err != nil {
+			cs.initErr = err
+			return nil, false
+		}
+		if !response.Found {
+			if response.Job != nil {
+				cs.initErr = database.NewError(database.CodeIntegrity, "cron broker response is invalid")
+			}
+			return nil, false
+		}
+		if response.Job == nil || validateCronJob(response.Job) != nil {
+			cs.initErr = database.NewError(database.CodeIntegrity, "cron broker response is invalid")
+			return nil, false
+		}
+		job := cloneCronJob(*response.Job)
+		return &job, true
+	}
 	if err := cs.loadStore(); err != nil {
 		return nil, false
 	}
@@ -625,6 +908,30 @@ func (cs *CronService) UpdateJob(job *CronJob) error {
 	defer cs.mu.Unlock()
 	if job == nil {
 		return fmt.Errorf("job is required")
+	}
+	if cs.brokerClient != nil {
+		var response cronBrokerResponse
+		jobCopy := cloneCronJob(*job)
+		err := cs.callBroker(
+			context.Background(), cronOperationUpdate,
+			cronUpdateRequest{StoreID: cs.storeID, Job: &jobCopy},
+			&response,
+			true,
+		)
+		if err != nil {
+			cs.initErr = err
+			return err
+		}
+		if err := cs.acceptBrokerResponse(response); err != nil {
+			return err
+		}
+		if response.Job == nil || validateCronJob(response.Job) != nil {
+			err := database.NewError(database.CodeIntegrity, "cron broker response is invalid")
+			cs.initErr = err
+			return err
+		}
+		cs.notify()
+		return nil
 	}
 	found := false
 	err := cs.mutateStoreUnsafe(func(store *CronStore) error {
@@ -699,6 +1006,25 @@ func sameInt64(a, b *int64) bool {
 func (cs *CronService) RemoveJob(jobID string) bool {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	if cs.brokerClient != nil {
+		var response cronBrokerResponse
+		err := cs.callBroker(
+			context.Background(), cronOperationRemove,
+			cronJobRequest{StoreID: cs.storeID, JobID: jobID},
+			&response,
+			true,
+		)
+		if err != nil {
+			cs.initErr = err
+			return false
+		}
+		if err := cs.acceptBrokerResponse(response); err != nil {
+			cs.initErr = err
+			return false
+		}
+		cs.notify()
+		return response.Removed
+	}
 	removed := false
 	if err := cs.mutateStoreUnsafe(func(store *CronStore) error {
 		removed = removeJobFromStore(store, jobID)
@@ -726,6 +1052,33 @@ func removeJobFromStore(store *CronStore, jobID string) bool {
 func (cs *CronService) EnableJob(jobID string, enabled bool) *CronJob {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	if cs.brokerClient != nil {
+		var response cronBrokerResponse
+		err := cs.callBroker(
+			context.Background(), cronOperationEnable,
+			cronEnableRequest{StoreID: cs.storeID, JobID: jobID, Enabled: enabled},
+			&response,
+			true,
+		)
+		if err != nil {
+			cs.initErr = err
+			return nil
+		}
+		if err := cs.acceptBrokerResponse(response); err != nil {
+			cs.initErr = err
+			return nil
+		}
+		if !response.Found {
+			return nil
+		}
+		if response.Job == nil || validateCronJob(response.Job) != nil {
+			cs.initErr = database.NewError(database.CodeIntegrity, "cron broker response is invalid")
+			return nil
+		}
+		cs.notify()
+		job := cloneCronJob(*response.Job)
+		return &job
+	}
 	var updated *CronJob
 	err := cs.mutateStoreUnsafe(func(store *CronStore) error {
 		for i := range store.Jobs {
@@ -759,6 +1112,22 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) *CronJob {
 func (cs *CronService) ListJobs(includeDisabled bool) []CronJob {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	if cs.brokerClient != nil {
+		jobs, err := cs.loadBrokerJobs(context.Background())
+		if err != nil {
+			cs.initErr = err
+			return nil
+		}
+		cs.store = &CronStore{Version: 1, Jobs: jobs}
+		cs.initErr = nil
+		filtered := make([]CronJob, 0, len(jobs))
+		for index := range jobs {
+			if includeDisabled || jobs[index].Enabled {
+				filtered = append(filtered, cloneCronJob(jobs[index]))
+			}
+		}
+		return filtered
+	}
 	if err := cs.loadStore(); err != nil {
 		return nil
 	}
@@ -784,6 +1153,31 @@ func (cs *CronService) ListJobs(includeDisabled bool) []CronJob {
 func (cs *CronService) Status() map[string]any {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	if cs.brokerClient != nil {
+		var response cronBrokerResponse
+		err := cs.callBroker(
+			context.Background(), cronOperationStatus,
+			cronStatusRequest{StoreID: cs.storeID, Running: cs.running},
+			&response,
+			false,
+		)
+		if err != nil {
+			cs.initErr = err
+			return map[string]any{"enabled": cs.running, "jobs": 0, "nextWakeAtMS": (*int64)(nil)}
+		}
+		if err := cs.acceptBrokerResponse(response); err != nil || response.Status == nil ||
+			response.Status.Jobs < 0 {
+			if err == nil {
+				err = database.NewError(database.CodeIntegrity, "cron broker response is invalid")
+			}
+			cs.initErr = err
+			return map[string]any{"enabled": cs.running, "jobs": 0, "nextWakeAtMS": (*int64)(nil)}
+		}
+		return map[string]any{
+			"enabled": response.Status.Enabled, "jobs": response.Status.Jobs,
+			"nextWakeAtMS": response.Status.NextWakeAtMS,
+		}
+	}
 	_ = cs.loadStore()
 
 	var enabledCount int

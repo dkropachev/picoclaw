@@ -7,11 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/seahorse"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -44,6 +43,8 @@ type seahorseBootstrapFunc func(
 	string,
 ) error
 
+var newRuntimeSeahorseEngine seahorseEngineFactory = seahorse.NewEngine
+
 type seahorseContextDependencies struct {
 	newEngine   seahorseEngineFactory
 	closeEngine seahorseEngineCloser
@@ -53,7 +54,7 @@ type seahorseContextDependencies struct {
 
 func defaultSeahorseContextDependencies() seahorseContextDependencies {
 	return seahorseContextDependencies{
-		newEngine: seahorse.NewEngine,
+		newEngine: newRuntimeSeahorseEngine,
 		closeEngine: func(engine *seahorse.Engine) error {
 			return engine.Close()
 		},
@@ -92,11 +93,7 @@ type seahorseAgentCandidate struct {
 	id            string
 	agent         *AgentInstance
 	registry      *tools.ToolRegistry
-	dbPath        string
-	dbIdentity    string
-	dbInfo        os.FileInfo
-	dbAnchor      os.FileInfo
-	dbSuffix      string
+	storeID       database.StoreID
 	engine        *seahorse.Engine
 	retrieval     *seahorse.RetrievalEngine
 	grep          *seahorse.GrepTool
@@ -190,7 +187,7 @@ func newSeahorseContextManagerWithDependencies(
 		}
 		candidate := &candidates[index]
 		engine, engineErr := dependencies.newEngine(
-			seahorse.Config{DBPath: candidate.dbPath},
+			seahorse.Config{Workspace: candidate.agent.Workspace},
 			agentProviderToCompleteFn(al, candidate.agent),
 		)
 		if engineErr != nil {
@@ -217,8 +214,8 @@ func newSeahorseContextManagerWithDependencies(
 	if manager.engine == nil {
 		return nil, fmt.Errorf("seahorse: default agent engine is required")
 	}
-	if identityErr := revalidateSeahorseDatabaseIdentities(candidates); identityErr != nil {
-		return nil, fmt.Errorf("seahorse: revalidate agent databases: %w", identityErr)
+	if identityErr := validateSeahorseStoreIdentities(candidates); identityErr != nil {
+		return nil, fmt.Errorf("seahorse: validate agent stores: %w", identityErr)
 	}
 
 	for index := range candidates {
@@ -367,37 +364,8 @@ func snapshotSeahorseAgents(
 			return nil, nil, fmt.Errorf("agent %q workspace must be exact and nonempty", agentID)
 		}
 
-		dbPath, dbIdentity, dbInfo, err := canonicalSeahorseDatabasePath(agent.Workspace)
-		if err != nil {
-			return nil, nil, fmt.Errorf("agent %q database path: %w", agentID, err)
-		}
-		dbAnchor, dbSuffix, err := seahorseDatabasePathAnchor(dbPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("agent %q database anchor: %w", agentID, err)
-		}
-		for _, previous := range candidates {
-			aliases := dbIdentity == previous.dbIdentity
-			if !aliases && dbInfo != nil && previous.dbInfo != nil {
-				aliases = os.SameFile(dbInfo, previous.dbInfo)
-			}
-			if !aliases && dbAnchor != nil && previous.dbAnchor != nil &&
-				dbSuffix == previous.dbSuffix {
-				aliases = os.SameFile(dbAnchor, previous.dbAnchor)
-			}
-			if aliases {
-				return nil, nil, fmt.Errorf(
-					"agents %q and %q alias Seahorse database %q",
-					previous.id,
-					agentID,
-					dbIdentity,
-				)
-			}
-		}
-
 		candidates = append(candidates, seahorseAgentCandidate{
 			id: agentID, agent: agent, registry: agent.Tools,
-			dbPath: dbPath, dbIdentity: dbIdentity, dbInfo: dbInfo,
-			dbAnchor: dbAnchor, dbSuffix: dbSuffix,
 		})
 		if agent == defaultAgent {
 			defaultFound = true
@@ -409,159 +377,35 @@ func snapshotSeahorseAgents(
 	return candidates, defaultAgent, nil
 }
 
-func seahorseDatabasePathAnchor(
-	databasePath string,
-) (os.FileInfo, string, error) {
-	cursor := filepath.Clean(databasePath)
-	suffix := make([]string, 0)
-	for {
-		info, err := os.Stat(cursor)
-		if err == nil {
-			for left, right := 0, len(suffix)-1; left < right; left, right = left+1, right-1 {
-				suffix[left], suffix[right] = suffix[right], suffix[left]
-			}
-			return info, filepath.Join(suffix...), nil
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, "", err
-		}
-		parent := filepath.Dir(cursor)
-		if parent == cursor {
-			return nil, "", err
-		}
-		suffix = append(suffix, filepath.Base(cursor))
-		cursor = parent
-	}
-}
-
-func revalidateSeahorseDatabaseIdentities(
-	candidates []seahorseAgentCandidate,
-) error {
+func validateSeahorseStoreIdentities(candidates []seahorseAgentCandidate) error {
+	seen := make(map[database.StoreID]string, len(candidates))
+	requireCatalogIdentity := database.RuntimeClient() != nil
 	for index := range candidates {
 		candidate := &candidates[index]
-		if candidate.retrieval == nil {
+		if candidate.engine == nil {
+			return fmt.Errorf("agent %q engine is unavailable", candidate.id)
+		}
+		storeID := candidate.engine.StoreID()
+		if !storeID.Valid() {
+			// Tests may inject explicit offline engines. The production dependency
+			// always has an installed runtime broker and must return a catalog ID.
+			if requireCatalogIdentity {
+				return fmt.Errorf("agent %q Seahorse StoreID is invalid", candidate.id)
+			}
 			continue
 		}
-		identity, err := resolveSeahorseDatabaseIdentity(candidate.dbPath)
-		if err != nil {
-			return fmt.Errorf("agent %q database identity: %w", candidate.id, err)
-		}
-		if identity != candidate.dbIdentity {
+		if previous, duplicate := seen[storeID]; duplicate {
 			return fmt.Errorf(
-				"agent %q database identity changed from %q to %q during construction",
+				"agents %q and %q share Seahorse StoreID %q",
+				previous,
 				candidate.id,
-				candidate.dbIdentity,
-				identity,
+				storeID,
 			)
 		}
-		info, err := os.Stat(candidate.dbPath)
-		if err != nil {
-			return fmt.Errorf("agent %q opened database: %w", candidate.id, err)
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("agent %q database is not a regular file", candidate.id)
-		}
-		for previousIndex := 0; previousIndex < index; previousIndex++ {
-			previous := &candidates[previousIndex]
-			if previous.dbInfo != nil && os.SameFile(info, previous.dbInfo) {
-				return fmt.Errorf(
-					"agents %q and %q opened one Seahorse database",
-					previous.id,
-					candidate.id,
-				)
-			}
-		}
-		candidate.dbIdentity = identity
-		candidate.dbInfo = info
+		seen[storeID] = candidate.id
+		candidate.storeID = storeID
 	}
 	return nil
-}
-
-func canonicalSeahorseDatabasePath(
-	workspace string,
-) (databasePath string, identity string, info os.FileInfo, returnErr error) {
-	databasePath, err := filepath.Abs(filepath.Join(
-		workspace,
-		"sessions",
-		"seahorse.db",
-	))
-	if err != nil {
-		return "", "", nil, fmt.Errorf("make absolute: %w", err)
-	}
-	databasePath = filepath.Clean(databasePath)
-	identity, err = resolveSeahorseDatabaseIdentity(databasePath)
-	if err != nil {
-		return "", "", nil, err
-	}
-	info, err = os.Stat(databasePath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", "", nil, fmt.Errorf("inspect database: %w", err)
-	}
-	return databasePath, identity, info, nil
-}
-
-func resolveSeahorseDatabaseIdentity(databasePath string) (string, error) {
-	current := filepath.Clean(databasePath)
-	seen := make(map[string]struct{})
-	for range 64 {
-		if _, duplicate := seen[current]; duplicate {
-			return "", fmt.Errorf("database path contains a symlink cycle")
-		}
-		seen[current] = struct{}{}
-
-		resolvedParent, err := resolveSeahorseExistingPathPrefix(filepath.Dir(current))
-		if err != nil {
-			return "", fmt.Errorf("resolve database parent: %w", err)
-		}
-		resolved := filepath.Join(filepath.Clean(resolvedParent), filepath.Base(current))
-		if resolved != current {
-			current = resolved
-			continue
-		}
-
-		info, err := os.Lstat(current)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return current, nil
-			}
-			return "", fmt.Errorf("inspect database identity: %w", err)
-		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			return current, nil
-		}
-		target, err := os.Readlink(current)
-		if err != nil {
-			return "", fmt.Errorf("read database symlink: %w", err)
-		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(filepath.Dir(current), target)
-		}
-		current = filepath.Clean(target)
-	}
-	return "", fmt.Errorf("database path has too many symlink indirections")
-}
-
-func resolveSeahorseExistingPathPrefix(path string) (string, error) {
-	cursor := filepath.Clean(path)
-	suffix := make([]string, 0)
-	for {
-		resolved, err := filepath.EvalSymlinks(cursor)
-		if err == nil {
-			for index := len(suffix) - 1; index >= 0; index-- {
-				resolved = filepath.Join(resolved, suffix[index])
-			}
-			return filepath.Clean(resolved), nil
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return "", err
-		}
-		parent := filepath.Dir(cursor)
-		if parent == cursor {
-			return "", err
-		}
-		suffix = append(suffix, filepath.Base(cursor))
-		cursor = parent
-	}
 }
 
 func stageSeahorseCatalog(

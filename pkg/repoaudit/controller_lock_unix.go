@@ -3,6 +3,7 @@
 package repoaudit
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,16 @@ import (
 // LockAutomationController acquires a non-blocking workspace-wide controller
 // lease. Only the holder may reconcile or execute automations in this store.
 func (s Store) LockAutomationController() (func(), error) {
+	if s.broker != nil {
+		return s.brokerAcquireNamedLease(
+			context.Background(),
+			reviewLeaseAutomationController,
+			reviewNamedLeaseRequest{},
+		)
+	}
+	if err := s.localProviderError(); err != nil {
+		return nil, err
+	}
 	lockPath, lockPathErr := repositoryReviewLockPath(s.root, "controller.lock")
 	if lockPathErr != nil {
 		return nil, lockPathErr

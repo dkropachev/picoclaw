@@ -216,7 +216,7 @@ func TestRecordPrivateFallbackResultRedactsProviderErrorAndPreservesHealth(t *te
 	if state.LastError != errPrivateProviderRequest.Error() {
 		t.Fatalf("last error = %q, want canonical private error", state.LastError)
 	}
-	db := openRawAccountRouterDB(t, router.StatePath)
+	db := openRawAccountRouterDB(t, router.store.path)
 	defer db.Close()
 	var persistedError string
 	if err := db.QueryRow(`SELECT last_error FROM account_router_accounts
@@ -625,7 +625,7 @@ func TestCredentialAuthInvalidationRecoversExactAliasAccountAcrossRoutersAfterRe
 	// Simulate the gateway starting after the launcher wrote the durable
 	// invalidation. The main state file still contains the old failure until a
 	// router operation consumes the sidecar generation.
-	stores.Delete(primary.StatePath)
+	stores.Delete(primary.store.path)
 	restarted := newRouter("router-primary")
 	selection := restarted.Select("", SelectReasonInitial)
 	if got := selectedAccount(t, selection); got != target {

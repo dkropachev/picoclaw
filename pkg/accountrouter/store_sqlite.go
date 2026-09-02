@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
@@ -220,8 +222,10 @@ type credentialAuthInvalidation struct {
 
 var accountRouterRandomRead = rand.Read
 
-// DatabasePath returns the canonical account-router database for a workspace.
-func DatabasePath(workspace string) string {
+var allowUnfencedAccountRouterProviderForTests atomic.Bool
+
+// databasePath returns the broker-side/offline account-router database.
+func databasePath(workspace string) string {
 	return filepath.Join(workspace, "state", accountRouterDatabaseFilename)
 }
 
@@ -257,7 +261,7 @@ func resolveAccountRouterStorePaths(locator string) (accountRouterStorePaths, er
 			paths.archiveRoot = filepath.Join(paths.sourceRoot, "legacy-json", accountRouterLegacyArchiveLabel)
 		}
 	default:
-		paths.databasePath = DatabasePath(resolved)
+		paths.databasePath = databasePath(resolved)
 		paths.sourceRoot = resolved
 		paths.sourceRelative = accountRouterLegacyFilename
 		paths.archiveRoot = filepath.Join(
@@ -271,6 +275,17 @@ func (s *Store) open(ctx context.Context) (*sql.DB, func(), error) {
 	if s == nil || strings.TrimSpace(s.path) == "" {
 		return nil, nil, errors.New("account-router store is unavailable")
 	}
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedAccountRouterProviderForTests.Load() {
+		return nil, nil, database.NewError(
+			database.CodeUnauthorized,
+			"account-router provider access requires database owner fencing",
+		)
+	}
+	if s.retainedDB != nil {
+		return s.retainedDB, func() {}, nil
+	}
 	unlock, err := lockAccountRouterDatabase(s.path)
 	if err != nil {
 		return nil, nil, err
@@ -281,6 +296,50 @@ func (s *Store) open(ctx context.Context) (*sql.DB, func(), error) {
 		return nil, nil, err
 	}
 	return db, unlock, nil
+}
+
+func (s *Store) retain() error {
+	if s == nil {
+		return errors.New("account-router store is unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.retainedDB != nil {
+		return nil
+	}
+	db, unlock, err := s.open(context.Background())
+	if err != nil {
+		return err
+	}
+	s.retainedDB = db
+	s.retainedUnlock = unlock
+	return nil
+}
+
+func (s *Store) closeRetained() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	db := s.retainedDB
+	unlock := s.retainedUnlock
+	s.retainedDB = nil
+	s.retainedUnlock = nil
+	var err error
+	if db != nil {
+		err = db.Close()
+	}
+	if unlock != nil {
+		unlock()
+	}
+	return err
+}
+
+func (s *Store) closeOpened(db *sql.DB) {
+	if db != nil && db != s.retainedDB {
+		_ = db.Close()
+	}
 }
 
 func (s *Store) options() sqlitestore.Options {
@@ -989,6 +1048,14 @@ func (s *Store) applyCredentialAuthInvalidations(
 }
 
 func getStore(locator string) (*Store, error) {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedAccountRouterProviderForTests.Load() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"account-router local store requires database owner fencing",
+		)
+	}
 	paths, err := resolveAccountRouterStorePaths(locator)
 	if err != nil {
 		return nil, err
@@ -1024,7 +1091,7 @@ func (s *Store) refresh() error {
 		return err
 	}
 	defer unlock()
-	defer db.Close()
+	defer s.closeOpened(db)
 	state, err := loadAccountRouterState(context.Background(), db)
 	if err != nil {
 		return err
@@ -1048,7 +1115,7 @@ func (s *Store) update(fn func(*State)) error {
 		return err
 	}
 	defer unlock()
-	defer db.Close()
+	defer s.closeOpened(db)
 	var committed State
 	err = sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
 		state, loadErr := loadAccountRouterState(ctx, conn)
@@ -1078,11 +1145,19 @@ func (s *Store) update(fn func(*State)) error {
 // InvalidateCredentialAuthFailure records a new credential generation in the
 // same SQLite authority consumed by router health updates.
 func InvalidateCredentialAuthFailure(statePath, credentialID string) error {
-	paths, err := resolveAccountRouterStorePaths(statePath)
-	if err != nil {
+	if database.RuntimeClient() != nil {
+		return InvalidateCredentialAuthFailureForStore(AccountRoutingStoreID, credentialID)
+	}
+	if !database.ProviderTestAuthorityHeld() && !allowUnfencedAccountRouterProviderForTests.Load() {
+		return database.NewError(
+			database.CodeUnavailable,
+			"account-router database broker client is unavailable",
+		)
+	}
+	if _, err := normalizeCredentialID(credentialID); err != nil {
 		return err
 	}
-	normalizedCredentialID, err := normalizeCredentialID(credentialID)
+	paths, err := resolveAccountRouterStorePaths(statePath)
 	if err != nil {
 		return err
 	}
@@ -1098,13 +1173,40 @@ func InvalidateCredentialAuthFailure(statePath, credentialID string) error {
 	if !databaseExists && !legacyExists {
 		return nil
 	}
-	generationBytes := make([]byte, 16)
-	if _, randomErr := accountRouterRandomRead(generationBytes); randomErr != nil {
-		return fmt.Errorf("generate account router auth invalidation: %w", randomErr)
-	}
 	store, err := getStore(statePath)
 	if err != nil {
 		return err
+	}
+	return invalidateCredentialAuthFailureStore(store, credentialID)
+}
+
+// InvalidateCredentialAuthFailureForWorkspace invalidates credential health in
+// the workspace's opaque account-routing store. Runtime callers never derive a
+// physical database path.
+func InvalidateCredentialAuthFailureForWorkspace(workspace, credentialID string) error {
+	if database.RuntimeClient() != nil {
+		return InvalidateCredentialAuthFailureForStore(AccountRoutingStoreID, credentialID)
+	}
+	if !database.ProviderTestAuthorityHeld() && !allowUnfencedAccountRouterProviderForTests.Load() {
+		return database.NewError(
+			database.CodeUnavailable,
+			"account-router database broker client is unavailable",
+		)
+	}
+	return InvalidateCredentialAuthFailure(databasePath(workspace), credentialID)
+}
+
+func invalidateCredentialAuthFailureStore(store *Store, credentialID string) error {
+	if store == nil {
+		return errors.New("account-router store is unavailable")
+	}
+	normalizedCredentialID, err := normalizeCredentialID(credentialID)
+	if err != nil {
+		return err
+	}
+	generationBytes := make([]byte, 16)
+	if _, randomErr := accountRouterRandomRead(generationBytes); randomErr != nil {
+		return fmt.Errorf("generate account router auth invalidation: %w", randomErr)
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -1114,7 +1216,7 @@ func InvalidateCredentialAuthFailure(statePath, credentialID string) error {
 		return err
 	}
 	defer unlock()
-	defer db.Close()
+	defer store.closeOpened(db)
 	now := store.now().UTC()
 	seconds, nanos, err := accountRouterRequiredTimeValues(now)
 	if err != nil {

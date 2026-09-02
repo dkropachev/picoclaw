@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/internal/sessiondb"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -30,13 +31,13 @@ func privateSessionsFixture(t *testing.T) (string, string) {
 
 func TestSQLiteStoreFreshSchemaHardeningAndReopen(t *testing.T) {
 	_, dir := privateSessionsFixture(t)
-	store, err := NewSQLiteStore(dir)
+	store, err := NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := store.DBPath()
-	if path != filepath.Join(dir, SessionsDatabaseFilename) {
-		t.Fatalf("DBPath() = %q", path)
+	path := filepath.Join(dir, sessionsDatabaseFilename)
+	if path != filepath.Join(dir, sessionsDatabaseFilename) {
+		t.Fatalf("database path = %q", path)
 	}
 	var version, foreignKeys, busyTimeout, synchronous int
 	var journal string
@@ -45,7 +46,7 @@ func TestSQLiteStoreFreshSchemaHardeningAndReopen(t *testing.T) {
 		"PRAGMA busy_timeout": &busyTimeout, "PRAGMA synchronous": &synchronous,
 		"PRAGMA journal_mode": &journal,
 	} {
-		if err := store.SQLDB().QueryRow(query).Scan(target); err != nil {
+		if err := sessiondb.Bind(store.ThreadStore()).Database().QueryRow(query).Scan(target); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -53,7 +54,7 @@ func TestSQLiteStoreFreshSchemaHardeningAndReopen(t *testing.T) {
 		t.Fatalf("pragmas = version:%d fk:%d busy:%d sync:%d journal:%q",
 			version, foreignKeys, busyTimeout, synchronous, journal)
 	}
-	for _, path := range []string{dir, store.DBPath()} {
+	for _, path := range []string{dir, filepath.Join(dir, sessionsDatabaseFilename)} {
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
@@ -76,7 +77,7 @@ func TestSQLiteStoreFreshSchemaHardeningAndReopen(t *testing.T) {
 		"storage_imports_archive_status_idx",
 	)
 	sort.Strings(wantObjects)
-	schemaRows, queryErr := store.SQLDB().Query(`SELECT name FROM sqlite_schema
+	schemaRows, queryErr := sessiondb.Bind(store.ThreadStore()).Database().Query(`SELECT name FROM sqlite_schema
         WHERE type IN ('table','index','trigger','view') AND name NOT LIKE 'sqlite_%'
         ORDER BY name`)
 	if queryErr != nil {
@@ -100,7 +101,7 @@ func TestSQLiteStoreFreshSchemaHardeningAndReopen(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := NewSQLiteStore(dir)
+	reopened, err := NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,12 +113,12 @@ func TestSQLiteStoreFreshSchemaHardeningAndReopen(t *testing.T) {
 
 func TestSQLiteStoreRoundTripSnapshotCASAndConcurrentAppends(t *testing.T) {
 	_, dir := privateSessionsFixture(t)
-	left, err := NewSQLiteStore(dir)
+	left, err := NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer left.Close()
-	right, err := NewSQLiteStore(dir)
+	right, err := NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +213,7 @@ func TestSQLiteStoreRoundTripSnapshotCASAndConcurrentAppends(t *testing.T) {
 
 func TestSQLiteStoreAliasPromotionRebindsRelationshipsTransactionally(t *testing.T) {
 	_, dir := privateSessionsFixture(t)
-	store, err := NewSQLiteStore(dir)
+	store, err := NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,32 +228,33 @@ func TestSQLiteStoreAliasPromotionRebindsRelationshipsTransactionally(t *testing
 	}
 	now := time.Date(2026, 8, 31, 1, 2, 3, 456789123, time.UTC)
 	seconds, nanos := now.Unix(), now.Nanosecond()
-	if err := store.Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
-		if _, err := conn.ExecContext(ctx, `INSERT INTO threads (
+	if err := sessiondb.Bind(store.ThreadStore()).
+		Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
+			if _, err := conn.ExecContext(ctx, `INSERT INTO threads (
             thread_id, ui_session_id, primary_session_key, agent_id, owner_identity,
             title, thread_type, source_query, registration, created_seconds,
             created_nanos, updated_seconds, updated_nanos, version
         ) VALUES ('thread', 'ui', ?, 'main', 'owner', 'title', 'general', '',
             'manual', ?, ?, ?, ?, 1)`, alias, seconds, nanos, seconds, nanos); err != nil {
-			return err
-		}
-		if _, err := conn.ExecContext(ctx, `INSERT INTO thread_sessions (
+				return err
+			}
+			if _, err := conn.ExecContext(ctx, `INSERT INTO thread_sessions (
             thread_id, sequence, session_key, is_primary
         ) VALUES ('thread', 0, ?, 1)`, alias); err != nil {
-			return err
-		}
-		if _, err := conn.ExecContext(ctx, `INSERT INTO session_thread_links (
+				return err
+			}
+			if _, err := conn.ExecContext(ctx, `INSERT INTO session_thread_links (
             session_key, thread_id, attached_seconds, attached_nanos
         ) VALUES (?, 'thread', ?, ?)`, alias, seconds, nanos); err != nil {
-			return err
-		}
-		_, err := conn.ExecContext(ctx, `INSERT INTO thread_handoffs (
+				return err
+			}
+			_, err := conn.ExecContext(ctx, `INSERT INTO thread_handoffs (
             handoff_id, origin_session_key, target_thread_id, target_session_id,
             agent_id, summary, created_seconds, created_nanos, version
         ) VALUES ('handoff', ?, 'thread', 'ui', 'main', '', ?, ?, 1)`,
-			alias, seconds, nanos)
-		return err
-	}); err != nil {
+				alias, seconds, nanos)
+			return err
+		}); err != nil {
 		t.Fatal(err)
 	}
 	promoted, err := store.PromoteAliasHistory(
@@ -268,12 +270,12 @@ func TestSQLiteStoreAliasPromotionRebindsRelationshipsTransactionally(t *testing
 		`SELECT origin_session_key FROM thread_handoffs WHERE handoff_id = 'handoff'`:           canonical,
 	} {
 		var got string
-		if err := store.SQLDB().QueryRow(query).Scan(&got); err != nil || got != want {
+		if err := sessiondb.Bind(store.ThreadStore()).Database().QueryRow(query).Scan(&got); err != nil || got != want {
 			t.Fatalf("%s = %q, %v; want %q", query, got, err, want)
 		}
 	}
 	var aliasRows int
-	if err := store.SQLDB().QueryRow(
+	if err := sessiondb.Bind(store.ThreadStore()).Database().QueryRow(
 		`SELECT COUNT(*) FROM sessions WHERE session_key = ?`, alias,
 	).Scan(&aliasRows); err != nil || aliasRows != 0 {
 		t.Fatalf("alias rows = %d, %v", aliasRows, err)
@@ -335,7 +337,7 @@ func TestSQLiteStoreLegacyFixtureAuditArchiveAndIdempotence(t *testing.T) {
 		ID: strings.Repeat("x", 16_385), PrimarySessionKey: "other", CreatedAt: created, UpdatedAt: created,
 	})
 
-	store, err := NewSQLiteStore(dir)
+	store, err := NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,11 +356,17 @@ func TestSQLiteStoreLegacyFixtureAuditArchiveAndIdempotence(t *testing.T) {
 		`SELECT COUNT(*) FROM session_thread_links`: 2,
 	} {
 		var count int
-		if err := store.SQLDB().QueryRow(query).Scan(&count); err != nil || count != want {
+		if err := sessiondb.Bind(store.ThreadStore()).
+			Database().
+			QueryRow(query).
+			Scan(&count); err != nil ||
+			count != want {
 			t.Fatalf("%s = %d, %v; want %d", query, count, err, want)
 		}
 	}
-	importRows, queryErr := store.SQLDB().Query(`SELECT source_relative, imported_count, skipped_count
+	importRows, queryErr := sessiondb.Bind(store.ThreadStore()).
+		Database().
+		Query(`SELECT source_relative, imported_count, skipped_count
         FROM storage_imports ORDER BY source_relative`)
 	if queryErr != nil {
 		t.Fatal(queryErr)
@@ -391,7 +399,7 @@ func TestSQLiteStoreLegacyFixtureAuditArchiveAndIdempotence(t *testing.T) {
 			t.Fatalf("accounting[%s] = %v, want %v; all=%v", relative, accounting[relative], want, accounting)
 		}
 	}
-	issueRows, err := store.SQLDB().Query(`SELECT issue_code, length(record_digest)
+	issueRows, err := sessiondb.Bind(store.ThreadStore()).Database().Query(`SELECT issue_code, length(record_digest)
         FROM storage_import_issues ORDER BY source_id, sequence`)
 	if err != nil {
 		t.Fatal(err)
@@ -416,7 +424,10 @@ func TestSQLiteStoreLegacyFixtureAuditArchiveAndIdempotence(t *testing.T) {
 		t.Fatalf("issue count = %d", issues)
 	}
 	var imports int
-	if err := store.SQLDB().QueryRow(`SELECT COUNT(*) FROM storage_imports`).Scan(&imports); err != nil {
+	if err := sessiondb.Bind(store.ThreadStore()).
+		Database().
+		QueryRow(`SELECT COUNT(*) FROM storage_imports`).
+		Scan(&imports); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -434,13 +445,16 @@ func TestSQLiteStoreLegacyFixtureAuditArchiveAndIdempotence(t *testing.T) {
 			t.Fatalf("archive %s = %#v, %v", archive, info, err)
 		}
 	}
-	reopened, err := NewSQLiteStore(dir)
+	reopened, err := NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
 	var reopenedImports int
-	if err := reopened.SQLDB().QueryRow(`SELECT COUNT(*) FROM storage_imports`).Scan(&reopenedImports); err != nil ||
+	if err := sessiondb.Bind(reopened.ThreadStore()).
+		Database().
+		QueryRow(`SELECT COUNT(*) FROM storage_imports`).
+		Scan(&reopenedImports); err != nil ||
 		reopenedImports != imports {
 		t.Fatalf("reopen import count = %d, %v; want %d", reopenedImports, err, imports)
 	}
@@ -448,36 +462,36 @@ func TestSQLiteStoreLegacyFixtureAuditArchiveAndIdempotence(t *testing.T) {
 
 func TestSQLiteStoreRejectsTooNewAndRelationalCorruption(t *testing.T) {
 	_, dir := privateSessionsFixture(t)
-	store, err := NewSQLiteStore(dir)
+	store, err := NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AddMessage(context.Background(), "session", "user", "one"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SQLDB().Exec(`UPDATE session_messages SET sequence = 2
+	if _, err := sessiondb.Bind(store.ThreadStore()).Database().Exec(`UPDATE session_messages SET sequence = 2
         WHERE session_key = 'session'`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if reopened, err := NewSQLiteStore(dir); err == nil || reopened != nil ||
+	if reopened, err := NewStore(dir); err == nil || reopened != nil ||
 		!strings.Contains(err.Error(), "non-contiguous sequence") {
 		t.Fatalf("corrupt sequence reopened as %#v, %v", reopened, err)
 	}
 
 	_, tooNewDir := privateSessionsFixture(t)
-	tooNew, err := NewSQLiteStore(tooNewDir)
+	tooNew, err := NewStore(tooNewDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := tooNew.DBPath()
-	if _, err := tooNew.SQLDB().Exec(`PRAGMA user_version = 99`); err != nil {
+	path := filepath.Join(tooNewDir, sessionsDatabaseFilename)
+	if _, err := sessiondb.Bind(tooNew.ThreadStore()).Database().Exec(`PRAGMA user_version = 99`); err != nil {
 		t.Fatal(err)
 	}
 	_ = tooNew.Close()
-	if reopened, err := NewSQLiteStore(tooNewDir); err == nil || reopened != nil ||
+	if reopened, err := NewStore(tooNewDir); err == nil || reopened != nil ||
 		!strings.Contains(err.Error(), "newer than supported") {
 		t.Fatalf("too-new database reopened as %#v, %v (%s)", reopened, err, path)
 	}
@@ -493,7 +507,7 @@ func TestSQLiteStoreLegacyUnsafeSourceAbortsWithoutArchive(t *testing.T) {
 	if err := os.Chmod(workspace, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	store, err := NewSQLiteStore(dir)
+	store, err := NewStore(dir)
 	if err == nil || store != nil || !strings.Contains(err.Error(), "non-writable real directory") {
 		t.Fatalf("unsafe migration = %#v, %v", store, err)
 	}
@@ -518,11 +532,11 @@ func TestSQLiteStoreLegacySymlinkEnumerationAborts(t *testing.T) {
 	if err := os.Symlink(outside, dir); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	store, err := NewSQLiteStore(dir)
+	store, err := NewStore(dir)
 	if err == nil || store != nil || !strings.Contains(err.Error(), "unsafe legacy sessions root") {
 		t.Fatalf("symlink migration = %#v, %v", store, err)
 	}
-	if _, err := os.Stat(filepath.Join(outside, SessionsDatabaseFilename)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(outside, sessionsDatabaseFilename)); !os.IsNotExist(err) {
 		t.Fatalf("symlink migration created authority: %v", err)
 	}
 }

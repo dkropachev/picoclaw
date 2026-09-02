@@ -13,9 +13,10 @@ through channels or run gated shell commands.
 ## Reconstruction Notes
 
 - Similarity target: recreate cron tool actions, persistent job storage, CLI job management, execution delivery modes, command gates, and heartbeat scheduling.
-- Core types/functions: cron tool, job parser/store, Cobra cron subcommands, heartbeat service, gateway delivery handler, and exec gate checks.
-- Runtime ordering: parse schedule, validate command/delivery gates, persist job, list/enable/disable/remove, run due jobs, route delivered prompts or execute command jobs.
+- Core types/functions: cron tool, job parser/store, typed cron broker client and handler, Cobra cron subcommands, heartbeat service, gateway delivery handler, and exec gate checks.
+- Runtime ordering: resolve the configured workspace to an opaque broker `StoreID`, parse schedule, validate command/delivery gates, persist through typed broker operations, list/enable/disable/remove, run due jobs, route delivered prompts or execute command jobs.
 - Non-obvious constraints: command jobs require both cron and exec permissions, disabled jobs stay stored, heartbeat uses ordinary agent execution, and a concrete agent loop publishes a scheduled direct response before releasing tracked-result output ownership.
+- Storage ownership is process-level rather than service-level: the supervisor broker retains the only provider pool, while runtime restarts reconnect without opening or deriving the cron database path.
 
 ## Requirements
 
@@ -28,12 +29,15 @@ through channels or run gated shell commands.
 | `FR-SCHED-005` | MUST | CLI cron add/list/enable/disable/remove reflects persisted job state. | Operators need direct schedule management. |
 | `FR-SCHED-006` | SHOULD | Heartbeat prompts run on configured interval and share the normal agent execution path. | Periodic assistant behavior should stay consistent. |
 | `FR-SCHED-007` | MUST | Gateway-owned cron commands, cron agent turns, heartbeat prompts, and workflow schedules acquire the exact `(config, registry, execution policy, diagnostic policy)` generation that created them before effects. A fresh or detached generation-fenced reacquisition without an owner-issued diagnostic origin is safe-only; retained synchronous work keeps its revocable origin, and a stale origin can only meet the current generation cap. First-party scheduled roots install zero, so preview propagation remains dormant. A cron service obtains that admission before clearing and persisting a due occurrence and holds it through callback bookkeeping; reload starts replacement cron only after other fallible initialization. `Stop` and `Close` serialize against `Start`, cancel and synchronously join the exact scheduler loop before returning or closing SQLite. When its executor supports the concrete direct-publishing boundary, an agent cron turn publishes or suppresses the root response inside that boundary before tracked child-result pumping may resume; compatibility executors retain the separate response callback. Already-due durable occurrences remain due across restart, while stale candidate or cached schedule work is rejected without executing commands, creating workflow runs, or publishing trigger telemetry. | Background schedules must not escape the reload transaction, lose a one-shot occurrence, reorder a tracked child result ahead of its root response, execute against another workspace, leave database work alive after shutdown, or observe provisional provider/config state. |
+| `FR-SCHED-008` | MUST | Gateway, launcher, and CLI cron operations use the typed cron broker client and a trusted-catalog-resolved opaque `StoreID`; callers cannot supply or derive a database path. The supervisor broker owns one retained provider pool per canonical cron store across runtime restarts. Broker loss returns a structured storage error and never installs a local fallback. A missing empty store may initialize at broker startup, but schema upgrades and legacy imports require `picoclaw database migrate` after exclusive supervisor shutdown fencing and a successful mandatory generation backup. | Concurrent schedule clients must share one durable owner, and ordinary runtime must never bypass migration safety after broker failure. |
 
 ## Data And State Model
 
 Schedule state includes persisted cron job records, enabled flags, schedule
 expressions/times, delivery target metadata, command payloads, execution timeout,
-and heartbeat interval/prompt state.
+and heartbeat interval/prompt state. Application code addresses that state only
+by opaque `StoreID`; the broker catalog alone maps the logical identity to the
+private physical generation and keeps its pool open until broker shutdown.
 
 ## Surface Ownership
 
@@ -58,6 +62,7 @@ Owns: TOOL cron
 | Tool | `cron` | Agent-callable scheduling actions. | `FR-SCHED-001` through `FR-SCHED-004` |
 | Config | `tools.cron.*`, `heartbeat.*` | Command gates, timeout, allowed remotes, and heartbeat interval. | `FR-SCHED-004`, `FR-SCHED-006` |
 | Storage | `<workspace>/cron/jobs.db`; legacy-only source `cron/jobs.json`; retained `cron/legacy-json/cron-jobs-v1/jobs.json` | Typed job definitions, ordering, and execution state. `jobs.json` is examined only during first-open migration and is never active storage or a dual-write target. | `FR-SCHED-002`, `FR-SCHED-005` |
+| Broker | typed cron domain operations and opaque `StoreID` | Retain the single provider pool, reject foreign logical stores, and reserve upgrades/imports for exclusively fenced, backed-up offline migration. | `FR-SCHED-008` |
 | Runtime | `AgentLoop.AcquireRuntimeGeneration`, gateway reload lifecycle | Fence due work to its originating config/provider generation and activate replacement cron only after fallible service setup. | `FR-SCHED-007` |
 | Runtime | optional direct-publishing job executor | Keep a scheduled root response inside the agent turn's tracked-result output boundary, with compatibility fallback for alternate executors. | `FR-SCHED-007` |
 
@@ -80,6 +85,9 @@ Owns: TOOL cron
 8. A concrete AgentLoop executor publishes the scheduled agent response inside
    its direct output-owner boundary; alternate JobExecutor implementations use
    the historical separate `PublishResponseIfNeeded` callback.
+9. Runtime and CLI clients perform every durable operation through the broker.
+   `Unavailable` and `MigrationRequired` stop the operation without opening a
+   local store; offline migration begins only after shutdown fencing and backup.
 
 ## Cross-Feature Behavior
 
@@ -99,6 +107,10 @@ tool execution and security gates. Agent conversations process scheduled prompts
 - Stopping an old cron service before runtime admission neither clears nor
   deletes its due job. The replacement/restarted service preserves the overdue
   timestamp and executes it once admitted.
+- Broker discovery, authentication, or readiness failure returns a structured
+  error and cannot create a caller-owned pool or fall back to the physical cron
+  file. An outdated or legacy generation remains unchanged until the exclusive
+  offline migrator has backed it up successfully.
 
 ## Acceptance Evidence
 
@@ -108,11 +120,13 @@ tool execution and security gates. Agent conversations process scheduled prompts
 | `FR-SCHED-005` | [cmd/picoclaw/internal/cron/add_test.go](../../cmd/picoclaw/internal/cron/add_test.go), [cmd/picoclaw/internal/cron/list_test.go](../../cmd/picoclaw/internal/cron/list_test.go), [cmd/picoclaw/internal/cron/enable_test.go](../../cmd/picoclaw/internal/cron/enable_test.go), [cmd/picoclaw/internal/cron/disable_test.go](../../cmd/picoclaw/internal/cron/disable_test.go), [cmd/picoclaw/internal/cron/remove_test.go](../../cmd/picoclaw/internal/cron/remove_test.go) |
 | `FR-SCHED-006` | [pkg/heartbeat/service_test.go](../../pkg/heartbeat/service_test.go) |
 | `FR-SCHED-007` | [pkg/tools/cron_test.go](../../pkg/tools/cron_test.go), [pkg/agent/workflow_automations_test.go](../../pkg/agent/workflow_automations_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [pkg/agent/runtime_gate_test.go](../../pkg/agent/runtime_gate_test.go), [pkg/agent/runtime_policy_late_work_test.go](../../pkg/agent/runtime_policy_late_work_test.go) |
+| `FR-SCHED-008` | [pkg/cron/broker_test.go](../../pkg/cron/broker_test.go), [pkg/cron/provider_access_test.go](../../pkg/cron/provider_access_test.go), [pkg/database/migration/offline_adapter_fence_test.go](../../pkg/database/migration/offline_adapter_fence_test.go), [pkg/database/migration/migration_test.go](../../pkg/database/migration/migration_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/tools/cron.go](../../pkg/tools/cron.go)
 - [pkg/cron/sqlite.go](../../pkg/cron/sqlite.go)
+- [pkg/cron/broker.go](../../pkg/cron/broker.go)
 - [pkg/agent/workflow_automations.go](../../pkg/agent/workflow_automations.go)
 - [pkg/gateway/gateway.go](../../pkg/gateway/gateway.go)
 - [pkg/heartbeat/service.go](../../pkg/heartbeat/service.go)

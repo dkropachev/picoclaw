@@ -1,4 +1,4 @@
-# SQLite Runtime Storage
+# SQLite Runtime Storage Provider
 
 ## Feature ID
 
@@ -6,84 +6,109 @@
 
 ## Behavior Summary
 
-PicoClaw-owned mutable runtime state is stored in subsystem-local SQLite
-databases. Every database uses the same durability, schema, migration, and
-legacy-archive contract while each subsystem retains typed ownership of its
-domain rows.
+SQLite is PicoClaw's sole shipped database provider. It implements the
+provider-neutral Database Layer contract inside the single-owner broker and is
+the only production boundary allowed to open or manipulate physical SQLite
+generations.
 
-Human-authored configuration, portable immutable artifacts, external formats,
-and the small recovery journals that must operate before a database opens remain
-file-backed.
+Application packages use typed domain clients and opaque logical store IDs.
+They do not observe SQLite handles, paths, SQL, PRAGMAs, journal files, driver
+errors, or migration machinery. Ordinary startup may initialize a missing empty
+store at the current schema but never upgrades an existing store or imports
+legacy state; those operations belong exclusively to the fenced offline
+migrator.
 
 ## Reconstruction Notes
 
-- Similarity target: recreate a small shared SQLite boundary that prepares a
-  private filesystem location, configures durable connection-local behavior,
-  upgrades and validates an owned schema, and imports bounded legacy sources
-  exactly once.
-- Core types/functions: `sqlitestore.Open`, `Options`, `Migration`,
-  `LegacyOptions`, `LegacySource`, `LegacyImporter`, `LegacyResultFinalizer`,
-  `LegacySealer`, and `sqlitestore.Immediate`.
-- Runtime ordering: validate the path and migration catalog, securely prepare
-  the directory and database, enable and verify PRAGMAs, reject corruption or a
-  future schema, run upgrades and legacy import in `BEGIN IMMEDIATE`, validate
-  the exact retained schema, commit, then archive verified legacy sources.
-- Non-obvious constraints: import diagnostics never retain payloads or secrets;
-  an archive transition is resumable after either side of its filesystem move;
-  a changed committed source is never archived; the primary database remains
-  present and private while transient WAL/SHM companions are identity-fenced and
-  hardened through their opened handles even if SQLite unlinks their path; and
-  arbitrary JSON may be a bounded column payload but not a generic whole-store
-  document table.
+- Similarity target: recreate a broker-private SQLite provider with one durable
+  connection pool per catalog-resolved physical store, exact current-schema
+  validation, private generation handling, and an exclusive offline migration
+  mode.
+- Core types/functions: provider registration, trusted physical-store
+  resolution, stable pool registry, current-schema initializer/validator,
+  broker-side domain adapters, structured error mapper, generation snapshot and
+  recovery helpers, migration transaction, and clean checkpoint/shutdown.
+- Runtime ordering: validate catalog identity and existing generation metadata,
+  reject unsafe sidecars before SQLite opens, open one pool, configure and
+  verify every connection, initialize only a genuinely missing empty store or
+  validate the exact current schema, then retain the pool until broker shutdown.
+- Non-obvious constraints: live permission checks use non-opening metadata
+  operations; no caller may independently open or close a live file; aliases
+  fail before pool publication; migration uses exclusive locking and rollback
+  journal before returning to WAL; matching WAL/SHM files are recovered through
+  SQLite rather than manually removed; pre-open hardening identity-fences every
+  primary/sidecar pathname and file handle while tolerating a transient
+  companion disappearance only after a fresh absence inspection; a complete
+  zero-source legacy enumeration still closes the shared import horizon;
+  bounded Git-workspace inventory and
+  individually audited candidate-checkpoint legacy inputs are imported exactly
+  once and retained without exposing their contents in diagnostics; and backend
+  errors never cross the domain API.
 
 ## Requirements
 
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
-| `FR-SQLITE-001` | MUST | A subsystem opens a mutable database at a filesystem path. | The returned handle uses WAL, foreign keys, a five-second busy timeout, and `synchronous=FULL`; the parent is private and the database and present companions are `0600` on POSIX hosts or carry a protected owner-only DACL on Windows. Every hardening pass binds each initial pathname identity to its opened handle, the current pathname, and final private-file validation. A WAL/SHM companion that SQLite unlinks during the pass is accepted only after a fresh pathname inspection proves it absent, while its verified opened handle is hardened before close. | A missing directory/database is securely created. | Empty, URI, NUL-bearing, symlinked/reparse, irregular, publicly writable/accessible, replaced, or otherwise unsafe boundaries fail before domain use. The primary database must remain present at every hardening stage; only transient WAL/SHM companions may safely disappear, and a dangling link, another inode, non-not-found error, or handle-hardening failure remains fatal. | Every store needs one durable and secure baseline. |
-| `FR-SQLITE-002` | MUST | The database schema is older, current, too new, malformed, or corrupt. | Contiguous migrations reach the supported `PRAGMA user_version` and the retained schema validates exactly. | Migrations run in one explicit `BEGIN IMMEDIATE` transaction. | Failure rolls back; a future version, invalid schema, or failed integrity check returns a typed error and never falls back to JSON. | Mixed schemas and partial upgrades must fail closed. |
-| `FR-SQLITE-003` | MUST | A subsystem performs its first complete bounded legacy JSON/JSONL enumeration, including an enumeration with no present source. | Valid records are imported deterministically by dependency order and relative path; selected malformed records are skipped with counts and safe issue codes/digests only. Aggregate/dependency importers may resolve relationships in `LegacyResultFinalizer`; their returned per-source outcomes atomically replace provisional counts and issues before commit. An optional idempotent `LegacySealer` may perform subsystem-specific closeout or validation; independently, the shared `storage_import_horizons` row always closes the generic import horizon before validation. | Domain rows, final durable import/issue rows, and the subsystem import-horizon marker commit in the same immediate transaction. A source first appearing after that marker is audited as SQLite-authoritative rather than imported. | Unsafe enumeration, symlinks or modes, size/count bounds, incomplete/extra/invalid final accounting, SQLite errors, importer errors, or seal failure abort without an import commit or closed marker. | Automatic upgrade must preserve valid state and relationships, become authoritative even after an empty first open, and make the audit describe committed rows without exposing secrets. |
-| `FR-SQLITE-004` | MUST | A committed import has an unarchived legacy source. | The exact imported bytes move to `legacy-json/<component>-v1/` without overwriting an existing archive and with their permissions retained. | Archive completion is durably recorded after the filesystem transition. | A crash before/after the move is retried without re-import; changed bytes or a conflicting archive fail closed. | SQLite becomes authoritative immediately while rollback material remains recoverable. |
-| `FR-SQLITE-005` | MUST | Concurrent PicoClaw processes mutate a subsystem store. | Bounded lock waits and immediate write transactions serialize domain operations; version-fenced owners can reject stale updates. | Only the committed SQLite transaction becomes visible. | Busy, canceled, and stale-version operations return errors without partial domain state or JSON dual writes. | CLI, launcher, and gateway processes must share one authority. |
-| `FR-SQLITE-006` | MUST | A clean integration runtime exercises persistent subsystems and then starts their owners a second time. | The exact expected private database inventory is present; every surviving JSON, JSONL, migrated snapshot, history slot, or invalidation sidecar matches an intentional configuration, recovery, exact component archive, sidecar, or immutable-artifact path; and the second startup creates no additional candidate path. | The test writes representative typed rows and immutable evidence, mutates and reopens Git workspace inventory through `Manager.Acquire`/`Stats`, and imports, version-fenced updates, and reopens a PR candidate checkpoint. Deliberate non-allowlisted JSON, exact Git/checkpoint archive-label near misses, JSON-like directory, unsafe archive-link, and SQLite-extension canaries are rejected without reading or reporting their payloads. | An unexpected candidate file/directory, unregistered `.db`/`.sqlite`/`.sqlite3` path, unsafe archive ancestry, missing/extra database (including `inventory.db` or `checkpoints.db`), non-private database mode, traversal failure, or changed second-start inventory fails the merge-gating suite. | A subsystem must not silently reintroduce mutable JSON persistence after its focused tests pass. |
-
-Shared helpers `RequireOneRow` and `ScanStrings` retain exact driver errors and
-provide bounded typed row/result validation without turning subsystem schemas
-into generic document stores.
+| `FR-SQLITE-001` | MUST | The broker opens a trusted catalog store that is missing and empty or already at the supported schema. | Every connection uses foreign keys, a five-second busy timeout, `synchronous=FULL`, and WAL; the owner-only directory and database generation remain private: directories and generation members are `0700`/`0600` on POSIX or carry a protected owner-only DACL on Windows. Pre-open hardening binds each initial pathname identity to its opened file handle, current pathname, and final private-file validation; once the pool is live, rechecks use non-opening metadata. | A genuinely missing empty store is initialized directly at the current schema, and one stable pool is registered for the broker epoch. | Empty/unknown IDs, caller paths or URIs, unsafe ancestors, symlinks, irregular files, unsafe or replaced pre-existing sidecars, a missing/replaced primary during hardening, an ambiguously vanished companion, configuration mismatch, or failed PRAGMA verification return a structured error before domain use. | Every physical store needs one secure and durable provider baseline. |
+| `FR-SQLITE-002` | MUST | Ordinary startup inspects a current, outdated, legacy, too-new, malformed, corrupt, or unavailable generation. | A current generation whose exact tables, indexes, views, triggers, import ledger, and horizon objects validate becomes `ready`; outdated or legacy state returns `MigrationRequired`; integrity failure and unavailability retain their distinct provider-neutral readiness. | Ordinary startup performs no schema upgrade, legacy import, archive transition, recovery rewrite, or destructive cleanup. | Too-new, malformed, unrelated-schema-object, or corrupt state fails closed; no JSON/file fallback or automatic upgrade is attempted. | Storage changes require an exclusive backed-up maintenance boundary. |
+| `FR-SQLITE-003` | MUST | Multiple catalog entries, clients, or runtime generations address SQLite state. | The provider publishes one pool per canonical physical store and reuses it for all broker-side domain operations until broker shutdown. | Runtime stop/restart changes no pool, journal mode, or physical generation. | Physical aliases and duplicate registrations fail closed; independent open/close, workflow idle teardown, and zero-idle pool policy are unsupported. | Connection-local settings and generation ownership remain sound only under one long-lived pool authority. |
+| `FR-SQLITE-004` | MUST | The exclusive offline migrator upgrades a schema, imports legacy data, backs up, recovers, or archives a store. | It snapshots and fsyncs the whole matching generation and affected inputs, recovers through SQLite, checks integrity/foreign keys, deterministically imports bounded inputs by dependency order and relative identity, finalizes exact per-source accounting so provisional counts/issues cannot survive commit, runs any idempotent domain sealer, and closes the shared import horizon even after a complete zero-source enumeration, and commits schema plus import ledger atomically under exclusive rollback-journal mode. Exact imported inputs—including the aggregate Git-workspace inventory and individually audited candidate checkpoints—are archived without overwrite after commit; the provider then returns to WAL, checkpoints, cleanly reopens, and revalidates. | Only the migrator changes schema/import state; domain rows, payload-free safe issue codes/digests and final counts, the sealed horizon, and ledger commit atomically, while archive completion remains crash-recoverable. The required timestamped backup is retained on success or failure. | Missing exclusivity, unsafe or unbounded enumeration, incomplete accounting, snapshot/fsync failure, too-new/corrupt state, migration/seal failure, changed input, archive conflict, failed checkpoint/reopen, or validation mismatch leaves the store unready and the backup recoverable. | Provider-specific upgrade and recovery must preserve ordered relationships, become authoritative after a complete enumeration, and remain atomic, durable, and reversible. |
+| `FR-SQLITE-005` | MUST | Production source needs a SQLite driver, physical DSN, PRAGMA, database/WAL/SHM/rollback-journal operation, schema codec, transaction, or provider diagnostic. | Only the broker's SQLite provider performs the physical operation; broker-side domain adapters own SQL and map every result to typed domain data and backend-neutral errors. | No application-facing object retains a raw handle, SQL callback, path, DSN, driver error, or provider control. | Static architecture tests reject `modernc.org/sqlite`, `sql.Open`, SQLite DSNs, PRAGMAs, and database-generation file operations outside the provider; the private Matrix/WhatsApp RPC driver is limited to logical IDs and does not open SQLite. | The SQLite implementation must remain replaceable and impossible to bypass. |
+| `FR-SQLITE-006` | MUST | A clean integration runtime exercises every persistent subsystem, including Git-workspace inventory and PR-candidate checkpoints, and then starts the owners a second time. | The trusted provider catalog and exact private generation inventory are stable; every surviving JSON/JSONL source, retained archive, history slot, invalidation sidecar, or immutable artifact is explicitly allow-listed, and the second startup creates no additional candidate path. | The suite writes representative typed rows, reopens broker-owned stores, mutates inventory through `Manager.Acquire`/`Stats`, and imports and version-fences one checkpoint through offline migration. | Unexpected mutable candidates, unregistered SQLite generations, unsafe archive ancestry, missing/extra stores including inventory/checkpoint stores, non-private modes, payload-bearing diagnostics, or a changed second-start inventory fail the merge gate. | A subsystem must not reintroduce mutable JSON persistence or a second physical SQLite owner after focused tests pass. |
 
 ## Data And State Model
 
-Every database owns typed subsystem tables and `PRAGMA user_version`. The shared
-import ledger stores component and relative source identities, SHA-256 digests,
-bounded source sizes, imported/skipped counts, archive status, timestamps, and
-issue codes plus record digests. It never stores an original rejected payload,
-credential, token, or diagnostic string derived from one.
+The broker catalog maps each opaque logical store ID to a provider-private
+canonical physical identity. The SQLite provider alone knows the directory,
+database filename, DSN, schema version, and database/WAL/SHM/rollback-journal generation members.
+The pool registry is keyed by canonical physical identity and records the
+logical owner, readiness, current broker epoch, open pool, and current-schema
+adapter. A second identity resolving to the same physical object is invalid.
+Git-workspace inventory and PR-candidate checkpoint state each have a trusted
+logical catalog entry; their physical generations, locks, legacy inputs, and
+retained archives remain provider-private even when a configured Git state root
+is located inside an agent workspace.
 
-Database paths are ordinary filesystem paths rather than caller-provided SQLite
-URIs. The database directory is owner-only. SQLite `-wal` and `-shm` companions
-share the database's private mode. Archives remain indefinitely and are not a
-second write target.
+Every persistent connection verifies foreign keys enabled, a 5,000 millisecond
+busy timeout, `synchronous=FULL`, and WAL. The provider sets a bounded positive
+open and idle connection policy; it does not use `SetMaxIdleConns(0)`, schedule
+idle pool teardown, or close between domain operations. Pools drain only during
+controlled broker shutdown or exclusive migration fencing.
 
-All PicoClaw processes sharing a home or workspace must stop and upgrade
-together. Rollback requires stopping them again, restoring retained archives to
-their original relative paths, and removing or restoring each database with its
-matching WAL, SHM, and lock directory as one generation. Mixed old/new binaries
-against one storage root are unsupported.
+Before the first SQLite open, the provider validates the store directory,
+database endpoint, and any existing matching sidecars as owner-controlled,
+regular, nonsymlinked artifacts. Database directories are owner-only and
+database generation members are `0600` where platform semantics support modes.
+After open, permission and identity rechecks use non-opening metadata operations
+so validation never creates a second live SQLite handle. SQLite itself performs
+recovery, checkpoint, journal transitions, and clean close; no code manually
+deletes a live WAL or SHM file.
 
-The workflow subsystem uses `workspace/state/workflows.db`. It normalizes runs,
-ordered events, ancestry links, job/step executions, human tasks, native state,
-compatibility stamps/issues, and active or archived development sessions.
-Canonical number-aware JSON BLOBs carry only nested payloads and private
-continuations. Legacy runs/events import before dependent records; native
-state, validation manifests, and development snapshots follow. Filesystem
-publish/template journals remain allowed because they recover workflow
-definition replacement when database state is unavailable.
+Schemas, SQL codecs, import ledgers, migration definitions, and transaction
+implementations live in broker-side domain adapters. Bounded canonical JSON may
+remain a typed column payload where a domain requires nested data, but no
+generic whole-store document API crosses the broker. Provider errors are
+classified into the Database Layer's structured errors and do not expose
+driver text, extended SQLite codes, SQL, schema names, or paths.
+
+Offline backup state lives below the migrator's selected backup parent in
+`database-migrate-<UTC>/`. Its manifest records logical store ID, provider and
+schema versions, all generation members and affected legacy inputs, hashes,
+sizes, modes, timestamps, and outcome. The backup is never the provider's live
+write target and is preserved whether migration succeeds or fails.
 
 ## Surface Ownership
 
-Owns: CODE pkg/sqlitestore/**
+Owns: CODE internal/sqliteprovider/**
+Owns: CODE internal/sqlitestore/**
+Owns: CODE internal/sqlbridge/**
+Owns: CODE internal/storecatalog/**
+Owns: TEST pkg/database/*
+Owns: TEST internal/sqliteprovider/*
+Owns: TEST internal/sqlitestore/*
+Owns: TEST internal/sqlbridge/*
+Owns: TEST internal/storecatalog/*
 Owns: CODE integration/suites/storage-json/**
-Owns: TEST pkg/sqlitestore/*
 Owns: TEST pkg/gateway/runtime_storage_json_allowlist_integration_test.go TestIntegrationRuntimeOwnedJSONAllowlist
 Owns: TEST pkg/gateway/runtime_storage_legacy_migration_integration_test.go TestIntegrationRuntimeOwnedJSONLegacyMigration
 Owns: TEST pkg/gitworkspace/runtime_storage_legacy_relations_integration_test.go TestIntegrationRuntimeOwnedJSONLegacyGitInventoryRelations
@@ -93,122 +118,164 @@ Owns: INTEGRATION storage-json
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
-| Go API | `sqlitestore.Open(ctx, path, options)` | Opens, configures, integrity-checks, migrates, validates, and archives one subsystem database or returns an error without a JSON fallback. | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-003`, `FR-SQLITE-004` |
-| Go API | `sqlitestore.Immediate(ctx, db, callback)` | Runs one callback between explicit `BEGIN IMMEDIATE` and `COMMIT`, rolling back on callback, context, or commit failure. | `FR-SQLITE-002`, `FR-SQLITE-005` |
-| Go API | `LegacyOptions.FinalizeResults` / `LegacyResultFinalizer` | Resolve ordered multi-source relationships and return exact final `ImportResult` for every newly imported source; the helper replaces provisional ledger counts/issues inside the import transaction. | `FR-SQLITE-003` |
-| Go API | `LegacyOptions.Seal` / `LegacySealer` | Performs optional idempotent subsystem-specific closeout or validation after every successful deterministic enumeration, including zero-source and already-closed opens, inside the migration transaction and before validation. The shared helper, not this callback, owns the generic durable horizon. | `FR-SQLITE-003` |
-| File | `<root>/*.db`, `<root>/*.db-wal`, `<root>/*.db-shm` | Private mutable SQLite authority owned by its subsystem. | `FR-SQLITE-001`, `FR-SQLITE-005` |
-| File | `<root>/legacy-json/<component>-v1/**` | Immutable retained legacy bytes, created once after their import transaction commits. | `FR-SQLITE-003`, `FR-SQLITE-004` |
-| File | `<PICOCLAW_HOME>/auth.db`, `auth.db.locks/`; `legacy-json/auth-v1/auth.json` | Typed, version-fenced credential authority, protected cross-process refresh locks, and retained legacy source. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<PICOCLAW_HOME>/launcher-auth.db`; `legacy-json/launcher-auth-v1/launcher-config.json` | Typed launcher password/token authority and the retained pre-redaction launcher settings source; active `launcher-config.json` remains settings-only. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<PICOCLAW_HOME>/model-catalogs.db`; `legacy-json/model-catalogs-v1/model_catalogs.json` | Typed catalogs and ordered model children with bounded canonical JSON metadata BLOBs. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<PICOCLAW_HOME>/tool-adaptation.db`; `legacy-json/tool-adaptation-v1/tool_adaptation_state.json` | Typed observations and outcome counters with timestamp/version fences and retained legacy source. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `$PICOCLAW_HOME/channels/wecom/reqid-store.db` | Typed WeCom request-route identities, chat types, expiry timestamps, and row versions. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `$PICOCLAW_HOME/channels/weixin/state.db` | Typed Weixin account, cursor, and ordered context-token relationships with timestamps and row versions. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<workspace>/sessions/sessions.db`; `<workspace>/legacy-json/sessions-v1/**` | Ordered messages, aliases, snapshots, metadata/delete manifests, threads, thread-session links, and handoffs with transactional relationship updates and retained legacy sources. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<workspace>/state/runtime.db` | Typed singleton last-channel/chat state with field-specific version-fenced updates. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<workspace>/cron/jobs.db`; `cron/legacy-json/cron-jobs-v1/jobs.json` | Typed ordered cron definitions/execution state and retained legacy source shared by CLI and gateway. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<workspace>/state/account-router.db`; `state/legacy-json/account-router-v1/**` | Typed router/account/session/affinity/cursor/invalidation state with transactional cross-process updates and retained legacy state/sidecars. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<workspace>/state/workflows.db`; `<workspace>/legacy-json/workflows-v1/**` | Typed runs, ordered events and links, execution snapshots, private continuation state, native/compatibility state, and development sessions with exact-number JSON BLOBs only where nested payloads require them. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<workspace>/repository_reviews/repository-reviews.db`; `repository_reviews/legacy-json/repository-reviews-v1/**` | Typed repository review identities, versions, summaries, profiles, automations, ordered relationships, and bounded nested review evidence. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<workspace>/repository_evaluations/evaluations.db`; `repository_evaluations/legacy-json/repository-evaluations-v1/**` | Typed evaluation identities, versions, lifecycle, progress, ordered model/run relationships, and bounded nested corpus/comparison payloads. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<evolution-state-dir>/evolution.db`; `legacy-json/evolution-v1/**` | Typed learning/pattern records, ordered evidence, skill drafts, profiles, version history, and retained JSON/JSONL migration sources. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<event-state>/pr-workspace-local-ci/evidence/cache.db`; `legacy-json/local-ci-cache-v1/cache/**` | Typed, version-fenced passing-result cache rows and retained legacy cache indexes; immutable plans, executions, attestations, and discovery records remain content-addressed JSON evidence. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<workspace>/.git-workspaces/inventory.db`; `legacy-json/git-workspaces-v1/inventory.json` | Typed repository/workspace inventory, ordered development-line and rotation evidence, histories, and retained legacy aggregate. | `FR-SQLITE-001` through `FR-SQLITE-005` |
-| File | `<workspace>/.git-workspaces/.pr-workspace-implementation/active/checkpoints.db`; `legacy-json/pr-workspace-checkpoints-v1/*.json` | Typed mutable candidate checkpoints and retained individually audited legacy checkpoint files. | `FR-SQLITE-001` through `FR-SQLITE-005` |
+| Internal provider API | SQLite provider registration and pool registry | Accept only broker-resolved catalog entries, open or initialize one current store, publish one stable pool, execute broker-side adapters, and close only during broker shutdown or migration. | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-003`, `FR-SQLITE-005` |
+| Internal provider API | Current-schema initializer and validator | Create the complete current schema only for a missing empty store; otherwise classify current, migration-required, too-new, malformed, corrupt, or unavailable state without upgrading it. | `FR-SQLITE-001`, `FR-SQLITE-002` |
+| Internal provider API | Offline snapshot, recovery, migration, and archive operations | Operate only under exclusive per-home fencing, require a complete durable backup, recover/check/migrate/archive/reopen in the prescribed order, and preserve diagnostic manifests without payload leakage. | `FR-SQLITE-004` |
+| Internal adapter API | Typed domain operation against one logical store | Own schema-aware query/mutation code and transaction boundaries, accept typed inputs, and return typed outputs or provider-neutral errors. | `FR-SQLITE-005` |
+| Internal adapter API | Git-workspace inventory logical store | Preserve typed repository/workspace inventory, ordered development-line and rotation evidence, histories, exact aggregate legacy accounting, and its sealed import horizon without exposing a physical location. | `FR-SQLITE-004`, `FR-SQLITE-005` |
+| Internal adapter API | PR-candidate checkpoint logical store | Preserve typed mutable checkpoints and independently audited legacy checkpoint inputs with exact per-source ledger and archive outcomes without exposing a physical location. | `FR-SQLITE-004`, `FR-SQLITE-005` |
+| Compatibility API | Private Matrix/WhatsApp RPC `database/sql/driver` | Carry only allow-listed logical store IDs to broker-side adapters; reject runtime DDL, mutating PRAGMAs, `ATTACH`, `DETACH`, and `VACUUM`; never import or open SQLite. | `FR-SQLITE-002`, `FR-SQLITE-005` |
+| File | Provider-private database generation | Database and matching WAL/SHM/rollback-journal artifacts are visible only to the provider, migrator, backup/recovery workflow, and provider artifact catalog. | `FR-SQLITE-001` through `FR-SQLITE-005` |
+| Integration suite | `storage-json` | Exercise the catalog-owned store inventory, retained legacy/archive allow-list, provider permissions, inventory/checkpoint relationships, malicious near-miss candidates, and second-start stability. | `FR-SQLITE-006` |
 
 ## Algorithms And Ordering
 
-1. Reject invalid component names, migration catalogs, paths, timeouts, and
-   connection bounds before opening SQLite.
-2. Create and inspect the final database directory and file without accepting a
-   symlink or irregular endpoint; set private permissions. During every database,
-   WAL, and SHM hardening pass, compare the initial, opened, current, and finally
-   secured identities. Require the primary database throughout; accept a vanished
-   companion only after reinspection proves absence, and harden any verified open
-   companion handle before closing it.
-3. Build the internal filesystem URI and configure every pooled connection with
-   foreign keys, the bounded busy timeout, and FULL synchronization. Select and
-   verify WAL for file-backed stores.
-4. Check existing integrity, acquire one connection, and enter
-   `BEGIN IMMEDIATE`. Read `user_version`, reject a future version, apply each
-   contiguous schema/data migration, enumerate and import deterministic legacy
-   inputs, finalize aggregate relationships/accounting when configured, run
-   optional subsystem closeout, always close the shared generic import horizon
-   after its first complete enumeration, validate domain and import schemas,
-   and commit once.
-5. Recheck integrity and permissions. For each pending import, revalidate the
-   recorded relative identity and digest, complete or recover its no-overwrite
-   archive transition, and mark the ledger row complete in an immediate
-   transaction.
+### Ordinary open
+
+1. Accept a broker catalog entry, not a path or DSN. Resolve its provider-private
+   physical identity and reject duplicate or aliased registration.
+2. Inspect the parent, endpoint, and existing sidecars without opening SQLite.
+   Reject unsafe modes, links/reparse points, irregular objects, ownership, or
+   identity drift. Bind each initial pathname to its opened hardening handle and
+   the final pathname; require the primary throughout, and accept a companion
+   unlinked during the pass only after fresh inspection proves it absent and
+   the verified handle has been hardened before close.
+3. Construct the private SQLite DSN, open exactly one pool, set bounded open and
+   idle capacity, and configure/verify foreign keys, five-second busy timeout,
+   FULL synchronous mode, and WAL on its connections.
+4. If no generation and no legacy input exists, create the complete current
+   domain schema. Otherwise inspect schema and integrity without applying a
+   migration or import.
+5. Classify readiness through provider-neutral status, publish only a `ready`
+   pool, and retain it until broker shutdown. Close a rejected candidate cleanly
+   without publishing it.
+
+### Domain operation
+
+1. Resolve the typed operation's declared logical store and current broker
+   epoch; reject cross-store transaction requests.
+2. Validate typed input before executing a broker-side schema adapter.
+3. Execute the adapter's read or single-store atomic command through the stable
+   pool. Provider SQL and transaction objects remain local to the adapter.
+4. Verify bounded result shape, detach provider values, and return typed domain
+   data or map the provider failure to the closed backend-neutral error set.
+
+### Offline migration
+
+1. Prove the supervisor/runtime/launcher are stopped, acquire the exclusive
+   per-home migration fence, load the trusted catalog, and select logical IDs.
+2. Snapshot and fsync the complete matching generation plus affected legacy
+   inputs into the timestamped backup, then fsync its manifest before mutation.
+3. Open through SQLite and let it recover or roll back hot state. Run integrity
+   and foreign-key checks; never remove sidecars manually.
+4. Enter exclusive locking and rollback-journal mode. In one all-or-nothing
+   transaction apply contiguous schema work, deterministic bounded legacy
+   import, exact accounting, schema version, and import ledger.
+   Third-party channel upgraders with internal commits operate only on a
+   provider-created SQLite-backup stage, which is validated and atomically
+   renamed over the original generation after all upgrade work succeeds.
+5. After commit, archive only exact digest-verified inputs without overwrite.
+   Record recoverable archive progress so a crash never repeats an import.
+6. Restore WAL, checkpoint through SQLite, close cleanly, reopen through the
+   ordinary provider path, and repeat schema, integrity, foreign-key,
+   permission, and physical-identity checks.
+7. Retain the complete backup and outcome manifest, close migration handles,
+   and release exclusivity only after durable cleanup.
 
 ## Cross-Feature Behavior
 
-Each owning subsystem defines its own relational schema, normalization rules,
-version fences, and compatibility constructors. Workspace protection treats
-database directories, database/WAL/SHM files, and legacy archives as
-runtime-owned; model-facing mutation tools must enforce frozen lexical,
-resolved, and exact-file-alias exclusions even when those paths fall inside a
-workspace or an outside-write allowlist. Dynamic legacy and archive trees from
-the configured/default workspace and every named-agent workspace use one
-generation-wide immutable physical-identity catalog. Its first pinned,
-batched pass retains only a streaming digest; its second pass retains the final
-deduplicated identity set. Root/owner tools and local repair share that pointer,
-so a source-to-archive rename cannot make a pre-existing hardlink alias
-writable. Reads, listings, edit/append read-before-write, and apply-patch source
-reads authorize the actual opened handle with `fstat`/`SameFile` and the catalog
-before consuming bytes or names. Unsafe tree entries, aggregate entry/path/depth
-bounds, or a changing two-pass snapshot fail agent construction without
-disclosing a protected path. Git-inventory and PR-checkpoint inputs participate
-in the same catalog; checkpoints also use pinned private-mode snapshots before
-and after catalog construction under their tighter 10,000-source/depth-4
-bounds. Each reload adds the current configured Git-state roots while retaining
-the prior generation's frozen roots. Portability excludes
-targets on which the required SQLite implementation is unsupported instead of
-selecting a mutable JSON fallback.
+The Database Layer owns broker discovery, supervision, logical IDs, readiness,
+IPC, retries, structured errors, and migration commands. This feature owns the
+physical SQLite implementation. Domain features own their models, validation,
+and operation semantics; their SQL codecs and atomic implementations execute as
+broker-side adapters rather than application APIs.
+
+Launcher authentication, global auth, model catalogs, tool adaptation,
+workflows, sessions/threads, eventing, cron, runtime state, account routing,
+reviews/evaluations, evolution, local-CI cache, Seahorse, WeCom, Weixin, Matrix,
+WhatsApp, Git-workspace inventory, and PR-candidate checkpoints all consume
+catalog IDs. Agent mutation protection asks the provider catalog for protected
+artifacts—including inventory/checkpoint legacy inputs, locks, and retained
+archives—and never reconstructs SQLite filenames. Matrix and WhatsApp retain
+only the temporary private RPC SQL bridge; Seahorse uses a normal typed client.
+
+The provider projection also seeds the Agent feature's generation-wide
+physical-file identity catalog for the configured/default workspace and every
+named-agent workspace. Pinned, bounded, two-pass enumeration retains a
+streaming digest followed by one deduplicated identity set; root and owner
+tools plus controller local repair share that immutable catalog. Reads and
+read-before-write operations reauthorize the actual opened handle before
+consuming bytes or names, so a hardlink alias, source-to-archive rename, unsafe
+entry, or changing snapshot cannot turn provider state into model-editable
+content. Git-inventory and checkpoint inputs use their stricter source/depth
+bounds, and reload retains earlier store-generation roots while adding the
+current catalog projection.
 
 ## Failure And Edge Cases
 
-- Missing legacy sources invoke no importer; the shared helper still closes the
-  generic first-open import horizon. An optional subsystem sealer still runs,
-  and enumeration or seal errors are not no-ops.
-- Inputs are bounded per source, in aggregate, and by source count.
-- Malformed records may be skipped only when the domain importer explicitly
-  classifies them; structural filesystem or SQLite failures abort.
-- Duplicate canonical identities use a subsystem's documented deterministic
-  winner and record later conflicts as safe issues.
-- An archive destination is never overwritten. Matching partial transition
-  states resume; mismatched bytes fail.
-- A second startup neither imports again nor creates a mutable JSON file.
-- An in-memory database is non-persistent and isolated from every other open.
+- An existing legacy source adjacent to a missing or empty database is not a
+  fresh initialization; ordinary startup returns `MigrationRequired`.
+- Legacy enumeration is bounded per source, in aggregate, and by source count.
+  Missing inputs still produce a complete seal decision; enumeration or seal
+  failure aborts migration. A source appearing after the sealed horizon is
+  audited as SQLite-authoritative rather than imported at startup.
+- A domain importer may skip malformed records only when it explicitly assigns
+  bounded safe counts and issue codes/digests. Structural filesystem/provider
+  failures and incomplete or extra final accounting abort the transaction.
+- Duplicate canonical inventory identities use the domain's documented
+  deterministic winner and record later conflicts as safe issues. Candidate
+  checkpoint inputs retain an independent exact ledger outcome per source.
+- An archive destination is never overwritten. A digest-matching partial
+  transition resumes without re-import; changed bytes or a conflicting archive
+  fail closed.
+- A second runtime startup neither repeats a committed import nor creates a
+  mutable JSON fallback or another physical generation candidate.
+- A store at a future version, with unknown schema objects, failed integrity or
+  foreign keys, invalid canonical data, or an unsafe physical generation never
+  becomes ready and never falls back to JSON.
+- Existing WAL/SHM/rollback-journal artifacts are validated before open. Hot state is recovered
+  through SQLite; manual sidecar deletion, replacement, or separate inspection
+  connection is forbidden.
+- A pool candidate is not published until configuration and current-schema
+  validation succeed. Runtime child restart neither closes nor reconfigures an
+  already published pool.
+- Physical alias detection includes canonical path, symlink, case behavior,
+  hard-link identity, resolved existing ancestors, and duplicate dynamic
+  catalog entries. Ambiguity fails closed.
+- Busy, locked, cancellation, constraint, corruption, I/O, and driver failures
+  map to backend-neutral errors. A possibly committed mutation becomes
+  `OutcomeUnknown` rather than an optimistic retry.
+- Backup, snapshot, fsync, recovery, integrity, migration, archive, checkpoint,
+  clean-close, or reopen failure preserves backup material and leaves readiness
+  non-ready.
+- The private compatibility driver cannot broaden its allow-list, carry a path,
+  run DDL in runtime mode, or become a general application SQL API.
 
 ## Acceptance Evidence
 
 | Requirement IDs | Evidence |
 | --- | --- |
-| `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-005` | [pkg/sqlitestore/open_test.go](../../pkg/sqlitestore/open_test.go) |
-| `FR-SQLITE-003`, `FR-SQLITE-004` | [pkg/sqlitestore/open_test.go](../../pkg/sqlitestore/open_test.go), [pkg/sqlitestore/legacy_finalize_results_test.go](../../pkg/sqlitestore/legacy_finalize_results_test.go), [pkg/memory/sqlite_store_test.go](../../pkg/memory/sqlite_store_test.go) |
-| `FR-SQLITE-003`, `FR-SQLITE-004`, `FR-SQLITE-006` | [pkg/gateway/runtime_storage_legacy_migration_integration_test.go](../../pkg/gateway/runtime_storage_legacy_migration_integration_test.go) |
-| `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/auth/store_sqlite_test.go](../../pkg/auth/store_sqlite_test.go), [web/backend/api/model_catalog_sqlite_test.go](../../web/backend/api/model_catalog_sqlite_test.go), [pkg/tools/adaptation_state_sqlite_test.go](../../pkg/tools/adaptation_state_sqlite_test.go) |
-| `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/state/state_test.go](../../pkg/state/state_test.go), [pkg/channels/wecom/reqid_store_test.go](../../pkg/channels/wecom/reqid_store_test.go), [pkg/channels/weixin/state_sqlite_test.go](../../pkg/channels/weixin/state_sqlite_test.go) |
-| `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/memory/sqlite_store_test.go](../../pkg/memory/sqlite_store_test.go), [pkg/workflows/sqlite_store_test.go](../../pkg/workflows/sqlite_store_test.go), [pkg/cron/sqlite_test.go](../../pkg/cron/sqlite_test.go), [pkg/accountrouter/store_sqlite_test.go](../../pkg/accountrouter/store_sqlite_test.go) |
-| `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/repoaudit/sqlite_test.go](../../pkg/repoaudit/sqlite_test.go), [pkg/repoeval/sqlite_test.go](../../pkg/repoeval/sqlite_test.go), [web/backend/dashboardauth/store_test.go](../../web/backend/dashboardauth/store_test.go) |
-| `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/evolution/sqlite_store_test.go](../../pkg/evolution/sqlite_store_test.go) |
-| `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/prworkspace/localci/store_cache_sqlite_test.go](../../pkg/prworkspace/localci/store_cache_sqlite_test.go) |
-| `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/gitworkspace/inventory_sqlite_test.go](../../pkg/gitworkspace/inventory_sqlite_test.go), [pkg/gateway/pr_workspace_candidate_checkpoint_test.go](../../pkg/gateway/pr_workspace_candidate_checkpoint_test.go) |
-| `FR-SQLITE-006` | [pkg/gateway/runtime_storage_json_allowlist_integration_test.go](../../pkg/gateway/runtime_storage_json_allowlist_integration_test.go), [integration/suites/storage-json](../../integration/suites/storage-json) |
+| `FR-SQLITE-001`, `FR-SQLITE-002` | `pkg/database/server_unix_test.go`, `pkg/database/catalog/catalog_test.go` |
+| `FR-SQLITE-003` | `pkg/database/server_unix_test.go`, `pkg/database/supervisor_test.go` |
+| `FR-SQLITE-004` | `pkg/database/migration/migration_test.go`, `cmd/picoclaw/internal/database/command_test.go` |
+| `FR-SQLITE-004`, `FR-SQLITE-005` | [pkg/gitworkspace/inventory_sqlite_test.go](../../pkg/gitworkspace/inventory_sqlite_test.go), [pkg/gateway/pr_workspace_candidate_checkpoint_test.go](../../pkg/gateway/pr_workspace_candidate_checkpoint_test.go) |
+| `FR-SQLITE-005` | `pkg/database/architecture_test.go`, `pkg/database/public_api_test.go`, `pkg/database/protocol_test.go` |
+| `FR-SQLITE-001` through `FR-SQLITE-005` | `pkg/database/server_unix_test.go`, `pkg/database/migration/migration_test.go` |
+| `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-004` | [internal/sqlitestore/open_test.go](../../internal/sqlitestore/open_test.go), [internal/sqlitestore/hardening_test.go](../../internal/sqlitestore/hardening_test.go), [internal/sqlitestore/legacy_finalize_results_test.go](../../internal/sqlitestore/legacy_finalize_results_test.go) |
+| `FR-SQLITE-006` | [pkg/gateway/runtime_storage_json_allowlist_integration_test.go](../../pkg/gateway/runtime_storage_json_allowlist_integration_test.go), [pkg/gateway/runtime_storage_legacy_migration_integration_test.go](../../pkg/gateway/runtime_storage_legacy_migration_integration_test.go), [pkg/gitworkspace/runtime_storage_legacy_relations_integration_test.go](../../pkg/gitworkspace/runtime_storage_legacy_relations_integration_test.go), [integration/suites/storage-json](../../integration/suites/storage-json) |
 
 ## Implementation Anchors
 
-- [pkg/sqlitestore/open.go](../../pkg/sqlitestore/open.go)
-- [pkg/sqlitestore/legacy.go](../../pkg/sqlitestore/legacy.go)
-- [pkg/sqlitestore/open_test.go](../../pkg/sqlitestore/open_test.go)
-- [pkg/state/state_sqlite.go](../../pkg/state/state_sqlite.go)
-- [pkg/channels/wecom/reqid_store.go](../../pkg/channels/wecom/reqid_store.go)
-- [pkg/channels/weixin/state_sqlite.go](../../pkg/channels/weixin/state_sqlite.go)
-- [pkg/memory/sqlite_store.go](../../pkg/memory/sqlite_store.go)
-- [pkg/workflows/sqlite_store.go](../../pkg/workflows/sqlite_store.go)
-- [pkg/repoaudit/sqlite.go](../../pkg/repoaudit/sqlite.go)
-- [pkg/repoeval/sqlite.go](../../pkg/repoeval/sqlite.go)
-- [pkg/gateway/runtime_storage_json_allowlist_integration_test.go](../../pkg/gateway/runtime_storage_json_allowlist_integration_test.go)
-- [integration/suites/storage-json](../../integration/suites/storage-json)
+- `internal/sqliteprovider/provider.go`
+- `internal/sqliteprovider/maintenance.go`
+- `internal/sqliteprovider/staged_migration.go`
+- `internal/sqlitestore/open.go`
+- `internal/sqlitestore/legacy.go`
+- `pkg/database/catalog/catalog.go`
+- `pkg/database/migration/migration.go`
+- `pkg/database/architecture_test.go`
+- `pkg/gitworkspace/inventory_sqlite.go`
+- `pkg/gateway/pr_workspace_candidate_checkpoint.go`
+- `pkg/gateway/runtime_storage_json_allowlist_integration_test.go`
+- `integration/suites/storage-json`
+- [Database-Agnostic Single-Owner Layer](database-layer.md)

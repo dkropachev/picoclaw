@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 func TestReqIDStorePersistsRoutes(t *testing.T) {
@@ -616,7 +616,7 @@ func TestReqIDStoreRejectsFutureInvalidCorruptAndSymlinkedDatabases(t *testing.T
 			t.Skipf("symlinks unavailable: %v", err)
 		}
 		if err := newReqIDStore(path).initializationError(); err == nil ||
-			!strings.Contains(err.Error(), "regular file") {
+			(!strings.Contains(err.Error(), "regular file") && !strings.Contains(err.Error(), "unsafe member")) {
 			t.Fatalf("database symlink error = %v", err)
 		}
 	})

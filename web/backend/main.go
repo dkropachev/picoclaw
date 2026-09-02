@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/netbind"
 	"github.com/sipeed/picoclaw/web/backend/api"
@@ -485,6 +486,39 @@ func main() {
 		logger.SetLevelFromString(config.ResolveGatewayLogLevel(absPath))
 	}
 
+	// The database broker must own storage before launcher authentication or
+	// any DB-backed controller starts. The launcher keeps its own online fence
+	// so an offline migration cannot begin while this process is still active,
+	// even if the broker is explicitly stopped.
+	supervisorOptions := database.EnsureOptions{
+		Home: picoHome, Executable: utils.FindPicoclawBinary(), ConfigPath: absPath,
+	}
+	brokerClient, err := database.EnsureSupervisor(context.Background(), supervisorOptions)
+	if err != nil {
+		logger.Fatalf("Failed to start database supervisor: %v", err)
+	}
+	database.InstallProcessClient(brokerClient)
+	brokerStatus, err := brokerClient.Status(context.Background())
+	if err != nil {
+		logger.Fatalf("Failed to read database readiness: %v", err)
+	}
+	if err = database.RequireBrokerReady(brokerStatus); err != nil {
+		logger.Fatalf("Database maintenance is required before launcher startup: %v", err)
+	}
+	launcherStorageFence, err := database.AcquireOnlineFence(picoHome)
+	if err != nil {
+		logger.Fatalf("Failed to fence launcher database ownership: %v", err)
+	}
+	defer launcherStorageFence.Close()
+	monitorContext, stopSupervisorMonitor := context.WithCancel(context.Background())
+	defer stopSupervisorMonitor()
+	go func() {
+		if monitorErr := database.MonitorSupervisor(monitorContext, supervisorOptions); monitorErr != nil &&
+			!errors.Is(monitorErr, context.Canceled) {
+			logger.ErrorC("database", fmt.Sprintf("Database supervisor monitor stopped: %v", monitorErr))
+		}
+	}()
+
 	logger.InfoC("web", fmt.Sprintf("%s launcher starting (version %s)...", appName, appVersion))
 	logger.InfoC("web", fmt.Sprintf("%s Home: %s", appName, picoHome))
 	if debug {
@@ -577,9 +611,9 @@ func main() {
 		logger.Fatalf("Dashboard auth setup failed: %v", dashErr)
 	}
 
-	// Open the bcrypt password store (creates the DB file on first run and
-	// imports removed auth fields from launcher-config.json when present).
-	authStore, authStoreErr := dashboardauth.NewWithLauncherConfig(picoHome, launcherPath)
+	// Launcher authentication is a typed broker client; only the supervisor
+	// process may open the physical password store.
+	authStore, authStoreErr := dashboardauth.NewBroker(brokerClient)
 	if authStoreErr != nil {
 		logger.Fatalf("Failed to open dashboard auth store: %v", authStoreErr)
 	}
@@ -609,6 +643,7 @@ func main() {
 
 	// API Routes (e.g. /api/status)
 	apiHandler = api.NewHandler(absPath)
+	apiHandler.SetDatabaseClient(brokerClient)
 	apiHandler.SetDebug(debug)
 	if _, err = apiHandler.EnsurePicoChannel(); err != nil {
 		logger.ErrorC("web", fmt.Sprintf("Warning: failed to ensure pico channel on startup: %v", err))

@@ -13,10 +13,15 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const maximumEvidenceBytes = 8 << 20
+
+var allowUnfencedLocalCIProviderForTests atomic.Bool
 
 type EvidenceStore interface {
 	PutPlan(ctx context.Context, plan Plan) error
@@ -32,12 +37,15 @@ type EvidenceStore interface {
 }
 
 type FileEvidenceStore struct {
-	rootPath string
-	root     *os.Root
-	cacheDB  *sql.DB
-	mu       sync.Mutex
-	now      func() time.Time
-	cacheTTL time.Duration
+	rootPath       string
+	root           *os.Root
+	cacheDB        *sql.DB
+	cacheBroker    *database.Client
+	cacheStoreID   database.StoreID
+	cacheBrokerErr error
+	mu             sync.Mutex
+	now            func() time.Time
+	cacheTTL       time.Duration
 }
 
 type cacheIndexRecord struct {
@@ -50,12 +58,43 @@ type cacheIndexRecord struct {
 }
 
 func OpenFileEvidenceStore(root string) (*FileEvidenceStore, error) {
+	client := database.RuntimeClient()
+	if client == nil && !database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedLocalCIProviderForTests.Load() {
+		return nil, database.NewError(
+			database.CodeUnavailable,
+			"local CI database broker client is unavailable",
+		)
+	}
+	return openFileEvidenceStore(root, client)
+}
+
+func openFileEvidenceStoreLocal(root string) (*FileEvidenceStore, error) {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedLocalCIProviderForTests.Load() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"local CI provider access requires database owner fencing",
+		)
+	}
+	return openFileEvidenceStore(root, nil)
+}
+
+func openFileEvidenceStore(root string, broker *database.Client) (*FileEvidenceStore, error) {
 	if strings.TrimSpace(root) != root || root == "" {
 		return nil, fmt.Errorf("%w: evidence root is required", ErrInvalid)
 	}
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve local CI evidence root: %w", err)
+	}
+	var cacheStoreID database.StoreID
+	if broker != nil {
+		cacheStoreID, err = resolveCacheStoreID(context.Background(), broker, absolute)
+		if err != nil {
+			return nil, err
+		}
 	}
 	info, err := os.Lstat(absolute)
 	if errors.Is(err, os.ErrNotExist) {
@@ -83,10 +122,12 @@ func OpenFileEvidenceStore(root string) (*FileEvidenceStore, error) {
 		return nil, fmt.Errorf("open local CI evidence root: %w", err)
 	}
 	store := &FileEvidenceStore{
-		rootPath: absolute,
-		root:     rootHandle,
-		now:      func() time.Time { return time.Now().UTC() },
-		cacheTTL: 24 * time.Hour,
+		rootPath:     absolute,
+		root:         rootHandle,
+		cacheBroker:  broker,
+		cacheStoreID: cacheStoreID,
+		now:          func() time.Time { return time.Now().UTC() },
+		cacheTTL:     24 * time.Hour,
 	}
 	for _, directory := range []string{"plans", "executions", "attestations", "cache", "discovery"} {
 		if err = rootHandle.MkdirAll(directory, 0o700); err != nil {
@@ -98,11 +139,13 @@ func OpenFileEvidenceStore(root string) (*FileEvidenceStore, error) {
 			return nil, err
 		}
 	}
-	store.cacheDB, err = store.openCacheDatabase(context.Background())
-	if err != nil {
-		_ = rootHandle.Close()
-		store.root = nil
-		return nil, fmt.Errorf("open local CI passing cache: %w", err)
+	if broker == nil {
+		store.cacheDB, err = store.openCacheDatabase(context.Background())
+		if err != nil {
+			_ = rootHandle.Close()
+			store.root = nil
+			return nil, fmt.Errorf("open local CI passing cache: %w", err)
+		}
 	}
 	return store, nil
 }
@@ -117,6 +160,12 @@ func (store *FileEvidenceStore) Close() error {
 	if store.cacheDB != nil {
 		databaseErr = store.cacheDB.Close()
 		store.cacheDB = nil
+	}
+	if store.cacheBroker != nil {
+		store.cacheBrokerErr = database.NewError(
+			database.CodeUnavailable,
+			"local CI cache client is closed",
+		)
 	}
 	if store.root != nil {
 		rootErr = store.root.Close()
@@ -265,6 +314,9 @@ func (store *FileEvidenceStore) LookupPassing(
 	ctx context.Context,
 	resultKey string,
 ) (Execution, bool, error) {
+	if store != nil && store.cacheBroker != nil {
+		return store.lookupPassingBroker(ctx, resultKey)
+	}
 	return store.lookupPassingCache(ctx, resultKey)
 }
 
@@ -272,6 +324,9 @@ func (store *FileEvidenceStore) PromotePassing(
 	ctx context.Context,
 	resultKey, executionDigest string,
 ) error {
+	if store != nil && store.cacheBroker != nil {
+		return store.promotePassingBroker(ctx, resultKey, executionDigest)
+	}
 	return store.promotePassingCache(ctx, resultKey, executionDigest)
 }
 

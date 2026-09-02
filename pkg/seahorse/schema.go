@@ -1,11 +1,43 @@
 package seahorse
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
+
+func runOfflineSchemaTransaction(db *sql.DB) (returnErr error) {
+	if db == nil {
+		return errors.New("seahorse database is unavailable")
+	}
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, "BEGIN EXCLUSIVE"); err != nil {
+		return fmt.Errorf("begin exclusive Seahorse migration: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = db.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+	// With one configured connection, the existing schema installer executes on
+	// this exclusively locked connection while retaining its proven statements.
+	if err := runSchema(db); err != nil {
+		return err
+	}
+	if err := sqliteprovider.SetSchemaVersion(ctx, db, 1); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("commit Seahorse migration: %w", err)
+	}
+	committed = true
+	return nil
+}
 
 // SQL statements for FTS5 tables with trigram tokenizer.
 const (
@@ -169,6 +201,34 @@ func runSchema(db *sql.DB) error {
 	return nil
 }
 
+func validateCurrentSchema(db *sql.DB) error {
+	required := []string{
+		"conversations", "messages", "message_parts", "summaries",
+		"summary_parents", "summary_messages", "context_items",
+		"summaries_fts", "messages_fts", "summaries_ai", "summaries_ad",
+		"summaries_au", "messages_ai", "messages_ad", "messages_au",
+	}
+	for _, name := range required {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE name=?`, name).Scan(&count); err != nil {
+			return err
+		}
+		if count != 1 {
+			return fmt.Errorf("required schema object %s is missing", name)
+		}
+	}
+	for _, column := range []string{"model_name", "reasoning_content"} {
+		present, err := tableHasColumn(db, "messages", column)
+		if err != nil {
+			return err
+		}
+		if !present {
+			return fmt.Errorf("required messages column %s is missing", column)
+		}
+	}
+	return nil
+}
+
 func ensureMessagesReasoningContentColumn(db *sql.DB) error {
 	hasColumn, err := tableHasColumn(db, "messages", "reasoning_content")
 	if err != nil {
@@ -200,22 +260,15 @@ func ensureMessagesModelNameColumn(db *sql.DB) error {
 }
 
 func tableHasColumn(db *sql.DB, tableName, columnName string) (bool, error) {
-	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, tableName))
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, tableName)
 	if err != nil {
 		return false, err
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var (
-			cid        int
-			name       string
-			columnType string
-			notNull    int
-			defaultVal sql.NullString
-			pk         int
-		)
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &pk); err != nil {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			return false, err
 		}
 		if name == columnName {

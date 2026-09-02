@@ -12,7 +12,7 @@ import (
 //nolint:govet // Independent storage assertions intentionally use narrow error scopes.
 func TestSQLiteStoreMetadataCompareAndDeleteCompatibilityBoundaries(t *testing.T) {
 	_, dir := privateSessionsFixture(t)
-	store, err := NewSQLiteStore(dir)
+	store, err := NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestSQLiteStoreMetadataCompareAndDeleteCompatibilityBoundaries(t *testing.T
 //nolint:govet // Independent storage assertions intentionally use narrow error scopes.
 func TestSQLiteStoreStrictMetadataMutationCreationRollbackAndFieldOwnership(t *testing.T) {
 	_, dir := privateSessionsFixture(t)
-	store, err := NewSQLiteStore(dir)
+	store, err := NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestSQLiteStoreStrictMetadataMutationCreationRollbackAndFieldOwnership(t *t
 
 func TestSQLiteStoreGroupedDeletionAndMatchingCallbacks(t *testing.T) {
 	_, dir := privateSessionsFixture(t)
-	store, err := NewSQLiteStore(dir)
+	store, err := NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/sipeed/picoclaw/pkg/prworkspace"
 	"github.com/sipeed/picoclaw/pkg/prworkspace/localci"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 func TestCheckpointJSONParserRejectsRecursiveMalformedAndDuplicateShapes(t *testing.T) {

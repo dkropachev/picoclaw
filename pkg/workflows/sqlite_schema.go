@@ -11,7 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -420,6 +421,14 @@ func workflowStoreOptions(workspace string) (sqlitestore.Options, error) {
 }
 
 func openWorkflowDatabase(ctx context.Context, workspace string) (*sql.DB, error) {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedWorkflowProviderForTests.Load() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"workflow provider access requires database owner fencing",
+		)
+	}
 	path, err := workflowDatabasePath(workspace)
 	if err != nil {
 		return nil, err
@@ -682,6 +691,10 @@ func workflowDatabaseError(operation string, err error) error {
 	if err == nil {
 		return nil
 	}
+	var structured *database.Error
+	if errors.As(err, &structured) && structured != nil {
+		return database.NewError(structured.Code, structured.Message)
+	}
 	for _, sentinel := range []error{
 		ErrPrivateWorkflowContext,
 		ErrHumanTaskNotFound,
@@ -713,5 +726,9 @@ func workflowDatabaseError(operation string, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return context.DeadlineExceeded
 	}
-	return fmt.Errorf("%w: %s workflow database: %v", ErrWorkflowStorageUnavailable, operation, err)
+	// Preserve both the compatibility storage-unavailable sentinel and the
+	// provider-neutral schema/integrity cause. Local callers retain their
+	// historical classification while the broker can map the underlying cause
+	// to the appropriate structured RPC error.
+	return fmt.Errorf("%w: %s workflow database: %w", ErrWorkflowStorageUnavailable, operation, err)
 }

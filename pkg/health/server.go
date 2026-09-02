@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 type Server struct {
@@ -280,10 +282,20 @@ func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
 	resp := StatusResponse{
 		Status: "ok",
 		Uptime: uptime.String(),
-		PID:    os.Getpid(),
+		PID:    reportedPID(),
 	}
 
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func reportedPID() int {
+	raw := os.Getenv(config.EnvGatewaySupervisorPID)
+	if raw != "" {
+		if pid, err := strconv.Atoi(raw); err == nil && pid > 0 && pid == os.Getppid() {
+			return pid
+		}
+	}
+	return os.Getpid()
 }
 
 func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {

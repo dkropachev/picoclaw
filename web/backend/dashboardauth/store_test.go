@@ -14,13 +14,13 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/web/backend/launcherconfig"
 )
 
 func TestOpenCreatesHardenedSchemaAndReopens(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, DBFilename)
+	path := filepath.Join(dir, databaseFilename)
 	store, openErr := Open(path)
 	if openErr != nil {
 		t.Fatalf("Open() error = %v", openErr)
@@ -89,7 +89,7 @@ func TestOpenCreatesHardenedSchemaAndReopens(t *testing.T) {
 
 func TestOpenRejectsTooNewAndInvalidSchema(t *testing.T) {
 	t.Run("too new", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), DBFilename)
+		path := filepath.Join(t.TempDir(), databaseFilename)
 		store, openErr := Open(path)
 		if openErr != nil {
 			t.Fatal(openErr)
@@ -107,7 +107,7 @@ func TestOpenRejectsTooNewAndInvalidSchema(t *testing.T) {
 	})
 
 	t.Run("invalid schema", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), DBFilename)
+		path := filepath.Join(t.TempDir(), databaseFilename)
 		store, openErr := Open(path)
 		if openErr != nil {
 			t.Fatal(openErr)
@@ -132,7 +132,7 @@ func TestOpenRejectsUnrelatedSchemaObjects(t *testing.T) {
 		"index": `CREATE INDEX rogue_launcher_import_idx ON storage_imports(source_id)`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), DBFilename)
+			path := filepath.Join(t.TempDir(), databaseFilename)
 			store, err := Open(path)
 			if err != nil {
 				t.Fatal(err)
@@ -156,7 +156,7 @@ func TestOpenRejectsUnrelatedSchemaObjects(t *testing.T) {
 
 func TestOpenPreservesUnversionedDatabaseAndArchivesLegacyConfig(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, DBFilename)
+	dbPath := filepath.Join(dir, databaseFilename)
 	legacyHash := testHash(t, "database-password")
 	raw, sqlOpenErr := sql.Open("sqlite", dbPath)
 	if sqlOpenErr != nil {
@@ -237,7 +237,7 @@ func TestLegacyCredentialPrecedenceAndInvalidHashFallback(t *testing.T) {
 			if err := os.WriteFile(configPath, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			store, openErr := OpenWithLauncherConfig(filepath.Join(dir, DBFilename), configPath)
+			store, openErr := OpenWithLauncherConfig(filepath.Join(dir, databaseFilename), configPath)
 			if openErr != nil {
 				t.Fatal(openErr)
 			}
@@ -274,7 +274,7 @@ func TestLegacyArchiveRetryAndConcurrentFinish(t *testing.T) {
 	if err := os.WriteFile(archivePath, []byte("collision"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	dbPath := filepath.Join(dir, DBFilename)
+	dbPath := filepath.Join(dir, databaseFilename)
 	if _, err := OpenWithLauncherConfig(dbPath, configPath); err == nil {
 		t.Fatal("archive collision unexpectedly succeeded")
 	}
@@ -318,7 +318,7 @@ func TestConfigWithoutLegacyAuthDoesNotCreateArchive(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`{"port":18800}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenWithLauncherConfig(filepath.Join(dir, DBFilename), configPath)
+	store, err := OpenWithLauncherConfig(filepath.Join(dir, databaseFilename), configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestLegacyArchiveRejectsSymlinkParentWithoutCleaningSource(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "legacy-json")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenWithLauncherConfig(filepath.Join(dir, DBFilename), configPath); err == nil ||
+	if _, err := OpenWithLauncherConfig(filepath.Join(dir, databaseFilename), configPath); err == nil ||
 		!strings.Contains(err.Error(), "real directory") {
 		t.Fatalf("OpenWithLauncherConfig() error = %v", err)
 	}

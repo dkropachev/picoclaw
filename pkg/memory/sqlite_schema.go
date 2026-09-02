@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 )
 
 const (
-	SessionsDatabaseFilename = "sessions.db"
+	sessionsDatabaseFilename = "sessions.db"
 	sessionsComponent        = "sessions"
 
 	sqlCreateSessions = `CREATE TABLE sessions (
