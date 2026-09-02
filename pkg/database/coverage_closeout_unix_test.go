@@ -18,7 +18,7 @@ import (
 )
 
 func TestCoverageUnixEndpointLifecycle(t *testing.T) {
-	root := t.TempDir()
+	root := shortCoverageUnixTempDir(t)
 	endpoint := filepath.Join(root, "socket-parent", "broker.sock")
 	if err := prepareEndpoint(endpoint); err != nil {
 		t.Fatal(err)
@@ -297,7 +297,7 @@ func TestCoverageUnixEndpointRejectsUnsafeBoundaries(t *testing.T) {
 		}
 	})
 	t.Run("stale socket", func(t *testing.T) {
-		parent := filepath.Join(t.TempDir(), "parent")
+		parent := filepath.Join(shortCoverageUnixTempDir(t), "parent")
 		if err := os.Mkdir(parent, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -320,6 +320,20 @@ func TestCoverageUnixEndpointRejectsUnsafeBoundaries(t *testing.T) {
 			t.Fatalf("stale socket remains: %v", err)
 		}
 	})
+}
+
+func shortCoverageUnixTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("/tmp", "pcdb-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(directory); err != nil {
+			t.Errorf("remove short Unix temp directory: %v", err)
+		}
+	})
+	return directory
 }
 
 func TestCoverageUnixOwnerOnlyFileHelpers(t *testing.T) {
