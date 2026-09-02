@@ -1148,7 +1148,10 @@ function AdaptationProfileRow({
         <div className="border-border/40 bg-muted/10 border-t px-4 py-4">
           <div className="grid gap-3 md:grid-cols-3">
             <ResolvedMetric
-              label={t("pages.agent.tools.adaptation.state_store", "State Store")}
+              label={t(
+                "pages.agent.tools.adaptation.state_store",
+                "State Store",
+              )}
               value={resolved.store_id || "unavailable"}
             />
             <ResolvedMetric
