@@ -33,6 +33,24 @@ func TestGatewayHostOverrideUsesExplicitRuntimePublic(t *testing.T) {
 	}
 }
 
+func TestGatewayHostOverridePreservesExplicitGatewayEnvironment(t *testing.T) {
+	t.Setenv(config.EnvGatewayHost, "127.0.0.1")
+
+	h := NewHandler(filepath.Join(t.TempDir(), "config.json"))
+	h.SetServerOptions(18800, true, true, nil)
+	h.SetServerBindHost("0.0.0.0", true)
+
+	if got := h.gatewayHostOverride(); got != "" {
+		t.Fatalf("gatewayHostOverride() = %q, want config environment authority", got)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Gateway.Host = "127.0.0.1"
+	if got := h.effectiveGatewayBindHost(cfg); got != "127.0.0.1" {
+		t.Fatalf("effectiveGatewayBindHost() = %q, want %q", got, "127.0.0.1")
+	}
+}
+
 func TestBuildWsURLUsesRequestHostWhenLauncherPublicSaved(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	launcherPath := launcherconfig.PathForAppConfig(configPath)

@@ -600,7 +600,7 @@ func main() {
 	}
 
 	// Initialize Server components
-	mux := http.NewServeMux()
+	mux := newLauncherServeMux(time.Now())
 
 	api.RegisterLauncherAuthRoutes(mux, api.LauncherAuthRouteOpts{
 		SessionCookie: dashboardSessionCookie,
@@ -635,11 +635,10 @@ func main() {
 	if err != nil {
 		logger.Fatalf("Invalid allowed CIDR configuration: %v", err)
 	}
-
 	dashAuth := middleware.LauncherDashboardAuth(middleware.LauncherDashboardAuthConfig{
 		ExpectedCookie: dashboardSessionCookie,
 		LocalAutoLogin: localAutoLogin,
-	}, accessControlledMux)
+	}, allowLoopbackLauncherHealth(canonicalPathMux, accessControlledMux))
 
 	// Apply middleware stack
 	handler := middleware.Recoverer(

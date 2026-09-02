@@ -11,58 +11,93 @@
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. 首次运行 — 自动生成 docker/data/config.json 后退出
-#    （仅在 config.json 和 workspace/ 都不存在时触发）
-docker compose -f docker/docker-compose.yml --profile gateway up
-# 容器打印 "First-run setup complete." 后自动停止
-
-# 3. 填写 API Key 等配置
-vim docker/data/config.json   # 设置 provider API key、Bot Token 等
-
-# 4. 正式启动
-docker compose -f docker/docker-compose.yml --profile gateway up -d
+# 2. 启动 Web + API + Gateway 单节点套件
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
 
-> [!TIP]
-> **Docker 用户**: 默认情况下, Gateway 监听 `127.0.0.1`，该端口不会暴露到容器外。如果需要通过端口映射访问健康检查接口，请在环境变量中设置 `PICOCLAW_GATEWAY_HOST=0.0.0.0` 或修改 `config.json`。
+打开 <http://localhost:18800/launcher-setup>，创建 dashboard 密码，然后在 WebUI 中配置提供商和模型。
+
+此命令会启动一个容器，其中包含：
+
+- 在已发布 `18800` 端口上运行的内嵌 WebUI 和 launcher API；
+- 在容器回环地址上运行、由 launcher 管理的 Gateway 子进程；
+- 一并持久保存在 `docker/data/` 中的文件型 SQLite 数据库和 workspace 数据。
+
+默认情况下，`18800` 端口仅绑定到主机回环地址（`127.0.0.1`）。任何对外开放前，请先在本机完成 `/launcher-setup`。只有明确需要 LAN 访问时，才使用以下命令重启套件：
 
 ```bash
-# 5. 查看日志
-docker compose -f docker/docker-compose.yml logs -f picoclaw-gateway
-
-# 6. 停止
-docker compose -f docker/docker-compose.yml --profile gateway down
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
 
-### Launcher 模式 (Web 控制台)
-
-`launcher` 镜像包含两个二进制文件（`picoclaw`、`picoclaw-launcher`），默认启动 Web 控制台，提供基于浏览器的配置和聊天界面。
-
-```bash
-docker compose -f docker/docker-compose.yml --profile launcher up -d
-```
-
-在浏览器中打开 <http://localhost:18800>。Launcher 会自动管理 Gateway 进程。
+浏览器聊天和媒体通过 launcher 已认证的同源代理访问，因此无需发布 Gateway 端口。`/health` 和 `/ready` 上的公开 `GET`/`HEAD` 探针独立报告 launcher 可用性，不受 Gateway 或模型配置影响。
 
 > [!WARNING]
-> Web 控制台通过 dashboard 登录密码保护。**不要**将启动器暴露到不可信网络或公网。完整说明见 [配置指南](configuration.md) 中的「Web 启动器控制台」一节。
+> Web 控制台通过 dashboard 登录密码保护，但不终止 TLS。允许 LAN 访问时，请使用防火墙或 TLS 反向代理，并配置 launcher 的 CIDR 控制。不要将其直接暴露到不可信网络。
+
+### 直接访问 Gateway（webhook）
+
+如果 HTTP 回调 channel 或高级集成需要直接访问 Gateway，请使用附加文件选择性发布 `18790` 端口：
+
+```bash
+docker compose -f docker/docker-compose.yml \
+  -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
+
+附加文件会将受管 Gateway 的绑定地址改为 `0.0.0.0` 并发布 `18790` 端口。请使用防火墙或 TLS 反向代理保护此端口。采用 socket、stream 或 long-polling 传输的 channel 不需要此附加文件。
+
+### 仅 Gateway 模式
+
+基础 Compose 文件仅包含 launcher；headless service 位于 `docker-compose.headless.yml`。如需只运行常驻 Gateway，请启用其 profile 并明确指定 service：
+
+```bash
+docker compose -f docker/docker-compose.headless.yml --profile gateway up --remove-orphans picoclaw-gateway
+```
+
+`--remove-orphans` 会在独立 Gateway 启动前停止同一 Compose 项目中现有的 launcher 容器，避免两套 Gateway 进程树共享 PID 文件和 SQLite 目录。
+
+使用全新 volume 时，core image 会生成 `docker/data/config.json` 后退出。设置提供商和 channel 值，然后加 `-d` 再次启动该 service。仅 Gateway 模式在 Gateway 端口提供 webhook、Pico、健康检查和受保护的 runtime route；它不提供 launcher WebUI 或通用 REST 聊天 endpoint。
 
 ### Agent 模式 (一次性运行)
 
 ```bash
 # 提问
-docker compose -f docker/docker-compose.yml run --rm picoclaw-agent -m "2+2 等于几？"
+docker compose -f docker/docker-compose.headless.yml run --rm picoclaw-agent -m "2+2 等于几？"
 
 # 交互模式
-docker compose -f docker/docker-compose.yml run --rm picoclaw-agent
+docker compose -f docker/docker-compose.headless.yml run --rm picoclaw-agent
+```
+
+### 日志与停止
+
+```bash
+# 查看默认套件日志
+docker compose -f docker/docker-compose.yml logs -f picoclaw-launcher
+
+# 停止套件
+docker compose -f docker/docker-compose.yml down
 ```
 
 ### 更新镜像
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile gateway up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
+
+从旧版基于 profile 的 Compose 布局一次性迁移时，请在首次启动新布局前停止并删除旧布局中名称固定的容器。此操作不会删除 bind mount 的 `docker/data/` 目录：
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+```
+
+### 备份与恢复
+
+复制或恢复 `docker/data/` 前，请停止所有 PicoClaw 进程。将整个目录视为同一个快照，确保每个 SQLite 数据库始终与其对应的 `-wal`、`-shm` 和锁文件配套。不要让不同版本的二进制文件使用同一个主目录/workspace。
+
+### 完整 MCP Runtime
+
+默认 launcher 镜像是最小化 Alpine runtime，不包含用于 stdio MCP package 的 Node.js、Python 或 `uv`。`docker-compose.full.yml` 保留了现有的完整 MCP agent 和 headless Gateway profile；它目前不提供 launcher service。
 
 ---
 

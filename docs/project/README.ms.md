@@ -256,29 +256,42 @@ Untuk dokumentasi WebUI terperinci, lihat [docs.picoclaw.io](https://docs.picocl
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. Jalankan pertama kali — jana docker/data/config.json secara automatik kemudian keluar
-docker compose -f docker/docker-compose.yml --profile launcher up
-
-# 3. Tetapkan kunci API anda
-vim docker/data/config.json
-
-# 4. Mulakan
-docker compose -f docker/docker-compose.yml --profile launcher up -d
-# Buka http://localhost:18800
+# 2. Mulakan API, WebUI dan pangkalan data dalam satu tika
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+# Buka http://localhost:18800/launcher-setup dan lengkapkan persediaan dalam WebUI
 ```
 
-> **Pengguna Docker / VM:** Gateway mendengar pada `127.0.0.1` secara lalai. Tetapkan `PICOCLAW_GATEWAY_HOST=0.0.0.0` atau gunakan bendera `-public` untuk membolehkan akses dari hos.
+Secara lalai, hanya port WebUI/API `18800` diterbitkan dan hanya pada gelung balik hos. Lengkapkan persediaan setempat dahulu di `http://localhost:18800/launcher-setup`. Untuk membenarkan akses LAN:
+
+```bash
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+Perintah ini mendedahkan WebUI/API melalui HTTP pada semua antara muka. Hadkan akses dengan tembok api dan gunakan proksi TLS sebelum mendedahkannya di luar rangkaian yang dipercayai.
+
+Untuk mendedahkan Gateway secara langsung pada port `18790` bagi integrasi webhook, gunakan fail tindihan pilihan:
+
+```bash
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
 
 ```bash
 # Semak log
 docker compose -f docker/docker-compose.yml logs -f
 
 # Henti
-docker compose -f docker/docker-compose.yml --profile launcher down
+docker compose -f docker/docker-compose.yml down
 
 # Kemas kini
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile launcher up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+Semasa menaik taraf kali pertama daripada susun atur Compose lama berasaskan profil, hentikan dan alih keluar bekas bernama tetap sebelum memulakan susun atur baharu. Data berterusan dalam `docker/data/` kekal disimpan:
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
 ```
 
 </details>

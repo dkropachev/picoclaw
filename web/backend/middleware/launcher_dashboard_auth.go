@@ -130,7 +130,7 @@ func ClearLauncherDashboardSessionCookie(w http.ResponseWriter, r *http.Request,
 }
 
 // LauncherDashboardAuth requires a valid session cookie before calling next.
-// Public paths are login/setup pages and /api/auth/* handlers.
+// Public paths are health probes, login/setup pages, and /api/auth/* handlers.
 func LauncherDashboardAuth(cfg LauncherDashboardAuthConfig, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := canonicalAuthPath(r.URL.Path)
@@ -254,6 +254,8 @@ func isPublicLauncherDashboardPath(method, p string) bool {
 		return true
 	}
 	switch p {
+	case "/health", "/ready":
+		return method == http.MethodGet || method == http.MethodHead
 	case "/api/auth/login":
 		return method == http.MethodPost
 	case "/api/auth/logout":

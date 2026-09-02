@@ -254,35 +254,46 @@ Mở WebUI, sau đó: **1)** Cấu hình Provider (thêm API key LLM của bạn
 <summary><b>Docker (thay thế)</b></summary>
 
 ```bash
-# 1. Clone this repo
+# 1. Sao chép kho mã nguồn này
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. First run — auto-generates docker/data/config.json then exits
-#    (only triggers when both config.json and workspace/ are missing)
-docker compose -f docker/docker-compose.yml --profile launcher up
-# The container prints "First-run setup complete." and stops.
-
-# 3. Set your API keys
-vim docker/data/config.json
-
-# 4. Start
-docker compose -f docker/docker-compose.yml --profile launcher up -d
-# Open http://localhost:18800
+# 2. Khởi động API, WebUI và cơ sở dữ liệu trong một instance
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+# Mở http://localhost:18800/launcher-setup và hoàn tất thiết lập trong WebUI
 ```
 
-> **Người dùng Docker / VM:** Gateway lắng nghe trên `127.0.0.1` theo mặc định. Đặt `PICOCLAW_GATEWAY_HOST=0.0.0.0` hoặc dùng cờ `-public` để có thể truy cập từ host.
+Theo mặc định, chỉ cổng WebUI/API `18800` được mở và chỉ trên loopback của host. Trước tiên, hoàn tất thiết lập cục bộ tại `http://localhost:18800/launcher-setup`. Để cho phép truy cập từ LAN:
 
 ```bash
-# Check logs
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+Lệnh này mở WebUI/API qua HTTP trên mọi giao diện mạng. Hạn chế truy cập bằng tường lửa và dùng proxy TLS trước khi mở ra ngoài mạng đáng tin cậy.
+
+Để mở trực tiếp cổng Gateway `18790` cho các tích hợp webhook, dùng tệp override tùy chọn:
+
+```bash
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
+
+```bash
+# Xem log
 docker compose -f docker/docker-compose.yml logs -f
 
-# Stop
-docker compose -f docker/docker-compose.yml --profile launcher down
+# Dừng
+docker compose -f docker/docker-compose.yml down
 
-# Update
+# Cập nhật
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile launcher up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+Khi nâng cấp lần đầu từ bố cục Compose cũ dựa trên profile, hãy dừng và xóa các container có tên cố định trước khi khởi động bố cục mới. Dữ liệu lâu dài trong `docker/data/` vẫn được giữ nguyên:
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
 ```
 
 </details>

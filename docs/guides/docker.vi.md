@@ -11,58 +11,93 @@ Bạn cũng có thể chạy PicoClaw bằng Docker Compose mà không cần cà
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. Lần chạy đầu tiên — tự động tạo docker/data/config.json rồi thoát
-#    (chỉ kích hoạt khi cả config.json và workspace/ đều không tồn tại)
-docker compose -f docker/docker-compose.yml --profile gateway up
-# Container hiển thị "First-run setup complete." và dừng lại.
-
-# 3. Cấu hình API key của bạn
-vim docker/data/config.json   # Set provider API keys, bot tokens, etc.
-
-# 4. Khởi động
-docker compose -f docker/docker-compose.yml --profile gateway up -d
+# 2. Khởi động gói một nút Web + API + Gateway
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
 
-> [!TIP]
-> **Người dùng Docker**: Mặc định, Gateway lắng nghe trên `127.0.0.1`, không thể truy cập từ host. Nếu bạn cần truy cập các health endpoint hoặc mở port, hãy đặt `PICOCLAW_GATEWAY_HOST=0.0.0.0` trong môi trường hoặc cập nhật `config.json`.
+Mở <http://localhost:18800/launcher-setup>, tạo mật khẩu dashboard, sau đó cấu hình nhà cung cấp và mô hình trong WebUI.
+
+Lệnh này khởi động một container chứa:
+
+- WebUI tích hợp và API launcher trên port `18800` được công khai;
+- tiến trình con Gateway do launcher quản lý trên loopback của container;
+- cơ sở dữ liệu SQLite dạng file và dữ liệu workspace được lưu lâu dài cùng nhau trong `docker/data/`.
+
+Theo mặc định, port `18800` chỉ bind vào địa chỉ loopback của host (`127.0.0.1`). Hoàn tất `/launcher-setup` trên máy cục bộ trước khi công khai. Chỉ khi có yêu cầu truy cập LAN, hãy khởi động lại gói bằng:
 
 ```bash
-# 5. Kiểm tra log
-docker compose -f docker/docker-compose.yml logs -f picoclaw-gateway
-
-# 6. Dừng
-docker compose -f docker/docker-compose.yml --profile gateway down
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
 
-### Chế Độ Launcher (Web Console)
-
-Image `launcher` bao gồm cả hai binary (`picoclaw`, `picoclaw-launcher`) và khởi động web console mặc định, cung cấp giao diện trình duyệt để cấu hình và chat.
-
-```bash
-docker compose -f docker/docker-compose.yml --profile launcher up -d
-```
-
-Mở http://localhost:18800 trong trình duyệt. Launcher tự động quản lý tiến trình gateway.
+Chat và media trong trình duyệt sử dụng các proxy same-origin đã xác thực của launcher, vì vậy không cần công khai port Gateway. Các probe `GET`/`HEAD` công khai tại `/health` và `/ready` báo cáo tình trạng hoạt động của launcher độc lập với cấu hình Gateway hoặc mô hình.
 
 > [!WARNING]
-> Web console được bảo vệ bằng mật khẩu đăng nhập dashboard. Không để lộ launcher ra mạng không tin cậy hoặc internet công cộng.
+> Web console được bảo vệ bằng mật khẩu đăng nhập dashboard nhưng không kết thúc TLS. Khi truy cập qua LAN, hãy sử dụng firewall hoặc reverse proxy TLS và cấu hình kiểm soát CIDR của launcher. Không để lộ trực tiếp ra mạng không tin cậy.
+
+### Truy cập trực tiếp Gateway (webhook)
+
+Nếu channel callback HTTP hoặc integration nâng cao cần truy cập trực tiếp Gateway, hãy chủ động công khai port `18790` bằng file bổ sung:
+
+```bash
+docker compose -f docker/docker-compose.yml \
+  -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
+
+File bổ sung đổi địa chỉ bind của Gateway được quản lý thành `0.0.0.0` và công khai port `18790`. Bảo vệ port này bằng firewall hoặc reverse proxy TLS. Các channel sử dụng socket, stream hoặc long-polling không cần file bổ sung này.
+
+### Chế độ chỉ Gateway
+
+File Compose cơ sở chỉ chứa launcher; các service headless nằm trong `docker-compose.headless.yml`. Để chỉ chạy Gateway dài hạn, hãy chỉ định rõ service và bật profile của nó:
+
+```bash
+docker compose -f docker/docker-compose.headless.yml --profile gateway up --remove-orphans picoclaw-gateway
+```
+
+`--remove-orphans` dừng mọi container launcher hiện có trong cùng project Compose trước khi Gateway độc lập khởi động, ngăn hai cây tiến trình Gateway dùng chung file PID và thư mục SQLite.
+
+Trên volume mới, core image tạo `docker/data/config.json` rồi thoát. Đặt các giá trị nhà cung cấp và channel, sau đó khởi động lại service đó với `-d`. Chế độ chỉ Gateway phục vụ các route webhook, Pico, tình trạng và runtime được bảo vệ trên port Gateway; chế độ này không cung cấp WebUI launcher hoặc các endpoint chat REST chung.
 
 ### Chế Độ Agent (One-shot)
 
 ```bash
 # Đặt câu hỏi
-docker compose -f docker/docker-compose.yml run --rm picoclaw-agent -m "What is 2+2?"
+docker compose -f docker/docker-compose.headless.yml run --rm picoclaw-agent -m "What is 2+2?"
 
 # Chế độ tương tác
-docker compose -f docker/docker-compose.yml run --rm picoclaw-agent
+docker compose -f docker/docker-compose.headless.yml run --rm picoclaw-agent
+```
+
+### Log và dừng
+
+```bash
+# Kiểm tra log của gói mặc định
+docker compose -f docker/docker-compose.yml logs -f picoclaw-launcher
+
+# Dừng gói
+docker compose -f docker/docker-compose.yml down
 ```
 
 ### Cập Nhật
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile gateway up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
+
+Khi di chuyển một lần từ bố cục Compose cũ dựa trên profile, hãy dừng và xóa các container có tên cố định trước lần khởi động đầu tiên với bố cục mới. Thao tác này không xóa thư mục `docker/data/` được gắn bằng bind mount:
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+```
+
+### Sao lưu và khôi phục
+
+Dừng mọi tiến trình PicoClaw trước khi sao chép hoặc khôi phục `docker/data/`. Coi toàn bộ thư mục là một snapshot để mỗi cơ sở dữ liệu SQLite luôn đi cùng các file `-wal`, `-shm` và file khóa tương ứng. Không chạy các phiên bản binary khác nhau trên cùng một home/workspace.
+
+### Runtime MCP đầy đủ
+
+Image launcher mặc định là runtime Alpine tối thiểu và không bao gồm Node.js, Python hoặc `uv` cho các package MCP stdio. `docker-compose.full.yml` giữ lại các profile agent MCP đầy đủ và Gateway headless hiện có; hiện tại file này không cung cấp service launcher.
 
 ### 🚀 Bắt Đầu Nhanh
 
