@@ -645,7 +645,6 @@ func (p *blockingDirectProvider) Chat(
 	finalResp := p.finalResp
 	if call == 1 && p.firstStarted != nil {
 		close(p.firstStarted)
-		p.firstStarted = nil
 	}
 	p.mu.Unlock()
 

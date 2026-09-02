@@ -45,18 +45,35 @@ func (f *fakeChannel) ReasoningChannelID() string                 { return f.id 
 
 type fakeMediaChannel struct {
 	fakeChannel
+	mu           sync.Mutex
 	sentMessages []bus.OutboundMessage
 	sentMedia    []bus.OutboundMediaMessage
 }
 
 func (f *fakeMediaChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]string, error) {
+	f.mu.Lock()
 	f.sentMessages = append(f.sentMessages, msg)
+	f.mu.Unlock()
 	return nil, nil
 }
 
 func (f *fakeMediaChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) ([]string, error) {
+	f.mu.Lock()
 	f.sentMedia = append(f.sentMedia, msg)
+	f.mu.Unlock()
 	return nil, nil
+}
+
+func (f *fakeMediaChannel) messagesSnapshot() []bus.OutboundMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bus.OutboundMessage(nil), f.sentMessages...)
+}
+
+func (f *fakeMediaChannel) mediaSnapshot() []bus.OutboundMediaMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bus.OutboundMediaMessage(nil), f.sentMedia...)
 }
 
 type recordingChannelManager struct {
@@ -1901,14 +1918,15 @@ func TestProcessMessage_MediaToolHandledSkipsFollowUpLLMAndFinalText(t *testing.
 		t.Fatal("expected tools to be available on the first LLM call")
 	}
 
-	if len(telegramChannel.sentMedia) != 1 {
-		t.Fatalf("expected exactly 1 synchronously sent media message, got %d", len(telegramChannel.sentMedia))
+	sentMedia := telegramChannel.mediaSnapshot()
+	if len(sentMedia) != 1 {
+		t.Fatalf("expected exactly 1 synchronously sent media message, got %d", len(sentMedia))
 	}
-	if telegramChannel.sentMedia[0].Channel != "telegram" || telegramChannel.sentMedia[0].ChatID != "chat1" {
-		t.Fatalf("unexpected sent media target: %+v", telegramChannel.sentMedia[0])
+	if sentMedia[0].Channel != "telegram" || sentMedia[0].ChatID != "chat1" {
+		t.Fatalf("unexpected sent media target: %+v", sentMedia[0])
 	}
-	if len(telegramChannel.sentMedia[0].Parts) != 1 {
-		t.Fatalf("expected exactly 1 sent media part, got %d", len(telegramChannel.sentMedia[0].Parts))
+	if len(sentMedia[0].Parts) != 1 {
+		t.Fatalf("expected exactly 1 sent media part, got %d", len(sentMedia[0].Parts))
 	}
 
 	select {
@@ -1997,8 +2015,8 @@ func TestProcessMessage_HandledToolProcessesQueuedSteeringBeforeReturning(t *tes
 	if provider.calls != 2 {
 		t.Fatalf("expected 2 LLM calls after queued steering, got %d", provider.calls)
 	}
-	if len(telegramChannel.sentMedia) != 1 {
-		t.Fatalf("expected exactly 1 synchronously sent media message, got %d", len(telegramChannel.sentMedia))
+	if sentMedia := telegramChannel.mediaSnapshot(); len(sentMedia) != 1 {
+		t.Fatalf("expected exactly 1 synchronously sent media message, got %d", len(sentMedia))
 	}
 }
 
@@ -2058,27 +2076,28 @@ func TestRunAgentLoop_ResponseHandledToolPublishesForUserWhenSendResponseDisable
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
-	for len(telegramChannel.sentMessages) == 0 && time.Now().Before(deadline) {
+	for len(telegramChannel.messagesSnapshot()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(telegramChannel.sentMessages) != 1 {
-		t.Fatalf("expected exactly 1 sent text message, got %d", len(telegramChannel.sentMessages))
+	sentMessages := telegramChannel.messagesSnapshot()
+	if len(sentMessages) != 1 {
+		t.Fatalf("expected exactly 1 sent text message, got %d", len(sentMessages))
 	}
-	if telegramChannel.sentMessages[0].Content != "Handled user output from tool." {
-		t.Fatalf("unexpected sent text message: %+v", telegramChannel.sentMessages[0])
+	if sentMessages[0].Content != "Handled user output from tool." {
+		t.Fatalf("unexpected sent text message: %+v", sentMessages[0])
 	}
-	if telegramChannel.sentMessages[0].Context.TopicID != "42" {
-		t.Fatalf("sent text topic_id = %q, want 42", telegramChannel.sentMessages[0].Context.TopicID)
+	if sentMessages[0].Context.TopicID != "42" {
+		t.Fatalf("sent text topic_id = %q, want 42", sentMessages[0].Context.TopicID)
 	}
-	if telegramChannel.sentMessages[0].AgentID != defaultAgent.ID {
-		t.Fatalf("sent text agent_id = %q, want %q", telegramChannel.sentMessages[0].AgentID, defaultAgent.ID)
+	if sentMessages[0].AgentID != defaultAgent.ID {
+		t.Fatalf("sent text agent_id = %q, want %q", sentMessages[0].AgentID, defaultAgent.ID)
 	}
-	if telegramChannel.sentMessages[0].SessionKey != "session-1" {
-		t.Fatalf("sent text session_key = %q, want session-1", telegramChannel.sentMessages[0].SessionKey)
+	if sentMessages[0].SessionKey != "session-1" {
+		t.Fatalf("sent text session_key = %q, want session-1", sentMessages[0].SessionKey)
 	}
-	if telegramChannel.sentMessages[0].Scope == nil ||
-		telegramChannel.sentMessages[0].Scope.Values["chat"] != "forum:chat1/42" {
-		t.Fatalf("unexpected sent text scope: %+v", telegramChannel.sentMessages[0].Scope)
+	if sentMessages[0].Scope == nil ||
+		sentMessages[0].Scope.Values["chat"] != "forum:chat1/42" {
+		t.Fatalf("unexpected sent text scope: %+v", sentMessages[0].Scope)
 	}
 }
 
@@ -2310,14 +2329,15 @@ func TestProcessMessage_MediaArtifactCanBeForwardedBySendFile(t *testing.T) {
 		t.Fatalf("expected 2 LLM calls (artifact + send_file), got %d", provider.calls)
 	}
 
-	if len(telegramChannel.sentMedia) != 1 {
-		t.Fatalf("expected exactly 1 synchronously sent media message, got %d", len(telegramChannel.sentMedia))
+	sentMedia := telegramChannel.mediaSnapshot()
+	if len(sentMedia) != 1 {
+		t.Fatalf("expected exactly 1 synchronously sent media message, got %d", len(sentMedia))
 	}
-	if telegramChannel.sentMedia[0].Channel != "telegram" || telegramChannel.sentMedia[0].ChatID != "chat1" {
-		t.Fatalf("unexpected sent media target: %+v", telegramChannel.sentMedia[0])
+	if sentMedia[0].Channel != "telegram" || sentMedia[0].ChatID != "chat1" {
+		t.Fatalf("unexpected sent media target: %+v", sentMedia[0])
 	}
-	if len(telegramChannel.sentMedia[0].Parts) != 1 {
-		t.Fatalf("expected exactly 1 sent media part, got %d", len(telegramChannel.sentMedia[0].Parts))
+	if len(sentMedia[0].Parts) != 1 {
+		t.Fatalf("expected exactly 1 sent media part, got %d", len(sentMedia[0].Parts))
 	}
 
 	select {

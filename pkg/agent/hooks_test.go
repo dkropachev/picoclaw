@@ -1320,10 +1320,11 @@ func TestAgentLoop_HookRespond_ResponseHandledMediaPreservesOutboundContext(t *t
 		t.Fatalf("runAgentLoop failed: %v", err)
 	}
 
-	if len(telegramChannel.sentMedia) != 1 {
-		t.Fatalf("expected exactly 1 sent media message, got %d", len(telegramChannel.sentMedia))
+	sentMedia := telegramChannel.mediaSnapshot()
+	if len(sentMedia) != 1 {
+		t.Fatalf("expected exactly 1 sent media message, got %d", len(sentMedia))
 	}
-	sent := telegramChannel.sentMedia[0]
+	sent := sentMedia[0]
 	if sent.Context.Channel != "telegram" || sent.Context.ChatID != "-100123" || sent.Context.TopicID != "42" {
 		t.Fatalf("unexpected media context: %+v", sent.Context)
 	}

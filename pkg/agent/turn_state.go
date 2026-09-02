@@ -1623,7 +1623,10 @@ func (ts *turnState) markGracefulTerminalUsed() {
 }
 
 func (ts *turnState) requestHardAbort() bool {
-	return requestTurnTreeCancellationWithClaim(ts.al, ts, true, false)
+	ts.mu.RLock()
+	al := ts.al
+	ts.mu.RUnlock()
+	return requestTurnTreeCancellationWithClaim(al, ts, true, false)
 }
 
 // requestTurnTreeCancellation first marks every reachable descendant and only
@@ -1982,6 +1985,7 @@ func (ts *turnState) commitClaimedTerminalWithPolicy(
 	actual := candidate
 	committed := false
 	var trackedResultOrphans []trackedSubagentResultOrphan
+	var turnLoop *AgentLoop
 	ts.finishOnce.Do(func() {
 		committed = true
 		ts.mu.Lock()
@@ -1994,6 +1998,7 @@ func (ts *turnState) commitClaimedTerminalWithPolicy(
 			actual = TurnEndStatusError
 		}
 		ts.terminalStatus = actual
+		turnLoop = ts.al
 		ts.isFinished.Store(true)
 		switch actual {
 		case TurnEndStatusCompleted:
@@ -2006,16 +2011,16 @@ func (ts *turnState) commitClaimedTerminalWithPolicy(
 			ts.finishedChan = make(chan struct{})
 		}
 		close(ts.finishedChan)
-		if ts.al != nil {
-			trackedResultOrphans = ts.al.noteTrackedSubagentResultTurnTerminalSafely(
+		if turnLoop != nil {
+			trackedResultOrphans = turnLoop.noteTrackedSubagentResultTurnTerminalSafely(
 				ts.turnID,
 				actual,
 			)
 		}
 	})
-	if ts.al != nil {
+	if turnLoop != nil {
 		for _, orphan := range trackedResultOrphans {
-			ts.al.emitTrackedSubagentResultOrphan(orphan)
+			turnLoop.emitTrackedSubagentResultOrphan(orphan)
 		}
 	}
 	if committed {
@@ -2135,7 +2140,10 @@ func (ts *turnState) Finish(isHardAbort bool) {
 	status := TurnEndStatusCompleted
 	if isHardAbort {
 		status = TurnEndStatusAborted
-		_ = requestTurnTreeCancellationWithClaim(ts.al, ts, true, true)
+		ts.mu.RLock()
+		al := ts.al
+		ts.mu.RUnlock()
+		_ = requestTurnTreeCancellationWithClaim(al, ts, true, true)
 	}
 	ts.commitClaimedTerminal(status)
 }
