@@ -124,7 +124,7 @@ func newWeixinStateStore(locator, kind string) (*weixinStateStore, error) {
 	if strings.TrimSpace(locator) == "" {
 		return nil, errors.New("Weixin state path is required")
 	}
-	if client := weixinBrokerClient(); client != nil {
+	if client := database.RuntimeClient(); client != nil {
 		store, err := newBrokerWeixinStateStore(locator, kind, client)
 		if err != nil {
 			return nil, err

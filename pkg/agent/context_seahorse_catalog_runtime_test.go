@@ -66,7 +66,7 @@ func TestSeahorseCatalogRuntimeReloadBuildsFreshFactoryTopologyAfterClosingA(t *
 			ctx,
 			raw,
 			owner,
-			defaultSeahorseContextDependencies(),
+			testSeahorseContextDependencies(),
 		)
 	}
 
@@ -156,7 +156,7 @@ func TestSeahorseCatalogRuntimeReloadCandidateFailureFallsBackWithoutRoots(t *te
 			cfgB := seahorseCatalogRuntimeConfig(t, root, []string{"beta", "gamma"})
 			providerB := &seahorseTestProvider{}
 			ensureStrictTestModelSelection(cfgB, providerB)
-			base := defaultSeahorseContextDependencies()
+			base := testSeahorseContextDependencies()
 			created := make([]*seahorse.Engine, 0, 2)
 			closed := make(map[*seahorse.Engine]int)
 			var creationCalls int
@@ -272,7 +272,7 @@ func TestSeahorseCatalogRuntimeCanceledReloadBootstrapClosesCandidate(t *testing
 	cfgB := seahorseCatalogRuntimeConfig(t, root, []string{"beta", "gamma"})
 	providerB := &seahorseTestProvider{}
 	ensureStrictTestModelSelection(cfgB, providerB)
-	base := defaultSeahorseContextDependencies()
+	base := testSeahorseContextDependencies()
 	entered := make(chan struct{})
 	created := make([]*seahorse.Engine, 0, 2)
 	closed := make(map[*seahorse.Engine]int)

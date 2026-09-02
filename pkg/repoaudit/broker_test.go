@@ -116,7 +116,7 @@ func TestReviewBrokerMultiClientWorkerAtomicity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reviewBrokerClient = func() *database.Client { return secondClient }
+	database.InstallProcessClient(secondClient)
 	second := NewSQLiteStore(workspace)
 	const writers = 10
 	var wait sync.WaitGroup
@@ -379,9 +379,9 @@ func closeReviewBroker(t *testing.T, server *database.Server) {
 
 func setReviewBrokerClientForTest(t *testing.T, client *database.Client) {
 	t.Helper()
-	previous := reviewBrokerClient
-	reviewBrokerClient = func() *database.Client { return client }
-	t.Cleanup(func() { reviewBrokerClient = previous })
+	previous := database.RuntimeClient()
+	database.InstallProcessClient(client)
+	t.Cleanup(func() { database.InstallProcessClient(previous) })
 }
 
 func newReviewBrokerHandlerForTest(

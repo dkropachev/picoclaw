@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -574,6 +576,127 @@ func TestSessionBrokerWorkspaceResolutionAndOfflineMigration(t *testing.T) {
 	}
 }
 
+func TestSessionBrokerCatalogResolutionAndDeepCloneBoundaries(t *testing.T) {
+	home := t.TempDir()
+	if _, err := NewBrokerAdapter(home, nil, "invalid store"); database.CodeOf(err) != database.CodeInvalid {
+		t.Fatalf("invalid broker StoreID error = %v", err)
+	}
+	primary, err := configuredSessionsDirectory(home, nil, SessionsStoreID)
+	if err != nil || primary != filepath.Join(home, "workspace", "sessions") {
+		t.Fatalf("default sessions directory = %q, %v", primary, err)
+	}
+	agentWorkspace := filepath.Join(home, "agent")
+	cfg := &config.Config{Agents: config.AgentsConfig{
+		Defaults: config.AgentDefaults{Workspace: filepath.Join(home, "primary")},
+		List: []config.AgentConfig{
+			{ID: "blank", Workspace: ""},
+			{ID: "duplicate", Workspace: filepath.Join(home, "primary")},
+			{ID: "agent", Workspace: agentWorkspace},
+		},
+	}}
+	selector, err := WorkspaceSelector(filepath.Join(agentWorkspace, "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentID, err := database.ParseStoreID("workspace." + selector + ".sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory, err := configuredSessionsDirectory(home, cfg, agentID)
+	if err != nil || directory != filepath.Join(agentWorkspace, "sessions") {
+		t.Fatalf("agent sessions directory = %q, %v", directory, err)
+	}
+	if _, err := configuredSessionsDirectory(
+		home,
+		cfg,
+		"workspace.unknown.sessions",
+	); database.CodeOf(
+		err,
+	) != database.CodeUnauthorized {
+		t.Fatalf("unknown sessions StoreID error = %v", err)
+	}
+
+	now := time.Now().UTC()
+	cache := &providers.CacheControl{Type: "ephemeral"}
+	function := &providers.FunctionCall{Name: "tool", Arguments: `{}`}
+	google := &providers.GoogleExtra{ThoughtSignature: "signature"}
+	original := []providers.Message{{
+		Role: "assistant", Content: "content", CreatedAt: &now,
+		Media: []string{"media"}, Attachments: []providers.Attachment{{Ref: "attachment"}},
+		Parts:       []providers.PromptPart{{Type: "text", Text: "part"}},
+		SystemParts: []providers.ContentBlock{{Type: "text", Text: "system", CacheControl: cache}},
+		ToolCalls: []providers.ToolCall{{
+			ID: "call", Function: function,
+			ExtraContent: &providers.ExtraContent{Google: google},
+		}},
+	}}
+	cloned := cloneProviderMessages(original)
+	cloned[0].Media[0] = "changed"
+	cloned[0].SystemParts[0].CacheControl.Type = "changed"
+	cloned[0].ToolCalls[0].Function.Name = "changed"
+	cloned[0].ToolCalls[0].ExtraContent.Google.ThoughtSignature = "changed"
+	if original[0].Media[0] != "media" || original[0].SystemParts[0].CacheControl.Type != "ephemeral" ||
+		original[0].ToolCalls[0].Function.Name != "tool" ||
+		original[0].ToolCalls[0].ExtraContent.Google.ThoughtSignature != "signature" {
+		t.Fatal("deep broker message clone aliases input")
+	}
+}
+
+func TestSessionBrokerAuthorityAndResolutionFailureBoundaries(t *testing.T) {
+	home := t.TempDir()
+	func() {
+		restoreAuthority := database.SuspendProviderTestAuthority()
+		defer restoreAuthority()
+		allowUnfencedSessionsProviderForTests.Store(false)
+		if adapter, err := NewBrokerAdapter(home, nil, SessionsStoreID); adapter != nil ||
+			database.CodeOf(err) != database.CodeUnauthorized {
+			t.Fatalf("unfenced broker adapter = %#v, %v", adapter, err)
+		}
+	}()
+	allowUnfencedSessionsProviderForTests.Store(true)
+	t.Cleanup(func() { allowUnfencedSessionsProviderForTests.Store(true) })
+	if _, err := NewBrokerAdapter(
+		home,
+		nil,
+		"workspace.unknown.sessions",
+	); database.CodeOf(
+		err,
+	) != database.CodeUnauthorized {
+		t.Fatalf("uncataloged broker adapter error = %v", err)
+	}
+	if _, err := configuredSessionsDirectory(
+		" invalid-home ",
+		nil,
+		SessionsStoreID,
+	); database.CodeOf(
+		err,
+	) != database.CodeInvalid {
+		t.Fatalf("invalid configured sessions home error = %v", err)
+	}
+
+	client := startMemoryCoverageServer(t, t.TempDir(), database.HandlerFunc(
+		func(_ context.Context, request database.Request) (any, error) {
+			if request.Operation == SessionOperationResolveStore {
+				return StoreResolutionResponse{}, nil
+			}
+			return nil, database.NewError(database.CodeUnavailable, "unavailable")
+		},
+	))
+	if _, err := ResolveBrokerStoreID(
+		t.Context(),
+		client,
+		filepath.Join(home, "sessions"),
+	); database.CodeOf(
+		err,
+	) != database.CodeIntegrity {
+		t.Fatalf("invalid resolved StoreID error = %v", err)
+	}
+	store := &SQLiteStore{brokerClient: client, storeID: SessionsStoreID}
+	if err := store.pingBroker(t.Context()); database.CodeOf(err) != database.CodeUnavailable {
+		t.Fatalf("broker ping failure = %v", err)
+	}
+}
+
 func TestSessionBrokerClientFacadeCompleteLifecycle(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, "workspace", "sessions")
@@ -714,6 +837,28 @@ func TestSessionBrokerClientFacadeCompleteLifecycle(t *testing.T) {
 	}
 	if deleted, err := store.DeleteSessions(t.Context(), []string{"admitted-client"}); err != nil || !deleted {
 		t.Fatalf("client grouped delete = %t, %v", deleted, err)
+	}
+	if err := store.EnsureSessionHistory(t.Context(), "matched-client"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSessionMeta(
+		t.Context(), "matched-client", scope, []string{"matched-alias"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := store.DeleteSessionsWithAliasesMatching(
+		t.Context(), []string{"matched-alias"},
+		func(SessionMeta, bool) bool { return false },
+		func(SessionMeta, string) bool { return false },
+	); err != nil || deleted {
+		t.Fatalf("nonmatching client delete = %t, %v", deleted, err)
+	}
+	if deleted, err := store.DeleteSessionsWithAliasesMatching(
+		t.Context(), []string{"matched-alias"},
+		func(meta SessionMeta, exists bool) bool { return exists && meta.Key == "matched-client" },
+		func(SessionMeta, string) bool { return true },
+	); err != nil || !deleted {
+		t.Fatalf("matching client delete = %t, %v", deleted, err)
 	}
 	if len(store.ListSessions()) == 0 {
 		t.Fatal("client session list is empty")

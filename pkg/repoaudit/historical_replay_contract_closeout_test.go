@@ -336,3 +336,90 @@ func TestHistoricalResumeAndRestartAdvanceSetupCheckpoint(t *testing.T) {
 		t.Fatalf("not-required restart = %v", err)
 	}
 }
+
+func TestHistoricalMergeRecoveryPreservesIdempotenceAndStateFences(t *testing.T) {
+	now := time.Date(2026, 9, 2, 14, 0, 0, 0, time.UTC)
+	store := newSQLiteStoreLocal(t.TempDir())
+	store.now = func() time.Time { return now }
+	state, err := store.load("owner/recover-idempotent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.HistoricalDeduplication = HistoricalDeduplicationReplay{
+		Required: true, Status: HistoricalDeduplicationReplaying,
+		ProfileSnapshot: historicalReplayCoverageSnapshot(), UpdatedAt: now,
+	}
+	state.UpdatedAt = now
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	recovered, replay, err := store.RecoverHistoricalDeduplicationMerge(state.Repository, "lease")
+	if err != nil || recovered.Version != state.Version || replay.Status != HistoricalDeduplicationReplaying {
+		t.Fatalf("idempotent recovery = %#v, %#v, %v", recovered, replay, err)
+	}
+	if _, _, recoveryErr := store.RecoverHistoricalDeduplicationMerge(
+		"owner/not-merging",
+		"lease",
+	); !errors.Is(
+		recoveryErr,
+		ErrConflict,
+	) {
+		t.Fatalf("invalid recovery state = %v", recoveryErr)
+	}
+}
+
+func TestHistoricalRestartClosureAndRetryRejectIncompleteState(t *testing.T) {
+	dependency := HistoricalDeduplicationDependency{
+		LegacyFindingID: "a", RawFindingID: "rrw_a",
+		CampaignID: "campaign", AdmissionBucket: "bucket",
+	}
+	missing := dependency
+	missing.LegacyFindingID = "missing"
+	if _, err := historicalDeduplicationRestartClosure(
+		RepositoryState{}, []HistoricalDeduplicationDependency{dependency},
+		[]HistoricalDeduplicationDependency{missing}, false,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("missing restart dependency = %v", err)
+	}
+	extra := dependency
+	extra.LegacyFindingID = "b"
+	extra.RawFindingID = "rrw_b"
+	state := RepositoryState{
+		RawFindings: []RawReviewFinding{
+			{ID: "rrw_a", LegacyFindingID: "a", AssignmentID: historicalReplayAssignmentID},
+			{ID: "rrw_b", LegacyFindingID: "b", AssignmentID: historicalReplayAssignmentID},
+		},
+		DeduplicatedFindings: []DeduplicatedReviewFinding{{RawSourceIDs: []string{"rrw_a", "rrw_b"}}},
+	}
+	desired := dependency
+	desired.CampaignID = "changed"
+	if _, err := historicalDeduplicationRestartClosure(
+		state, []HistoricalDeduplicationDependency{dependency, extra},
+		[]HistoricalDeduplicationDependency{desired}, false,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("aggregate restart dependency = %v", err)
+	}
+
+	if _, err := retryHistoricalDeduplicationReplayInState(nil, time.Now()); err == nil {
+		t.Fatal("nil retry state was accepted")
+	}
+	if err := resetFailedHistoricalDeduplicationModelWork(nil, time.Now()); err == nil {
+		t.Fatal("nil failed-work state was accepted")
+	}
+	if err := resetFailedHistoricalDeduplicationModelWork(
+		&RepositoryState{},
+		time.Now(),
+	); !errors.Is(
+		err,
+		ErrConflict,
+	) {
+		t.Fatalf("empty failed-work reset = %v", err)
+	}
+	broken := RepositoryState{RawFindings: []RawReviewFinding{{
+		ID: "rrw_broken", LegacyFindingID: "broken", AssignmentID: historicalReplayAssignmentID,
+		State: RawFindingDeduplicationFailed,
+	}}}
+	if err := resetFailedHistoricalDeduplicationModelWork(&broken, time.Now()); !errors.Is(err, ErrConflict) {
+		t.Fatalf("broken failed-work reset = %v", err)
+	}
+}

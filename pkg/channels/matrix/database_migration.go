@@ -21,24 +21,39 @@ const (
 	matrixMigrationAfterVersion = "after-version"
 )
 
-var matrixMigrationCheckpoint = func(string) error { return nil }
-
 // MigrateCryptoDatabase upgrades Matrix state and crypto schemas while the
 // caller holds the exclusive offline migration fence.
 func MigrateCryptoDatabase(ctx context.Context, path string) error {
+	return migrateCryptoDatabaseWithCheckpoint(ctx, path, nil)
+}
+
+func migrateCryptoDatabaseWithCheckpoint(
+	ctx context.Context,
+	path string,
+	checkpoint func(string) error,
+) error {
 	if !database.MigrationFenceHeld() {
 		return database.NewError(database.CodeConflict, "Matrix migration requires the exclusive database fence")
+	}
+	if checkpoint == nil {
+		checkpoint = func(string) error { return nil }
 	}
 	return sqliteprovider.MigrateStagedOffline(
 		ctx,
 		path,
 		5*time.Second,
 		1,
-		migrateCryptoDatabaseStage,
+		func(ctx context.Context, stagedPath string) error {
+			return migrateCryptoDatabaseStage(ctx, stagedPath, checkpoint)
+		},
 	)
 }
 
-func migrateCryptoDatabaseStage(ctx context.Context, path string) (returnErr error) {
+func migrateCryptoDatabaseStage(
+	ctx context.Context,
+	path string,
+	checkpoint func(string) error,
+) (returnErr error) {
 	db, openErr := sqliteprovider.OpenStore(path, 5*time.Second)
 	if openErr != nil {
 		return openErr
@@ -60,7 +75,7 @@ func migrateCryptoDatabaseStage(ctx context.Context, path string) (returnErr err
 	if err := stateStore.Upgrade(ctx); err != nil {
 		return err
 	}
-	if err := matrixMigrationCheckpoint(matrixMigrationAfterState); err != nil {
+	if err := checkpoint(matrixMigrationAfterState); err != nil {
 		return err
 	}
 	cryptoStore := crypto.NewSQLCryptoStore(
@@ -73,11 +88,11 @@ func migrateCryptoDatabaseStage(ctx context.Context, path string) (returnErr err
 	if err := cryptoStore.DB.Upgrade(ctx); err != nil {
 		return err
 	}
-	if err := matrixMigrationCheckpoint(matrixMigrationAfterCrypto); err != nil {
+	if err := checkpoint(matrixMigrationAfterCrypto); err != nil {
 		return err
 	}
 	if err := sqliteprovider.SetSchemaVersion(ctx, db, 1); err != nil {
 		return err
 	}
-	return matrixMigrationCheckpoint(matrixMigrationAfterVersion)
+	return checkpoint(matrixMigrationAfterVersion)
 }

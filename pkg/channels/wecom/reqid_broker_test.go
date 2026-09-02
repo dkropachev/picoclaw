@@ -80,7 +80,7 @@ func TestReqIDBrokerMultiClientConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wecomBrokerClient = func() *database.Client { return secondClient }
+	database.InstallProcessClient(secondClient)
 	second := newReqIDStore("")
 	if err := second.initializationError(); err != nil {
 		t.Fatal(err)
@@ -118,9 +118,9 @@ func TestReqIDBrokerMultiClientConcurrency(t *testing.T) {
 }
 
 func TestReqIDBrokerHandlerCannotReenterRuntimeClient(t *testing.T) {
-	previous := wecomBrokerClient
-	wecomBrokerClient = func() *database.Client { panic("broker handler consulted runtime client") }
-	t.Cleanup(func() { wecomBrokerClient = previous })
+	previous := database.RuntimeClient()
+	database.InstallProcessClient(&database.Client{})
+	t.Cleanup(func() { database.InstallProcessClient(previous) })
 	handler := NewBrokerHandler(t.TempDir())
 	store, err := handler.open()
 	if err != nil {
@@ -156,7 +156,7 @@ func closeWecomBroker(t *testing.T, server *database.Server) {
 
 func setWecomBrokerClientForTest(t *testing.T, client *database.Client) {
 	t.Helper()
-	previous := wecomBrokerClient
-	wecomBrokerClient = func() *database.Client { return client }
-	t.Cleanup(func() { wecomBrokerClient = previous })
+	previous := database.RuntimeClient()
+	database.InstallProcessClient(client)
+	t.Cleanup(func() { database.InstallProcessClient(previous) })
 }

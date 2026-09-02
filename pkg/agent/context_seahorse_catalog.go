@@ -43,8 +43,6 @@ type seahorseBootstrapFunc func(
 	string,
 ) error
 
-var newRuntimeSeahorseEngine seahorseEngineFactory = seahorse.NewEngine
-
 type seahorseContextDependencies struct {
 	newEngine   seahorseEngineFactory
 	closeEngine seahorseEngineCloser
@@ -54,7 +52,7 @@ type seahorseContextDependencies struct {
 
 func defaultSeahorseContextDependencies() seahorseContextDependencies {
 	return seahorseContextDependencies{
-		newEngine: newRuntimeSeahorseEngine,
+		newEngine: seahorse.NewEngine,
 		closeEngine: func(engine *seahorse.Engine) error {
 			return engine.Close()
 		},

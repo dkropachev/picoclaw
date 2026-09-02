@@ -12,11 +12,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
-var (
-	runGatewayRuntimeCommand    = runAuthenticatedGatewayRuntime
-	runGatewaySupervisorCommand = runSupervisedGateway
-)
-
 func resolveGatewayHostOverride(explicit bool, host string) (string, error) {
 	if !explicit {
 		return "", nil
@@ -72,10 +67,10 @@ func NewGatewayCommand() *cobra.Command {
 
 			if os.Getenv(gatewayRuntimeChildEnvironment) != "" {
 				_ = os.Unsetenv(gatewayRuntimeChildEnvironment)
-				return runGatewayRuntimeCommand(cmd.Context(), debug, allowEmpty)
+				return runAuthenticatedGatewayRuntime(cmd.Context(), debug, allowEmpty)
 			}
 
-			return runGatewaySupervisorCommand(cmd, debug, noTruncate, allowEmpty)
+			return runSupervisedGateway(cmd, debug, noTruncate, allowEmpty)
 		},
 	}
 

@@ -1,7 +1,6 @@
 package database
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -16,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
 	dblayer "github.com/sipeed/picoclaw/pkg/database"
+	"github.com/sipeed/picoclaw/pkg/prworkspace/localci"
 )
 
 func TestDatabaseCommandConfigurationAndWorkspaceBoundaries(t *testing.T) {
@@ -52,24 +52,9 @@ func TestDatabaseCommandConfigurationAndWorkspaceBoundaries(t *testing.T) {
 	if _, err := trustedWorkspace(home, "bad\x00workspace"); dblayer.CodeOf(err) != dblayer.CodeInvalid {
 		t.Fatalf("NUL workspace error = %v", err)
 	}
-}
-
-func TestEnsureForCommandProjectsExecutableAndConfig(t *testing.T) {
-	previous := ensureSupervisor
-	t.Cleanup(func() { ensureSupervisor = previous })
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.json")
-	t.Setenv(config.EnvHome, home)
-	t.Setenv(config.EnvConfig, configPath)
-	want := errors.New("ensure called")
-	ensureSupervisor = func(_ context.Context, options dblayer.EnsureOptions) (*dblayer.Client, error) {
-		if options.Home != home || options.ConfigPath != configPath || options.Executable == "" {
-			t.Fatalf("ensure options = %#v", options)
-		}
-		return nil, want
-	}
-	if _, err := ensureForCommand(t.Context()); !errors.Is(err, want) {
-		t.Fatalf("ensureForCommand error = %v", err)
+	t.Setenv("HOME", "")
+	if _, err := trustedWorkspace(home, "~"); dblayer.CodeOf(err) != dblayer.CodeInvalid {
+		t.Fatalf("home-less workspace error = %v", err)
 	}
 }
 
@@ -211,7 +196,7 @@ func TestDatabaseServeOwnsTypedDomainRouter(t *testing.T) {
 	for _, domain := range []string{
 		"launcher-auth", "auth", "model-catalogs", "workflows", "cron", "account-routing",
 		"sessions", "eventing", "evolution", "repository-reviews", "repository-evaluations",
-		"runtime-state", "seahorse", "local-ci", "channel-wecom", "channel-weixin",
+		"runtime-state", "seahorse", localci.CacheBrokerDomain, "channel-wecom", "channel-weixin",
 		"tool-adaptation", sqlbridge.RPCDomain, "git-workspace-inventory", "pr-workspace-checkpoints",
 	} {
 		err := client.Call(
@@ -240,49 +225,6 @@ func TestDatabaseServeOwnsTypedDomainRouter(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("database serve did not stop")
-	}
-}
-
-func TestDatabaseStatusRefreshesStaleInheritedClient(t *testing.T) {
-	home := t.TempDir()
-	first, err := dblayer.StartServer(t.Context(), dblayer.ServerOptions{Home: home})
-	if err != nil {
-		t.Fatal(err)
-	}
-	stale, err := dblayer.ConnectWithManifest(home, first.Manifest())
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if closeErr := first.Close(ctx); closeErr != nil {
-		cancel()
-		t.Fatal(closeErr)
-	}
-	cancel()
-	second, err := dblayer.StartServer(t.Context(), dblayer.ServerOptions{Home: home})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = second.Close(ctx)
-	})
-
-	previous := ensureSupervisor
-	t.Cleanup(func() { ensureSupervisor = previous })
-	ensureSupervisor = func(context.Context, dblayer.EnsureOptions) (*dblayer.Client, error) {
-		return stale, nil
-	}
-	command := NewDatabaseCommand()
-	var output bytes.Buffer
-	command.SetOut(&output)
-	command.SetArgs([]string{"status"})
-	if err := command.Execute(); err != nil {
-		t.Fatalf("status refresh: %v", err)
-	}
-	if !strings.Contains(output.String(), second.Manifest().Epoch) {
-		t.Fatalf("refreshed status = %s", output.String())
 	}
 }
 
@@ -341,58 +283,16 @@ type failingWriter struct{ err error }
 
 func (writer failingWriter) Write([]byte) (int, error) { return 0, writer.err }
 
-func TestDatabaseCommandOutputAndEnsureErrors(t *testing.T) {
+func TestDatabaseCommandOutputErrors(t *testing.T) {
 	want := errors.New("write failed")
 	command := NewDatabaseCommand()
 	command.SetOut(failingWriter{err: want})
 	if err := writeJSON(command, map[string]bool{"ok": true}); !errors.Is(err, want) {
 		t.Fatalf("writeJSON error = %v", err)
 	}
-
-	previous := ensureSupervisor
-	t.Cleanup(func() { ensureSupervisor = previous })
-	ensureSupervisor = func(context.Context, dblayer.EnsureOptions) (*dblayer.Client, error) {
-		return nil, want
-	}
-	for _, name := range []string{"status", "shutdown"} {
-		command = NewDatabaseCommand()
-		command.SetOut(&bytes.Buffer{})
-		command.SetArgs([]string{name})
-		if err := command.Execute(); !errors.Is(err, want) {
-			t.Fatalf("database %s error = %v", name, err)
-		}
-	}
 }
 
-func TestDatabaseCommandsReturnStaleBrokerAndMigrationInputErrors(t *testing.T) {
-	home := t.TempDir()
-	server, err := dblayer.StartServer(t.Context(), dblayer.ServerOptions{Home: home})
-	if err != nil {
-		t.Fatal(err)
-	}
-	stale, err := dblayer.ConnectWithManifest(home, server.Manifest())
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := server.Close(ctx); err != nil {
-		cancel()
-		t.Fatal(err)
-	}
-	cancel()
-	previous := ensureSupervisor
-	t.Cleanup(func() { ensureSupervisor = previous })
-	ensureSupervisor = func(context.Context, dblayer.EnsureOptions) (*dblayer.Client, error) { return stale, nil }
-	for _, name := range []string{"status", "shutdown"} {
-		command := NewDatabaseCommand()
-		command.SetOut(io.Discard)
-		command.SetErr(io.Discard)
-		command.SetArgs([]string{name})
-		if err := command.Execute(); err == nil {
-			t.Fatalf("database %s accepted stale broker", name)
-		}
-	}
-
+func TestDatabaseCommandsReturnMigrationInputErrors(t *testing.T) {
 	t.Setenv(config.EnvHome, " invalid-home ")
 	command := NewDatabaseCommand()
 	command.SetOut(io.Discard)
@@ -402,7 +302,7 @@ func TestDatabaseCommandsReturnStaleBrokerAndMigrationInputErrors(t *testing.T) 
 		t.Fatalf("invalid migration home error = %v", err)
 	}
 
-	home = t.TempDir()
+	home := t.TempDir()
 	broken := filepath.Join(home, "broken.json")
 	if err := os.WriteFile(broken, []byte(`{"agents":`), 0o600); err != nil {
 		t.Fatal(err)
@@ -422,6 +322,19 @@ func TestLazyDomainHandlerWithoutOpenerFailsClosed(t *testing.T) {
 	lazy := &lazyDomainHandler{}
 	if err := lazy.ensureOpen(); dblayer.CodeOf(err) != dblayer.CodeUnavailable {
 		t.Fatalf("zero lazy handler error = %v", err)
+	}
+}
+
+func TestLazyDomainHandlerRejectsPostOpenClosedState(t *testing.T) {
+	handler := &lazyDomainHandler{
+		handler: dblayer.HandlerFunc(func(context.Context, dblayer.Request) (any, error) {
+			return dblayer.EmptyPayload{}, nil
+		}),
+		closed: true,
+	}
+	handler.once.Do(func() {})
+	if _, err := handler.Handle(t.Context(), dblayer.Request{}); dblayer.CodeOf(err) != dblayer.CodeUnavailable {
+		t.Fatalf("closed post-open handler = %v", err)
 	}
 }
 

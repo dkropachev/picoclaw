@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/bits"
 	"net"
 	"os"
 	"os/exec"
@@ -37,9 +38,16 @@ type coverageBlock struct {
 	File       string
 	Range      string
 	StartLine  int
+	StartCol   int
 	EndLine    int
+	EndCol     int
 	Statements int
 	Covered    bool
+}
+
+type coverageBlockIdentity struct {
+	File  string
+	Range string
 }
 
 type goCachePaths struct {
@@ -57,9 +65,10 @@ type coveragePlan struct {
 }
 
 const (
-	featureCoverageRegressionToleranceStatements = 10
-	coverageNestedBenchmarkSkipPattern           = `^Test(GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath|WorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig)$`
-	coverageGoTestParallelism                    = 1
+	newFeatureMinimumCoveragePercent   = 95
+	changedCodeMinimumCoveragePercent  = 90
+	coverageNestedBenchmarkSkipPattern = `^Test(GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath|WorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig)$`
+	coverageGoTestParallelism          = 1
 )
 
 type listedPackage struct {
@@ -129,7 +138,7 @@ func runCoverageDelta(root, base, head, tags string, forcedPackages []string, in
 		formatCoverage(headProfile.Global),
 		uncoveredStatements(baseProfile.Global),
 		uncoveredStatements(headProfile.Global),
-		changedLineStatus(plan.ChangedLines),
+		changedCodeStatus(changedCodeCoverage(plan.ChangedLines, headProfile)),
 	)
 	return nil
 }
@@ -242,6 +251,7 @@ func isCoverageRelevantGoFile(path string) bool {
 		return false
 	}
 	if strings.HasPrefix(path, "cmd/") ||
+		strings.HasPrefix(path, "internal/") ||
 		strings.HasPrefix(path, "pkg/") ||
 		strings.HasPrefix(path, "web/backend/") ||
 		strings.HasPrefix(path, "integration/") {
@@ -1096,7 +1106,7 @@ func parseCoverageBlock(root, modulePath, line string) (coverageBlock, error) {
 	if len(fields) != 3 {
 		return coverageBlock{}, fmt.Errorf("invalid coverage fields %q", line)
 	}
-	startLine, endLine, err := coverageRangeLines(fields[0])
+	startLine, startCol, endLine, endCol, err := coverageRange(fields[0])
 	if err != nil {
 		return coverageBlock{}, fmt.Errorf("invalid coverage range in %q: %w", line, err)
 	}
@@ -1112,34 +1122,41 @@ func parseCoverageBlock(root, modulePath, line string) (coverageBlock, error) {
 		File:       filePath,
 		Range:      fields[0],
 		StartLine:  startLine,
+		StartCol:   startCol,
 		EndLine:    endLine,
+		EndCol:     endCol,
 		Statements: statements,
 		Covered:    count > 0,
 	}, nil
 }
 
-func coverageRangeLines(value string) (int, int, error) {
+func coverageRange(value string) (int, int, int, int, error) {
 	parts := strings.Split(value, ",")
 	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("expected start,end")
+		return 0, 0, 0, 0, fmt.Errorf("expected start,end")
 	}
-	start, err := coveragePointLine(parts[0])
+	startLine, startCol, err := coveragePoint(parts[0])
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, 0, err
 	}
-	end, err := coveragePointLine(parts[1])
+	endLine, endCol, err := coveragePoint(parts[1])
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, 0, err
 	}
-	return start, end, nil
+	return startLine, startCol, endLine, endCol, nil
 }
 
-func coveragePointLine(value string) (int, error) {
-	line, _, ok := strings.Cut(value, ".")
+func coveragePoint(value string) (int, int, error) {
+	lineText, colText, ok := strings.Cut(value, ".")
 	if !ok {
-		return 0, fmt.Errorf("expected line.column")
+		return 0, 0, fmt.Errorf("expected line.column")
 	}
-	return strconv.Atoi(line)
+	line, lineErr := strconv.Atoi(lineText)
+	column, colErr := strconv.Atoi(colText)
+	if lineErr != nil || colErr != nil || line < 1 || column < 1 {
+		return 0, 0, fmt.Errorf("expected positive line.column")
+	}
+	return line, column, nil
 }
 
 func coverageFileToRepoPath(root, modulePath, filePath string) string {
@@ -1212,13 +1229,30 @@ func compareCoverage(
 	baseProfile, headProfile coverageProfile,
 ) []string {
 	var failures []string
-	if summaryRegressed(baseProfile.Global, headProfile.Global) {
+	if baseProfile.Global.TotalStatements == 0 && headProfile.Global.TotalStatements > 0 &&
+		!coverageAtLeastPercent(headProfile.Global, newFeatureMinimumCoveragePercent) {
 		failures = append(failures, fmt.Sprintf(
-			"scoped Go uncovered statement debt increased: %d -> %d (coverage %s -> %s)",
+			"scoped new Go coverage is below %d%%: %s",
+			newFeatureMinimumCoveragePercent,
+			formatCoverage(headProfile.Global),
+		))
+	} else if baseProfile.Global.TotalStatements > 0 &&
+		summaryRegressed(baseProfile.Global, headProfile.Global) {
+		failures = append(failures, fmt.Sprintf(
+			"scoped Go coverage regressed: uncovered statement debt %d -> %d and coverage %s -> %s",
 			uncoveredStatements(baseProfile.Global),
 			uncoveredStatements(headProfile.Global),
 			formatCoverage(baseProfile.Global),
 			formatCoverage(headProfile.Global),
+		))
+	}
+	changedSummary := changedCodeCoverage(plan.ChangedLines, headProfile)
+	if changedSummary.TotalStatements > 0 &&
+		!coverageAtLeastPercent(changedSummary, changedCodeMinimumCoveragePercent) {
+		failures = append(failures, fmt.Sprintf(
+			"changed production Go coverage is below %d%%: %s",
+			changedCodeMinimumCoveragePercent,
+			formatCoverage(changedSummary),
 		))
 	}
 
@@ -1233,20 +1267,25 @@ func compareCoverage(
 		if headSummary.TotalStatements == 0 {
 			continue
 		}
-		if featureSummaryRegressed(baseSummary, headSummary) {
+		if baseSummary.TotalStatements == 0 {
+			if !coverageAtLeastPercent(headSummary, newFeatureMinimumCoveragePercent) {
+				failures = append(failures, fmt.Sprintf(
+					"%s new Go feature coverage is below %d%%: %s",
+					spec.RelPath,
+					newFeatureMinimumCoveragePercent,
+					formatCoverage(headSummary),
+				))
+			}
+			continue
+		}
+		if summaryRegressed(baseSummary, headSummary) {
 			failures = append(failures, fmt.Sprintf(
-				"%s Go uncovered statement debt increased: %d -> %d (coverage %s -> %s)",
+				"%s Go coverage regressed: uncovered statement debt %d -> %d and coverage %s -> %s",
 				spec.RelPath,
 				uncoveredStatements(baseSummary),
 				uncoveredStatements(headSummary),
 				formatCoverage(baseSummary),
 				formatCoverage(headSummary),
-			))
-		}
-		if baseSummary.TotalStatements == 0 && headSummary.TotalStatements > 0 && headSummary.CoveredStatements == 0 {
-			failures = append(failures, fmt.Sprintf(
-				"%s owns new Go production statements but has zero covered statements",
-				spec.RelPath,
 			))
 		}
 	}
@@ -1281,64 +1320,55 @@ func specOwnsCodeFile(spec featureSpecMetadata, file string) bool {
 	return false
 }
 
-func changedLineCoverageFailures(changedLines map[string]map[int]bool, profile coverageProfile) []string {
-	var failures []string
+func changedCodeCoverage(
+	changedLines map[string]map[int]bool,
+	profile coverageProfile,
+) coverageSummary {
+	changedBlocks := make(map[coverageBlockIdentity]coverageBlock)
 	for file, lines := range changedLines {
 		if !isGoProductionCoverageFile(file) || !isProductionCodePath(file) {
 			continue
 		}
-		blocks := profile.Blocks[file]
-		if len(blocks) == 0 {
-			continue
-		}
-		for _, line := range sortedLineNumbers(lines) {
-			matching := blocksForLine(blocks, line)
-			if len(matching) == 0 {
+		for _, block := range profile.Blocks[file] {
+			if !blockTouchesChangedLine(block, lines) {
 				continue
 			}
-			covered := false
-			for _, block := range matching {
-				if block.Covered {
-					covered = true
-					break
-				}
+			identity := coverageBlockIdentity{File: file, Range: block.Range}
+			if existing, ok := changedBlocks[identity]; ok {
+				existing.Covered = existing.Covered || block.Covered
+				changedBlocks[identity] = existing
+				continue
 			}
-			if !covered {
-				failures = append(failures, fmt.Sprintf("%s:%d changed executable line is not covered", file, line))
-			}
+			block.File = file
+			changedBlocks[identity] = block
 		}
 	}
-	return failures
+	var summary coverageSummary
+	for _, block := range changedBlocks {
+		summary.TotalStatements += block.Statements
+		if block.Covered {
+			summary.CoveredStatements += block.Statements
+		}
+	}
+	return summary
 }
 
-func changedLineStatus(changedLines map[string]map[int]bool) string {
-	total := 0
-	for file, lines := range changedLines {
-		if !isGoProductionCoverageFile(file) || !isProductionCodePath(file) {
-			continue
+func blockTouchesChangedLine(block coverageBlock, lines map[int]bool) bool {
+	for line := range lines {
+		endsAfterLineStart := line < block.EndLine ||
+			line == block.EndLine && (block.EndCol == 0 || block.EndCol > 1)
+		if line >= block.StartLine && endsAfterLineStart {
+			return true
 		}
-		total += len(lines)
 	}
-	if total == 0 {
-		return "no changed production Go lines"
-	}
-	return fmt.Sprintf("%d changed production Go line(s) covered", total)
+	return false
 }
 
-func blocksForLine(blocks map[string]coverageBlock, line int) []coverageBlock {
-	var matching []coverageBlock
-	for _, block := range blocks {
-		if line >= block.StartLine && line <= block.EndLine {
-			matching = append(matching, block)
-		}
+func changedCodeStatus(summary coverageSummary) string {
+	if summary.TotalStatements == 0 {
+		return "no changed executable Go statements"
 	}
-	sort.Slice(matching, func(i, j int) bool {
-		if matching[i].StartLine != matching[j].StartLine {
-			return matching[i].StartLine < matching[j].StartLine
-		}
-		return matching[i].EndLine < matching[j].EndLine
-	})
-	return matching
+	return fmt.Sprintf("changed executable Go coverage %s", formatCoverage(summary))
 }
 
 func changedGoLines(root, base, head string) (map[string]map[int]bool, error) {
@@ -1410,12 +1440,33 @@ func isGoProductionCoverageFile(path string) bool {
 }
 
 func summaryRegressed(base, head coverageSummary) bool {
-	return uncoveredStatements(head) > uncoveredStatements(base)
+	return uncoveredStatements(head) > uncoveredStatements(base) &&
+		coverageRatioLess(head, base)
 }
 
-func featureSummaryRegressed(base, head coverageSummary) bool {
-	return uncoveredStatements(head) >
-		uncoveredStatements(base)+featureCoverageRegressionToleranceStatements
+func coverageAtLeastPercent(summary coverageSummary, minimum int) bool {
+	return !coverageRatioLess(summary, coverageSummary{
+		CoveredStatements: minimum,
+		TotalStatements:   100,
+	})
+}
+
+func coverageRatioLess(left, right coverageSummary) bool {
+	leftCovered, leftTotal := exactCoverageRatio(left)
+	rightCovered, rightTotal := exactCoverageRatio(right)
+	leftHigh, leftLow := bits.Mul64(leftCovered, rightTotal)
+	rightHigh, rightLow := bits.Mul64(rightCovered, leftTotal)
+	if leftHigh != rightHigh {
+		return leftHigh < rightHigh
+	}
+	return leftLow < rightLow
+}
+
+func exactCoverageRatio(summary coverageSummary) (uint64, uint64) {
+	if summary.TotalStatements == 0 {
+		return 1, 1
+	}
+	return uint64(summary.CoveredStatements), uint64(summary.TotalStatements)
 }
 
 func uncoveredStatements(summary coverageSummary) int {
@@ -1442,15 +1493,6 @@ func sortedKeys(values map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-func sortedLineNumbers(values map[int]bool) []int {
-	lines := make([]int, 0, len(values))
-	for line := range values {
-		lines = append(lines, line)
-	}
-	sort.Ints(lines)
-	return lines
 }
 
 func regexpMarkdownLink() *regexp.Regexp {

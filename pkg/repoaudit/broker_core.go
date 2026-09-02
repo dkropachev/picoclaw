@@ -31,8 +31,6 @@ const defaultReviewBrokerLeaseTTL = 30 * time.Second
 
 const ReviewStoreID database.StoreID = "workspace.repository-reviews"
 
-var reviewBrokerClient = database.RuntimeClient
-
 type auditBrokerClientState struct {
 	mu      sync.Mutex
 	leaseID string
@@ -76,10 +74,12 @@ type reviewLeaseResponse struct {
 	TTLNanoSeconds int64  `json:"ttl_nanoseconds"`
 }
 type reviewStateResponse struct {
-	State RepositoryState `json:"state"`
+	State           RepositoryState `json:"state"`
+	PurgeInProgress bool            `json:"purge_in_progress,omitempty"`
 }
 type reviewMutationResponse struct {
-	Updated bool `json:"updated"`
+	Updated         bool `json:"updated"`
+	PurgeInProgress bool `json:"purge_in_progress,omitempty"`
 }
 type reviewClockResponse struct {
 	Now time.Time `json:"now"`
@@ -145,6 +145,9 @@ func (s Store) brokerLoadState(repository string) (RepositoryState, error) {
 		},
 		&response,
 	)
+	if err == nil && response.PurgeInProgress {
+		return RepositoryState{}, ErrRepositoryReviewPurgeInProgress
+	}
 	return response.State, mapReviewClientError(err)
 }
 
@@ -269,8 +272,15 @@ func (handler *reviewStoreHandler) Handle(ctx context.Context, request database.
 	if handler == nil || request.Domain != reviewBrokerDomain || request.Version != reviewBrokerVersion {
 		return nil, database.NewError(database.CodeUnsupported, "database domain is unsupported")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, database.NewError(database.CodeDeadline, "repository review request deadline was exceeded")
+	}
 	gateRequest := request.Operation != reviewOperationLock &&
-		request.Operation != reviewOperationAcquireNamedLease
+		request.Operation != reviewOperationAcquireNamedLease &&
+		request.Operation != reviewOperationRenewLease
 	if gateRequest {
 		select {
 		case <-ctx.Done():
@@ -317,6 +327,9 @@ func (handler *reviewStoreHandler) Handle(ctx context.Context, request database.
 			return nil, mapReviewBrokerError(err)
 		}
 		state, err := store.load(input.Repository)
+		if errors.Is(err, ErrRepositoryReviewPurgeInProgress) {
+			return reviewStateResponse{PurgeInProgress: true}, nil
+		}
 		if err != nil {
 			return nil, mapReviewBrokerError(err)
 		}
@@ -532,7 +545,8 @@ func mapReviewBrokerError(err error) error {
 	case errors.Is(err, ErrProfileActive), errors.Is(err, ErrAutomationActive):
 		return database.NewError(database.CodeUnsupported, "repository review record is active")
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrHistoricalDeduplicationInProgress),
-		errors.Is(err, ErrAutomationControllerLocked):
+		errors.Is(err, ErrAutomationControllerLocked),
+		errors.Is(err, ErrRepositoryReviewPurgeInProgress):
 		return database.NewError(database.CodeConflict, "repository review state changed concurrently")
 	case errors.Is(err, os.ErrNotExist):
 		return database.NewError(database.CodeNotFound, "repository review record was not found")

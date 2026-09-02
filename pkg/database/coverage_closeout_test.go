@@ -79,6 +79,9 @@ func TestCoverageCanonicalJSONBoundaries(t *testing.T) {
 	if err := unmarshalCanonicalStrict([]byte(` {"value":1}`), &strict); err == nil {
 		t.Fatal("strict decoder accepted whitespace")
 	}
+	if err := unmarshalCanonicalStrict([]byte(`{`), &strict); err == nil {
+		t.Fatal("strict decoder accepted malformed JSON")
+	}
 	if _, err := (canonicalNumber("")).MarshalJSON(); err == nil {
 		t.Fatal("empty canonical number marshaled")
 	}
@@ -88,7 +91,7 @@ func TestCoverageCanonicalJSONBoundaries(t *testing.T) {
 		}
 	}
 	for raw, want := range map[string]string{
-		"-0": "0", "100.00": "100", "0.00120": "0.0012", "-1E+3": "-1000",
+		"-0": "0", "100.00": "100", "0.00120": "0.0012", "12.34": "12.34", "-1E+3": "-1000",
 		"1234567890123456789010": "1.23456789012345678901e21",
 	} {
 		if got, err := normalizeCanonicalNumber(raw); err != nil || got != want {
@@ -146,6 +149,10 @@ func TestCoverageStructuredErrorBoundaries(t *testing.T) {
 	if len(bounded.Message) > maxStructuredErrorMessageBytes || !strings.Contains(bounded.Error(), "Internal:") {
 		t.Fatalf("bounded error = %#v", bounded)
 	}
+	invalidBoundary := NewError(CodeInternal, strings.Repeat("a", maxStructuredErrorMessageBytes-1)+"é")
+	if len(invalidBoundary.Message) != maxStructuredErrorMessageBytes-1 {
+		t.Fatalf("UTF-8 boundary message length = %d", len(invalidBoundary.Message))
+	}
 	if protocolError(nil) != nil || protocolError(context.DeadlineExceeded).Code != CodeDeadline ||
 		protocolError(context.Canceled).Code != CodeDeadline ||
 		protocolError(NewError(CodeNotFound, "missing")).Code != CodeNotFound ||
@@ -155,7 +162,7 @@ func TestCoverageStructuredErrorBoundaries(t *testing.T) {
 }
 
 func TestCoverageWindowsSIDValidationEdges(t *testing.T) {
-	if validWindowsSIDString("S-1--21") ||
+	if validWindowsSIDString("S-1-2") || validWindowsSIDString("S-1--21") ||
 		validWindowsSIDString("S-"+strings.Repeat("1", 185)) {
 		t.Fatal("invalid Windows SID edge accepted")
 	}

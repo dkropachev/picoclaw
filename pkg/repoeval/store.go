@@ -74,7 +74,7 @@ type BulkDeleteResult struct {
 // NewSQLiteStore constructs the durable repository model-evaluation store.
 // Schema creation and legacy import happen on the first operation.
 func NewSQLiteStore(workspace string) Store {
-	if client := evaluationBrokerClient(); client != nil {
+	if client := database.RuntimeClient(); client != nil {
 		storeID, err := resolveEvaluationBrokerStoreID(context.Background(), client, workspace)
 		return Store{
 			workspace: workspace, now: time.Now, newID: randomEvaluationID,

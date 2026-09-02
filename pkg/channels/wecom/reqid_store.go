@@ -104,7 +104,7 @@ var wecomReqIDLocks [wecomReqIDLockShards]sync.Mutex
 var allowUnfencedWeComProviderForTests atomic.Bool
 
 func newReqIDStore(path string) *reqIDStore {
-	if client := wecomBrokerClient(); client != nil {
+	if client := database.RuntimeClient(); client != nil {
 		store := &reqIDStore{
 			now: time.Now, broker: client, storeID: WeComStoreID,
 		}

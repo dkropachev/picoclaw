@@ -48,24 +48,39 @@ const (
 	whatsappMigrationAfterVersion = "after-version"
 )
 
-var whatsappMigrationCheckpoint = func(string) error { return nil }
-
 // MigrateDatabase upgrades the WhatsApp library schema while the caller holds
 // the exclusive offline migration fence.
 func MigrateDatabase(ctx context.Context, path string) error {
+	return migrateWhatsAppDatabaseWithCheckpoint(ctx, path, nil)
+}
+
+func migrateWhatsAppDatabaseWithCheckpoint(
+	ctx context.Context,
+	path string,
+	checkpoint func(string) error,
+) error {
 	if !database.MigrationFenceHeld() {
 		return database.NewError(database.CodeConflict, "WhatsApp migration requires the exclusive database fence")
+	}
+	if checkpoint == nil {
+		checkpoint = func(string) error { return nil }
 	}
 	return sqliteprovider.MigrateStagedOffline(
 		ctx,
 		path,
 		5*time.Second,
 		1,
-		migrateWhatsAppDatabaseStage,
+		func(ctx context.Context, stagedPath string) error {
+			return migrateWhatsAppDatabaseStage(ctx, stagedPath, checkpoint)
+		},
 	)
 }
 
-func migrateWhatsAppDatabaseStage(ctx context.Context, path string) error {
+func migrateWhatsAppDatabaseStage(
+	ctx context.Context,
+	path string,
+	checkpoint func(string) error,
+) error {
 	db, err := sqliteprovider.OpenStore(path, 5*time.Second)
 	if err != nil {
 		return err
@@ -82,13 +97,13 @@ func migrateWhatsAppDatabaseStage(ctx context.Context, path string) error {
 	if err := container.Upgrade(ctx); err != nil {
 		return err
 	}
-	if err := whatsappMigrationCheckpoint(whatsappMigrationAfterUpgrade); err != nil {
+	if err := checkpoint(whatsappMigrationAfterUpgrade); err != nil {
 		return err
 	}
 	if err := sqliteprovider.SetSchemaVersion(ctx, db, 1); err != nil {
 		return err
 	}
-	return whatsappMigrationCheckpoint(whatsappMigrationAfterVersion)
+	return checkpoint(whatsappMigrationAfterVersion)
 }
 
 // WhatsAppNativeChannel implements the WhatsApp channel using whatsmeow (in-process, no external bridge).

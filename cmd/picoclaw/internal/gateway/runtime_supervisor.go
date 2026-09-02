@@ -22,14 +22,6 @@ import (
 
 const gatewayRuntimeChildEnvironment = "PICOCLAW_GATEWAY_RUNTIME_CHILD"
 
-var (
-	resolveGatewayRuntimeExecutable = os.Executable
-	ensureGatewaySupervisor         = database.EnsureSupervisor
-	gatewayInheritedAuthority       = database.InheritedAuthorityEnvironment
-	runGatewayChild                 = runGatewayRuntimeChild
-	runGatewayCore                  = coregateway.Run
-)
-
 var preparedRuntimeAuthority struct {
 	sync.Mutex
 	client *database.Client
@@ -93,7 +85,7 @@ func runAuthenticatedGatewayRuntime(ctx context.Context, debug, allowEmpty bool)
 	stopMonitor := make(chan struct{})
 	defer close(stopMonitor)
 	go monitorRuntimeBroker(client, stopMonitor)
-	return runGatewayCore(debug, home, internal.GetConfigPath(), allowEmpty)
+	return coregateway.Run(debug, home, internal.GetConfigPath(), allowEmpty)
 }
 
 func runSupervisedGateway(
@@ -106,11 +98,11 @@ func runSupervisedGateway(
 	if err != nil {
 		return err
 	}
-	executable, err := resolveGatewayRuntimeExecutable()
+	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve gateway runtime executable: %w", err)
 	}
-	client, err := ensureGatewaySupervisor(command.Context(), database.EnsureOptions{
+	client, err := database.EnsureSupervisor(command.Context(), database.EnsureOptions{
 		Home: home, Executable: executable, ConfigPath: internal.GetConfigPath(),
 	})
 	if err != nil {
@@ -119,7 +111,7 @@ func runSupervisedGateway(
 	if readinessErr := requireGatewayDatabaseReadiness(command.Context(), client); readinessErr != nil {
 		return readinessErr
 	}
-	authority, err := gatewayInheritedAuthority(home)
+	authority, err := database.InheritedAuthorityEnvironment(home)
 	if err != nil {
 		return err
 	}
@@ -130,7 +122,7 @@ func runSupervisedGateway(
 	for attempt := 0; ; attempt++ {
 		startedAt := time.Now()
 		runtimeEpoch := client.Epoch()
-		err = runGatewayChild(
+		err = runGatewayRuntimeChild(
 			ctx, command, client, executable, authority, debug, noTruncate, allowEmpty,
 		)
 		if ctx.Err() != nil {
@@ -147,7 +139,7 @@ func runSupervisedGateway(
 			if err != nil {
 				return fmt.Errorf("recover database supervisor after runtime loss: %w", err)
 			}
-			authority, err = gatewayInheritedAuthority(home)
+			authority, err = database.InheritedAuthorityEnvironment(home)
 			if err != nil {
 				return err
 			}
@@ -183,7 +175,7 @@ func recoverGatewayDatabaseSupervisor(
 	backoff := 100 * time.Millisecond
 	var lastErr error
 	for attempt := 0; attempt < 6; attempt++ {
-		client, err := ensureGatewaySupervisor(ctx, database.EnsureOptions{
+		client, err := database.EnsureSupervisor(ctx, database.EnsureOptions{
 			Home: home, Executable: executable, ConfigPath: internal.GetConfigPath(),
 		})
 		if err == nil {

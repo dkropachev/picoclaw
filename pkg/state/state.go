@@ -63,7 +63,7 @@ var allowUnfencedRuntimeStateProviderForTests atomic.Bool
 
 // NewSQLiteManager creates and validates a SQLite runtime-state manager.
 func NewSQLiteManager(workspace string) (*Manager, error) {
-	if client := runtimeStateBrokerClient(); client != nil {
+	if client := database.RuntimeClient(); client != nil {
 		manager, err := newBrokerManager(workspace, client)
 		if err != nil {
 			return nil, err
@@ -110,7 +110,7 @@ func newSQLiteManagerLocal(workspace string) (*Manager, error) {
 // constructor. Initialization failures are logged; later operations retry the
 // same authoritative broker/store, and setters return any failure to callers.
 func NewManager(workspace string) *Manager {
-	if client := runtimeStateBrokerClient(); client != nil {
+	if client := database.RuntimeClient(); client != nil {
 		manager, err := newBrokerManager(workspace, client)
 		if err != nil {
 			logger.WarnCF("state", "failed to configure runtime-state broker", map[string]any{

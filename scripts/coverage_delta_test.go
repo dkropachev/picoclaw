@@ -99,7 +99,7 @@ func TestCoverageIntegrationSuitesAllowHeadOnlyAddition(t *testing.T) {
 	}
 }
 
-func TestCoverageRegressionTracksUncoveredStatementDebt(t *testing.T) {
+func TestCoverageRegressionUsesDebtAndExactPercentage(t *testing.T) {
 	tests := []struct {
 		name string
 		base coverageSummary
@@ -107,21 +107,27 @@ func TestCoverageRegressionTracksUncoveredStatementDebt(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "covered legacy deletion reduces debt",
-			base: coverageSummary{CoveredStatements: 22045, TotalStatements: 27866},
-			head: coverageSummary{CoveredStatements: 14524, TotalStatements: 19782},
+			name: "covered code deletion with unchanged debt",
+			base: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
+			head: coverageSummary{CoveredStatements: 70, TotalStatements: 90},
 			want: false,
 		},
 		{
-			name: "new uncovered statement increases debt",
+			name: "increased debt and percentage regression",
 			base: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
 			head: coverageSummary{CoveredStatements: 80, TotalStatements: 101},
 			want: true,
 		},
 		{
-			name: "additional coverage reduces debt",
+			name: "increased debt with stable percentage",
 			base: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
-			head: coverageSummary{CoveredStatements: 81, TotalStatements: 100},
+			head: coverageSummary{CoveredStatements: 160, TotalStatements: 200},
+			want: false,
+		},
+		{
+			name: "increased debt with improved percentage",
+			base: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
+			head: coverageSummary{CoveredStatements: 162, TotalStatements: 200},
 			want: false,
 		},
 	}
@@ -134,20 +140,217 @@ func TestCoverageRegressionTracksUncoveredStatementDebt(t *testing.T) {
 	}
 }
 
-func TestFeatureCoverageRegressionAllowsTenUncoveredStatements(t *testing.T) {
-	base := coverageSummary{CoveredStatements: 80, TotalStatements: 100}
-	withinTolerance := coverageSummary{CoveredStatements: 80, TotalStatements: 110}
-	regressed := coverageSummary{CoveredStatements: 80, TotalStatements: 111}
-
-	if featureSummaryRegressed(base, withinTolerance) {
-		t.Fatal("featureSummaryRegressed() rejected the documented ten-statement tolerance")
+func TestCoverageMinimumsUseExactIntegerRatios(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary coverageSummary
+		minimum int
+		want    bool
+	}{
+		{
+			name:    "new feature exactly ninety five percent",
+			summary: coverageSummary{CoveredStatements: 95, TotalStatements: 100},
+			minimum: newFeatureMinimumCoveragePercent,
+			want:    true,
+		},
+		{
+			name:    "new feature one statement below threshold",
+			summary: coverageSummary{CoveredStatements: 94_999, TotalStatements: 100_000},
+			minimum: newFeatureMinimumCoveragePercent,
+			want:    false,
+		},
+		{
+			name:    "changed code exactly ninety percent",
+			summary: coverageSummary{CoveredStatements: 9, TotalStatements: 10},
+			minimum: changedCodeMinimumCoveragePercent,
+			want:    true,
+		},
+		{
+			name:    "changed code one statement below threshold",
+			summary: coverageSummary{CoveredStatements: 89_999, TotalStatements: 100_000},
+			minimum: changedCodeMinimumCoveragePercent,
+			want:    false,
+		},
 	}
-	if !featureSummaryRegressed(base, regressed) {
-		t.Fatal("featureSummaryRegressed() accepted an eleven-statement debt increase")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := coverageAtLeastPercent(test.summary, test.minimum); got != test.want {
+				t.Fatalf(
+					"coverageAtLeastPercent(%+v, %d) = %t, want %t",
+					test.summary,
+					test.minimum,
+					got,
+					test.want,
+				)
+			}
+		})
 	}
 }
 
-func TestCompareCoverageReportsUncoveredDebtAndCoverage(t *testing.T) {
+func TestCompareCoverageAllowsExactNewScopeFromEmptyBase(t *testing.T) {
+	spec := featureSpecMetadata{
+		RelPath:    "docs/features/new.md",
+		Ownerships: []featureOwnership{{Kind: "CODE", Pattern: "internal/new/**"}},
+	}
+	plan := coveragePlan{ImpactedFeature: map[string]bool{spec.RelPath: true}}
+	base := emptyCoverageProfile()
+	head := coverageProfile{
+		Global: coverageSummary{CoveredStatements: 95, TotalStatements: 100},
+		Files: map[string]coverageSummary{
+			"internal/new/feature.go": {CoveredStatements: 95, TotalStatements: 100},
+		},
+	}
+	if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); len(failures) != 0 {
+		t.Fatalf("exact empty-base threshold failures = %#v", failures)
+	}
+	head.Global.CoveredStatements = 94
+	head.Files["internal/new/feature.go"] = coverageSummary{CoveredStatements: 94, TotalStatements: 100}
+	if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); len(failures) != 2 {
+		t.Fatalf("below empty-base threshold failures = %#v, want global and feature failures", failures)
+	}
+}
+
+func TestInternalProductionAndCoverageBlockColumnBoundaries(t *testing.T) {
+	file := "internal/sqliteprovider/provider.go"
+	if !isCoverageRelevantGoFile(file) || !isProductionCodePath(file) {
+		t.Fatal("internal production Go was excluded from coverage policy")
+	}
+	if !isCoverageRelevantGoFile("internal/sqliteprovider/provider_test.go") ||
+		isProductionCodePath("internal/sqliteprovider/provider_test.go") {
+		t.Fatal("internal Go test coverage relevance/production classification is invalid")
+	}
+	profile := coverageProfile{Blocks: map[string]map[string]coverageBlock{
+		file: {
+			"10.1,11.1": {
+				File: file, Range: "10.1,11.1", StartLine: 10, StartCol: 1,
+				EndLine: 11, EndCol: 1, Statements: 9, Covered: true,
+			},
+			"11.1,11.20": {
+				File: file, Range: "11.1,11.20", StartLine: 11, StartCol: 1,
+				EndLine: 11, EndCol: 20, Statements: 1,
+			},
+		},
+	}}
+	changed := map[string]map[int]bool{file: {11: true}}
+	if got := changedCodeCoverage(changed, profile); got != (coverageSummary{0, 1}) {
+		t.Fatalf("line-start block boundary coverage = %+v, want only uncovered 11.1 block", got)
+	}
+}
+
+func TestCompareCoverageRequiresNinetyFivePercentForNewFeature(t *testing.T) {
+	spec := featureSpecMetadata{
+		RelPath: "docs/features/example.md",
+		Ownerships: []featureOwnership{
+			{Kind: "CODE", Pattern: "pkg/example/**"},
+		},
+	}
+	plan := coveragePlan{ImpactedFeature: map[string]bool{spec.RelPath: true}}
+	base := coverageProfile{
+		Global: coverageSummary{CoveredStatements: 900, TotalStatements: 1000},
+		Files: map[string]coverageSummary{
+			"pkg/existing/existing.go": {CoveredStatements: 900, TotalStatements: 1000},
+		},
+	}
+	head := func(featureCovered int) coverageProfile {
+		return coverageProfile{
+			Global: coverageSummary{CoveredStatements: 901 + featureCovered, TotalStatements: 1100},
+			Files: map[string]coverageSummary{
+				"pkg/existing/existing.go": {CoveredStatements: 901, TotalStatements: 1000},
+				"pkg/example/example.go":   {CoveredStatements: featureCovered, TotalStatements: 100},
+			},
+		}
+	}
+
+	if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head(95)); len(failures) != 0 {
+		t.Fatalf("exact threshold failures = %#v", failures)
+	}
+	want := []string{
+		"docs/features/example.md new Go feature coverage is below 95%: 94.00% (94/100)",
+	}
+	if got := compareCoverage([]featureSpecMetadata{spec}, plan, base, head(94)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("below threshold failures = %#v, want %#v", got, want)
+	}
+}
+
+func TestCompareCoverageRequiresNinetyPercentForChangedBlocks(t *testing.T) {
+	plan := coveragePlan{ChangedLines: map[string]map[int]bool{
+		"pkg/example/example.go": {10: true, 11: true, 20: true},
+	}}
+	base := coverageProfile{Global: coverageSummary{CoveredStatements: 100, TotalStatements: 100}}
+	head := func(coveredStatements, uncoveredStatements int) coverageProfile {
+		return coverageProfile{
+			Global: coverageSummary{CoveredStatements: 100, TotalStatements: 100},
+			Blocks: map[string]map[string]coverageBlock{
+				"pkg/example/example.go": {
+					"10.1,12.1": {
+						File: "pkg/example/example.go", Range: "10.1,12.1",
+						StartLine: 10, EndLine: 12, Statements: coveredStatements, Covered: true,
+					},
+					"20.1,20.5": {
+						File: "pkg/example/example.go", Range: "20.1,20.5",
+						StartLine: 20, EndLine: 20, Statements: uncoveredStatements,
+					},
+				},
+			},
+		}
+	}
+
+	exact := head(9, 1)
+	if summary := changedCodeCoverage(plan.ChangedLines, exact); summary != (coverageSummary{9, 10}) {
+		t.Fatalf("exact changed coverage = %+v, want 9/10", summary)
+	}
+	if failures := compareCoverage(nil, plan, base, exact); len(failures) != 0 {
+		t.Fatalf("exact threshold failures = %#v", failures)
+	}
+	below := head(8, 2)
+	want := []string{"changed production Go coverage is below 90%: 80.00% (8/10)"}
+	if got := compareCoverage(nil, plan, base, below); !reflect.DeepEqual(got, want) {
+		t.Fatalf("below threshold failures = %#v, want %#v", got, want)
+	}
+}
+
+func TestChangedCoverageDeduplicatesSpanningBlocksAndFeatureOwnershipCanOverlap(t *testing.T) {
+	file := "pkg/example/example.go"
+	profile := coverageProfile{
+		Files: map[string]coverageSummary{
+			file: {CoveredStatements: 9, TotalStatements: 10},
+		},
+		Blocks: map[string]map[string]coverageBlock{
+			file: {
+				"10.1,12.1": {
+					File: file, Range: "10.1,12.1", StartLine: 10, EndLine: 12,
+					Statements: 9, Covered: true,
+				},
+				"20.1,20.5": {
+					File: file, Range: "20.1,20.5", StartLine: 20, EndLine: 20,
+					Statements: 1,
+				},
+			},
+		},
+	}
+	changedLines := map[string]map[int]bool{
+		file: {10: true, 11: true, 12: true, 20: true},
+	}
+	if got := changedCodeCoverage(changedLines, profile); got != (coverageSummary{9, 10}) {
+		t.Fatalf("changed coverage = %+v, want each block counted once as 9/10", got)
+	}
+
+	specs := []featureSpecMetadata{
+		{RelPath: "docs/features/first.md", Ownerships: []featureOwnership{{Kind: "CODE", Pattern: "pkg/example/**"}}},
+		{
+			RelPath:    "docs/features/second.md",
+			Ownerships: []featureOwnership{{Kind: "CODE", Pattern: "pkg/example/example.go"}},
+		},
+	}
+	got := featureCoverage(specs, profile)
+	for _, spec := range specs {
+		if got[spec.RelPath] != (coverageSummary{9, 10}) {
+			t.Fatalf("%s coverage = %+v, want 9/10", spec.RelPath, got[spec.RelPath])
+		}
+	}
+}
+
+func TestCompareCoverageUsesHybridPolicyForExistingGlobalAndFeature(t *testing.T) {
 	spec := featureSpecMetadata{
 		RelPath: "docs/features/example.md",
 		Ownerships: []featureOwnership{
@@ -169,11 +372,62 @@ func TestCompareCoverageReportsUncoveredDebtAndCoverage(t *testing.T) {
 	}
 
 	want := []string{
-		"scoped Go uncovered statement debt increased: 20 -> 31 (coverage 80.00% (80/100) -> 69.00% (69/100))",
-		"docs/features/example.md Go uncovered statement debt increased: 20 -> 31 (coverage 80.00% (80/100) -> 69.00% (69/100))",
+		"scoped Go coverage regressed: uncovered statement debt 20 -> 31 and coverage 80.00% (80/100) -> 69.00% (69/100)",
+		"docs/features/example.md Go coverage regressed: uncovered statement debt 20 -> 31 and coverage 80.00% (80/100) -> 69.00% (69/100)",
 	}
 	if got := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); !reflect.DeepEqual(got, want) {
 		t.Fatalf("compareCoverage() = %#v, want %#v", got, want)
+	}
+}
+
+func TestCompareCoverageAllowsDebtIncreaseAtStableOrImprovedPercentage(t *testing.T) {
+	spec := featureSpecMetadata{
+		RelPath: "docs/features/example.md",
+		Ownerships: []featureOwnership{
+			{Kind: "CODE", Pattern: "pkg/example/**"},
+		},
+	}
+	plan := coveragePlan{ImpactedFeature: map[string]bool{spec.RelPath: true}}
+	base := coverageProfile{
+		Global: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
+		Files: map[string]coverageSummary{
+			"pkg/example/example.go": {CoveredStatements: 80, TotalStatements: 100},
+		},
+	}
+	for _, summary := range []coverageSummary{
+		{CoveredStatements: 160, TotalStatements: 200},
+		{CoveredStatements: 162, TotalStatements: 200},
+	} {
+		head := coverageProfile{
+			Global: summary,
+			Files:  map[string]coverageSummary{"pkg/example/example.go": summary},
+		}
+		if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); len(failures) != 0 {
+			t.Fatalf("head %+v failures = %#v", summary, failures)
+		}
+	}
+}
+
+func TestCompareCoverageAllowsCoveredCodeDeletionWithUnchangedDebt(t *testing.T) {
+	spec := featureSpecMetadata{
+		RelPath: "docs/features/example.md",
+		Ownerships: []featureOwnership{
+			{Kind: "CODE", Pattern: "pkg/example/**"},
+		},
+	}
+	plan := coveragePlan{ImpactedFeature: map[string]bool{spec.RelPath: true}}
+	baseSummary := coverageSummary{CoveredStatements: 80, TotalStatements: 100}
+	headSummary := coverageSummary{CoveredStatements: 70, TotalStatements: 90}
+	base := coverageProfile{
+		Global: baseSummary,
+		Files:  map[string]coverageSummary{"pkg/example/example.go": baseSummary},
+	}
+	head := coverageProfile{
+		Global: headSummary,
+		Files:  map[string]coverageSummary{"pkg/example/example.go": headSummary},
+	}
+	if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); len(failures) != 0 {
+		t.Fatalf("covered deletion failures = %#v", failures)
 	}
 }
 

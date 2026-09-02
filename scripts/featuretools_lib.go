@@ -374,7 +374,8 @@ func isProductionCodePath(path string) bool {
 	if isIgnoredProductionPath(path) {
 		return false
 	}
-	if strings.HasPrefix(path, "cmd/") || strings.HasPrefix(path, "pkg/") || strings.HasPrefix(path, "web/backend/") {
+	if strings.HasPrefix(path, "cmd/") || strings.HasPrefix(path, "internal/") ||
+		strings.HasPrefix(path, "pkg/") || strings.HasPrefix(path, "web/backend/") {
 		return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go")
 	}
 	if strings.HasPrefix(path, "web/frontend/src/") {

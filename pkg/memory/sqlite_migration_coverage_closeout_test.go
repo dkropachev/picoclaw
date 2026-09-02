@@ -3,7 +3,9 @@ package memory
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,6 +88,73 @@ func TestLegacySessionMigrationEnumerationAndClassificationBoundaries(t *testing
 	}
 }
 
+func TestLegacySessionOptionsCaptureAndFinalizeFences(t *testing.T) {
+	workspace := t.TempDir()
+	dir := filepath.Join(workspace, "sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacyTestFile(t, workspace, "sessions/source.json", []byte(`{"key":"source"}`))
+	options, err := newSessionsLegacyOptions(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources, err := options.Sources()
+	if err != nil || len(sources) != 1 || sources[0].Relative != "sessions/source.json" {
+		t.Fatalf("captured legacy sources = %#v, %v", sources, err)
+	}
+	sources[0].Relative = "mutated"
+	again, err := options.Sources()
+	if err != nil || again[0].Relative != "sessions/source.json" {
+		t.Fatalf("detached legacy sources = %#v, %v", again, err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	input := sqlitestore.LegacyInput{ID: "source", Relative: "sessions/source.json", Data: []byte(`{}`)}
+	if _, err := options.Import(canceled, nil, input); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled legacy capture error = %v", err)
+	}
+	if _, err := options.Import(t.Context(), nil, input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := options.FinalizeResults(t.Context(), nil, sqlitestore.LegacyFinalizeInput{
+		SourceIDs: []string{"missing"},
+	}); err == nil {
+		t.Fatal("missing captured source finalized")
+	}
+	if err := validateLegacyEnumerationDirectory(nil); err == nil {
+		t.Fatal("nil legacy directory metadata accepted")
+	}
+}
+
+func TestLegacyEnumerationRejectsNestedAliasAndWritableDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "sessions", "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(target, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(workspace, "sessions", "nested", "alias.json")); err == nil {
+		if _, err := enumerateLegacySessionSources(workspace); err == nil {
+			t.Fatal("nested legacy symlink accepted")
+		}
+	}
+
+	workspace = t.TempDir()
+	nested := filepath.Join(workspace, "sessions", "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(nested, 0o722); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enumerateLegacySessionSources(workspace); err == nil {
+		t.Fatal("writable nested legacy directory accepted")
+	}
+}
+
 func TestLegacySessionMigrationDecodersAndAuditBoundaries(t *testing.T) {
 	if count, err := countLegacyHistoryRecords([]byte("\n one \n\n two\n")); err != nil || count != 2 {
 		t.Fatalf("history record count = %d, %v", count, err)
@@ -133,6 +202,29 @@ func TestLegacySessionMigrationDecodersAndAuditBoundaries(t *testing.T) {
 	if len(filtered) != 2 {
 		t.Fatalf("filtered aggregate messages = %#v", filtered)
 	}
+	oversized := source
+	oversized.Data = bytes.Repeat([]byte("x"), maxLineSize+1)
+	if _, _, err := decodeLegacyHistoryForImport(oversized, 0, audit); err == nil {
+		t.Fatal("oversized legacy history line accepted")
+	}
+	transient := providers.Message{Role: "assistant", ReasoningContent: "thought"}
+	encodedTransient, err := json.Marshal(transient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transientSource := source
+	transientSource.Data = append(encodedTransient, '\n')
+	if history, count, err := decodeLegacyHistoryForImport(
+		transientSource,
+		0,
+		audit,
+	); err != nil || count != 0 ||
+		len(history) != 0 {
+		t.Fatalf("transient legacy history = %#v count:%d err:%v", history, count, err)
+	}
+	if got := filterAggregateLegacyMessages([]providers.Message{transient}, source, audit); len(got) != 0 {
+		t.Fatalf("transient aggregate history = %#v", got)
+	}
 }
 
 func TestLegacySessionMigrationMetadataValidationBoundaries(t *testing.T) {
@@ -156,6 +248,17 @@ func TestLegacySessionMigrationMetadataValidationBoundaries(t *testing.T) {
 		"history selector": {Key: "key", HistorySlot: "c"},
 		"bad scope":        {Key: "key", Scope: json.RawMessage(`{`)},
 		"bad context":      {Key: "key", ThreadContext: map[string]string{"": "value"}},
+		"bad alias":        {Key: "key", Aliases: []string{strings.Repeat("a", 16_385)}},
+		"bad scope dimension": {
+			Key: "key", Scope: json.RawMessage(
+				`{"version":1,"dimensions":["missing"],"values":{}}`,
+			),
+		},
+		"duplicate scope dimension": {
+			Key: "key", Scope: json.RawMessage(
+				`{"version":1,"dimensions":["d","d"],"values":{"d":"v"}}`,
+			),
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := prepareLegacySessionMeta(meta); err == nil {
@@ -311,5 +414,245 @@ func TestLegacyMigrationRelationalInsertBoundaries(t *testing.T) {
 	inserted, reason, err = insertLegacyHandoff(t.Context(), conn, handoff)
 	if err != nil || inserted || reason != "handoff-identity-conflict" {
 		t.Fatalf("duplicate legacy handoff = %t, %q, %v", inserted, reason, err)
+	}
+}
+
+func TestLegacyMigrationAuditsDeletedMissingAndConflictingInputs(t *testing.T) {
+	workspace, dir := privateSessionsFixture(t)
+	if err := os.MkdirAll(filepath.Join(workspace, "threads", "handoffs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	writeLegacyJSONTestFile(t, workspace, "sessions/.session-delete-v1-invalid.json", sessionDeleteManifest{
+		Version: 2, Keys: []string{"ignored"},
+	})
+	writeLegacyJSONTestFile(t, workspace, "sessions/.session-delete-v1-empty.json", sessionDeleteManifest{
+		Version: 1,
+	})
+	writeLegacyJSONTestFile(t, workspace, "sessions/.session-delete-v1-good.json", sessionDeleteManifest{
+		Version: 1, Keys: []string{"deleted", "deleted-history"},
+	})
+	writeLegacyJSONTestFile(t, workspace, "sessions/deleted.json", jsonSession{
+		Key: "deleted", Messages: []providers.Message{{Role: "user", Content: "deleted"}},
+	})
+	writeLegacyJSONTestFile(t, workspace, "sessions/deleted.meta.json", SessionMeta{
+		Key: "deleted", Count: 0,
+	})
+	writeLegacyJSONTestFile(t, workspace, "sessions/selector.meta.json", SessionMeta{
+		Key: "selector", HistorySlot: "invalid",
+	})
+	writeLegacyJSONTestFile(t, workspace, "sessions/missing.meta.json", SessionMeta{
+		Key: "missing", Count: 1,
+	})
+	writeLegacyJSONTestFile(t, workspace, "sessions/inconsistent.meta.json", SessionMeta{
+		Key: "inconsistent", Count: 2, CreatedAt: now, UpdatedAt: now,
+	})
+	writeLegacyLinesTestFile(t, workspace, "sessions/inconsistent.jsonl", []string{
+		`{"role":"user","content":"one"}`,
+	})
+	writeLegacyLinesTestFile(t, workspace, "sessions/deleted-history.jsonl", []string{
+		`{"role":"user","content":"deleted"}`,
+	})
+	writeLegacyLinesTestFile(t, workspace, "sessions/orphan.history-a", []string{
+		`{"role":"user","content":"orphan"}`,
+	})
+	writeLegacyTestFile(t, workspace, "sessions/fallback.json", []byte(
+		`{"messages":[{"role":"user","content":"fallback"}]}`,
+	))
+	writeLegacyJSONTestFile(t, workspace, "sessions/thread-session.json", jsonSession{
+		Key: "thread-session", Messages: []providers.Message{{Role: "user", Content: "thread"}},
+	})
+	thread := legacyThreadMeta{
+		ID: "duplicate-thread", PrimarySessionKey: "thread-session", CreatedAt: now, UpdatedAt: now,
+	}
+	writeLegacyJSONTestFile(t, workspace, "threads/a-thread.json", thread)
+	writeLegacyJSONTestFile(t, workspace, "threads/b-thread.json", thread)
+	writeLegacyJSONTestFile(t, workspace, "threads/broken-reference.json", legacyThreadMeta{
+		ID: "broken-thread", PrimarySessionKey: "missing-session", CreatedAt: now, UpdatedAt: now,
+	})
+	writeLegacyJSONTestFile(t, workspace, "threads/handoffs/invalid.json", legacyThreadHandoff{})
+	writeLegacyJSONTestFile(t, workspace, "threads/handoffs/broken.json", legacyThreadHandoff{
+		ID: "broken-handoff", OriginSessionKey: "missing-session",
+		TargetThreadID: "duplicate-thread", CreatedAt: now,
+	})
+
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var issueCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM storage_import_issues`).Scan(&issueCount); err != nil {
+		t.Fatal(err)
+	}
+	if issueCount < 10 {
+		t.Fatalf("edge migration issue count = %d", issueCount)
+	}
+	if history, err := store.GetHistory(t.Context(), "fallback"); err != nil || len(history) != 1 {
+		t.Fatalf("fallback aggregate history = %#v, %v", history, err)
+	}
+}
+
+func TestLegacyMigrationReconstructsMetaProjectedThreadRelationships(t *testing.T) {
+	workspace, dir := privateSessionsFixture(t)
+	if err := os.MkdirAll(filepath.Join(workspace, "threads", "handoffs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for index, key := range []string{"projected-one", "projected-two"} {
+		meta := SessionMeta{
+			Key: key, Count: 1, HistorySlot: "a", ThreadID: "projected-thread",
+			ThreadTitle: "Projected", ThreadType: "coding", ThreadContext: map[string]string{"repo": "x"},
+			ThreadAttachedAt: now, CreatedAt: now, UpdatedAt: now,
+		}
+		writeLegacyJSONTestFile(t, workspace, "sessions/"+key+".meta.json", meta)
+		writeLegacyLinesTestFile(t, workspace, "sessions/"+key+".history-a", []string{
+			`{"role":"user","content":"message-` + string(rune('a'+index)) + `"}`,
+		})
+	}
+	writeLegacyJSONTestFile(t, workspace, "threads/projected.json", legacyThreadMeta{
+		ID: "projected-thread", PrimarySessionKey: "projected-one", CreatedAt: now, UpdatedAt: now,
+	})
+	writeLegacyJSONTestFile(t, workspace, "threads/handoffs/projected.json", legacyThreadHandoff{
+		ID: "projected-handoff", OriginSessionKey: "projected-two",
+		TargetThreadID: "projected-thread", CreatedAt: now,
+	})
+	writeLegacyJSONTestFile(t, workspace, "sessions/conflict.json", jsonSession{
+		Key: "conflict", Messages: []providers.Message{{Role: "user", Content: "aggregate"}},
+	})
+	writeLegacyLinesTestFile(t, workspace, "sessions/conflict.jsonl", []string{
+		`{"role":"user","content":"history"}`,
+	})
+
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for query, want := range map[string]int{
+		`SELECT COUNT(*) FROM threads WHERE thread_id = 'projected-thread'`:           1,
+		`SELECT COUNT(*) FROM thread_sessions WHERE thread_id = 'projected-thread'`:   2,
+		`SELECT COUNT(*) FROM thread_handoffs WHERE handoff_id = 'projected-handoff'`: 1,
+	} {
+		var count int
+		if err := store.db.QueryRow(query).Scan(&count); err != nil || count != want {
+			t.Fatalf("%s = %d, %v; want %d", query, count, err, want)
+		}
+	}
+}
+
+func TestLegacyInsertHelpersPropagateMissingRelationFaults(t *testing.T) {
+	now := time.Now().UTC()
+	scope := json.RawMessage(`{"version":1,"channel":"pico","values":{}}`)
+	for name, test := range map[string]struct {
+		breakSQL string
+		meta     SessionMeta
+		history  []providers.Message
+	}{
+		"sessions": {`DROP TABLE sessions`, SessionMeta{Key: "key"}, nil},
+		"scope": {
+			`DROP TABLE session_scopes`, SessionMeta{Key: "key", Scope: scope}, nil,
+		},
+		"aliases": {
+			`DROP TABLE session_aliases`, SessionMeta{Key: "key", Aliases: []string{"alias"}}, nil,
+		},
+		"messages": {
+			`DROP TABLE session_messages`,
+			SessionMeta{Key: "key"},
+			[]providers.Message{{Role: "user", Content: "one"}},
+		},
+	} {
+		t.Run("session "+name, func(t *testing.T) {
+			store, conn := newSessionSchemaCoverageConn(t)
+			if _, err := store.db.Exec(test.breakSQL); err != nil {
+				t.Fatal(err)
+			}
+			test.meta.CreatedAt, test.meta.UpdatedAt = now, now
+			if inserted, err := insertLegacySession(
+				t.Context(), conn, "key", test.history, test.meta,
+			); err == nil || inserted {
+				t.Fatalf("missing %s relation = inserted:%t err:%v", name, inserted, err)
+			}
+		})
+	}
+	for name, relation := range map[string]string{
+		"threads": `threads`, "context": `thread_context`, "aliases": `thread_aliases`,
+	} {
+		t.Run("thread "+name, func(t *testing.T) {
+			store, conn := newSessionSchemaCoverageConn(t)
+			if err := store.EnsureSessionHistory(t.Context(), "session"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(`PRAGMA foreign_keys = OFF; DROP TABLE ` + relation); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := conn.ExecContext(t.Context(), `BEGIN`); err != nil {
+				t.Fatal(err)
+			}
+			inserted, _, err := insertLegacyThread(t.Context(), conn, legacyThreadMeta{
+				ID: "thread", PrimarySessionKey: "session", Context: map[string]string{"repo": "x"},
+				Aliases: []string{"alias"}, CreatedAt: now, UpdatedAt: now,
+			})
+			_, _ = conn.ExecContext(t.Context(), `ROLLBACK`)
+			if err == nil || inserted {
+				t.Fatalf("missing %s relation = inserted:%t err:%v", name, inserted, err)
+			}
+		})
+	}
+	t.Run("handoff sessions query", func(t *testing.T) {
+		store, conn := newSessionSchemaCoverageConn(t)
+		if _, err := store.db.Exec(`DROP TABLE sessions`); err != nil {
+			t.Fatal(err)
+		}
+		if inserted, _, err := insertLegacyHandoff(t.Context(), conn, legacyThreadHandoff{
+			ID: "handoff", OriginSessionKey: "origin", TargetThreadID: "thread",
+		}); err == nil || inserted {
+			t.Fatalf("missing session relation = inserted:%t err:%v", inserted, err)
+		}
+	})
+	t.Run("handoff threads query", func(t *testing.T) {
+		store, conn := newSessionSchemaCoverageConn(t)
+		if err := store.EnsureSessionHistory(t.Context(), "origin"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`PRAGMA foreign_keys = OFF; DROP TABLE threads`); err != nil {
+			t.Fatal(err)
+		}
+		if inserted, _, err := insertLegacyHandoff(t.Context(), conn, legacyThreadHandoff{
+			ID: "handoff", OriginSessionKey: "origin", TargetThreadID: "thread",
+		}); err == nil || inserted {
+			t.Fatalf("missing thread relation = inserted:%t err:%v", inserted, err)
+		}
+	})
+}
+
+func TestFinalizeLegacySessionsAuditAndDeleteFailureBoundaries(t *testing.T) {
+	store, conn := newSessionSchemaCoverageConn(t)
+	sources := []sqlitestore.LegacyInput{
+		{ID: "bad-meta", Relative: "sessions/bad.meta.json", Data: []byte(`{`)},
+		{ID: "bad-aggregate", Relative: "sessions/bad.json", Data: []byte(`{`)},
+		{ID: "bad-thread", Relative: "threads/bad.json", Data: []byte(`{`)},
+		{ID: "bad-handoff", Relative: "threads/handoffs/bad.json", Data: []byte(`{`)},
+	}
+	results, err := finalizeLegacySessions(t.Context(), conn, sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range sources {
+		if results[source.ID].Skipped != 1 {
+			t.Fatalf("audit result %q = %#v", source.ID, results[source.ID])
+		}
+	}
+	if _, err := store.db.Exec(`DROP TABLE sessions`); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := json.Marshal(sessionDeleteManifest{Version: 1, Keys: []string{"deleted"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := finalizeLegacySessions(t.Context(), conn, []sqlitestore.LegacyInput{{
+		ID: "delete", Relative: "sessions/.session-delete-v1-delete.json", Data: manifest,
+	}}); err == nil {
+		t.Fatal("final legacy delete relation failure was hidden")
 	}
 }

@@ -31,8 +31,6 @@ const (
 
 const RuntimeStateStoreID database.StoreID = "workspace.runtime-state"
 
-var runtimeStateBrokerClient = database.RuntimeClient
-
 type runtimeStateResolveRequest struct {
 	WorkspaceSelector string `json:"workspace_selector"`
 }

@@ -2,6 +2,7 @@ package repoaudit
 
 import (
 	"context"
+	"errors"
 	"os"
 
 	"github.com/sipeed/picoclaw/pkg/database"
@@ -73,18 +74,21 @@ type reviewAutomationUpdateRequest struct {
 }
 
 type reviewGetStateResponse struct {
-	Found bool            `json:"found"`
-	State RepositoryState `json:"state"`
+	Found           bool            `json:"found"`
+	State           RepositoryState `json:"state"`
+	PurgeInProgress bool            `json:"purge_in_progress,omitempty"`
 }
 
 type reviewStatesResponse struct {
-	Items []RepositoryState `json:"items"`
-	Done  bool              `json:"done"`
+	Items           []RepositoryState `json:"items"`
+	Done            bool              `json:"done"`
+	PurgeInProgress bool              `json:"purge_in_progress,omitempty"`
 }
 
 type reviewSummariesResponse struct {
-	Items []RepositorySummary `json:"items"`
-	Done  bool                `json:"done"`
+	Items           []RepositorySummary `json:"items"`
+	Done            bool                `json:"done"`
+	PurgeInProgress bool                `json:"purge_in_progress,omitempty"`
 }
 
 type reviewGetProfileResponse struct {
@@ -106,17 +110,20 @@ type reviewBoolResponse struct {
 }
 
 type reviewGetAutomationResponse struct {
-	Found      bool                       `json:"found"`
-	Automation RepositoryReviewAutomation `json:"automation"`
+	Found           bool                       `json:"found"`
+	Automation      RepositoryReviewAutomation `json:"automation"`
+	PurgeInProgress bool                       `json:"purge_in_progress,omitempty"`
 }
 
 type reviewAutomationsResponse struct {
-	Items []RepositoryReviewAutomation `json:"items"`
-	Done  bool                         `json:"done"`
+	Items           []RepositoryReviewAutomation `json:"items"`
+	Done            bool                         `json:"done"`
+	PurgeInProgress bool                         `json:"purge_in_progress,omitempty"`
 }
 
 type reviewAutomationResponse struct {
-	Automation RepositoryReviewAutomation `json:"automation"`
+	Automation      RepositoryReviewAutomation `json:"automation"`
+	PurgeInProgress bool                       `json:"purge_in_progress,omitempty"`
 }
 
 type reviewRewriteStateRequest struct {
@@ -130,6 +137,9 @@ func (s Store) brokerGetByID(id string) (RepositoryState, bool, error) {
 		context.Background(), reviewBrokerDomain, reviewBrokerVersion, reviewOperationGetByID,
 		reviewIDRequest{StoreID: s.StoreID(), ID: id}, &response,
 	)
+	if err == nil && response.PurgeInProgress {
+		return RepositoryState{}, false, ErrRepositoryReviewPurgeInProgress
+	}
 	return response.State, response.Found, mapReviewClientError(err)
 }
 
@@ -143,6 +153,9 @@ func (s Store) brokerListStates() ([]RepositoryState, error) {
 		)
 		if err != nil {
 			return nil, mapReviewClientError(err)
+		}
+		if response.PurgeInProgress {
+			return nil, ErrRepositoryReviewPurgeInProgress
 		}
 		if len(response.Items) > reviewStatePageSize || len(items)+len(response.Items) > 10_000 {
 			return nil, database.NewError(database.CodeIntegrity, "repository review list response is invalid")
@@ -167,6 +180,9 @@ func (s Store) brokerListSummaries() ([]RepositorySummary, error) {
 		)
 		if err != nil {
 			return nil, mapReviewClientError(err)
+		}
+		if response.PurgeInProgress {
+			return nil, ErrRepositoryReviewPurgeInProgress
 		}
 		items = append(items, response.Items...)
 		if response.Done {
@@ -276,6 +292,9 @@ func (s Store) brokerListAutomations(ctx context.Context) ([]RepositoryReviewAut
 		if err != nil {
 			return nil, mapReviewAutomationClientError(err)
 		}
+		if response.PurgeInProgress {
+			return nil, ErrRepositoryReviewPurgeInProgress
+		}
 		items = append(items, response.Items...)
 		if response.Done {
 			return items, nil
@@ -289,6 +308,9 @@ func (s Store) brokerGetAutomation(ctx context.Context, id string) (RepositoryRe
 		ctx, reviewBrokerDomain, reviewBrokerVersion, reviewOperationGetAutomation,
 		reviewIDRequest{StoreID: s.StoreID(), ID: id}, &response,
 	)
+	if err == nil && response.PurgeInProgress {
+		return RepositoryReviewAutomation{}, false, ErrRepositoryReviewPurgeInProgress
+	}
 	return response.Automation, response.Found, mapReviewAutomationClientError(err)
 }
 
@@ -302,6 +324,9 @@ func (s Store) brokerCreateAutomation(
 		reviewAutomationRequest{StoreID: s.StoreID(), Automation: automation}, &response,
 		database.CallOptions{Mutation: true},
 	)
+	if err == nil && response.PurgeInProgress {
+		return RepositoryReviewAutomation{}, ErrRepositoryReviewPurgeInProgress
+	}
 	return response.Automation, mapReviewAutomationClientError(err)
 }
 
@@ -333,6 +358,9 @@ func (s Store) brokerUpdateAutomation(
 		},
 		&response, database.CallOptions{Mutation: true},
 	)
+	if err == nil && response.PurgeInProgress {
+		return RepositoryReviewAutomation{}, ErrRepositoryReviewPurgeInProgress
+	}
 	return response.Automation, mapReviewAutomationClientError(err)
 }
 
@@ -343,6 +371,9 @@ func (s Store) brokerDeleteAutomation(ctx context.Context, id string, expectedVe
 		reviewVersionRequest{StoreID: s.StoreID(), ID: id, ExpectedVersion: expectedVersion}, &response,
 		database.CallOptions{Mutation: true},
 	)
+	if err == nil && response.PurgeInProgress {
+		return ErrRepositoryReviewPurgeInProgress
+	}
 	return mapReviewAutomationClientError(err)
 }
 
@@ -394,6 +425,9 @@ func (handler *reviewStoreHandler) handleExtended(ctx context.Context, request d
 			return nil, mapReviewBrokerError(err)
 		}
 		state, found, err := store.GetByID(input.ID)
+		if errors.Is(err, ErrRepositoryReviewPurgeInProgress) {
+			return reviewGetStateResponse{PurgeInProgress: true}, nil
+		}
 		if err != nil {
 			return nil, mapReviewBrokerError(err)
 		}
@@ -410,6 +444,8 @@ func (handler *reviewStoreHandler) handleExtended(ctx context.Context, request d
 		return handler.handleAutomationMutation(ctx, request)
 	case reviewOperationRewriteState, reviewOperationRewriteProfile, reviewOperationRewriteAutomation:
 		return handler.handleRewrite(ctx, request)
+	case reviewOperationPurgeSnapshot, reviewOperationPurgeAutomation, reviewOperationReconcilePurges:
+		return handler.handlePurgeOperation(ctx, request)
 	default:
 		return nil, database.NewError(database.CodeUnsupported, "repository review operation is unsupported")
 	}
@@ -479,6 +515,9 @@ func (handler *reviewStoreHandler) handleList(ctx context.Context, request datab
 			return nil, database.NewError(database.CodeInvalid, "repository review page is invalid")
 		}
 		items, err := store.List()
+		if errors.Is(err, ErrRepositoryReviewPurgeInProgress) {
+			return reviewStatesResponse{PurgeInProgress: true}, nil
+		}
 		if err != nil {
 			return nil, mapReviewBrokerError(err)
 		}
@@ -489,6 +528,9 @@ func (handler *reviewStoreHandler) handleList(ctx context.Context, request datab
 			return nil, database.NewError(database.CodeInvalid, "repository review page is invalid")
 		}
 		items, err := store.ListSummaries()
+		if errors.Is(err, ErrRepositoryReviewPurgeInProgress) {
+			return reviewSummariesResponse{PurgeInProgress: true}, nil
+		}
 		if err != nil {
 			return nil, mapReviewBrokerError(err)
 		}
@@ -509,6 +551,9 @@ func (handler *reviewStoreHandler) handleList(ctx context.Context, request datab
 			return nil, database.NewError(database.CodeInvalid, "repository review page is invalid")
 		}
 		items, err := store.ListAutomations(ctx)
+		if errors.Is(err, ErrRepositoryReviewPurgeInProgress) {
+			return reviewAutomationsResponse{PurgeInProgress: true}, nil
+		}
 		if err != nil {
 			return nil, mapReviewBrokerError(err)
 		}
@@ -541,6 +586,9 @@ func (handler *reviewStoreHandler) handleGetCatalog(ctx context.Context, request
 		return reviewBoolResponse{Value: value}, nil
 	default:
 		value, found, err := store.GetAutomation(ctx, input.ID)
+		if errors.Is(err, ErrRepositoryReviewPurgeInProgress) {
+			return reviewGetAutomationResponse{PurgeInProgress: true}, nil
+		}
 		if err != nil {
 			return nil, mapReviewBrokerError(err)
 		}
@@ -548,7 +596,6 @@ func (handler *reviewStoreHandler) handleGetCatalog(ctx context.Context, request
 	}
 }
 
-//nolint:dupl // Profile and automation commands intentionally keep their typed wire contracts separate.
 func (handler *reviewStoreHandler) handleProfileMutation(ctx context.Context, request database.Request) (any, error) {
 	store, err := handler.open()
 	if err != nil {
@@ -592,7 +639,6 @@ func (handler *reviewStoreHandler) handleProfileMutation(ctx context.Context, re
 	}
 }
 
-//nolint:dupl // Profile and automation commands intentionally keep their typed wire contracts separate.
 func (handler *reviewStoreHandler) handleAutomationMutation(
 	ctx context.Context,
 	request database.Request,
@@ -608,6 +654,9 @@ func (handler *reviewStoreHandler) handleAutomationMutation(
 			return nil, database.NewError(database.CodeInvalid, "repository review request is invalid")
 		}
 		value, err := store.CreateAutomation(ctx, input.Automation)
+		if errors.Is(err, ErrRepositoryReviewPurgeInProgress) {
+			return reviewAutomationResponse{PurgeInProgress: true}, nil
+		}
 		if err != nil {
 			return nil, mapReviewBrokerError(err)
 		}
@@ -623,6 +672,9 @@ func (handler *reviewStoreHandler) handleAutomationMutation(
 			input.ExpectedVersion,
 			func(value *RepositoryReviewAutomation) error { *value = cloneAutomation(input.Candidate); return nil },
 		)
+		if errors.Is(err, ErrRepositoryReviewPurgeInProgress) {
+			return reviewAutomationResponse{PurgeInProgress: true}, nil
+		}
 		if err != nil {
 			return nil, mapReviewBrokerError(err)
 		}
@@ -632,7 +684,12 @@ func (handler *reviewStoreHandler) handleAutomationMutation(
 		if request.DecodePayload(&input) != nil || input.StoreID != handler.storeID {
 			return nil, database.NewError(database.CodeInvalid, "repository review request is invalid")
 		}
-		if err := store.DeleteAutomation(ctx, input.ID, input.ExpectedVersion); err != nil {
+		if err := store.DeleteAutomation(ctx, input.ID, input.ExpectedVersion); errors.Is(
+			err,
+			ErrRepositoryReviewPurgeInProgress,
+		) {
+			return reviewMutationResponse{PurgeInProgress: true}, nil
+		} else if err != nil {
 			return nil, mapReviewBrokerError(err)
 		}
 		return reviewMutationResponse{Updated: true}, nil

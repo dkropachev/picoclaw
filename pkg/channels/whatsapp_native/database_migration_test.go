@@ -50,15 +50,13 @@ func TestMigrateWhatsAppDatabaseFailureLeavesOriginalGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	injected := errors.New("injected after WhatsApp library upgrade")
-	originalHook := whatsappMigrationCheckpoint
-	whatsappMigrationCheckpoint = func(phase string) error {
+	checkpoint := func(phase string) error {
 		if phase == whatsappMigrationAfterUpgrade {
 			return injected
 		}
 		return nil
 	}
-	t.Cleanup(func() { whatsappMigrationCheckpoint = originalHook })
-	if err := MigrateDatabase(t.Context(), path); !errors.Is(err, injected) {
+	if err := migrateWhatsAppDatabaseWithCheckpoint(t.Context(), path, checkpoint); !errors.Is(err, injected) {
 		t.Fatalf("WhatsApp migration error = %v", err)
 	}
 	after, err := os.ReadFile(path)
@@ -88,13 +86,13 @@ func TestMigrateWhatsAppDatabaseCrashBeforeCutoverLeavesOriginalGeneration(t *te
 			os.Exit(91)
 		}
 		defer fence.Close()
-		whatsappMigrationCheckpoint = func(phase string) error {
+		checkpoint := func(phase string) error {
 			if phase == whatsappMigrationAfterVersion {
 				os.Exit(92)
 			}
 			return nil
 		}
-		_ = MigrateDatabase(t.Context(), path)
+		_ = migrateWhatsAppDatabaseWithCheckpoint(t.Context(), path, checkpoint)
 		os.Exit(93)
 	}
 

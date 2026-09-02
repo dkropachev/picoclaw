@@ -24,8 +24,6 @@ const (
 
 const WeComStoreID database.StoreID = "channel.wecom"
 
-var wecomBrokerClient = database.RuntimeClient
-
 type wecomBrokerTarget struct {
 	StoreID database.StoreID `json:"store_id"`
 }

@@ -137,7 +137,7 @@ func TestSeahorseCatalogDependencyAndSnapshotFailuresPrecedeEngineIO(t *testing.
 	fixture := newSeahorseCatalogFixture(t, seahorseCatalogAgentSpec{
 		id: routing.DefaultAgentID, defaultID: true,
 	})
-	valid := defaultSeahorseContextDependencies()
+	valid := testSeahorseContextDependencies()
 	tests := []struct {
 		name string
 		deps seahorseContextDependencies
@@ -317,13 +317,13 @@ func TestSeahorseCatalogCreatesAllEnginesBeforeSortedBootstrapAndInstall(t *test
 		workspaceOwners[agent.Workspace] = id
 	}
 	events := make([]string, 0, 7)
-	deps := defaultSeahorseContextDependencies()
+	deps := testSeahorseContextDependencies()
 	deps.newEngine = func(
 		cfg seahorse.Config,
 		complete seahorse.CompleteFn,
 	) (*seahorse.Engine, error) {
 		events = append(events, "engine:"+workspaceOwners[cfg.Workspace])
-		return newRuntimeSeahorseEngine(cfg, complete)
+		return testRuntimeSeahorseEngine(cfg, complete)
 	}
 	deps.bootstrap = func(
 		_ context.Context,
@@ -374,7 +374,9 @@ func TestSeahorseCatalogDefaultAdaptersAndNilContext(t *testing.T) {
 			id: routing.DefaultAgentID, defaultID: true,
 			sessions: []string{"adapter-bootstrap-session"},
 		})
-		managerRaw, err := newSeahorseContextManager(nil, fixture.loop)
+		managerRaw, err := newSeahorseContextManagerWithDependencies(
+			context.Background(), nil, fixture.loop, testSeahorseContextDependencies(),
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -398,7 +400,7 @@ func TestSeahorseCatalogDefaultAdaptersAndNilContext(t *testing.T) {
 			nil,
 			nil,
 			fixture.loop,
-			defaultSeahorseContextDependencies(),
+			testSeahorseContextDependencies(),
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -445,7 +447,9 @@ func TestSeahorseContextManagerOperationAndCloseEdges(t *testing.T) {
 	fixture := newSeahorseCatalogFixture(t, seahorseCatalogAgentSpec{
 		id: routing.DefaultAgentID, defaultID: true,
 	})
-	managerRaw, err := newSeahorseContextManagerWithContext(t.Context(), nil, fixture.loop)
+	managerRaw, err := newSeahorseContextManagerWithDependencies(
+		t.Context(), nil, fixture.loop, testSeahorseContextDependencies(),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +513,7 @@ func TestSeahorseCatalogLaterEngineFailuresCloseEveryPrivateEngine(t *testing.T)
 			created := make([]*seahorse.Engine, 0, 2)
 			closed := make([]*seahorse.Engine, 0, 2)
 			var closeMu sync.Mutex
-			deps := defaultSeahorseContextDependencies()
+			deps := testSeahorseContextDependencies()
 			deps.newEngine = func(
 				cfg seahorse.Config,
 				complete seahorse.CompleteFn,
@@ -525,7 +529,7 @@ func TestSeahorseCatalogLaterEngineFailuresCloseEveryPrivateEngine(t *testing.T)
 						return nil, nil
 					}
 				}
-				engine, err := newRuntimeSeahorseEngine(cfg, complete)
+				engine, err := testRuntimeSeahorseEngine(cfg, complete)
 				if err == nil {
 					created = append(created, engine)
 				}
@@ -575,7 +579,7 @@ func TestSeahorseCatalogInvalidEngineRetrievalClosesPrivateEngine(t *testing.T) 
 	invalidEngine := &seahorse.Engine{}
 	closeCalls := 0
 	installCalls := 0
-	deps := defaultSeahorseContextDependencies()
+	deps := testSeahorseContextDependencies()
 	deps.newEngine = func(
 		seahorse.Config,
 		seahorse.CompleteFn,
@@ -624,12 +628,12 @@ func TestSeahorseCatalogBootstrapFailuresAndCancellationRollBack(t *testing.T) {
 			created := make([]*seahorse.Engine, 0, 2)
 			closed := make([]*seahorse.Engine, 0, 2)
 			var closeMu sync.Mutex
-			deps := defaultSeahorseContextDependencies()
+			deps := testSeahorseContextDependencies()
 			deps.newEngine = func(
 				cfg seahorse.Config,
 				complete seahorse.CompleteFn,
 			) (*seahorse.Engine, error) {
-				engine, err := newRuntimeSeahorseEngine(cfg, complete)
+				engine, err := testRuntimeSeahorseEngine(cfg, complete)
 				if err == nil {
 					created = append(created, engine)
 				}
@@ -693,7 +697,7 @@ func TestSeahorseCatalogAllowlistCapabilitiesTraitsAndVersions(t *testing.T) {
 	)
 	var admissions []tools.FactoryBackedAdmission
 	var stagedBatches []tools.FactoryBackedBatch
-	deps := defaultSeahorseContextDependencies()
+	deps := testSeahorseContextDependencies()
 	deps.install = func(
 		batches []tools.FactoryBackedBatch,
 	) ([]tools.FactoryBackedAdmission, error) {
@@ -809,7 +813,7 @@ func TestSeahorseCatalogInitialAndLateCollisionsRollBackAllRegistries(t *testing
 			closed := make([]*seahorse.Engine, 0, 2)
 			var closeMu sync.Mutex
 			var staged []tools.FactoryBackedBatch
-			deps := defaultSeahorseContextDependencies()
+			deps := testSeahorseContextDependencies()
 			deps.closeEngine = trackedSeahorseCloser(&closeMu, &closed)
 			deps.install = func(
 				batches []tools.FactoryBackedBatch,
@@ -855,7 +859,7 @@ func TestSeahorseCatalogInstallerErrorsAndPanicsClosePrivateEngines(t *testing.T
 			)
 			closed := make([]*seahorse.Engine, 0, 2)
 			var closeMu sync.Mutex
-			deps := defaultSeahorseContextDependencies()
+			deps := testSeahorseContextDependencies()
 			deps.closeEngine = trackedSeahorseCloser(&closeMu, &closed)
 			deps.install = func(
 				[]tools.FactoryBackedBatch,
@@ -885,7 +889,7 @@ func TestSeahorseCatalogPostCommitMalformedAdmissionsRetainManager(t *testing.T)
 			)
 			closed := make([]*seahorse.Engine, 0, 2)
 			var closeMu sync.Mutex
-			deps := defaultSeahorseContextDependencies()
+			deps := testSeahorseContextDependencies()
 			deps.closeEngine = trackedSeahorseCloser(&closeMu, &closed)
 			deps.install = func(
 				batches []tools.FactoryBackedBatch,
@@ -1064,7 +1068,7 @@ func TestSeahorseCatalogOwnerProductsAndAgentStoresAreIsolated(t *testing.T) {
 	)
 	managerRaw, err := newSeahorseContextManagerWithDependencies(
 		context.Background(), nil, fixture.loop,
-		defaultSeahorseContextDependencies(),
+		testSeahorseContextDependencies(),
 	)
 	if err != nil {
 		t.Fatal(err)

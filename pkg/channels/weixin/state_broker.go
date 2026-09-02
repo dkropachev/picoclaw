@@ -29,8 +29,6 @@ const (
 
 const WeixinStoreID database.StoreID = "channel.weixin"
 
-var weixinBrokerClient = database.RuntimeClient
-
 type weixinBrokerTarget struct {
 	StoreID database.StoreID `json:"store_id"`
 }

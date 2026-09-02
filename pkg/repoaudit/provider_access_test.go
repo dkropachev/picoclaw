@@ -19,9 +19,9 @@ func TestRuntimeStoreWithoutBrokerFailsClosed(t *testing.T) {
 	t.Cleanup(restoreAuthority)
 	allowUnfencedReviewProviderForTests.Store(false)
 	t.Cleanup(func() { allowUnfencedReviewProviderForTests.Store(true) })
-	previousClient := reviewBrokerClient
-	reviewBrokerClient = func() *database.Client { return nil }
-	t.Cleanup(func() { reviewBrokerClient = previousClient })
+	previousClient := database.RuntimeClient()
+	database.InstallProcessClient(nil)
+	t.Cleanup(func() { database.InstallProcessClient(previousClient) })
 
 	workspace := filepath.Join(t.TempDir(), "must-not-create")
 	store := NewSQLiteStore(workspace)

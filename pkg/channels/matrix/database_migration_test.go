@@ -48,15 +48,13 @@ func TestMigrateCryptoDatabaseFailureLeavesOriginalGeneration(t *testing.T) {
 		t.Fatal(readErr)
 	}
 	injected := errors.New("injected after Matrix state upgrade")
-	originalHook := matrixMigrationCheckpoint
-	matrixMigrationCheckpoint = func(phase string) error {
+	checkpoint := func(phase string) error {
 		if phase == matrixMigrationAfterState {
 			return injected
 		}
 		return nil
 	}
-	t.Cleanup(func() { matrixMigrationCheckpoint = originalHook })
-	if err := MigrateCryptoDatabase(t.Context(), path); !errors.Is(err, injected) {
+	if err := migrateCryptoDatabaseWithCheckpoint(t.Context(), path, checkpoint); !errors.Is(err, injected) {
 		t.Fatalf("Matrix migration error = %v", err)
 	}
 	after, err := os.ReadFile(path)
@@ -86,13 +84,13 @@ func TestMigrateCryptoDatabaseCrashBeforeCutoverLeavesOriginalGeneration(t *test
 			os.Exit(81)
 		}
 		defer fence.Close()
-		matrixMigrationCheckpoint = func(phase string) error {
+		checkpoint := func(phase string) error {
 			if phase == matrixMigrationAfterVersion {
 				os.Exit(82)
 			}
 			return nil
 		}
-		_ = MigrateCryptoDatabase(t.Context(), path)
+		_ = migrateCryptoDatabaseWithCheckpoint(t.Context(), path, checkpoint)
 		os.Exit(83)
 	}
 

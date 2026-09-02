@@ -68,7 +68,7 @@ type Store struct {
 // operation. The returned value is safe to copy; mutations remain version
 // fenced in repository-reviews.db.
 func NewSQLiteStore(workspace string) Store {
-	if client := reviewBrokerClient(); client != nil {
+	if client := database.RuntimeClient(); client != nil {
 		storeID, err := resolveReviewBrokerStoreID(context.Background(), client, workspace)
 		return Store{
 			workspace: workspace, now: time.Now, broker: client,

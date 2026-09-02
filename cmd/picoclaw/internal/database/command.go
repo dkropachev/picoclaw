@@ -46,8 +46,6 @@ import (
 	"github.com/sipeed/picoclaw/web/backend/launcherconfig"
 )
 
-var ensureSupervisor = dblayer.EnsureSupervisor
-
 // NewDatabaseCommand returns the provider-neutral database maintenance tree.
 func NewDatabaseCommand() *cobra.Command {
 	command := &cobra.Command{
@@ -531,7 +529,7 @@ func ensureForCommand(ctx context.Context) (*dblayer.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ensureSupervisor(ctx, dblayer.EnsureOptions{
+	return dblayer.EnsureSupervisor(ctx, dblayer.EnsureOptions{
 		Home: internal.GetPicoclawHome(), Executable: executable,
 		ConfigPath: internal.GetConfigPath(),
 	})

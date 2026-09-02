@@ -339,6 +339,102 @@ func TestThreadBrokerRejectsMalformedTypedOperations(t *testing.T) {
 	}
 }
 
+func TestThreadBrokerMapsClosedProviderOperationFailures(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "workspace")
+	handler, err := NewBrokerHandler(home, &config.Config{Agents: config.AgentsConfig{
+		Defaults: config.AgentDefaults{Workspace: workspace},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
+	threadBrokerCall[threadBrokerResponse](
+		t, handler, BrokerPreflightOperation,
+		threadStoreRequest{StoreID: memory.SessionsStoreID},
+	)
+	local := handler.workspaces[memory.SessionsStoreID].adapter.LocalStore()
+	if _, err := threadSessionDatabase(local).Exec(`
+		PRAGMA foreign_keys = OFF;
+		DROP TABLE sessions;
+		DROP TABLE threads;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	requests := []struct {
+		operation string
+		input     any
+	}{
+		{threadOperationSearch, threadSearchRequest{
+			StoreID: memory.SessionsStoreID, Options: SearchOptions{Limit: 1},
+		}},
+		{threadOperationList, threadListRequest{StoreID: memory.SessionsStoreID, Limit: 1}},
+		{threadOperationGet, threadIDRequest{StoreID: memory.SessionsStoreID, ID: "thread"}},
+		{threadOperationGetMeta, threadIDRequest{StoreID: memory.SessionsStoreID, ID: "thread"}},
+		{threadOperationCreate, threadCreateRequest{
+			StoreID: memory.SessionsStoreID,
+			Request: CreateRequest{ID: "thread", PrimarySessionKey: "session"},
+		}},
+		{threadOperationCreatePico, threadCreatePicoRequest{
+			StoreID: memory.SessionsStoreID,
+			Allocation: PicoAllocation{
+				SessionID: "pico", Key: "pico", Scope: session.SessionScope{Channel: "pico"},
+			},
+			Request: CreateRequest{ID: "pico"},
+		}},
+		{threadOperationUpdate, threadUpdateRequest{
+			StoreID: memory.SessionsStoreID, ID: "thread", Request: UpdateRequest{Title: "updated"},
+		}},
+		{threadOperationAttach, threadAttachRequest{
+			StoreID: memory.SessionsStoreID,
+			Request: AttachRequest{ThreadID: "thread", SessionKey: "session"},
+		}},
+		{threadOperationDetach, threadDetachRequest{
+			StoreID: memory.SessionsStoreID, SessionKey: "session",
+		}},
+	}
+	for _, request := range requests {
+		t.Run(request.operation, func(t *testing.T) {
+			if _, err := threadBrokerHandle(
+				t.Context(), handler, request.operation, request.input,
+			); err == nil {
+				t.Fatal("closed provider operation succeeded")
+			}
+		})
+	}
+}
+
+func TestThreadBrokerWorkspaceCatalogBoundaries(t *testing.T) {
+	if _, err := NewBrokerHandler(" missing-home ", nil); database.CodeOf(err) != database.CodeInvalid {
+		t.Fatalf("invalid broker home error = %v", err)
+	}
+	home := t.TempDir()
+	primary := filepath.Join(home, "primary")
+	agent := filepath.Join(home, "agent")
+	cfg := &config.Config{Agents: config.AgentsConfig{
+		Defaults: config.AgentDefaults{Workspace: primary},
+		List: []config.AgentConfig{
+			{ID: "blank", Workspace: ""},
+			{ID: "duplicate", Workspace: primary},
+			{ID: "agent", Workspace: agent},
+		},
+	}}
+	workspaces, err := configuredSessionWorkspaces(home, cfg)
+	if err != nil || len(workspaces) != 2 {
+		t.Fatalf("configured broker workspaces = %#v, %v", workspaces, err)
+	}
+	for _, configured := range []string{"", "relative", "~", "~/nested", agent} {
+		if _, err := resolveBrokerWorkspace(home, configured); err != nil {
+			t.Errorf("resolveBrokerWorkspace(%q): %v", configured, err)
+		}
+	}
+	if _, err := configuredSessionWorkspaces(home, &config.Config{Agents: config.AgentsConfig{
+		Defaults: config.AgentDefaults{Workspace: "bad\x00workspace"},
+	}}); err == nil {
+		t.Fatal("invalid configured broker workspace accepted")
+	}
+}
+
 func TestThreadBrokerClientRejectsMalformedResponses(t *testing.T) {
 	home := t.TempDir()
 	handler := database.HandlerFunc(func(_ context.Context, request database.Request) (any, error) {
@@ -347,8 +443,11 @@ func TestThreadBrokerClientRejectsMalformedResponses(t *testing.T) {
 			return threadBrokerResponse{Threads: []Thread{{ID: "search"}}}, nil
 		case threadOperationList:
 			return threadBrokerResponse{Next: -1}, nil
-		case threadOperationGet, threadOperationGetMeta, threadOperationCreate:
+		case threadOperationGet, threadOperationGetMeta, threadOperationCreate,
+			threadOperationCreatePico, threadOperationAttach, threadOperationReturnOrigin:
 			return threadBrokerResponse{Found: true}, nil
+		case threadOperationDetach:
+			return threadBrokerResponse{OK: false}, nil
 		default:
 			return threadBrokerResponse{OK: true}, nil
 		}
@@ -388,6 +487,27 @@ func TestThreadBrokerClientRejectsMalformedResponses(t *testing.T) {
 	); found || database.CodeOf(err) != database.CodeIntegrity {
 		t.Fatalf("malformed broker mutation = found:%t err:%v", found, err)
 	}
+	if _, err := store.CreatePicoThread(
+		t.Context(),
+		config.DefaultConfig(),
+		CreateRequest{ID: "pico"},
+	); database.CodeOf(
+		err,
+	) != database.CodeIntegrity {
+		t.Fatalf("malformed Pico broker response error = %v", err)
+	}
+	if _, _, err := store.AttachCurrent(t.Context(), AttachRequest{
+		ThreadID: "thread", SessionKey: "session",
+	}); database.CodeOf(err) != database.CodeIntegrity {
+		t.Fatalf("malformed attach broker response error = %v", err)
+	}
+	if err := store.DetachCurrent("session"); database.CodeOf(err) != database.CodeIntegrity {
+		t.Fatalf("malformed detach broker response error = %v", err)
+	}
+	if _, found, err := store.ReturnToOrigin("handoff"); found ||
+		database.CodeOf(err) != database.CodeIntegrity {
+		t.Fatalf("malformed return broker response = found:%t err:%v", found, err)
+	}
 
 	if _, err := (Store{}).resolvedBrokerStoreID(t.Context()); database.CodeOf(err) != database.CodeUnavailable {
 		t.Fatalf("missing broker client resolution error = %v", err)
@@ -400,6 +520,111 @@ func TestThreadBrokerClientRejectsMalformedResponses(t *testing.T) {
 	if database.CodeOf(err) != database.CodeUnavailable {
 		t.Fatalf("missing broker call error = %v", err)
 	}
+}
+
+func TestThreadBrokerClientPropagatesTypedFailuresAndSuccesses(t *testing.T) {
+	want := database.NewError(database.CodeUnavailable, "broker unavailable")
+	failureStore := newThreadCoverageClientStore(t, database.HandlerFunc(
+		func(context.Context, database.Request) (any, error) { return nil, want },
+	))
+	operations := []func() error{
+		func() error { _, err := failureStore.brokerSearch(t.Context(), SearchOptions{}); return err },
+		func() error { _, err := failureStore.brokerList(t.Context(), ListOptions{}); return err },
+		func() error { _, _, err := failureStore.brokerGet(t.Context(), "id"); return err },
+		func() error { _, _, err := failureStore.brokerGetMeta(t.Context(), "id"); return err },
+		func() error {
+			_, _, err := failureStore.brokerThreadMutation(
+				t.Context(), threadOperationCreate,
+				threadCreateRequest{StoreID: memory.SessionsStoreID},
+			)
+			return err
+		},
+		func() error {
+			_, err := failureStore.CreatePicoThread(t.Context(), config.DefaultConfig(), CreateRequest{ID: "pico"})
+			return err
+		},
+		func() error {
+			_, _, err := failureStore.AttachCurrent(t.Context(), AttachRequest{ThreadID: "id", SessionKey: "key"})
+			return err
+		},
+		func() error { return failureStore.DetachCurrent("key") },
+		func() error { _, _, err := failureStore.ReturnToOrigin("handoff"); return err },
+	}
+	for index, operation := range operations {
+		if err := operation(); database.CodeOf(err) != database.CodeUnavailable {
+			t.Errorf("failure operation %d = %v", index, err)
+		}
+	}
+
+	now := time.Now().UTC()
+	thread := Thread{ID: "id", Context: map[string]string{"repo": "owner/repo"}, Updated: now}
+	meta := ThreadMeta{ID: "id", Context: map[string]string{"repo": "owner/repo"}, SessionKeys: []string{"key"}}
+	handoff := ThreadHandoff{ID: "handoff", CreatedAt: now}
+	successStore := newThreadCoverageClientStore(t, database.HandlerFunc(
+		func(_ context.Context, request database.Request) (any, error) {
+			switch request.Operation {
+			case threadOperationSearch:
+				return threadBrokerResponse{Threads: []Thread{thread}}, nil
+			case threadOperationList:
+				return threadBrokerResponse{Threads: []Thread{thread}}, nil
+			case threadOperationGet, threadOperationCreate, threadOperationCreatePico,
+				threadOperationUpdate:
+				threadCopy := thread
+				return threadBrokerResponse{Found: true, Thread: &threadCopy}, nil
+			case threadOperationGetMeta:
+				metaCopy := meta
+				return threadBrokerResponse{Found: true, Meta: &metaCopy}, nil
+			case threadOperationAttach:
+				threadCopy, handoffCopy := thread, handoff
+				return threadBrokerResponse{Found: true, Thread: &threadCopy, Handoff: &handoffCopy}, nil
+			case threadOperationDetach:
+				return threadBrokerResponse{OK: true}, nil
+			case threadOperationReturnOrigin:
+				handoffCopy := handoff
+				return threadBrokerResponse{Found: true, Handoff: &handoffCopy}, nil
+			default:
+				return nil, database.NewError(database.CodeUnsupported, "unsupported")
+			}
+		},
+	))
+	if _, err := successStore.CreatePicoThread(
+		t.Context(),
+		config.DefaultConfig(),
+		CreateRequest{ID: "pico"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := successStore.AttachCurrent(
+		t.Context(),
+		AttachRequest{ThreadID: "id", SessionKey: "key"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := successStore.DetachCurrent("key"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := successStore.ReturnToOrigin("handoff"); err != nil || !found {
+		t.Fatalf("successful return = found:%t err:%v", found, err)
+	}
+}
+
+func newThreadCoverageClientStore(t *testing.T, handler database.Handler) Store {
+	t.Helper()
+	home := t.TempDir()
+	server, err := database.StartServer(t.Context(), database.ServerOptions{Home: home, Handler: handler})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Close(ctx)
+	})
+	client, err := database.Connect(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Store{brokerClient: client, brokerStoreID: memory.SessionsStoreID}
 }
 
 func threadBrokerCall[T any](

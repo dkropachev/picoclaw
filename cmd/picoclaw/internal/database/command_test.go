@@ -50,8 +50,18 @@ func TestDatabaseCommandShapeAndHiddenServe(t *testing.T) {
 
 func TestDatabaseStatusAndShutdownUseTypedBroker(t *testing.T) {
 	home := t.TempDir()
+	configPath := filepath.Join(home, "config.json")
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = filepath.Join(home, "workspace")
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	_, fingerprint, err := dblayer.LoadCatalogConfiguration(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	server, err := dblayer.StartServer(context.Background(), dblayer.ServerOptions{
-		Home: home,
+		Home: home, CatalogFingerprint: fingerprint,
 		StatusProvider: func(context.Context) ([]dblayer.StoreStatus, error) {
 			return []dblayer.StoreStatus{{ID: "global.auth", Readiness: dblayer.StoreReady}}, nil
 		},
@@ -64,15 +74,8 @@ func TestDatabaseStatusAndShutdownUseTypedBroker(t *testing.T) {
 		defer cancel()
 		_ = server.Close(ctx)
 	})
-	client, err := dblayer.Connect(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	originalEnsure := ensureSupervisor
-	ensureSupervisor = func(context.Context, dblayer.EnsureOptions) (*dblayer.Client, error) {
-		return client, nil
-	}
-	t.Cleanup(func() { ensureSupervisor = originalEnsure })
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, configPath)
 
 	statusCommand := NewDatabaseCommand()
 	var statusOutput bytes.Buffer

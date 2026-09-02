@@ -102,7 +102,7 @@ func TestWeixinBrokerMultiClientAndAccountConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	weixinBrokerClient = func() *database.Client { return secondClient }
+	database.InstallProcessClient(secondClient)
 	second, err := newWeixinStateStore(
 		filepath.Join("sync", "bbbbbbbbbbbbbbbb.json"), weixinStateKindCursor,
 	)
@@ -167,9 +167,9 @@ func TestWeixinBrokerStructuredInvalidAndNoRecursion(t *testing.T) {
 	}
 	closeWeixinBroker(t, server)
 
-	previous := weixinBrokerClient
-	weixinBrokerClient = func() *database.Client { panic("broker handler consulted runtime client") }
-	t.Cleanup(func() { weixinBrokerClient = previous })
+	previous := database.RuntimeClient()
+	database.InstallProcessClient(&database.Client{})
+	t.Cleanup(func() { database.InstallProcessClient(previous) })
 	localHandler := NewBrokerHandler(t.TempDir())
 	localStore, err := localHandler.open()
 	if err != nil {
@@ -205,7 +205,7 @@ func closeWeixinBroker(t *testing.T, server *database.Server) {
 
 func setWeixinBrokerClientForTest(t *testing.T, client *database.Client) {
 	t.Helper()
-	previous := weixinBrokerClient
-	weixinBrokerClient = func() *database.Client { return client }
-	t.Cleanup(func() { weixinBrokerClient = previous })
+	previous := database.RuntimeClient()
+	database.InstallProcessClient(client)
+	t.Cleanup(func() { database.InstallProcessClient(previous) })
 }

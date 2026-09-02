@@ -100,7 +100,7 @@ func TestEvaluationBrokerMultiClientConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	evaluationBrokerClient = func() *database.Client { return secondClient }
+	database.InstallProcessClient(secondClient)
 	second := NewSQLiteStore(workspace)
 	const writers = 12
 	var wait sync.WaitGroup
@@ -330,9 +330,9 @@ func closeEvaluationBroker(t *testing.T, server *database.Server) {
 
 func setEvaluationBrokerClientForTest(t *testing.T, client *database.Client) {
 	t.Helper()
-	previous := evaluationBrokerClient
-	evaluationBrokerClient = func() *database.Client { return client }
-	t.Cleanup(func() { evaluationBrokerClient = previous })
+	previous := database.RuntimeClient()
+	database.InstallProcessClient(client)
+	t.Cleanup(func() { database.InstallProcessClient(previous) })
 }
 
 func newEvaluationBrokerHandlerForTest(

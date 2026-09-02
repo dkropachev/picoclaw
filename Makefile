@@ -393,7 +393,7 @@ lint-features:
 feature-delta:
 	@$(GO) run -tags featuretools ./scripts/feature_delta_guard.go ./scripts/featuretools_lib.go --base "$(BASE_REF)" --head "$(HEAD_REF)"
 
-## coverage-delta: Require global and per-feature uncovered Go statement debt to not increase
+## coverage-delta: Enforce 95% new-feature, 90% changed-code, and balanced regression coverage
 coverage-delta:
 	@$(GO) run -tags featuretools ./scripts/coverage_delta.go ./scripts/featuretools_lib.go --base "$(BASE_REF)" --head "$(HEAD_REF)" --tags "$(GO_BUILD_TAGS)" --packages "$(COVERAGE_PACKAGES)" --integration=$(COVERAGE_INTEGRATION)
 

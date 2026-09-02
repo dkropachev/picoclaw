@@ -34,8 +34,6 @@ const defaultEvaluationBrokerLeaseTTL = 30 * time.Second
 
 const EvaluationStoreID database.StoreID = "workspace.repository-evaluations"
 
-var evaluationBrokerClient = database.RuntimeClient
-
 type evaluationTarget struct {
 	StoreID database.StoreID `json:"store_id"`
 }

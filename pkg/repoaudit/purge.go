@@ -286,6 +286,13 @@ func (s Store) PurgeAutomationHistory(
 	if strings.TrimSpace(expectedLedgerFence) == "" {
 		return RepositoryReviewAutomation{}, RepositoryReviewPurgeEligibility{}, ErrInvalidAutomation
 	}
+	id = strings.TrimSpace(id)
+	if s.broker != nil {
+		return s.brokerPurgeAutomation(
+			ctx, id, expectedAutomationVersion, expectedRepositoryVersion,
+			expectedLedgerFence, confirmRepository, repositoryReviewPurgeReset,
+		)
+	}
 	return s.purgeAutomation(
 		ctx, id, expectedAutomationVersion, expectedRepositoryVersion,
 		expectedLedgerFence, confirmRepository, repositoryReviewPurgeReset,
@@ -306,6 +313,14 @@ func (s Store) DeleteAutomationAndHistory(
 	if strings.TrimSpace(expectedLedgerFence) == "" {
 		return RepositoryReviewPurgeEligibility{}, ErrInvalidAutomation
 	}
+	id = strings.TrimSpace(id)
+	if s.broker != nil {
+		_, eligibility, err := s.brokerPurgeAutomation(
+			ctx, id, expectedAutomationVersion, expectedRepositoryVersion,
+			expectedLedgerFence, confirmRepository, repositoryReviewPurgeRemove,
+		)
+		return eligibility, err
+	}
 	_, eligibility, err := s.purgeAutomation(
 		ctx, id, expectedAutomationVersion, expectedRepositoryVersion,
 		expectedLedgerFence, confirmRepository, repositoryReviewPurgeRemove,
@@ -316,6 +331,9 @@ func (s Store) DeleteAutomationAndHistory(
 func (s Store) RepositoryReviewPurgeEligibilityForAutomation(
 	automation RepositoryReviewAutomation,
 ) (RepositoryReviewPurgeEligibility, error) {
+	if s.broker != nil {
+		return s.brokerRepositoryReviewPurgeEligibility(context.Background(), automation)
+	}
 	unlock, err := s.lock("repository-review-purge-eligibility:" + automation.ID)
 	if err != nil {
 		return RepositoryReviewPurgeEligibility{}, err
@@ -350,6 +368,9 @@ func (s Store) RepositoryReviewAutomationSnapshot(
 	id = strings.TrimSpace(id)
 	if !validAutomationID(id) {
 		return RepositoryReviewAutomationSnapshot{}, ErrInvalidAutomation
+	}
+	if s.broker != nil {
+		return s.brokerRepositoryReviewAutomationSnapshot(ctx, id)
 	}
 	unlock, err := s.lock("repository-review-automation-snapshot:" + id)
 	if err != nil {
@@ -489,6 +510,9 @@ func (s Store) purgeAutomation(
 func (s Store) ReconcilePurgeIntents(ctx context.Context) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
+	}
+	if s.broker != nil {
+		return s.brokerReconcilePurgeIntents(ctx)
 	}
 	unlock, err := s.lock("repository-review-purge-recovery")
 	if err != nil {
@@ -720,7 +744,7 @@ func (s Store) resolveRepositoryStateIgnoringPurge(
 	if len(wanted) == 0 {
 		return RepositoryState{}, false, nil
 	}
-	states, err := s.listStates(false)
+	states, err := s.listRepositoryPurgeStatesBounded()
 	if err != nil {
 		return RepositoryState{}, false, err
 	}
@@ -770,7 +794,7 @@ func (s Store) resolveRepositoryPurgeInventory(
 		}
 	}
 	if !primaryFound && len(wanted) > 0 {
-		states, err := s.listStates(false)
+		states, err := s.listRepositoryPurgeStatesBounded()
 		if err != nil {
 			return RepositoryState{}, false, nil, nil, err
 		}
@@ -810,6 +834,38 @@ func (s Store) resolveRepositoryPurgeInventory(
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Repository < targets[j].Repository })
 	sort.Slice(states, func(i, j int) bool { return states[i].Repository < states[j].Repository })
 	return primary, primaryFound, targets, states, nil
+}
+
+func (s Store) listRepositoryPurgeStatesBounded() ([]RepositoryState, error) {
+	database, release, err := s.acquireDatabase(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	//nolint:rowserrcheck // ScanStrings checks rows.Err and closes the result set.
+	rows, err := database.QueryContext(context.Background(), `
+		SELECT state_id FROM repository_review_states
+	 ORDER BY updated_at_unix_nano DESC, state_id ASC
+	 LIMIT ?`, maxAutomationCount+1)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := sqlitestore.ScanStrings(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) > maxAutomationCount {
+		return nil, errors.New("repository review purge inventory exceeds its repository limit")
+	}
+	states := make([]RepositoryState, 0, len(ids))
+	for _, id := range ids {
+		state, loadErr := loadRepositoryStateRow(context.Background(), database, id)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		states = append(states, state)
+	}
+	return states, nil
 }
 
 func (s Store) loadPurgeTargetLedger(repository string) (RepositoryState, bool, error) {
@@ -912,11 +968,11 @@ func repositoryReviewAutomationHistoryReset(automation RepositoryReviewAutomatio
 }
 
 func (s Store) removeRepositoryReviewAutomation(intent repositoryReviewPurgeIntent) error {
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer release()
 	return sqlitestore.Immediate(context.Background(), database, func(conn *sql.Conn) error {
 		var version int64
 		var repository string
@@ -961,11 +1017,11 @@ func (s Store) removeRepositoryReviewLedger(repository string) error {
 func (s Store) removeRepositoryReviewLedgers(
 	targets []repositoryReviewPurgeLedgerTarget,
 ) error {
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer release()
 	return sqlitestore.Immediate(context.Background(), database, func(conn *sql.Conn) error {
 		for _, target := range targets {
 			var version int64
@@ -1086,11 +1142,11 @@ func repositoryReviewLegacyStateFilename(repository string) string {
 func (s Store) repositoryReviewPurgeArchiveRecords(
 	candidates []repositoryReviewPurgeArchiveCandidate,
 ) ([]repositoryReviewPurgeArchiveRecord, error) {
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	defer database.Close()
+	defer release()
 	records := make([]repositoryReviewPurgeArchiveRecord, 0, len(candidates))
 	for _, candidate := range candidates {
 		var digest []byte
@@ -1248,7 +1304,13 @@ func (s Store) savePurgeIntent(intent repositoryReviewPurgeIntent) error {
 		return err
 	}
 	// The intent contains only JSON-native scalar/time fields.
-	data, _ := json.Marshal(intent)
+	data, err := json.Marshal(intent)
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) > maxAutomationFileBytes {
+		return fmt.Errorf("%w: purge intent exceeds its size limit", ErrInvalidAutomation)
+	}
 	paths := s.purgeIntentPaths(intent)
 	for _, path := range paths {
 		if info, statErr := repositoryReviewPurgeLstat(path); statErr == nil {
