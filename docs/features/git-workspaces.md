@@ -222,6 +222,12 @@ the planned controller lifecycle must account for, compact, archive, and retire
 both non-adopted pinned checkouts and development lines. Generic quota and
 maintenance never substitute for that lifecycle.
 
+`FR-GITWS-022` storage MUST durably close the shared inventory import horizon
+after the first complete `inventory.json` enumeration, even when it finds no
+source. A later inventory source is safely audited and retained below
+`legacy-json/git-workspaces-v1/`, but MUST NOT reach inventory import or
+finalization; `inventory.db` remains authoritative.
+
 ## Data And State Model
 
 The manager root contains typed relational `inventory.db`, its private WAL/SHM

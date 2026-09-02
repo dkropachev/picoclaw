@@ -145,6 +145,13 @@ restart and exact replay do not duplicate it, any missing/invalid/estimated
 provider usage keeps the lifetime incomplete, and confined tool diagnostics
 never enter the aggregate or CLI result.
 
+Under `FR-EVENT-AUTOMATION-096` and `FR-EVENT-AUTOMATION-097`, each local-CI
+cache or checkpoint database MUST durably close its shared import horizon after
+the first complete bounded legacy enumeration, including zero sources. Later
+cache-index or checkpoint JSON is safely audited and archived below its exact
+component archive, but MUST NOT be domain-imported, finalized, or applied as a
+deletion; `cache.db` or `checkpoints.db` remains authoritative.
+
 ## Data And State Model
 
 ### Generic event state

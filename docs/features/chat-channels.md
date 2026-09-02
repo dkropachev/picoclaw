@@ -57,6 +57,13 @@ publication; commit closes the complete retired set after releasing transaction
 and reload locks, so a provider close callback cannot deadlock by re-entering
 loop shutdown or reload.
 
+Under `FR-CHANNEL-020`, each channel-local SQLite store MUST durably close its
+shared legacy import horizon after the first complete bounded enumeration,
+even when no WeCom or Weixin source exists. A later selected JSON source is
+audited and archived in that component's `legacy-json/*-v1/` tree, but MUST
+NOT reach channel import or finalization; the channel database remains
+authoritative.
+
 ## Data And State Model
 
 Channel state includes enabled config entries, platform credentials/settings,
