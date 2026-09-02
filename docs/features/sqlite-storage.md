@@ -83,6 +83,8 @@ Owns: CODE pkg/sqlitestore/**
 Owns: CODE integration/suites/storage-json/**
 Owns: TEST pkg/sqlitestore/*
 Owns: TEST pkg/gateway/runtime_storage_json_allowlist_integration_test.go TestIntegrationRuntimeOwnedJSONAllowlist
+Owns: TEST pkg/gateway/runtime_storage_legacy_migration_integration_test.go TestIntegrationRuntimeOwnedJSONLegacyMigration
+Owns: TEST pkg/gitworkspace/runtime_storage_legacy_relations_integration_test.go TestIntegrationRuntimeOwnedJSONLegacyGitInventoryRelations
 Owns: INTEGRATION storage-json
 
 ## Auxiliary Interfaces
@@ -178,6 +180,7 @@ selecting a mutable JSON fallback.
 | --- | --- |
 | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-005` | [pkg/sqlitestore/open_test.go](../../pkg/sqlitestore/open_test.go) |
 | `FR-SQLITE-003`, `FR-SQLITE-004` | [pkg/sqlitestore/open_test.go](../../pkg/sqlitestore/open_test.go), [pkg/sqlitestore/legacy_finalize_results_test.go](../../pkg/sqlitestore/legacy_finalize_results_test.go), [pkg/memory/sqlite_store_test.go](../../pkg/memory/sqlite_store_test.go) |
+| `FR-SQLITE-003`, `FR-SQLITE-004`, `FR-SQLITE-006` | [pkg/gateway/runtime_storage_legacy_migration_integration_test.go](../../pkg/gateway/runtime_storage_legacy_migration_integration_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/auth/store_sqlite_test.go](../../pkg/auth/store_sqlite_test.go), [web/backend/api/model_catalog_sqlite_test.go](../../web/backend/api/model_catalog_sqlite_test.go), [pkg/tools/adaptation_state_sqlite_test.go](../../pkg/tools/adaptation_state_sqlite_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/state/state_test.go](../../pkg/state/state_test.go), [pkg/channels/wecom/reqid_store_test.go](../../pkg/channels/wecom/reqid_store_test.go), [pkg/channels/weixin/state_sqlite_test.go](../../pkg/channels/weixin/state_sqlite_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/memory/sqlite_store_test.go](../../pkg/memory/sqlite_store_test.go), [pkg/workflows/sqlite_store_test.go](../../pkg/workflows/sqlite_store_test.go), [pkg/cron/sqlite_test.go](../../pkg/cron/sqlite_test.go), [pkg/accountrouter/store_sqlite_test.go](../../pkg/accountrouter/store_sqlite_test.go) |
