@@ -364,3 +364,93 @@ func TestPolicyAwareReadAndListConstructors(t *testing.T) {
 		t.Fatalf("mixed policy lister = %#v, %v", tool, buildErr)
 	}
 }
+
+func TestPreparedFileMutationPolicyRejectsSymlinkCycles(t *testing.T) {
+	workspace := t.TempDir()
+	cycle := filepath.Join(workspace, "cycle")
+	if err := os.Symlink(filepath.Base(cycle), cycle); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	prepared, err := NewPreparedFileMutationPolicy(workspace, FileMutationPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if protected, queryErr := prepared.ProtectsPath(cycle); queryErr == nil || protected ||
+		!strings.Contains(queryErr.Error(), "cannot be resolved") {
+		t.Fatalf("cycle ProtectsPath() = %t, %v", protected, queryErr)
+	}
+	if overlaps, queryErr := prepared.OverlapsPath(cycle); queryErr == nil || overlaps ||
+		!strings.Contains(queryErr.Error(), "cannot be resolved") {
+		t.Fatalf("cycle OverlapsPath() = %t, %v", overlaps, queryErr)
+	}
+
+	withCycle, err := NewPreparedFileMutationPolicy(workspace, FileMutationPolicy{
+		ProtectedSiblingPrefixes: []FileMutationSiblingPrefix{{
+			Parent: cycle,
+			Prefix: "runtime-sidecar.",
+		}},
+	})
+	if err == nil || withCycle != nil || !strings.Contains(err.Error(), "cannot be resolved") {
+		t.Fatalf("cycle sibling policy = %#v, %v", withCycle, err)
+	}
+}
+
+func TestPolicyAwareOperationsReportKernelReadAndEnumerationFailures(t *testing.T) {
+	workspace := t.TempDir()
+	prepared, prepareErr := NewPreparedFileMutationPolicy(workspace, FileMutationPolicy{
+		ProtectedRoots: []string{filepath.Join(workspace, "runtime.db")},
+	})
+	if prepareErr != nil {
+		t.Fatal(prepareErr)
+	}
+
+	ordinary := filepath.Join(workspace, "ordinary.txt")
+	if err := os.WriteFile(ordinary, []byte("ordinary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lister, listErr := NewListDirToolWithPolicy(
+		workspace,
+		true,
+		FileMutationPolicy{Prepared: prepared},
+	)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if result := lister.Execute(
+		context.Background(),
+		map[string]any{"path": ordinary},
+	); result == nil || !result.IsError || !strings.Contains(result.ForLLM, "failed to read directory") {
+		t.Fatalf("regular-file listing result = %#v", result)
+	}
+
+	const processMemory = "/proc/self/mem"
+	probe, openErr := os.Open(processMemory)
+	if openErr != nil {
+		t.Skipf("kernel memory view unavailable: %v", openErr)
+	}
+	probeBuffer := make([]byte, 1)
+	_, probeErr := probe.Read(probeBuffer)
+	closeErr := probe.Close()
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if probeErr == nil {
+		t.Skip("kernel memory view does not expose the expected read failure")
+	}
+
+	editor, editErr := NewEditFileToolWithPolicy(
+		workspace,
+		false,
+		FileMutationPolicy{Prepared: prepared},
+	)
+	if editErr != nil {
+		t.Fatal(editErr)
+	}
+	result := editor.Execute(context.Background(), map[string]any{
+		"path": processMemory, "old_text": "before", "new_text": "after",
+	})
+	if result == nil || !result.IsError || !strings.Contains(result.ForLLM, "failed to read file") {
+		t.Fatalf("kernel read-failure result = %#v", result)
+	}
+}
