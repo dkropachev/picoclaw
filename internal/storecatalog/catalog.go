@@ -59,7 +59,13 @@ func build(home string, cfg *config.Config, inspectGenerations bool) (*Catalog, 
 		cfg = &config.Config{}
 	}
 
-	workspace, err := resolveWorkspace(canonicalHome, cfg.Agents.Defaults.Workspace)
+	workspacePath := resolveWorkspace
+	gitWorkspacePath := resolveGitWorkspaceRoot
+	if !inspectGenerations {
+		workspacePath = projectWorkspace
+		gitWorkspacePath = projectGitWorkspaceRoot
+	}
+	workspace, err := workspacePath(canonicalHome, cfg.Agents.Defaults.Workspace)
 	if err != nil {
 		return nil, fmt.Errorf("database catalog workspace: %w", err)
 	}
@@ -86,7 +92,7 @@ func build(home string, cfg *config.Config, inspectGenerations bool) (*Catalog, 
 		Path:        filepath.Join(canonicalHome, "tool-adaptation.db"),
 		LegacyRoots: []string{filepath.Join(canonicalHome, "tool_adaptation_state.json")},
 	})
-	gitWorkspaceRoot, err := resolveGitWorkspaceRoot(canonicalHome, workspace, cfg)
+	gitWorkspaceRoot, err := gitWorkspacePath(canonicalHome, workspace, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("database catalog git workspace root: %w", err)
 	}
@@ -142,7 +148,7 @@ func build(home string, cfg *config.Config, inspectGenerations bool) (*Catalog, 
 		if raw == "" {
 			continue
 		}
-		agentWorkspace, resolveErr := resolveWorkspace(canonicalHome, raw)
+		agentWorkspace, resolveErr := workspacePath(canonicalHome, raw)
 		if resolveErr != nil {
 			return nil, fmt.Errorf("database catalog agent %q workspace: %w", agent.ID, resolveErr)
 		}
@@ -259,6 +265,14 @@ func resolveGitWorkspaceRoot(canonicalHome, workspace string, cfg *config.Config
 		root = filepath.Join(canonicalHome, root)
 	}
 	return canonicalDirectoryPath(root)
+}
+
+func projectGitWorkspaceRoot(canonicalHome, workspace string, cfg *config.Config) (string, error) {
+	root := cfg.GitWorkspaces.EffectiveRootDir(workspace)
+	if !filepath.IsAbs(root) {
+		root = filepath.Join(canonicalHome, root)
+	}
+	return projectedStorePath(root)
 }
 
 func (c *Catalog) Lookup(id string) (Spec, bool) {
@@ -424,6 +438,18 @@ func eventDatabasePath(
 }
 
 func resolveWorkspace(home, configured string) (string, error) {
+	return resolveWorkspaceWith(home, configured, canonicalDirectoryPath)
+}
+
+func projectWorkspace(home, configured string) (string, error) {
+	return resolveWorkspaceWith(home, configured, projectedStorePath)
+}
+
+func resolveWorkspaceWith(
+	home,
+	configured string,
+	resolve func(string) (string, error),
+) (string, error) {
 	path := strings.TrimSpace(configured)
 	if path == "" {
 		path = filepath.Join(home, "workspace")
@@ -440,7 +466,7 @@ func resolveWorkspace(home, configured string) (string, error) {
 	} else if !filepath.IsAbs(path) {
 		path = filepath.Join(home, path)
 	}
-	return canonicalDirectoryPath(path)
+	return resolve(path)
 }
 
 func canonicalDirectoryPath(path string) (string, error) {
@@ -474,8 +500,9 @@ func canonicalStorePath(path string) (string, error) {
 	return canonical, nil
 }
 
-// projectedStorePath canonicalizes only the parent namespace. In particular it
-// never stats the database leaf or any WAL/SHM/journal sibling.
+// projectedStorePath derives a lexical absolute artifact identity without
+// inspecting mutable configured namespaces. The model-facing identity catalog
+// performs bounded physical validation; broker Build remains strict.
 func projectedStorePath(path string) (string, error) {
 	if strings.TrimSpace(path) == "" || strings.TrimSpace(path) != path {
 		return "", errors.New("path is empty or has surrounding whitespace")
@@ -487,11 +514,7 @@ func projectedStorePath(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	directory, err := canonicalDirectoryPath(filepath.Dir(absolute))
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(directory, filepath.Base(absolute)), nil
+	return absolute, nil
 }
 
 func canonicalLegacyPath(path string) (string, error) {
