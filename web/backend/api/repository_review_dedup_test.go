@@ -106,7 +106,12 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 		Attempts: 2, Error: "historical replay failed", UpdatedAt: time.Now().UTC(),
 	}
 	state = seedRepositoryReviewDeduplicationAPIState(t, workspace, state, campaignID)
-	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
+	automation := seedRepositoryReviewDetailAutomation(
+		t,
+		handler,
+		state.Repository,
+		state.Runs[0].ID,
+	)
 	base := "/api/repository-reviews/automations/" + automation.ID
 
 	findings := httptest.NewRecorder()
@@ -141,13 +146,20 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 		rawPage.RawFindings[0].ID != state.RawFindings[2].ID ||
 		!strings.Contains(rawCollection.Body.String(), `"findings_processing"`) ||
 		!strings.Contains(rawCollection.Body.String(), `"historical_deduplication"`) {
-		t.Fatalf("raw findings status=%d page=%#v body=%s", rawCollection.Code, rawPage, rawCollection.Body.String())
+		t.Fatalf(
+			"raw findings status=%d page=%#v body=%s",
+			rawCollection.Code,
+			rawPage,
+			rawCollection.Body.String(),
+		)
 	}
 
 	failedRawCollection := httptest.NewRecorder()
 	mux.ServeHTTP(failedRawCollection, httptest.NewRequest(
 		http.MethodGet,
-		base+"/raw-findings?query="+url.QueryEscape("deduplication_state = failed ORDER BY created DESC"),
+		base+"/raw-findings?query="+url.QueryEscape(
+			"deduplication_state = failed ORDER BY created DESC",
+		),
 		nil,
 	))
 	var failedRawPage struct {
@@ -158,8 +170,14 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 		t.Fatal(err)
 	}
 	if failedRawCollection.Code != http.StatusOK || failedRawPage.Total != 1 ||
-		len(failedRawPage.RawFindings) != 1 || failedRawPage.RawFindings[0].ID != state.RawFindings[2].ID {
-		t.Fatalf("filtered raw findings status=%d body=%s", failedRawCollection.Code, failedRawCollection.Body.String())
+		len(
+			failedRawPage.RawFindings,
+		) != 1 || failedRawPage.RawFindings[0].ID != state.RawFindings[2].ID {
+		t.Fatalf(
+			"filtered raw findings status=%d body=%s",
+			failedRawCollection.Code,
+			failedRawCollection.Body.String(),
+		)
 	}
 
 	wrongCursor := httptest.NewRecorder()
@@ -177,8 +195,14 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 	mux.ServeHTTP(runFindings, httptest.NewRequest(
 		http.MethodGet, base+"/run-findings?query=ALL", nil,
 	))
-	if runFindings.Code != http.StatusOK ||
-		!strings.Contains(runFindings.Body.String(), `"run_finding_status"`) {
+	var legacyPage struct {
+		Findings []repositoryReviewRunFindingSummary `json:"findings"`
+		Total    int                                 `json:"total"`
+	}
+	if err := json.Unmarshal(runFindings.Body.Bytes(), &legacyPage); err != nil {
+		t.Fatal(err)
+	}
+	if runFindings.Code != http.StatusOK || legacyPage.Total != 0 || len(legacyPage.Findings) != 0 {
 		t.Fatalf("run findings status=%d body=%s", runFindings.Code, runFindings.Body.String())
 	}
 
@@ -190,6 +214,19 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 		!strings.Contains(detail.Body.String(), `"raw_source_total":1`) ||
 		!strings.Contains(detail.Body.String(), state.DeduplicatedFindings[0].Evidence) {
 		t.Fatalf("deduplicated detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	if len(state.RepositoryFindings) > 0 {
+		strict := httptest.NewRecorder()
+		mux.ServeHTTP(strict, httptest.NewRequest(
+			http.MethodGet, base+"/findings/"+state.RepositoryFindings[0].ID, nil,
+		))
+		if strict.Code != http.StatusNotFound {
+			t.Fatalf(
+				"rdf-only detail accepted repository finding: status=%d body=%s",
+				strict.Code,
+				strict.Body.String(),
+			)
+		}
 	}
 
 	sources := httptest.NewRecorder()
@@ -234,7 +271,11 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 		!strings.Contains(failedDetail.Body.String(), `"model_alias":"review-model"`) ||
 		!strings.Contains(failedDetail.Body.String(), `"account":"api"`) ||
 		!strings.Contains(failedDetail.Body.String(), `"retryable":true`) {
-		t.Fatalf("failed raw detail status=%d body=%s", failedDetail.Code, failedDetail.Body.String())
+		t.Fatalf(
+			"failed raw detail status=%d body=%s",
+			failedDetail.Code,
+			failedDetail.Body.String(),
+		)
 	}
 	canonicalDetail := httptest.NewRecorder()
 	mux.ServeHTTP(canonicalDetail, httptest.NewRequest(
@@ -252,7 +293,11 @@ func TestRepositoryReviewDeduplicatedFindingAndRawProcessingRoutes(t *testing.T)
 		!strings.Contains(canonicalDetail.Body.String(), `"finding"`) ||
 		canonicalPayload.HistoricalDeduplication.Status != repoaudit.HistoricalDeduplicationFailed ||
 		canonicalPayload.HistoricalDeduplication.Error != "historical replay failed" {
-		t.Fatalf("canonical raw detail status=%d body=%s", canonicalDetail.Code, canonicalDetail.Body.String())
+		t.Fatalf(
+			"canonical raw detail status=%d body=%s",
+			canonicalDetail.Code,
+			canonicalDetail.Body.String(),
+		)
 	}
 	aliasDetail := httptest.NewRecorder()
 	mux.ServeHTTP(aliasDetail, httptest.NewRequest(

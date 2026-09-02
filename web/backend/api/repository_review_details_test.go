@@ -247,7 +247,7 @@ func TestRepositoryReviewRunFindingStatusRetryRoute(t *testing.T) {
 	aggregateDetail := httptest.NewRecorder()
 	mux.ServeHTTP(aggregateDetail, httptest.NewRequest(
 		http.MethodGet,
-		base+"/findings/"+associated.RepositoryFindings[0].ID,
+		base+"/repository-findings/"+associated.RepositoryFindings[0].ID,
 		nil,
 	))
 	if aggregateDetail.Code != http.StatusOK ||
@@ -433,7 +433,7 @@ func TestRepositoryReviewAggregateDetailSkipsUnassociatedOccurrenceBeforeLinkedI
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(
 		http.MethodGet,
-		"/api/repository-reviews/automations/"+automation.ID+"/findings/"+aggregate.ID,
+		"/api/repository-reviews/automations/"+automation.ID+"/repository-findings/"+aggregate.ID,
 		nil,
 	))
 	if response.Code != http.StatusOK ||
@@ -462,26 +462,24 @@ func TestRepositoryReviewAutomationCapabilitiesAreExplicitForUnavailableActions(
 		automation := seedRepositoryReviewDetailAutomation(
 			t, handler, state.Repository, state.Runs[0].ID,
 		)
-		response := httptest.NewRecorder()
-		mux.ServeHTTP(response, httptest.NewRequest(
+		legacyResponse := httptest.NewRecorder()
+		mux.ServeHTTP(legacyResponse, httptest.NewRequest(
 			http.MethodGet,
-			"/api/repository-reviews/automations/"+automation.ID+"/findings/"+
+			"/api/repository-reviews/automations/"+automation.ID+"/run-findings/"+
 				linkedState.Findings[0].ID,
 			nil,
 		))
-		body := response.Body.String()
-		for _, capability := range []string{
-			`"can_link_issue":false`, `"can_search_issues":false`,
-			`"can_unlink_issue":true`, `"can_replace_issue":true`,
-		} {
-			if response.Code != http.StatusOK || !strings.Contains(body, capability) {
-				t.Fatalf("linked finding capability %s status=%d body=%s", capability, response.Code, body)
-			}
+		if legacyResponse.Code != http.StatusNotFound {
+			t.Fatalf(
+				"modern finding exposed as legacy occurrence status=%d body=%s",
+				legacyResponse.Code,
+				legacyResponse.Body.String(),
+			)
 		}
 		aggregateResponse := httptest.NewRecorder()
 		mux.ServeHTTP(aggregateResponse, httptest.NewRequest(
 			http.MethodGet,
-			"/api/repository-reviews/automations/"+automation.ID+"/findings/"+
+			"/api/repository-reviews/automations/"+automation.ID+"/repository-findings/"+
 				linkedState.Findings[0].RepositoryFindingID,
 			nil,
 		))
@@ -531,6 +529,59 @@ func TestRepositoryReviewAutomationCapabilitiesAreExplicitForUnavailableActions(
 			}
 		}
 	})
+}
+
+func TestRepositoryReviewAutomationLedgerCapabilitiesUseOneSnapshot(t *testing.T) {
+	handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	state := seedRepositoryReviewAPIState(t, workspace)
+	automation := seedRepositoryReviewDetailAutomation(
+		t, handler, state.Repository, state.Runs[0].ID,
+	)
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := handler.repositoryReviewAutomationLedger(t.Context(), automation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateAutomation(
+		t.Context(), automation.ID, automation.Version,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			candidate.Name += " changed"
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RepositoryReviewPurgeEligibilityForAutomation(ledger.Automation); !errors.Is(
+		err,
+		repoaudit.ErrConflict,
+	) {
+		t.Fatalf("stale eligibility error = %v", err)
+	}
+	capabilities := repositoryReviewGlobalCapabilities(ledger)
+	if capabilities.PurgeSummary == nil ||
+		capabilities.PurgeSummary.LedgerFence != ledger.PurgeEligibility.Summary.LedgerFence {
+		t.Fatalf("snapshot capabilities=%#v eligibility=%#v", capabilities, ledger.PurgeEligibility)
+	}
+	for _, blocker := range capabilities.PurgeBlockers {
+		if blocker.Code == repoaudit.RepositoryReviewPurgeBlockerRetentionUnavailable {
+			t.Fatalf("snapshot was replaced with unavailable blocker: %#v", capabilities)
+		}
+	}
+}
+
+func TestRepositoryReviewUnavailablePurgeInventoryOmitsCounts(t *testing.T) {
+	capabilities := repositoryReviewGlobalCapabilities(repositoryReviewAutomationLedger{
+		PurgeInventoryError: errors.New("injected inventory failure"),
+	})
+	if capabilities.PurgeSummary != nil || capabilities.CanPurgeHistory ||
+		capabilities.CanRemoveRepository || len(capabilities.PurgeBlockers) != 1 ||
+		capabilities.PurgeBlockers[0].Code != repoaudit.RepositoryReviewPurgeBlockerRetentionUnavailable {
+		t.Fatalf("unavailable purge capabilities=%#v", capabilities)
+	}
 }
 
 func TestRepositoryReviewRepositoryFindingLifecycleAndValidationRoutes(t *testing.T) {
