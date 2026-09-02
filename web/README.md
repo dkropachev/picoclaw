@@ -25,13 +25,17 @@ This directory is a small monorepo:
   - Vite + React 19 + TanStack Router SPA.
   - Provides the launcher dashboard and chat UI.
 
-At runtime the launcher and the main PicoClaw engine are separate processes:
+At runtime the recommended single-node bundle contains two processes:
 
 1. The launcher starts the web backend on port `18800` by default.
 2. The launcher serves the dashboard and handles dashboard authentication.
 3. When allowed, it starts or attaches to `picoclaw gateway -E`.
 4. The frontend talks only to the launcher backend.
 5. The launcher proxies chat traffic to the gateway through `/pico/ws`.
+
+The frontend, API, and Gateway therefore deploy together without becoming one
+failure-prone in-process runtime. Persistent state uses local SQLite databases
+under the PicoClaw home/workspace; no separate database server is required.
 
 ## Dashboard Capabilities
 
@@ -165,9 +169,52 @@ When public access is enabled:
 - `allow_localhost_bypass` defaults to `true`; set it to `false` when same-host proxies or tunnels should not bypass `allowed_cidrs`
 - optional `trusted_proxy_cidrs` can trust specific reverse proxies to supply the original client IP through headers such as `X-Forwarded-For`
 - trusted proxy deployments should overwrite or sanitize forwarding headers such as `X-Forwarded-For` and `X-Real-IP` instead of passing through user-supplied values
-- the gateway host is overridden so remote clients can still use the launcher-managed proxy paths
+- remote browser clients continue to use launcher-managed same-origin proxy paths
+- an explicit `PICOCLAW_GATEWAY_HOST` remains authoritative, allowing the
+  managed Gateway to stay on loopback even while the launcher is public
+
+Unauthenticated `GET`/`HEAD` requests to `/health` and `/ready` report launcher
+availability. They intentionally do not depend on the optional Gateway child or
+model configuration, so configuration and recovery remain observable while the
+Gateway is stopped.
 
 ## Build And Run
+
+### Docker Single-Node Bundle
+
+The default Compose service builds the frontend and both Go binaries into one
+launcher image, persists the complete PicoClaw home, and maps only the Web/API
+port to host loopback:
+
+```bash
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+Open <http://localhost:18800>. The Gateway child remains on container loopback;
+browser chat reaches it through the authenticated launcher proxy. To expose the
+launcher on a LAN, first complete `/launcher-setup` locally, then set
+`PICOCLAW_LAUNCHER_BIND=0.0.0.0` and use a firewall, TLS proxy, and CIDR policy.
+To expose the Gateway listener for HTTP callbacks or advanced integrations,
+apply the explicit override:
+
+```bash
+docker compose -f docker/docker-compose.yml \
+  -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
+
+This publishes `18790` and must be protected with a firewall or TLS reverse
+proxy. Stop the bundle before backing up or restoring the mounted PicoClaw home
+so SQLite databases and their WAL/SHM files remain consistent.
+
+The Compose project name is fixed to `picoclaw`, so launcher/headless
+`--remove-orphans` transitions cannot affect an unrelated project merely
+because its Compose file also lives in a directory named `docker`.
+
+The minimal launcher image does not include Node.js, Python, or `uv` at runtime.
+The separate headless Compose file retains minimal agent and Gateway profiles.
+The existing full MCP Compose file supplies Node.js, Python, and `uv` for its
+agent and headless Gateway profiles, but does not currently define a launcher
+service.
 
 ### Prerequisites
 

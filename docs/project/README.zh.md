@@ -258,31 +258,42 @@ picoclaw-launcher
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. 首次运行——自动生成 docker/data/config.json 后退出
-#    （仅在 config.json 和 workspace/ 均不存在时触发）
-docker compose -f docker/docker-compose.yml --profile launcher up
-# 容器打印 "First-run setup complete." 后停止。
-
-# 3. 填写 API Key
-vim docker/data/config.json
-
-# 4. 启动
-docker compose -f docker/docker-compose.yml --profile launcher up -d
-# 打开 http://localhost:18800
+# 2. 在单个实例中启动 API、WebUI 和数据库
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+# 打开 http://localhost:18800/launcher-setup，在 WebUI 中完成设置
 ```
 
-> **Docker / 虚拟机用户：** Gateway 默认监听 `127.0.0.1`。设置 `PICOCLAW_GATEWAY_HOST=0.0.0.0` 或使用 `-public` 参数以允许从宿主机访问。
+默认仅在宿主机回环地址上开放 WebUI/API 端口 `18800`。请先在 `http://localhost:18800/launcher-setup` 完成本地设置。如需允许局域网访问：
+
+```bash
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+此命令会通过 HTTP 在所有网络接口上开放 WebUI/API。请使用防火墙限制访问，并在向可信网络以外开放前配置 TLS 反向代理。
+
+如需为 Webhook 集成直接开放 Gateway 端口 `18790`，请使用可选的 Compose 覆盖文件：
+
+```bash
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
 
 ```bash
 # 查看日志
 docker compose -f docker/docker-compose.yml logs -f
 
 # 停止
-docker compose -f docker/docker-compose.yml --profile launcher down
+docker compose -f docker/docker-compose.yml down
 
 # 更新
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile launcher up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+从旧版基于 profile 的 Compose 布局首次升级时，请先停止并删除固定名称的容器，再启动新版布局。`docker/data/` 中的持久化数据会保留：
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
 ```
 
 </details>

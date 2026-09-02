@@ -261,31 +261,42 @@ Pour la documentation détaillée du WebUI, voir [docs.picoclaw.io](https://docs
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. Premier lancement — génère automatiquement docker/data/config.json puis s'arrête
-#    (se déclenche uniquement quand config.json et workspace/ sont tous deux absents)
-docker compose -f docker/docker-compose.yml --profile launcher up
-# Le conteneur affiche "First-run setup complete." et s'arrête.
-
-# 3. Définir vos clés API
-vim docker/data/config.json
-
-# 4. Démarrer
-docker compose -f docker/docker-compose.yml --profile launcher up -d
-# Ouvrez http://localhost:18800
+# 2. Démarrer l'API, le WebUI et la base de données sur une seule instance
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+# Ouvrez http://localhost:18800/launcher-setup et terminez la configuration dans le WebUI
 ```
 
-> **Utilisateurs Docker / VM :** Le Gateway écoute sur `127.0.0.1` par défaut. Définissez `PICOCLAW_GATEWAY_HOST=0.0.0.0` ou utilisez le flag `-public` pour le rendre accessible depuis l'hôte.
+Par défaut, seul le port WebUI/API `18800` est publié, uniquement sur la boucle locale de l'hôte. Terminez d'abord la configuration locale sur `http://localhost:18800/launcher-setup`. Pour autoriser l'accès depuis le réseau local :
+
+```bash
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+Cette commande expose le WebUI/API en HTTP sur toutes les interfaces. Limitez l'accès avec un pare-feu et utilisez un proxy TLS avant toute exposition hors d'un réseau de confiance.
+
+Pour exposer directement le Gateway sur le port `18790` pour les intégrations webhook, utilisez le fichier complémentaire optionnel :
+
+```bash
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
 
 ```bash
 # Vérifier les logs
 docker compose -f docker/docker-compose.yml logs -f
 
 # Arrêter
-docker compose -f docker/docker-compose.yml --profile launcher down
+docker compose -f docker/docker-compose.yml down
 
 # Mettre à jour
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile launcher up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+Lors de la première mise à niveau depuis l'ancienne disposition Compose basée sur les profils, arrêtez et supprimez ses conteneurs à nom fixe avant le nouveau démarrage. Les données persistantes dans `docker/data/` sont conservées :
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
 ```
 
 </details>

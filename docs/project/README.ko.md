@@ -258,31 +258,42 @@ WebUI를 연 뒤 다음 순서로 진행하세요. **1)** 프로바이더 설정
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. 첫 실행 - docker/data/config.json을 자동 생성한 뒤 종료
-#    (config.json과 workspace/가 모두 없을 때만 실행됨)
-docker compose -f docker/docker-compose.yml --profile launcher up
-# 컨테이너가 "First-run setup complete."를 출력하고 종료됩니다.
-
-# 3. API 키 설정
-vim docker/data/config.json
-
-# 4. 시작
-docker compose -f docker/docker-compose.yml --profile launcher up -d
-# http://localhost:18800 열기
+# 2. API, WebUI, 데이터베이스를 단일 인스턴스로 시작
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+# http://localhost:18800/launcher-setup을 열고 WebUI에서 설정 완료
 ```
 
-> **Docker / VM 사용자:** 게이트웨이는 기본적으로 `127.0.0.1`에서 수신합니다. 호스트에서 접근 가능하게 하려면 `PICOCLAW_GATEWAY_HOST=0.0.0.0`을 설정하거나 `-public` 플래그를 사용하세요.
+기본적으로 WebUI/API 포트 `18800`만 호스트 루프백에 한정해 공개됩니다. 먼저 `http://localhost:18800/launcher-setup`에서 로컬 설정을 완료하세요. LAN 접근을 허용하려면:
+
+```bash
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+이 명령은 모든 인터페이스에 WebUI/API를 HTTP로 공개합니다. 방화벽으로 접근을 제한하고 신뢰할 수 있는 네트워크 외부에 공개하기 전에 TLS 프록시를 사용하세요.
+
+Webhook 연동을 위해 Gateway 포트 `18790`을 직접 공개하려면 선택적 오버라이드 파일을 사용하세요:
+
+```bash
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
 
 ```bash
 # 로그 확인
 docker compose -f docker/docker-compose.yml logs -f
 
 # 중지
-docker compose -f docker/docker-compose.yml --profile launcher down
+docker compose -f docker/docker-compose.yml down
 
 # 업데이트
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile launcher up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+이전 프로필 기반 Compose 구성에서 처음 업그레이드할 때는 새 구성을 시작하기 전에 고정 이름 컨테이너를 중지하고 삭제하세요. `docker/data/`의 영구 데이터는 유지됩니다:
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
 ```
 
 </details>

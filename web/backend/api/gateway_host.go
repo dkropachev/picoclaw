@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -30,6 +31,14 @@ func (h *Handler) effectiveLauncherPublic() bool {
 }
 
 func (h *Handler) gatewayHostOverride() string {
+	// An explicit gateway host has narrower intent than the launcher's public
+	// or explicit listener. Preserve it instead of replacing it with the
+	// launcher bind. This lets a public launcher proxy to a loopback-only managed
+	// gateway while retaining the legacy aligned bind when no gateway host was
+	// supplied.
+	if strings.TrimSpace(os.Getenv(config.EnvGatewayHost)) != "" {
+		return ""
+	}
 	if h.serverHostExplicit {
 		return strings.TrimSpace(h.serverHostInput)
 	}

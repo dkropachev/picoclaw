@@ -340,6 +340,11 @@ func startGatewayAndCaptureEnv(t *testing.T, h *Handler) gatewayStartEnvSnapshot
 	t.Helper()
 
 	unsetGatewayStartEnvForTest(t, config.EnvGatewayHost)
+	return startGatewayAndCaptureCurrentEnv(t, h)
+}
+
+func startGatewayAndCaptureCurrentEnv(t *testing.T, h *Handler) gatewayStartEnvSnapshot {
+	t.Helper()
 
 	envPath := filepath.Join(t.TempDir(), "gateway-child-env.json")
 	gatewayExecCommand = func(_ string, _ ...string) *exec.Cmd {
@@ -420,6 +425,21 @@ func TestStartGatewayLocked_ForwardsWildcardHostForPublicLauncher(t *testing.T) 
 	}
 	if snapshot.GatewayHost != "*" {
 		t.Fatalf("gateway host env = %q, want %q", snapshot.GatewayHost, "*")
+	}
+}
+
+func TestStartGatewayLocked_PublicLauncherPreservesExplicitGatewayEnv(t *testing.T) {
+	t.Setenv(config.EnvGatewayHost, "127.0.0.1")
+	h := newGatewayStartTestHandler(t)
+	h.SetServerOptions(18800, true, true, nil)
+	h.SetServerBindHost("0.0.0.0", true)
+
+	snapshot := startGatewayAndCaptureCurrentEnv(t, h)
+	if !snapshot.GatewayHostSet {
+		t.Fatal("gateway host env was not set")
+	}
+	if snapshot.GatewayHost != "127.0.0.1" {
+		t.Fatalf("gateway host env = %q, want %q", snapshot.GatewayHost, "127.0.0.1")
 	}
 }
 

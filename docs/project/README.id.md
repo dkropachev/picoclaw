@@ -258,31 +258,42 @@ Untuk dokumentasi WebUI lengkap, lihat [docs.picoclaw.io](https://docs.picoclaw.
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. Jalankan pertama kali — otomatis membuat docker/data/config.json lalu keluar
-#    (hanya terpicu ketika config.json dan workspace/ keduanya tidak ada)
-docker compose -f docker/docker-compose.yml --profile launcher up
-# Container mencetak "First-run setup complete." dan berhenti.
-
-# 3. Atur API key Anda
-vim docker/data/config.json
-
-# 4. Mulai
-docker compose -f docker/docker-compose.yml --profile launcher up -d
-# Buka http://localhost:18800
+# 2. Jalankan API, WebUI, dan database dalam satu instance
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+# Buka http://localhost:18800/launcher-setup lalu selesaikan penyiapan di WebUI
 ```
 
-> **Pengguna Docker / VM:** Gateway mendengarkan di `127.0.0.1` secara default. Atur `PICOCLAW_GATEWAY_HOST=0.0.0.0` atau gunakan flag `-public` agar dapat diakses dari host.
+Secara default, hanya port WebUI/API `18800` yang dipublikasikan, dan hanya pada loopback host. Selesaikan penyiapan lokal terlebih dahulu di `http://localhost:18800/launcher-setup`. Untuk mengizinkan akses dari LAN:
+
+```bash
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+Perintah ini mengekspos WebUI/API melalui HTTP pada semua antarmuka. Batasi akses dengan firewall dan gunakan proxy TLS sebelum mengeksposnya di luar jaringan tepercaya.
+
+Untuk mengekspos Gateway secara langsung pada port `18790` bagi integrasi webhook, gunakan file override opsional:
+
+```bash
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
 
 ```bash
 # Cek log
 docker compose -f docker/docker-compose.yml logs -f
 
 # Hentikan
-docker compose -f docker/docker-compose.yml --profile launcher down
+docker compose -f docker/docker-compose.yml down
 
 # Update
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile launcher up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+Saat pertama kali memperbarui dari tata letak Compose lama berbasis profil, hentikan dan hapus container dengan nama tetap sebelum memulai tata letak baru. Data persisten di `docker/data/` tetap tersimpan:
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
 ```
 
 </details>

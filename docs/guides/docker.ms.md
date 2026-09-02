@@ -11,57 +11,93 @@ Anda juga boleh menjalankan PicoClaw menggunakan Docker Compose tanpa memasang a
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. Larian pertama — jana docker/data/config.json secara automatik kemudian keluar
-docker compose -f docker/docker-compose.yml --profile gateway up
-# Container akan memaparkan "First-run setup complete." dan berhenti.
-
-# 3. Tetapkan kunci API anda
-vim docker/data/config.json   # Tetapkan API key penyedia, token bot, dan sebagainya.
-
-# 4. Mula
-docker compose -f docker/docker-compose.yml --profile gateway up -d
+# 2. Mulakan pakej nod tunggal Web + API + Gateway
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
 
-> [!TIP]
-> **Pengguna Docker**: Secara lalai, Gateway mendengar pada `127.0.0.1` yang tidak boleh diakses dari host. Jika anda perlu mengakses health endpoint atau mendedahkan port, tetapkan `PICOCLAW_GATEWAY_HOST=0.0.0.0` dalam persekitaran anda atau kemas kini `config.json`.
+Buka <http://localhost:18800/launcher-setup>, cipta kata laluan dashboard, kemudian konfigurasikan penyedia dan model dalam WebUI.
+
+Arahan ini memulakan satu container yang merangkumi:
+
+- WebUI terbina dalam dan API launcher pada port `18800` yang diterbitkan;
+- proses anak Gateway yang diurus launcher pada loopback container;
+- pangkalan data SQLite berasaskan fail dan data workspace yang disimpan bersama dalam `docker/data/`.
+
+Secara lalai, port `18800` terikat hanya pada alamat loopback host (`127.0.0.1`). Lengkapkan `/launcher-setup` secara setempat sebelum sebarang pendedahan. Hanya jika akses LAN diminta, mulakan semula pakej dengan:
 
 ```bash
-# 5. Semak log
-docker compose -f docker/docker-compose.yml logs -f picoclaw-gateway
-
-# 6. Hentikan
-docker compose -f docker/docker-compose.yml --profile gateway down
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
 
-### Mod Launcher (Konsol Web)
-
-Imej `launcher` merangkumi kedua-dua binari (`picoclaw`, `picoclaw-launcher`) dan memulakan konsol web secara lalai, yang menyediakan UI berasaskan pelayar untuk konfigurasi dan sembang.
-
-```bash
-docker compose -f docker/docker-compose.yml --profile launcher up -d
-```
-
-Buka http://localhost:18800 dalam pelayar anda. Launcher mengurus proses gateway secara automatik.
+Sembang dan media pelayar menggunakan proksi same-origin launcher yang disahkan, jadi port Gateway tidak perlu diterbitkan. Probe `GET`/`HEAD` awam pada `/health` dan `/ready` melaporkan ketersediaan launcher secara berasingan daripada konfigurasi Gateway atau model.
 
 > [!WARNING]
-> Konsol web dilindungi oleh kata laluan log masuk dashboard. Jangan dedahkannya kepada rangkaian tidak dipercayai atau internet awam.
+> Konsol web dilindungi oleh kata laluan log masuk dashboard tetapi tidak menamatkan TLS. Untuk akses LAN, gunakan firewall atau reverse proxy TLS dan konfigurasikan kawalan CIDR launcher. Jangan dedahkannya terus kepada rangkaian tidak dipercayai.
+
+### Akses terus Gateway (webhook)
+
+Jika channel callback HTTP atau integrasi lanjutan memerlukan akses terus kepada Gateway, terbitkan port `18790` secara pilihan dengan fail tambahan:
+
+```bash
+docker compose -f docker/docker-compose.yml \
+  -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
+
+Fail tambahan menukar alamat bind Gateway yang diurus kepada `0.0.0.0` dan menerbitkan port `18790`. Lindungi port ini dengan firewall atau reverse proxy TLS. Channel yang menggunakan socket, stream atau long-polling tidak memerlukan fail tambahan ini.
+
+### Mod Gateway sahaja
+
+Fail Compose asas hanya mengandungi launcher; service headless berada dalam `docker-compose.headless.yml`. Untuk menjalankan Gateway jangka panjang sahaja, sasarkan service tersebut secara jelas dan aktifkan profilenya:
+
+```bash
+docker compose -f docker/docker-compose.headless.yml --profile gateway up --remove-orphans picoclaw-gateway
+```
+
+`--remove-orphans` menghentikan container launcher sedia ada dalam project Compose yang sama sebelum Gateway kendiri bermula, sekali gus menghalang dua pepohon proses Gateway daripada berkongsi fail PID dan direktori SQLite.
+
+Pada volume baharu, core image menjana `docker/data/config.json` kemudian berhenti. Tetapkan nilai penyedia dan channel, kemudian mulakan semula service itu dengan `-d`. Mod Gateway sahaja menyediakan route webhook, Pico, kesihatan dan runtime terlindung pada port Gateway; ia tidak menyediakan WebUI launcher atau endpoint sembang REST umum.
 
 ### Mod Agent (One-shot)
 
 ```bash
 # Tanyakan soalan
-docker compose -f docker/docker-compose.yml run --rm picoclaw-agent -m "What is 2+2?"
+docker compose -f docker/docker-compose.headless.yml run --rm picoclaw-agent -m "What is 2+2?"
 
 # Mod interaktif
-docker compose -f docker/docker-compose.yml run --rm picoclaw-agent
+docker compose -f docker/docker-compose.headless.yml run --rm picoclaw-agent
+```
+
+### Log dan hentikan
+
+```bash
+# Semak log pakej lalai
+docker compose -f docker/docker-compose.yml logs -f picoclaw-launcher
+
+# Hentikan pakej
+docker compose -f docker/docker-compose.yml down
 ```
 
 ### Kemas kini
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile gateway up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
+
+Semasa migrasi sekali sahaja daripada susun atur Compose berasaskan profile yang lama, hentikan dan buang container bernama tetap sebelum pelancaran pertama susun atur baharu. Tindakan ini tidak membuang direktori `docker/data/` yang dipasang sebagai bind mount:
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+```
+
+### Sandaran dan pemulihan
+
+Hentikan semua proses PicoClaw sebelum menyalin atau memulihkan `docker/data/`. Anggap seluruh direktori sebagai satu snapshot supaya setiap pangkalan data SQLite kekal dipasangkan dengan fail `-wal`, `-shm` dan kunci yang sepadan. Jangan jalankan versi binary berlainan pada home/workspace yang sama.
+
+### Runtime MCP penuh
+
+Image launcher lalai ialah runtime Alpine minimum dan tidak merangkumi Node.js, Python atau `uv` untuk package MCP stdio. `docker-compose.full.yml` mengekalkan profile agent MCP penuh dan Gateway headless sedia ada; buat masa ini ia tidak menyediakan service launcher.
 
 ### 🚀 Quick Start
 

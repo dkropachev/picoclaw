@@ -31,6 +31,13 @@ The launcher can start the gateway in limited mode when no model alias is
 selected, so non-model management remains available. Model-dependent execution
 continues to fail locally until a concrete model is configured.
 
+The default Docker topology is one single-node launcher container: embedded
+WebUI, launcher API, managed Gateway child, and local SQLite state share one
+PicoClaw home. Only launcher port `18800` is mapped by default; direct
+Gateway port `18790` requires an explicit Compose override. Host port `18800`
+binds only to loopback unless the operator explicitly selects another host
+address after completing password setup.
+
 ## Reconstruction Notes
 
 - Similarity target: authenticated launcher APIs and a responsive management UI
@@ -80,6 +87,7 @@ continues to fail locally until a concrete model is configured.
 
 | `FR-LAUNCHER-029` | MUST | The authenticated launcher proxies the feature-owned typed Development workspace list contract without narrowing its valid bounded query/cursor transport, and `/development` uses the standard shared collection while `/development/new` and `/development/:id` retain dedicated intake and aggregate detail. Canonical collection `q`/`view` survives routed New/detail navigation independently of workspace tab and evidence state. | Workspace inventory needs server paging and stable Back navigation without changing launcher authentication, direct aggregate authority, or specialized workspace behavior. |
 | `FR-LAUNCHER-030` | MUST | Generic workflow run detail, listing, graph, JSON event, and SSE event routes preserve raw owner-local workflow state while projecting browser-safe detached copies. Repository-review campaign authority and recovery markers are removed recursively from every such response without mutating storage; private PR-lifecycle filtering and event-draft diagnostic masking continue to apply independently. | The launcher must expose useful workflow diagnostics without turning internal campaign identifiers into browser-visible or event-consumable authority. |
+| `FR-LAUNCHER-031` | MUST | The default Compose topology uses the stable `picoclaw` project identity and defines and starts exactly one launcher container without selecting a profile; optional one-shot agent and standalone headless Gateway services live in a separate Compose file and cannot be co-started by enabling a profile on the default file. Documented launcher/headless transitions remove alternate orphan services before startup so two Gateway trees never share one PID/SQLite home, while the fixed project identity prevents orphan cleanup from selecting an unrelated directory-named project. The launcher container embeds the WebUI and API, supervises the Gateway child, persists the complete PicoClaw home, maps launcher port `18800` only to host loopback by default, and both launcher image variants keep the Gateway on container loopback unless explicit operator configuration widens it. Explicit operator input may widen the host-side launcher bind after password setup; a separate Compose override may select a wildcard Gateway bind and publish `18790` for HTTP callbacks. Public `GET`/`HEAD /health` and `/ready` report launcher availability without depending on Gateway or model state; unsupported methods remain unavailable, all management routes retain dashboard authentication, a loopback health command remains available under restrictive CIDR policy, and both source-built and release image healthchecks probe launcher liveness. | Single-node installation should work by default without exposing setup, internal runtime control, or a second process tree against the same SQLite home, while operators retain explicit remote-access and headless modes and can observe/recover the launcher when its optional child is stopped. |
 
 The `FR-LAUNCHER-025` query control has one production chain:
 `StandardCollectionPage` renders `CollectionToolbar`, which renders the sole
@@ -262,6 +270,10 @@ Owns: HTTP * /api/model-aliases*
 Owns: UI /models/aliases*
 Owns: HTTP * /api/oauth*
 Owns: HTTP GET /oauth/callback
+Owns: HTTP GET /health
+Owns: HTTP HEAD /health
+Owns: HTTP GET /ready
+Owns: HTTP HEAD /ready
 Owns: HTTP * /api/system*
 Owns: HTTP * /api/agents*
 Owns: HTTP * /api/wecom*
@@ -314,6 +326,7 @@ Owns: TEST web/backend/api/weixin*
 | HTTP/UI | `/api/accounts*`; `/accounts`, `/accounts/new`, `/accounts/{id}`, `/accounts/{id}/edit` | Secret-free typed query/cursor account inventory, direct opaque-ID detail, routed provider onboarding and exact-identity renewal, confirmed logout, and detail-owned sanitized usage limits. | `FR-LAUNCHER-004`, `FR-LAUNCHER-026` |
 | HTTP/UI | `/api/git-workspaces*`; `/agent/git-workspaces*` | Authenticated composition of the feature-owned standard inventory, direct maintenance, operational history, and revision-fenced global limits; effective policy participates in gateway restart detection. | `FR-LAUNCHER-011`, `FR-LAUNCHER-027` |
 | HTTP | `/api/config*`, `/api/models*`, `/api/oauth*`, `/api/system*`, `/api/agents*`, `/api/workflows*` | Existing authenticated management surfaces retain their scoped contracts and shared mutation fencing. | `FR-LAUNCHER-001` through `FR-LAUNCHER-012` |
+| HTTP/Deployment | `GET/HEAD /health`, `GET/HEAD /ready`; `docker/docker-compose.yml`; `docker/docker-compose.gateway-public.yml`; `docker/docker-compose.headless.yml` | Public launcher-only probes, a host-loopback one-container default, explicit launcher bind selection, an explicit direct-Gateway exposure override, and isolated opt-in headless services. | `FR-LAUNCHER-031` |
 
 | HTTP/UI | `/api/model-aliases*`; `/models/aliases*` | Name-addressed typed query/list/detail/CRUD, revision-fenced explicit-name bulk delete, catalog templates on creation only, and standard collection/detail/editor routes. | `FR-LAUNCHER-025` |
 | UI governance | `web/frontend/collection-surfaces.json`, shared collection subsystem, UI linter, and base/head guard | Audited standard/legacy/exempt inventory, canonical collection state/presentation, enforced standard-page/toolbar/query-input ownership and reserved query slot, static route/shell enforcement, and touched-legacy migration enforcement. | `FR-LAUNCHER-009`, `FR-LAUNCHER-025` |
@@ -385,7 +398,8 @@ path, while sidebar navigation and model/account metadata reads remain inert.
 
 ## Failure And Edge Cases
 
-Unauthenticated requests fail before config or process access. Noncanonical
+Except for bounded launcher health/readiness and setup/login assets,
+unauthenticated requests fail before config or process access. Noncanonical
 paths, repeated/unknown query keys, aliases for removed development routes, cross-site
 mutations, missing or streaming bodies, unsafe encodings, oversized JSON,
 unknown fields, stale config/workspace/head revisions, unavailable runtime
@@ -431,6 +445,7 @@ removes or resolves the durable inbox item.
 | `FR-LAUNCHER-028` | [web/backend/api/pr_lifecycle_collections_test.go](../../web/backend/api/pr_lifecycle_collections_test.go), [web/frontend/src/api/pr-lifecycle-repository-assignments.test.ts](../../web/frontend/src/api/pr-lifecycle-repository-assignments.test.ts), [web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts](../../web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts), [web/frontend/src/components/pr-workspaces/pr-lifecycle-collection-route-state.test.ts](../../web/frontend/src/components/pr-workspaces/pr-lifecycle-collection-route-state.test.ts), [web/frontend/src/routes/-development-admin-route.test.tsx](../../web/frontend/src/routes/-development-admin-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 | `FR-LAUNCHER-029` | [pkg/prworkspace/http_collection_test.go](../../pkg/prworkspace/http_collection_test.go), [web/backend/api/pr_workspaces_test.go](../../web/backend/api/pr_workspaces_test.go), [web/frontend/src/api/development-workspaces.test.ts](../../web/frontend/src/api/development-workspaces.test.ts), [web/frontend/src/routes/-development-collection-route.test.tsx](../../web/frontend/src/routes/-development-collection-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 | `FR-LAUNCHER-030` | [web/backend/api/workflow_event_context_test.go](../../web/backend/api/workflow_event_context_test.go), [pkg/workflows/repository_review_campaign_privacy_test.go](../../pkg/workflows/repository_review_campaign_privacy_test.go) |
+| `FR-LAUNCHER-031` | [web/backend/health_test.go](../../web/backend/health_test.go), [web/backend/middleware/launcher_dashboard_auth_test.go](../../web/backend/middleware/launcher_dashboard_auth_test.go), [web/backend/api/gateway_host_test.go](../../web/backend/api/gateway_host_test.go), [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [docker/Dockerfile.launcher](../../docker/Dockerfile.launcher), [docker/Dockerfile.goreleaser.launcher](../../docker/Dockerfile.goreleaser.launcher), [docker/docker-compose.yml](../../docker/docker-compose.yml), [docker/docker-compose.gateway-public.yml](../../docker/docker-compose.gateway-public.yml), [docker/docker-compose.headless.yml](../../docker/docker-compose.headless.yml) |
 
 ## Implementation Anchors
 
@@ -442,6 +457,12 @@ removes or resolves the durable inbox item.
 - [web/backend/api/gateway.go](../../web/backend/api/gateway.go)
 - [web/backend/api/git_workspaces.go](../../web/backend/api/git_workspaces.go)
 - [web/backend/main.go](../../web/backend/main.go)
+- [web/backend/health.go](../../web/backend/health.go)
+- [docker/docker-compose.yml](../../docker/docker-compose.yml)
+- [docker/docker-compose.gateway-public.yml](../../docker/docker-compose.gateway-public.yml)
+- [docker/docker-compose.headless.yml](../../docker/docker-compose.headless.yml)
+- [docker/Dockerfile.launcher](../../docker/Dockerfile.launcher)
+- [docker/Dockerfile.goreleaser.launcher](../../docker/Dockerfile.goreleaser.launcher)
 - [web/backend/dashboardauth](../../web/backend/dashboardauth)
 - [web/backend/launcherconfig](../../web/backend/launcherconfig)
 - [web/backend/middleware](../../web/backend/middleware)

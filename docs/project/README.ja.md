@@ -258,31 +258,42 @@ WebUI の詳細なドキュメントは [docs.picoclaw.io](https://docs.picoclaw
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. 初回実行 — docker/data/config.json を自動生成して終了
-#    （config.json と workspace/ の両方が存在しない場合のみ実行）
-docker compose -f docker/docker-compose.yml --profile launcher up
-# コンテナが "First-run setup complete." を出力して停止します。
-
-# 3. API キーを設定
-vim docker/data/config.json
-
-# 4. 起動
-docker compose -f docker/docker-compose.yml --profile launcher up -d
-# http://localhost:18800 を開く
+# 2. API、WebUI、データベースを単一インスタンスで起動
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+# http://localhost:18800/launcher-setup を開き、WebUI でセットアップを完了
 ```
 
-> **Docker / VM ユーザー:** Gateway はデフォルトで `127.0.0.1` でリッスンします。ホストからアクセスできるようにするには `PICOCLAW_GATEWAY_HOST=0.0.0.0` を設定するか、`-public` フラグを使用してください。
+デフォルトでは WebUI/API のポート `18800` のみが、ホストのループバックに限定して公開されます。まず `http://localhost:18800/launcher-setup` でローカルセットアップを完了してください。LAN からのアクセスを許可する場合：
+
+```bash
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+このコマンドは WebUI/API をすべてのインターフェースに HTTP で公開します。ファイアウォールでアクセスを制限し、信頼できるネットワークの外部に公開する前に TLS プロキシを使用してください。
+
+Webhook 連携のために Gateway のポート `18790` を直接公開する場合は、オプションのオーバーライドファイルを使用します：
+
+```bash
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
 
 ```bash
 # ログを確認
 docker compose -f docker/docker-compose.yml logs -f
 
 # 停止
-docker compose -f docker/docker-compose.yml --profile launcher down
+docker compose -f docker/docker-compose.yml down
 
 # 更新
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile launcher up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+旧プロファイルベースの Compose 構成から初めて更新する場合は、新しい構成を起動する前に固定名のコンテナを停止して削除してください。`docker/data/` の永続データは保持されます：
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
 ```
 
 </details>

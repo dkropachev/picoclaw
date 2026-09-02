@@ -1,0 +1,9 @@
+# Opt in to direct Gateway access for webhooks and advanced integrations:
+#   docker compose -f docker/docker-compose.yml \
+#     -f docker/docker-compose.gateway-public.yml up --remove-orphans
+services:
+  picoclaw-launcher:
+    environment:
+      PICOCLAW_GATEWAY_HOST: 0.0.0.0
+    ports:
+      - "18790:18790"

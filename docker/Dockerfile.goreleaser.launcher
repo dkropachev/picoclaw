@@ -4,6 +4,11 @@ ARG TARGETPLATFORM
 
 RUN apk add --no-cache ca-certificates tzdata
 
+ENV PICOCLAW_GATEWAY_HOST=127.0.0.1
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q --spider http://127.0.0.1:18800/health || exit 1
+
 COPY $TARGETPLATFORM/picoclaw /usr/local/bin/picoclaw
 COPY $TARGETPLATFORM/picoclaw-launcher /usr/local/bin/picoclaw-launcher
 

@@ -11,58 +11,93 @@ Vous pouvez également exécuter PicoClaw avec Docker Compose sans rien installe
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. Premier lancement — génère automatiquement docker/data/config.json puis s'arrête
-#    (se déclenche uniquement quand config.json et workspace/ sont tous deux absents)
-docker compose -f docker/docker-compose.yml --profile gateway up
-# Le conteneur affiche "First-run setup complete." et s'arrête.
-
-# 3. Configurer vos clés API
-vim docker/data/config.json   # Set provider API keys, bot tokens, etc.
-
-# 4. Démarrer
-docker compose -f docker/docker-compose.yml --profile gateway up -d
+# 2. Démarrer le bundle mono-nœud Web + API + Gateway
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
 
-> [!TIP]
-> **Utilisateurs Docker** : Par défaut, le Gateway écoute sur `127.0.0.1`, ce qui n'est pas accessible depuis l'hôte. Si vous devez accéder aux endpoints de santé ou exposer des ports, définissez `PICOCLAW_GATEWAY_HOST=0.0.0.0` dans votre environnement ou mettez à jour `config.json`.
+Ouvrez <http://localhost:18800/launcher-setup>, créez le mot de passe du dashboard, puis configurez un fournisseur et un modèle dans la WebUI.
+
+Cette commande démarre un seul conteneur contenant :
+
+- la WebUI intégrée et l'API du launcher sur le port publié `18800` ;
+- le processus enfant Gateway géré par le launcher sur la boucle locale du conteneur ;
+- les bases de données SQLite basées sur des fichiers et les données du workspace, conservées ensemble dans `docker/data/`.
+
+Par défaut, le port `18800` est lié uniquement à l'adresse de boucle locale de l'hôte (`127.0.0.1`). Terminez `/launcher-setup` localement avant toute exposition. Uniquement si un accès LAN est demandé, relancez le bundle avec :
 
 ```bash
-# 5. Vérifier les logs
-docker compose -f docker/docker-compose.yml logs -f picoclaw-gateway
-
-# 6. Arrêter
-docker compose -f docker/docker-compose.yml --profile gateway down
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
 
-### Mode Launcher (Console Web)
-
-L'image `launcher` inclut les deux binaires (`picoclaw`, `picoclaw-launcher`) et démarre la console web par défaut, qui fournit une interface navigateur pour la configuration et le chat.
-
-```bash
-docker compose -f docker/docker-compose.yml --profile launcher up -d
-```
-
-Ouvrez http://localhost:18800 dans votre navigateur. Le launcher gère automatiquement le processus gateway.
+Le chat et les médias du navigateur passent par les proxies same-origin authentifiés du launcher ; il n'est donc pas nécessaire de publier le port du Gateway. Les sondes publiques `GET`/`HEAD` sur `/health` et `/ready` indiquent la disponibilité du launcher indépendamment de la configuration du Gateway ou du modèle.
 
 > [!WARNING]
-> La console web est protégée par un mot de passe de connexion au dashboard. Ne l'exposez pas à des réseaux non fiables ni à Internet public.
+> La console web est protégée par un mot de passe de connexion au dashboard, mais elle ne termine pas TLS. Pour un accès LAN, utilisez un pare-feu ou un reverse proxy TLS et configurez les contrôles CIDR du launcher. Ne l'exposez pas directement à un réseau non fiable.
+
+### Accès direct au Gateway (webhooks)
+
+Si un canal de callback HTTP ou une intégration avancée nécessite un accès direct au Gateway, publiez explicitement le port `18790` avec le fichier complémentaire :
+
+```bash
+docker compose -f docker/docker-compose.yml \
+  -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
+
+Le fichier complémentaire remplace l'adresse d'écoute du Gateway géré par `0.0.0.0` et publie le port `18790`. Protégez ce port avec un pare-feu ou un reverse proxy TLS. Les canaux utilisant une socket, un stream ou du long-polling n'ont pas besoin de ce fichier.
+
+### Mode Gateway uniquement
+
+Le fichier Compose de base ne contient que le launcher. Les services headless se trouvent dans `docker-compose.headless.yml`. Pour lancer uniquement le Gateway longue durée, ciblez explicitement son service et activez son profil :
+
+```bash
+docker compose -f docker/docker-compose.headless.yml --profile gateway up --remove-orphans picoclaw-gateway
+```
+
+`--remove-orphans` arrête tout conteneur launcher existant du même projet Compose avant le démarrage du Gateway autonome, empêchant ainsi deux arborescences de processus Gateway de partager le fichier PID et le répertoire SQLite.
+
+Sur un volume neuf, l'image principale génère `docker/data/config.json` puis s'arrête. Renseignez les valeurs du fournisseur et des canaux, puis redémarrez ce service avec `-d`. Le mode Gateway uniquement sert les routes de webhook, Pico, de santé et d'exécution protégées sur le port du Gateway ; il ne fournit ni la WebUI du launcher ni des endpoints REST génériques de chat.
 
 ### Mode Agent (One-shot)
 
 ```bash
 # Poser une question
-docker compose -f docker/docker-compose.yml run --rm picoclaw-agent -m "What is 2+2?"
+docker compose -f docker/docker-compose.headless.yml run --rm picoclaw-agent -m "What is 2+2?"
 
 # Mode interactif
-docker compose -f docker/docker-compose.yml run --rm picoclaw-agent
+docker compose -f docker/docker-compose.headless.yml run --rm picoclaw-agent
+```
+
+### Logs et arrêt
+
+```bash
+# Vérifier les logs du bundle par défaut
+docker compose -f docker/docker-compose.yml logs -f picoclaw-launcher
+
+# Arrêter le bundle
+docker compose -f docker/docker-compose.yml down
 ```
 
 ### Mise à jour
 
 ```bash
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile gateway up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
+
+Lors de la migration unique depuis l'ancienne disposition Compose basée sur des profils, arrêtez et supprimez ses conteneurs aux noms fixes avant le premier démarrage avec la nouvelle disposition. Cela ne supprime pas le répertoire `docker/data/` monté par bind mount :
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+```
+
+### Sauvegarde et restauration
+
+Arrêtez tous les processus PicoClaw avant de copier ou de restaurer `docker/data/`. Traitez le répertoire entier comme un seul snapshot afin que chaque base SQLite reste associée à ses fichiers `-wal`, `-shm` et de verrouillage correspondants. N'exécutez pas des versions différentes des binaires sur un même répertoire personnel/workspace.
+
+### Runtime MCP complet
+
+L'image du launcher par défaut est le runtime Alpine minimal et n'inclut ni Node.js, ni Python, ni `uv` pour les packages MCP stdio. `docker-compose.full.yml` conserve les profils existants de l'agent MCP complet et du Gateway headless ; il ne fournit actuellement aucun service launcher.
 
 ### 🚀 Démarrage Rapide
 

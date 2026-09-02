@@ -425,10 +425,10 @@ check: deps fmt vet test lint-docs lint-features
 run: build
 	@$(BUILD_DIR)/$(BINARY_NAME) $(ARGS)
 
-## docker-build: Build Docker image (minimal Alpine-based)
+## docker-build: Build default single-node Docker image
 docker-build:
-	@echo "Building minimal Docker image (Alpine-based)..."
-	docker compose -f docker/docker-compose.yml build picoclaw-agent picoclaw-gateway
+	@echo "Building single-node launcher image (Alpine-based)..."
+	docker compose -f docker/docker-compose.yml build picoclaw-launcher
 
 ## docker-build-full: Build Docker image with full MCP support (Node.js 24)
 docker-build-full:
@@ -443,7 +443,7 @@ docker-test:
 
 ## docker-run: Run picoclaw gateway in Docker (Alpine-based)
 docker-run:
-	docker compose -f docker/docker-compose.yml --profile gateway up
+	docker compose -f docker/docker-compose.headless.yml --profile gateway up --remove-orphans picoclaw-gateway
 
 ## docker-run-full: Run picoclaw gateway in Docker (full-featured)
 docker-run-full:
@@ -451,7 +451,7 @@ docker-run-full:
 
 ## docker-run-agent: Run picoclaw agent in Docker (interactive, Alpine-based)
 docker-run-agent:
-	docker compose -f docker/docker-compose.yml run --rm picoclaw-agent
+	docker compose -f docker/docker-compose.headless.yml run --rm picoclaw-agent
 
 ## docker-run-agent-full: Run picoclaw agent in Docker (interactive, full-featured)
 docker-run-agent-full:
@@ -459,8 +459,9 @@ docker-run-agent-full:
 
 ## docker-clean: Clean Docker images and volumes
 docker-clean:
-	docker compose -f docker/docker-compose.yml down -v
-	docker compose -f docker/docker-compose.full.yml down -v
+	docker compose -f docker/docker-compose.full.yml --profile "*" down -v
+	docker compose -f docker/docker-compose.yml -f docker/docker-compose.headless.yml \
+		--profile "*" down -v --remove-orphans
 	docker rmi picoclaw:latest picoclaw:full 2>/dev/null || true
 
 
@@ -508,7 +509,7 @@ help:
 	@echo "  make install            # Install to ~/.local/bin"
 	@echo "  make uninstall          # Remove from /usr/local/bin"
 	@echo "  make install-skills     # Install skills to workspace"
-	@echo "  make docker-build       # Build minimal Docker image"
+	@echo "  make docker-build       # Build default single-node Docker image"
 	@echo "  make docker-test        # Test MCP tools in Docker"
 	@echo ""
 	@echo "Environment Variables:"

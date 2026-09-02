@@ -270,32 +270,61 @@ For detailed WebUI documentation, see [docs.picoclaw.io](https://docs.picoclaw.i
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw
 
-# 2. First run — auto-generates docker/data/config.json then exits
-#    (only triggers when both config.json and workspace/ are missing)
-docker compose -f docker/docker-compose.yml --profile launcher up
-# The container prints "First-run setup complete." and stops.
-
-# 3. Set your API keys
-vim docker/data/config.json
-
-# 4. Start
-docker compose -f docker/docker-compose.yml --profile launcher up -d
+# 2. Start the single-node Web + API + Gateway bundle
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
 # Open http://localhost:18800
 ```
 
-> **Docker / VM users:** The Gateway listens on `127.0.0.1` by default. Set `PICOCLAW_GATEWAY_HOST=0.0.0.0` or use the `-public` flag to make it accessible from the host.
+On first launch, open `/launcher-setup`, create the dashboard password, then
+configure a provider and model in the WebUI. The complete PicoClaw home,
+including its SQLite databases and workspace, persists under `docker/data/`.
+
+Only launcher port `18800` is mapped to host loopback by default. Browser chat
+uses the launcher's same-origin proxy, while the managed Gateway remains on
+container loopback. Complete `/launcher-setup` locally before allowing LAN
+access. When requested, bind the launcher beyond the host with appropriate
+firewall, TLS proxy, and CIDR controls:
+
+```bash
+PICOCLAW_LAUNCHER_BIND=0.0.0.0 \
+  docker compose -f docker/docker-compose.yml up -d --remove-orphans
+```
+
+If an HTTP callback channel or advanced integration needs direct Gateway
+access, opt in to port `18790`:
+
+```bash
+docker compose -f docker/docker-compose.yml \
+  -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
+```
+
+Protect direct Gateway access with a firewall or TLS reverse proxy. Launcher
+`/health` and `/ready` report launcher availability independently of optional
+Gateway/model state.
 
 ```bash
 # Check logs
 docker compose -f docker/docker-compose.yml logs -f
 
 # Stop
-docker compose -f docker/docker-compose.yml --profile launcher down
+docker compose -f docker/docker-compose.yml down
 
 # Update
 docker compose -f docker/docker-compose.yml pull
-docker compose -f docker/docker-compose.yml --profile launcher up -d
+docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
+
+When upgrading once from the older profile-based Compose layout, stop and
+remove its fixed-name containers before the first new start. Persistent data in
+`docker/data/` is not removed:
+
+```bash
+docker stop picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+docker rm picoclaw-launcher picoclaw-gateway picoclaw-agent 2>/dev/null || true
+```
+
+Stop the bundle before copying or restoring `docker/data/` so each SQLite
+database and its matching WAL/SHM files remain one consistent snapshot.
 
 </details>
 
