@@ -19,6 +19,42 @@ func repositoryReviewTestLockPath(t *testing.T, root, name string) string {
 	return path
 }
 
+func TestRepositoryReviewLockPathAndFileFailureBoundaries(t *testing.T) {
+	if _, err := repositoryReviewLockPath("", "store.lock"); err == nil {
+		t.Fatal("empty lock root was accepted")
+	}
+
+	directory := t.TempDir()
+	directoryFile, err := os.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directoryFile.Close()
+	if err := secureRepositoryReviewLockFile(directory, directoryFile); err == nil {
+		t.Fatal("directory lock handle was accepted")
+	}
+	if err := secureRepositoryReviewLockFile(filepath.Join(directory, "missing"), nil); err == nil {
+		t.Fatal("nil lock handle was accepted")
+	}
+
+	lockPath := filepath.Join(directory, "lock")
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	decoyPath := filepath.Join(directory, "decoy")
+	if err := os.WriteFile(decoyPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	decoy, err := os.OpenFile(decoyPath, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoy.Close()
+	if err := secureRepositoryReviewLockFile(lockPath, decoy); err == nil {
+		t.Fatal("lock handle opened under a different identity was accepted")
+	}
+}
+
 func TestRepositoryReviewLocksUsePrivateStoreLocalNamespace(t *testing.T) {
 	store := NewSQLiteStore(t.TempDir())
 	// A pre-upgrade sibling lock is no longer authoritative and cannot block

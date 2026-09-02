@@ -441,6 +441,16 @@ func TestHistoricalReplayAdditionalStoreStateMachine(t *testing.T) {
 	if err != nil || !acquired || replay.Status != HistoricalDeduplicationMerging {
 		t.Fatalf("acquire=%v replay=%#v err=%v", acquired, replay, err)
 	}
+	attemptsBeforeRecovery := replay.Attempts
+	state, replay, err = store.RecoverHistoricalDeduplicationMerge(repository, "lease")
+	if err != nil || replay.Status != HistoricalDeduplicationReplaying ||
+		replay.MergeLease.ID != "" || replay.Attempts != attemptsBeforeRecovery+1 {
+		t.Fatalf("recover replay=%#v err=%v", replay, err)
+	}
+	state, replay, acquired, err = store.AcquireHistoricalDeduplicationMerge(repository, "lease", nil)
+	if err != nil || !acquired || replay.Status != HistoricalDeduplicationMerging {
+		t.Fatalf("reacquire=%v replay=%#v err=%v", acquired, replay, err)
+	}
 	_, _, acquiredAgain, acquireAgainErr := store.AcquireHistoricalDeduplicationMerge(
 		repository,
 		"lease",
