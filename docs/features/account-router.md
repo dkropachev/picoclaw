@@ -18,8 +18,9 @@ selects an exact model alias.
 - Similarity target: recreate a config-backed account router with workflow-like
   block IDs and fallback edges.
 - Core types/functions: `AccountRouterConfig`, `AccountRouterBlock`,
-  `accountrouter.Router`, persistent router state store, agent candidate
-  selection, fallback result recording, and launcher model handlers.
+  `accountrouter.Router`, typed account-routing broker client and handler,
+  persistent router state store, agent candidate selection, fallback result
+  recording, and launcher model handlers.
 - Runtime ordering: validate router graph and account references, select a
   concrete account, resolve the requested alias to its base model or that
   concrete account's override, execute normal provider fallback, record
@@ -30,6 +31,9 @@ selects an exact model alias.
   chosen account becomes unavailable, and failed attempts must be attributed by
   stable account identity even when two accounts use the same provider and
   model ID.
+- Runtime state is addressed only by the catalogued opaque account-routing
+  `StoreID`; the supervisor broker, not an agent or launcher process, owns the
+  retained physical-store pool and its migration lifecycle.
 
 ## Requirements
 
@@ -46,6 +50,7 @@ selects an exact model alias.
 | `FR-ACCOUNT-ROUTER-009` | MUST  | Private agent execution records provider fallback outcomes through the router's private-result path. That path preserves stable account attribution, classified failure reason, health/cooldown transitions, request/token accounting, and success recovery, but replaces every persisted upstream or wrapper error with the fixed `provider request failed` text. Ordinary non-private result recording retains its existing diagnostics. | A provider error can echo compiler-private workflow context or frozen media; router health must remain accurate without turning shared durable state into an exfiltration surface. |
 
 | `FR-ACCOUNT-ROUTER-010` | MUST | Authenticated `/api/account-routers` provides a name-identified standard collection with bounded typed `query`, opaque cursor paging, total and schema metadata, direct detail, create/update/delete, revision-fenced make-default, and at-most-200 explicit-ID bulk deletion. Canonical path-safe nonreserved names are their own IDs; an unsafe, dot-segment, reserved-route, or opaque-shaped persisted name receives a deterministic backend-issued base64url digest ID and remains viewable/editable without data migration. One config revision fences each mutation; candidate validation and one save preserve unrelated configuration and return restart effects. Structurally valid disabled routers persist and remain editable but are unavailable to runtime selection and cannot become default. Bulk results return successful IDs plus stable `default`, `referenced`, and `not_found` failures with safe blockers. The UI uses List/Table/Grid at `/accounts/routers` with dedicated `/new`, `/{id}`, and `/{id}/edit` routes, optional enable/disable and make-default item actions, partial-success selection reconciliation, and no compatibility handling for `/accounts/account-router/new` or index-addressed URLs. | Router administration needs stable names, safe concurrency, and directly loadable editors without mutable model-list indexes, combined credential cards, or query-wide deletion. |
+| `FR-ACCOUNT-ROUTER-011` | MUST | Runtime and administrative account-routing operations use typed broker commands against the trusted catalog's opaque account-routing `StoreID`; no caller supplies a path, obtains a provider handle, or falls back to local storage. The supervisor broker retains one provider pool for the canonical store across runtime restarts. A missing empty store may initialize normally, while a legacy, outdated, or integrity-failed generation returns a structured readiness error and can change only through `picoclaw database migrate` after exclusive shutdown fencing and a completed mandatory backup. | Shared health, affinity, usage, and credential-invalidations need one owner and a recovery path that cannot be bypassed by runtime fallback. |
 
 `FR-ACCOUNT-ROUTER-005` storage closeout MUST durably close the shared import
 horizon after the first complete `account_router_state.json` and invalidation-sidecar
@@ -81,7 +86,9 @@ Runtime state persists under the agent workspace as
 health and usage, session block affinities, block cursors, invalidation
 generations, row versions, and full-range seconds/nanoseconds. Legacy
 `account_router_state.json` and exact auth-invalidation siblings are retained
-only in `state/legacy-json/account-router-v1/` after one bounded import.
+only in `state/legacy-json/account-router-v1/` after one bounded import. Those
+physical names are broker-provider details; application code retains only the
+opaque account-routing `StoreID` and typed domain results.
 
 All processes sharing the workspace must upgrade together. Rollback requires
 stopping them, restoring archived legacy files to their original relative
@@ -102,7 +109,8 @@ and exposes neither credentials nor runtime error detail.
 | Type    | Surface                                       | Contract                                                                                                                              | Requirement IDs                                         |
 | ------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
 | Config  | `account_routers[]`                           | Router name, static account-only block graph, fallback refs, strategy, and refresh interval; no model field.                                      | `FR-ACCOUNT-ROUTER-001` through `FR-ACCOUNT-ROUTER-003` |
-| Runtime | `pkg/accountrouter`, `<workspace>/state/account-router.db` | Select candidates, enforce session affinity, transactionally track health/usage/invalidation generations across processes, redact private provider errors, and migrate/archive legacy state without fallback. | `FR-ACCOUNT-ROUTER-003` through `FR-ACCOUNT-ROUTER-005`, `FR-ACCOUNT-ROUTER-009` |
+| Runtime | `pkg/accountrouter`, opaque account-routing `StoreID` | Select candidates, enforce session affinity, and track health/usage/invalidation generations through typed broker operations without local fallback. | `FR-ACCOUNT-ROUTER-003` through `FR-ACCOUNT-ROUTER-005`, `FR-ACCOUNT-ROUTER-009`, `FR-ACCOUNT-ROUTER-011` |
+| Broker | account-routing domain handler and trusted store catalog | Own one retained provider pool, redact provider details at the domain boundary, and permit schema/legacy migration only under the backed-up offline fence. | `FR-ACCOUNT-ROUTER-005`, `FR-ACCOUNT-ROUTER-011` |
 | Agent   | Agent model resolution and fallback execution | Select/reselect concrete accounts, resolve the exact alias for each selected account, and record results by account identity. | `FR-ACCOUNT-ROUTER-004`, `FR-ACCOUNT-ROUTER-006`        |
 | HTTP/UI | `/api/account-routers*`, `/accounts/routers*` | Name-identified typed collection/detail/CRUD with backend-issued IDs for unsafe names, revision-fenced default selection and explicit-ID bulk deletion, routed graph editing, and independent model-alias selection. | `FR-ACCOUNT-ROUTER-007`, `FR-ACCOUNT-ROUTER-010` |
 
@@ -133,10 +141,12 @@ and exposes neither credentials nor runtime error detail.
    operational and increment usage. When the caller marks the execution
    private, keep those classifications and counters but replace persisted
    provider error detail with one fixed message before writing shared state.
-9. Under the private database/file lock, begin an immediate transaction, reload
-   all normalized state, consume credential generations, apply selection/result
-   changes, prune stale state, consume again for late-result fencing, upsert
-   typed/versioned rows, delete untouched rows, and commit once.
+9. Send the typed selection, result, snapshot, or invalidation command with the
+   catalogued opaque `StoreID`. Under its retained provider pool, the broker
+   begins an immediate transaction, reloads all normalized state, consumes
+   credential generations, applies changes, prunes stale state, consumes again
+   for late-result fencing, upserts typed/versioned rows, deletes untouched rows,
+   and commits once.
 
 ## Cross-Feature Behavior
 
@@ -164,6 +174,10 @@ semantics; router entries intentionally do not store API keys.
 - Corrupt or future SQLite schemas and unsafe/oversized legacy sources fail
   closed; they are never renamed into a new mutable format or bypassed through
   JSON.
+- Broker unavailability or `MigrationRequired` stops selection/state mutation
+  with a structured domain error. Runtime never derives the physical filename,
+  opens a replacement pool, or imports legacy files; migration waits for
+  exclusive supervisor shutdown fencing and a successful generation backup.
 
 ## Acceptance Evidence
 
@@ -175,11 +189,13 @@ semantics; router entries intentionally do not store API keys.
 | `FR-ACCOUNT-ROUTER-007`                                                                            | [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/backend/api/account_router_collections_test.go](../../web/backend/api/account_router_collections_test.go), [web/frontend/src/api/accounts.test.ts](../../web/frontend/src/api/accounts.test.ts), [web/frontend/src/routes/-accounts-route.test.tsx](../../web/frontend/src/routes/-accounts-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-ACCOUNT-ROUTER-009`                                                                            | [pkg/accountrouter/router_test.go](../../pkg/accountrouter/router_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go)                                                                                                                        |
 | `FR-ACCOUNT-ROUTER-010`                                                                            | [pkg/config/account_router_test.go](../../pkg/config/account_router_test.go), [web/backend/api/account_router_collections_test.go](../../web/backend/api/account_router_collections_test.go), [web/frontend/src/api/accounts.test.ts](../../web/frontend/src/api/accounts.test.ts), [web/frontend/src/routes/-accounts-route.test.tsx](../../web/frontend/src/routes/-accounts-route.test.tsx), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
+| `FR-ACCOUNT-ROUTER-011`                                                                            | [pkg/accountrouter/broker_test.go](../../pkg/accountrouter/broker_test.go), [pkg/accountrouter/provider_access_test.go](../../pkg/accountrouter/provider_access_test.go), [pkg/database/migration/offline_adapter_fence_test.go](../../pkg/database/migration/offline_adapter_fence_test.go), [pkg/database/migration/migration_test.go](../../pkg/database/migration/migration_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/config/config.go](../../pkg/config/config.go)
 - [pkg/accountrouter](../../pkg/accountrouter)
+- [pkg/accountrouter/broker.go](../../pkg/accountrouter/broker.go)
 - [pkg/agent/instance.go](../../pkg/agent/instance.go)
 - [pkg/agent/pipeline_setup.go](../../pkg/agent/pipeline_setup.go)
 - [pkg/agent/pipeline_llm.go](../../pkg/agent/pipeline_llm.go)

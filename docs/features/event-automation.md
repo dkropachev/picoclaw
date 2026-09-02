@@ -34,6 +34,14 @@ links. The installable PWA may send privacy-minimal Web Push only for newly open
 critical/high items after explicit per-device opt-in. It remains fully usable as
 an in-app inbox where push is unsupported.
 
+All event inbox, local-CI cache, and PR candidate-checkpoint persistence is
+resolved through opaque catalog `StoreID` values and typed broker commands. The
+supervisor owns stable provider pools across gateway restart; runtime
+constructors never open a configured database path or fall back locally. Schema
+or retained JSON import requires the exclusively fenced, backed-up offline
+database migration command, and a non-ready required store blocks automation
+startup before any running transition is persisted.
+
 Schema v20 is a deliberate breaking cutover. It preserves generic event and
 workflow rows while destructively replacing v19 pull-request workspaces with
 development workspaces and notification state. Old workspace rows, `prw_` IDs,
