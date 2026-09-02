@@ -618,7 +618,105 @@ func isKnownCoverageBaselineFlake(out []byte) bool {
 	return isKnownCoverageTempDirCleanupRace(out) ||
 		isKnownRepositoryModelEvaluationCancellationRace(out) ||
 		isKnownEvolutionDraftPersistenceTimeout(out) ||
-		isKnownRepositoryReviewAutoContinueCompletionTimeout(out)
+		isKnownRepositoryReviewAutoContinueCompletionTimeout(out) ||
+		isKnownRepositoryReviewLateControllerShutdownCompanionRace(out)
+}
+
+func isKnownRepositoryReviewLateControllerShutdownCompanionRace(out []byte) bool {
+	const (
+		parentTest    = "TestRepositoryReviewAssignmentAdmissionFailureBranches"
+		subtest       = parentTest + "/late_controller_shutdown"
+		failedPackage = "github.com/sipeed/picoclaw/web/backend/api"
+		diagnostic    = "repository_review_assignment_coverage_test.go:409: " +
+			"late controller shutdown error = secure repository-reviews database files: " +
+			"private file changed while securing"
+		continuationPrefix = "lstat "
+		continuationSuffix = ": no such file or directory"
+	)
+	var (
+		failureMarkers        []string
+		diagnostics           []string
+		continuations         []string
+		packageFailures       int
+		failurePackage        string
+		previousWasDiagnostic bool
+	)
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.Contains(line, "_test.go:") && line != diagnostic {
+			return false
+		}
+		if strings.HasPrefix(line, continuationPrefix) {
+			if !previousWasDiagnostic {
+				return false
+			}
+			continuations = append(continuations, line)
+		}
+		if strings.HasPrefix(line, "--- FAIL:") {
+			name, ok := coverageFailedTestName(line)
+			if !ok {
+				return false
+			}
+			failureMarkers = append(failureMarkers, name)
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "FAIL" {
+			packageFailures++
+			failurePackage = fields[1]
+		}
+		isDiagnostic := coverageGoTestDiagnostic(line)
+		if isDiagnostic {
+			diagnostics = append(diagnostics, line)
+		}
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") ||
+			strings.Contains(line, "[build failed]") || strings.Contains(line, "[setup failed]") {
+			return false
+		}
+		previousWasDiagnostic = isDiagnostic && line == diagnostic
+	}
+	if scanner.Err() != nil || len(failureMarkers) != 2 || failureMarkers[0] != parentTest ||
+		failureMarkers[1] != subtest || packageFailures != 1 || failurePackage != failedPackage ||
+		len(diagnostics) != 1 || diagnostics[0] != diagnostic || len(continuations) != 1 ||
+		!strings.HasPrefix(continuations[0], continuationPrefix) ||
+		!strings.HasSuffix(continuations[0], continuationSuffix) {
+		return false
+	}
+	path := strings.TrimSuffix(
+		strings.TrimPrefix(continuations[0], continuationPrefix),
+		continuationSuffix,
+	)
+	return isSafeRepositoryReviewLateControllerShutdownCompanionPath(path)
+}
+
+func isSafeRepositoryReviewLateControllerShutdownCompanionPath(path string) bool {
+	if path == "" || strings.ContainsRune(path, '\x00') || !filepath.IsAbs(path) ||
+		filepath.Clean(path) != path {
+		return false
+	}
+	tempRoot := filepath.Clean(os.TempDir())
+	relative, err := filepath.Rel(tempRoot, path)
+	if err != nil || relative == "." || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	if len(parts) != 9 || parts[1] != "base-picoclaw-home" || parts[2] != ".tmp" ||
+		parts[4] != "tmp" || parts[6] != "001" || parts[7] != "repository_reviews" ||
+		(parts[8] != "repository-reviews.db-wal" && parts[8] != "repository-reviews.db-shm") {
+		return false
+	}
+	const (
+		coveragePrefix   = "picoclaw-coverage-delta-"
+		apiRuntimePrefix = "picoclaw-api-test-runtime-"
+		testPrefix       = "TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_cont"
+	)
+	return strings.HasPrefix(parts[0], coveragePrefix) &&
+		coverageCanonicalUint32Decimal(strings.TrimPrefix(parts[0], coveragePrefix)) &&
+		strings.HasPrefix(parts[3], apiRuntimePrefix) &&
+		coverageCanonicalUint32Decimal(strings.TrimPrefix(parts[3], apiRuntimePrefix)) &&
+		strings.HasPrefix(parts[5], testPrefix) &&
+		coverageCanonicalUint32Decimal(strings.TrimPrefix(parts[5], testPrefix))
 }
 
 func isKnownRepositoryReviewAutoContinueCompletionTimeout(out []byte) bool {
@@ -765,6 +863,15 @@ func coverageASCIIDigits(value string) bool {
 		}
 	}
 	return true
+}
+
+func coverageCanonicalUint32Decimal(value string) bool {
+	if !coverageASCIIDigits(value) || len(value) > 10 ||
+		(len(value) > 1 && value[0] == '0') {
+		return false
+	}
+	_, err := strconv.ParseUint(value, 10, 32)
+	return err == nil
 }
 
 func isKnownRepositoryModelEvaluationCancellationRace(out []byte) bool {
