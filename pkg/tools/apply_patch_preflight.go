@@ -534,6 +534,9 @@ func (t *ApplyPatchTool) resolveApplyPatchCandidate(
 	if err != nil {
 		return applyPatchCandidate{}, fmt.Errorf("resolve patch path %q: %w", label, err)
 	}
+	if preparedErr := t.authorizePreparedMutationPaths(lexical, canonical); preparedErr != nil {
+		return applyPatchCandidate{}, preparedErr
+	}
 	if authorizeErr := t.authorizeApplyPatchCanonical(plan, canonical); authorizeErr != nil {
 		return applyPatchCandidate{}, authorizeErr
 	}
@@ -561,6 +564,9 @@ func (t *ApplyPatchTool) resolveApplyPatchCandidate(
 	coherentCanonical, coherentErr := resolveApplyPatchPathAgainstExistingAncestor(lexical)
 	if coherentErr != nil || coherentCanonical != canonical {
 		return applyPatchCandidate{}, fmt.Errorf("patch path %q changed during preflight", label)
+	}
+	if preparedErr := t.authorizePreparedMutationPaths(lexical, coherentCanonical); preparedErr != nil {
+		return applyPatchCandidate{}, preparedErr
 	}
 	if authorizeErr := t.authorizeApplyPatchCanonical(plan, coherentCanonical); authorizeErr != nil {
 		return applyPatchCandidate{}, authorizeErr
@@ -591,6 +597,19 @@ func (t *ApplyPatchTool) resolveApplyPatchCandidate(
 		exists: lstatErr == nil, info: info, fences: fences,
 		identityCatalog: t.protectedIdentities,
 	}, nil
+}
+
+func (t *ApplyPatchTool) authorizePreparedMutationPaths(lexical, canonical string) error {
+	if t == nil || t.preparedMutationPolicy == nil {
+		return nil
+	}
+	for _, candidate := range []string{lexical, canonical} {
+		protected, err := t.preparedMutationPolicy.ProtectsPath(candidate)
+		if err != nil || protected {
+			return fmt.Errorf("patch path is protected")
+		}
+	}
+	return nil
 }
 
 func (t *ApplyPatchTool) authorizeApplyPatchCanonical(

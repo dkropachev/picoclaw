@@ -908,6 +908,7 @@ func newLocalRepairToolRegistryWithDiagnosticPolicy(
 			ProtectedRoots:                 append([]string(nil), patchRoots...),
 			ProtectedIdentities:            guard.protectedIdentities,
 			PreparedVolatileProtectedRoots: guard.preparedApplyPatchRoots,
+			PreparedMutationPolicy:         guard.preparedMutationPolicy,
 			PathGuard:                      guard.validateMutation,
 		},
 	)

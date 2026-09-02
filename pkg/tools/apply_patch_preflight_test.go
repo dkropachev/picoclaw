@@ -1057,6 +1057,39 @@ func TestApplyPatchPreflightSharesDetachedPreparedVolatileRoots(t *testing.T) {
 	}
 }
 
+func TestApplyPatchPreflightSharesPreparedSiblingPrefixPolicy(t *testing.T) {
+	workspace := t.TempDir()
+	prepared, err := NewPreparedFileMutationPolicy(workspace, FileMutationPolicy{
+		ProtectedSiblingPrefixes: []FileMutationSiblingPrefix{{
+			Parent: workspace,
+			Prefix: "account_router_state.json.auth-invalidation.",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := newApplyPatchPreflightTestTool(t, workspace, true, true, ApplyPatchPreflightPolicy{
+		PreparedMutationPolicy: prepared,
+	})
+	target := "account_router_state.json.auth-invalidation.0123456789abcdef0123456789abcdef"
+	result := executeApplyPatch(t, tool, context.Background(),
+		"*** Begin Patch\n*** Add File: "+target+"\n+forged\n*** End Patch",
+	)
+	requireApplyPatchError(t, result, "protected")
+	if _, err := os.Stat(filepath.Join(workspace, target)); !os.IsNotExist(err) {
+		t.Fatalf("prepared sibling prefix was created: %v", err)
+	}
+	result = executeApplyPatch(t, tool, context.Background(),
+		"*** Begin Patch\n*** Add File: ordinary.txt\n+allowed\n*** End Patch",
+	)
+	if result == nil || result.IsError {
+		t.Fatalf("ordinary patch denied by sibling prefix: %#v", result)
+	}
+	if tool.preparedMutationPolicy != prepared {
+		t.Fatal("apply_patch copied or dropped prepared mutation policy")
+	}
+}
+
 func TestApplyPatchPreflightPolicyRejectsInvalidRuntimeRoots(t *testing.T) {
 	workspace := t.TempDir()
 	transactionRoot := filepath.Join(t.TempDir(), "apply-patch-transactions")

@@ -889,7 +889,6 @@ func TestAgentFileMutationPolicyHomeInsideWorkspaceOmitsUnsafeApplyPatch(t *test
 	cfg := agentFileMutationTestConfig(workspace)
 	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
 	defer agent.Close()
-
 	if _, ok := agent.Tools.Get("apply_patch"); ok {
 		t.Fatal("apply_patch retained an authenticated state root inside workspace authority")
 	}
@@ -928,10 +927,21 @@ func TestAgentFileMutationPolicyProtectsAccountRouterStateAndHardlinks(t *testin
 	cfg := agentFileMutationTestConfig(workspace)
 	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
 	defer agent.Close()
+	futureSidecar := legacy + ".auth-invalidation.abcdef0123456789abcdef0123456789"
 	for _, target := range targets {
 		for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
 			requireAgentFileMutationDenied(t, agent.Tools, toolName, workspace, target, true)
 		}
+	}
+	for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+		requireAgentFileMutationDenied(
+			t,
+			agent.Tools,
+			toolName,
+			workspace,
+			futureSidecar,
+			false,
+		)
 	}
 	for label, source := range map[string]string{
 		"database": database,
@@ -2271,6 +2281,20 @@ func TestAgentDynamicIdentityCatalogCoversEveryMutableLegacyTreeAcrossRename(t *
 				"legacy-json",
 				"repository-evaluations-v1",
 				"evaluation_legacy.json",
+			),
+		},
+		{
+			name: "account-router-invalidation",
+			source: filepath.Join(
+				workspace,
+				"account_router_state.json.auth-invalidation.0123456789abcdef0123456789abcdef",
+			),
+			archive: filepath.Join(
+				workspace,
+				"state",
+				"legacy-json",
+				"account-router-v1",
+				"account_router_state.json.auth-invalidation.0123456789abcdef0123456789abcdef",
 			),
 		},
 	}

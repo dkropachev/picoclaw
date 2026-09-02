@@ -31,9 +31,13 @@ type ApplyPatchPreflightPolicy struct {
 	// PreparedVolatileProtectedRoots reuses one immutable generation-wide
 	// volatile-root policy. It is mutually exclusive with the source slice.
 	PreparedVolatileProtectedRoots *PreparedApplyPatchVolatileRoots
-	PathGuard                      func(string) error
-	TransactionStateRoot           string
-	WriteAllowRoots                []string
+	// PreparedMutationPolicy shares the generation-wide sibling-prefix/root
+	// predicate used by write/edit/append tools. Apply-patch still snapshots its
+	// volatile roots independently for transaction fencing.
+	PreparedMutationPolicy *PreparedFileMutationPolicy
+	PathGuard              func(string) error
+	TransactionStateRoot   string
+	WriteAllowRoots        []string
 }
 
 // PreparedApplyPatchVolatileRoots is one immutable set of strict runtime
@@ -59,15 +63,16 @@ func NewPreparedApplyPatchVolatileRoots(
 }
 
 type ApplyPatchTool struct {
-	workspace           string
-	restrict            bool
-	allowPaths          []*regexp.Regexp
-	allowCreate         bool
-	allowUpdate         bool
-	pathGuard           func(string) error
-	protectedRoots      []applyPatchProtectedRoot
-	volatileRoots       *PreparedApplyPatchVolatileRoots
-	protectedIdentities *FileIdentityCatalog
+	workspace              string
+	restrict               bool
+	allowPaths             []*regexp.Regexp
+	allowCreate            bool
+	allowUpdate            bool
+	pathGuard              func(string) error
+	protectedRoots         []applyPatchProtectedRoot
+	volatileRoots          *PreparedApplyPatchVolatileRoots
+	protectedIdentities    *FileIdentityCatalog
+	preparedMutationPolicy *PreparedFileMutationPolicy
 
 	transactionStateRoot applyPatchTransactionStateRoot
 	transactionStateErr  error
@@ -162,16 +167,17 @@ func NewApplyPatchToolWithPermissionsAndPolicy(
 		}
 	}
 	return &ApplyPatchTool{
-		workspace:            workspace,
-		restrict:             restrict,
-		allowPaths:           cloneApplyPatchPatterns(allowPaths),
-		allowCreate:          allowCreate,
-		allowUpdate:          allowUpdate,
-		pathGuard:            policy.PathGuard,
-		protectedRoots:       protected,
-		volatileRoots:        volatileProtected,
-		protectedIdentities:  policy.ProtectedIdentities,
-		transactionStateRoot: transactionState,
+		workspace:              workspace,
+		restrict:               restrict,
+		allowPaths:             cloneApplyPatchPatterns(allowPaths),
+		allowCreate:            allowCreate,
+		allowUpdate:            allowUpdate,
+		pathGuard:              policy.PathGuard,
+		protectedRoots:         protected,
+		volatileRoots:          volatileProtected,
+		protectedIdentities:    policy.ProtectedIdentities,
+		preparedMutationPolicy: policy.PreparedMutationPolicy,
+		transactionStateRoot:   transactionState,
 	}, nil
 }
 

@@ -17,6 +17,7 @@ type (
 	LoadImageTool              = fstools.LoadImageTool
 	SendFileTool               = fstools.SendFileTool
 	FileMutationPolicy         = fstools.FileMutationPolicy
+	FileMutationSiblingPrefix  = fstools.FileMutationSiblingPrefix
 	PreparedFileMutationPolicy = fstools.PreparedFileMutationPolicy
 	FileIdentityCatalog        = fstools.FileIdentityCatalog
 	FileIdentityCatalogOptions = fstools.FileIdentityCatalogOptions

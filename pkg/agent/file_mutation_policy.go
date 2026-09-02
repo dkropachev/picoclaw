@@ -38,6 +38,7 @@ const (
 	agentFileIdentityDirectoryEntryLimit = 131_072
 	agentAccountRouterLegacySidecarLimit = 100_000
 	agentFileIdentityDirectoryReadBatch  = 256
+	agentAccountRouterInvalidationPrefix = "account_router_state.json.auth-invalidation."
 )
 
 func agentWorkflowRuntimeFileMutationProtectedRoots(workspace string) ([]string, error) {
@@ -731,12 +732,29 @@ func agentWorkspaceAccountRouterProtectedRoots(workspace string) ([]string, erro
 }
 
 func agentAccountRouterLegacySidecarName(name string) bool {
-	suffix, ok := strings.CutPrefix(name, "account_router_state.json.auth-invalidation.")
+	suffix, ok := strings.CutPrefix(name, agentAccountRouterInvalidationPrefix)
 	if !ok || len(suffix) != 32 || suffix != strings.ToLower(suffix) {
 		return false
 	}
 	_, err := hex.DecodeString(suffix)
 	return err == nil
+}
+
+func agentAccountRouterFileMutationProtectedPrefixes(
+	workspaces []string,
+) ([]tools.FileMutationSiblingPrefix, error) {
+	normalized, err := normalizeAgentFileMutationWorkspaces(workspaces)
+	if err != nil {
+		return nil, err
+	}
+	prefixes := make([]tools.FileMutationSiblingPrefix, 0, len(normalized))
+	for _, workspace := range normalized {
+		prefixes = append(prefixes, tools.FileMutationSiblingPrefix{
+			Parent: workspace,
+			Prefix: agentAccountRouterInvalidationPrefix,
+		})
+	}
+	return prefixes, nil
 }
 
 func mustAgentWorkspaceAccountRouterProtectedRoots(workspace string) []string {
@@ -1336,9 +1354,18 @@ func newAgentFileMutationIdentityGeneration(
 	if err != nil {
 		return nil, err
 	}
+	prefixWorkspaces := append(
+		append([]string(nil), workspaces...),
+		agentFileMutationWorkspacesFromProtectedRoots(protectedRoots)...,
+	)
+	prefixes, err := agentAccountRouterFileMutationProtectedPrefixes(prefixWorkspaces)
+	if err != nil {
+		return nil, err
+	}
 	preparedPolicy, err := tools.NewPreparedFileMutationPolicy("", tools.FileMutationPolicy{
-		ProtectedRoots:      protectedRoots,
-		ProtectedIdentities: catalog,
+		ProtectedRoots:           protectedRoots,
+		ProtectedSiblingPrefixes: prefixes,
+		ProtectedIdentities:      catalog,
 	})
 	if err != nil {
 		return nil, err

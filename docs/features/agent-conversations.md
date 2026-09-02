@@ -188,7 +188,13 @@ sources; workflow `workflow_runs`, `workflow_validations`, `workflow_dev`, and
 database, WAL/SHM companions, legacy sources, rollback backups, archive
 namespace, and exact archived sources. Configured workflow definitions,
 `workflow_artifacts`, and human-authored config remain editable. Each registry
-generation builds one bounded physical-file identity catalog over the
+also freezes the absolute parent plus
+`account_router_state.json.auth-invalidation.` sibling-name prefix for every
+current and retained workspace. The shared prepared predicate is enforced by
+write/edit/append, apply-patch, owner products, and controller local repair, so
+a sidecar created after the identity snapshot but before first router open
+cannot become migration input.
+Each registry generation builds one bounded physical-file identity catalog over the
 configured/default workspace and all named-agent workspace policies. Pinned
 directory handles, batched enumeration, a streaming-digest first pass, one
 final deduplicated identity set, aggregate entry/path-byte/depth limits, and

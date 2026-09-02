@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"testing"
 
@@ -63,6 +64,14 @@ func TestAgentReloadRetainsOldWorkspaceAndCustomRuntimeIdentities(t *testing.T) 
 	newConfig.Evolution.StateDir = newEvolution
 	newConfig.Events.Ingress.Enabled = true
 	newConfig.Events.Ingress.DatabasePath = newEventDatabase
+	oldFutureSidecar := filepath.Join(
+		oldWorkspace,
+		"account_router_state.json.auth-invalidation.abcdef0123456789abcdef0123456789",
+	)
+	newConfig.Tools.AllowWritePaths = append(
+		newConfig.Tools.AllowWritePaths,
+		"^"+regexp.QuoteMeta(oldFutureSidecar)+"$",
+	)
 	if err := loop.ReloadProviderAndConfig(
 		context.Background(),
 		&mockProvider{},
@@ -107,6 +116,20 @@ func TestAgentReloadRetainsOldWorkspaceAndCustomRuntimeIdentities(t *testing.T) 
 		if err != nil || !preparedProtected {
 			t.Fatalf("old runtime alias %d prepared protected=%t err=%v", index, preparedProtected, err)
 		}
+	}
+	if protected, err := agent.preparedFileMutationPolicy.ProtectsPath(oldFutureSidecar); err != nil ||
+		!protected {
+		t.Fatalf("retained old-workspace sibling prefix protected=%t err=%v", protected, err)
+	}
+	for _, toolName := range []string{"write_file", "edit_file", "append_file", "apply_patch"} {
+		requireAgentFileMutationDenied(
+			t,
+			agent.Tools,
+			toolName,
+			newWorkspace,
+			oldFutureSidecar,
+			false,
+		)
 	}
 }
 

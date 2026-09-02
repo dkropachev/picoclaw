@@ -18,11 +18,20 @@ import (
 // descendants. Roots are detached and resolved when the tool is constructed;
 // existing filesystem aliases are revalidated before every write.
 type FileMutationPolicy struct {
-	ProtectedRoots      []string
-	ProtectedIdentities *FileIdentityCatalog
+	ProtectedRoots           []string
+	ProtectedSiblingPrefixes []FileMutationSiblingPrefix
+	ProtectedIdentities      *FileIdentityCatalog
 	// Prepared is an immutable root/identity policy resolved once for a whole
 	// runtime generation. It is mutually exclusive with the source fields.
 	Prepared *PreparedFileMutationPolicy
+}
+
+// FileMutationSiblingPrefix protects every child in one exact absolute parent
+// whose basename begins with Prefix. It covers legacy sibling sidecars whose
+// bounded suffix is not known until another process creates the file.
+type FileMutationSiblingPrefix struct {
+	Parent string
+	Prefix string
 }
 
 type fileMutationProtectedRoot struct {
@@ -30,11 +39,18 @@ type fileMutationProtectedRoot struct {
 	canonical string
 }
 
+type fileMutationProtectedSiblingPrefix struct {
+	lexicalParent   string
+	canonicalParent string
+	prefix          string
+}
+
 // PreparedFileMutationPolicy is an immutable, generation-shareable policy.
 // Its resolved roots are never exposed or copied into individual tools.
 type PreparedFileMutationPolicy struct {
-	roots      []fileMutationProtectedRoot
-	identities *FileIdentityCatalog
+	roots           []fileMutationProtectedRoot
+	siblingPrefixes []fileMutationProtectedSiblingPrefix
+	identities      *FileIdentityCatalog
 }
 
 // NewPreparedFileMutationPolicy detaches and resolves one source policy for
@@ -50,9 +66,16 @@ func NewPreparedFileMutationPolicy(
 	if err != nil {
 		return nil, err
 	}
+	prefixes, err := prepareFileMutationProtectedSiblingPrefixes(
+		policy.ProtectedSiblingPrefixes,
+	)
+	if err != nil {
+		return nil, err
+	}
 	return &PreparedFileMutationPolicy{
-		roots:      roots,
-		identities: policy.ProtectedIdentities,
+		roots:           roots,
+		siblingPrefixes: prefixes,
+		identities:      policy.ProtectedIdentities,
 	}, nil
 }
 
@@ -86,6 +109,16 @@ func (policy *PreparedFileMutationPolicy) ProtectsPath(path string) (bool, error
 			if identityErr != nil || protected {
 				return protected, identityErr
 			}
+		}
+	}
+	for _, prefix := range policy.siblingPrefixes {
+		protected, prefixErr := fileMutationProtectedBySiblingPrefix(
+			candidate,
+			canonicalCandidate,
+			prefix,
+		)
+		if prefixErr != nil || protected {
+			return protected, prefixErr
 		}
 	}
 	for _, root := range policy.roots {
@@ -128,6 +161,19 @@ func (policy *PreparedFileMutationPolicy) OverlapsPath(path string) (bool, error
 	canonicalCandidate, err := resolvePathAgainstExistingAncestor(candidate)
 	if err != nil {
 		return false, errors.New("prepared file-mutation path cannot be resolved")
+	}
+	for _, prefix := range policy.siblingPrefixes {
+		currentParent, resolveErr := resolvePathAgainstExistingAncestor(prefix.lexicalParent)
+		if resolveErr != nil ||
+			fileMutationPathKey(currentParent) != fileMutationPathKey(prefix.canonicalParent) {
+			return false, errors.New("prepared file-mutation sibling parent changed")
+		}
+		if fileMutationPathWithin(prefix.lexicalParent, candidate) ||
+			fileMutationPathWithin(currentParent, canonicalCandidate) ||
+			fileMutationSiblingPrefixMatches(candidate, prefix.lexicalParent, prefix.prefix) ||
+			fileMutationSiblingPrefixMatches(canonicalCandidate, currentParent, prefix.prefix) {
+			return true, nil
+		}
 	}
 	for _, root := range policy.roots {
 		currentCanonical, resolveErr := resolvePathAgainstExistingAncestor(root.lexical)
@@ -185,6 +231,18 @@ func (policy *PreparedFileMutationPolicy) ProtectsOpenedPath(
 			return protected, identityErr
 		}
 	}
+	if candidate != "" {
+		for _, prefix := range policy.siblingPrefixes {
+			protected, prefixErr := fileMutationProtectedBySiblingPrefix(
+				candidate,
+				canonical,
+				prefix,
+			)
+			if prefixErr != nil || protected {
+				return protected, prefixErr
+			}
+		}
+	}
 	for _, root := range policy.roots {
 		currentCanonical, resolveErr := resolvePathAgainstExistingAncestor(root.lexical)
 		if resolveErr != nil ||
@@ -212,12 +270,13 @@ func (policy *PreparedFileMutationPolicy) ProtectsOpenedPath(
 // append_file. This keeps every read-before-write and mutation path on one
 // policy boundary and binds reads/listings to their actual opened handles.
 type protectedMutationFS struct {
-	delegate   fileSystem
-	workspace  string
-	restrict   bool
-	patterns   []*regexp.Regexp
-	roots      []fileMutationProtectedRoot
-	identities *FileIdentityCatalog
+	delegate        fileSystem
+	workspace       string
+	restrict        bool
+	patterns        []*regexp.Regexp
+	roots           []fileMutationProtectedRoot
+	siblingPrefixes []fileMutationProtectedSiblingPrefix
+	identities      *FileIdentityCatalog
 
 	// Package-test seam executed after the destination parent is pinned and
 	// before namespace/root revalidation.
@@ -244,12 +303,15 @@ func buildMutationFS(
 ) (fileSystem, error) {
 	delegate := buildFs(workspace, restrict, patterns)
 	var roots []fileMutationProtectedRoot
+	var siblingPrefixes []fileMutationProtectedSiblingPrefix
 	identities := policy.ProtectedIdentities
 	if policy.Prepared != nil {
-		if len(policy.ProtectedRoots) != 0 || policy.ProtectedIdentities != nil {
+		if len(policy.ProtectedRoots) != 0 || len(policy.ProtectedSiblingPrefixes) != 0 ||
+			policy.ProtectedIdentities != nil {
 			return nil, errors.New("prepared file-mutation policy has source fields")
 		}
 		roots = policy.Prepared.roots
+		siblingPrefixes = policy.Prepared.siblingPrefixes
 		identities = policy.Prepared.identities
 	} else {
 		var err error
@@ -257,18 +319,94 @@ func buildMutationFS(
 		if err != nil {
 			return nil, err
 		}
+		siblingPrefixes, err = prepareFileMutationProtectedSiblingPrefixes(
+			policy.ProtectedSiblingPrefixes,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if len(roots) == 0 && identities == nil {
+	if len(roots) == 0 && len(siblingPrefixes) == 0 && identities == nil {
 		return delegate, nil
 	}
 	return &protectedMutationFS{
-		delegate:   delegate,
-		workspace:  workspace,
-		restrict:   restrict,
-		patterns:   append([]*regexp.Regexp(nil), patterns...),
-		roots:      roots,
-		identities: identities,
+		delegate:        delegate,
+		workspace:       workspace,
+		restrict:        restrict,
+		patterns:        append([]*regexp.Regexp(nil), patterns...),
+		roots:           roots,
+		siblingPrefixes: siblingPrefixes,
+		identities:      identities,
 	}, nil
+}
+
+func prepareFileMutationProtectedSiblingPrefixes(
+	configured []FileMutationSiblingPrefix,
+) ([]fileMutationProtectedSiblingPrefix, error) {
+	prepared := make([]fileMutationProtectedSiblingPrefix, 0, len(configured))
+	seen := make(map[string]struct{}, len(configured))
+	for index, configuredPrefix := range append([]FileMutationSiblingPrefix(nil), configured...) {
+		parent := configuredPrefix.Parent
+		prefix := configuredPrefix.Prefix
+		if parent == "" || parent != strings.TrimSpace(parent) || !filepath.IsAbs(parent) ||
+			filepath.Clean(parent) != parent || !utf8.ValidString(parent) ||
+			strings.ContainsRune(parent, '\x00') || prefix == "" ||
+			prefix != strings.TrimSpace(prefix) || !utf8.ValidString(prefix) ||
+			strings.ContainsRune(prefix, '\x00') || filepath.Base(prefix) != prefix ||
+			prefix == "." || prefix == ".." {
+			return nil, fmt.Errorf("file-mutation protected sibling prefix %d is invalid", index)
+		}
+		if platformErr := fileMutationValidatePlatform(filepath.Join(parent, prefix)); platformErr != nil {
+			return nil, fmt.Errorf("file-mutation protected sibling prefix %d is invalid", index)
+		}
+		canonicalParent, err := resolvePathAgainstExistingAncestor(parent)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"file-mutation protected sibling prefix %d cannot be resolved",
+				index,
+			)
+		}
+		identity := fileMutationDistinctPathKey(parent) + "\x00" +
+			fileMutationDistinctPathKey(canonicalParent) + "\x00" +
+			fileMutationPathKey(filepath.Join(parent, prefix))
+		if _, duplicate := seen[identity]; duplicate {
+			continue
+		}
+		seen[identity] = struct{}{}
+		prepared = append(prepared, fileMutationProtectedSiblingPrefix{
+			lexicalParent: parent, canonicalParent: canonicalParent, prefix: prefix,
+		})
+	}
+	return prepared, nil
+}
+
+func fileMutationSiblingPrefixMatches(
+	candidate string,
+	parent string,
+	prefix string,
+) bool {
+	if candidate == "" || parent == "" || prefix == "" ||
+		fileMutationPathKey(filepath.Dir(candidate)) != fileMutationPathKey(parent) {
+		return false
+	}
+	candidateKey := fileMutationPathKey(filepath.Join(parent, filepath.Base(candidate)))
+	prefixKey := fileMutationPathKey(filepath.Join(parent, prefix))
+	return strings.HasPrefix(candidateKey, prefixKey)
+}
+
+func fileMutationProtectedBySiblingPrefix(
+	candidate string,
+	canonical string,
+	prefix fileMutationProtectedSiblingPrefix,
+) (bool, error) {
+	currentParent, err := resolvePathAgainstExistingAncestor(prefix.lexicalParent)
+	if err != nil || fileMutationPathKey(currentParent) != fileMutationPathKey(prefix.canonicalParent) {
+		return false, errors.New("file-mutation protected sibling parent changed")
+	}
+	return fileMutationSiblingPrefixMatches(candidate, prefix.lexicalParent, prefix.prefix) ||
+		fileMutationSiblingPrefixMatches(candidate, prefix.canonicalParent, prefix.prefix) ||
+		fileMutationSiblingPrefixMatches(canonical, prefix.lexicalParent, prefix.prefix) ||
+		fileMutationSiblingPrefixMatches(canonical, currentParent, prefix.prefix), nil
 }
 
 func prepareFileMutationProtectedRoots(
@@ -635,6 +773,16 @@ func (p *protectedMutationFS) validateAccessSnapshot(
 			currentCanonical,
 		)
 		if sameFileErr != nil || sameFile {
+			return fileMutationAccessSnapshot{}, fileMutationPolicyDenied()
+		}
+	}
+	for _, prefix := range p.siblingPrefixes {
+		protected, prefixErr := fileMutationProtectedBySiblingPrefix(
+			candidate,
+			canonicalCandidate,
+			prefix,
+		)
+		if prefixErr != nil || protected {
 			return fileMutationAccessSnapshot{}, fileMutationPolicyDenied()
 		}
 	}

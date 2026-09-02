@@ -407,11 +407,22 @@ func newAgentInstanceWithRuntimePolicies(
 		if identityCatalogErr != nil {
 			panic(fmt.Sprintf("build file-mutation identity catalog: %v", identityCatalogErr))
 		}
+		prefixWorkspaces := append(
+			[]string{workspace},
+			agentFileMutationWorkspacesFromProtectedRoots(fileMutationProtectedRoots)...,
+		)
+		protectedPrefixes, prefixErr := agentAccountRouterFileMutationProtectedPrefixes(
+			prefixWorkspaces,
+		)
+		if prefixErr != nil {
+			panic(fmt.Sprintf("build file-mutation sibling-prefix policy: %v", prefixErr))
+		}
 		preparedFileMutationPolicy, protectedRootErr = tools.NewPreparedFileMutationPolicy(
 			workspace,
 			tools.FileMutationPolicy{
-				ProtectedRoots:      fileMutationProtectedRoots,
-				ProtectedIdentities: fileMutationIdentityCatalog,
+				ProtectedRoots:           fileMutationProtectedRoots,
+				ProtectedSiblingPrefixes: protectedPrefixes,
+				ProtectedIdentities:      fileMutationIdentityCatalog,
 			},
 		)
 		if protectedRootErr != nil {
@@ -578,6 +589,7 @@ func newAgentInstanceWithRuntimePolicies(
 						[]string(nil), applyPatchProtectedRoots...,
 					),
 					PreparedVolatileProtectedRoots: preparedApplyPatchRoots,
+					PreparedMutationPolicy:         preparedFileMutationPolicy,
 					ProtectedIdentities:            fileMutationIdentityCatalog,
 					TransactionStateRoot:           applyPatchTransactionRoot,
 				},

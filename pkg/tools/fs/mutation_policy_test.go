@@ -184,11 +184,113 @@ func TestPreparedFileMutationPolicyIsDetachedAndSharedByToolFilesystems(t *testi
 	}); mixedErr == nil || mixed != nil {
 		t.Fatalf("mixed prepared/source policy = %#v, %v", mixed, mixedErr)
 	}
+	if mixed, mixedErr := buildMutationFS(workspace, false, nil, FileMutationPolicy{
+		Prepared: prepared,
+		ProtectedSiblingPrefixes: []FileMutationSiblingPrefix{{
+			Parent: workspace, Prefix: "runtime.",
+		}},
+	}); mixedErr == nil || mixed != nil {
+		t.Fatalf("mixed prepared/sibling-prefix policy = %#v, %v", mixed, mixedErr)
+	}
 	if preparedAgain, preparedErr := NewPreparedFileMutationPolicy(
 		workspace,
 		FileMutationPolicy{Prepared: prepared},
 	); preparedErr == nil || preparedAgain != nil {
 		t.Fatalf("reprepared policy = %#v, %v", preparedAgain, preparedErr)
+	}
+}
+
+func TestFileMutationPolicyProtectsDynamicSiblingPrefixes(t *testing.T) {
+	workspace := t.TempDir()
+	prefixes := []FileMutationSiblingPrefix{{
+		Parent: workspace,
+		Prefix: "account_router_state.json.auth-invalidation.",
+	}}
+	prepared, err := NewPreparedFileMutationPolicy(workspace, FileMutationPolicy{
+		ProtectedSiblingPrefixes: prefixes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefixes[0].Prefix = "ordinary."
+	target := filepath.Join(
+		workspace,
+		"account_router_state.json.auth-invalidation.0123456789abcdef0123456789abcdef",
+	)
+	for _, policy := range []FileMutationPolicy{
+		{ProtectedSiblingPrefixes: []FileMutationSiblingPrefix{{
+			Parent: workspace, Prefix: "account_router_state.json.auth-invalidation.",
+		}}},
+		{Prepared: prepared},
+	} {
+		for toolName, tool := range buildFileMutationTestTools(t, workspace, true, policy) {
+			requireFileMutationPolicyDenied(t, toolName, tool, target)
+		}
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("protected sibling was created: %v", err)
+	}
+	ordinary := filepath.Join(workspace, "account_router_state.json")
+	tool := buildFileMutationTestTools(
+		t,
+		workspace,
+		true,
+		FileMutationPolicy{Prepared: prepared},
+	)["write_file"]
+	result := executeFileMutationTestTool("write_file", tool, ordinary)
+	if result == nil || result.IsError {
+		t.Fatalf("adjacent ordinary file was denied: %#v", result)
+	}
+	if protected, err := prepared.ProtectsPath(target); err != nil || !protected {
+		t.Fatalf("prepared sibling prefix protected=%t err=%v", protected, err)
+	}
+	if overlap, err := prepared.OverlapsPath(workspace); err != nil || !overlap {
+		t.Fatalf("sibling-prefix parent overlap=%t err=%v", overlap, err)
+	}
+	for _, invalid := range []FileMutationSiblingPrefix{
+		{Parent: "relative", Prefix: "sidecar."},
+		{Parent: workspace, Prefix: "../sidecar."},
+		{Parent: workspace, Prefix: ""},
+	} {
+		if candidate, err := NewPreparedFileMutationPolicy(workspace, FileMutationPolicy{
+			ProtectedSiblingPrefixes: []FileMutationSiblingPrefix{invalid},
+		}); err == nil || candidate != nil {
+			t.Fatalf("invalid sibling prefix %#v accepted: %#v, %v", invalid, candidate, err)
+		}
+	}
+}
+
+func TestFileMutationSiblingPrefixParentDriftFailsClosed(t *testing.T) {
+	workspace := t.TempDir()
+	parent := filepath.Join(workspace, "runtime")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := NewPreparedFileMutationPolicy(workspace, FileMutationPolicy{
+		ProtectedSiblingPrefixes: []FileMutationSiblingPrefix{{
+			Parent: parent, Prefix: "sidecar.",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := parent + "-moved"
+	if err := os.Rename(parent, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, parent); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	target := filepath.Join(workspace, "ordinary.txt")
+	tool := buildFileMutationTestTools(
+		t,
+		workspace,
+		true,
+		FileMutationPolicy{Prepared: prepared},
+	)["write_file"]
+	requireFileMutationPolicyDenied(t, "write_file", tool, target)
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("parent drift allowed an ordinary mutation: %v", err)
 	}
 }
 
