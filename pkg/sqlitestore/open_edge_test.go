@@ -451,8 +451,8 @@ func TestIntegrityAndSQLiteFileHelpersRejectInvalidState(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	if err := secureSQLiteFiles(filepath.Join(root, "missing.db")); err != nil {
-		t.Fatalf("secureSQLiteFiles(missing) error = %v", err)
+	if err := secureSQLiteFiles(filepath.Join(root, "missing.db")); !os.IsNotExist(err) {
+		t.Fatalf("secureSQLiteFiles(missing) error = %v, want not-exist", err)
 	}
 	regular := filepath.Join(root, "regular.db")
 	if err := os.WriteFile(regular, nil, 0o644); err != nil {

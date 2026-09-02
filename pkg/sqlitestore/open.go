@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -192,7 +193,7 @@ func prepareDatabaseFile(path string) error {
 	}
 	created := false
 	if info, err := lstatSQLitePath(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		if info == nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("database must be a regular file")
 		}
 	} else if !os.IsNotExist(err) {
@@ -571,8 +572,9 @@ func foreignKeyCheckQuery(ctx context.Context, queryer contextQueryer, component
 
 func secureSQLiteFiles(path string) error {
 	for index, candidate := range []string{path, path + "-wal", path + "-shm"} {
+		optionalCompanion := index > 0
 		info, err := lstatSQLitePath(candidate)
-		if os.IsNotExist(err) {
+		if optionalCompanion && errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
@@ -583,13 +585,35 @@ func secureSQLiteFiles(path string) error {
 		}
 		file, err := openSQLiteFile(candidate, os.O_RDWR, 0)
 		if err != nil {
+			if optionalCompanion && errors.Is(err, fs.ErrNotExist) {
+				_, currentErr := lstatSQLitePath(candidate)
+				if errors.Is(currentErr, fs.ErrNotExist) {
+					continue
+				}
+				if currentErr != nil {
+					return currentErr
+				}
+				return fmt.Errorf("%s changed while opening", filepath.Base(candidate))
+			}
 			return err
 		}
 		openedInfo, statErr := file.Stat()
 		currentInfo, lstatErr := lstatSQLitePath(candidate)
-		if statErr != nil || lstatErr != nil || !openedInfo.Mode().IsRegular() ||
+		if optionalCompanion && errors.Is(lstatErr, fs.ErrNotExist) && statErr == nil &&
+			openedInfo != nil && openedInfo.Mode().IsRegular() && os.SameFile(info, openedInfo) {
+			if chmodErr := file.Chmod(0o600); chmodErr != nil {
+				_ = file.Close()
+				return chmodErr
+			}
+			if closeErr := file.Close(); closeErr != nil {
+				return closeErr
+			}
+			continue
+		}
+		if statErr != nil || lstatErr != nil || openedInfo == nil || currentInfo == nil ||
+			!openedInfo.Mode().IsRegular() ||
 			!currentInfo.Mode().IsRegular() || currentInfo.Mode()&os.ModeSymlink != 0 ||
-			!os.SameFile(openedInfo, currentInfo) {
+			!os.SameFile(info, openedInfo) || !os.SameFile(openedInfo, currentInfo) {
 			_ = file.Close()
 			return errors.Join(
 				fmt.Errorf("%s changed while opening", filepath.Base(candidate)),
@@ -604,14 +628,25 @@ func secureSQLiteFiles(path string) error {
 		if err := file.Close(); err != nil {
 			return err
 		}
-		if _, err := securePrivateSQLiteFile(candidate); err != nil {
+		securedInfo, err := securePrivateSQLiteFile(candidate)
+		if err != nil {
 			// SQLite may remove an unused WAL or SHM companion after its opened
 			// handle is hardened and closed. A vanished companion no longer has an
 			// ACL to validate; the primary database must always remain strict.
-			if index > 0 && os.IsNotExist(err) {
-				continue
+			if optionalCompanion && errors.Is(err, fs.ErrNotExist) {
+				_, currentErr := lstatSQLitePath(candidate)
+				if errors.Is(currentErr, fs.ErrNotExist) {
+					continue
+				}
+				if currentErr != nil {
+					return currentErr
+				}
+				return fmt.Errorf("%s changed while securing", filepath.Base(candidate))
 			}
 			return err
+		}
+		if securedInfo == nil || !os.SameFile(openedInfo, securedInfo) {
+			return fmt.Errorf("%s changed while securing", filepath.Base(candidate))
 		}
 	}
 	return nil
