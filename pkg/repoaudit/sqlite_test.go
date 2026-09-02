@@ -445,6 +445,9 @@ func TestRepositoryReviewSQLiteEnumerationAndClosedConnectionBoundaries(t *testi
 	if err := validateRepositoryReviewDatabaseSchema(t.Context(), conn); err == nil {
 		t.Fatal("closed schema connection validated")
 	}
+	if err := validateRepositoryReviewSchemaObjectSet(t.Context(), conn); err == nil {
+		t.Fatal("closed schema object-set connection validated")
+	}
 	if err := validateRepositoryReviewAggregateRows(t.Context(), conn); err == nil {
 		t.Fatal("closed aggregate query validated")
 	}
@@ -1926,6 +1929,29 @@ func TestRepositoryReviewSQLiteRejectsTooNewAndTamperedSchema(t *testing.T) {
 		},
 		"schema": func(t *testing.T, database *sql.DB) {
 			if _, err := database.Exec("DROP INDEX repository_review_states_updated_idx"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rogue table": func(t *testing.T, database *sql.DB) {
+			if _, err := database.Exec(`CREATE TABLE rogue_review_table(id INTEGER)`); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rogue view": func(t *testing.T, database *sql.DB) {
+			if _, err := database.Exec(`CREATE VIEW rogue_review_view AS
+				SELECT state_id FROM repository_review_states`); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rogue index": func(t *testing.T, database *sql.DB) {
+			if _, err := database.Exec(`CREATE INDEX rogue_review_index
+				ON repository_review_states(last_commit_sha)`); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rogue trigger": func(t *testing.T, database *sql.DB) {
+			if _, err := database.Exec(`CREATE TRIGGER rogue_review_trigger
+				AFTER INSERT ON repository_review_states BEGIN SELECT 1; END`); err != nil {
 				t.Fatal(err)
 			}
 		},
