@@ -37,9 +37,9 @@ func TestRepositoryEvaluationLockPathAndFileFailureBranches(t *testing.T) {
 	if err := secureRepositoryEvaluationLockFile("unused", nil); err == nil {
 		t.Fatal("nil lock file was accepted")
 	}
-	closed, err := os.CreateTemp(t.TempDir(), "closed-lock-")
-	if err != nil {
-		t.Fatal(err)
+	closed, createErr := os.CreateTemp(t.TempDir(), "closed-lock-")
+	if createErr != nil {
+		t.Fatal(createErr)
 	}
 	if err := closed.Close(); err != nil {
 		t.Fatal(err)
@@ -48,14 +48,14 @@ func TestRepositoryEvaluationLockPathAndFileFailureBranches(t *testing.T) {
 		t.Fatal("closed lock file was accepted")
 	}
 
-	opened, err := os.CreateTemp(t.TempDir(), "opened-lock-")
-	if err != nil {
-		t.Fatal(err)
+	opened, openErr := os.CreateTemp(t.TempDir(), "opened-lock-")
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
 	t.Cleanup(func() { _ = opened.Close() })
-	replacement, err := os.CreateTemp(t.TempDir(), "replacement-lock-")
-	if err != nil {
-		t.Fatal(err)
+	replacement, replacementErr := os.CreateTemp(t.TempDir(), "replacement-lock-")
+	if replacementErr != nil {
+		t.Fatal(replacementErr)
 	}
 	replacementPath := replacement.Name()
 	if err := replacement.Close(); err != nil {

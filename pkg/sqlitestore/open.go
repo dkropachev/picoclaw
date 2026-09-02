@@ -621,12 +621,12 @@ func secureSQLiteFiles(path string) error {
 				lstatErr,
 			)
 		}
-		if err := file.Chmod(0o600); err != nil {
+		if chmodErr := file.Chmod(0o600); chmodErr != nil {
 			_ = file.Close()
-			return err
+			return chmodErr
 		}
-		if err := file.Close(); err != nil {
-			return err
+		if closeErr := file.Close(); closeErr != nil {
+			return closeErr
 		}
 		securedInfo, err := securePrivateSQLiteFile(candidate)
 		if err != nil {

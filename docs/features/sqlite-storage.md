@@ -30,15 +30,17 @@ file-backed.
   the exact retained schema, commit, then archive verified legacy sources.
 - Non-obvious constraints: import diagnostics never retain payloads or secrets;
   an archive transition is resumable after either side of its filesystem move;
-  a changed committed source is never archived; database, WAL, and SHM files are
-  private; and arbitrary JSON may be a bounded column payload but not a generic
-  whole-store document table.
+  a changed committed source is never archived; the primary database remains
+  present and private while transient WAL/SHM companions are identity-fenced and
+  hardened through their opened handles even if SQLite unlinks their path; and
+  arbitrary JSON may be a bounded column payload but not a generic whole-store
+  document table.
 
 ## Requirements
 
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
-| `FR-SQLITE-001` | MUST | A subsystem opens a mutable database at a filesystem path. | The returned handle uses WAL, foreign keys, a five-second busy timeout, and `synchronous=FULL`; the parent is private and the database and companions are `0600` on POSIX hosts or carry a protected owner-only DACL on Windows. | A missing directory/database is securely created. | Empty, URI, NUL-bearing, symlinked/reparse, irregular, publicly writable/accessible, or otherwise unsafe boundaries fail before domain use. | Every store needs one durable and secure baseline. |
+| `FR-SQLITE-001` | MUST | A subsystem opens a mutable database at a filesystem path. | The returned handle uses WAL, foreign keys, a five-second busy timeout, and `synchronous=FULL`; the parent is private and the database and present companions are `0600` on POSIX hosts or carry a protected owner-only DACL on Windows. Every hardening pass binds each initial pathname identity to its opened handle, the current pathname, and final private-file validation. A WAL/SHM companion that SQLite unlinks during the pass is accepted only after a fresh pathname inspection proves it absent, while its verified opened handle is hardened before close. | A missing directory/database is securely created. | Empty, URI, NUL-bearing, symlinked/reparse, irregular, publicly writable/accessible, replaced, or otherwise unsafe boundaries fail before domain use. The primary database must remain present at every hardening stage; only transient WAL/SHM companions may safely disappear, and a dangling link, another inode, non-not-found error, or handle-hardening failure remains fatal. | Every store needs one durable and secure baseline. |
 | `FR-SQLITE-002` | MUST | The database schema is older, current, too new, malformed, or corrupt. | Contiguous migrations reach the supported `PRAGMA user_version` and the retained schema validates exactly. | Migrations run in one explicit `BEGIN IMMEDIATE` transaction. | Failure rolls back; a future version, invalid schema, or failed integrity check returns a typed error and never falls back to JSON. | Mixed schemas and partial upgrades must fail closed. |
 | `FR-SQLITE-003` | MUST | A subsystem performs its first complete bounded legacy JSON/JSONL enumeration, including an enumeration with no present source. | Valid records are imported deterministically by dependency order and relative path; selected malformed records are skipped with counts and safe issue codes/digests only. Aggregate/dependency importers may resolve relationships in `LegacyResultFinalizer`; their returned per-source outcomes atomically replace provisional counts and issues before commit. An optional idempotent `LegacySealer` may perform subsystem-specific closeout or validation; independently, the shared `storage_import_horizons` row always closes the generic import horizon before validation. | Domain rows, final durable import/issue rows, and the subsystem import-horizon marker commit in the same immediate transaction. A source first appearing after that marker is audited as SQLite-authoritative rather than imported. | Unsafe enumeration, symlinks or modes, size/count bounds, incomplete/extra/invalid final accounting, SQLite errors, importer errors, or seal failure abort without an import commit or closed marker. | Automatic upgrade must preserve valid state and relationships, become authoritative even after an empty first open, and make the audit describe committed rows without exposing secrets. |
 | `FR-SQLITE-004` | MUST | A committed import has an unarchived legacy source. | The exact imported bytes move to `legacy-json/<component>-v1/` without overwriting an existing archive and with their permissions retained. | Archive completion is durably recorded after the filesystem transition. | A crash before/after the move is retried without re-import; changed bytes or a conflicting archive fail closed. | SQLite becomes authoritative immediately while rollback material remains recoverable. |
@@ -120,7 +122,11 @@ Owns: INTEGRATION storage-json
 1. Reject invalid component names, migration catalogs, paths, timeouts, and
    connection bounds before opening SQLite.
 2. Create and inspect the final database directory and file without accepting a
-   symlink or irregular endpoint; set private permissions.
+   symlink or irregular endpoint; set private permissions. During every database,
+   WAL, and SHM hardening pass, compare the initial, opened, current, and finally
+   secured identities. Require the primary database throughout; accept a vanished
+   companion only after reinspection proves absence, and harden any verified open
+   companion handle before closing it.
 3. Build the internal filesystem URI and configure every pooled connection with
    foreign keys, the bounded busy timeout, and FULL synchronization. Select and
    verify WAL for file-backed stores.

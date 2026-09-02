@@ -39,18 +39,18 @@ func TestFileMutationPolicyFacadeConstructorsRemainAvailable(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("state"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := NewFileIdentityCatalog(FileIdentityCatalogOptions{
+	catalog, catalogErr := NewFileIdentityCatalog(FileIdentityCatalogOptions{
 		ExactPaths: []string{protected},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if catalogErr != nil {
+		t.Fatal(catalogErr)
 	}
-	prepared, err := NewPreparedFileMutationPolicy(workspace, FileMutationPolicy{
+	prepared, prepareErr := NewPreparedFileMutationPolicy(workspace, FileMutationPolicy{
 		ProtectedRoots:      []string{protected},
 		ProtectedIdentities: catalog,
 	})
-	if err != nil {
-		t.Fatal(err)
+	if prepareErr != nil {
+		t.Fatal(prepareErr)
 	}
 	policy := FileMutationPolicy{Prepared: prepared}
 	if tool, err := NewWriteFileToolWithPolicy(workspace, true, policy); err != nil || tool == nil {
