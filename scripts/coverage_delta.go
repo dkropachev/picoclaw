@@ -450,13 +450,25 @@ func coverageForRef(
 	}
 
 	if includeIntegration && len(plan.IntegrationSuites) > 0 && len(coverImports) > 0 {
+		integrationSuites, err := coverageIntegrationSuitesForRef(
+			worktree,
+			label,
+			ref,
+			plan.IntegrationSuites,
+		)
+		if err != nil {
+			return coverageProfile{}, err
+		}
+		if len(integrationSuites) == 0 {
+			return profile, nil
+		}
 		integrationProfile, err := runIntegrationCoverage(
 			worktree,
 			label,
 			ref,
 			tags,
 			coverImports,
-			plan.IntegrationSuites,
+			integrationSuites,
 			environment,
 		)
 		if err != nil {
@@ -466,6 +478,67 @@ func coverageForRef(
 	}
 
 	return profile, nil
+}
+
+// coverageIntegrationSuitesForRef resolves a head-derived integration plan
+// against one checked-out ref. A suite added by the head cannot exist in the
+// immutable base, so base coverage omits only that absent directory. Head must
+// contain every planned suite, and either ref still fails closed for an unsafe
+// or non-directory path instead of silently bypassing a broken suite.
+func coverageIntegrationSuitesForRef(
+	worktree,
+	label,
+	ref string,
+	planned []string,
+) ([]string, error) {
+	available := make([]string, 0, len(planned))
+	for _, suite := range planned {
+		if suite == "" || suite != strings.TrimSpace(suite) || strings.ContainsRune(suite, '\x00') ||
+			suite == "." || suite == ".." || filepath.Base(suite) != suite ||
+			strings.ContainsAny(suite, `/\`) {
+			return nil, fmt.Errorf(
+				"integration coverage for %s (%s): planned suite identity is invalid",
+				label,
+				ref,
+			)
+		}
+		path := filepath.Join(worktree, "integration", "suites", suite)
+		info, err := os.Lstat(path)
+		switch {
+		case err == nil:
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf(
+					"integration coverage for %s (%s): suite %s is not a real directory",
+					label,
+					ref,
+					suite,
+				)
+			}
+			available = append(available, suite)
+		case errors.Is(err, os.ErrNotExist) && label == "base":
+			fmt.Printf(
+				"coverage delta: base %s omits head-only integration suite %s\n",
+				ref,
+				suite,
+			)
+		case errors.Is(err, os.ErrNotExist):
+			return nil, fmt.Errorf(
+				"integration coverage for %s (%s): planned suite %s is missing",
+				label,
+				ref,
+				suite,
+			)
+		default:
+			return nil, fmt.Errorf(
+				"integration coverage for %s (%s): inspect suite %s: %w",
+				label,
+				ref,
+				suite,
+				err,
+			)
+		}
+	}
+	return available, nil
 }
 
 func runGoCoverage(

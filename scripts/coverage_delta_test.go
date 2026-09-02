@@ -46,6 +46,59 @@ func TestCoverageGoTestParallelismIsBounded(t *testing.T) {
 	}
 }
 
+func TestCoverageIntegrationSuitesAllowHeadOnlyAddition(t *testing.T) {
+	root := t.TempDir()
+	base := filepath.Join(root, "base")
+	head := filepath.Join(root, "head")
+	for _, path := range []string{
+		filepath.Join(base, "integration", "suites", "existing"),
+		filepath.Join(head, "integration", "suites", "existing"),
+		filepath.Join(head, "integration", "suites", "storage-json"),
+	} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	planned := []string{"existing", "storage-json"}
+
+	baseSuites, err := coverageIntegrationSuitesForRef(base, "base", "base-ref", planned)
+	if err != nil || !reflect.DeepEqual(baseSuites, []string{"existing"}) {
+		t.Fatalf("base suites = %#v, %v", baseSuites, err)
+	}
+	headSuites, err := coverageIntegrationSuitesForRef(head, "head", "head-ref", planned)
+	if err != nil || !reflect.DeepEqual(headSuites, planned) {
+		t.Fatalf("head suites = %#v, %v", headSuites, err)
+	}
+
+	if err := os.Remove(filepath.Join(head, "integration", "suites", "storage-json")); err != nil {
+		t.Fatal(err)
+	}
+	if suites, err := coverageIntegrationSuitesForRef(head, "head", "head-ref", planned); err == nil ||
+		suites != nil || !strings.Contains(err.Error(), "planned suite storage-json is missing") {
+		t.Fatalf("missing head suite = %#v, %v", suites, err)
+	}
+
+	unsafe := filepath.Join(base, "integration", "suites", "storage-json")
+	if err := os.WriteFile(unsafe, []byte("not a suite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if suites, err := coverageIntegrationSuitesForRef(base, "base", "base-ref", planned); err == nil ||
+		suites != nil || !strings.Contains(err.Error(), "is not a real directory") {
+		t.Fatalf("unsafe base suite = %#v, %v", suites, err)
+	}
+
+	for _, invalid := range []string{"", ".", "..", "../escape", `child\escape`, " bad"} {
+		if suites, err := coverageIntegrationSuitesForRef(
+			base,
+			"base",
+			"base-ref",
+			[]string{invalid},
+		); err == nil || suites != nil || !strings.Contains(err.Error(), "identity is invalid") {
+			t.Fatalf("invalid suite identity %q = %#v, %v", invalid, suites, err)
+		}
+	}
+}
+
 func TestCoverageRegressionTracksUncoveredStatementDebt(t *testing.T) {
 	tests := []struct {
 		name string
