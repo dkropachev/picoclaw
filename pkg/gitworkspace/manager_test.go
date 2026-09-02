@@ -252,6 +252,31 @@ func TestManagerRejectsOptionLikeGenericRef(t *testing.T) {
 	}
 }
 
+func TestNormalizeGenericAcquireRefIgnoresAmbientBrokenWorktree(t *testing.T) {
+	ambient := t.TempDir()
+	missingGitDirectory := filepath.Join(ambient, "host-only", "git", "worktrees", "coverage")
+	if err := os.WriteFile(
+		filepath.Join(ambient, ".git"),
+		[]byte("gitdir: "+missingGitDirectory+"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(ambient)
+
+	for _, want := range []string{"main", "@", "refs/heads/main", "refs/tags/v1"} {
+		ref, err := normalizeGenericAcquireRef(context.Background(), want)
+		if err != nil || ref != want {
+			t.Fatalf("normalizeGenericAcquireRef(%q) = %q, %v", want, ref, err)
+		}
+	}
+	for _, invalid := range []string{"@{-1}", "main..bad"} {
+		if _, err := normalizeGenericAcquireRef(context.Background(), invalid); err == nil {
+			t.Fatalf("normalizeGenericAcquireRef(%q) error = nil", invalid)
+		}
+	}
+}
+
 func TestManagerRejectsCredentialedRepositoryURL(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	manager := newTestManager(t, &now)
