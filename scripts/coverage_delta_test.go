@@ -374,6 +374,111 @@ func knownRepositoryModelEvaluationCancellationRestartRaceOutput() string {
 	}, "\n")
 }
 
+func knownEvolutionDraftPersistenceTimeoutOutput() string {
+	path := filepath.Join(
+		os.TempDir(),
+		"picoclaw-coverage-delta-123456789",
+		"base-picoclaw-home",
+		".tmp",
+		"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator123",
+		"001",
+		"state",
+		"evolution",
+		"skill-drafts.json",
+	)
+	return strings.Join([]string{
+		"--- FAIL: TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator (1.00s)",
+		"    evolution_bridge_test.go:596: timed out waiting for 1 drafts at " + path,
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/pkg/agent\t88.000s",
+	}, "\n")
+}
+
+func TestKnownEvolutionDraftPersistenceTimeout(t *testing.T) {
+	valid := knownEvolutionDraftPersistenceTimeoutOutput()
+	if !isKnownEvolutionDraftPersistenceTimeout([]byte(valid)) ||
+		!isKnownCoverageBaselineFlake([]byte(valid)) {
+		t.Fatal("exact evolution draft timeout was rejected")
+	}
+	tests := map[string]string{
+		"wrong package": strings.Replace(
+			valid,
+			"github.com/sipeed/picoclaw/pkg/agent",
+			"github.com/sipeed/picoclaw/pkg/agents",
+			1,
+		),
+		"wrong test": strings.Replace(
+			valid,
+			"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator",
+			"TestEvolutionBridge_DraftModeUsesFallbackGenerator",
+			1,
+		),
+		"wrong line": strings.Replace(valid, "evolution_bridge_test.go:596:",
+			"evolution_bridge_test.go:597:", 1),
+		"wrong message":      strings.Replace(valid, "waiting for 1 drafts", "waiting for 2 drafts", 1),
+		"additional failure": valid + "\n--- FAIL: TestEvolutionBridgeOther (0.01s)",
+		"additional diagnostic": valid +
+			"\n    evolution_bridge_test.go:600: unexpected persisted draft",
+		"panic": valid + "\npanic: concurrent test failure",
+		"relative path": strings.Replace(
+			valid,
+			filepath.Join(
+				os.TempDir(), "picoclaw-coverage-delta-123456789", "base-picoclaw-home", ".tmp",
+				"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator123", "001",
+			),
+			"relative",
+			1,
+		),
+		"unclean path": strings.Replace(
+			valid,
+			filepath.Join(
+				os.TempDir(), "picoclaw-coverage-delta-123456789", "base-picoclaw-home", ".tmp",
+				"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator123", "001",
+			),
+			filepath.Join(os.TempDir(), "fixture")+string(filepath.Separator)+".."+
+				string(filepath.Separator)+"escape",
+			1,
+		),
+		"outside temp": strings.Replace(
+			valid,
+			filepath.Join(
+				os.TempDir(), "picoclaw-coverage-delta-123456789", "base-picoclaw-home", ".tmp",
+				"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator123", "001",
+			),
+			filepath.Join(filepath.Dir(os.TempDir()), "outside-evolution-fixture"),
+			1,
+		),
+		"head coverage home": strings.Replace(
+			valid,
+			"base-picoclaw-home",
+			"head-picoclaw-home",
+			1,
+		),
+		"wrong test temp directory": strings.Replace(
+			valid,
+			string(filepath.Separator)+"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator123"+
+				string(filepath.Separator),
+			string(filepath.Separator)+"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGeneratorOther123"+
+				string(filepath.Separator),
+			1,
+		),
+		"nonnumeric coverage sandbox": strings.Replace(
+			valid,
+			"picoclaw-coverage-delta-123456789",
+			"picoclaw-coverage-delta-not-numeric",
+			1,
+		),
+	}
+	for name, output := range tests {
+		t.Run(name, func(t *testing.T) {
+			if isKnownEvolutionDraftPersistenceTimeout([]byte(output)) ||
+				isKnownCoverageBaselineFlake([]byte(output)) {
+				t.Fatal("evolution draft timeout classifier accepted a near miss")
+			}
+		})
+	}
+}
+
 func TestKnownCoverageTempDirCleanupRace(t *testing.T) {
 	agentCleanupRace := knownAgentTempDirCleanupRaceOutput()
 	workflowCleanupRace := knownWorkflowTempDirCleanupRaceOutput()
@@ -644,6 +749,7 @@ func TestKnownRepositoryModelEvaluationCancellationRace(t *testing.T) {
 func TestRunCoverageCommandRetriesOnlyKnownBaselineFlakes(t *testing.T) {
 	batchCancellation := knownRepositoryModelEvaluationBatchCancellationRaceOutput()
 	cancellationRestart := knownRepositoryModelEvaluationCancellationRestartRaceOutput()
+	evolutionDraftTimeout := knownEvolutionDraftPersistenceTimeoutOutput()
 	tests := []struct {
 		name         string
 		label        string
@@ -662,6 +768,13 @@ func TestRunCoverageCommandRetriesOnlyKnownBaselineFlakes(t *testing.T) {
 			name:         "base cancellation and restart",
 			label:        "base",
 			output:       cancellationRestart,
+			wantRetried:  true,
+			wantAttempts: 2,
+		},
+		{
+			name:         "base evolution draft persistence timeout",
+			label:        "base",
+			output:       evolutionDraftTimeout,
 			wantRetried:  true,
 			wantAttempts: 2,
 		},
@@ -704,6 +817,12 @@ func TestRunCoverageCommandRetriesOnlyKnownBaselineFlakes(t *testing.T) {
 			name:         "head cancellation and restart",
 			label:        "head",
 			output:       cancellationRestart,
+			wantAttempts: 1,
+		},
+		{
+			name:         "head evolution draft persistence timeout",
+			label:        "head",
+			output:       evolutionDraftTimeout,
 			wantAttempts: 1,
 		},
 	}

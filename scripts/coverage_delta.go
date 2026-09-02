@@ -616,7 +616,90 @@ func runCoverageCommandWithBaselineRetry(
 
 func isKnownCoverageBaselineFlake(out []byte) bool {
 	return isKnownCoverageTempDirCleanupRace(out) ||
-		isKnownRepositoryModelEvaluationCancellationRace(out)
+		isKnownRepositoryModelEvaluationCancellationRace(out) ||
+		isKnownEvolutionDraftPersistenceTimeout(out)
+}
+
+func isKnownEvolutionDraftPersistenceTimeout(out []byte) bool {
+	const (
+		failedTest    = "TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator"
+		failedPackage = "github.com/sipeed/picoclaw/pkg/agent"
+		diagnostic    = "evolution_bridge_test.go:596: timed out waiting for 1 drafts at "
+	)
+	var (
+		failureMarkers  []string
+		diagnostics     []string
+		packageFailures int
+		failurePackage  string
+	)
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "--- FAIL:") {
+			name, ok := coverageFailedTestName(line)
+			if !ok {
+				return false
+			}
+			failureMarkers = append(failureMarkers, name)
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "FAIL" {
+			packageFailures++
+			failurePackage = fields[1]
+		}
+		if coverageGoTestDiagnostic(line) {
+			diagnostics = append(diagnostics, line)
+		}
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") ||
+			strings.Contains(line, "[build failed]") || strings.Contains(line, "[setup failed]") {
+			return false
+		}
+	}
+	if scanner.Err() != nil || len(failureMarkers) != 1 || failureMarkers[0] != failedTest ||
+		packageFailures != 1 || failurePackage != failedPackage || len(diagnostics) != 1 ||
+		!strings.HasPrefix(diagnostics[0], diagnostic) {
+		return false
+	}
+	return isSafeEvolutionDraftTimeoutPath(strings.TrimPrefix(diagnostics[0], diagnostic))
+}
+
+func isSafeEvolutionDraftTimeoutPath(path string) bool {
+	if path == "" || strings.ContainsRune(path, '\x00') || !filepath.IsAbs(path) ||
+		filepath.Clean(path) != path {
+		return false
+	}
+	tempRoot := filepath.Clean(os.TempDir())
+	relative, err := filepath.Rel(tempRoot, path)
+	if err != nil || relative == "." || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	if len(parts) != 8 || parts[1] != "base-picoclaw-home" || parts[2] != ".tmp" ||
+		parts[5] != "state" || parts[6] != "evolution" || parts[7] != "skill-drafts.json" {
+		return false
+	}
+	const (
+		coveragePrefix = "picoclaw-coverage-delta-"
+		testPrefix     = "TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator"
+	)
+	return strings.HasPrefix(parts[0], coveragePrefix) &&
+		coverageASCIIDigits(strings.TrimPrefix(parts[0], coveragePrefix)) &&
+		strings.HasPrefix(parts[3], testPrefix) &&
+		coverageASCIIDigits(strings.TrimPrefix(parts[3], testPrefix)) &&
+		coverageASCIIDigits(parts[4])
+}
+
+func coverageASCIIDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func isKnownRepositoryModelEvaluationCancellationRace(out []byte) bool {
