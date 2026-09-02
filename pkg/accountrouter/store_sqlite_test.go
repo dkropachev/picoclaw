@@ -153,7 +153,7 @@ func TestAccountRouterEmptyFirstOpenClosesLegacyHorizonWithoutRootModeCheck(t *t
 					t.Fatal(err)
 				}
 			}
-			databasePath := DatabasePath(workspace)
+			databasePath := databasePath(workspace)
 			if _, err := NewSQLite(
 				"runtime-router",
 				testAccountRouterConfig(),

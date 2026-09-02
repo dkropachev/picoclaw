@@ -8,13 +8,19 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"path/filepath"
+	"strings"
 
 	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
 )
 
 func endpointForStateDirectory(stateDir string) string {
-	digest := sha256.Sum256([]byte(stateDir))
+	// Windows resolves these physical paths case-insensitively. Hash the same
+	// normalized identity used by sameCanonicalPath so aliases discover one
+	// named pipe instead of producing an invalid manifest endpoint.
+	normalized := strings.ToLower(filepath.Clean(stateDir))
+	digest := sha256.Sum256([]byte(normalized))
 	return `\\.\pipe\picoclaw-database-` + hex.EncodeToString(digest[:12])
 }
 

@@ -104,6 +104,26 @@ func TestWindowsManifestBootstrapAndLocksAreOwnerOnly(t *testing.T) {
 	assertWindowsOwnerOnlyFile(t, filepath.Join(stateDir, brokerLockFileName))
 }
 
+func TestWindowsEndpointAndManifestAcceptCaseAlias(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), StateDirectoryName)
+	alias := strings.ToUpper(stateDir)
+	endpoint := endpointForStateDirectory(stateDir)
+	if alias == stateDir {
+		t.Skip("temporary path has no case-distinct alias")
+	}
+	if got := endpointForStateDirectory(alias); got != endpoint {
+		t.Fatalf("case-alias endpoint = %q, want %q", got, endpoint)
+	}
+	manifest := Manifest{
+		PID: os.Getpid(), Protocol: ProtocolVersion,
+		Token: strings.Repeat("a", tokenBytes*2), Endpoint: endpoint,
+		Epoch: strings.Repeat("b", epochBytes*2),
+	}
+	if err := validateManifest(manifest, alias); err != nil {
+		t.Fatalf("case-alias manifest rejected: %v", err)
+	}
+}
+
 func TestWindowsOwnerValidationUsesCurrentUserSeam(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), StateDirectoryName)
 	if err := createOwnerOnlyDirectory(stateDir); err != nil {

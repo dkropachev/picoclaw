@@ -86,6 +86,40 @@ func TestProbeStatusesClassifiesFreshMigrationAndIntegrity(t *testing.T) {
 	}
 }
 
+func TestProbeStatusesClassifiesCurrentPreHorizonStoreForMigration(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "workspace")
+	if err := os.MkdirAll(filepath.Join(workspace, "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	cfg.Workflows.Enabled = true
+	workflowPath := filepath.Join(workspace, "state", "workflows.db")
+	pool, err := sqliteprovider.OpenStore(workflowPath, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(`CREATE TABLE retained (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Close(); err != nil {
+		t.Fatal(err)
+	}
+	statuses, err := ProbeStatuses(t.Context(), home, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := statusByID(statuses, "workspace.workflows")
+	if status.Readiness != database.StoreMigrationRequired ||
+		database.CodeOf(status.Error) != database.CodeMigrationRequired {
+		t.Fatalf("pre-horizon workflow readiness = %#v", status)
+	}
+}
+
 func statusByID(statuses []database.StoreStatus, id database.StoreID) database.StoreStatus {
 	for _, status := range statuses {
 		if status.ID == id {

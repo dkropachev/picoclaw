@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/internal/sessiondb"
 )
 
 func TestSQLiteSessionHorizonCannotApplyLateDeleteManifest(t *testing.T) {
@@ -15,7 +17,7 @@ func TestSQLiteSessionHorizonCannotApplyLateDeleteManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessionsDir := filepath.Join(workspace, "sessions")
-	store, err := NewSQLiteStore(sessionsDir)
+	store, err := NewStore(sessionsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +39,7 @@ func TestSQLiteSessionHorizonCannotApplyLateDeleteManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := NewSQLiteStore(sessionsDir)
+	reopened, err := NewStore(sessionsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +58,7 @@ func TestSQLiteSessionHorizonCannotApplyLateDeleteManifest(t *testing.T) {
 		t.Fatalf("late delete archive = %q, %v", archived, err)
 	}
 	var imported, skipped, issues int
-	if err := reopened.SQLDB().QueryRow(`SELECT imported_count, skipped_count,
+	if err := sessiondb.Bind(reopened.ThreadStore()).Database().QueryRow(`SELECT imported_count, skipped_count,
 	    (SELECT COUNT(*) FROM storage_import_issues AS issue
 	      WHERE issue.component = storage_imports.component
 	        AND issue.source_id = storage_imports.source_id

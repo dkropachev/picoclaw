@@ -69,6 +69,29 @@ func ProbeStatuses(ctx context.Context, home string, cfg *config.Config) ([]data
 			case expected > 0 && inspection.Version > expected:
 				status.Readiness = database.StoreUnavailable
 				status.Error = database.NewError(database.CodeUnsupported, "database schema is newer than supported")
+			case expected > 0 && domainUsesSharedImportSchema(spec.Domain):
+				ready, readinessErr := sqliteprovider.HasSchemaObjects(
+					ctx,
+					spec.Path,
+					5*time.Second,
+					"storage_imports",
+					"storage_import_issues",
+					"storage_import_horizons",
+					"storage_imports_archive_status_idx",
+				)
+				if readinessErr != nil {
+					status.Readiness = database.StoreUnavailable
+					status.Error = database.NewError(
+						database.CodeUnavailable,
+						"database schema readiness is unavailable",
+					)
+				} else if !ready {
+					status.Readiness = database.StoreMigrationRequired
+					status.Error = database.NewError(
+						database.CodeMigrationRequired,
+						"database migration is required",
+					)
+				}
 			}
 		}
 		if (!inspection.Exists || inspection.Empty) &&
@@ -79,6 +102,19 @@ func ProbeStatuses(ctx context.Context, home string, cfg *config.Config) ([]data
 		statuses = append(statuses, status)
 	}
 	return database.ValidateStoreStatuses(statuses)
+}
+
+func domainUsesSharedImportSchema(domain string) bool {
+	switch domain {
+	case "auth", "launcher-auth", "model-catalogs", "tool-adaptation",
+		"workflows", "sessions", "cron", "runtime-state", "account-routing",
+		"repository-reviews", "repository-evaluations", "evolution", "local-ci",
+		"channel-wecom", "channel-weixin", "git-workspace-inventory",
+		"pr-workspace-checkpoints":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateUnversionedReadiness(

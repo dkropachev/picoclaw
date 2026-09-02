@@ -51,6 +51,17 @@ func TestOnlineFenceInitializesOnlyMissingEmptyStore(t *testing.T) {
 	if err := outdated.Close(); err != nil {
 		t.Fatal(err)
 	}
+	preHorizonPath := filepath.Join(home, "pre-horizon.db")
+	preHorizon, err := Open(t.Context(), preHorizonPath, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := preHorizon.Exec(`DROP TABLE storage_import_horizons`); err != nil {
+		t.Fatal(err)
+	}
+	if err := preHorizon.Close(); err != nil {
+		t.Fatal(err)
+	}
 	fence, err := database.AcquireOnlineFence(home)
 	if err != nil {
 		t.Fatal(err)
@@ -63,6 +74,18 @@ func TestOnlineFenceInitializesOnlyMissingEmptyStore(t *testing.T) {
 	); opened != nil ||
 		database.CodeOf(err) != database.CodeMigrationRequired {
 		t.Fatalf("outdated online Open() = %#v, %v", opened, err)
+	}
+	if opened, err := Open(
+		t.Context(),
+		preHorizonPath,
+		testOptions(),
+	); opened != nil || database.CodeOf(err) != database.CodeMigrationRequired {
+		t.Fatalf("pre-horizon online Open() = %#v, %v", opened, err)
+	}
+	if ready, err := sqliteprovider.HasSchemaObjects(
+		t.Context(), preHorizonPath, 5*time.Second, "storage_import_horizons",
+	); err != nil || ready {
+		t.Fatalf("online Open() mutated pre-horizon generation: ready=%v error=%v", ready, err)
 	}
 
 	freshPath := filepath.Join(home, "fresh.db")

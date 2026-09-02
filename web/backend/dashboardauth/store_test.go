@@ -132,7 +132,7 @@ func TestOpenRejectsUnrelatedSchemaObjects(t *testing.T) {
 		"index": `CREATE INDEX rogue_launcher_import_idx ON storage_imports(source_id)`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), DBFilename)
+			path := filepath.Join(t.TempDir(), databaseFilename)
 			store, err := Open(path)
 			if err != nil {
 				t.Fatal(err)
