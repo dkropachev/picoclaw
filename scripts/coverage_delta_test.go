@@ -394,6 +394,100 @@ func knownEvolutionDraftPersistenceTimeoutOutput() string {
 	}, "\n")
 }
 
+func knownRepositoryReviewAutoContinueCompletionTimeoutOutput() string {
+	return strings.Join([]string{
+		"--- FAIL: TestRepositoryReviewAutomationAutoContinueReusesResolvedCommit (1.84s)",
+		"    repository_review_automations_test.go:1897: automation rra_heceemhmds56guifrx3ifu2tnf did not reach completed",
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/web/backend/api\t323.656s",
+	}, "\n")
+}
+
+func TestKnownRepositoryReviewAutoContinueCompletionTimeout(t *testing.T) {
+	valid := knownRepositoryReviewAutoContinueCompletionTimeoutOutput()
+	if !isKnownRepositoryReviewAutoContinueCompletionTimeout([]byte(valid)) ||
+		!isKnownCoverageBaselineFlake([]byte(valid)) {
+		t.Fatal("exact repository review auto-continuation timeout was rejected")
+	}
+	tests := map[string]string{
+		"wrong package": strings.Replace(
+			valid,
+			"github.com/sipeed/picoclaw/web/backend/api",
+			"github.com/sipeed/picoclaw/web/backend",
+			1,
+		),
+		"wrong test": strings.Replace(
+			valid,
+			"TestRepositoryReviewAutomationAutoContinueReusesResolvedCommit",
+			"TestRepositoryReviewAutomationAutoContinueUsesLatestCommit",
+			1,
+		),
+		"wrong file": strings.Replace(
+			valid,
+			"repository_review_automations_test.go",
+			"repository_review_automation_test.go",
+			1,
+		),
+		"wrong line": strings.Replace(
+			valid,
+			"repository_review_automations_test.go:1897:",
+			"repository_review_automations_test.go:1898:",
+			1,
+		),
+		"wrong status": strings.Replace(valid, "did not reach completed", "did not reach paused", 1),
+		"wrong id prefix": strings.Replace(
+			valid,
+			"rra_heceemhmds56guifrx3ifu2tnf",
+			"rrb_heceemhmds56guifrx3ifu2tnf",
+			1,
+		),
+		"uppercase id": strings.Replace(
+			valid,
+			"rra_heceemhmds56guifrx3ifu2tnf",
+			"rra_Heceemhmds56guifrx3ifu2tnf",
+			1,
+		),
+		"invalid id alphabet": strings.Replace(
+			valid,
+			"rra_heceemhmds56guifrx3ifu2tnf",
+			"rra_heceemhmds56guifrx3ifu2tn0",
+			1,
+		),
+		"short id": strings.Replace(
+			valid,
+			"rra_heceemhmds56guifrx3ifu2tnf",
+			"rra_heceemhmds56guifrx3ifu2tn",
+			1,
+		),
+		"long id": strings.Replace(
+			valid,
+			"rra_heceemhmds56guifrx3ifu2tnf",
+			"rra_heceemhmds56guifrx3ifu2tnfa",
+			1,
+		),
+		"additional failure": valid +
+			"\n--- FAIL: TestRepositoryReviewAutomationPause (0.01s)",
+		"additional diagnostic": valid +
+			"\n    repository_review_automations_test.go:1900: unrelated assertion",
+		"additional package": valid +
+			"\nFAIL\tgithub.com/sipeed/picoclaw/pkg/repoaudit\t0.01s",
+		"panic": valid + "\npanic: concurrent test failure",
+		"fatal": valid + "\nfatal error: concurrent map writes",
+		"build failure": valid +
+			"\nFAIL\tgithub.com/sipeed/picoclaw/web/backend/api [build failed]",
+		"setup failure": valid +
+			"\nFAIL\tgithub.com/sipeed/picoclaw/web/backend/api [setup failed]",
+	}
+	for name, output := range tests {
+		t.Run(name, func(t *testing.T) {
+			if isKnownRepositoryReviewAutoContinueCompletionTimeout([]byte(output)) ||
+				isKnownCoverageBaselineFlake([]byte(output)) {
+				t.Fatal("repository review auto-continuation timeout classifier accepted a near miss")
+			}
+		})
+	}
+}
+
 func TestKnownEvolutionDraftPersistenceTimeout(t *testing.T) {
 	valid := knownEvolutionDraftPersistenceTimeoutOutput()
 	if !isKnownEvolutionDraftPersistenceTimeout([]byte(valid)) ||
@@ -750,6 +844,7 @@ func TestRunCoverageCommandRetriesOnlyKnownBaselineFlakes(t *testing.T) {
 	batchCancellation := knownRepositoryModelEvaluationBatchCancellationRaceOutput()
 	cancellationRestart := knownRepositoryModelEvaluationCancellationRestartRaceOutput()
 	evolutionDraftTimeout := knownEvolutionDraftPersistenceTimeoutOutput()
+	repositoryReviewAutoContinueTimeout := knownRepositoryReviewAutoContinueCompletionTimeoutOutput()
 	tests := []struct {
 		name         string
 		label        string
@@ -775,6 +870,13 @@ func TestRunCoverageCommandRetriesOnlyKnownBaselineFlakes(t *testing.T) {
 			name:         "base evolution draft persistence timeout",
 			label:        "base",
 			output:       evolutionDraftTimeout,
+			wantRetried:  true,
+			wantAttempts: 2,
+		},
+		{
+			name:         "base repository review auto-continuation completion timeout",
+			label:        "base",
+			output:       repositoryReviewAutoContinueTimeout,
 			wantRetried:  true,
 			wantAttempts: 2,
 		},
@@ -823,6 +925,12 @@ func TestRunCoverageCommandRetriesOnlyKnownBaselineFlakes(t *testing.T) {
 			name:         "head evolution draft persistence timeout",
 			label:        "head",
 			output:       evolutionDraftTimeout,
+			wantAttempts: 1,
+		},
+		{
+			name:         "head repository review auto-continuation completion timeout",
+			label:        "head",
+			output:       repositoryReviewAutoContinueTimeout,
 			wantAttempts: 1,
 		},
 	}

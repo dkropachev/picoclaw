@@ -576,13 +576,13 @@ func runGoCoverage(
 		return cmd.CombinedOutput()
 	}
 	// The guard tests detached base and head worktrees. A synchronization fix
-	// in head cannot change a known historical base test race, so retry only an
+	// in head cannot change a known historical base test flake, so retry only an
 	// exact recognized failure from base once. Head failures are always final.
 	out, err, retried := runCoverageCommandWithBaselineRetry(label, run)
 	if retried {
 		fmt.Fprintf(
 			os.Stderr,
-			"coverage delta: retried %s (%s) after known baseline test race\n",
+			"coverage delta: retried %s (%s) after known baseline test flake\n",
 			label,
 			ref,
 		)
@@ -617,7 +617,72 @@ func runCoverageCommandWithBaselineRetry(
 func isKnownCoverageBaselineFlake(out []byte) bool {
 	return isKnownCoverageTempDirCleanupRace(out) ||
 		isKnownRepositoryModelEvaluationCancellationRace(out) ||
-		isKnownEvolutionDraftPersistenceTimeout(out)
+		isKnownEvolutionDraftPersistenceTimeout(out) ||
+		isKnownRepositoryReviewAutoContinueCompletionTimeout(out)
+}
+
+func isKnownRepositoryReviewAutoContinueCompletionTimeout(out []byte) bool {
+	const (
+		failedTest       = "TestRepositoryReviewAutomationAutoContinueReusesResolvedCommit"
+		failedPackage    = "github.com/sipeed/picoclaw/web/backend/api"
+		diagnosticPrefix = "repository_review_automations_test.go:1897: automation "
+		diagnosticSuffix = " did not reach completed"
+	)
+	var (
+		failureMarkers  []string
+		diagnostics     []string
+		packageFailures int
+		failurePackage  string
+	)
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "--- FAIL:") {
+			name, ok := coverageFailedTestName(line)
+			if !ok {
+				return false
+			}
+			failureMarkers = append(failureMarkers, name)
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "FAIL" {
+			packageFailures++
+			failurePackage = fields[1]
+		}
+		if coverageGoTestDiagnostic(line) {
+			diagnostics = append(diagnostics, line)
+		}
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") ||
+			strings.Contains(line, "[build failed]") || strings.Contains(line, "[setup failed]") {
+			return false
+		}
+	}
+	if scanner.Err() != nil || len(failureMarkers) != 1 || failureMarkers[0] != failedTest ||
+		packageFailures != 1 || failurePackage != failedPackage || len(diagnostics) != 1 ||
+		!strings.HasPrefix(diagnostics[0], diagnosticPrefix) ||
+		!strings.HasSuffix(diagnostics[0], diagnosticSuffix) {
+		return false
+	}
+	automationID := strings.TrimSuffix(
+		strings.TrimPrefix(diagnostics[0], diagnosticPrefix),
+		diagnosticSuffix,
+	)
+	return isCoverageGeneratedRepositoryReviewAutomationID(automationID)
+}
+
+func isCoverageGeneratedRepositoryReviewAutomationID(id string) bool {
+	const prefix = "rra_"
+	if !strings.HasPrefix(id, prefix) || len(id) != len(prefix)+26 {
+		return false
+	}
+	for _, character := range strings.TrimPrefix(id, prefix) {
+		if character < 'a' || character > 'z' {
+			if character < '2' || character > '7' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func isKnownEvolutionDraftPersistenceTimeout(out []byte) bool {
