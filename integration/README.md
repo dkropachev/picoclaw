@@ -69,6 +69,10 @@ integration-tagged runtime storage gate without an external dependency. The
 test initializes every migrated store represented on the current branch under
 one disposable PicoClaw home/workspace, reopens the public owners, verifies the
 exact private SQLite database inventory, and scans the complete generated root.
+Git inventory is mutated and reopened through the public manager, while the
+gateway checkpoint store imports one legacy source, performs a fenced update,
+and reopens the typed row; their exact archive roots and near-miss labels are
+covered by the same deny-by-default scan.
 
 JSON, JSONL, migrated session snapshots, history slots, and account-router
 invalidation sidecars are default-denied. The scanner admits only exact

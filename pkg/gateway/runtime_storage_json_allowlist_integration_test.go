@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -28,6 +29,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/cron"
 	"github.com/sipeed/picoclaw/pkg/evolution"
+	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/pid"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -46,22 +48,28 @@ import (
 const runtimeStoragePassword = "runtime-storage-integration-password"
 
 type runtimeStorageIntegrationFixture struct {
-	root          string
-	home          string
-	workspace     string
-	evolutionRoot string
-	evidenceRoot  string
-	configPath    string
-	launcherPath  string
-	pidPath       string
-	threadID      string
-	handoffID     string
-	cronJobID     string
-	planDigest    string
-	resultKey     string
-	executionID   string
-	reviewID      string
-	evaluationID  string
+	root                  string
+	home                  string
+	workspace             string
+	evolutionRoot         string
+	evidenceRoot          string
+	gitRoot               string
+	checkpointRoot        string
+	configPath            string
+	launcherPath          string
+	pidPath               string
+	threadID              string
+	handoffID             string
+	cronJobID             string
+	planDigest            string
+	resultKey             string
+	executionID           string
+	reviewID              string
+	evaluationID          string
+	gitWorkspaceID        string
+	checkpointID          string
+	checkpointTree        string
+	checkpointArchivePath string
 }
 
 type runtimeStorageScan struct {
@@ -121,6 +129,12 @@ func newRuntimeStorageIntegrationFixture(t *testing.T) *runtimeStorageIntegratio
 		evolutionRoot: filepath.Join(root, "custom-evolution"),
 		evidenceRoot:  filepath.Join(root, "local-ci-evidence"),
 	}
+	fixture.gitRoot = filepath.Join(fixture.workspace, ".git-workspaces")
+	fixture.checkpointRoot = filepath.Join(
+		fixture.gitRoot,
+		".pr-workspace-implementation",
+		"active",
+	)
 	fixture.configPath = filepath.Join(fixture.home, "config.json")
 	fixture.launcherPath = filepath.Join(fixture.home, launcherconfig.FileName)
 	fixture.pidPath = filepath.Join(fixture.home, ".picoclaw.pid")
@@ -139,6 +153,7 @@ func newRuntimeStorageIntegrationFixture(t *testing.T) *runtimeStorageIntegratio
 
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = fixture.workspace
+	cfg.GitWorkspaces.RootDir = fixture.gitRoot
 	if err := config.SaveConfig(fixture.configPath, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -302,11 +317,140 @@ func exerciseRuntimeStorageFirstStartup(t *testing.T, fixture *runtimeStorageInt
 	)
 	fixture.reviewID = writeRepositoryReviewSentinel(t, fixture.workspace)
 	fixture.evaluationID = writeRepositoryEvaluationSentinel(t, fixture.workspace)
-
-	// TODO(runtime-json-allowlist): after the held Git Workspace migration
-	// merges, extend this same fixture with gitworkspace inventory mutation and
-	// PR-workspace checkpoint Save/reopen assertions.
+	exerciseGitInventoryAndCheckpointFirstStartup(t, fixture)
 	time.Sleep(150 * time.Millisecond) // release workflow/channel idle handles before scanning
+}
+
+func exerciseGitInventoryAndCheckpointFirstStartup(
+	t *testing.T,
+	fixture *runtimeStorageIntegrationFixture,
+) {
+	t.Helper()
+	ctx := context.Background()
+	source := filepath.Join(fixture.root, "source-repository")
+	runtimeStorageInitGitRepository(t, source)
+	manager, err := gitworkspace.NewManager(gitworkspace.Options{RootDir: fixture.gitRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := manager.Acquire(ctx, gitworkspace.AcquireRequest{
+		Repository: source, Ref: "main",
+		SessionKey: "runtime-storage/inventory", AgentID: "runtime-storage",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := manager.Stats(ctx)
+	if err != nil || stats.RepositoryCount != 1 || stats.WorkspaceCount != 1 ||
+		stats.LockedWorkspaceCount != 1 || len(stats.Workspaces) != 1 ||
+		stats.Workspaces[0].ID != workspace.ID {
+		t.Fatalf("Git inventory stats = %#v, %v", stats, err)
+	}
+	fixture.gitWorkspaceID = workspace.ID
+
+	if mkdirErr := os.MkdirAll(fixture.checkpointRoot, 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	checkpoint := runtimeStorageCheckpointFixture(workspace.ID)
+	legacyName := legacyPRWorkspaceCheckpointFilename(checkpoint.WorkspaceID)
+	legacyPath := filepath.Join(fixture.checkpointRoot, legacyName)
+	encoded, err := json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(legacyPath, encoded, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	store, err := newPRWorkspaceCandidateCheckpointStore(fixture.checkpointRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, revision, found, err := store.Load(checkpoint.WorkspaceID)
+	if err != nil || !found || !equivalentPRWorkspaceCheckpoint(loaded, checkpoint) {
+		t.Fatalf("imported checkpoint = %#v, found=%v err=%v", loaded, found, err)
+	}
+	checkpoint.Candidate.Tree = strings.Repeat("5", 40)
+	checkpoint.Candidate.CandidateDigest = strings.Repeat("6", 64)
+	checkpoint.Candidate.ChangedFiles = 3
+	committed, err := store.Save(checkpoint, revision)
+	if err != nil || !validPRWorkspaceCheckpointRevision(committed, checkpoint.WorkspaceID) {
+		t.Fatalf("updated checkpoint revision = %#v, %v", committed, err)
+	}
+	fixture.checkpointID = checkpoint.WorkspaceID
+	fixture.checkpointTree = checkpoint.Candidate.Tree
+	fixture.checkpointArchivePath = filepath.Join(
+		fixture.checkpointRoot,
+		"legacy-json",
+		prWorkspaceCheckpointArchiveLabel,
+		legacyName,
+	)
+	if _, err := os.Lstat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("active checkpoint JSON remains after import: %v", err)
+	}
+	if info, err := os.Lstat(fixture.checkpointArchivePath); err != nil ||
+		!info.Mode().IsRegular() {
+		t.Fatalf("checkpoint archive = %#v, %v", info, err)
+	}
+}
+
+func runtimeStorageCheckpointFixture(gitWorkspaceID string) prWorkspaceCandidateCheckpoint {
+	const head = "1111111111111111111111111111111111111111"
+	return prWorkspaceCandidateCheckpoint{
+		Version:        prWorkspaceCandidateCheckpointVersion,
+		State:          prWorkspaceCandidateCheckpointActive,
+		WorkspaceID:    "devw_77777777777777777777777777777777",
+		Repository:     "runtime-storage/source-repository",
+		SourceRef:      "main",
+		HeadSHA:        head,
+		CharterID:      "pchar_77777777777777777777777777777777",
+		CharterHeadSHA: head,
+		GitWorkspaceID: gitWorkspaceID,
+		LineID:         "pdln_77777777777777777777777777777777",
+		Lease: gitworkspace.PinnedLineLease{
+			WorkspaceID: gitWorkspaceID, Version: 0, MutationEpoch: 1,
+			Tip: head, Tree: strings.Repeat("2", 40),
+		},
+		Candidate: gitworkspace.PinnedCandidate{
+			WorkspaceID: gitWorkspaceID, ParentCommit: head,
+			Tree: strings.Repeat("3", 40), CandidateDigest: strings.Repeat("4", 64),
+			ChangedFiles: 2,
+		},
+	}
+}
+
+func runtimeStorageInitGitRepository(t *testing.T, repository string) {
+	t.Helper()
+	if err := os.MkdirAll(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeStorageGit(t, repository, "init")
+	runtimeStorageGit(t, repository, "checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("runtime storage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtimeStorageGit(t, repository, "add", "README.md")
+	runtimeStorageGit(
+		t,
+		repository,
+		"-c", "user.name=PicoClaw Integration",
+		"-c", "user.email=picoclaw@example.invalid",
+		"commit", "-m", "runtime storage fixture",
+	)
+}
+
+func runtimeStorageGit(t *testing.T, repository string, arguments ...string) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", repository}, arguments...)...)
+	command.Env = append(
+		os.Environ(),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Git fixture command failed: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func writeRepositoryReviewSentinel(t *testing.T, workspace string) string {
@@ -679,6 +823,27 @@ func exerciseRuntimeStorageSecondStartup(t *testing.T, fixture *runtimeStorageIn
 		)
 	}
 
+	restartedManager, err := gitworkspace.NewManager(gitworkspace.Options{RootDir: fixture.gitRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := restartedManager.Stats(ctx)
+	if err != nil || stats.RepositoryCount != 1 || stats.WorkspaceCount != 1 ||
+		stats.LockedWorkspaceCount != 1 || len(stats.Workspaces) != 1 ||
+		stats.Workspaces[0].ID != fixture.gitWorkspaceID {
+		t.Fatalf("reopened Git inventory stats = %#v, %v", stats, err)
+	}
+	restartedCheckpointStore, err := newPRWorkspaceCandidateCheckpointStore(fixture.checkpointRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, _, found, err := restartedCheckpointStore.Load(fixture.checkpointID)
+	if err != nil || !found || checkpoint.WorkspaceID != fixture.checkpointID ||
+		checkpoint.GitWorkspaceID != fixture.gitWorkspaceID ||
+		checkpoint.Candidate.Tree != fixture.checkpointTree {
+		t.Fatalf("reopened checkpoint = %#v, found=%v err=%v", checkpoint, found, err)
+	}
+
 	cfg, loadConfigErr := config.LoadConfig(fixture.configPath)
 	if loadConfigErr != nil || cfg.WorkspacePath() != fixture.workspace {
 		t.Fatalf("reopened config workspace = %#v, %v", cfg, loadConfigErr)
@@ -781,6 +946,12 @@ func (allowlist runtimeStorageJSONAllowlist) legacyArchiveRoots() []string {
 		),
 		filepath.Join(fixture.evolutionRoot, "legacy-json", "evolution-v1"),
 		filepath.Join(fixture.evidenceRoot, "legacy-json", "local-ci-cache-v1"),
+		filepath.Join(fixture.gitRoot, "legacy-json", "git-workspaces-v1"),
+		filepath.Join(
+			fixture.checkpointRoot,
+			"legacy-json",
+			prWorkspaceCheckpointArchiveLabel,
+		),
 	}
 }
 
@@ -909,6 +1080,26 @@ func assertRuntimeStorageAllowlistExamples(t *testing.T, allowlist runtimeStorag
 			true,
 		},
 		{
+			"registered Git inventory archive",
+			filepath.Join(
+				fixture.gitRoot,
+				"legacy-json",
+				"git-workspaces-v1",
+				"inventory.json",
+			),
+			true,
+		},
+		{
+			"registered checkpoint archive",
+			filepath.Join(
+				fixture.checkpointRoot,
+				"legacy-json",
+				prWorkspaceCheckpointArchiveLabel,
+				"devw_fixture.json",
+			),
+			true,
+		},
+		{
 			"workflow publish journal",
 			filepath.Join(fixture.workspace, "workflow_state", "publish-transaction.json"),
 			true,
@@ -959,6 +1150,32 @@ func assertRuntimeStorageAllowlistExamples(t *testing.T, allowlist runtimeStorag
 		{"active runtime JSON", filepath.Join(fixture.workspace, "state.json"), false},
 		{"session JSONL", filepath.Join(fixture.workspace, "sessions", "session.jsonl"), false},
 		{"cron JSON", filepath.Join(fixture.workspace, "cron", "jobs.json"), false},
+		{"active Git inventory JSON", filepath.Join(fixture.gitRoot, "inventory.json"), false},
+		{
+			"active checkpoint JSON",
+			filepath.Join(fixture.checkpointRoot, "devw_fixture.json"),
+			false,
+		},
+		{
+			"Git archive version near miss",
+			filepath.Join(
+				fixture.gitRoot,
+				"legacy-json",
+				"git-workspaces-v2",
+				"inventory.json",
+			),
+			false,
+		},
+		{
+			"checkpoint archive version near miss",
+			filepath.Join(
+				fixture.checkpointRoot,
+				"legacy-json",
+				"pr-workspace-checkpoints-v2",
+				"devw_fixture.json",
+			),
+			false,
+		},
 		{
 			"unregistered archive component",
 			filepath.Join(fixture.workspace, "state", "legacy-json", "component-v1", "record.jsonl"),
@@ -1122,6 +1339,38 @@ func assertRuntimeStorageScannerCanaries(
 		}
 		defer func() { _ = os.Remove(path) }()
 		assertRejected(t, "workspace/state/legacy-json/runtime-state-v2/state.json")
+	})
+	t.Run("Git inventory archive label near miss", func(t *testing.T) {
+		directory := filepath.Join(fixture.gitRoot, "legacy-json", "git-workspaces-v2")
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(directory, "inventory.json")
+		if err := os.WriteFile(path, []byte("private-canary-payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(path) }()
+		assertRejected(t, "workspace/.git-workspaces/legacy-json/git-workspaces-v2/inventory.json")
+	})
+	t.Run("checkpoint archive label near miss", func(t *testing.T) {
+		directory := filepath.Join(
+			fixture.checkpointRoot,
+			"legacy-json",
+			"pr-workspace-checkpoints-v2",
+		)
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(directory, "devw_canary.json")
+		if err := os.WriteFile(path, []byte("private-canary-payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(path) }()
+		assertRejected(
+			t,
+			"workspace/.git-workspaces/.pr-workspace-implementation/active/legacy-json/"+
+				"pr-workspace-checkpoints-v2/devw_canary.json",
+		)
 	})
 	t.Run("JSON-like directory", func(t *testing.T) {
 		path := filepath.Join(fixture.workspace, "state", "runtime-owned-directory.json")
@@ -1302,6 +1551,8 @@ func runtimeStorageExpectedDatabasePaths(
 		filepath.Join(fixture.workspace, "repository_evaluations", "evaluations.db"),
 		filepath.Join(fixture.evolutionRoot, "evolution.db"),
 		filepath.Join(fixture.evidenceRoot, "cache.db"),
+		filepath.Join(fixture.gitRoot, "inventory.db"),
+		filepath.Join(fixture.checkpointRoot, "checkpoints.db"),
 	}
 }
 
@@ -1338,6 +1589,7 @@ func assertRuntimeStorageJSONFiles(
 		runtimeStorageSlashRelative(fixture.root, filepath.Join(
 			fixture.evidenceRoot, "executions", fixture.executionID[:2], fixture.executionID+".json",
 		)),
+		runtimeStorageSlashRelative(fixture.root, fixture.checkpointArchivePath),
 	}
 	sort.Strings(want)
 	if !slices.Equal(got, want) {
