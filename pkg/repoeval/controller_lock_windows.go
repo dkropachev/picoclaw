@@ -15,7 +15,7 @@ func (s Store) LockController() (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if info, err := os.Lstat(lockPath); err == nil {
+	if info, err := repositoryEvaluationLstatLockFile(lockPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return nil, errors.New("repository evaluation controller lock must be a regular file")
 		}

@@ -12,6 +12,8 @@ import (
 
 const repositoryEvaluationLockDirectory = ".locks"
 
+var repositoryEvaluationLstatLockFile = os.Lstat
+
 func repositoryEvaluationLockPath(root, name string) (string, error) {
 	if strings.TrimSpace(root) == "" || strings.TrimSpace(name) == "" ||
 		name != filepath.Base(name) || strings.ContainsAny(name, `/\\`) ||

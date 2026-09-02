@@ -665,6 +665,13 @@ func TestSQLiteStoreBulkDeleteFailureAndCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			_ = database.Close()
+			// This test deliberately installs a trigger that the production open
+			// path correctly rejects as an unexpected schema object. Reopen the
+			// already-created fixture directly so BulkDelete reaches the injected
+			// DELETE boundary being exercised here.
+			store.openForTest = func(context.Context) (*sql.DB, error) {
+				return sql.Open("sqlite", store.databasePath())
+			}
 			if _, err := store.BulkDelete(
 				t.Context(), []BulkDeleteItem{{ID: created.ID, Version: created.Version}},
 			); err == nil {

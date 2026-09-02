@@ -16,6 +16,59 @@ func repositoryEvaluationTestLockPath(t *testing.T, root, name string) string {
 	return path
 }
 
+func TestRepositoryEvaluationLockPathAndFileFailureBranches(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		root string
+		lock string
+	}{
+		{name: "empty root", lock: "store.lock"},
+		{name: "empty name", root: t.TempDir()},
+		{name: "nested name", root: t.TempDir(), lock: "nested/store.lock"},
+		{name: "nul name", root: t.TempDir(), lock: "store\x00.lock"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := repositoryEvaluationLockPath(test.root, test.lock); err == nil {
+				t.Fatal("invalid lock path was accepted")
+			}
+		})
+	}
+
+	if err := secureRepositoryEvaluationLockFile("unused", nil); err == nil {
+		t.Fatal("nil lock file was accepted")
+	}
+	closed, err := os.CreateTemp(t.TempDir(), "closed-lock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureRepositoryEvaluationLockFile(closed.Name(), closed); err == nil {
+		t.Fatal("closed lock file was accepted")
+	}
+
+	opened, err := os.CreateTemp(t.TempDir(), "opened-lock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+	replacement, err := os.CreateTemp(t.TempDir(), "replacement-lock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPath := replacement.Name()
+	if err := replacement.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureRepositoryEvaluationLockFile(replacementPath, opened); err == nil {
+		t.Fatal("mismatched lock file identity was accepted")
+	}
+	if _, err := opened.Stat(); err != nil {
+		t.Fatalf("opened lock changed unexpectedly: %v", err)
+	}
+}
+
 func TestRepositoryEvaluationLocksUsePrivateStoreLocalNamespace(t *testing.T) {
 	store := NewSQLiteStore(t.TempDir())
 	if err := os.Mkdir(store.root+".lock", 0o700); err != nil {
