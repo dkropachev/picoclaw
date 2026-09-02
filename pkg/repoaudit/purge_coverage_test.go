@@ -257,7 +257,7 @@ func TestRepositoryReviewPurgeHelperErrorCoverage(t *testing.T) {
 	t.Run("database removal failure", func(t *testing.T) {
 		store := newAutomationTestStore(t)
 		state := createPurgeTestLedger(t, store, "owner/remove-failure")
-		purgeTestRejectLedgerDeletion(t, store)
+		purgeTestRejectLedgerDeletion(t, &store)
 		if err := store.removeRepositoryReviewLedger(state.Repository); err == nil {
 			t.Fatal("ledger removal ignored a database failure")
 		}

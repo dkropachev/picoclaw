@@ -3,6 +3,7 @@ package repoaudit
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -1033,7 +1034,7 @@ func purgeTestDeleteAutomation(t *testing.T, store Store, automationID string) {
 	}
 }
 
-func purgeTestRejectLedgerDeletion(t *testing.T, store Store) {
+func purgeTestRejectLedgerDeletion(t *testing.T, store *Store) {
 	t.Helper()
 	database, err := store.openDatabase(t.Context())
 	if err != nil {
@@ -1050,5 +1051,13 @@ func purgeTestRejectLedgerDeletion(t *testing.T, store Store) {
 	}
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
+	}
+	purgeTestUseRawDatabase(store)
+}
+
+func purgeTestUseRawDatabase(store *Store) {
+	databasePath := store.database
+	store.openForTest = func(context.Context) (*sql.DB, error) {
+		return sql.Open("sqlite", databasePath)
 	}
 }

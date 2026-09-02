@@ -503,7 +503,10 @@ func TestRepositoryReviewAuditedArchivePortableBoundaries(t *testing.T) {
 func TestRepositoryReviewPurgePrimaryFenceScanBoundaries(t *testing.T) {
 	t.Run("public catalog lock failures", func(t *testing.T) {
 		store := NewStore(t.TempDir())
-		if err := os.Mkdir(store.root+".lock", 0o700); err != nil {
+		if err := os.Mkdir(
+			repositoryReviewTestLockPath(t, store.root, "store.lock"),
+			0o700,
+		); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, err := store.GetByID(RepositoryID("owner/locked")); err == nil {

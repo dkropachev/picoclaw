@@ -42,7 +42,10 @@ func TestRepositoryReviewPurgeCompositeBoundaryCoverage(t *testing.T) {
 func TestRepositoryReviewPurgeEligibilitySnapshotFailures(t *testing.T) {
 	t.Run("lock failure", func(t *testing.T) {
 		store := NewStore(t.TempDir())
-		if err := os.Mkdir(store.root+".lock", 0o700); err != nil {
+		if err := os.Mkdir(
+			repositoryReviewTestLockPath(t, store.root, "store.lock"),
+			0o700,
+		); err != nil {
 			t.Fatal(err)
 		}
 		_, err := store.RepositoryReviewPurgeEligibilityForAutomation(
@@ -432,7 +435,10 @@ func TestRepositoryReviewPurgeSQLiteRemovalFailureCoverage(t *testing.T) {
 			_ = database.Close()
 			t.Fatal(err)
 		}
-		_ = database.Close()
+		if err := database.Close(); err != nil {
+			t.Fatal(err)
+		}
+		purgeTestUseRawDatabase(&store)
 		if err := store.removeRepositoryReviewAutomation(repositoryReviewPurgeIntent{
 			AutomationID: automation.ID, ConfiguredRepository: automation.Repository,
 			ExpectedAutomationVersion: automation.Version,
@@ -478,7 +484,10 @@ func TestRepositoryReviewPurgeSQLiteRemovalFailureCoverage(t *testing.T) {
 			_ = database.Close()
 			t.Fatal(err)
 		}
-		_ = database.Close()
+		if err := database.Close(); err != nil {
+			t.Fatal(err)
+		}
+		purgeTestUseRawDatabase(&store)
 		if err := store.removeRepositoryReviewLedgers([]repositoryReviewPurgeLedgerTarget{{
 			Repository: state.Repository, Version: state.Version,
 		}}); !errors.Is(err, ErrConflict) {

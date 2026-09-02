@@ -147,7 +147,7 @@ func TestRepositoryReviewPurgePhaseFailureCoverage(t *testing.T) {
 
 	t.Run("ledger committing delete failure", func(t *testing.T) {
 		fixture := newPurgePhaseFixture(t, repositoryReviewPurgeLedgerCommitting, true)
-		purgeTestRejectLedgerDeletion(t, fixture.store)
+		purgeTestRejectLedgerDeletion(t, &fixture.store)
 		if _, err := fixture.store.applyPurgeIntent(fixture.intent); err == nil {
 			t.Fatal("ledger phase ignored delete failure")
 		}
@@ -227,7 +227,10 @@ func TestRepositoryReviewPurgeStoreFailureCoverage(t *testing.T) {
 	t.Run("lock failure", func(t *testing.T) {
 		workspace := t.TempDir()
 		store := NewStore(workspace)
-		if err := os.Mkdir(store.root+".lock", 0o700); err != nil {
+		if err := os.Mkdir(
+			repositoryReviewTestLockPath(t, store.root, "store.lock"),
+			0o700,
+		); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, err := store.PurgeAutomationHistory(
@@ -240,7 +243,10 @@ func TestRepositoryReviewPurgeStoreFailureCoverage(t *testing.T) {
 	t.Run("reconcile lock failure", func(t *testing.T) {
 		workspace := t.TempDir()
 		store := NewStore(workspace)
-		if err := os.Mkdir(store.root+".lock", 0o700); err != nil {
+		if err := os.Mkdir(
+			repositoryReviewTestLockPath(t, store.root, "store.lock"),
+			0o700,
+		); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.ReconcilePurgeIntents(context.Background()); err == nil {
