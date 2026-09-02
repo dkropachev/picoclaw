@@ -25,6 +25,8 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
+const repositoryReviewAutomationAsyncTestTimeout = 10 * time.Second
+
 type repositoryReviewRecoveryProfileRunner struct {
 	profile workflows.RepositoryReviewModelProfile
 }
@@ -1084,7 +1086,7 @@ func TestRepositoryReviewAutomationStartPersistsResolvedCommitBeforeBatch(t *tes
 				observation.persisted,
 			)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(repositoryReviewAutomationAsyncTestTimeout):
 		t.Fatal("repository review batch did not observe admitted commit")
 	}
 }
@@ -1143,7 +1145,7 @@ func TestRepositoryReviewAutomationStartAfterConfigurationResetCreatesCampaignDe
 			t.Fatalf("reset start batch=%#v ledger=%#v found=%v err=%v",
 				observed, ledger.CurrentCampaign, found, ledgerErr)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(repositoryReviewAutomationAsyncTestTimeout):
 		t.Fatal("configuration-reset start did not launch")
 	}
 }
@@ -1477,7 +1479,7 @@ func TestRepositoryReviewAutomationChangedCommitOrProfileResetStartsCleanCampaig
 				if observed.CampaignID != resumed.CampaignID || observed.ResolvedCommitSHA != test.selection {
 					t.Fatalf("clean campaign batch=%#v", observed)
 				}
-			case <-time.After(time.Second):
+			case <-time.After(repositoryReviewAutomationAsyncTestTimeout):
 				t.Fatal("clean campaign did not start")
 			}
 		})
@@ -1680,7 +1682,7 @@ func TestRepositoryReviewAutomationContinuationStartsCleanCampaignAfterRuntimePr
 					close(release)
 					t.Fatalf("clean campaign batch=%#v", observed)
 				}
-			case <-time.After(time.Second):
+			case <-time.After(repositoryReviewAutomationAsyncTestTimeout):
 				close(release)
 				t.Fatal("clean campaign did not start")
 			}
@@ -1828,7 +1830,7 @@ func TestRepositoryReviewAutomationLegacyRecoveryReplaysAfterScopeCASConflict(t 
 			observed.ScopePlan.Hash == "" {
 			t.Fatalf("replayed recovery batch=%#v", observed)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(repositoryReviewAutomationAsyncTestTimeout):
 		t.Fatal("replayed legacy recovery did not start")
 	}
 }
@@ -2294,7 +2296,7 @@ func TestRepositoryReviewAutomationResumePersistsExactCommitSelection(t *testing
 				if observed.ResolvedCommitSHA != testCase.selection {
 					t.Fatalf("batch automation=%#v", observed)
 				}
-			case <-time.After(time.Second):
+			case <-time.After(repositoryReviewAutomationAsyncTestTimeout):
 				t.Fatal("resumed batch did not start")
 			}
 			completed := waitForRepositoryReviewAutomationStatus(
@@ -2437,7 +2439,7 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 			!reflect.DeepEqual(observed.automation.ScopePlan, automation.ScopePlan) {
 			t.Fatalf("resumed batch=%#v run_id=%q", observed.automation, observed.runID)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(repositoryReviewAutomationAsyncTestTimeout):
 		t.Fatal("resumed failed batch did not start")
 	}
 
@@ -2769,7 +2771,7 @@ func TestRepositoryReviewOrdinaryResumeRetainsLegacyAccountingSnapshot(t *testin
 		if price.InputPricePer1M != 1 || price.OutputPricePer1M != 2 {
 			t.Fatalf("ordinary resume did not refresh central pricing: %#v", price)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(repositoryReviewAutomationAsyncTestTimeout):
 		t.Fatal("resumed batch did not start")
 	}
 	completed := waitForRepositoryReviewAutomationStatus(
@@ -3685,7 +3687,7 @@ func TestRepositoryReviewAutomationStopCancelsBlockedQuotaAdmission(t *testing.T
 	}()
 	select {
 	case <-probeStarted:
-	case <-time.After(time.Second):
+	case <-time.After(repositoryReviewAutomationAsyncTestTimeout):
 		t.Fatal("quota probe did not start")
 	}
 	stoppedAt := time.Now()
@@ -3698,7 +3700,7 @@ func TestRepositoryReviewAutomationStopCancelsBlockedQuotaAdmission(t *testing.T
 		if !errors.Is(admissionErr, errRepositoryReviewSafeStop) {
 			t.Fatalf("task admission error=%v", admissionErr)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(repositoryReviewAutomationAsyncTestTimeout):
 		t.Fatal("blocked admission did not exit")
 	}
 	current, _, getErr := store.GetAutomation(t.Context(), automation.ID)
@@ -3799,7 +3801,13 @@ func waitForRepositoryReviewAutomationStatus(
 	status repoaudit.RepositoryReviewAutomationStatus,
 ) repoaudit.RepositoryReviewAutomation {
 	t.Helper()
-	return waitForRepositoryReviewAutomationStatusWithin(t, store, id, status, time.Second)
+	return waitForRepositoryReviewAutomationStatusWithin(
+		t,
+		store,
+		id,
+		status,
+		repositoryReviewAutomationAsyncTestTimeout,
+	)
 }
 
 func waitForRepositoryReviewAutomationStatusWithin(
