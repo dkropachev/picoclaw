@@ -1856,6 +1856,7 @@ func TestRepositoryReviewAutomationAutoContinueReusesResolvedCommit(t *testing.T
 	}
 	seenCommits := make(chan string, 2)
 	seenCampaigns := make(chan string, 2)
+	secondBatchStarted := make(chan struct{})
 	var batches atomic.Int32
 	controller.runBatch = func(
 		_ context.Context,
@@ -1868,6 +1869,7 @@ func TestRepositoryReviewAutomationAutoContinueReusesResolvedCommit(t *testing.T
 		remaining := 1
 		if batches.Add(1) == 2 {
 			remaining = 0
+			close(secondBatchStarted)
 		}
 		return &workflows.RunResult{
 			RunID: runID, Status: workflows.RunStatusSucceeded,
@@ -1894,11 +1896,17 @@ func TestRepositoryReviewAutomationAutoContinueReusesResolvedCommit(t *testing.T
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("start status=%d body=%s", response.Code, response.Body.String())
 	}
-	completed := waitForRepositoryReviewAutomationStatus(
+	select {
+	case <-secondBatchStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("automatic continuation did not start its second batch")
+	}
+	completed := waitForRepositoryReviewAutomationStatusWithin(
 		t,
 		store,
 		automation.ID,
 		repoaudit.RepositoryReviewAutomationCompleted,
+		10*time.Second,
 	)
 	close(seenCommits)
 	close(seenCampaigns)
@@ -3791,7 +3799,18 @@ func waitForRepositoryReviewAutomationStatus(
 	status repoaudit.RepositoryReviewAutomationStatus,
 ) repoaudit.RepositoryReviewAutomation {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	return waitForRepositoryReviewAutomationStatusWithin(t, store, id, status, time.Second)
+}
+
+func waitForRepositoryReviewAutomationStatusWithin(
+	t *testing.T,
+	store repoaudit.Store,
+	id string,
+	status repoaudit.RepositoryReviewAutomationStatus,
+	timeout time.Duration,
+) repoaudit.RepositoryReviewAutomation {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		automation, found, err := store.GetAutomation(t.Context(), id)
 		if err != nil {
