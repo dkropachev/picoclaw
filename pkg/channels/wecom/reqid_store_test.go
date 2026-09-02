@@ -268,15 +268,27 @@ func TestReqIDStoreEnforcesRuntimeAndSchemaRowCaps(t *testing.T) {
 	)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := newReqIDStore(path).initializationError(); err == nil ||
-		!strings.Contains(err.Error(), "row count") {
-		t.Fatalf("legacy route beyond cap error = %v", err)
+	reopened := newReqIDStore(path)
+	if err := reopened.initializationError(); err != nil {
+		t.Fatalf("late legacy route open error = %v", err)
 	}
-	if _, err := os.Stat(legacyPath); err != nil {
-		t.Fatalf("over-cap legacy source was removed: %v", err)
+	if _, ok := reopened.Get("legacy-chat"); ok {
+		t.Fatal("late legacy route bypassed the SQLite row cap")
 	}
-	if err := os.Remove(legacyPath); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("late legacy source remains: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(
+		reopened.archiveRoot, filepath.FromSlash(reopened.sourceRelative),
+	)); err != nil {
+		t.Fatalf("late legacy source was not archived: %v", err)
+	}
+	var lateIssues int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM storage_import_issues
+	    WHERE component = ? AND issue_code = 'late-source'`, wecomReqIDComponent).Scan(
+		&lateIssues,
+	); err != nil || lateIssues != 1 {
+		t.Fatalf("late legacy audit = %d, %v", lateIssues, err)
 	}
 	if _, err := db.Exec(`INSERT INTO wecom_request_routes (
         chat_id, request_id, chat_type, version

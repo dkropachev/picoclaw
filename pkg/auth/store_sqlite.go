@@ -299,6 +299,7 @@ func validateAuthSchema(ctx context.Context, conn *sql.Conn) error {
               'auth_credentials_provider_idx',
               'storage_imports',
               'storage_import_issues',
+              'storage_import_horizons',
               'storage_imports_archive_status_idx'
           )`).Scan(&unexpected); err != nil {
 		return err

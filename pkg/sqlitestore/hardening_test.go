@@ -920,7 +920,7 @@ func TestImportLegacySourcesQueryAndRootFailures(t *testing.T) {
 		nil,
 	)
 	if _, err := importLegacySources(t.Context(), conn, "test-store", options); err == nil ||
-		!strings.Contains(err.Error(), "import record") {
+		!strings.Contains(err.Error(), "import horizon") {
 		t.Fatalf("importLegacySources(missing schema) error = %v", err)
 	}
 	options.SourceRoot = ""

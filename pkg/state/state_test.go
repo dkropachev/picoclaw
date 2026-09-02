@@ -485,7 +485,7 @@ func TestSQLiteRuntimeStateRemainsAuthoritativeOverLateLegacySource(t *testing.T
 		t.Fatal(err)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM storage_import_issues
-        WHERE component = ? AND source_id = ? AND issue_code = 'sqlite-authoritative'`,
+        WHERE component = ? AND source_id = ? AND issue_code = 'late-source'`,
 		runtimeDatabaseComponent,
 		runtimeDirectorySourceID,
 	).Scan(&authoritativeIssues); err != nil {

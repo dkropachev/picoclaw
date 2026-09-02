@@ -63,6 +63,8 @@ type MetadataAwareSessionStore interface {
 }
 
 // NewJSONLBackend wraps a memory.Store for use as a SessionStore.
+//
+// Deprecated: use NewSQLiteBackend for persistent session storage.
 func NewJSONLBackend(store memory.Store) *JSONLBackend {
 	return &JSONLBackend{store: store}
 }

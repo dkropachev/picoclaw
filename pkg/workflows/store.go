@@ -105,6 +105,9 @@ const (
 	privateRunMarkerContents = "picoclaw-private-workflow-context-v1\n"
 )
 
+// NewFileRunStore returns the SQLite-backed compatibility workflow store.
+//
+// Deprecated: use NewSQLiteRunStore.
 func NewFileRunStore(workspace string) *FileRunStore {
 	return &FileRunStore{
 		root:      filepath.Join(workspace, "workflow_runs"),

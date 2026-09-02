@@ -354,7 +354,8 @@ func validateAccountRouterSchema(ctx context.Context, conn *sql.Conn) error {
               'account_router_block_cursors', 'account_router_auth_invalidations',
               'account_router_accounts_health_idx', 'account_router_sessions_updated_idx',
               'account_router_affinities_account_idx', 'account_router_invalidations_created_idx',
-              'storage_imports', 'storage_import_issues', 'storage_imports_archive_status_idx'
+              'storage_imports', 'storage_import_issues', 'storage_import_horizons',
+              'storage_imports_archive_status_idx'
           )`).Scan(&unexpected); err != nil {
 		return err
 	}

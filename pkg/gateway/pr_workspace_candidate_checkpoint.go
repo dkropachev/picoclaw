@@ -248,7 +248,8 @@ func validatePRWorkspaceCheckpointSchema(ctx context.Context, conn *sql.Conn) er
 		            'checkpoint_metadata', 'checkpoint_legacy_import_state', 'checkpoint_deletions',
 		            'candidate_checkpoints', 'candidate_checkpoints_state_idx',
 		            'checkpoint_deletions_sequence_idx',
-            'storage_imports', 'storage_import_issues', 'storage_imports_archive_status_idx'
+            'storage_imports', 'storage_import_issues', 'storage_import_horizons',
+            'storage_imports_archive_status_idx'
         )`).Scan(&unexpected); err != nil {
 		return err
 	}

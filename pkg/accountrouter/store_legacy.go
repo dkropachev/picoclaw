@@ -29,9 +29,6 @@ type legacyAccountRouterEntry struct {
 }
 
 func (s *Store) legacyOptions() *sqlitestore.LegacyOptions {
-	if !s.hasLegacyState() {
-		return nil
-	}
 	return &sqlitestore.LegacyOptions{
 		SourceRoot:    s.sourceRoot,
 		ArchiveRoot:   s.archiveRoot,

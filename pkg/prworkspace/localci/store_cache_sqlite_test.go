@@ -1376,7 +1376,7 @@ func TestLocalCIPassingCacheMigrationKeepsSQLiteAuthoritative(t *testing.T) {
 	var version int
 	var createdSeconds int64
 	if err = reopened.cacheDB.QueryRow(`SELECT issue_code FROM storage_import_issues
-        WHERE component = ?`, localCICacheComponent).Scan(&code); err != nil || code != "sqlite-authoritative" {
+		WHERE component = ?`, localCICacheComponent).Scan(&code); err != nil || code != "late-source" {
 		t.Fatalf("conflict issue = %q, %v", code, err)
 	}
 	if err = reopened.cacheDB.QueryRow(`SELECT version, created_at_unix_seconds
