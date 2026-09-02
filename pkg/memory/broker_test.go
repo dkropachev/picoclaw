@@ -45,6 +45,84 @@ func TestSessionRuntimeConstructorRequiresBrokerAndDoesNotOpenProvider(t *testin
 	}
 }
 
+func TestSessionBrokerAdapterConstructionIsLazyAndRetainsOnePool(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "workspace", "sessions")
+	startupFence, err := database.AcquireOnlineFence(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Agents.Defaults.Workspace = filepath.Dir(dir)
+	adapter, err := NewBrokerAdapter(home, cfg, SessionsStoreID)
+	if err != nil {
+		_ = startupFence.Close()
+		t.Fatal(err)
+	}
+	if adapter.LocalStore() != nil {
+		t.Fatal("adapter construction opened provider storage")
+	}
+	if _, statErr := os.Lstat(filepath.Join(dir, sessionsDatabaseFilename)); !os.IsNotExist(statErr) {
+		t.Fatalf("adapter construction created database: %v", statErr)
+	}
+	server, err := database.StartServer(t.Context(), database.ServerOptions{
+		Home: home, Handler: adapter, CloseHandler: adapter.Close,
+	})
+	if err != nil {
+		_ = adapter.Close()
+		_ = startupFence.Close()
+		t.Fatal(err)
+	}
+	if fenceCloseErr := startupFence.Close(); fenceCloseErr != nil {
+		_ = server.Close(context.Background())
+		t.Fatal(fenceCloseErr)
+	}
+	client, err := database.Connect(home)
+	if err != nil {
+		_ = server.Close(context.Background())
+		t.Fatal(err)
+	}
+	const callers = 16
+	errorsOut := make(chan error, callers)
+	var wait sync.WaitGroup
+	for range callers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			var response sessionBrokerResponse
+			errorsOut <- client.Call(
+				context.Background(), SessionsBrokerDomain, SessionsBrokerVersion,
+				sessionOperationPing, sessionStoreRequest{StoreID: SessionsStoreID}, &response,
+			)
+		}()
+	}
+	wait.Wait()
+	close(errorsOut)
+	for callErr := range errorsOut {
+		if callErr != nil {
+			t.Fatal(callErr)
+		}
+	}
+	retained := adapter.LocalStore()
+	if retained == nil || retained.db == nil {
+		t.Fatal("first typed operation did not retain a pool")
+	}
+	pool := retained.db
+	var response sessionBrokerResponse
+	if err := client.Call(
+		t.Context(), SessionsBrokerDomain, SessionsBrokerVersion,
+		sessionOperationPing, sessionStoreRequest{StoreID: SessionsStoreID}, &response,
+	); err != nil || adapter.LocalStore().db != pool {
+		t.Fatalf("subsequent operation replaced retained pool: %v", err)
+	}
+	if err := server.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.LocalStore() == nil || adapter.LocalStore().db != nil {
+		t.Fatal("broker close did not close retained pool exactly once")
+	}
+}
+
 func TestSessionBrokerMultiClientPaginationAndAtomicOperations(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, "workspace", "sessions")

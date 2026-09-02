@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	modelCatalogOperationLoadPage = "load-page"
-	modelCatalogOperationSaveAll  = "save-all"
-	modelCatalogOperationSave     = "save"
-	modelCatalogOperationDelete   = "delete"
+	modelCatalogOperationPreflight = "preflight"
+	modelCatalogOperationLoadPage  = "load-page"
+	modelCatalogOperationSaveAll   = "save-all"
+	modelCatalogOperationSave      = "save"
+	modelCatalogOperationDelete    = "delete"
 )
 
 const (
@@ -99,6 +100,17 @@ func (handler *ModelCatalogBrokerHandler) Handle(
 		return nil, database.NewError(database.CodeUnsupported, "database domain is unsupported")
 	}
 	switch request.Operation {
+	case modelCatalogOperationPreflight:
+		var input struct {
+			StoreID database.StoreID `json:"store_id"`
+		}
+		if err := request.DecodePayload(&input); err != nil || input.StoreID != ModelCatalogStoreID {
+			return nil, database.NewError(database.CodeInvalid, "model catalog request is invalid")
+		}
+		if _, err := handler.open(ctx); err != nil {
+			return nil, mapModelCatalogBrokerError(err)
+		}
+		return modelCatalogMutationResponse{Updated: true}, nil
 	case modelCatalogOperationLoadPage:
 		var input modelCatalogPageRequest
 		if err := request.DecodePayload(&input); err != nil || input.StoreID != ModelCatalogStoreID ||

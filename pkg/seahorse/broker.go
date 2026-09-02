@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/database"
 	dbcatalog "github.com/sipeed/picoclaw/pkg/database/catalog"
@@ -21,6 +22,7 @@ const (
 	BrokerVersion    = 1
 	seahorsePageSize = 200
 	opResolveStore   = "resolve-store"
+	opPreflight      = "preflight"
 )
 
 const (
@@ -87,6 +89,11 @@ type seahorseRequest struct {
 	MaxOrdinalExclusive int                `json:"max_ordinal_exclusive,omitempty"`
 	Search              SearchInput        `json:"search,omitempty"`
 }
+
+type seahorseStoreRequest struct {
+	StoreID database.StoreID `json:"store_id"`
+}
+
 type seahorseResponse struct {
 	StoreID      database.StoreID     `json:"store_id,omitempty"`
 	Updated      bool                 `json:"updated,omitempty"`
@@ -109,6 +116,12 @@ type seahorseResponse struct {
 type seahorseTarget struct {
 	selector string
 	path     string
+}
+
+type seahorseBrokerStore struct {
+	target seahorseTarget
+	engine *Engine
+	opMu   sync.Mutex
 }
 
 func canonicalSeahorsePath(path string) (string, error) {
@@ -279,8 +292,7 @@ func collect[T any](fetch func(int) ([]T, bool, error)) ([]T, error) {
 
 type BrokerHandler struct {
 	mu        sync.RWMutex
-	opMu      sync.Mutex
-	engines   map[database.StoreID]*Engine
+	stores    map[database.StoreID]*seahorseBrokerStore
 	selectors map[string]database.StoreID
 	closed    bool
 }
@@ -301,20 +313,14 @@ func NewBrokerHandler(home string, cfg *config.Config) (*BrokerHandler, error) {
 		return nil, err
 	}
 	handler := &BrokerHandler{
-		engines:   make(map[database.StoreID]*Engine, len(targets)),
+		stores:    make(map[database.StoreID]*seahorseBrokerStore, len(targets)),
 		selectors: make(map[string]database.StoreID, len(targets)),
 	}
 	for id, target := range targets {
-		engine, err := newLocalEngine(Config{databasePath: target.path}, nil)
-		if err != nil {
-			_ = handler.Close()
-			return nil, err
-		}
-		handler.engines[id] = engine
 		if _, duplicate := handler.selectors[target.selector]; duplicate {
-			_ = handler.Close()
 			return nil, database.NewError(database.CodeConflict, "seahorse workspace selector collision")
 		}
+		handler.stores[id] = &seahorseBrokerStore{target: target}
 		handler.selectors[target.selector] = id
 	}
 	return handler, nil
@@ -341,15 +347,32 @@ func (h *BrokerHandler) Handle(ctx context.Context, request database.Request) (a
 		return seahorseResponse{StoreID: storeID}, nil
 	}
 	var in seahorseRequest
-	if err := request.DecodePayload(&in); err != nil {
+	if request.Operation == opPreflight {
+		var target seahorseStoreRequest
+		if err := request.DecodePayload(&target); err != nil {
+			return nil, database.NewError(database.CodeInvalid, "seahorse request invalid")
+		}
+		in.StoreID = target.StoreID
+	} else if err := request.DecodePayload(&in); err != nil {
 		return nil, database.NewError(database.CodeInvalid, "seahorse request invalid")
 	}
-	engine := h.engines[in.StoreID]
-	if engine == nil {
+	item := h.stores[in.StoreID]
+	if item == nil {
 		return nil, database.NewError(database.CodeUnauthorized, "seahorse store not cataloged")
 	}
-	h.opMu.Lock()
-	defer h.opMu.Unlock()
+	item.opMu.Lock()
+	defer item.opMu.Unlock()
+	if item.engine == nil {
+		engine, openErr := newLocalEngine(Config{databasePath: item.target.path}, nil)
+		if openErr != nil {
+			return nil, mapSeahorseError(openErr)
+		}
+		item.engine = engine
+	}
+	engine := item.engine
+	if request.Operation == opPreflight {
+		return seahorseResponse{}, nil
+	}
 	out, err := dispatchSeahorse(ctx, engine.store, request.Operation, in)
 	return out, mapSeahorseError(err)
 }
@@ -503,8 +526,17 @@ func mapSeahorseError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if code := database.CodeOf(err); code != database.CodeInternal {
+		return database.NewError(code, "seahorse operation failed")
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return database.NewError(database.CodeDeadline, "seahorse deadline exceeded")
+	}
+	if sqliteprovider.IsInspectionIntegrity(err) {
+		return database.NewError(database.CodeIntegrity, "seahorse integrity validation failed")
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return database.NewError(database.CodeUnavailable, "seahorse store unavailable")
 	}
 	return database.NewError(database.CodeInternal, "seahorse operation failed")
 }
@@ -534,8 +566,10 @@ func (h *BrokerHandler) Close() error {
 	}
 	h.closed = true
 	var result error
-	for _, engine := range h.engines {
-		result = errors.Join(result, engine.Close())
+	for _, item := range h.stores {
+		if item != nil && item.engine != nil {
+			result = errors.Join(result, item.engine.Close())
+		}
 	}
 	return result
 }

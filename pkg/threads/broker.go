@@ -18,6 +18,10 @@ import (
 )
 
 const (
+	// BrokerPreflightOperation opens and fully validates exactly one cataloged
+	// sessions/thread store without mutating domain data.
+	BrokerPreflightOperation = "preflight"
+
 	threadOperationPing         = "thread.ping"
 	threadOperationSearch       = "thread.search"
 	threadOperationList         = "thread.list"
@@ -92,8 +96,28 @@ type threadBrokerResponse struct {
 }
 
 type brokerWorkspace struct {
-	adapter *memory.BrokerAdapter
-	store   Store
+	workspace string
+	adapter   *memory.BrokerAdapter
+	store     Store
+	once      sync.Once
+	err       error
+}
+
+func (workspace *brokerWorkspace) ensureStore() (Store, error) {
+	if workspace == nil || workspace.adapter == nil {
+		return Store{}, database.NewError(database.CodeUnavailable, "session/thread store is unavailable")
+	}
+	workspace.once.Do(func() {
+		local, err := workspace.adapter.EnsureLocalStore()
+		if err != nil {
+			workspace.err = err
+			return
+		}
+		store := workspace.store
+		store.brokerStore = local
+		workspace.store = store
+	})
+	return workspace.store, workspace.err
 }
 
 // BrokerHandler composes one stable session adapter/pool for every cataloged
@@ -122,20 +146,31 @@ func NewBrokerHandler(home string, cfg *config.Config) (*BrokerHandler, error) {
 		selectors:  make(map[string]database.StoreID, len(configured)),
 	}
 	for _, item := range configured {
-		adapter, openErr := memory.NewBrokerAdapter(canonicalHome, cfg, item.storeID)
-		if openErr != nil {
+		adapter, configureErr := memory.NewBrokerAdapter(canonicalHome, cfg, item.storeID)
+		if configureErr != nil {
 			_ = handler.Close()
-			return nil, openErr
+			return nil, configureErr
 		}
-		store := NewStoreFromWorkspace(item.workspace)
-		store.brokerClient = nil
-		store.brokerStore = adapter.LocalStore()
-		store.brokerStoreID = item.storeID
-		store.brokerResolveErr = nil
-		handler.workspaces[item.storeID] = &brokerWorkspace{adapter: adapter, store: store}
+		handler.workspaces[item.storeID] = &brokerWorkspace{
+			workspace: item.workspace,
+			adapter:   adapter,
+			store:     newBrokerThreadStore(item.workspace, item.storeID),
+		}
 		handler.selectors[item.selector] = item.storeID
 	}
 	return handler, nil
+}
+
+func newBrokerThreadStore(workspace string, storeID database.StoreID) Store {
+	workspace = ResolveWorkspace(workspace)
+	return Store{
+		Dir:              filepath.Join(workspace, "sessions"),
+		Workspace:        workspace,
+		ThreadsDir:       filepath.Join(workspace, "threads"),
+		HandoffsDir:      filepath.Join(workspace, "threads", "handoffs"),
+		brokerStoreID:    storeID,
+		brokerResolveErr: nil,
+	}
 }
 
 func (handler *BrokerHandler) Handle(ctx context.Context, request database.Request) (any, error) {
@@ -159,6 +194,25 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 		}
 		return memory.StoreResolutionResponse{StoreID: storeID}, nil
 	}
+	if request.Operation == BrokerPreflightOperation {
+		var input threadStoreRequest
+		if request.DecodePayload(&input) != nil || !input.StoreID.Valid() {
+			return nil, invalidThreadRequest()
+		}
+		workspace := handler.workspaces[input.StoreID]
+		if workspace == nil {
+			return nil, database.NewError(database.CodeUnauthorized, "session StoreID is not cataloged")
+		}
+		handler.mu.Lock()
+		defer handler.mu.Unlock()
+		if handler.closed {
+			return nil, database.NewError(database.CodeUnavailable, "session/thread broker is closed")
+		}
+		if _, err := workspace.ensureStore(); err != nil {
+			return nil, mapThreadBrokerError(err)
+		}
+		return threadBrokerResponse{OK: true}, nil
+	}
 	storeID, err := requestStoreID(request)
 	if err != nil {
 		return nil, err
@@ -176,13 +230,17 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := ctx.Err(); err != nil {
+	if contextErr := ctx.Err(); contextErr != nil {
 		return nil, database.NewError(database.CodeDeadline, "thread request deadline was exceeded")
 	}
 	handler.mu.Lock()
 	defer handler.mu.Unlock()
 	if handler.closed {
 		return nil, database.NewError(database.CodeUnavailable, "session/thread broker is closed")
+	}
+	store, err := workspace.ensureStore()
+	if err != nil {
+		return nil, mapThreadBrokerError(err)
 	}
 
 	switch request.Operation {
@@ -198,7 +256,7 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 			input.Options.Offset < 0 || input.Options.Limit < 0 || input.Options.Limit > MaxLimit {
 			return nil, invalidThreadRequest()
 		}
-		items, err := workspace.store.Search(input.Options)
+		items, err := store.Search(input.Options)
 		return threadBrokerResponse{Threads: cloneThreads(items)}, mapThreadBrokerError(err)
 	case threadOperationList:
 		var input threadListRequest
@@ -206,7 +264,7 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 			input.Offset < 0 || input.Limit < 1 || input.Limit > threadBrokerPageLimit {
 			return nil, invalidThreadRequest()
 		}
-		items, err := workspace.store.ListAll(input.Options)
+		items, err := store.ListAll(input.Options)
 		if err != nil {
 			return nil, mapThreadBrokerError(err)
 		}
@@ -223,7 +281,7 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 			!validThreadIdentity(input.ID) {
 			return nil, invalidThreadRequest()
 		}
-		item, found, err := workspace.store.Get(input.ID)
+		item, found, err := store.Get(input.ID)
 		if err != nil {
 			return nil, mapThreadBrokerError(err)
 		}
@@ -239,7 +297,7 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 			!validThreadIdentity(input.ID) {
 			return nil, invalidThreadRequest()
 		}
-		meta, found, err := workspace.store.GetMeta(input.ID)
+		meta, found, err := store.GetMeta(input.ID)
 		if err != nil {
 			return nil, mapThreadBrokerError(err)
 		}
@@ -254,7 +312,7 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 		if request.DecodePayload(&input) != nil || !validThreadStoreID(input.StoreID) {
 			return nil, invalidThreadRequest()
 		}
-		item, err := workspace.store.CreateThread(ctx, cloneCreateRequest(input.Request))
+		item, err := store.CreateThread(ctx, cloneCreateRequest(input.Request))
 		if err != nil {
 			return nil, mapThreadBrokerError(err)
 		}
@@ -265,7 +323,7 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 		if request.DecodePayload(&input) != nil || !validThreadStoreID(input.StoreID) {
 			return nil, invalidThreadRequest()
 		}
-		item, err := workspace.store.createPicoThreadWithAllocation(
+		item, err := store.createPicoThreadWithAllocation(
 			ctx, input.Allocation, cloneCreateRequest(input.Request),
 		)
 		if err != nil {
@@ -279,7 +337,7 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 			!validThreadIdentity(input.ID) {
 			return nil, invalidThreadRequest()
 		}
-		item, found, err := workspace.store.UpdateThread(input.ID, cloneUpdateRequest(input.Request))
+		item, found, err := store.UpdateThread(input.ID, cloneUpdateRequest(input.Request))
 		if err != nil {
 			return nil, mapThreadBrokerError(err)
 		}
@@ -294,7 +352,7 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 		if request.DecodePayload(&input) != nil || !validThreadStoreID(input.StoreID) {
 			return nil, invalidThreadRequest()
 		}
-		item, handoff, err := workspace.store.AttachCurrent(ctx, cloneAttachRequest(input.Request))
+		item, handoff, err := store.AttachCurrent(ctx, cloneAttachRequest(input.Request))
 		if err != nil {
 			return nil, mapThreadBrokerError(err)
 		}
@@ -306,7 +364,7 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 			!validThreadIdentity(input.SessionKey) {
 			return nil, invalidThreadRequest()
 		}
-		if err := workspace.store.DetachCurrent(input.SessionKey); err != nil {
+		if err := store.DetachCurrent(input.SessionKey); err != nil {
 			return nil, mapThreadBrokerError(err)
 		}
 		return threadBrokerResponse{OK: true}, nil
@@ -316,7 +374,7 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 			!validThreadIdentity(input.ID) {
 			return nil, invalidThreadRequest()
 		}
-		handoff, found, err := workspace.store.ReturnToOrigin(input.ID)
+		handoff, found, err := store.ReturnToOrigin(input.ID)
 		if err != nil {
 			return nil, mapThreadBrokerError(err)
 		}

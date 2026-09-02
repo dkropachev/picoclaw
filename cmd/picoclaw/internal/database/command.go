@@ -222,6 +222,7 @@ func newServeCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer dbcatalog.CloseProbePools(canonicalHome)
 			serverContext, stop := signal.NotifyContext(
 				command.Context(), os.Interrupt, syscall.SIGTERM,
 			)
@@ -337,6 +338,7 @@ func newServeCommand() *cobra.Command {
 						wecomHandler.Close(), weixinHandler.Close(),
 						adaptationHandler.Close(), bridgeHandler.Close(),
 						gitInventoryHandler.Close(), checkpointHandler.Close(),
+						dbcatalog.CloseProbePools(canonicalHome),
 					)
 				})
 				return handlersCloseErr
@@ -408,6 +410,14 @@ func newServeCommand() *cobra.Command {
 						return preflightBrokerTarget(
 							ctx, authHandler, "launcher-auth", "is-initialized", entry.ID,
 						)
+					case "model-catalogs":
+						return preflightBrokerTarget(
+							ctx, modelCatalogHandler, "model-catalogs", "preflight", entry.ID,
+						)
+					case "tool-adaptation":
+						return preflightBrokerTarget(
+							ctx, adaptationHandler, "tool-adaptation", "preflight", entry.ID,
+						)
 					case "workflows":
 						return preflightBrokerTarget(
 							ctx,
@@ -417,17 +427,29 @@ func newServeCommand() *cobra.Command {
 							entry.ID,
 						)
 					case "cron":
-						return cronHandler.ensureOpen()
+						return preflightBrokerTarget(
+							ctx, cronHandler, cron.BrokerDomain, "preflight", entry.ID,
+						)
 					case "account-routing":
 						return accountRoutingHandler.ensureOpen()
 					case "sessions":
-						return sessionHandler.ensureOpen()
+						return preflightBrokerTarget(
+							ctx, sessionHandler, "sessions", threads.BrokerPreflightOperation, entry.ID,
+						)
 					case "eventing":
-						return eventingHandler.ensureOpen()
+						return preflightBrokerTarget(
+							ctx, eventingHandler, eventing.BrokerDomain,
+							eventing.BrokerPreflightOperation, entry.ID,
+						)
 					case "evolution":
-						return evolutionHandler.ensureOpen()
+						return preflightBrokerTarget(
+							ctx, evolutionHandler, evolution.BrokerDomain,
+							evolution.BrokerPreflightOperation, entry.ID,
+						)
 					case "runtime-state":
-						return runtimeStateHandler.ensureOpen()
+						return preflightBrokerTarget(
+							ctx, runtimeStateHandler, "runtime-state", "preflight", entry.ID,
+						)
 					case "repository-reviews":
 						return preflightBrokerTarget(
 							ctx, reviewHandler, "repository-reviews", "preflight", entry.ID,
@@ -437,9 +459,13 @@ func newServeCommand() *cobra.Command {
 							ctx, evaluationHandler, "repository-evaluations", "preflight", entry.ID,
 						)
 					case "local-ci":
-						return localCIHandler.ensureOpen()
+						return preflightBrokerTarget(
+							ctx, localCIHandler, localci.CacheBrokerDomain, "preflight", entry.ID,
+						)
 					case "seahorse":
-						return seahorseHandler.ensureOpen()
+						return preflightBrokerTarget(
+							ctx, seahorseHandler, seahorse.BrokerDomain, "preflight", entry.ID,
+						)
 					case "channel-wecom":
 						return preflightBrokerTarget(
 							ctx, wecomHandler, "channel-wecom", "preflight", entry.ID,

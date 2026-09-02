@@ -22,9 +22,10 @@ const (
 
 	CacheStoreID database.StoreID = "workspace.local-ci"
 
-	cacheOperationResolve = "resolve-store"
-	cacheOperationLookup  = "lookup-passing"
-	cacheOperationPromote = "promote-passing"
+	cacheOperationResolve   = "resolve-store"
+	cacheOperationPreflight = "preflight"
+	cacheOperationLookup    = "lookup-passing"
+	cacheOperationPromote   = "promote-passing"
 )
 
 type cacheResolveRequest struct {
@@ -32,6 +33,10 @@ type cacheResolveRequest struct {
 }
 
 type cacheResolveResponse struct {
+	StoreID database.StoreID `json:"store_id"`
+}
+
+type cacheStoreRequest struct {
 	StoreID database.StoreID `json:"store_id"`
 }
 
@@ -54,14 +59,16 @@ type cacheResponse struct {
 
 type cacheBrokerStore struct {
 	selector string
+	root     string
 	store    *FileEvidenceStore
+	opMu     sync.Mutex
 }
 
 type BrokerHandler struct {
 	stores    map[database.StoreID]*cacheBrokerStore
 	selectors map[string]database.StoreID
 
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	closed    bool
 	closeOnce sync.Once
 	closeErr  error
@@ -84,12 +91,10 @@ func NewBrokerHandler(home string, cfg *config.Config) (*BrokerHandler, error) {
 		selectors: make(map[string]database.StoreID, len(configured)),
 	}
 	for _, item := range configured {
-		store, openErr := openFileEvidenceStoreLocal(item.root)
-		if openErr != nil {
-			_ = handler.Close()
-			return nil, mapCacheBrokerError(openErr)
+		handler.stores[item.storeID] = &cacheBrokerStore{
+			selector: item.selector,
+			root:     item.root,
 		}
-		handler.stores[item.storeID] = &cacheBrokerStore{selector: item.selector, store: store}
 		handler.selectors[item.selector] = item.storeID
 	}
 	return handler, nil
@@ -105,8 +110,8 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 	if err := ctx.Err(); err != nil {
 		return nil, database.NewError(database.CodeDeadline, "local CI cache deadline was exceeded")
 	}
-	handler.mu.Lock()
-	defer handler.mu.Unlock()
+	handler.mu.RLock()
+	defer handler.mu.RUnlock()
 	if handler.closed {
 		return nil, database.NewError(database.CodeUnavailable, "local CI cache broker is closed")
 	}
@@ -126,10 +131,27 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 		return nil, err
 	}
 	item, ok := handler.stores[storeID]
-	if !ok || item.store == nil {
+	if !ok || item == nil {
 		return nil, database.NewError(database.CodeUnauthorized, "local CI cache StoreID is not cataloged")
 	}
+	if request.Operation == cacheOperationPreflight {
+		var input cacheStoreRequest
+		if request.DecodePayload(&input) != nil || input.StoreID != storeID {
+			return nil, database.NewError(database.CodeInvalid, "local CI cache request is invalid")
+		}
+	}
+	item.opMu.Lock()
+	defer item.opMu.Unlock()
+	if item.store == nil {
+		store, openErr := openFileEvidenceStoreLocal(item.root)
+		if openErr != nil {
+			return nil, mapCacheBrokerError(openErr)
+		}
+		item.store = store
+	}
 	switch request.Operation {
+	case cacheOperationPreflight:
+		return cacheResponse{}, nil
 	case cacheOperationLookup:
 		var input cacheLookupRequest
 		if request.DecodePayload(&input) != nil || input.StoreID != storeID || !validDigest(input.ResultKey) {

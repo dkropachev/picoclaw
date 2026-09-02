@@ -13,6 +13,98 @@ import (
 	"github.com/sipeed/picoclaw/pkg/database"
 )
 
+func TestCronBrokerLazilyIsolatesMigrationRequiredWorkspace(t *testing.T) {
+	home := t.TempDir()
+	primary := filepath.Join(home, "primary")
+	sibling := filepath.Join(home, "sibling")
+	legacyDir := filepath.Join(sibling, "cron")
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(legacyDir, cronLegacyFilename)
+	if err := os.WriteFile(legacyPath, []byte(`{"version":1,"jobs":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = primary
+	cfg.Agents.List = []config.AgentConfig{{ID: "sibling", Workspace: sibling}}
+
+	handler, err := NewBrokerHandler(home, cfg)
+	if err != nil {
+		t.Fatalf("constructor: %v", err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
+	for id, workspace := range handler.workspaces {
+		if workspace.service != nil {
+			t.Fatalf("constructor opened %q", id)
+		}
+	}
+	primaryDatabase := filepath.Join(primary, "cron", cronDatabaseFilename)
+	siblingDatabase := filepath.Join(sibling, "cron", cronDatabaseFilename)
+	for _, path := range []string{primaryDatabase, siblingDatabase} {
+		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("constructor touched %q: %v", path, statErr)
+		}
+	}
+
+	fence, err := database.AcquireOnlineFence(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fence.Close() })
+	if _, err = handler.Handle(t.Context(), cronBrokerTestRequest(
+		t, cronOperationPreflight, cronStoreRequest{StoreID: BrokerStoreID},
+	)); err != nil {
+		t.Fatalf("primary preflight: %v", err)
+	}
+	primaryPool := cronBrokerPoolForStore(handler, BrokerStoreID)
+	if primaryPool == nil {
+		t.Fatal("primary preflight did not retain its pool")
+	}
+	var siblingID database.StoreID
+	for id := range handler.workspaces {
+		if id != BrokerStoreID {
+			siblingID = id
+		}
+	}
+	if !siblingID.Valid() {
+		t.Fatal("sibling StoreID missing")
+	}
+	if _, err = handler.Handle(t.Context(), cronBrokerTestRequest(
+		t, cronOperationPreflight, cronStoreRequest{StoreID: siblingID},
+	)); database.CodeOf(err) != database.CodeMigrationRequired {
+		t.Fatalf("sibling preflight error = %v", err)
+	}
+	if handler.workspaces[siblingID].service != nil {
+		t.Fatal("failed sibling open was retained")
+	}
+	every := int64(60_000)
+	if _, err = handler.Handle(t.Context(), cronBrokerTestRequest(t, cronOperationAdd, cronAddRequest{
+		StoreID:  BrokerStoreID,
+		Name:     "ready-after-sibling-failure",
+		Schedule: CronSchedule{Kind: "every", EveryMS: &every},
+	})); err != nil {
+		t.Fatalf("primary operation after sibling failure: %v", err)
+	}
+	if cronBrokerPoolForStore(handler, BrokerStoreID) != primaryPool {
+		t.Fatal("primary retained pool changed")
+	}
+	if _, statErr := os.Lstat(legacyPath); statErr != nil {
+		t.Fatalf("failed sibling migration source changed: %v", statErr)
+	}
+}
+
+func cronBrokerTestRequest(t *testing.T, operation string, payload any) database.Request {
+	t.Helper()
+	raw, err := database.MarshalCanonical(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return database.Request{
+		Domain: BrokerDomain, Version: BrokerVersion, Operation: operation, Payload: raw,
+	}
+}
+
 func TestCronBrokerMultiClientCRUDUsesOneOwner(t *testing.T) {
 	home := t.TempDir()
 	databasePath := filepath.Join(home, "workspace", "cron", "jobs.db")
@@ -403,7 +495,12 @@ func closeCronBroker(server *database.Server) error {
 }
 
 func cronBrokerPool(handler *BrokerHandler) *sql.DB {
-	if handler == nil || handler.service == nil || handler.service.storage == nil {
+	if handler == nil {
+		return nil
+	}
+	handler.serviceMu.RLock()
+	defer handler.serviceMu.RUnlock()
+	if handler.service == nil || handler.service.storage == nil {
 		return nil
 	}
 	handler.service.storage.dbMu.Lock()
@@ -412,12 +509,16 @@ func cronBrokerPool(handler *BrokerHandler) *sql.DB {
 }
 
 func cronBrokerPoolForStore(handler *BrokerHandler, storeID database.StoreID) *sql.DB {
-	if handler == nil || handler.workspaces[storeID] == nil ||
-		handler.workspaces[storeID].service == nil ||
-		handler.workspaces[storeID].service.storage == nil {
+	if handler == nil || handler.workspaces[storeID] == nil {
 		return nil
 	}
-	storage := handler.workspaces[storeID].service.storage
+	workspace := handler.workspaces[storeID]
+	workspace.opMu.Lock()
+	defer workspace.opMu.Unlock()
+	if workspace.service == nil || workspace.service.storage == nil {
+		return nil
+	}
+	storage := workspace.service.storage
 	storage.dbMu.Lock()
 	defer storage.dbMu.Unlock()
 	return storage.db

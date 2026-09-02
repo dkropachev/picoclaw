@@ -13,6 +13,103 @@ import (
 	"github.com/sipeed/picoclaw/pkg/database"
 )
 
+func TestRuntimeStateBrokerLazilyIsolatesMigrationRequiredWorkspace(t *testing.T) {
+	home := t.TempDir()
+	primary := filepath.Join(home, "primary")
+	sibling := filepath.Join(home, "sibling")
+	if err := os.MkdirAll(sibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(sibling, "state.json")
+	if err := os.WriteFile(legacyPath, []byte(`{"last_channel":"legacy"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Agents.Defaults.Workspace = primary
+	cfg.Agents.List = []config.AgentConfig{{ID: "sibling", Workspace: sibling}}
+	handler, err := NewBrokerHandler(home, cfg)
+	if err != nil {
+		t.Fatalf("constructor: %v", err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
+	for id, workspace := range handler.workspaces {
+		if workspace.manager != nil {
+			t.Fatalf("constructor opened %q", id)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(primary, "state", runtimeDatabaseFilename),
+		filepath.Join(sibling, "state", runtimeDatabaseFilename),
+	} {
+		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("constructor touched %q: %v", path, statErr)
+		}
+	}
+	fence, err := database.AcquireOnlineFence(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fence.Close() })
+	if _, err = handler.Handle(t.Context(), runtimeBrokerTestRequest(
+		t, runtimeStateOperationPreflight, runtimeStateTarget{StoreID: RuntimeStateStoreID},
+	)); err != nil {
+		t.Fatalf("primary preflight: %v", err)
+	}
+	primaryManager := handler.workspaces[RuntimeStateStoreID].manager
+	if primaryManager == nil || primaryManager.retained == nil || primaryManager.retained.db == nil {
+		t.Fatal("primary preflight did not retain its pool")
+	}
+	primaryPool := primaryManager.retained.db
+	var siblingID database.StoreID
+	for id := range handler.workspaces {
+		if id != RuntimeStateStoreID {
+			siblingID = id
+		}
+	}
+	if !siblingID.Valid() {
+		t.Fatal("sibling StoreID missing")
+	}
+	if _, err = handler.Handle(t.Context(), runtimeBrokerTestRequest(
+		t, runtimeStateOperationPreflight, runtimeStateTarget{StoreID: siblingID},
+	)); database.CodeOf(err) != database.CodeMigrationRequired {
+		t.Fatalf("sibling preflight error = %v", err)
+	}
+	if handler.workspaces[siblingID].manager != nil {
+		t.Fatal("failed sibling open was retained")
+	}
+	if _, err = handler.Handle(t.Context(), runtimeBrokerTestRequest(
+		t,
+		runtimeStateOperationSetLastChannel,
+		runtimeStateSetRequest{StoreID: RuntimeStateStoreID, Value: "ready"},
+	)); err != nil {
+		t.Fatalf("primary mutation after sibling failure: %v", err)
+	}
+	response, err := handler.Handle(t.Context(), runtimeBrokerTestRequest(
+		t, runtimeStateOperationSnapshot, runtimeStateTarget{StoreID: RuntimeStateStoreID},
+	))
+	if err != nil || response.(runtimeStateSnapshotResponse).State.LastChannel != "ready" {
+		t.Fatalf("primary snapshot after sibling failure = %#v, %v", response, err)
+	}
+	if handler.workspaces[RuntimeStateStoreID].manager.retained.db != primaryPool {
+		t.Fatal("primary retained pool changed")
+	}
+	if _, statErr := os.Lstat(legacyPath); statErr != nil {
+		t.Fatalf("failed sibling migration source changed: %v", statErr)
+	}
+}
+
+func runtimeBrokerTestRequest(t *testing.T, operation string, payload any) database.Request {
+	t.Helper()
+	raw, err := database.MarshalCanonical(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return database.Request{
+		Domain: RuntimeStateDomain, Version: RuntimeStateVersion,
+		Operation: operation, Payload: raw,
+	}
+}
+
 func TestRuntimeStateBrokerConfiguredWorkspaceIsolation(t *testing.T) {
 	home := t.TempDir()
 	primary := filepath.Join(home, "primary")

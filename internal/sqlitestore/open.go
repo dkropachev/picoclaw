@@ -199,11 +199,11 @@ func requireOnlineCurrentStore(
 		return false, err
 	}
 	var objects int
-	if err := db.QueryRowContext(
+	if queryErr := db.QueryRowContext(
 		ctx,
 		`SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`,
-	).Scan(&objects); err != nil {
-		return false, err
+	).Scan(&objects); queryErr != nil {
+		return false, queryErr
 	}
 	if version == 0 && objects == 0 && !legacyExists {
 		return true, nil
@@ -228,6 +228,18 @@ func requireOnlineCurrentStore(
 			"offline database migration is required",
 		)
 	}
+	if options.Legacy != nil {
+		closed, horizonErr := sharedImportHorizonClosed(ctx, db, options.Component)
+		if horizonErr != nil {
+			return false, horizonErr
+		}
+		if !closed {
+			return false, dblayer.NewError(
+				dblayer.CodeMigrationRequired,
+				"offline database migration is required",
+			)
+		}
+	}
 	return false, nil
 }
 
@@ -240,6 +252,22 @@ func sharedImportSchemaObjectsPresent(ctx context.Context, queryer contextQuerye
 		return false, err
 	}
 	return count == 4, nil
+}
+
+func sharedImportHorizonClosed(
+	ctx context.Context,
+	queryer contextQueryer,
+	component string,
+) (bool, error) {
+	var count int
+	if err := queryer.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM storage_import_horizons WHERE component=?`,
+		component,
+	).Scan(&count); err != nil {
+		return false, err
+	}
+	return count == 1, nil
 }
 
 func onlineLegacySourceExists(options *LegacyOptions) (bool, error) {

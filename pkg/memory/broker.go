@@ -178,9 +178,12 @@ type sessionBrokerResponse struct {
 // session/thread broker handler. It is local-only even when a process client is
 // installed, preventing recursive IPC.
 type BrokerAdapter struct {
+	dir      string
 	store    *SQLiteStore
 	storeID  database.StoreID
 	selector string
+	openOnce sync.Once
+	openErr  error
 
 	mu        sync.Mutex
 	closed    bool
@@ -214,30 +217,61 @@ func NewBrokerAdapter(
 }
 
 func newBrokerAdapterAtDirectory(dir string, storeID database.StoreID) (*BrokerAdapter, error) {
-	store, err := openLocalSQLiteStore(context.Background(), dir)
-	if err != nil {
-		return nil, mapSessionBrokerError(err)
-	}
-	store.storeID = storeID
 	selector, err := WorkspaceSelector(dir)
 	if err != nil {
-		_ = store.Close()
 		return nil, err
 	}
-	return &BrokerAdapter{store: store, storeID: storeID, selector: selector}, nil
+	return &BrokerAdapter{dir: dir, storeID: storeID, selector: selector}, nil
 }
 
-// LocalStore exposes the adapter's stable typed store only to broker-side
-// composition. It contains no public database/sql value.
+// LocalStore exposes an already-opened stable typed store only to broker-side
+// composition. It never opens provider storage.
 func (adapter *BrokerAdapter) LocalStore() *SQLiteStore {
 	if adapter == nil {
 		return nil
 	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
 	return adapter.store
 }
 
+// StoreID returns this adapter's opaque catalog identity.
+func (adapter *BrokerAdapter) StoreID() database.StoreID {
+	if adapter == nil {
+		return ""
+	}
+	return adapter.storeID
+}
+
+// EnsureLocalStore opens this adapter's one retained provider pool on first
+// typed use. Failure is isolated to this StoreID for the broker epoch.
+func (adapter *BrokerAdapter) EnsureLocalStore() (*SQLiteStore, error) {
+	if adapter == nil {
+		return nil, database.NewError(database.CodeUnavailable, "session broker adapter is unavailable")
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if adapter.closed {
+		return nil, database.NewError(database.CodeUnavailable, "session broker adapter is closed")
+	}
+	return adapter.ensureLocalStoreLocked()
+}
+
+func (adapter *BrokerAdapter) ensureLocalStoreLocked() (*SQLiteStore, error) {
+	adapter.openOnce.Do(func() {
+		adapter.store, adapter.openErr = openLocalSQLiteStore(context.Background(), adapter.dir)
+		if adapter.openErr != nil {
+			adapter.openErr = mapSessionBrokerError(adapter.openErr)
+			adapter.store = nil
+			return
+		}
+		adapter.store.storeID = adapter.storeID
+	})
+	return adapter.store, adapter.openErr
+}
+
 func (adapter *BrokerAdapter) Handle(ctx context.Context, request database.Request) (any, error) {
-	if adapter == nil || adapter.store == nil || request.Domain != SessionsBrokerDomain ||
+	if adapter == nil || request.Domain != SessionsBrokerDomain ||
 		request.Version != SessionsBrokerVersion || !strings.HasPrefix(request.Operation, "session.") {
 		return nil, database.NewError(database.CodeUnsupported, "database domain is unsupported")
 	}
@@ -253,14 +287,18 @@ func (adapter *BrokerAdapter) Handle(ctx context.Context, request database.Reque
 	if err := ctx.Err(); err != nil {
 		return nil, database.NewError(database.CodeDeadline, "session request deadline was exceeded")
 	}
-
-	switch request.Operation {
-	case SessionOperationResolveStore:
+	if request.Operation == SessionOperationResolveStore {
 		var input StoreResolutionRequest
 		if request.DecodePayload(&input) != nil || input.WorkspaceSelector != adapter.selector {
 			return nil, database.NewError(database.CodeUnauthorized, "session workspace is not cataloged")
 		}
 		return StoreResolutionResponse{StoreID: adapter.storeID}, nil
+	}
+	if _, err := adapter.ensureLocalStoreLocked(); err != nil {
+		return nil, err
+	}
+
+	switch request.Operation {
 	case sessionOperationPing:
 		var input sessionStoreRequest
 		if request.DecodePayload(&input) != nil || !adapter.validStoreID(input.StoreID) {

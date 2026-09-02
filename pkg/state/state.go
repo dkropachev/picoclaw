@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,8 +18,6 @@ import (
 )
 
 const maxRuntimeStateValueBytes = 64 << 10
-
-const runtimeDatabaseLockShards = 64
 
 // State represents the persistent runtime delivery state for a workspace.
 type State struct {
@@ -58,7 +55,7 @@ type retainedRuntimeDatabase struct {
 	closed bool
 }
 
-var runtimeDatabaseLocks [runtimeDatabaseLockShards]sync.Mutex
+var runtimeDatabaseLocks sync.Map // map[string]*sync.Mutex
 
 var closeInitializedRuntimeDatabase = func(db *sql.DB) error { return db.Close() }
 
@@ -454,9 +451,8 @@ func (sm *Manager) StoreID() database.StoreID {
 }
 
 func runtimeLocalDatabaseLock(databasePath string) *sync.Mutex {
-	hash := fnv.New32a()
-	_, _ = hash.Write([]byte(databasePath))
-	return &runtimeDatabaseLocks[hash.Sum32()%runtimeDatabaseLockShards]
+	lock, _ := runtimeDatabaseLocks.LoadOrStore(databasePath, &sync.Mutex{})
+	return lock.(*sync.Mutex)
 }
 
 func validateRuntimeStateValue(value string) error {

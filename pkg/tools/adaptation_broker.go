@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -113,6 +114,13 @@ func (handler *adaptationBrokerHandler) Handle(
 		return value, nil
 	}
 	switch request.Operation {
+	case "preflight":
+		var input adaptationProfileRequest
+		if err := request.DecodePayload(&input); err != nil || input.StoreID != ToolAdaptationStoreID {
+			return nil, database.NewError(database.CodeInvalid, "tool adaptation request is invalid")
+		}
+		_, _ = handler.store.latest(ToolAdaptationProfile{})
+		return result(adaptationObservationResponse{}, false)
 	case "observe-cache":
 		var input adaptationObservationRequest
 		if err := request.DecodePayload(&input); err != nil || input.StoreID != ToolAdaptationStoreID {
@@ -200,6 +208,10 @@ func mapAdaptationBrokerError(err error, mutation bool) error {
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return database.NewError(database.CodeDeadline, "tool adaptation request deadline was exceeded")
+	case errors.Is(err, sqlitestore.ErrTooNew):
+		return database.NewError(database.CodeUnsupported, "tool adaptation schema is newer than supported")
+	case errors.Is(err, sqlitestore.ErrInvalidSchema), errors.Is(err, sqlitestore.ErrIntegrity):
+		return database.NewError(database.CodeIntegrity, "tool adaptation integrity validation failed")
 	case errors.Is(err, os.ErrPermission):
 		return database.NewError(database.CodeUnavailable, "tool adaptation store is unavailable")
 	default:

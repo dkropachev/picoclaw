@@ -41,6 +41,7 @@ const (
 	cronOperationClaim      = "claim-due"
 	cronOperationComplete   = "complete-run"
 	cronOperationResolve    = "resolve-store"
+	cronOperationPreflight  = "preflight"
 )
 
 type cronResolveStoreRequest struct {
@@ -126,9 +127,10 @@ type cronBrokerResponse struct {
 }
 
 type cronBrokerWorkspace struct {
-	selector string
-	service  *CronService
-	opMu     sync.Mutex
+	selector  string
+	storePath string
+	service   *CronService
+	opMu      sync.Mutex
 }
 
 // BrokerHandler owns one stable CronService/pool for the primary and every
@@ -139,16 +141,17 @@ type BrokerHandler struct {
 	selectors  map[string]database.StoreID
 
 	// Primary alias retained for one-package compatibility tests.
-	service *CronService
+	serviceMu sync.RWMutex
+	service   *CronService
 
 	closed    bool
 	closeOnce sync.Once
 	closeErr  error
 }
 
-// NewBrokerHandler opens local-only services derived solely from trusted
-// configuration. It never consults RuntimeClient and cannot recurse into its
-// own domain.
+// NewBrokerHandler catalogs local-only services derived solely from trusted
+// configuration. Each store opens lazily on its first target-specific request;
+// construction never consults RuntimeClient or opens a SQLite generation.
 func NewBrokerHandler(home string, cfg *config.Config) (*BrokerHandler, error) {
 	if !database.BrokerAuthorityHeld() && !database.ProviderTestAuthorityHeld() &&
 		!allowUnfencedCronProviderForTests.Load() {
@@ -172,19 +175,13 @@ func NewBrokerHandler(home string, cfg *config.Config) (*BrokerHandler, error) {
 		workspaces: make(map[database.StoreID]*cronBrokerWorkspace, len(configured)),
 		selectors:  make(map[string]database.StoreID, len(configured)),
 	}
-	for index, item := range configured {
-		service, openErr := newLocalCronService(filepath.Join(item.workspace, "cron"), nil)
-		if openErr != nil {
-			_ = handler.Close()
-			return nil, mapCronBrokerError(openErr)
+	for _, item := range configured {
+		workspace := &cronBrokerWorkspace{
+			selector:  item.selector,
+			storePath: filepath.Join(item.workspace, "cron"),
 		}
-		service.storeID = item.storeID
-		workspace := &cronBrokerWorkspace{selector: item.selector, service: service}
 		handler.workspaces[item.storeID] = workspace
 		handler.selectors[item.selector] = item.storeID
-		if index == 0 {
-			handler.service = service
-		}
 	}
 	return handler, nil
 }
@@ -224,14 +221,38 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 		return nil, err
 	}
 	workspace, ok := handler.workspaces[storeID]
-	if !ok || workspace == nil || workspace.service == nil {
+	if !ok || workspace == nil {
 		return nil, database.NewError(database.CodeUnauthorized, "cron store is not cataloged")
+	}
+	if request.Operation == cronOperationPreflight {
+		var input cronStoreRequest
+		if err := request.DecodePayload(&input); err != nil || input.StoreID != storeID {
+			return nil, invalidCronRequest()
+		}
 	}
 	workspace.opMu.Lock()
 	defer workspace.opMu.Unlock()
+	if workspace.service == nil {
+		service, openErr := newLocalCronService(workspace.storePath, nil)
+		if openErr != nil {
+			if service != nil {
+				_ = service.Close()
+			}
+			return nil, mapCronBrokerError(openErr)
+		}
+		service.storeID = storeID
+		workspace.service = service
+		if storeID == BrokerStoreID {
+			handler.serviceMu.Lock()
+			handler.service = service
+			handler.serviceMu.Unlock()
+		}
+	}
 	service := workspace.service
 
 	switch request.Operation {
+	case cronOperationPreflight:
+		return handler.response(nil, nil), nil
 	case cronOperationList:
 		var input cronListRequest
 		if err := request.DecodePayload(&input); err != nil || !validCronStoreID(input.StoreID) ||

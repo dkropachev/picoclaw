@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/database"
 	developmentnotifications "github.com/sipeed/picoclaw/pkg/developmentnotifications"
@@ -435,6 +436,101 @@ func TestEventingBrokerConfiguredWorkspacesAreIsolated(t *testing.T) {
 		if !workspace.store.closed.Load() || workspace.store.db.Ping() == nil {
 			t.Fatalf("eventing pool %q remained open", storeID)
 		}
+	}
+}
+
+func TestEventingBrokerMixedWorkspaceReadinessIsStoreLocal(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	primaryWorkspace := filepath.Join(home, "workspace")
+	agentWorkspace := filepath.Join(home, "agents", "worker")
+	agentPath := filepath.Join(agentWorkspace, "eventing", "events.db")
+	if err := os.MkdirAll(filepath.Dir(agentPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old, err := sqliteprovider.OpenStore(agentPath, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, execErr := old.Exec(`CREATE TABLE retained (id TEXT PRIMARY KEY)`); execErr != nil {
+		t.Fatal(execErr)
+	}
+	if schemaErr := sqliteprovider.SetSchemaVersion(t.Context(), old, 1); schemaErr != nil {
+		t.Fatal(schemaErr)
+	}
+	if closeErr := old.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = primaryWorkspace
+	cfg.Agents.List = []config.AgentConfig{{ID: "worker", Workspace: agentWorkspace}}
+	cfg.Events.Ingress.Enabled = true
+	handler, err := NewBrokerHandler(home, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primaryPath := filepath.Join(primaryWorkspace, "eventing", "events.db")
+	if _, statErr := os.Lstat(primaryPath); !os.IsNotExist(statErr) {
+		t.Fatalf("handler construction opened primary storage: %v", statErr)
+	}
+	for id, workspace := range handler.workspaces {
+		if workspace.store != nil {
+			t.Fatalf("handler construction opened %q", id)
+		}
+	}
+	server, err := database.StartServer(t.Context(), database.ServerOptions{
+		Home: home, Handler: handler, CloseHandler: handler.Close,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := database.Connect(home)
+	if err != nil {
+		_ = server.Close(context.Background())
+		t.Fatal(err)
+	}
+	closeServer := true
+	t.Cleanup(func() {
+		if closeServer {
+			_ = server.Close(context.Background())
+		}
+	})
+
+	preflight := func(id database.StoreID) error {
+		var response eventingBrokerResponse
+		return client.Call(
+			t.Context(), BrokerDomain, BrokerVersion, BrokerPreflightOperation,
+			eventingBrokerTarget{StoreID: id}, &response,
+		)
+	}
+	if err := preflight(EventingStoreID); err != nil {
+		t.Fatalf("primary preflight: %v", err)
+	}
+	primary := handler.workspaces[EventingStoreID].store
+	if primary == nil || primary.db == nil {
+		t.Fatal("primary preflight did not retain its pool")
+	}
+	var agentID database.StoreID
+	for id := range handler.workspaces {
+		if id != EventingStoreID {
+			agentID = id
+		}
+	}
+	if err := preflight(agentID); database.CodeOf(err) != database.CodeMigrationRequired {
+		t.Fatalf("outdated agent preflight = %v", err)
+	}
+	if handler.workspaces[agentID].store != nil {
+		t.Fatal("failed agent preflight retained a pool")
+	}
+	if err := preflight(EventingStoreID); err != nil || handler.workspaces[EventingStoreID].store != primary {
+		t.Fatalf("agent failure poisoned primary: %v", err)
+	}
+	if err := server.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	closeServer = false
+	if !primary.closed.Load() || primary.db.Ping() == nil {
+		t.Fatal("primary retained pool remained usable after broker close")
 	}
 }
 

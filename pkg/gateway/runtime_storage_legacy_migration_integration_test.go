@@ -22,6 +22,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/cron"
+	dblayer "github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/evolution"
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/sipeed/picoclaw/pkg/internal/sessiondb"
@@ -754,6 +755,17 @@ func exerciseRuntimeLegacyMigrationFirstStartup(
 ) {
 	t.Helper()
 	ctx := t.Context()
+	fence, err := dblayer.AcquireMigrationFence(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dashboardauth.RunOfflineDatabaseMigration(fixture.home, fixture.launcherPath); err != nil {
+		_ = fence.Close()
+		t.Fatal(err)
+	}
+	if err := fence.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	loadedAuth, err := auth.LoadStore()
 	if err != nil {
@@ -770,17 +782,11 @@ func exerciseRuntimeLegacyMigrationFirstStartup(
 		t.Fatalf("legacy auth credential = %#v", credential)
 	}
 
-	dashboard, err := dashboardauth.NewWithLauncherConfig(fixture.home, fixture.launcherPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if valid, verifyErr := dashboard.VerifyPassword(ctx, fixture.launcherPassword); verifyErr != nil || !valid {
-		_ = dashboard.Close()
-		t.Fatalf("legacy launcher password valid=%v err=%v", valid, verifyErr)
-	}
-	if err := dashboard.Close(); err != nil {
-		t.Fatal(err)
-	}
+	withRuntimeDashboardBroker(t, fixture.runtimeStorageIntegrationFixture, func(dashboard *dashboardauth.Store) {
+		if valid, verifyErr := dashboard.VerifyPassword(ctx, fixture.launcherPassword); verifyErr != nil || !valid {
+			t.Fatalf("legacy launcher password valid=%v err=%v", valid, verifyErr)
+		}
+	})
 
 	// SaveCatalog is the exported owner boundary. Opening imports legacy rows
 	// before this unrelated live catalog is transactionally replaced.

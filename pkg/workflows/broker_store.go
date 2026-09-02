@@ -273,6 +273,10 @@ func workflowRPCError(err error) error {
 	if err == nil {
 		return nil
 	}
+	var structured *database.Error
+	if errors.As(err, &structured) && structured != nil {
+		return database.NewError(structured.Code, structured.Message)
+	}
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return database.NewError(database.CodeDeadline, "workflow operation deadline was exceeded")
@@ -592,8 +596,33 @@ func (s *FileRunStore) brokerPruneTerminalRuns(ctx context.Context, olderThan ti
 }
 
 type workflowBrokerWorkspace struct {
-	selector string
-	store    *FileRunStore
+	selector  string
+	store     *FileRunStore
+	openOnce  sync.Once
+	openError error
+}
+
+// open initializes exactly this cataloged workspace on its first domain
+// operation. Store resolution remains metadata-only, and a failed sibling is
+// remembered locally without preventing another StoreID from opening.
+func (workspace *workflowBrokerWorkspace) open(
+	ctx context.Context,
+) (*FileRunStore, error) {
+	if workspace == nil || workspace.store == nil {
+		return nil, database.NewError(database.CodeUnavailable, "workflow store is unavailable")
+	}
+	workspace.openOnce.Do(func() {
+		store := workspace.store
+		store.database = workflowDatabasePoolFor(store.workspaceDir())
+		store.database.retainUntilClose()
+		if err := store.Preflight(ctx); err != nil {
+			workspace.openError = errors.Join(err, store.database.close())
+		}
+	})
+	if workspace.openError != nil {
+		return nil, workspace.openError
+	}
+	return workspace.store, nil
 }
 
 // BrokerHandler owns one stable workflow pool for the primary and every
@@ -639,12 +668,12 @@ func NewBrokerHandler(home string, cfg *config.Config) (*BrokerHandler, error) {
 		selectors:  make(map[string]database.StoreID, len(configured)),
 	}
 	for index, item := range configured {
-		store := newLocalFileRunStore(item.workspace)
-		if store.brokerErr != nil {
-			_ = handler.Close()
-			return nil, store.brokerErr
+		// Construct only the logical target here. The provider pool is opened and
+		// validated by workflowBrokerWorkspace.open on the first operation for
+		// this exact StoreID.
+		store := &FileRunStore{
+			root: filepath.Join(item.workspace, "workflow_runs"), workspace: item.workspace,
 		}
-		store.database.retainUntilClose()
 		handler.workspaces[item.storeID] = &workflowBrokerWorkspace{
 			selector: item.selector,
 			store:    store,
@@ -692,7 +721,11 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 	if !ok || workspace == nil || workspace.store == nil {
 		return nil, database.NewError(database.CodeUnauthorized, "workflow store is not cataloged")
 	}
-	return handler.handle(ctx, request, workspace.store)
+	store, err := workspace.open(ctx)
+	if err != nil {
+		return nil, workflowRPCError(err)
+	}
+	return handler.handle(ctx, request, store)
 }
 
 func (handler *BrokerHandler) validateStoreID(id database.StoreID) error {
@@ -946,7 +979,7 @@ func (handler *BrokerHandler) handle(
 	}
 }
 
-// Close closes the broker-owned stable workflow pool. It must run before the
+// Close closes every broker-owned stable workflow pool. It must run before the
 // server releases its online storage fence.
 func (handler *BrokerHandler) Close() error {
 	if handler == nil {

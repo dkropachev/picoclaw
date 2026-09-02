@@ -62,6 +62,27 @@ func TestOnlineFenceInitializesOnlyMissingEmptyStore(t *testing.T) {
 	if err := preHorizon.Close(); err != nil {
 		t.Fatal(err)
 	}
+	missingHorizonPath := filepath.Join(home, "missing-horizon-row.db")
+	horizonOptions := testOptions()
+	horizonOptions.Legacy = &LegacyOptions{
+		SourceRoot: home, ArchiveRoot: filepath.Join(home, "archive"),
+		Sources: func() ([]LegacySource, error) { return nil, nil },
+		Import: func(context.Context, *sql.Conn, LegacyInput) (ImportResult, error) {
+			return ImportResult{}, nil
+		},
+	}
+	missingHorizon, err := Open(t.Context(), missingHorizonPath, horizonOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := missingHorizon.Exec(
+		`DELETE FROM storage_import_horizons WHERE component='test-store'`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := missingHorizon.Close(); err != nil {
+		t.Fatal(err)
+	}
 	fence, err := database.AcquireOnlineFence(home)
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +107,11 @@ func TestOnlineFenceInitializesOnlyMissingEmptyStore(t *testing.T) {
 		t.Context(), preHorizonPath, 5*time.Second, "storage_import_horizons",
 	); err != nil || ready {
 		t.Fatalf("online Open() mutated pre-horizon generation: ready=%v error=%v", ready, err)
+	}
+	if opened, err := Open(
+		t.Context(), missingHorizonPath, horizonOptions,
+	); opened != nil || database.CodeOf(err) != database.CodeMigrationRequired {
+		t.Fatalf("missing-horizon online Open() = %#v, %v", opened, err)
 	}
 
 	freshPath := filepath.Join(home, "fresh.db")

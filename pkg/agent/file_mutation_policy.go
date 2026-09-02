@@ -26,9 +26,6 @@ const (
 )
 
 const (
-	agentWecomReqIDDatabaseName  = "reqid-store.db"
-	agentWeixinStateDatabaseName = "state.db"
-
 	agentFileIdentityDirectoryEntryLimit = 131_072
 	agentAccountRouterLegacySidecarLimit = 100_000
 	agentFileIdentityDirectoryReadBatch  = 256

@@ -73,6 +73,9 @@ const (
 	eventingOpPutPushState                  = "put-push-state"
 	eventingOpPruneNotifications            = "prune-notifications"
 	eventingOpResolveStore                  = "resolve-store"
+	// BrokerPreflightOperation opens and fully validates exactly one cataloged
+	// event store without mutating domain data.
+	BrokerPreflightOperation = "preflight"
 
 	eventingNotificationPageSize = 200
 )
@@ -82,6 +85,10 @@ type eventingResolveRequest struct {
 }
 
 type eventingResolveResponse struct {
+	StoreID database.StoreID `json:"store_id"`
+}
+
+type eventingBrokerTarget struct {
 	StoreID database.StoreID `json:"store_id"`
 }
 
@@ -124,6 +131,7 @@ type eventingBrokerRequest struct {
 }
 
 type eventingBrokerResponse struct {
+	Ready                bool                                      `json:"ready,omitempty"`
 	Mutation             bool                                      `json:"mutation,omitempty"`
 	Insert               InsertResult                              `json:"insert,omitempty"`
 	Event                StoredEvent                               `json:"event,omitempty"`
@@ -207,6 +215,10 @@ func mapEventingBrokerError(err error) error {
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return database.NewError(database.CodeDeadline, "eventing operation deadline was exceeded")
+	case errors.Is(err, ErrSchemaTooNew):
+		return database.NewError(database.CodeUnsupported, "eventing schema is newer than supported")
+	case errors.Is(err, ErrSchemaInvalid):
+		return database.NewError(database.CodeIntegrity, "eventing schema validation failed")
 	case errors.Is(err, ErrNotFound):
 		return database.NewError(database.CodeNotFound, "eventing_not_found")
 	case errors.Is(err, ErrStaleLease):
@@ -288,8 +300,30 @@ func decodeEventingBrokerError(err error) error {
 }
 
 type eventingBrokerWorkspace struct {
-	selector string
-	store    *Store
+	selector        string
+	databasePath    string
+	maxPayloadBytes int
+	redactFields    []string
+	secretValues    []string
+
+	once  sync.Once
+	store *Store
+	err   error
+}
+
+func (workspace *eventingBrokerWorkspace) open() (*Store, error) {
+	if workspace == nil {
+		return nil, database.NewError(database.CodeUnavailable, "eventing store is unavailable")
+	}
+	workspace.once.Do(func() {
+		workspace.store, workspace.err = openLocal(
+			context.Background(),
+			workspace.databasePath,
+			WithMaxPayloadBytes(workspace.maxPayloadBytes),
+			WithRedaction(workspace.redactFields, workspace.secretValues),
+		)
+	})
+	return workspace.store, workspace.err
 }
 
 // BrokerHandler owns one stable eventing pool for the primary and every
@@ -302,9 +336,10 @@ type BrokerHandler struct {
 	selectors  map[string]database.StoreID
 
 	// Primary aliases are retained for one-package compatibility tests.
-	storeID database.StoreID
-	store   *Store
-	closed  bool
+	storeID          database.StoreID
+	store            *Store
+	primaryStoreOnce sync.Once
+	closed           bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -326,22 +361,20 @@ func NewBrokerHandler(home string, cfg *config.Config) (*BrokerHandler, error) {
 		workspaces: make(map[database.StoreID]*eventingBrokerWorkspace, len(configured)),
 		selectors:  make(map[string]database.StoreID, len(configured)),
 	}
+	secretValues := append([]string(nil), cfg.SensitiveDataValues()...)
 	for index, item := range configured {
-		store, openErr := openLocal(context.Background(), item.databasePath,
-			WithMaxPayloadBytes(item.maxPayloadBytes),
-			WithRedaction(item.redactFields, cfg.SensitiveDataValues()),
-		)
-		if openErr != nil {
-			_ = handler.Close()
-			return nil, openErr
+		workspace := &eventingBrokerWorkspace{
+			selector:        item.selector,
+			databasePath:    item.databasePath,
+			maxPayloadBytes: item.maxPayloadBytes,
+			redactFields:    append([]string(nil), item.redactFields...),
+			secretValues:    append([]string(nil), secretValues...),
 		}
-		workspace := &eventingBrokerWorkspace{selector: item.selector, store: store}
 		handler.workspaces[item.storeID] = workspace
 		handler.selectors[item.selector] = item.storeID
 		handler.selectors[item.workspaceSelect] = item.storeID
 		if index == 0 {
 			handler.storeID = item.storeID
-			handler.store = store
 		}
 	}
 	return handler, nil
@@ -373,6 +406,22 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 		}
 		return eventingResolveResponse{StoreID: storeID}, nil
 	}
+	if request.Operation == BrokerPreflightOperation {
+		var input eventingBrokerTarget
+		if request.DecodePayload(&input) != nil || !input.StoreID.Valid() {
+			return nil, database.NewError(database.CodeInvalid, "eventing broker request is invalid")
+		}
+		workspace := handler.workspaces[input.StoreID]
+		if workspace == nil {
+			return nil, database.NewError(database.CodeUnauthorized, "eventing store is not cataloged")
+		}
+		store, err := workspace.open()
+		if err != nil {
+			return nil, mapEventingBrokerError(err)
+		}
+		handler.retainPrimaryAlias(input.StoreID, store)
+		return eventingBrokerResponse{Ready: true}, nil
+	}
 	var input eventingBrokerRequest
 	if err := request.DecodePayload(&input); err != nil {
 		return nil, database.NewError(database.CodeInvalid, "eventing broker request is invalid")
@@ -381,11 +430,22 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 		return nil, database.NewError(database.CodeInvalid, "eventing broker request is invalid")
 	}
 	workspace, ok := handler.workspaces[input.StoreID]
-	if !ok || workspace == nil || workspace.store == nil {
+	if !ok || workspace == nil {
 		return nil, database.NewError(database.CodeUnauthorized, "eventing store is not cataloged")
 	}
-	response, err := handler.dispatch(ctx, request.Operation, input, workspace.store)
+	store, err := workspace.open()
+	if err != nil {
+		return nil, mapEventingBrokerError(err)
+	}
+	handler.retainPrimaryAlias(input.StoreID, store)
+	response, err := handler.dispatch(ctx, request.Operation, input, store)
 	return response, mapEventingBrokerError(err)
+}
+
+func (handler *BrokerHandler) retainPrimaryAlias(storeID database.StoreID, store *Store) {
+	if handler != nil && storeID == handler.storeID {
+		handler.primaryStoreOnce.Do(func() { handler.store = store })
+	}
 }
 
 // dispatch keeps every related mutation inside one broker-side store command.

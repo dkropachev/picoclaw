@@ -20,6 +20,9 @@ import (
 const (
 	BrokerDomain  = "evolution"
 	BrokerVersion = 1
+	// BrokerPreflightOperation opens and fully validates exactly one cataloged
+	// evolution store without mutating domain data.
+	BrokerPreflightOperation = "preflight"
 
 	evolutionOpAppendRecords = "append-records"
 	evolutionOpSaveRecords   = "save-records"
@@ -50,7 +53,12 @@ type evolutionBrokerRequest struct {
 	Offset         int              `json:"offset,omitempty"`
 }
 
+type evolutionBrokerTargetRequest struct {
+	StoreID database.StoreID `json:"store_id"`
+}
+
 type evolutionBrokerResponse struct {
+	Ready    bool             `json:"ready,omitempty"`
 	Updated  bool             `json:"updated,omitempty"`
 	Records  []LearningRecord `json:"records,omitempty"`
 	Drafts   []SkillDraft     `json:"drafts,omitempty"`
@@ -383,9 +391,38 @@ func paginateEvolution[T any](values []T, offset int) ([]T, bool) {
 	return values[offset:end], end < len(values)
 }
 
+type evolutionBrokerStore struct {
+	paths Paths
+	once  sync.Once
+	store *Store
+	err   error
+}
+
+func (target *evolutionBrokerStore) open() (*Store, error) {
+	if target == nil {
+		return nil, database.NewError(database.CodeUnavailable, "evolution store unavailable")
+	}
+	target.once.Do(func() {
+		target.store = newLocalStore(target.paths)
+		target.err = target.store.retain()
+		if target.err != nil {
+			_ = target.store.Close()
+			target.store = nil
+		}
+	})
+	return target.store, target.err
+}
+
+func (target *evolutionBrokerStore) close() error {
+	if target == nil || target.store == nil {
+		return nil
+	}
+	return target.store.Close()
+}
+
 type BrokerHandler struct {
 	mu     sync.RWMutex
-	stores map[database.StoreID]*Store
+	stores map[database.StoreID]*evolutionBrokerStore
 	closed bool
 }
 
@@ -404,14 +441,9 @@ func NewBrokerHandler(home string, cfg *config.Config) (*BrokerHandler, error) {
 	if err != nil {
 		return nil, err
 	}
-	handler := &BrokerHandler{stores: make(map[database.StoreID]*Store, len(targets))}
+	handler := &BrokerHandler{stores: make(map[database.StoreID]*evolutionBrokerStore, len(targets))}
 	for id, target := range targets {
-		store := newLocalStore(target.paths)
-		if err := store.retain(); err != nil {
-			_ = handler.Close()
-			return nil, err
-		}
-		handler.stores[id] = store
+		handler.stores[id] = &evolutionBrokerStore{paths: target.paths}
 	}
 	return handler, nil
 }
@@ -425,13 +457,31 @@ func (h *BrokerHandler) Handle(ctx context.Context, request database.Request) (a
 	if h.closed {
 		return nil, database.NewError(database.CodeUnavailable, "evolution broker unavailable")
 	}
+	if request.Operation == BrokerPreflightOperation {
+		var in evolutionBrokerTargetRequest
+		if request.DecodePayload(&in) != nil || !in.StoreID.Valid() {
+			return nil, database.NewError(database.CodeInvalid, "evolution request invalid")
+		}
+		target := h.stores[in.StoreID]
+		if target == nil {
+			return nil, database.NewError(database.CodeUnauthorized, "evolution store not cataloged")
+		}
+		if _, err := target.open(); err != nil {
+			return nil, mapEvolutionBrokerError(err)
+		}
+		return evolutionBrokerResponse{Ready: true}, nil
+	}
 	var in evolutionBrokerRequest
 	if err := request.DecodePayload(&in); err != nil {
 		return nil, database.NewError(database.CodeInvalid, "evolution request invalid")
 	}
-	store := h.stores[in.StoreID]
-	if store == nil {
+	target := h.stores[in.StoreID]
+	if target == nil {
 		return nil, database.NewError(database.CodeUnauthorized, "evolution store not cataloged")
+	}
+	store, err := target.open()
+	if err != nil {
+		return nil, mapEvolutionBrokerError(err)
 	}
 	out, err := h.dispatch(ctx, store, request.Operation, in)
 	return out, mapEvolutionBrokerError(err)
@@ -582,6 +632,9 @@ func mapEvolutionBrokerError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if code := database.CodeOf(err); code != database.CodeInternal {
+		return database.NewError(code, "evolution operation failed")
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return database.NewError(database.CodeDeadline, "evolution deadline exceeded")
 	}
@@ -628,7 +681,7 @@ func (h *BrokerHandler) Close() error {
 	h.closed = true
 	var result error
 	for _, store := range h.stores {
-		result = errors.Join(result, store.Close())
+		result = errors.Join(result, store.close())
 	}
 	return result
 }

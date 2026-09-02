@@ -11,6 +11,129 @@ import (
 	"github.com/sipeed/picoclaw/pkg/database"
 )
 
+func TestLocalCICacheBrokerLazilyIsolatesMigrationRequiredWorkspace(t *testing.T) {
+	home := t.TempDir()
+	primary := filepath.Join(home, "primary")
+	sibling := filepath.Join(home, "sibling")
+	unopenableSibling := filepath.Join(home, "unopenable-sibling")
+	cfg := &config.Config{}
+	cfg.Agents.Defaults.Workspace = primary
+	cfg.Agents.List = []config.AgentConfig{
+		{ID: "sibling", Workspace: sibling},
+		{ID: "unopenable", Workspace: unopenableSibling},
+	}
+	configured, err := configuredCacheStores(home, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var primaryRoot, siblingRoot, unopenableRoot string
+	var siblingID, unopenableID database.StoreID
+	for _, item := range configured {
+		if item.storeID == CacheStoreID {
+			primaryRoot = item.root
+		} else if siblingRoot == "" {
+			siblingRoot = item.root
+			siblingID = item.storeID
+		} else {
+			unopenableRoot = item.root
+			unopenableID = item.storeID
+		}
+	}
+	if primaryRoot == "" || siblingRoot == "" || unopenableRoot == "" ||
+		!siblingID.Valid() || !unopenableID.Valid() {
+		t.Fatalf("configured stores = %#v", configured)
+	}
+	legacyDir := filepath.Join(siblingRoot, "cache")
+	if mkdirErr := os.MkdirAll(legacyDir, 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	legacyPath := filepath.Join(legacyDir, stringsOf("a", 64)+".json")
+	if writeErr := os.WriteFile(legacyPath, []byte(`{"legacy":true}`), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if mkdirErr := os.MkdirAll(filepath.Dir(unopenableRoot), 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	if writeErr := os.WriteFile(unopenableRoot, []byte("not a directory"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	handler, err := NewBrokerHandler(home, cfg)
+	if err != nil {
+		t.Fatalf("constructor: %v", err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
+	for id, item := range handler.stores {
+		if item.store != nil {
+			t.Fatalf("constructor opened %q", id)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(primaryRoot, localCICacheDatabaseName),
+		filepath.Join(siblingRoot, localCICacheDatabaseName),
+	} {
+		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("constructor touched %q: %v", path, statErr)
+		}
+	}
+	fence, err := database.AcquireOnlineFence(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fence.Close() })
+	if _, err = handler.Handle(t.Context(), cacheBrokerTestRequest(
+		t, cacheOperationPreflight, cacheStoreRequest{StoreID: CacheStoreID},
+	)); err != nil {
+		t.Fatalf("primary preflight: %v", err)
+	}
+	primaryStore := handler.stores[CacheStoreID].store
+	if primaryStore == nil || primaryStore.cacheDB == nil {
+		t.Fatal("primary preflight did not retain its pool")
+	}
+	primaryPool := primaryStore.cacheDB
+	if _, err = handler.Handle(t.Context(), cacheBrokerTestRequest(
+		t, cacheOperationPreflight, cacheStoreRequest{StoreID: siblingID},
+	)); database.CodeOf(err) != database.CodeMigrationRequired {
+		t.Fatalf("sibling preflight error = %v", err)
+	}
+	if handler.stores[siblingID].store != nil {
+		t.Fatal("failed sibling open was retained")
+	}
+	if _, err = handler.Handle(t.Context(), cacheBrokerTestRequest(
+		t, cacheOperationPreflight, cacheStoreRequest{StoreID: unopenableID},
+	)); database.CodeOf(err) != database.CodeInvalid {
+		t.Fatalf("unopenable sibling preflight error = %v", err)
+	}
+	if handler.stores[unopenableID].store != nil {
+		t.Fatal("unopenable sibling store was retained")
+	}
+	response, err := handler.Handle(t.Context(), cacheBrokerTestRequest(
+		t,
+		cacheOperationLookup,
+		cacheLookupRequest{StoreID: CacheStoreID, ResultKey: stringsOf("b", 64)},
+	))
+	if err != nil || response.(cacheResponse).Found {
+		t.Fatalf("primary lookup after sibling failure = %#v, %v", response, err)
+	}
+	if handler.stores[CacheStoreID].store.cacheDB != primaryPool {
+		t.Fatal("primary retained pool changed")
+	}
+	if _, statErr := os.Lstat(legacyPath); statErr != nil {
+		t.Fatalf("failed sibling migration source changed: %v", statErr)
+	}
+}
+
+func cacheBrokerTestRequest(t *testing.T, operation string, payload any) database.Request {
+	t.Helper()
+	raw, err := database.MarshalCanonical(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return database.Request{
+		Domain: CacheBrokerDomain, Version: CacheBrokerVersion,
+		Operation: operation, Payload: raw,
+	}
+}
+
 func TestLocalCIRuntimeConstructorRequiresBrokerAndDoesNotOpenProvider(t *testing.T) {
 	previous := database.RuntimeClient()
 	database.InstallProcessClient(nil)

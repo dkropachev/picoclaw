@@ -12,9 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/pkg/config"
 	dblayer "github.com/sipeed/picoclaw/pkg/database"
+	dbcatalog "github.com/sipeed/picoclaw/pkg/database/catalog"
 	"github.com/sipeed/picoclaw/pkg/database/migration"
+	backendapi "github.com/sipeed/picoclaw/web/backend/api"
 )
 
 func TestDatabaseCommandShapeAndHiddenServe(t *testing.T) {
@@ -244,4 +247,73 @@ func TestLazyDomainHandlerCloseBeforeUseNeverOpens(t *testing.T) {
 	if opened.Load() != 0 {
 		t.Fatal("closing unused lazy domain opened storage")
 	}
+}
+
+func TestOptionalModelCatalogTypedPreflightUpdatesReadiness(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "workspace")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	fence, fenceErr := dblayer.AcquireMigrationFence(home)
+	if fenceErr != nil {
+		t.Fatal(fenceErr)
+	}
+	if migrateErr := backendapi.RunOfflineModelCatalogMigration(t.Context(), home); migrateErr != nil {
+		_ = fence.Close()
+		t.Fatal(migrateErr)
+	}
+	if closeFenceErr := fence.Close(); closeFenceErr != nil {
+		t.Fatal(closeFenceErr)
+	}
+	path := filepath.Join(home, "model-catalogs.db")
+	database, err := sqliteprovider.OpenStore(path, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, executeErr := database.Exec(`DROP INDEX model_catalogs_provider_idx`); executeErr != nil {
+		_ = database.Close()
+		t.Fatal(executeErr)
+	}
+	if closeDatabaseErr := database.Close(); closeDatabaseErr != nil {
+		t.Fatal(closeDatabaseErr)
+	}
+	statuses, err := dbcatalog.ProbeStatuses(t.Context(), home, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dbcatalog.CloseProbePools(home) })
+	logical, err := dbcatalog.New(home, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := backendapi.NewModelCatalogBrokerHandler(home)
+	t.Cleanup(func() { _ = handler.Close() })
+	statuses, err = dbcatalog.InitializeRequired(
+		t.Context(), logical, statuses,
+		func(ctx context.Context, entry dbcatalog.Entry) error {
+			if entry.Domain != "model-catalogs" {
+				return nil
+			}
+			return preflightBrokerTarget(
+				ctx, handler, "model-catalogs", "preflight", entry.ID,
+			)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range statuses {
+		if status.ID != backendapi.ModelCatalogStoreID {
+			continue
+		}
+		if status.Readiness != dblayer.StoreIntegrityFailed ||
+			status.Error == nil || status.Error.Code != dblayer.CodeIntegrity {
+			t.Fatalf("optional model catalog readiness = %#v", status)
+		}
+		return
+	}
+	t.Fatal("optional model catalog status is missing")
 }
