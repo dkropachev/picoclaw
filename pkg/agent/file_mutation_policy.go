@@ -726,31 +726,6 @@ func agentWorkspaceAccountRouterProtectedRoots(workspace string) ([]string, erro
 		archiveRoot,
 		filepath.Join(archiveRoot, "account_router_state.json"),
 	)
-	entries, err := os.ReadDir(workspace)
-	if os.IsNotExist(err) {
-		entries = nil
-	} else if err != nil {
-		return nil, fmt.Errorf("enumerate account-router legacy state: %w", err)
-	}
-	for _, entry := range entries {
-		if agentAccountRouterLegacySidecarName(entry.Name()) {
-			roots = append(roots, filepath.Join(workspace, entry.Name()))
-		}
-	}
-	if err := filepath.WalkDir(archiveRoot, func(path string, entry os.DirEntry, walkErr error) error {
-		if os.IsNotExist(walkErr) {
-			return nil
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if path != archiveRoot && !entry.IsDir() {
-			roots = append(roots, path)
-		}
-		return nil
-	}); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("enumerate account-router archives: %w", err)
-	}
 	return normalizeProtectedRoots(roots), nil
 }
 

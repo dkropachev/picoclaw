@@ -90,3 +90,21 @@ func TestCatalogDoesNotInspectLiveGenerationMembers(t *testing.T) {
 		t.Fatal("protected-artifact projection omitted the lexical WAL member")
 	}
 }
+
+func TestCatalogProjectsUnsafeMutableWorkspaceLexically(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace-file")
+	if err := os.WriteFile(workspace, []byte("identity catalog validates this later"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	catalog, err := New(home, cfg)
+	if err != nil {
+		t.Fatalf("lexical provider projection inspected workspace: %v", err)
+	}
+	want := filepath.Join(workspace, "state", "account-router.db")
+	if !slices.Contains(catalog.ProtectedRootsForDomains("account-routing"), want) {
+		t.Fatalf("lexical provider projection omitted %q", want)
+	}
+}
