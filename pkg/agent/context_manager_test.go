@@ -220,6 +220,41 @@ func TestResolveContextManager_UnknownFallsBackToLegacy(t *testing.T) {
 	}
 }
 
+func TestLegacyContextManagerFindNearestUserMessage(t *testing.T) {
+	manager := &legacyContextManager{}
+	messages := []providers.Message{
+		{Role: "assistant"},
+		{Role: "user"},
+		{Role: "tool"},
+		{Role: "user"},
+		{Role: "assistant"},
+	}
+	for _, test := range []struct {
+		name     string
+		messages []providers.Message
+		middle   int
+		want     int
+	}{
+		{name: "already user", messages: messages, middle: 3, want: 3},
+		{name: "nearest on left", messages: messages, middle: 4, want: 3},
+		{name: "nearest on right", messages: messages, middle: 0, want: 1},
+		{
+			name: "no user preserves original",
+			messages: []providers.Message{
+				{Role: "assistant"}, {Role: "tool"}, {Role: "assistant"},
+			},
+			middle: 1,
+			want:   1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := manager.findNearestUserMessage(test.messages, test.middle); got != test.want {
+				t.Fatalf("nearest user index = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
 func TestResolveContextManager_RegisteredFactory(t *testing.T) {
 	cleanup := resetCMRegistry()
 	defer cleanup()

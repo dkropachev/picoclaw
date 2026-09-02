@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1700,6 +1701,107 @@ func TestAgentFileMutationPolicyFailureBoundaries(t *testing.T) {
 			}()
 			construct()
 		})
+	}
+}
+
+func TestAgentFileMutationStorageHelperBoundaries(t *testing.T) {
+	if workspaces, err := normalizeAgentFileMutationWorkspaces([]string{" bad "}); err == nil || workspaces != nil {
+		t.Fatalf("whitespace workspace normalization = %#v, %v", workspaces, err)
+	}
+	first := filepath.Join(t.TempDir(), "first")
+	second := filepath.Join(t.TempDir(), "second")
+	workspaces, err := normalizeAgentFileMutationWorkspaces([]string{second, first, first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWorkspaces := []string{first, second}
+	slices.Sort(wantWorkspaces)
+	if !slices.Equal(workspaces, wantWorkspaces) {
+		t.Fatalf("normalized workspaces = %#v, want %#v", workspaces, wantWorkspaces)
+	}
+
+	if catalog, err := agentFileMutationIdentityCatalogForWorkspaces(nil, nil, nil); err == nil || catalog != nil {
+		t.Fatalf("empty-workspace catalog = %#v, %v", catalog, err)
+	}
+	if catalog, err := agentFileMutationIdentityCatalogForWorkspaces([]string{"\x00"}, nil, nil); err == nil || catalog != nil {
+		t.Fatalf("invalid-workspace catalog = %#v, %v", catalog, err)
+	}
+	var nilGeneration *agentFileMutationIdentityGeneration
+	if catalog, err := nilGeneration.catalog("\x00", nil, nil); err == nil || catalog != nil {
+		t.Fatalf("nil-generation invalid catalog = %#v, %v", catalog, err)
+	}
+	emptyGeneration := &agentFileMutationIdentityGeneration{}
+	if catalog, err := emptyGeneration.catalog("\x00", nil, nil); err == nil || catalog != nil {
+		t.Fatalf("empty-generation invalid catalog = %#v, %v", catalog, err)
+	}
+	if generation, err := newAgentFileMutationIdentityGeneration(
+		[]string{"\x00"}, nil, nil, nil,
+	); err == nil || generation != nil {
+		t.Fatalf("invalid identity generation = %#v, %v", generation, err)
+	}
+
+	if got := safeAgentCheckpointEnumerationError("", errors.New("entry limit exceeded")); got == nil || got.Error() != "checkpoint enumeration failed" {
+		t.Fatalf("empty-prefix checkpoint error = %v", got)
+	}
+	if got := safeAgentCheckpointEnumerationError("checkpoint", errors.New("private detail")); got == nil || got.Error() != "checkpoint: enumeration failed" {
+		t.Fatalf("unknown checkpoint error = %v", got)
+	}
+
+	leftCheckpoint := agentCheckpointStateSnapshot{
+		"missing": {missing: true, protect: true},
+	}
+	rightCheckpoint := agentCheckpointStateSnapshot{
+		"missing": {missing: true, protect: false},
+	}
+	if equalAgentCheckpointStateSnapshots(leftCheckpoint, rightCheckpoint) {
+		t.Fatal("checkpoint snapshots with different protection compared equal")
+	}
+
+	leftPath := filepath.Join(t.TempDir(), "left")
+	rightPath := filepath.Join(t.TempDir(), "right")
+	for _, path := range []string{leftPath, rightPath} {
+		if err := os.WriteFile(path, []byte("state"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leftInfo, err := os.Stat(leftPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rightInfo, err := os.Stat(rightPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if equalAgentAccountRouterLegacySidecarSnapshots(
+		agentLegacySidecarSnapshot{"state": leftInfo},
+		agentLegacySidecarSnapshot{"state": rightInfo},
+	) {
+		t.Fatal("sidecar snapshots with different identities compared equal")
+	}
+
+	if workspaces, err := agentRegistryFileMutationWorkspaces(nil, nil); err == nil || workspaces != nil {
+		t.Fatalf("nil-config registry workspaces = %#v, %v", workspaces, err)
+	}
+	previous := []string{filepath.Join(t.TempDir(), "previous")}
+	gotRoots := agentRegistryCumulativeFileMutationProtectedRoots(nil, previous)
+	if !slices.Equal(gotRoots, previous) {
+		t.Fatalf("nil-registry cumulative roots = %#v, want %#v", gotRoots, previous)
+	}
+	gotRoots[0] = "changed"
+	if gotRoots[0] == previous[0] {
+		t.Fatal("nil-registry cumulative roots alias caller storage")
+	}
+
+	newRoot := filepath.Join(t.TempDir(), "new")
+	registry := &AgentRegistry{agents: map[string]*AgentInstance{
+		"nil": nil,
+		"live": {
+			fileMutationProtectedRoots: []string{previous[0], newRoot},
+		},
+	}}
+	gotRoots = agentRegistryCumulativeFileMutationProtectedRoots(registry, previous)
+	if !slices.Equal(gotRoots, []string{previous[0], newRoot}) {
+		t.Fatalf("registry cumulative roots = %#v", gotRoots)
 	}
 }
 
