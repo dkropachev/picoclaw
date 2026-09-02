@@ -23,6 +23,7 @@ const (
 	RuntimeStateVersion = 1
 
 	runtimeStateOperationResolveStore   = "resolve-store"
+	runtimeStateOperationPreflight      = "preflight"
 	runtimeStateOperationSnapshot       = "snapshot"
 	runtimeStateOperationSetLastChannel = "set-last-channel"
 	runtimeStateOperationSetLastChatID  = "set-last-chat-id"
@@ -146,8 +147,10 @@ func (sm *Manager) brokerUpdate(ctx context.Context, field, value string) error 
 }
 
 type runtimeBrokerWorkspace struct {
-	selector string
-	manager  *Manager
+	selector  string
+	workspace string
+	manager   *Manager
+	opMu      sync.Mutex
 }
 
 // BrokerHandler owns one stable pool for the primary and every distinct
@@ -156,7 +159,7 @@ type BrokerHandler struct {
 	workspaces map[database.StoreID]*runtimeBrokerWorkspace
 	selectors  map[string]database.StoreID
 
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	closed    bool
 	closeOnce sync.Once
 	closeErr  error
@@ -179,14 +182,8 @@ func NewBrokerHandler(home string, cfg *config.Config) (*BrokerHandler, error) {
 		selectors:  make(map[string]database.StoreID, len(configured)),
 	}
 	for _, item := range configured {
-		manager, openErr := newRetainedSQLiteManager(item.workspace)
-		if openErr != nil {
-			_ = handler.Close()
-			return nil, mapRuntimeStateBrokerError(openErr)
-		}
-		manager.storeID = item.storeID
 		handler.workspaces[item.storeID] = &runtimeBrokerWorkspace{
-			selector: item.selector, manager: manager,
+			selector: item.selector, workspace: item.workspace,
 		}
 		handler.selectors[item.selector] = item.storeID
 	}
@@ -203,8 +200,8 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 	if err := ctx.Err(); err != nil {
 		return nil, database.NewError(database.CodeDeadline, "runtime-state request deadline was exceeded")
 	}
-	handler.mu.Lock()
-	defer handler.mu.Unlock()
+	handler.mu.RLock()
+	defer handler.mu.RUnlock()
 	if handler.closed {
 		return nil, database.NewError(database.CodeUnavailable, "runtime-state broker is closed")
 	}
@@ -224,11 +221,29 @@ func (handler *BrokerHandler) Handle(ctx context.Context, request database.Reque
 		return nil, err
 	}
 	workspace, ok := handler.workspaces[storeID]
-	if !ok || workspace.manager == nil {
+	if !ok || workspace == nil {
 		return nil, database.NewError(database.CodeUnauthorized, "runtime-state StoreID is not cataloged")
+	}
+	if request.Operation == runtimeStateOperationPreflight {
+		var input runtimeStateTarget
+		if request.DecodePayload(&input) != nil || input.StoreID != storeID {
+			return nil, database.NewError(database.CodeInvalid, "runtime-state request is invalid")
+		}
+	}
+	workspace.opMu.Lock()
+	defer workspace.opMu.Unlock()
+	if workspace.manager == nil {
+		manager, openErr := newRetainedSQLiteManager(workspace.workspace)
+		if openErr != nil {
+			return nil, mapRuntimeStateBrokerError(openErr)
+		}
+		manager.storeID = storeID
+		workspace.manager = manager
 	}
 	manager := workspace.manager
 	switch request.Operation {
+	case runtimeStateOperationPreflight:
+		return runtimeStateMutationResponse{}, nil
 	case runtimeStateOperationSnapshot:
 		var input runtimeStateTarget
 		if request.DecodePayload(&input) != nil || input.StoreID != storeID {

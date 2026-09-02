@@ -2,7 +2,9 @@ package sqliteprovider
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -57,5 +59,107 @@ func TestOpenAndBusyClassification(t *testing.T) {
 	}
 	if IsBusyOrLocked(errors.New("ordinary")) {
 		t.Fatal("ordinary error classified as retryable")
+	}
+}
+
+func TestInspectionPoolIsAdoptedByStoreOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "retained.db")
+	database, openErr := OpenStore(path, 5*time.Second)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	if _, err := database.Exec(`CREATE TABLE retained (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := Inspect(t.Context(), path, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inspection.Exists || inspection.database == nil {
+		t.Fatalf("inspection = %#v", inspection)
+	}
+	repeated, err := Inspect(t.Context(), path, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.database != inspection.database {
+		t.Fatal("repeat inspection opened a duplicate pool")
+	}
+	adopted, err := OpenStore(path, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted != inspection.database {
+		t.Fatal("store owner opened a second pool after readiness inspection")
+	}
+	if err := adopted.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInspectionPoolAdoptionRejectsGenerationReplacement(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "retained.db")
+	database, openErr := OpenStore(path, 5*time.Second)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	if _, err := database.Exec(`CREATE TABLE retained (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := Inspect(t.Context(), path, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := path + ".old"
+	if err := os.Rename(path, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if adopted, err := OpenStore(path, 5*time.Second); err == nil || adopted != nil {
+		if adopted != nil {
+			_ = adopted.Close()
+		}
+		t.Fatalf("replacement generation adoption = %#v, %v", adopted, err)
+	}
+	if err := inspection.database.Ping(); err == nil {
+		t.Fatal("replaced inspection pool remained open")
+	}
+}
+
+func TestInspectionSecuresProviderDirectoryBeforeOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows validates DACLs instead of POSIX modes")
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "retained.db")
+	database, openErr := OpenStore(path, 5*time.Second)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	if _, err := database.Exec(`CREATE TABLE retained (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := Inspect(t.Context(), path, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inspection.Release() })
+	if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("provider directory = %v, %v", info, err)
 	}
 }

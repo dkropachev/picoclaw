@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/memory"
@@ -120,6 +121,86 @@ func TestSessionThreadBrokerCataloguesPrimaryAndAgentWorkspaces(t *testing.T) {
 	}
 }
 
+func TestSessionThreadBrokerMixedWorkspaceReadinessIsStoreLocal(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	primary := filepath.Join(home, "primary")
+	agent := filepath.Join(home, "agent-workspace")
+	agentPath := filepath.Join(agent, "sessions", "sessions.db")
+	if err := os.MkdirAll(filepath.Dir(agentPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old, err := sqliteprovider.OpenStore(agentPath, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, execErr := old.Exec(`CREATE TABLE retained (id TEXT PRIMARY KEY)`); execErr != nil {
+		t.Fatal(execErr)
+	}
+	if schemaErr := sqliteprovider.SetSchemaVersion(t.Context(), old, 1); schemaErr != nil {
+		t.Fatal(schemaErr)
+	}
+	if closeErr := old.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	cfg := &config.Config{}
+	cfg.Agents.Defaults.Workspace = primary
+	cfg.Agents.List = []config.AgentConfig{{ID: "secondary", Workspace: agent}}
+	handler, err := NewBrokerHandler(home, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(primary, "sessions", "sessions.db")); !os.IsNotExist(statErr) {
+		t.Fatalf("handler construction opened primary storage: %v", statErr)
+	}
+	for id, workspace := range handler.workspaces {
+		if workspace.adapter.LocalStore() != nil {
+			t.Fatalf("handler construction opened %q", id)
+		}
+	}
+	server, err := database.StartServer(t.Context(), database.ServerOptions{
+		Home: home, Handler: handler, CloseHandler: handler.Close,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := database.Connect(home)
+	if err != nil {
+		_ = server.Close(context.Background())
+		t.Fatal(err)
+	}
+	defer server.Close(context.Background())
+	preflight := func(id database.StoreID) error {
+		var response threadBrokerResponse
+		return client.Call(
+			t.Context(), memory.SessionsBrokerDomain, memory.SessionsBrokerVersion,
+			BrokerPreflightOperation, threadStoreRequest{StoreID: id}, &response,
+		)
+	}
+	if err := preflight(memory.SessionsStoreID); err != nil {
+		t.Fatalf("primary preflight: %v", err)
+	}
+	primaryStore := handler.workspaces[memory.SessionsStoreID].adapter.LocalStore()
+	if primaryStore == nil {
+		t.Fatal("primary preflight did not retain its pool")
+	}
+	var agentID database.StoreID
+	for id := range handler.workspaces {
+		if id != memory.SessionsStoreID {
+			agentID = id
+		}
+	}
+	if err := preflight(agentID); database.CodeOf(err) != database.CodeMigrationRequired {
+		t.Fatalf("outdated agent preflight = %v", err)
+	}
+	if handler.workspaces[agentID].adapter.LocalStore() != nil {
+		t.Fatal("failed agent preflight retained a pool")
+	}
+	if err := preflight(memory.SessionsStoreID); err != nil ||
+		handler.workspaces[memory.SessionsStoreID].adapter.LocalStore() != primaryStore {
+		t.Fatalf("agent failure poisoned primary: %v", err)
+	}
+}
+
 func TestThreadBrokerPaginatesListsAndFailsClosed(t *testing.T) {
 	home := t.TempDir()
 	workspace := filepath.Join(home, "workspace")
@@ -129,15 +210,18 @@ func TestThreadBrokerPaginatesListsAndFailsClosed(t *testing.T) {
 	database.InstallProcessClient(client)
 	t.Cleanup(func() { database.InstallProcessClient(nil) })
 
-	local := handler.workspaces[memory.SessionsStoreID].store
+	local, err := handler.workspaces[memory.SessionsStoreID].ensureStore()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for index := 0; index < threadBrokerPageLimit+7; index++ {
-		_, err := local.CreateThread(context.Background(), CreateRequest{
+		_, createErr := local.CreateThread(context.Background(), CreateRequest{
 			ID:                fmt.Sprintf("paged-%03d", index),
 			PrimarySessionKey: fmt.Sprintf("paged-session-%03d", index),
 			Title:             "Paged",
 		})
-		if err != nil {
-			t.Fatal(err)
+		if createErr != nil {
+			t.Fatal(createErr)
 		}
 	}
 	clientStore := NewStoreFromWorkspace(workspace)

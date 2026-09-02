@@ -45,6 +45,13 @@ func OpenStore(path string, busyTimeout time.Duration) (*sql.DB, error) {
 		}
 		return open(dsn)
 	}
+	retained, err := adoptInspectedPool(path)
+	if err != nil {
+		return nil, err
+	}
+	if retained != nil {
+		return retained, nil
+	}
 	if err := PrepareStore(path); err != nil {
 		return nil, err
 	}
@@ -256,6 +263,7 @@ func SecureGeneration(path string) error { return validateGenerationMembers(path
 
 func validateGenerationMembers(path string, requireDatabase bool) error {
 	for index, member := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		optional := index > 0
 		info, err := os.Lstat(member)
 		if errors.Is(err, os.ErrNotExist) {
 			if requireDatabase && index == 0 {
@@ -276,7 +284,23 @@ func validateGenerationMembers(path string, requireDatabase bool) error {
 			return errors.New("SQLite provider generation member is owned by another user")
 		}
 		if err := secureProviderFile(member); err != nil {
+			if optional && errors.Is(err, os.ErrNotExist) {
+				if _, currentErr := os.Lstat(member); errors.Is(currentErr, os.ErrNotExist) {
+					continue
+				}
+			}
 			return fmt.Errorf("secure SQLite provider generation: %w", err)
+		}
+		current, currentErr := os.Lstat(member)
+		if optional && errors.Is(currentErr, os.ErrNotExist) {
+			continue
+		}
+		if currentErr != nil || current == nil || !current.Mode().IsRegular() ||
+			current.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, current) {
+			return errors.Join(
+				errors.New("SQLite provider generation member changed while securing"),
+				currentErr,
+			)
 		}
 	}
 	return nil

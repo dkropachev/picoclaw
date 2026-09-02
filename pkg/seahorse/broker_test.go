@@ -23,6 +23,101 @@ type seahorseBrokerFixture struct {
 	primaryEngine, agentEngine *Engine
 }
 
+func TestSeahorseBrokerLazilyIsolatesCorruptWorkspace(t *testing.T) {
+	home := t.TempDir()
+	primary := filepath.Join(home, "primary")
+	sibling := filepath.Join(home, "sibling")
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = primary
+	cfg.Agents.List = []config.AgentConfig{{ID: "sibling", Workspace: sibling}}
+	targets, err := configuredSeahorseTargets(home, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var siblingID database.StoreID
+	var siblingPath string
+	for id, target := range targets {
+		if id != "workspace.seahorse" {
+			siblingID = id
+			siblingPath = target.path
+		}
+	}
+	if !siblingID.Valid() || siblingPath == "" {
+		t.Fatalf("configured targets = %#v", targets)
+	}
+	if mkdirErr := os.MkdirAll(filepath.Dir(siblingPath), 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	corrupt := []byte("not a sqlite database")
+	if writeErr := os.WriteFile(siblingPath, corrupt, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	handler, err := NewBrokerHandler(home, cfg)
+	if err != nil {
+		t.Fatalf("constructor: %v", err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
+	for id, item := range handler.stores {
+		if item.engine != nil {
+			t.Fatalf("constructor opened %q", id)
+		}
+	}
+	primaryPath := targets["workspace.seahorse"].path
+	if _, statErr := os.Lstat(primaryPath); !os.IsNotExist(statErr) {
+		t.Fatalf("constructor touched primary store: %v", statErr)
+	}
+	gotCorrupt, err := os.ReadFile(siblingPath)
+	if err != nil || string(gotCorrupt) != string(corrupt) {
+		t.Fatalf("constructor changed corrupt sibling: %q, %v", gotCorrupt, err)
+	}
+	fence, err := database.AcquireOnlineFence(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fence.Close() })
+	primaryID := database.StoreID("workspace.seahorse")
+	if _, err = handler.Handle(t.Context(), seahorseBrokerTestRequest(
+		t, opPreflight, seahorseStoreRequest{StoreID: primaryID},
+	)); err != nil {
+		t.Fatalf("primary preflight: %v", err)
+	}
+	primaryEngine := handler.stores[primaryID].engine
+	if primaryEngine == nil || primaryEngine.store == nil || primaryEngine.store.db == nil {
+		t.Fatal("primary preflight did not retain its pool")
+	}
+	primaryPool := primaryEngine.store.db
+	if _, err = handler.Handle(t.Context(), seahorseBrokerTestRequest(
+		t, opPreflight, seahorseStoreRequest{StoreID: siblingID},
+	)); database.CodeOf(err) != database.CodeIntegrity {
+		t.Fatalf("sibling preflight error = %v", err)
+	}
+	if handler.stores[siblingID].engine != nil {
+		t.Fatal("failed sibling open was retained")
+	}
+	response, err := handler.Handle(t.Context(), seahorseBrokerTestRequest(
+		t,
+		opGetOrCreate,
+		seahorseRequest{StoreID: primaryID, SessionKey: "ready-after-sibling-failure"},
+	))
+	if err != nil || response.(seahorseResponse).Conversation == nil {
+		t.Fatalf("primary operation after sibling failure = %#v, %v", response, err)
+	}
+	if handler.stores[primaryID].engine.store.db != primaryPool {
+		t.Fatal("primary retained pool changed")
+	}
+}
+
+func seahorseBrokerTestRequest(t *testing.T, operation string, payload any) database.Request {
+	t.Helper()
+	raw, err := database.MarshalCanonical(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return database.Request{
+		Domain: BrokerDomain, Version: BrokerVersion, Operation: operation, Payload: raw,
+	}
+}
+
 func newSeahorseBrokerFixture(t *testing.T) *seahorseBrokerFixture {
 	t.Helper()
 	home := filepath.Join(t.TempDir(), "home")
@@ -80,8 +175,8 @@ func newSeahorseBrokerFixture(t *testing.T) *seahorseBrokerFixture {
 		if err := server.Close(ctx); err != nil {
 			t.Errorf("close: %v", err)
 		}
-		for _, engine := range handler.engines {
-			if engine.store.db != nil && engine.store.db.Ping() == nil {
+		for _, item := range handler.stores {
+			if item.engine != nil && item.engine.store.db != nil && item.engine.store.db.Ping() == nil {
 				t.Error("pool remained usable")
 			}
 		}

@@ -35,19 +35,19 @@ func TestMigrationBacksUpSelectedStoreAndLegacyInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := preHorizon.Exec(`DROP TABLE storage_import_horizons`); err != nil {
-		t.Fatal(err)
+	if _, dropErr := preHorizon.Exec(`DROP TABLE storage_import_horizons`); dropErr != nil {
+		t.Fatal(dropErr)
 	}
-	if err := preHorizon.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := preHorizon.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	legacyPath := filepath.Join(workspace, "workflow_runs", "run-1", "run.json")
-	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
-		t.Fatal(err)
+	if mkdirErr := os.MkdirAll(filepath.Dir(legacyPath), 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
 	legacyPayload := []byte(`{"id":"run-1"}`)
-	if err := os.WriteFile(legacyPath, legacyPayload, 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(legacyPath, legacyPayload, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	databasePayload, err := os.ReadFile(databasePath)
 	if err != nil {

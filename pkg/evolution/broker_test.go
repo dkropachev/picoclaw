@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/database"
 )
@@ -118,8 +119,8 @@ func newEvolutionBrokerFixture(t *testing.T) *evolutionBrokerFixture {
 		if err := server.Close(ctx); err != nil {
 			t.Errorf("close: %v", err)
 		}
-		for _, store := range handler.stores {
-			if store.retained != nil {
+		for _, target := range handler.stores {
+			if target.store != nil && target.store.retained != nil {
 				t.Error("retained pool remained open")
 			}
 		}
@@ -174,6 +175,92 @@ func TestEvolutionBrokerPrimaryAndDynamicWorkspaceStores(t *testing.T) {
 	tasks, _ := f.primaryStore.LoadTaskRecords()
 	if tasks[0].Status != "clustered" {
 		t.Fatalf("clustered=%#v", tasks[0])
+	}
+}
+
+func TestEvolutionBrokerMixedWorkspaceReadinessIsStoreLocal(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	primary := filepath.Join(home, "workspace")
+	agent := filepath.Join(home, "agent-workspace")
+	for _, path := range []string{primary, agent} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = primary
+	cfg.Agents.List = []config.AgentConfig{{ID: "worker", Workspace: agent}}
+	targets, err := configuredEvolutionTargets(home, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var agentID database.StoreID
+	for id, target := range targets {
+		if id == "workspace.evolution" {
+			continue
+		}
+		agentID = id
+		if mkdirErr := os.MkdirAll(filepath.Dir(target.paths.Database), 0o700); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+		old, openErr := sqliteprovider.OpenStore(target.paths.Database, 5*time.Second)
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		if _, execErr := old.Exec(`CREATE TABLE retained (id TEXT PRIMARY KEY)`); execErr != nil {
+			t.Fatal(execErr)
+		}
+		if versionErr := sqliteprovider.SetSchemaVersion(t.Context(), old, 1); versionErr != nil {
+			t.Fatal(versionErr)
+		}
+		if closeErr := old.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}
+	handler, err := NewBrokerHandler(home, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, target := range handler.stores {
+		if target.store != nil {
+			t.Fatalf("handler construction opened %q", id)
+		}
+	}
+	server, err := database.StartServer(t.Context(), database.ServerOptions{
+		Home: home, Handler: handler, CloseHandler: handler.Close,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := database.Connect(home)
+	if err != nil {
+		_ = server.Close(context.Background())
+		t.Fatal(err)
+	}
+	defer server.Close(context.Background())
+	preflight := func(id database.StoreID) error {
+		var response evolutionBrokerResponse
+		return client.Call(
+			t.Context(), BrokerDomain, BrokerVersion, BrokerPreflightOperation,
+			evolutionBrokerTargetRequest{StoreID: id}, &response,
+		)
+	}
+	primaryID := database.StoreID("workspace.evolution")
+	if err := preflight(primaryID); err != nil {
+		t.Fatalf("primary preflight: %v", err)
+	}
+	primaryStore := handler.stores[primaryID].store
+	if primaryStore == nil || primaryStore.retained == nil {
+		t.Fatal("primary preflight did not retain its pool")
+	}
+	if err := preflight(agentID); database.CodeOf(err) != database.CodeMigrationRequired {
+		t.Fatalf("outdated agent preflight = %v", err)
+	}
+	if handler.stores[agentID].store != nil {
+		t.Fatal("failed agent preflight retained a pool")
+	}
+	if err := preflight(primaryID); err != nil || handler.stores[primaryID].store != primaryStore {
+		t.Fatalf("agent failure poisoned primary: %v", err)
 	}
 }
 
@@ -258,7 +345,7 @@ func TestEvolutionBrokerConcurrentClientsRetainPools(t *testing.T) {
 	if err != nil || len(records) != clients {
 		t.Fatalf("records=%d %v", len(records), err)
 	}
-	if f.handler.stores[f.primaryStore.storeID].retained == nil {
+	if target := f.handler.stores[f.primaryStore.storeID]; target.store == nil || target.store.retained == nil {
 		t.Fatal("primary pool not retained")
 	}
 	var out evolutionBrokerResponse

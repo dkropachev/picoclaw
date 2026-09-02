@@ -505,6 +505,162 @@ func TestWorkflowBrokerConfiguredWorkspacesAreIsolated(t *testing.T) {
 	}
 }
 
+func TestWorkflowBrokerLazyMixedWorkspaceReadinessIsIsolated(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		wantCode database.ErrorCode
+		sabotage func(*testing.T, string)
+	}{
+		{
+			name:     "migration required",
+			wantCode: database.CodeMigrationRequired,
+			sabotage: func(t *testing.T, workspace string) {
+				t.Helper()
+				db, err := openWorkflowDatabase(t.Context(), workspace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`PRAGMA user_version = 0`); err != nil {
+					_ = db.Close()
+					t.Fatal(err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:     "corrupt schema",
+			wantCode: database.CodeIntegrity,
+			sabotage: func(t *testing.T, workspace string) {
+				t.Helper()
+				db, err := openWorkflowDatabase(t.Context(), workspace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`DROP INDEX workflow_runs_status_idx`); err != nil {
+					_ = db.Close()
+					t.Fatal(err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), "home")
+			primaryWorkspace := filepath.Join(home, "workspace")
+			brokenWorkspace := filepath.Join(home, "agents", "broken")
+			for _, workspace := range []string{primaryWorkspace, brokenWorkspace} {
+				if err := os.MkdirAll(workspace, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			test.sabotage(t, brokenWorkspace)
+
+			cfg := config.DefaultConfig()
+			cfg.Agents.Defaults.Workspace = primaryWorkspace
+			cfg.Agents.List = []config.AgentConfig{{ID: "broken", Workspace: brokenWorkspace}}
+			handler, err := NewBrokerHandler(home, cfg)
+			if err != nil {
+				t.Fatalf("metadata-only NewBrokerHandler() error = %v", err)
+			}
+			if len(handler.workspaces) != 2 {
+				t.Fatalf("cataloged workflow workspaces = %d, want 2", len(handler.workspaces))
+			}
+			for id, workspace := range handler.workspaces {
+				if workspace == nil || workspace.store == nil || workspace.store.database != nil {
+					t.Fatalf("constructor opened workflow store %q: %#v", id, workspace)
+				}
+			}
+
+			server, err := database.StartServer(context.Background(), database.ServerOptions{
+				Home: home, Handler: handler, CloseHandler: handler.Close,
+			})
+			if err != nil {
+				_ = handler.Close()
+				t.Fatal(err)
+			}
+			closed := false
+			t.Cleanup(func() {
+				if closed {
+					return
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if closeErr := server.Close(ctx); closeErr != nil {
+					t.Errorf("server.Close() error = %v", closeErr)
+				}
+			})
+			client, err := database.Connect(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			primaryID, err := resolveWorkflowBrokerStoreID(t.Context(), client, primaryWorkspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			brokenID, err := resolveWorkflowBrokerStoreID(t.Context(), client, brokenWorkspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for id, workspace := range handler.workspaces {
+				if workspace.store.database != nil {
+					t.Fatalf("StoreID resolution opened workflow store %q", id)
+				}
+			}
+
+			newClientStore := func(workspace string, id database.StoreID) *FileRunStore {
+				return &FileRunStore{
+					root: filepath.Join(workspace, "workflow_runs"), workspace: workspace,
+					broker: client, storeID: id,
+				}
+			}
+			primary := newClientStore(primaryWorkspace, primaryID)
+			broken := newClientStore(brokenWorkspace, brokenID)
+			if err := primary.Preflight(t.Context()); err != nil {
+				t.Fatalf("ready sibling preflight error = %v", err)
+			}
+			if err := broken.Preflight(t.Context()); database.CodeOf(err) != test.wantCode {
+				t.Fatalf("broken sibling preflight error = %v, want %s", err, test.wantCode)
+			}
+			// The failed target is memoized within its own lazy owner; it neither
+			// retries nor changes the already-ready sibling's retained pool.
+			if err := broken.Preflight(t.Context()); database.CodeOf(err) != test.wantCode {
+				t.Fatalf("repeated broken preflight error = %v, want %s", err, test.wantCode)
+			}
+			run := &Run{
+				ID: "wr_ready_after_sibling_failure", WorkflowRef: "workflows/lazy.yml",
+				Status: RunStatusRunning, CreatedAt: time.Now().UTC(),
+			}
+			if err := primary.CreateRun(t.Context(), run); err != nil {
+				t.Fatalf("ready sibling mutation after failure = %v", err)
+			}
+			if got, err := primary.GetRun(t.Context(), run.ID); err != nil || got.ID != run.ID {
+				t.Fatalf("ready sibling read after failure = %#v, %v", got, err)
+			}
+			primaryPool := handler.workspaces[primaryID].store.database
+			if primaryPool == nil {
+				t.Fatal("ready sibling did not retain its pool")
+			}
+			primaryPool.mu.Lock()
+			primaryOpen := primaryPool.db != nil
+			primaryPool.mu.Unlock()
+			if !primaryOpen {
+				t.Fatal("ready sibling pool is not open")
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := server.Close(ctx); err != nil {
+				t.Fatal(err)
+			}
+			closed = true
+		})
+	}
+}
+
 func TestWorkflowBrokerRuntimeConstructorProcess(t *testing.T) {
 	if os.Getenv("PICOCLAW_WORKFLOW_BROKER_CONSTRUCTOR_HELPER") == "1" {
 		client, home, err := database.ConnectInherited(context.Background())

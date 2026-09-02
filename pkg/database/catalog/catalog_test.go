@@ -31,6 +31,7 @@ func TestCatalogProjectionAndReadinessRequireOwnerAuthority(t *testing.T) {
 
 func TestProbeStatusesClassifiesFreshMigrationAndIntegrity(t *testing.T) {
 	home := t.TempDir()
+	t.Cleanup(func() { _ = CloseProbePools(home) })
 	workspace := filepath.Join(home, "workspace")
 	if err := os.MkdirAll(filepath.Join(workspace, "state"), 0o700); err != nil {
 		t.Fatal(err)
@@ -73,6 +74,9 @@ func TestProbeStatusesClassifiesFreshMigrationAndIntegrity(t *testing.T) {
 	if err := RequireReady(logical, statuses); database.CodeOf(err) != database.CodeMigrationRequired {
 		t.Fatalf("RequireReady() error = %v", err)
 	}
+	if err := CloseProbePools(home); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.WriteFile(workflowPath, []byte("not a database"), 0o600); err != nil {
 		t.Fatal(err)
@@ -88,6 +92,7 @@ func TestProbeStatusesClassifiesFreshMigrationAndIntegrity(t *testing.T) {
 
 func TestProbeStatusesClassifiesCurrentPreHorizonStoreForMigration(t *testing.T) {
 	home := t.TempDir()
+	t.Cleanup(func() { _ = CloseProbePools(home) })
 	workspace := filepath.Join(home, "workspace")
 	if err := os.MkdirAll(filepath.Join(workspace, "state"), 0o700); err != nil {
 		t.Fatal(err)
@@ -100,7 +105,12 @@ func TestProbeStatusesClassifiesCurrentPreHorizonStoreForMigration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(`CREATE TABLE retained (id TEXT PRIMARY KEY)`); err != nil {
+	if _, err := pool.Exec(`
+		CREATE TABLE storage_imports (component TEXT, source_id TEXT);
+		CREATE TABLE storage_import_issues (component TEXT, source_id TEXT);
+		CREATE TABLE storage_import_horizons (component TEXT PRIMARY KEY, completed_at INTEGER NOT NULL);
+		CREATE INDEX storage_imports_archive_status_idx ON storage_imports(component, source_id);
+	`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(`PRAGMA user_version = 1`); err != nil {
@@ -294,7 +304,7 @@ func TestCatalogRejectsSymlinkedHomeWithoutInspectingSidecar(t *testing.T) {
 	}
 }
 
-func TestInitializeRequiredInitializesOnlyReadyRequiredStores(t *testing.T) {
+func TestInitializeRequiredInitializesEveryReadyStore(t *testing.T) {
 	logical := &Catalog{entries: []Entry{
 		{ID: "required.missing", Domain: "missing", Required: true},
 		{ID: "required.unwritable", Domain: "unwritable", Required: true},
@@ -325,7 +335,7 @@ func TestInitializeRequiredInitializesOnlyReadyRequiredStores(t *testing.T) {
 		t.Fatal(err)
 	}
 	if called["required.missing"] != 1 || called["required.unwritable"] != 1 ||
-		called["required.legacy"] != 0 || called["optional.missing"] != 0 {
+		called["required.legacy"] != 0 || called["optional.missing"] != 1 {
 		t.Fatalf("readiness initialization calls = %#v", called)
 	}
 	byID := make(map[database.StoreID]database.StoreStatus, len(initialized))

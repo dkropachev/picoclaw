@@ -142,6 +142,7 @@ func newLocalEngine(config Config, completeFn CompleteFn) (*Engine, error) {
 		config.databasePath,
 		5*time.Second,
 	)
+	defer inspection.Release()
 	if inspectErr != nil && dblayer.OnlineFenceHeld() {
 		return nil, fmt.Errorf("inspect db: %w", inspectErr)
 	}

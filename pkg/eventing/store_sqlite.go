@@ -137,6 +137,7 @@ func openLocal(ctx context.Context, path string, options ...Option) (*Store, err
 			if inspectErr != nil {
 				return nil, fmt.Errorf("inspect eventing database: %w", inspectErr)
 			}
+			defer inspection.Release()
 			if inspection.Exists && !inspection.Empty {
 				switch {
 				case inspection.Version < schemaVersion:

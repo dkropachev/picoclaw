@@ -6,7 +6,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sipeed/picoclaw/internal/sqliteprovider"
@@ -14,6 +16,8 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/database"
 )
+
+var readinessPoolPaths sync.Map
 
 // ProbeStatuses inspects every trusted generation and returns backend-neutral
 // readiness. It initializes or migrates nothing.
@@ -28,6 +32,22 @@ func ProbeStatuses(ctx context.Context, home string, cfg *config.Config) ([]data
 	if err != nil {
 		return nil, err
 	}
+	if closeErr := CloseProbePools(physical.Home); closeErr != nil {
+		return nil, database.NewError(
+			database.CodeUnavailable,
+			"previous database readiness pools could not be closed",
+		)
+	}
+	paths := make([]string, 0, len(physical.Specs))
+	for _, spec := range physical.Specs {
+		paths = append(paths, spec.Path)
+	}
+	retained := false
+	defer func() {
+		if !retained {
+			_ = sqliteprovider.CloseInspectedPools(paths)
+		}
+	}()
 	statuses := make([]database.StoreStatus, 0, len(physical.Specs))
 	for _, spec := range physical.Specs {
 		id, parseErr := database.ParseStoreID(spec.ID)
@@ -56,7 +76,9 @@ func ProbeStatuses(ctx context.Context, home string, cfg *config.Config) ([]data
 			// A physically present but otherwise empty endpoint is equivalent to
 			// a missing empty store and may be initialized at current schema.
 		default:
-			if readinessErr := validateUnversionedReadiness(ctx, spec, &status); readinessErr != nil {
+			if readinessErr := validateUnversionedReadiness(
+				ctx, inspection, spec, &status,
+			); readinessErr != nil {
 				status.Readiness = database.StoreUnavailable
 				status.Error = database.NewError(database.CodeUnavailable, "database schema readiness is unavailable")
 				break
@@ -69,11 +91,9 @@ func ProbeStatuses(ctx context.Context, home string, cfg *config.Config) ([]data
 			case expected > 0 && inspection.Version > expected:
 				status.Readiness = database.StoreUnavailable
 				status.Error = database.NewError(database.CodeUnsupported, "database schema is newer than supported")
-			case expected > 0 && domainUsesSharedImportSchema(spec.Domain):
-				ready, readinessErr := sqliteprovider.HasSchemaObjects(
+			case expected > 0 && importHorizonComponent(spec.Domain) != "":
+				ready, readinessErr := inspection.HasSchemaObjects(
 					ctx,
-					spec.Path,
-					5*time.Second,
 					"storage_imports",
 					"storage_import_issues",
 					"storage_import_horizons",
@@ -91,6 +111,23 @@ func ProbeStatuses(ctx context.Context, home string, cfg *config.Config) ([]data
 						database.CodeMigrationRequired,
 						"database migration is required",
 					)
+				} else {
+					closed, horizonErr := inspection.HasImportHorizon(
+						ctx, importHorizonComponent(spec.Domain),
+					)
+					if horizonErr != nil {
+						status.Readiness = database.StoreIntegrityFailed
+						status.Error = database.NewError(
+							database.CodeIntegrity,
+							"database import readiness is invalid",
+						)
+					} else if !closed {
+						status.Readiness = database.StoreMigrationRequired
+						status.Error = database.NewError(
+							database.CodeMigrationRequired,
+							"database migration is required",
+						)
+					}
 				}
 			}
 		}
@@ -99,26 +136,68 @@ func ProbeStatuses(ctx context.Context, home string, cfg *config.Config) ([]data
 			status.Readiness = database.StoreMigrationRequired
 			status.Error = database.NewError(database.CodeMigrationRequired, "database migration is required")
 		}
+		if status.Readiness != database.StoreReady {
+			if releaseErr := inspection.Release(); releaseErr != nil {
+				status.Readiness = database.StoreUnavailable
+				status.Error = database.NewError(
+					database.CodeUnavailable,
+					"database readiness pool could not be closed",
+				)
+			}
+		}
 		statuses = append(statuses, status)
 	}
-	return database.ValidateStoreStatuses(statuses)
+	validated, err := database.ValidateStoreStatuses(statuses)
+	if err != nil {
+		return nil, err
+	}
+	readinessPoolPaths.Store(readinessHomeKey(physical.Home), append([]string(nil), paths...))
+	retained = true
+	return validated, nil
 }
 
-func domainUsesSharedImportSchema(domain string) bool {
+func importHorizonComponent(domain string) string {
 	switch domain {
-	case "auth", "launcher-auth", "model-catalogs", "tool-adaptation",
-		"workflows", "sessions", "cron", "runtime-state", "account-routing",
-		"repository-reviews", "repository-evaluations", "evolution", "local-ci",
-		"channel-wecom", "channel-weixin", "git-workspace-inventory",
-		"pr-workspace-checkpoints":
-		return true
+	case "auth":
+		return "auth"
+	case "model-catalogs":
+		return "model-catalogs"
+	case "tool-adaptation":
+		return "tool-adaptation"
+	case "workflows":
+		return "workflows"
+	case "sessions":
+		return "sessions"
+	case "cron":
+		return "cron-jobs"
+	case "runtime-state":
+		return "runtime-state"
+	case "account-routing":
+		return "account-router"
+	case "repository-reviews":
+		return "repository-reviews"
+	case "repository-evaluations":
+		return "repository-evaluations"
+	case "evolution":
+		return "evolution"
+	case "local-ci":
+		return "local_ci_cache"
+	case "channel-wecom":
+		return "wecom-reqid"
+	case "channel-weixin":
+		return "weixin-state"
+	case "git-workspace-inventory":
+		return "git-workspace-inventory"
+	case "pr-workspace-checkpoints":
+		return "pr-workspace-checkpoints"
 	default:
-		return false
+		return ""
 	}
 }
 
 func validateUnversionedReadiness(
 	ctx context.Context,
+	inspection sqliteprovider.Inspection,
 	spec storecatalog.Spec,
 	status *database.StoreStatus,
 ) error {
@@ -137,13 +216,13 @@ func validateUnversionedReadiness(
 	default:
 		return nil
 	}
-	ready, err := sqliteprovider.HasSchemaObjects(ctx, spec.Path, 5*time.Second, objects...)
+	ready, err := inspection.HasSchemaObjects(ctx, objects...)
 	if err != nil {
 		return err
 	}
 	if ready && spec.Domain == "seahorse" {
-		ready, err = sqliteprovider.HasTableColumns(
-			ctx, spec.Path, 5*time.Second, "messages", "model_name", "reasoning_content",
+		ready, err = inspection.HasTableColumns(
+			ctx, "messages", "model_name", "reasoning_content",
 		)
 		if err != nil {
 			return err
@@ -154,6 +233,29 @@ func validateUnversionedReadiness(
 		status.Error = database.NewError(database.CodeMigrationRequired, "database migration is required")
 	}
 	return nil
+}
+
+// CloseProbePools closes readiness pools that no typed domain handler adopted.
+// It exposes no physical identity and is used only by broker lifecycle code.
+func CloseProbePools(home string) error {
+	key := readinessHomeKey(home)
+	value, ok := readinessPoolPaths.LoadAndDelete(key)
+	if !ok {
+		return nil
+	}
+	paths, _ := value.([]string)
+	return sqliteprovider.CloseInspectedPools(paths)
+}
+
+func readinessHomeKey(home string) string {
+	absolute, err := filepath.Abs(filepath.Clean(home))
+	if err != nil {
+		absolute = filepath.Clean(home)
+	}
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		absolute = strings.ToLower(absolute)
+	}
+	return absolute
 }
 
 // RequireReady fails when any enabled required catalog store is not ready.
@@ -184,11 +286,11 @@ func RequireReady(logical *Catalog, statuses []database.StoreStatus) error {
 	return nil
 }
 
-// InitializeRequired synchronously initializes or proves every required store
-// already classified ready. Non-ready stores are never opened, so legacy and
-// outdated generations remain migration-required. Optional stores remain lazy.
-// Initialization failures are reflected in the returned status snapshot so the
-// broker remains available for maintenance while runtime admission fails.
+// InitializeRequired synchronously proves every catalog store already
+// classified ready through its typed domain adapter. Non-ready stores are never
+// opened, so legacy and outdated generations remain migration-required.
+// Optional-store failures remain visible in status without blocking admission;
+// required-store failures still prevent runtime startup.
 func InitializeRequired(
 	ctx context.Context,
 	logical *Catalog,
@@ -207,14 +309,11 @@ func InitializeRequired(
 		byID[validated[index].ID] = index
 	}
 	for _, entry := range logical.Entries() {
-		if !entry.Required {
-			continue
-		}
 		index, found := byID[entry.ID]
 		if !found {
 			return nil, database.NewError(
 				database.CodeIntegrity,
-				"required database store has no readiness status",
+				"database store has no readiness status",
 			)
 		}
 		if validated[index].Readiness != database.StoreReady {
