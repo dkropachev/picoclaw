@@ -66,7 +66,7 @@ func (m *legacyContextManager) Compact(_ context.Context, req *CompactRequest) e
 }
 
 func (m *legacyContextManager) Ingest(_ context.Context, _ *IngestRequest) error {
-	// Legacy: no-op. Messages are persisted by Sessions JSONL.
+	// Legacy: no-op. Messages are persisted by the session store.
 	return nil
 }
 
