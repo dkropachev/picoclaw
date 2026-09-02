@@ -5,6 +5,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -112,18 +113,25 @@ func TestSQLiteMutationPolicyFailsClosedWhenRootsCannotBeResolved(t *testing.T) 
 		"evolution": func() ([]string, error) {
 			return agentEvolutionFileMutationProtectedRoots("", "relative-evolution")
 		},
-		"Git workspace": func() ([]string, error) {
-			return agentGitWorkspaceFileMutationProtectedRoots(cfg)
-		},
-		"local CI": func() ([]string, error) {
-			return agentLocalCIEvidenceFileMutationProtectedRoots(cfg)
-		},
 		"account router": func() ([]string, error) {
 			return agentWorkspaceAccountRouterProtectedRoots("relative-workspace")
 		},
 		"workspace SQLite": func() ([]string, error) {
 			return appendAgentWorkspaceSQLiteProtectedRoots(nil, cfg)
 		},
+	}
+	gitRoots, gitErr := agentGitWorkspaceFileMutationProtectedRoots(cfg)
+	gitLock := filepath.Join(config.GetHome(), "relative-git-workspaces", "inventory.lock")
+	if gitErr != nil || !slices.Contains(gitRoots, gitLock) {
+		t.Fatalf("home-relative Git workspace roots = %#v, %v; want %q", gitRoots, gitErr, gitLock)
+	}
+	localCIRoots, localCIErr := agentLocalCIEvidenceFileMutationProtectedRoots(cfg)
+	localCIDatabase := filepath.Join(
+		config.GetHome(), "relative-workspace", "relative-events",
+		"pr-workspace-local-ci", "evidence", "cache.db",
+	)
+	if localCIErr != nil || !slices.Contains(localCIRoots, localCIDatabase) {
+		t.Fatalf("home-relative local CI roots = %#v, %v; want %q", localCIRoots, localCIErr, localCIDatabase)
 	}
 	for name, check := range checks {
 		if roots, checkErr := check(); checkErr == nil || roots != nil {
@@ -134,9 +142,6 @@ func TestSQLiteMutationPolicyFailsClosedWhenRootsCannotBeResolved(t *testing.T) 
 	for name, check := range map[string]func(){
 		"workspace": func() {
 			_ = mustAgentWorkspaceFileMutationProtectedRoots("relative-workspace")
-		},
-		"local CI": func() {
-			_ = mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg)
 		},
 		"account router": func() {
 			_ = mustAgentWorkspaceAccountRouterProtectedRoots("relative-workspace")
