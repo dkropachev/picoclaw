@@ -309,17 +309,20 @@ func newServeCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			gitInventoryHandler, err := gitworkspace.NewBrokerHandler(canonicalHome, cfg)
-			if err != nil {
-				_ = bridgeHandler.Close()
-				return err
-			}
-			checkpointHandler, err := gateway.NewPRWorkspaceCheckpointBrokerHandler(canonicalHome, cfg)
-			if err != nil {
-				_ = gitInventoryHandler.Close()
-				_ = bridgeHandler.Close()
-				return err
-			}
+			gitInventoryHandler := newLazyDomainHandler(func() (dblayer.Handler, func() error, error) {
+				handler, openErr := gitworkspace.NewBrokerHandler(canonicalHome, cfg)
+				if openErr != nil {
+					return nil, nil, openErr
+				}
+				return handler, handler.Close, nil
+			})
+			checkpointHandler := newLazyDomainHandler(func() (dblayer.Handler, func() error, error) {
+				handler, openErr := gateway.NewPRWorkspaceCheckpointBrokerHandler(canonicalHome, cfg)
+				if openErr != nil {
+					return nil, nil, openErr
+				}
+				return handler, handler.Close, nil
+			})
 			var closeOnce sync.Once
 			var handlersCloseErr error
 			closeHandlers := func() error {
@@ -452,8 +455,7 @@ func newServeCommand() *cobra.Command {
 							ctx, gitInventoryHandler, gitworkspace.BrokerDomain, "preflight", entry.ID,
 						)
 					case gateway.PRWorkspaceCheckpointBrokerDomain:
-						// Construction retained and validated the sole broker-side pool.
-						return nil
+						return checkpointHandler.ensureOpen()
 					default:
 						return dblayer.NewError(
 							dblayer.CodeUnsupported,

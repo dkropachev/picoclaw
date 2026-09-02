@@ -214,7 +214,32 @@ func requireOnlineCurrentStore(
 			"offline database migration is required",
 		)
 	}
+	importSchemaReady, err := sharedImportSchemaObjectsPresent(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	if !importSchemaReady {
+		// The provider-owned import horizon was added without changing each
+		// domain's user_version. A generation at the domain version but missing
+		// those shared objects is therefore outdated, not corrupt. Online startup
+		// must classify it for fenced offline migration without repairing it.
+		return false, dblayer.NewError(
+			dblayer.CodeMigrationRequired,
+			"offline database migration is required",
+		)
+	}
 	return false, nil
+}
+
+func sharedImportSchemaObjectsPresent(ctx context.Context, queryer contextQueryer) (bool, error) {
+	var count int
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema
+	    WHERE (type = 'table' AND name IN (
+	        'storage_imports', 'storage_import_issues', 'storage_import_horizons'
+	    )) OR (type = 'index' AND name = 'storage_imports_archive_status_idx')`).Scan(&count); err != nil {
+		return false, err
+	}
+	return count == 4, nil
 }
 
 func onlineLegacySourceExists(options *LegacyOptions) (bool, error) {

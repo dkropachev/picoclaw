@@ -28,6 +28,19 @@ func TestMigrationBacksUpSelectedStoreAndLegacyInputs(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	// Model a valid current-version generation created before the shared durable
+	// import horizon existed. The offline engine must back it up and install the
+	// missing provider metadata before importing the retained legacy source.
+	preHorizon, err := sqliteprovider.OpenStore(databasePath, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := preHorizon.Exec(`DROP TABLE storage_import_horizons`); err != nil {
+		t.Fatal(err)
+	}
+	if err := preHorizon.Close(); err != nil {
+		t.Fatal(err)
+	}
 	legacyPath := filepath.Join(workspace, "workflow_runs", "run-1", "run.json")
 	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
 		t.Fatal(err)

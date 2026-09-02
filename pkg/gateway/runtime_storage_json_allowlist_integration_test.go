@@ -219,7 +219,7 @@ func exerciseRuntimeStorageFirstStartup(t *testing.T, fixture *runtimeStorageInt
 	exerciseChannelStorage(t, ctx)
 
 	sessionsDir := filepath.Join(fixture.workspace, "sessions")
-	sessionStore, err := memory.NewSQLiteStore(sessionsDir)
+	sessionStore, err := memory.NewStore(sessionsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,11 +247,7 @@ func exerciseRuntimeStorageFirstStartup(t *testing.T, fixture *runtimeStorageInt
 	}
 	fixture.threadID, fixture.handoffID = thread.ID, handoff.ID
 
-	cronPath := filepath.Join(fixture.workspace, "cron", "jobs.db")
-	cronService, err := cron.NewSQLiteCronService(cronPath, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cronService := cron.NewForWorkspace(filepath.Join(fixture.workspace, "cron"), nil)
 	every := int64(time.Hour / time.Millisecond)
 	job, err := cronService.AddJob(
 		"runtime storage", cron.CronSchedule{Kind: "every", EveryMS: &every},
@@ -546,12 +542,12 @@ func exerciseAccountRouterStorage(t *testing.T, fixture *runtimeStorageIntegrati
 			Candidates: []providers.FallbackCandidate{{Provider: "openai", Model: "runtime-model"}},
 		},
 	}
-	router, err := accountrouter.NewSQLite(
+	router := accountrouter.NewForWorkspace(
 		routerConfig.Name, routerConfig, accounts,
-		filepath.Join(fixture.workspace, "state", "account-router.db"),
+		fixture.workspace,
 	)
-	if err != nil {
-		t.Fatal(err)
+	if router == nil {
+		t.Fatal("account router construction failed")
 	}
 	selection := router.Select("runtime-storage-session", accountrouter.SelectReasonInitial)
 	if len(selection.Candidates) != 1 {
@@ -706,7 +702,7 @@ func exerciseRuntimeStorageSecondStartup(t *testing.T, fixture *runtimeStorageIn
 	}
 	exerciseChannelStorage(t, ctx)
 
-	sessionStore, err := memory.NewSQLiteStore(filepath.Join(fixture.workspace, "sessions"))
+	sessionStore, err := memory.NewStore(filepath.Join(fixture.workspace, "sessions"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -728,11 +724,7 @@ func exerciseRuntimeStorageSecondStartup(t *testing.T, fixture *runtimeStorageIn
 		t.Fatalf("reopened handoff = %#v, %v, %v", handoff, handoffFound, handoffErr)
 	}
 
-	cronPath := filepath.Join(fixture.workspace, "cron", "jobs.db")
-	cronService, err := cron.NewSQLiteCronService(cronPath, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cronService := cron.NewForWorkspace(filepath.Join(fixture.workspace, "cron"), nil)
 	job, jobFound := cronService.GetJob(fixture.cronJobID)
 	if !jobFound || job == nil || job.ID != fixture.cronJobID {
 		_ = cronService.Close()
