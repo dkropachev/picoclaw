@@ -8,6 +8,7 @@ import (
 	logx "github.com/sipeed/picoclaw/pkg/logger"
 	toolpkg "github.com/sipeed/picoclaw/pkg/tools"
 	i "io"
+	"os"
 	"strings"
 )
 
@@ -50,4 +51,8 @@ func nonEmittingErrorMethod(err ordinaryError) string {
 func reviewedNonLoggerFunctionValue() {
 	result := toolpkg.ErrorResult
 	_ = result("functional result, not a log")
+}
+
+func directoryEntryMetadata(entry os.DirEntry) {
+	_, _ = entry.Info()
 }

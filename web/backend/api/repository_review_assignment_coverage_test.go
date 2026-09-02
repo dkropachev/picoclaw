@@ -296,7 +296,12 @@ func TestRepositoryReviewAssignmentAdmissionFailureBranches(t *testing.T) {
 	t.Run("abandoned reservation interrupt", func(t *testing.T) {
 		fixture := prepare(t, "interrupt-failure")
 		calls := 0
-		lockPath := filepath.Join(fixture.workspace, "repository_reviews.lock")
+		lockPath := filepath.Join(
+			fixture.workspace,
+			"repository_reviews",
+			".locks",
+			"store.lock",
+		)
 		fixture.controller.update = func(
 			ctx context.Context,
 			store repoaudit.Store,
