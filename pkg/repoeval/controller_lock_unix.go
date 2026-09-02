@@ -15,19 +15,26 @@ import (
 // controller lease. Store file locks protect individual CAS operations; this
 // lease prevents two launcher processes from recovering the same durable run.
 func (s Store) LockController() (func(), error) {
-	lockPath := s.root + ".controller.lock"
-	if info, err := os.Lstat(lockPath); err == nil {
+	lockPath, lockPathErr := repositoryEvaluationLockPath(s.root, "controller.lock")
+	if lockPathErr != nil {
+		return nil, lockPathErr
+	}
+	if info, inspectErr := os.Lstat(lockPath); inspectErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
 			return nil, errors.New("repository evaluation controller lock must be a private regular file")
 		}
-	} else if !os.IsNotExist(err) {
-		return nil, err
+	} else if !os.IsNotExist(inspectErr) {
+		return nil, inspectErr
 	}
-	if err := repositoryEvaluationMkdirLockDir(filepath.Dir(lockPath), 0o700); err != nil {
-		return nil, err
+	if mkdirErr := repositoryEvaluationMkdirLockDir(filepath.Dir(lockPath), 0o700); mkdirErr != nil {
+		return nil, mkdirErr
 	}
 	file, err := repositoryEvaluationOpenLockFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
+		return nil, err
+	}
+	if err := secureRepositoryEvaluationLockFile(lockPath, file); err != nil {
+		_ = file.Close()
 		return nil, err
 	}
 	if err := repositoryEvaluationFlock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {

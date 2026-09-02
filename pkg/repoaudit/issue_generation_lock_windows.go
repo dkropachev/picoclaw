@@ -23,8 +23,13 @@ func (s Store) TryLockIssueGenerationAttempt(
 		!validBoundedText(generationID, maxIssueGenerationIDBytes) {
 		return nil, false, errors.New("invalid repository review issue generation lock")
 	}
-	lockPath := s.root + ".issue-generation-" +
-		stableID("", repository, draftID, generationID) + ".lock"
+	lockPath, err := repositoryReviewLockPath(
+		s.root,
+		"issue-generation-"+stableID("", repository, draftID, generationID)+".lock",
+	)
+	if err != nil {
+		return nil, false, err
+	}
 	return tryLockRepositoryReviewIssueFile(lockPath)
 }
 
@@ -40,7 +45,13 @@ func (s Store) AcquireIssueGenerationSlot(
 	}
 	for {
 		for slot := 0; slot < maximum; slot++ {
-			lockPath := fmt.Sprintf("%s.issue-writer-slot-%02d.lock", s.root, slot)
+			lockPath, lockPathErr := repositoryReviewLockPath(
+				s.root,
+				fmt.Sprintf("issue-writer-slot-%02d.lock", slot),
+			)
+			if lockPathErr != nil {
+				return nil, lockPathErr
+			}
 			release, acquired, err := tryLockRepositoryReviewIssueFile(lockPath)
 			if err != nil {
 				return nil, err
@@ -72,6 +83,10 @@ func tryLockRepositoryReviewIssueFile(lockPath string) (func(), bool, error) {
 	}
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
+		return nil, false, err
+	}
+	if err := secureRepositoryReviewLockFile(lockPath, file); err != nil {
+		_ = file.Close()
 		return nil, false, err
 	}
 	overlapped := new(windows.Overlapped)

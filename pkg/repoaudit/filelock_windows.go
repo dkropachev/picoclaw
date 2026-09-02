@@ -12,7 +12,10 @@ import (
 )
 
 func lockRepositoryReviewStore(root string) (func(), error) {
-	lockPath := root + ".lock"
+	lockPath, err := repositoryReviewLockPath(root, "store.lock")
+	if err != nil {
+		return nil, err
+	}
 	if info, err := os.Lstat(lockPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return nil, errors.New("repository review lock must be a regular file")
@@ -25,6 +28,10 @@ func lockRepositoryReviewStore(root string) (func(), error) {
 	}
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
+		return nil, err
+	}
+	if err := secureRepositoryReviewLockFile(lockPath, file); err != nil {
+		_ = file.Close()
 		return nil, err
 	}
 	var overlapped windows.Overlapped

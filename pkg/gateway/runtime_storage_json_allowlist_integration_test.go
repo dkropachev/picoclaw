@@ -1388,6 +1388,34 @@ func assertRuntimeStorageScannerCanaries(
 		defer func() { _ = os.Remove(path) }()
 		assertRejected(t, "workspace/state/runtime-owned.sqlite3: SQLite path is not allowlisted")
 	})
+	t.Run("ordinary-name symlink", func(t *testing.T) {
+		target := filepath.Join(fixture.workspace, "ordinary-target")
+		path := filepath.Join(fixture.workspace, "ordinary-alias")
+		if err := os.WriteFile(target, []byte("ordinary"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(target) }()
+		if err := os.Symlink(target, path); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink creation is unavailable: %v", err)
+			}
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(path) }()
+		assertRejected(t, "workspace/ordinary-alias: unsafe symlink")
+	})
+	t.Run("ordinary-name special file", func(t *testing.T) {
+		path := filepath.Join(fixture.workspace, "ordinary-special")
+		created, err := runtimeStorageCreateSpecialCanary(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !created {
+			t.Skip("special-file creation is unavailable")
+		}
+		defer func() { _ = os.Remove(path) }()
+		assertRejected(t, "workspace/ordinary-special: unsafe file type")
+	})
 	t.Run("symlinked archive root", func(t *testing.T) {
 		archiveRoot := filepath.Join(fixture.evolutionRoot, "legacy-json", "evolution-v1")
 		if err := os.MkdirAll(filepath.Dir(archiveRoot), 0o700); err != nil {
@@ -1428,24 +1456,34 @@ func scanRuntimeStorageTree(allowlist runtimeStorageJSONAllowlist) (runtimeStora
 		if walkErr != nil {
 			return walkErr
 		}
+		relative := runtimeStorageSlashRelative(allowlist.fixture.root, path)
+		// Inspect every entry before filtering on a storage-looking suffix. A
+		// symlink or special file can otherwise hide mutable runtime state behind
+		// an innocuous name and evade this repository-wide invariant.
+		if entry.Type()&os.ModeSymlink != 0 {
+			issues = append(issues, relative+": unsafe symlink")
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			issues = append(issues, relative+": unsafe file type")
+			return nil
+		}
 		isPID := filepath.Clean(path) == filepath.Clean(allowlist.fixture.pidPath)
 		isJSON := runtimeStorageJSONCandidate(path) || isPID
 		isDatabase := runtimeStorageSQLiteCandidate(path)
 		if !isJSON && !isDatabase {
 			return nil
 		}
-		relative := runtimeStorageSlashRelative(allowlist.fixture.root, path)
 		if entry.IsDir() {
 			issues = append(issues, relative+": storage candidate is a directory")
 			return filepath.SkipDir
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if entry.Type()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			issues = append(issues, relative+": unsafe file type")
-			return nil
 		}
 		if isDatabase {
 			if !allowlist.allowsDatabase(path) {

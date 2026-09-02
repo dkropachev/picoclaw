@@ -128,8 +128,12 @@ func TestRepositoryReviewUnixLockSyscallFailures(t *testing.T) {
 	t.Run("issue lock irregular file", func(t *testing.T) {
 		restoreRepositoryReviewLockHooks(t)
 		store := NewStore(t.TempDir())
-		lockPath := store.root + ".issue-generation-" +
-			stableID("", "owner/repo", "draft", "generation") + ".lock"
+		lockPath := repositoryReviewTestLockPath(
+			t,
+			store.root,
+			"issue-generation-"+
+				stableID("", "owner/repo", "draft", "generation")+".lock",
+		)
 		if err := os.MkdirAll(lockPath, 0o700); err != nil {
 			t.Fatal(err)
 		}

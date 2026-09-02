@@ -118,6 +118,9 @@ type LocalRepairRunnerConfig struct {
 	// with ordinary file tools and apply_patch.
 	ProtectedIdentities    *tools.FileIdentityCatalog
 	PreparedMutationPolicy *tools.PreparedFileMutationPolicy
+	// PreparedApplyPatchRoots is the immutable volatile-root snapshot paired
+	// with PreparedMutationPolicy for the same runtime generation.
+	PreparedApplyPatchRoots *tools.PreparedApplyPatchVolatileRoots
 }
 
 // LocalRepairRequest contains no raw workspace path. The exact pin is resolved
@@ -143,20 +146,21 @@ type LocalRepairResult struct {
 // LocalRepairRunner runs an isolated edit-only model loop over an exact pinned
 // checkout. It owns neither durable conversation state nor publication.
 type LocalRepairRunner struct {
-	workspaces             PinnedWorkspaceAcquirer
-	provider               providers.LLMProvider
-	model                  string
-	maxIterations          int
-	maxTokens              int
-	temperature            float64
-	reasoningEffort        string
-	providerSlot           chan struct{}
-	runtimeLoop            *AgentLoop
-	generationID           uint64
-	strictRuntime          bool
-	protectedRoots         []string
-	protectedIdentities    *tools.FileIdentityCatalog
-	preparedMutationPolicy *tools.PreparedFileMutationPolicy
+	workspaces              PinnedWorkspaceAcquirer
+	provider                providers.LLMProvider
+	model                   string
+	maxIterations           int
+	maxTokens               int
+	temperature             float64
+	reasoningEffort         string
+	providerSlot            chan struct{}
+	runtimeLoop             *AgentLoop
+	generationID            uint64
+	strictRuntime           bool
+	protectedRoots          []string
+	protectedIdentities     *tools.FileIdentityCatalog
+	preparedMutationPolicy  *tools.PreparedFileMutationPolicy
+	preparedApplyPatchRoots *tools.PreparedApplyPatchVolatileRoots
 }
 
 func NewLocalRepairRunner(config LocalRepairRunnerConfig) (*LocalRepairRunner, error) {
@@ -166,9 +170,11 @@ func NewLocalRepairRunner(config LocalRepairRunnerConfig) (*LocalRepairRunner, e
 	if localRepairNil(config.Provider) {
 		return nil, errors.New("local repair provider is required")
 	}
-	if config.PreparedMutationPolicy != nil &&
-		(len(config.ProtectedRoots) != 0 || config.ProtectedIdentities != nil) {
+	if config.PreparedMutationPolicy != nil && len(config.ProtectedRoots) != 0 {
 		return nil, errors.New("prepared local repair policy has source fields")
+	}
+	if (config.PreparedMutationPolicy == nil) != (config.PreparedApplyPatchRoots == nil) {
+		return nil, errors.New("prepared local repair policies must be paired")
 	}
 	model := strings.TrimSpace(config.Model)
 	if model == "" || model != config.Model || !validLocalRepairIdentity(model, 1024) {
@@ -197,17 +203,18 @@ func NewLocalRepairRunner(config LocalRepairRunnerConfig) (*LocalRepairRunner, e
 		return nil, err
 	}
 	return &LocalRepairRunner{
-		workspaces:             config.Workspaces,
-		provider:               config.Provider,
-		model:                  model,
-		maxIterations:          maxIterations,
-		maxTokens:              maxTokens,
-		temperature:            config.Temperature,
-		reasoningEffort:        reasoningEffort,
-		providerSlot:           make(chan struct{}, 1),
-		protectedRoots:         append([]string(nil), config.ProtectedRoots...),
-		protectedIdentities:    config.ProtectedIdentities,
-		preparedMutationPolicy: config.PreparedMutationPolicy,
+		workspaces:              config.Workspaces,
+		provider:                config.Provider,
+		model:                   model,
+		maxIterations:           maxIterations,
+		maxTokens:               maxTokens,
+		temperature:             config.Temperature,
+		reasoningEffort:         reasoningEffort,
+		providerSlot:            make(chan struct{}, 1),
+		protectedRoots:          append([]string(nil), config.ProtectedRoots...),
+		protectedIdentities:     config.ProtectedIdentities,
+		preparedMutationPolicy:  config.PreparedMutationPolicy,
+		preparedApplyPatchRoots: config.PreparedApplyPatchRoots,
 	}, nil
 }
 
@@ -324,6 +331,7 @@ func (runner *LocalRepairRunner) runPinned(
 	if err != nil {
 		return LocalRepairResult{}, fmt.Errorf("%w: %v", ErrLocalRepairPin, err)
 	}
+	guard.preparedApplyPatchRoots = runner.preparedApplyPatchRoots
 	result.WorkspaceID = before.ID
 	profile, err := newLocalRepairProviderProfile(
 		runner.maxTokens,
@@ -501,11 +509,12 @@ func compareLocalRepairWorkspace(
 }
 
 type localRepairPathGuard struct {
-	root                   string
-	gitRoot                string
-	protectedRoots         []localRepairProtectedRoot
-	protectedIdentities    *tools.FileIdentityCatalog
-	preparedMutationPolicy *tools.PreparedFileMutationPolicy
+	root                    string
+	gitRoot                 string
+	protectedRoots          []localRepairProtectedRoot
+	protectedIdentities     *tools.FileIdentityCatalog
+	preparedMutationPolicy  *tools.PreparedFileMutationPolicy
+	preparedApplyPatchRoots *tools.PreparedApplyPatchVolatileRoots
 	// Deterministic package-test seam after path inspection, before open.
 	beforeFileOpen func()
 }
@@ -541,7 +550,7 @@ func newLocalRepairPathGuardWithPolicy(
 	if len(preparedPolicies) == 1 {
 		preparedPolicy = preparedPolicies[0]
 	}
-	if preparedPolicy != nil && (len(configured) != 0 || protectedIdentities != nil) {
+	if preparedPolicy != nil && len(configured) != 0 {
 		return nil, errors.New("prepared local repair path guard has source fields")
 	}
 	if err := validateLocalRepairWorkspaceInfo(workspace, pin); err != nil {
@@ -896,9 +905,10 @@ func newLocalRepairToolRegistryWithDiagnosticPolicy(
 		true,
 		true,
 		tools.ApplyPatchPreflightPolicy{
-			ProtectedRoots:      append([]string(nil), patchRoots...),
-			ProtectedIdentities: guard.protectedIdentities,
-			PathGuard:           guard.validateMutation,
+			ProtectedRoots:                 append([]string(nil), patchRoots...),
+			ProtectedIdentities:            guard.protectedIdentities,
+			PreparedVolatileProtectedRoots: guard.preparedApplyPatchRoots,
+			PathGuard:                      guard.validateMutation,
 		},
 	)
 	if patchErr != nil {

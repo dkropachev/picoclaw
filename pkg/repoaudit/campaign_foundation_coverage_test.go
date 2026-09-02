@@ -34,7 +34,7 @@ func TestRepositoryReviewCampaignBeginOperationalFailures(t *testing.T) {
 
 	t.Run("lock", func(t *testing.T) {
 		store := newRepositoryAuditTestStore(t)
-		if err := os.Mkdir(store.root+".lock", 0o700); err != nil {
+		if err := os.Mkdir(repositoryReviewTestLockPath(t, store.root, "store.lock"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.BeginCampaign(
@@ -126,10 +126,10 @@ func TestRepositoryReviewCampaignReconcileOperationalFailures(t *testing.T) {
 
 	t.Run("lock", func(t *testing.T) {
 		store, request, _ := repositoryReviewCampaignReconcileFixture(t, "owner/reconcile-lock")
-		if err := os.Remove(store.root + ".lock"); err != nil {
+		if err := os.Remove(repositoryReviewTestLockPath(t, store.root, "store.lock")); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Mkdir(store.root+".lock", 0o700); err != nil {
+		if err := os.Mkdir(repositoryReviewTestLockPath(t, store.root, "store.lock"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.ReconcileCampaign(context.Background(), request); err == nil {

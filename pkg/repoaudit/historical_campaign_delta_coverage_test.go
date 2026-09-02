@@ -454,7 +454,7 @@ func TestHistoricalReplayRemainingStoreBranches(t *testing.T) {
 	}
 
 	locked := NewStore(t.TempDir())
-	if err := os.Mkdir(locked.root+".lock", 0o700); err != nil {
+	if err := os.Mkdir(repositoryReviewTestLockPath(t, locked.root, "store.lock"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := locked.RetryHistoricalDeduplicationReplay("owner/repo"); err == nil {

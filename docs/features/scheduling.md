@@ -57,7 +57,7 @@ Owns: TOOL cron
 | CLI | `picoclaw cron add/list/enable/disable/remove` | Persistent job management. | `FR-SCHED-005` |
 | Tool | `cron` | Agent-callable scheduling actions. | `FR-SCHED-001` through `FR-SCHED-004` |
 | Config | `tools.cron.*`, `heartbeat.*` | Command gates, timeout, allowed remotes, and heartbeat interval. | `FR-SCHED-004`, `FR-SCHED-006` |
-| Storage | `<workspace>/cron/jobs.db`; `cron/jobs.json`; `cron/legacy-json/cron-jobs-v1/jobs.json` | Typed job definitions, ordering and execution state plus the protected active and immutable verified legacy sources. | `FR-SCHED-002`, `FR-SCHED-005` |
+| Storage | `<workspace>/cron/jobs.db`; legacy-only source `cron/jobs.json`; retained `cron/legacy-json/cron-jobs-v1/jobs.json` | Typed job definitions, ordering, and execution state. `jobs.json` is examined only during first-open migration and is never active storage or a dual-write target. | `FR-SCHED-002`, `FR-SCHED-005` |
 | Runtime | `AgentLoop.AcquireRuntimeGeneration`, gateway reload lifecycle | Fence due work to its originating config/provider generation and activate replacement cron only after fallible service setup. | `FR-SCHED-007` |
 | Runtime | optional direct-publishing job executor | Keep a scheduled root response inside the agent turn's tracked-result output boundary, with compatibility fallback for alternate executors. | `FR-SCHED-007` |
 

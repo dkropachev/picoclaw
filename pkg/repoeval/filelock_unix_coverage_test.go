@@ -23,7 +23,7 @@ func TestRepositoryEvaluationFileLockFailureBranches(t *testing.T) {
 
 	t.Run("irregular", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "state")
-		if err := os.Mkdir(root+".lock", 0o700); err != nil {
+		if err := os.Mkdir(repositoryEvaluationTestLockPath(t, root, "store.lock"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := lockRepositoryEvaluationStore(root); err == nil {
@@ -32,7 +32,7 @@ func TestRepositoryEvaluationFileLockFailureBranches(t *testing.T) {
 	})
 	t.Run("broad permissions", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "state")
-		if err := os.WriteFile(root+".lock", nil, 0o644); err != nil {
+		if err := os.WriteFile(repositoryEvaluationTestLockPath(t, root, "store.lock"), nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := lockRepositoryEvaluationStore(root); err == nil {
@@ -89,7 +89,7 @@ func TestRepositoryEvaluationControllerLockBranches(t *testing.T) {
 
 	t.Run("irregular", func(t *testing.T) {
 		store := NewStore(t.TempDir())
-		if err := os.Mkdir(store.root+".controller.lock", 0o700); err != nil {
+		if err := os.Mkdir(repositoryEvaluationTestLockPath(t, store.root, "controller.lock"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.LockController(); err == nil {
@@ -98,7 +98,8 @@ func TestRepositoryEvaluationControllerLockBranches(t *testing.T) {
 	})
 	t.Run("broad permissions", func(t *testing.T) {
 		store := NewStore(t.TempDir())
-		if err := os.WriteFile(store.root+".controller.lock", nil, 0o644); err != nil {
+		lockPath := repositoryEvaluationTestLockPath(t, store.root, "controller.lock")
+		if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.LockController(); err == nil {

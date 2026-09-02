@@ -74,6 +74,7 @@ type AgentInstance struct {
 	fileMutationIdentityCatalog *tools.FileIdentityCatalog
 	fileMutationProtectedRoots  []string
 	preparedFileMutationPolicy  *tools.PreparedFileMutationPolicy
+	preparedApplyPatchRoots     *tools.PreparedApplyPatchVolatileRoots
 
 	managedCalibrationCache map[string]workflowManagedCalibrationCacheEntry
 }
@@ -920,6 +921,7 @@ func newAgentInstanceWithRuntimePolicies(
 		fileMutationIdentityCatalog: fileMutationIdentityCatalog,
 		fileMutationProtectedRoots:  fileMutationProtectedRoots,
 		preparedFileMutationPolicy:  preparedFileMutationPolicy,
+		preparedApplyPatchRoots:     preparedApplyPatchRoots,
 		managedCalibrationCache:     make(map[string]workflowManagedCalibrationCacheEntry),
 	}
 }

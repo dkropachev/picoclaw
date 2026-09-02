@@ -286,7 +286,11 @@ func TestDeduplicationDeepSlotAndSnapshotCoverage(t *testing.T) {
 	release()
 	unsafeWorkspace := t.TempDir()
 	unsafeStore := NewStore(unsafeWorkspace)
-	lockPath := filepath.Join(unsafeWorkspace, storeDirectory) + ".deduplication-slot-00.lock"
+	lockPath := repositoryReviewTestLockPath(
+		t,
+		unsafeStore.root,
+		"deduplication-slot-00.lock",
+	)
 	symlinkErr := os.Symlink(filepath.Join(unsafeWorkspace, "missing"), lockPath)
 	if symlinkErr != nil {
 		t.Fatal(symlinkErr)
@@ -504,7 +508,8 @@ func TestDeduplicationDeepStoreInjectionCoverage(t *testing.T) {
 
 	lockWorkspace := t.TempDir()
 	lockFailure := NewStore(lockWorkspace)
-	if err := os.Symlink(filepath.Join(lockWorkspace, "missing"), lockFailure.root+".lock"); err != nil {
+	lockPath := repositoryReviewTestLockPath(t, lockFailure.root, "store.lock")
+	if err := os.Symlink(filepath.Join(lockWorkspace, "missing"), lockPath); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, _, err := lockFailure.ClaimDeduplicationJob(repository, "job", time.Minute); err == nil {

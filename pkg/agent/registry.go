@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
@@ -247,6 +248,44 @@ func agentRegistryFileMutationWorkspaces(
 		}
 	}
 	return normalizeAgentFileMutationWorkspaces(candidates)
+}
+
+// agentRegistryCumulativeFileMutationProtectedRoots captures the complete
+// published generation. Reload uses it as the base for the next generation so
+// retired workspaces and custom state roots never become writable by a later
+// model generation.
+func agentRegistryCumulativeFileMutationProtectedRoots(
+	registry *AgentRegistry,
+	previous []string,
+) []string {
+	roots := append([]string(nil), previous...)
+	seen := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		seen[agentFileMutationWorkspaceKey(filepath.Clean(root))] = struct{}{}
+	}
+	if registry == nil {
+		return roots
+	}
+	registry.mu.RLock()
+	agents := make([]*AgentInstance, 0, len(registry.agents))
+	for _, agent := range registry.agents {
+		agents = append(agents, agent)
+	}
+	registry.mu.RUnlock()
+	for _, agent := range agents {
+		if agent == nil {
+			continue
+		}
+		for _, root := range agent.fileMutationProtectedRoots {
+			key := agentFileMutationWorkspaceKey(filepath.Clean(root))
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
+	return roots
 }
 
 // CloseCandidate closes an unpublished registry and every internally-created

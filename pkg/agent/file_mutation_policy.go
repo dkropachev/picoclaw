@@ -904,6 +904,10 @@ func agentFileMutationIdentityCatalogForWorkspaces(
 	cfg *config.Config,
 	exactRoots []string,
 ) (*tools.FileIdentityCatalog, error) {
+	workspaces = append(
+		append([]string(nil), workspaces...),
+		agentFileMutationWorkspacesFromProtectedRoots(exactRoots)...,
+	)
 	workspaces, err := normalizeAgentFileMutationWorkspaces(workspaces)
 	if err != nil {
 		return nil, err
@@ -911,7 +915,11 @@ func agentFileMutationIdentityCatalogForWorkspaces(
 	if len(workspaces) == 0 {
 		return nil, errors.New("file-identity catalog has no workspace")
 	}
-	trees, exclusions, err := agentFileMutationIdentityCatalogTrees(workspaces, cfg)
+	trees, exclusions, err := agentFileMutationIdentityCatalogTrees(
+		workspaces,
+		cfg,
+		exactRoots,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -981,6 +989,7 @@ func agentFileMutationIdentityCatalogForWorkspaces(
 func agentFileMutationIdentityCatalogTrees(
 	workspaces []string,
 	cfg *config.Config,
+	exactRoots []string,
 ) ([]string, []string, error) {
 	home, err := filepath.Abs(filepath.Clean(config.GetHome()))
 	if err != nil {
@@ -1080,7 +1089,69 @@ func agentFileMutationIdentityCatalogTrees(
 	} {
 		exclusions = append(exclusions, database, database+"-wal", database+"-shm")
 	}
+	retainedTrees, retainedExclusions := agentFileMutationRetainedCatalogRoots(exactRoots)
+	trees = append(trees, retainedTrees...)
+	exclusions = append(exclusions, retainedExclusions...)
 	return trees, exclusions, nil
+}
+
+// agentFileMutationWorkspacesFromProtectedRoots preserves the workspace set
+// across reloads. The loop passes every prior generation root into the next
+// registry, so old session, workflow, router, review, and evaluation trees
+// remain part of the physical-identity snapshot after their config entry is
+// removed or redirected.
+func agentFileMutationWorkspacesFromProtectedRoots(roots []string) []string {
+	workspaces := make([]string, 0)
+	for _, root := range roots {
+		cleaned := filepath.Clean(root)
+		base := strings.ToLower(filepath.Base(cleaned))
+		var workspace string
+		switch base {
+		case "sessions", "threads", "cron", "state", "workflow_runs",
+			"workflow_validations", "workflow_dev", "workflow_state",
+			agentRepositoryReviewStateDir, agentRepositoryEvalStateDir:
+			workspace = filepath.Dir(cleaned)
+		case "sessions.db", "jobs.db", "runtime.db", "account-router.db",
+			"workflows.db", "repository-reviews.db", "evaluations.db":
+			workspace = filepath.Dir(filepath.Dir(cleaned))
+			if base == "runtime.db" || base == "account-router.db" || base == "workflows.db" {
+				workspace = filepath.Dir(filepath.Dir(cleaned))
+			}
+		}
+		if workspace != "" {
+			workspaces = append(workspaces, workspace)
+		}
+	}
+	return workspaces
+}
+
+// agentFileMutationRetainedCatalogRoots selects only mutable legacy/runtime
+// subtrees from cumulative protected roots. In particular it does not scan the
+// immutable local-CI evidence namespace, which can contain large content-
+// addressed bodies; its cache and archive children are selected separately.
+func agentFileMutationRetainedCatalogRoots(roots []string) ([]string, []string) {
+	trees := make([]string, 0)
+	exclusions := make([]string, 0)
+	for _, root := range roots {
+		cleaned := filepath.Clean(root)
+		base := strings.ToLower(filepath.Base(cleaned))
+		if base == "active" &&
+			strings.EqualFold(filepath.Base(filepath.Dir(cleaned)), ".pr-workspace-implementation") {
+			trees = append(trees, cleaned)
+		}
+		switch base {
+		case "legacy-json", "sessions", "threads", "workflow_runs",
+			"workflow_validations", "workflow_dev", "workflow_state",
+			"profiles", "backups", "cache", "sync", "context-tokens",
+			agentRepositoryReviewStateDir, agentRepositoryEvalStateDir:
+			trees = append(trees, cleaned)
+		}
+		if strings.HasSuffix(base, ".db") || strings.HasSuffix(base, ".db-wal") ||
+			strings.HasSuffix(base, ".db-shm") {
+			exclusions = append(exclusions, cleaned)
+		}
+	}
+	return trees, exclusions
 }
 
 func agentCheckpointRetainedStateSnapshot(

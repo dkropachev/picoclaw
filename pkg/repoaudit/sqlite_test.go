@@ -869,7 +869,7 @@ func TestRepositoryReviewSQLiteMigrationRewriteFailureBoundaries(t *testing.T) {
 	}
 
 	lockStore := NewSQLiteStore(t.TempDir())
-	if err := os.Mkdir(lockStore.root+".lock", 0o700); err != nil {
+	if err := os.Mkdir(repositoryReviewTestLockPath(t, lockStore.root, "store.lock"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := lockStore.rewriteMigrationRow(

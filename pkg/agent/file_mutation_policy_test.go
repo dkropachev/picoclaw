@@ -2015,11 +2015,16 @@ func TestAgentRegistrySharesCrossWorkspaceIdentityUnionWithRootOwnerAndLocalRepa
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runner.protectedIdentities != nil || len(runner.protectedRoots) != 0 {
-		t.Fatal("prepared local repair retained parallel source policy")
+	if runner.protectedIdentities != main.fileMutationIdentityCatalog ||
+		len(runner.protectedRoots) != 0 {
+		t.Fatal("prepared local repair lost its shared identity catalog")
 	}
 	if runner.preparedMutationPolicy != main.preparedFileMutationPolicy {
 		t.Fatal("local repair did not retain registry prepared mutation policy")
+	}
+	if runner.preparedApplyPatchRoots != main.preparedApplyPatchRoots ||
+		runner.preparedApplyPatchRoots == nil {
+		t.Fatal("local repair did not retain prepared apply_patch volatile roots")
 	}
 	pin, repairWorkspace, checkout := newLocalRepairTestWorkspace(t)
 	repairAlias := filepath.Join(checkout, "cross-workspace-runtime.alias")

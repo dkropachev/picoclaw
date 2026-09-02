@@ -9,7 +9,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
-	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // NewControllerLocalRepairRunner resolves one controller-owned repair runner
@@ -35,6 +34,9 @@ func (al *AgentLoop) NewControllerLocalRepairRunner(
 	cfg := al.cfg
 	registry := al.registry
 	workspaces := al.gitWorkspaces
+	loopProtectedRoots := cloneAgentRuntimeFileMutationProtectedRoots(
+		al.fileMutationProtectedRoots,
+	)
 	al.mu.RUnlock()
 	return al.newControllerLocalRepairRunner(
 		cfg,
@@ -44,6 +46,7 @@ func (al *AgentLoop) NewControllerLocalRepairRunner(
 		false,
 		agentID,
 		routingText,
+		loopProtectedRoots,
 	)
 }
 
@@ -64,6 +67,9 @@ func (al *AgentLoop) NewControllerLocalRepairRunnerWithRuntimeLease(
 	}
 	al.mu.RLock()
 	workspaces := al.gitWorkspaces
+	loopProtectedRoots := cloneAgentRuntimeFileMutationProtectedRoots(
+		al.fileMutationProtectedRoots,
+	)
 	al.mu.RUnlock()
 	return al.newControllerLocalRepairRunner(
 		generation.cfg,
@@ -73,6 +79,7 @@ func (al *AgentLoop) NewControllerLocalRepairRunnerWithRuntimeLease(
 		true,
 		agentID,
 		routingText,
+		loopProtectedRoots,
 	)
 }
 
@@ -84,7 +91,23 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 	strictRuntime bool,
 	agentID string,
 	routingText string,
+	loopProtectedRootSets ...[]string,
 ) (*LocalRepairRunner, error) {
+	var loopProtectedRoots []string
+	if len(loopProtectedRootSets) > 1 {
+		return nil, errors.New("controller local repair has multiple root snapshots")
+	}
+	if len(loopProtectedRootSets) == 1 {
+		loopProtectedRoots = cloneAgentRuntimeFileMutationProtectedRoots(
+			loopProtectedRootSets[0],
+		)
+	} else {
+		al.mu.RLock()
+		loopProtectedRoots = cloneAgentRuntimeFileMutationProtectedRoots(
+			al.fileMutationProtectedRoots,
+		)
+		al.mu.RUnlock()
+	}
 	if agentID != strings.TrimSpace(agentID) || !routing.IsCanonicalAgentID(agentID) {
 		return nil, errors.New("controller local repair agent ID must be exact and canonical")
 	}
@@ -138,9 +161,10 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 
 	preparedMutationPolicy := agent.preparedFileMutationPolicy
 	var protectedRoots []string
-	var protectedIdentities *tools.FileIdentityCatalog
+	protectedIdentities := agent.fileMutationIdentityCatalog
+	preparedApplyPatchRoots := agent.preparedApplyPatchRoots
 	if preparedMutationPolicy == nil {
-		protectedRoots = append([]string(nil), al.fileMutationProtectedRoots...)
+		protectedRoots = append([]string(nil), loopProtectedRoots...)
 		if len(agent.fileMutationProtectedRoots) != 0 {
 			protectedRoots = append([]string(nil), agent.fileMutationProtectedRoots...)
 		}
@@ -186,7 +210,6 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 			return nil, errors.New("controller local repair local CI state is invalid")
 		}
 		protectedRoots = append(protectedRoots, localCIRoots...)
-		protectedIdentities = agent.fileMutationIdentityCatalog
 	}
 	runner, err := NewLocalRepairRunner(LocalRepairRunnerConfig{
 		Workspaces:      workspaces,
@@ -199,8 +222,9 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
 			protectedRoots,
 		),
-		ProtectedIdentities:    protectedIdentities,
-		PreparedMutationPolicy: preparedMutationPolicy,
+		ProtectedIdentities:     protectedIdentities,
+		PreparedMutationPolicy:  preparedMutationPolicy,
+		PreparedApplyPatchRoots: preparedApplyPatchRoots,
 	})
 	if err != nil {
 		return nil, errors.New("controller local repair agent configuration is invalid")
