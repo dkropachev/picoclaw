@@ -83,6 +83,9 @@ stored. Legacy sources are retained below
 Frozen sets and per-agent Seahorse stores remain separate derived state.
 The independent `runtime-state` singleton contains only last channel, last chat ID,
 timestamp seconds/nanoseconds, source priority, and row version.
+The shared `pkg/internal/sessiondb` transaction helper is broker-side/internal
+only: it operates on the broker-owned retained pool and is not an
+application-facing constructor, SQL callback, or alternate storage owner.
 
 ## Surface Ownership
 
@@ -90,6 +93,7 @@ Owns: CODE pkg/agent/memory/**
 Owns: CODE pkg/agent/sessions/**
 Owns: CODE pkg/agent/state/**
 Owns: CODE pkg/identity/**
+Owns: CODE pkg/internal/sessiondb/**
 Owns: CODE pkg/memory/**
 Owns: CODE pkg/media/frozen.go
 Owns: CODE pkg/seahorse/**
