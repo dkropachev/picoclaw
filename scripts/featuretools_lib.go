@@ -48,6 +48,11 @@ type frontendOwnershipRule struct {
 	Patterns []string `json:"patterns"`
 }
 
+type changedFileStatus struct {
+	Kind  byte
+	Paths []string
+}
+
 func repoRoot() (string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -95,19 +100,113 @@ func gitOutput(root string, args ...string) (string, error) {
 }
 
 func changedFiles(root, base, head string) ([]string, error) {
-	out, err := gitOutput(root, "diff", "--name-only", "--diff-filter=ACMRTD", base+"..."+head)
+	records, err := changedFileStatusRecords(root, base, head)
 	if err != nil {
-		return nil, fmt.Errorf("git diff %s...%s: %w", base, head, err)
+		return nil, err
 	}
-	var files []string
-	for _, line := range strings.Split(out, "\n") {
-		line = normalizeRepoPath(line)
-		if line != "" {
-			files = append(files, line)
+	seen := make(map[string]bool)
+	for _, record := range records {
+		paths := record.Paths
+		if record.Kind == 'C' {
+			paths = paths[len(paths)-1:]
 		}
+		for _, path := range paths {
+			seen[path] = true
+		}
+	}
+	files := make([]string, 0, len(seen))
+	for path := range seen {
+		files = append(files, path)
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+func changedFileStatusRecords(root, base, head string) ([]changedFileStatus, error) {
+	out, err := gitOutput(
+		root,
+		"diff",
+		"--name-status",
+		"-z",
+		"--find-renames",
+		"--find-copies",
+		"--diff-filter=ACMRTD",
+		base+"..."+head,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("git diff %s...%s: %w", base, head, err)
+	}
+	records, err := parseChangedFileStatusRecords(out)
+	if err != nil {
+		return nil, fmt.Errorf("parse git diff %s...%s: %w", base, head, err)
+	}
+	return records, nil
+}
+
+func parseChangedFileStatuses(out string) ([]string, error) {
+	records, err := parseChangedFileStatusRecords(out)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	for _, record := range records {
+		paths := record.Paths
+		if record.Kind == 'C' {
+			paths = paths[len(paths)-1:]
+		}
+		for _, path := range paths {
+			seen[path] = true
+		}
+	}
+	files := make([]string, 0, len(seen))
+	for path := range seen {
+		files = append(files, path)
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func parseChangedFileStatusRecords(out string) ([]changedFileStatus, error) {
+	if out == "" {
+		return nil, nil
+	}
+	if !strings.HasSuffix(out, "\x00") {
+		return nil, fmt.Errorf("name-status output is not NUL-terminated")
+	}
+
+	fields := strings.Split(out[:len(out)-1], "\x00")
+	var records []changedFileStatus
+	for index := 0; index < len(fields); {
+		status := fields[index]
+		index++
+		if status == "" {
+			return nil, fmt.Errorf("empty change status")
+		}
+
+		pathCount := 1
+		switch status[0] {
+		case 'A', 'M', 'T', 'D':
+		case 'C', 'R':
+			pathCount = 2
+		default:
+			return nil, fmt.Errorf("unsupported change status %q", status)
+		}
+		if len(fields)-index < pathCount {
+			return nil, fmt.Errorf("change status %q is missing path data", status)
+		}
+
+		record := changedFileStatus{Kind: status[0], Paths: make([]string, 0, pathCount)}
+		for _, rawPath := range fields[index : index+pathCount] {
+			path := normalizeRepoPath(rawPath)
+			if path == "" {
+				return nil, fmt.Errorf("change status %q contains an empty path", status)
+			}
+			record.Paths = append(record.Paths, path)
+		}
+		records = append(records, record)
+		index += pathCount
+	}
+	return records, nil
 }
 
 func isFeatureSpecPath(path string) bool {
@@ -374,7 +473,9 @@ func isProductionCodePath(path string) bool {
 	if isIgnoredProductionPath(path) {
 		return false
 	}
-	if strings.HasPrefix(path, "cmd/") || strings.HasPrefix(path, "pkg/") || strings.HasPrefix(path, "web/backend/") {
+	if strings.HasPrefix(path, "cmd/") || strings.HasPrefix(path, "internal/") ||
+		strings.HasPrefix(path, "pkg/") || strings.HasPrefix(path, "scripts/") ||
+		strings.HasPrefix(path, "web/backend/") {
 		return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go")
 	}
 	if strings.HasPrefix(path, "web/frontend/src/") {
