@@ -25,9 +25,9 @@ func TestRepositoryReviewLockPathAndFileFailureBoundaries(t *testing.T) {
 	}
 
 	directory := t.TempDir()
-	directoryFile, err := os.Open(directory)
-	if err != nil {
-		t.Fatal(err)
+	directoryFile, openErr := os.Open(directory)
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
 	defer directoryFile.Close()
 	if err := secureRepositoryReviewLockFile(directory, directoryFile); err == nil {
@@ -45,9 +45,9 @@ func TestRepositoryReviewLockPathAndFileFailureBoundaries(t *testing.T) {
 	if err := os.WriteFile(decoyPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	decoy, err := os.OpenFile(decoyPath, os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatal(err)
+	decoy, openErr := os.OpenFile(decoyPath, os.O_RDWR, 0o600)
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
 	defer decoy.Close()
 	if err := secureRepositoryReviewLockFile(lockPath, decoy); err == nil {

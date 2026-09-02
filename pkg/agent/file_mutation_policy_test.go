@@ -1710,9 +1710,9 @@ func TestAgentFileMutationStorageHelperBoundaries(t *testing.T) {
 	}
 	first := filepath.Join(t.TempDir(), "first")
 	second := filepath.Join(t.TempDir(), "second")
-	workspaces, err := normalizeAgentFileMutationWorkspaces([]string{second, first, first})
-	if err != nil {
-		t.Fatal(err)
+	workspaces, normalizeErr := normalizeAgentFileMutationWorkspaces([]string{second, first, first})
+	if normalizeErr != nil {
+		t.Fatal(normalizeErr)
 	}
 	wantWorkspaces := []string{first, second}
 	slices.Sort(wantWorkspaces)
@@ -1723,7 +1723,8 @@ func TestAgentFileMutationStorageHelperBoundaries(t *testing.T) {
 	if catalog, err := agentFileMutationIdentityCatalogForWorkspaces(nil, nil, nil); err == nil || catalog != nil {
 		t.Fatalf("empty-workspace catalog = %#v, %v", catalog, err)
 	}
-	if catalog, err := agentFileMutationIdentityCatalogForWorkspaces([]string{"\x00"}, nil, nil); err == nil || catalog != nil {
+	if catalog, err := agentFileMutationIdentityCatalogForWorkspaces([]string{"\x00"}, nil, nil); err == nil ||
+		catalog != nil {
 		t.Fatalf("invalid-workspace catalog = %#v, %v", catalog, err)
 	}
 	var nilGeneration *agentFileMutationIdentityGeneration
@@ -1740,10 +1741,12 @@ func TestAgentFileMutationStorageHelperBoundaries(t *testing.T) {
 		t.Fatalf("invalid identity generation = %#v, %v", generation, err)
 	}
 
-	if got := safeAgentCheckpointEnumerationError("", errors.New("entry limit exceeded")); got == nil || got.Error() != "checkpoint enumeration failed" {
+	if got := safeAgentCheckpointEnumerationError("", errors.New("entry limit exceeded")); got == nil ||
+		got.Error() != "checkpoint enumeration failed" {
 		t.Fatalf("empty-prefix checkpoint error = %v", got)
 	}
-	if got := safeAgentCheckpointEnumerationError("checkpoint", errors.New("private detail")); got == nil || got.Error() != "checkpoint: enumeration failed" {
+	if got := safeAgentCheckpointEnumerationError("checkpoint", errors.New("private detail")); got == nil ||
+		got.Error() != "checkpoint: enumeration failed" {
 		t.Fatalf("unknown checkpoint error = %v", got)
 	}
 

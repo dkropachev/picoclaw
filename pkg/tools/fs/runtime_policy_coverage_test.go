@@ -180,7 +180,6 @@ func TestPreparedFileMutationPolicyQueryMatrix(t *testing.T) {
 	if _, queryErr := prepared.ProtectsOpenedFile(ordinaryHandle, rootInfo); queryErr == nil {
 		t.Fatal("mismatched opened-file preflight accepted")
 	}
-
 }
 
 func TestPreparedFileMutationPolicyRootDriftFailsEveryQuery(t *testing.T) {
@@ -364,5 +363,4 @@ func TestPolicyAwareReadAndListConstructors(t *testing.T) {
 	); buildErr == nil || tool != nil {
 		t.Fatalf("mixed policy lister = %#v, %v", tool, buildErr)
 	}
-
 }
