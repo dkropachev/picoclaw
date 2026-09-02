@@ -46,6 +46,59 @@ func TestCoverageGoTestParallelismIsBounded(t *testing.T) {
 	}
 }
 
+func TestCoverageIntegrationSuitesAllowHeadOnlyAddition(t *testing.T) {
+	root := t.TempDir()
+	base := filepath.Join(root, "base")
+	head := filepath.Join(root, "head")
+	for _, path := range []string{
+		filepath.Join(base, "integration", "suites", "existing"),
+		filepath.Join(head, "integration", "suites", "existing"),
+		filepath.Join(head, "integration", "suites", "storage-json"),
+	} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	planned := []string{"existing", "storage-json"}
+
+	baseSuites, err := coverageIntegrationSuitesForRef(base, "base", "base-ref", planned)
+	if err != nil || !reflect.DeepEqual(baseSuites, []string{"existing"}) {
+		t.Fatalf("base suites = %#v, %v", baseSuites, err)
+	}
+	headSuites, err := coverageIntegrationSuitesForRef(head, "head", "head-ref", planned)
+	if err != nil || !reflect.DeepEqual(headSuites, planned) {
+		t.Fatalf("head suites = %#v, %v", headSuites, err)
+	}
+
+	if err := os.Remove(filepath.Join(head, "integration", "suites", "storage-json")); err != nil {
+		t.Fatal(err)
+	}
+	if suites, err := coverageIntegrationSuitesForRef(head, "head", "head-ref", planned); err == nil ||
+		suites != nil || !strings.Contains(err.Error(), "planned suite storage-json is missing") {
+		t.Fatalf("missing head suite = %#v, %v", suites, err)
+	}
+
+	unsafe := filepath.Join(base, "integration", "suites", "storage-json")
+	if err := os.WriteFile(unsafe, []byte("not a suite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if suites, err := coverageIntegrationSuitesForRef(base, "base", "base-ref", planned); err == nil ||
+		suites != nil || !strings.Contains(err.Error(), "is not a real directory") {
+		t.Fatalf("unsafe base suite = %#v, %v", suites, err)
+	}
+
+	for _, invalid := range []string{"", ".", "..", "../escape", `child\escape`, " bad"} {
+		if suites, err := coverageIntegrationSuitesForRef(
+			base,
+			"base",
+			"base-ref",
+			[]string{invalid},
+		); err == nil || suites != nil || !strings.Contains(err.Error(), "identity is invalid") {
+			t.Fatalf("invalid suite identity %q = %#v, %v", invalid, suites, err)
+		}
+	}
+}
+
 func TestCoverageRegressionTracksUncoveredStatementDebt(t *testing.T) {
 	tests := []struct {
 		name string
@@ -321,6 +374,589 @@ func knownRepositoryModelEvaluationCancellationRestartRaceOutput() string {
 	}, "\n")
 }
 
+func knownEvolutionDraftPersistenceTimeoutOutput() string {
+	path := filepath.Join(
+		os.TempDir(),
+		"picoclaw-coverage-delta-123456789",
+		"base-picoclaw-home",
+		".tmp",
+		"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator123",
+		"001",
+		"state",
+		"evolution",
+		"skill-drafts.json",
+	)
+	return strings.Join([]string{
+		"--- FAIL: TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator (1.00s)",
+		"    evolution_bridge_test.go:596: timed out waiting for 1 drafts at " + path,
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/pkg/agent\t88.000s",
+	}, "\n")
+}
+
+func knownRepositoryReviewAutoContinueCompletionTimeoutOutput() string {
+	return strings.Join([]string{
+		"--- FAIL: TestRepositoryReviewAutomationAutoContinueReusesResolvedCommit (1.84s)",
+		"    repository_review_automations_test.go:1897: automation rra_heceemhmds56guifrx3ifu2tnf did not reach completed",
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/web/backend/api\t323.656s",
+	}, "\n")
+}
+
+func repositoryReviewSQLiteCompanionFixturePath(testPrefix, companion string) string {
+	return filepath.Join(
+		os.TempDir(),
+		"picoclaw-coverage-delta-2601977052",
+		"base-picoclaw-home",
+		".tmp",
+		"picoclaw-api-test-runtime-2341162620",
+		"tmp",
+		testPrefix+"1535117873",
+		"001",
+		"repository_reviews",
+		"repository-reviews.db-"+companion,
+	)
+}
+
+func knownRepositoryReviewRoutesInlineOpenCompanionRaceOutput(companion string) string {
+	path := repositoryReviewSQLiteCompanionFixturePath(
+		"TestRepositoryReviewAutomationRoutesRejectInvalidStateTransition",
+		companion,
+	)
+	return strings.Join([]string{
+		"--- FAIL: TestRepositoryReviewAutomationRoutesRejectInvalidStateTransitionsAndBodies (0.91s)",
+		"    repository_review_automations_test.go:387: secure repository-reviews database files: open " + path + ": no such file or directory",
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/web/backend/api\t209.206s",
+	}, "\n")
+}
+
+func knownRepositoryReviewLateControllerCompanionRaceOutput(companion string) string {
+	path := repositoryReviewSQLiteCompanionFixturePath(
+		"TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_cont",
+		companion,
+	)
+	return strings.Join([]string{
+		"--- FAIL: TestRepositoryReviewAssignmentAdmissionFailureBranches (0.79s)",
+		"    --- FAIL: TestRepositoryReviewAssignmentAdmissionFailureBranches/late_controller_shutdown (0.17s)",
+		"        repository_review_assignment_coverage_test.go:409: late controller shutdown error = secure repository-reviews database files: private file changed while securing",
+		"            lstat " + path + ": no such file or directory",
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/web/backend/api\t204.189s",
+	}, "\n")
+}
+
+func knownRepositoryReviewCampaignAuthorizationCompanionRaceOutput(companion string) string {
+	path := repositoryReviewSQLiteCompanionFixturePath(
+		"TestRepositoryReviewAssignmentAdmissionFailureBranchescampaign_",
+		companion,
+	)
+	return strings.Join([]string{
+		"--- FAIL: TestRepositoryReviewAssignmentAdmissionFailureBranches (0.76s)",
+		"    --- FAIL: TestRepositoryReviewAssignmentAdmissionFailureBranches/campaign_authorization (0.14s)",
+		"        repository_review_assignment_coverage_test.go:385: campaign authorization error = secure repository-reviews database files: private file changed while securing",
+		"            lstat " + path + ": no such file or directory",
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/web/backend/api\t209.206s",
+	}, "\n")
+}
+
+func knownRepositoryReviewChangedWhileOpeningCompanionRaceOutput(companion string) string {
+	path := repositoryReviewSQLiteCompanionFixturePath(
+		"TestRepositoryReviewAssignmentAdmissionFailureBranchescampaign_",
+		companion,
+	)
+	return strings.Join([]string{
+		"--- FAIL: TestRepositoryReviewAssignmentAdmissionFailureBranches (0.76s)",
+		"    --- FAIL: TestRepositoryReviewAssignmentAdmissionFailureBranches/campaign_authorization (0.14s)",
+		"        repository_review_assignment_coverage_test.go:385: campaign authorization error = secure repository-reviews database files: repository-reviews.db-" + companion + " changed while opening",
+		"            lstat " + path + ": no such file or directory",
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/web/backend/api\t209.206s",
+	}, "\n")
+}
+
+func repositoryReviewSQLiteCompanionRaceOutputs() map[string]string {
+	return map[string]string{
+		"routes inline open SHM":    knownRepositoryReviewRoutesInlineOpenCompanionRaceOutput("shm"),
+		"routes inline open WAL":    knownRepositoryReviewRoutesInlineOpenCompanionRaceOutput("wal"),
+		"late final lstat WAL":      knownRepositoryReviewLateControllerCompanionRaceOutput("wal"),
+		"campaign final lstat WAL":  knownRepositoryReviewCampaignAuthorizationCompanionRaceOutput("wal"),
+		"campaign final lstat SHM":  knownRepositoryReviewCampaignAuthorizationCompanionRaceOutput("shm"),
+		"changed while opening WAL": knownRepositoryReviewChangedWhileOpeningCompanionRaceOutput("wal"),
+		"changed while opening SHM": knownRepositoryReviewChangedWhileOpeningCompanionRaceOutput("shm"),
+	}
+}
+
+func TestKnownRepositoryReviewSQLiteCompanionDisappearance(t *testing.T) {
+	for name, output := range repositoryReviewSQLiteCompanionRaceOutputs() {
+		t.Run(name, func(t *testing.T) {
+			if !isKnownRepositoryReviewSQLiteCompanionDisappearance([]byte(output)) ||
+				!isKnownCoverageBaselineFlake([]byte(output)) {
+				t.Fatal("exact repository-review SQLite companion disappearance was rejected")
+			}
+		})
+	}
+}
+
+func TestKnownRepositoryReviewSQLiteCompanionDisappearanceRejectsNearMisses(t *testing.T) {
+	valid := knownRepositoryReviewLateControllerCompanionRaceOutput("wal")
+	openFailure := knownRepositoryReviewRoutesInlineOpenCompanionRaceOutput("shm")
+	openingFailure := knownRepositoryReviewChangedWhileOpeningCompanionRaceOutput("wal")
+	testPath := repositoryReviewSQLiteCompanionFixturePath(
+		"TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_cont",
+		"wal",
+	)
+	testRoot := filepath.Dir(testPath)
+	outsideTestRoot := filepath.Join(
+		filepath.Dir(os.TempDir()),
+		"outside-coverage-runtime",
+		"repository_reviews",
+	)
+	tests := map[string]string{
+		"wrong package": strings.Replace(
+			valid,
+			"github.com/sipeed/picoclaw/web/backend/api",
+			"github.com/sipeed/picoclaw/web/backend",
+			1,
+		),
+		"non-review parent": strings.Replace(
+			valid,
+			"TestRepositoryReviewAssignmentAdmissionFailureBranches",
+			"TestRepositoryAssignmentAdmissionFailureBranches",
+			-1,
+		),
+		"failure and temp test disagree": strings.Replace(
+			valid,
+			"/late_controller_shutdown",
+			"/campaign_authorization",
+			1,
+		),
+		"leaf without parent": strings.Replace(
+			valid,
+			"--- FAIL: TestRepositoryReviewAssignmentAdmissionFailureBranches (0.79s)\n    ",
+			"",
+			1,
+		),
+		"non-hierarchical child": strings.Replace(
+			valid,
+			"TestRepositoryReviewAssignmentAdmissionFailureBranches/late_controller_shutdown",
+			"TestRepositoryReviewAutomationRoutes/late_controller_shutdown",
+			1,
+		),
+		"unsafe test name": strings.Replace(
+			valid,
+			"/late_controller_shutdown",
+			"/late controller shutdown",
+			1,
+		),
+		"wrong source family": strings.Replace(
+			valid,
+			"repository_review_assignment_coverage_test.go",
+			"repository_model_assignment_coverage_test.go",
+			1,
+		),
+		"source path": strings.Replace(
+			valid,
+			"repository_review_assignment_coverage_test.go",
+			"api/repository_review_assignment_coverage_test.go",
+			1,
+		),
+		"empty source stem": strings.Replace(
+			valid,
+			"repository_review_assignment_coverage_test.go",
+			"repository_review__test.go",
+			1,
+		),
+		"unsafe source stem": strings.Replace(
+			valid,
+			"repository_review_assignment_coverage_test.go",
+			"repository_review_Assignment_coverage_test.go",
+			1,
+		),
+		"zero diagnostic line": strings.Replace(
+			valid,
+			"repository_review_assignment_coverage_test.go:409:",
+			"repository_review_assignment_coverage_test.go:0:",
+			1,
+		),
+		"leading-zero diagnostic line": strings.Replace(
+			valid,
+			"repository_review_assignment_coverage_test.go:409:",
+			"repository_review_assignment_coverage_test.go:0409:",
+			1,
+		),
+		"overflowing diagnostic line": strings.Replace(
+			valid,
+			"repository_review_assignment_coverage_test.go:409:",
+			"repository_review_assignment_coverage_test.go:4294967296:",
+			1,
+		),
+		"wrong database component": strings.Replace(
+			valid,
+			"secure repository-reviews database files",
+			"secure repository-evaluations database files",
+			1,
+		),
+		"unsafe assertion preamble": strings.Replace(
+			valid,
+			"late controller shutdown error = ",
+			"late controller shutdown: error = ",
+			1,
+		),
+		"preamble without error suffix": strings.Replace(
+			valid,
+			"late controller shutdown error = ",
+			"late controller shutdown = ",
+			1,
+		),
+		"wrong diagnostic": strings.Replace(
+			valid,
+			"private file changed while securing",
+			"private file disappeared while securing",
+			1,
+		),
+		"wrong continuation operation": strings.Replace(valid, "lstat ", "stat ", 1),
+		"wrong continuation error": strings.Replace(
+			valid,
+			": no such file or directory",
+			": permission denied",
+			1,
+		),
+		"missing continuation": strings.Replace(
+			valid,
+			"\n            lstat "+testPath+": no such file or directory",
+			"",
+			1,
+		),
+		"detached continuation": strings.Replace(
+			valid,
+			"\n            lstat ",
+			"\n            unrelated output\n            lstat ",
+			1,
+		),
+		"open failure with continuation": openFailure +
+			"\nlstat " + strings.TrimSuffix(testPath, "-wal") + "-shm: no such file or directory",
+		"wrong open operation": strings.Replace(openFailure, ": open ", ": stat ", 1),
+		"changed-opening companion mismatch": strings.Replace(
+			openingFailure,
+			"repository-reviews.db-wal changed while opening",
+			"repository-reviews.db-shm changed while opening",
+			1,
+		),
+		"head coverage home": strings.Replace(valid, "base-picoclaw-home", "head-picoclaw-home", 1),
+		"wrong outer temp directory": strings.Replace(
+			valid,
+			string(filepath.Separator)+".tmp"+string(filepath.Separator),
+			string(filepath.Separator)+".temp"+string(filepath.Separator),
+			1,
+		),
+		"wrong inner temp directory": strings.Replace(
+			valid,
+			string(filepath.Separator)+"picoclaw-api-test-runtime-2341162620"+
+				string(filepath.Separator)+"tmp"+string(filepath.Separator),
+			string(filepath.Separator)+"picoclaw-api-test-runtime-2341162620"+
+				string(filepath.Separator)+"temp"+string(filepath.Separator),
+			1,
+		),
+		"nonnumeric coverage sandbox": strings.Replace(
+			valid,
+			"picoclaw-coverage-delta-2601977052",
+			"picoclaw-coverage-delta-main",
+			1,
+		),
+		"leading-zero coverage sandbox": strings.Replace(
+			valid,
+			"picoclaw-coverage-delta-2601977052",
+			"picoclaw-coverage-delta-0123456789",
+			1,
+		),
+		"too-long coverage sandbox": strings.Replace(
+			valid,
+			"picoclaw-coverage-delta-2601977052",
+			"picoclaw-coverage-delta-12345678901",
+			1,
+		),
+		"overflowing coverage sandbox": strings.Replace(
+			valid,
+			"picoclaw-coverage-delta-2601977052",
+			"picoclaw-coverage-delta-4294967296",
+			1,
+		),
+		"wrong runtime directory": strings.Replace(
+			valid,
+			"picoclaw-api-test-runtime-2341162620",
+			"picoclaw-api-runtime-2341162620",
+			1,
+		),
+		"nonnumeric runtime directory": strings.Replace(
+			valid,
+			"picoclaw-api-test-runtime-2341162620",
+			"picoclaw-api-test-runtime-current",
+			1,
+		),
+		"leading-zero runtime directory": strings.Replace(
+			valid,
+			"picoclaw-api-test-runtime-2341162620",
+			"picoclaw-api-test-runtime-0123456789",
+			1,
+		),
+		"overflowing runtime directory": strings.Replace(
+			valid,
+			"picoclaw-api-test-runtime-2341162620",
+			"picoclaw-api-test-runtime-4294967296",
+			1,
+		),
+		"wrong test temp directory": strings.Replace(
+			valid,
+			"TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_cont1535117873",
+			"TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_controller1535117873",
+			1,
+		),
+		"nonnumeric test temp directory": strings.Replace(
+			valid,
+			"TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_cont1535117873",
+			"TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_contcurrent",
+			1,
+		),
+		"leading-zero test temp directory": strings.Replace(
+			valid,
+			"TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_cont1535117873",
+			"TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_cont0123456789",
+			1,
+		),
+		"overflowing test temp directory": strings.Replace(
+			valid,
+			"TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_cont1535117873",
+			"TestRepositoryReviewAssignmentAdmissionFailureBrancheslate_cont4294967296",
+			1,
+		),
+		"wrong temp slot": strings.Replace(
+			valid,
+			testRoot,
+			strings.Replace(
+				testRoot,
+				string(filepath.Separator)+"001"+string(filepath.Separator),
+				string(filepath.Separator)+"002"+string(filepath.Separator),
+				1,
+			),
+			1,
+		),
+		"wrong repository directory": strings.Replace(valid, "repository_reviews", "repository-reviews", 1),
+		"main database":              strings.Replace(valid, "repository-reviews.db-wal", "repository-reviews.db", 1),
+		"journal companion": strings.Replace(
+			valid,
+			"repository-reviews.db-wal",
+			"repository-reviews.db-journal",
+			1,
+		),
+		"relative path": strings.Replace(valid, testRoot, "relative", 1),
+		"outside temp":  strings.Replace(valid, testRoot, outsideTestRoot, 1),
+		"unclean traversal": strings.Replace(
+			valid,
+			string(filepath.Separator)+"repository_reviews"+string(filepath.Separator),
+			string(filepath.Separator)+"repository_reviews"+string(filepath.Separator)+".."+
+				string(filepath.Separator)+"repository_reviews"+string(filepath.Separator),
+			1,
+		),
+		"nul path": strings.Replace(valid, "repository_reviews", "repository_reviews\x00", 1),
+		"additional failure": valid +
+			"\n--- FAIL: TestRepositoryReviewAssignmentAdmissionSuccess (0.01s)",
+		"additional diagnostic": valid +
+			"\n    repository_review_assignment_coverage_test.go:420: unrelated assertion",
+		"additional malformed diagnostic": valid +
+			"\n    repository_review_assignment_other_test.go:not-a-line: unrelated assertion",
+		"additional continuation": valid +
+			"\n    lstat " + strings.TrimSuffix(testPath, "-wal") + "-shm: no such file or directory",
+		"additional package": valid +
+			"\nFAIL\tgithub.com/sipeed/picoclaw/pkg/repoaudit\t0.01s",
+		"panic": valid + "\npanic: concurrent test failure",
+		"fatal": valid + "\nfatal error: concurrent map writes",
+		"build failure": valid +
+			"\nFAIL\tgithub.com/sipeed/picoclaw/web/backend/api [build failed]",
+		"setup failure": valid +
+			"\nFAIL\tgithub.com/sipeed/picoclaw/web/backend/api [setup failed]",
+	}
+	for name, output := range tests {
+		t.Run(name, func(t *testing.T) {
+			if isKnownRepositoryReviewSQLiteCompanionDisappearance([]byte(output)) ||
+				isKnownCoverageBaselineFlake([]byte(output)) {
+				t.Fatal("repository-review SQLite companion classifier accepted a near miss")
+			}
+		})
+	}
+}
+
+func TestKnownRepositoryReviewAutoContinueCompletionTimeout(t *testing.T) {
+	valid := knownRepositoryReviewAutoContinueCompletionTimeoutOutput()
+	if !isKnownRepositoryReviewAutoContinueCompletionTimeout([]byte(valid)) ||
+		!isKnownCoverageBaselineFlake([]byte(valid)) {
+		t.Fatal("exact repository review auto-continuation timeout was rejected")
+	}
+	tests := map[string]string{
+		"wrong package": strings.Replace(
+			valid,
+			"github.com/sipeed/picoclaw/web/backend/api",
+			"github.com/sipeed/picoclaw/web/backend",
+			1,
+		),
+		"wrong test": strings.Replace(
+			valid,
+			"TestRepositoryReviewAutomationAutoContinueReusesResolvedCommit",
+			"TestRepositoryReviewAutomationAutoContinueUsesLatestCommit",
+			1,
+		),
+		"wrong file": strings.Replace(
+			valid,
+			"repository_review_automations_test.go",
+			"repository_review_automation_test.go",
+			1,
+		),
+		"wrong line": strings.Replace(
+			valid,
+			"repository_review_automations_test.go:1897:",
+			"repository_review_automations_test.go:1898:",
+			1,
+		),
+		"wrong status": strings.Replace(valid, "did not reach completed", "did not reach paused", 1),
+		"wrong id prefix": strings.Replace(
+			valid,
+			"rra_heceemhmds56guifrx3ifu2tnf",
+			"rrb_heceemhmds56guifrx3ifu2tnf",
+			1,
+		),
+		"uppercase id": strings.Replace(
+			valid,
+			"rra_heceemhmds56guifrx3ifu2tnf",
+			"rra_Heceemhmds56guifrx3ifu2tnf",
+			1,
+		),
+		"invalid id alphabet": strings.Replace(
+			valid,
+			"rra_heceemhmds56guifrx3ifu2tnf",
+			"rra_heceemhmds56guifrx3ifu2tn0",
+			1,
+		),
+		"short id": strings.Replace(
+			valid,
+			"rra_heceemhmds56guifrx3ifu2tnf",
+			"rra_heceemhmds56guifrx3ifu2tn",
+			1,
+		),
+		"long id": strings.Replace(
+			valid,
+			"rra_heceemhmds56guifrx3ifu2tnf",
+			"rra_heceemhmds56guifrx3ifu2tnfa",
+			1,
+		),
+		"additional failure": valid +
+			"\n--- FAIL: TestRepositoryReviewAutomationPause (0.01s)",
+		"additional diagnostic": valid +
+			"\n    repository_review_automations_test.go:1900: unrelated assertion",
+		"additional package": valid +
+			"\nFAIL\tgithub.com/sipeed/picoclaw/pkg/repoaudit\t0.01s",
+		"panic": valid + "\npanic: concurrent test failure",
+		"fatal": valid + "\nfatal error: concurrent map writes",
+		"build failure": valid +
+			"\nFAIL\tgithub.com/sipeed/picoclaw/web/backend/api [build failed]",
+		"setup failure": valid +
+			"\nFAIL\tgithub.com/sipeed/picoclaw/web/backend/api [setup failed]",
+	}
+	for name, output := range tests {
+		t.Run(name, func(t *testing.T) {
+			if isKnownRepositoryReviewAutoContinueCompletionTimeout([]byte(output)) ||
+				isKnownCoverageBaselineFlake([]byte(output)) {
+				t.Fatal("repository review auto-continuation timeout classifier accepted a near miss")
+			}
+		})
+	}
+}
+
+func TestKnownEvolutionDraftPersistenceTimeout(t *testing.T) {
+	valid := knownEvolutionDraftPersistenceTimeoutOutput()
+	if !isKnownEvolutionDraftPersistenceTimeout([]byte(valid)) ||
+		!isKnownCoverageBaselineFlake([]byte(valid)) {
+		t.Fatal("exact evolution draft timeout was rejected")
+	}
+	tests := map[string]string{
+		"wrong package": strings.Replace(
+			valid,
+			"github.com/sipeed/picoclaw/pkg/agent",
+			"github.com/sipeed/picoclaw/pkg/agents",
+			1,
+		),
+		"wrong test": strings.Replace(
+			valid,
+			"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator",
+			"TestEvolutionBridge_DraftModeUsesFallbackGenerator",
+			1,
+		),
+		"wrong line": strings.Replace(valid, "evolution_bridge_test.go:596:",
+			"evolution_bridge_test.go:597:", 1),
+		"wrong message":      strings.Replace(valid, "waiting for 1 drafts", "waiting for 2 drafts", 1),
+		"additional failure": valid + "\n--- FAIL: TestEvolutionBridgeOther (0.01s)",
+		"additional diagnostic": valid +
+			"\n    evolution_bridge_test.go:600: unexpected persisted draft",
+		"panic": valid + "\npanic: concurrent test failure",
+		"relative path": strings.Replace(
+			valid,
+			filepath.Join(
+				os.TempDir(), "picoclaw-coverage-delta-123456789", "base-picoclaw-home", ".tmp",
+				"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator123", "001",
+			),
+			"relative",
+			1,
+		),
+		"unclean path": strings.Replace(
+			valid,
+			filepath.Join(
+				os.TempDir(), "picoclaw-coverage-delta-123456789", "base-picoclaw-home", ".tmp",
+				"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator123", "001",
+			),
+			filepath.Join(os.TempDir(), "fixture")+string(filepath.Separator)+".."+
+				string(filepath.Separator)+"escape",
+			1,
+		),
+		"outside temp": strings.Replace(
+			valid,
+			filepath.Join(
+				os.TempDir(), "picoclaw-coverage-delta-123456789", "base-picoclaw-home", ".tmp",
+				"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator123", "001",
+			),
+			filepath.Join(filepath.Dir(os.TempDir()), "outside-evolution-fixture"),
+			1,
+		),
+		"head coverage home": strings.Replace(
+			valid,
+			"base-picoclaw-home",
+			"head-picoclaw-home",
+			1,
+		),
+		"wrong test temp directory": strings.Replace(
+			valid,
+			string(filepath.Separator)+"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator123"+
+				string(filepath.Separator),
+			string(filepath.Separator)+"TestEvolutionBridge_DraftModeUsesProviderBackedDraftGeneratorOther123"+
+				string(filepath.Separator),
+			1,
+		),
+		"nonnumeric coverage sandbox": strings.Replace(
+			valid,
+			"picoclaw-coverage-delta-123456789",
+			"picoclaw-coverage-delta-not-numeric",
+			1,
+		),
+	}
+	for name, output := range tests {
+		t.Run(name, func(t *testing.T) {
+			if isKnownEvolutionDraftPersistenceTimeout([]byte(output)) ||
+				isKnownCoverageBaselineFlake([]byte(output)) {
+				t.Fatal("evolution draft timeout classifier accepted a near miss")
+			}
+		})
+	}
+}
+
 func TestKnownCoverageTempDirCleanupRace(t *testing.T) {
 	agentCleanupRace := knownAgentTempDirCleanupRaceOutput()
 	workflowCleanupRace := knownWorkflowTempDirCleanupRaceOutput()
@@ -591,6 +1227,12 @@ func TestKnownRepositoryModelEvaluationCancellationRace(t *testing.T) {
 func TestRunCoverageCommandRetriesOnlyKnownBaselineFlakes(t *testing.T) {
 	batchCancellation := knownRepositoryModelEvaluationBatchCancellationRaceOutput()
 	cancellationRestart := knownRepositoryModelEvaluationCancellationRestartRaceOutput()
+	evolutionDraftTimeout := knownEvolutionDraftPersistenceTimeoutOutput()
+	repositoryReviewAutoContinueTimeout := knownRepositoryReviewAutoContinueCompletionTimeoutOutput()
+	repositoryReviewInlineOpenRace := knownRepositoryReviewRoutesInlineOpenCompanionRaceOutput("shm")
+	repositoryReviewLateShutdownRace := knownRepositoryReviewLateControllerCompanionRaceOutput("wal")
+	repositoryReviewCampaignRace := knownRepositoryReviewCampaignAuthorizationCompanionRaceOutput("wal")
+	repositoryReviewOpeningRace := knownRepositoryReviewChangedWhileOpeningCompanionRaceOutput("wal")
 	tests := []struct {
 		name         string
 		label        string
@@ -609,6 +1251,48 @@ func TestRunCoverageCommandRetriesOnlyKnownBaselineFlakes(t *testing.T) {
 			name:         "base cancellation and restart",
 			label:        "base",
 			output:       cancellationRestart,
+			wantRetried:  true,
+			wantAttempts: 2,
+		},
+		{
+			name:         "base evolution draft persistence timeout",
+			label:        "base",
+			output:       evolutionDraftTimeout,
+			wantRetried:  true,
+			wantAttempts: 2,
+		},
+		{
+			name:         "base repository review auto-continuation completion timeout",
+			label:        "base",
+			output:       repositoryReviewAutoContinueTimeout,
+			wantRetried:  true,
+			wantAttempts: 2,
+		},
+		{
+			name:         "base repository review inline-open companion race",
+			label:        "base",
+			output:       repositoryReviewInlineOpenRace,
+			wantRetried:  true,
+			wantAttempts: 2,
+		},
+		{
+			name:         "base repository review late-controller companion race",
+			label:        "base",
+			output:       repositoryReviewLateShutdownRace,
+			wantRetried:  true,
+			wantAttempts: 2,
+		},
+		{
+			name:         "base repository review campaign companion race",
+			label:        "base",
+			output:       repositoryReviewCampaignRace,
+			wantRetried:  true,
+			wantAttempts: 2,
+		},
+		{
+			name:         "base repository review changed-while-opening companion race",
+			label:        "base",
+			output:       repositoryReviewOpeningRace,
 			wantRetried:  true,
 			wantAttempts: 2,
 		},
@@ -651,6 +1335,42 @@ func TestRunCoverageCommandRetriesOnlyKnownBaselineFlakes(t *testing.T) {
 			name:         "head cancellation and restart",
 			label:        "head",
 			output:       cancellationRestart,
+			wantAttempts: 1,
+		},
+		{
+			name:         "head evolution draft persistence timeout",
+			label:        "head",
+			output:       evolutionDraftTimeout,
+			wantAttempts: 1,
+		},
+		{
+			name:         "head repository review auto-continuation completion timeout",
+			label:        "head",
+			output:       repositoryReviewAutoContinueTimeout,
+			wantAttempts: 1,
+		},
+		{
+			name:         "head repository review inline-open companion race",
+			label:        "head",
+			output:       repositoryReviewInlineOpenRace,
+			wantAttempts: 1,
+		},
+		{
+			name:         "head repository review late-controller companion race",
+			label:        "head",
+			output:       repositoryReviewLateShutdownRace,
+			wantAttempts: 1,
+		},
+		{
+			name:         "head repository review campaign companion race",
+			label:        "head",
+			output:       repositoryReviewCampaignRace,
+			wantAttempts: 1,
+		},
+		{
+			name:         "head repository review changed-while-opening companion race",
+			label:        "head",
+			output:       repositoryReviewOpeningRace,
 			wantAttempts: 1,
 		},
 	}
@@ -801,6 +1521,33 @@ func TestRunCoverageCommandDoesNotRetryKnownCleanupRaceTwice(t *testing.T) {
 			retried,
 			attempts,
 		)
+	}
+}
+
+func TestRunCoverageCommandRetriesRepositoryReviewSQLiteCompanionRaceOnlyOnce(t *testing.T) {
+	for name, output := range repositoryReviewSQLiteCompanionRaceOutputs() {
+		t.Run(name, func(t *testing.T) {
+			raceOutput := []byte(output)
+			wantErr := errors.New("exit status 1")
+			attempts := 0
+			out, err, retried := runCoverageCommandWithBaselineRetry(
+				"base",
+				func() ([]byte, error) {
+					attempts++
+					return raceOutput, wantErr
+				},
+			)
+			if !errors.Is(err, wantErr) || string(out) != string(raceOutput) ||
+				!retried || attempts != 2 {
+				t.Fatalf(
+					"runCoverageCommandWithBaselineRetry() = (%q, %v, %t), attempts = %d",
+					out,
+					err,
+					retried,
+					attempts,
+				)
+			}
+		})
 	}
 }
 

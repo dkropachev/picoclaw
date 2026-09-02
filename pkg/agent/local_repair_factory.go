@@ -34,6 +34,9 @@ func (al *AgentLoop) NewControllerLocalRepairRunner(
 	cfg := al.cfg
 	registry := al.registry
 	workspaces := al.gitWorkspaces
+	loopProtectedRoots := cloneAgentRuntimeFileMutationProtectedRoots(
+		al.fileMutationProtectedRoots,
+	)
 	al.mu.RUnlock()
 	return al.newControllerLocalRepairRunner(
 		cfg,
@@ -43,6 +46,7 @@ func (al *AgentLoop) NewControllerLocalRepairRunner(
 		false,
 		agentID,
 		routingText,
+		loopProtectedRoots,
 	)
 }
 
@@ -63,6 +67,9 @@ func (al *AgentLoop) NewControllerLocalRepairRunnerWithRuntimeLease(
 	}
 	al.mu.RLock()
 	workspaces := al.gitWorkspaces
+	loopProtectedRoots := cloneAgentRuntimeFileMutationProtectedRoots(
+		al.fileMutationProtectedRoots,
+	)
 	al.mu.RUnlock()
 	return al.newControllerLocalRepairRunner(
 		generation.cfg,
@@ -72,6 +79,7 @@ func (al *AgentLoop) NewControllerLocalRepairRunnerWithRuntimeLease(
 		true,
 		agentID,
 		routingText,
+		loopProtectedRoots,
 	)
 }
 
@@ -83,7 +91,23 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 	strictRuntime bool,
 	agentID string,
 	routingText string,
+	loopProtectedRootSets ...[]string,
 ) (*LocalRepairRunner, error) {
+	var loopProtectedRoots []string
+	if len(loopProtectedRootSets) > 1 {
+		return nil, errors.New("controller local repair has multiple root snapshots")
+	}
+	if len(loopProtectedRootSets) == 1 {
+		loopProtectedRoots = cloneAgentRuntimeFileMutationProtectedRoots(
+			loopProtectedRootSets[0],
+		)
+	} else {
+		al.mu.RLock()
+		loopProtectedRoots = cloneAgentRuntimeFileMutationProtectedRoots(
+			al.fileMutationProtectedRoots,
+		)
+		al.mu.RUnlock()
+	}
 	if agentID != strings.TrimSpace(agentID) || !routing.IsCanonicalAgentID(agentID) {
 		return nil, errors.New("controller local repair agent ID must be exact and canonical")
 	}
@@ -135,32 +159,58 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 		return nil, errors.New("controller local repair agent configuration is invalid")
 	}
 
-	protectedRoots := append(
-		[]string(nil),
-		al.fileMutationProtectedRoots...,
-	)
-	if strings.TrimSpace(agent.Workspace) != "" {
-		protectedRoots = append(
-			protectedRoots,
-			mustAgentWorkspaceFileMutationProtectedRoots(agent.Workspace)...,
+	preparedMutationPolicy := agent.preparedFileMutationPolicy
+	var protectedRoots []string
+	protectedIdentities := agent.fileMutationIdentityCatalog
+	preparedApplyPatchRoots := agent.preparedApplyPatchRoots
+	if preparedMutationPolicy == nil {
+		protectedRoots = append([]string(nil), loopProtectedRoots...)
+		if len(agent.fileMutationProtectedRoots) != 0 {
+			protectedRoots = append([]string(nil), agent.fileMutationProtectedRoots...)
+		}
+		if strings.TrimSpace(agent.Workspace) != "" {
+			protectedRoots = append(
+				protectedRoots,
+				mustAgentWorkspaceFileMutationProtectedRoots(agent.Workspace)...,
+			)
+			protectedRoots = append(
+				protectedRoots,
+				mustAgentWorkspaceAccountRouterProtectedRoots(agent.Workspace)...,
+			)
+			protectedRoots = append(
+				protectedRoots,
+				agentSessionFileMutationProtectedRoots(agent.Workspace)...,
+			)
+			protectedRoots = append(
+				protectedRoots,
+				agentCronFileMutationProtectedRoots(agent.Workspace)...,
+			)
+			workflowRoots, workflowErr := agentWorkflowRuntimeFileMutationProtectedRoots(
+				agent.Workspace,
+			)
+			if workflowErr != nil {
+				return nil, errors.New("controller local repair workflow state is invalid")
+			}
+			protectedRoots = append(protectedRoots, workflowRoots...)
+			protectedRoots = appendAgentRepositoryFileMutationProtectedRoots(
+				protectedRoots,
+				agent.Workspace,
+			)
+		}
+		evolutionRoots, rootsErr := agentEvolutionFileMutationProtectedRoots(
+			agent.Workspace,
+			cfg.Evolution.StateDir,
 		)
-		protectedRoots = append(
-			protectedRoots,
-			mustAgentWorkspaceAccountRouterProtectedRoots(agent.Workspace)...,
-		)
-		protectedRoots = append(
-			protectedRoots,
-			agentSessionFileMutationProtectedRoots(agent.Workspace)...,
-		)
+		if rootsErr != nil {
+			return nil, errors.New("controller local repair evolution state is invalid")
+		}
+		protectedRoots = append(protectedRoots, evolutionRoots...)
+		localCIRoots, localCIRootsErr := agentLocalCIEvidenceFileMutationProtectedRoots(cfg)
+		if localCIRootsErr != nil {
+			return nil, errors.New("controller local repair local CI state is invalid")
+		}
+		protectedRoots = append(protectedRoots, localCIRoots...)
 	}
-	evolutionRoots, rootsErr := agentEvolutionFileMutationProtectedRoots(
-		agent.Workspace,
-		cfg.Evolution.StateDir,
-	)
-	if rootsErr != nil {
-		return nil, errors.New("controller local repair evolution state is invalid")
-	}
-	protectedRoots = append(protectedRoots, evolutionRoots...)
 	runner, err := NewLocalRepairRunner(LocalRepairRunnerConfig{
 		Workspaces:      workspaces,
 		Provider:        provider,
@@ -172,6 +222,9 @@ func (al *AgentLoop) newControllerLocalRepairRunner(
 		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
 			protectedRoots,
 		),
+		ProtectedIdentities:     protectedIdentities,
+		PreparedMutationPolicy:  preparedMutationPolicy,
+		PreparedApplyPatchRoots: preparedApplyPatchRoots,
 	})
 	if err != nil {
 		return nil, errors.New("controller local repair agent configuration is invalid")

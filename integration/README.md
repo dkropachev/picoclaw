@@ -62,6 +62,29 @@ It does three things:
 
 That suite complements [`TestIntegration_StreamableHTTPCompatibility`](../pkg/mcp/manager_integration_test.go), which exercises the same area in-process. Together they cover both protocol behavior and real service wiring.
 
+## Runtime storage JSON allowlist suite
+
+[`integration/suites/storage-json/`](suites/storage-json/) runs the
+integration-tagged runtime storage gate without an external dependency. The
+test initializes every migrated store represented on the current branch under
+one disposable PicoClaw home/workspace, reopens the public owners, verifies the
+exact private SQLite database inventory, and scans the complete generated root.
+Git inventory is mutated and reopened through the public manager, while the
+gateway checkpoint store imports one legacy source, performs a fenced update,
+and reopens the typed row; their exact archive roots and near-miss labels are
+covered by the same deny-by-default scan.
+
+JSON, JSONL, migrated session snapshots, history slots, and account-router
+invalidation sidecars are default-denied. The scanner admits only exact
+human-authored config and PID paths, explicitly registered component archive
+roots, workflow publish/template journals and requested artifacts, skill-origin
+sidecars in skill roots, authenticated apply-patch journals, and
+content-addressed immutable local-CI evidence. Database-like `.db`, `.sqlite`,
+and `.sqlite3` paths are also default-denied outside the exact expected database
+inventory. Live near-miss, unsafe archive-link, JSON-like-directory, and rogue
+SQLite canaries must be rejected without exposing their payloads, and both
+inventories must remain unchanged after the second startup.
+
 ## Coding-agent benchmark fixture
 
 The deterministic transfer-idempotency smoke fixture is tracked under

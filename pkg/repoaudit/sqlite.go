@@ -262,7 +262,38 @@ func validateRepositoryReviewDatabaseSchema(ctx context.Context, conn *sql.Conn)
 			return err
 		}
 	}
+	if err := validateRepositoryReviewSchemaObjectSet(ctx, conn); err != nil {
+		return err
+	}
 	return validateRepositoryReviewAggregateRows(ctx, conn)
+}
+
+func validateRepositoryReviewSchemaObjectSet(ctx context.Context, conn *sql.Conn) error {
+	var unexpected int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema
+		WHERE type IN ('table', 'index', 'view', 'trigger')
+		  AND name NOT LIKE 'sqlite_%'
+		  AND name NOT IN (
+		    'repository_review_states', 'repository_review_records',
+		    'repository_review_profiles', 'repository_review_profile_scope',
+		    'repository_review_automations', 'repository_review_automation_models',
+		    'repository_review_automation_runs',
+		    'repository_review_states_updated_idx', 'repository_review_records_status_idx',
+		    'repository_review_profiles_updated_idx',
+		    'repository_review_automations_updated_idx',
+		    'repository_review_automations_status_idx',
+		    'repository_review_automations_profile_idx',
+		    'repository_review_automations_repository_idx',
+		    'repository_review_automations_canonical_idx',
+		    'storage_imports', 'storage_import_issues', 'storage_import_horizons',
+		    'storage_imports_archive_status_idx'
+		  )`).Scan(&unexpected); err != nil {
+		return err
+	}
+	if unexpected != 0 {
+		return errors.New("repository review database has unexpected schema objects")
+	}
+	return nil
 }
 
 func validateRepositoryReviewAggregateRows(ctx context.Context, conn *sql.Conn) error {

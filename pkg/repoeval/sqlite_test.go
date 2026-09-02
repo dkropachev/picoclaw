@@ -169,6 +169,9 @@ func TestSQLitePayloadRelationshipAndHelperFailures(t *testing.T) {
 		if err := validateEvaluationDatabaseSchema(t.Context(), conn); err == nil {
 			t.Fatal("closed schema connection validated")
 		}
+		if err := validateEvaluationSchemaObjectSet(t.Context(), conn); err == nil {
+			t.Fatal("closed schema object-set connection validated")
+		}
 		_ = database.Close()
 	})
 
@@ -662,6 +665,13 @@ func TestSQLiteStoreBulkDeleteFailureAndCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			_ = database.Close()
+			// This test deliberately installs a trigger that the production open
+			// path correctly rejects as an unexpected schema object. Reopen the
+			// already-created fixture directly so BulkDelete reaches the injected
+			// DELETE boundary being exercised here.
+			store.openForTest = func(context.Context) (*sql.DB, error) {
+				return sql.Open("sqlite", store.databasePath())
+			}
 			if _, err := store.BulkDelete(
 				t.Context(), []BulkDeleteItem{{ID: created.ID, Version: created.Version}},
 			); err == nil {
@@ -789,6 +799,29 @@ func TestSQLiteStoreRejectsTooNewAndTamperedSchema(t *testing.T) {
 		},
 		"schema": func(t *testing.T, database *sql.DB) {
 			if _, err := database.Exec("DROP INDEX repository_evaluations_status_idx"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rogue table": func(t *testing.T, database *sql.DB) {
+			if _, err := database.Exec(`CREATE TABLE rogue_evaluation_table(id INTEGER)`); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rogue view": func(t *testing.T, database *sql.DB) {
+			if _, err := database.Exec(`CREATE VIEW rogue_evaluation_view AS
+				SELECT evaluation_id FROM repository_evaluations`); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rogue index": func(t *testing.T, database *sql.DB) {
+			if _, err := database.Exec(`CREATE INDEX rogue_evaluation_index
+				ON repository_evaluations(ref)`); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rogue trigger": func(t *testing.T, database *sql.DB) {
+			if _, err := database.Exec(`CREATE TRIGGER rogue_evaluation_trigger
+				AFTER INSERT ON repository_evaluations BEGIN SELECT 1; END`); err != nil {
 				t.Fatal(err)
 			}
 		},

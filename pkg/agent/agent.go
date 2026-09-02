@@ -1037,6 +1037,9 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	al.mu.RLock()
 	sameConfigGeneration := al.cfg == cfg
 	currentRegistry := al.registry
+	currentFileMutationProtectedRoots := cloneAgentRuntimeFileMutationProtectedRoots(
+		al.fileMutationProtectedRoots,
+	)
 	al.mu.RUnlock()
 	if requireFreshConfig && sameConfigGeneration {
 		return nil, fmt.Errorf("reload config must be a new generation snapshot")
@@ -1066,7 +1069,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 				executionPolicy,
 				diagnosticPolicy,
 				providerGeneration,
-				cloneAgentRuntimeFileMutationProtectedRoots(al.fileMutationProtectedRoots),
+				currentFileMutationProtectedRoots,
 			)
 		} else if al.runtimePolicyRegistryFactory != nil {
 			registry = al.runtimePolicyRegistryFactory(
@@ -1086,7 +1089,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 				executionPolicy,
 				diagnosticPolicy,
 				nil,
-				cloneAgentRuntimeFileMutationProtectedRoots(al.fileMutationProtectedRoots),
+				currentFileMutationProtectedRoots,
 			)
 		}
 	}()
@@ -1227,6 +1230,10 @@ func (al *AgentLoop) reloadProviderAndConfig(
 
 		al.cfg = cfg
 		al.registry = registry
+		al.fileMutationProtectedRoots = agentRegistryCumulativeFileMutationProtectedRoots(
+			registry,
+			currentFileMutationProtectedRoots,
+		)
 		al.executionPolicy = executionPolicy
 		al.diagnosticPolicy = diagnosticPolicy
 		al.runtimeGenerationID++

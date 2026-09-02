@@ -970,7 +970,8 @@ func validateWeixinStateSchema(ctx context.Context, conn *sql.Conn) error {
           AND name NOT IN (
               'weixin_accounts', 'weixin_cursors', 'weixin_context_tokens',
               'weixin_cursors_updated_idx', 'weixin_context_tokens_updated_idx',
-              'storage_imports', 'storage_import_issues', 'storage_imports_archive_status_idx'
+              'storage_imports', 'storage_import_issues', 'storage_import_horizons',
+              'storage_imports_archive_status_idx'
           )`).Scan(&unexpected); err != nil {
 		return err
 	}

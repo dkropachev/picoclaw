@@ -450,13 +450,25 @@ func coverageForRef(
 	}
 
 	if includeIntegration && len(plan.IntegrationSuites) > 0 && len(coverImports) > 0 {
+		integrationSuites, err := coverageIntegrationSuitesForRef(
+			worktree,
+			label,
+			ref,
+			plan.IntegrationSuites,
+		)
+		if err != nil {
+			return coverageProfile{}, err
+		}
+		if len(integrationSuites) == 0 {
+			return profile, nil
+		}
 		integrationProfile, err := runIntegrationCoverage(
 			worktree,
 			label,
 			ref,
 			tags,
 			coverImports,
-			plan.IntegrationSuites,
+			integrationSuites,
 			environment,
 		)
 		if err != nil {
@@ -466,6 +478,67 @@ func coverageForRef(
 	}
 
 	return profile, nil
+}
+
+// coverageIntegrationSuitesForRef resolves a head-derived integration plan
+// against one checked-out ref. A suite added by the head cannot exist in the
+// immutable base, so base coverage omits only that absent directory. Head must
+// contain every planned suite, and either ref still fails closed for an unsafe
+// or non-directory path instead of silently bypassing a broken suite.
+func coverageIntegrationSuitesForRef(
+	worktree,
+	label,
+	ref string,
+	planned []string,
+) ([]string, error) {
+	available := make([]string, 0, len(planned))
+	for _, suite := range planned {
+		if suite == "" || suite != strings.TrimSpace(suite) || strings.ContainsRune(suite, '\x00') ||
+			suite == "." || suite == ".." || filepath.Base(suite) != suite ||
+			strings.ContainsAny(suite, `/\`) {
+			return nil, fmt.Errorf(
+				"integration coverage for %s (%s): planned suite identity is invalid",
+				label,
+				ref,
+			)
+		}
+		path := filepath.Join(worktree, "integration", "suites", suite)
+		info, err := os.Lstat(path)
+		switch {
+		case err == nil:
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf(
+					"integration coverage for %s (%s): suite %s is not a real directory",
+					label,
+					ref,
+					suite,
+				)
+			}
+			available = append(available, suite)
+		case errors.Is(err, os.ErrNotExist) && label == "base":
+			fmt.Printf(
+				"coverage delta: base %s omits head-only integration suite %s\n",
+				ref,
+				suite,
+			)
+		case errors.Is(err, os.ErrNotExist):
+			return nil, fmt.Errorf(
+				"integration coverage for %s (%s): planned suite %s is missing",
+				label,
+				ref,
+				suite,
+			)
+		default:
+			return nil, fmt.Errorf(
+				"integration coverage for %s (%s): inspect suite %s: %w",
+				label,
+				ref,
+				suite,
+				err,
+			)
+		}
+	}
+	return available, nil
 }
 
 func runGoCoverage(
@@ -503,13 +576,13 @@ func runGoCoverage(
 		return cmd.CombinedOutput()
 	}
 	// The guard tests detached base and head worktrees. A synchronization fix
-	// in head cannot change a known historical base test race, so retry only an
+	// in head cannot change a known historical base test flake, so retry only an
 	// exact recognized failure from base once. Head failures are always final.
 	out, err, retried := runCoverageCommandWithBaselineRetry(label, run)
 	if retried {
 		fmt.Fprintf(
 			os.Stderr,
-			"coverage delta: retried %s (%s) after known baseline test race\n",
+			"coverage delta: retried %s (%s) after known baseline test flake\n",
 			label,
 			ref,
 		)
@@ -543,7 +616,436 @@ func runCoverageCommandWithBaselineRetry(
 
 func isKnownCoverageBaselineFlake(out []byte) bool {
 	return isKnownCoverageTempDirCleanupRace(out) ||
-		isKnownRepositoryModelEvaluationCancellationRace(out)
+		isKnownRepositoryModelEvaluationCancellationRace(out) ||
+		isKnownEvolutionDraftPersistenceTimeout(out) ||
+		isKnownRepositoryReviewAutoContinueCompletionTimeout(out) ||
+		isKnownRepositoryReviewSQLiteCompanionDisappearance(out)
+}
+
+// isKnownRepositoryReviewSQLiteCompanionDisappearance recognizes the one
+// shared immutable-base sqlitestore race rather than any assertion callsite.
+// Binding the sole diagnostic to its failed test's Go TempDir prevents the
+// same low-level text in unrelated output from authorizing a retry.
+func isKnownRepositoryReviewSQLiteCompanionDisappearance(out []byte) bool {
+	const (
+		failedPackage = "github.com/sipeed/picoclaw/web/backend/api"
+	)
+	var (
+		failureMarkers   []string
+		diagnostics      []string
+		diagnosticLines  []int
+		lstatLines       []string
+		lstatLineIndexes []int
+		packageFailures  int
+		failurePackage   string
+		lineIndex        int
+	)
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.Contains(line, "_test.go:") && !coverageGoTestDiagnostic(line) {
+			return false
+		}
+		if strings.HasPrefix(line, "lstat ") {
+			lstatLines = append(lstatLines, line)
+			lstatLineIndexes = append(lstatLineIndexes, lineIndex)
+		}
+		if strings.HasPrefix(line, "--- FAIL:") {
+			name, ok := coverageFailedTestName(line)
+			if !ok {
+				return false
+			}
+			failureMarkers = append(failureMarkers, name)
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "FAIL" {
+			packageFailures++
+			failurePackage = fields[1]
+		}
+		if coverageGoTestDiagnostic(line) {
+			diagnostics = append(diagnostics, line)
+			diagnosticLines = append(diagnosticLines, lineIndex)
+		}
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") ||
+			strings.Contains(line, "[build failed]") || strings.Contains(line, "[setup failed]") {
+			return false
+		}
+		lineIndex++
+	}
+	if scanner.Err() != nil || packageFailures != 1 || failurePackage != failedPackage ||
+		len(diagnostics) != 1 || len(diagnosticLines) != 1 {
+		return false
+	}
+	failedTest, ok := repositoryReviewCoverageFailureLeaf(failureMarkers)
+	if !ok {
+		return false
+	}
+	diagnostic, ok := repositoryReviewSQLiteCompanionDiagnostic(diagnostics[0])
+	if !ok {
+		return false
+	}
+	path, diagnosticCompanion, needsContinuation, ok := repositoryReviewSQLiteCompanionErrorPath(diagnostic)
+	if !ok {
+		return false
+	}
+	if needsContinuation {
+		if len(lstatLines) != 1 || len(lstatLineIndexes) != 1 ||
+			lstatLineIndexes[0] != diagnosticLines[0]+1 {
+			return false
+		}
+		const (
+			continuationPrefix = "lstat "
+			continuationSuffix = ": no such file or directory"
+		)
+		if !strings.HasPrefix(lstatLines[0], continuationPrefix) ||
+			!strings.HasSuffix(lstatLines[0], continuationSuffix) {
+			return false
+		}
+		path = strings.TrimSuffix(
+			strings.TrimPrefix(lstatLines[0], continuationPrefix),
+			continuationSuffix,
+		)
+	} else if len(lstatLines) != 0 || len(lstatLineIndexes) != 0 {
+		return false
+	}
+	pathCompanion, ok := safeRepositoryReviewSQLiteCompanionPath(path, failedTest)
+	return ok && (diagnosticCompanion == "" || diagnosticCompanion == pathCompanion)
+}
+
+func repositoryReviewCoverageFailureLeaf(failureMarkers []string) (string, bool) {
+	if len(failureMarkers) == 0 || len(failureMarkers) > 4 {
+		return "", false
+	}
+	for index, name := range failureMarkers {
+		if !safeRepositoryReviewCoverageTestName(name) {
+			return "", false
+		}
+		if index == 0 {
+			if strings.Contains(name, "/") {
+				return "", false
+			}
+			continue
+		}
+		prefix := failureMarkers[index-1] + "/"
+		if !strings.HasPrefix(name, prefix) ||
+			strings.Contains(strings.TrimPrefix(name, prefix), "/") {
+			return "", false
+		}
+	}
+	return failureMarkers[len(failureMarkers)-1], true
+}
+
+func safeRepositoryReviewCoverageTestName(name string) bool {
+	if !strings.HasPrefix(name, "TestRepositoryReview") || len(name) > 256 {
+		return false
+	}
+	for _, character := range name {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '_' || character == '/' {
+			continue
+		}
+		return false
+	}
+	for _, segment := range strings.Split(name, "/") {
+		if segment == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func repositoryReviewSQLiteCompanionDiagnostic(line string) (string, bool) {
+	const (
+		filePrefix = "repository_review_"
+		fileSuffix = "_test.go"
+	)
+	goSuffix := strings.Index(line, ".go:")
+	if goSuffix < 0 {
+		return "", false
+	}
+	file := line[:goSuffix+len(".go")]
+	if !strings.HasPrefix(file, filePrefix) || !strings.HasSuffix(file, fileSuffix) ||
+		strings.ContainsAny(file, `/\`) {
+		return "", false
+	}
+	stem := strings.TrimSuffix(strings.TrimPrefix(file, filePrefix), fileSuffix)
+	if stem == "" {
+		return "", false
+	}
+	for _, character := range stem {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' ||
+			character == '_' {
+			continue
+		}
+		return "", false
+	}
+	lineAndDiagnostic := line[goSuffix+len(".go:"):]
+	separator := strings.Index(lineAndDiagnostic, ": ")
+	if separator <= 0 {
+		return "", false
+	}
+	lineNumber := lineAndDiagnostic[:separator]
+	if lineNumber == "0" || !coverageCanonicalUint32Decimal(lineNumber) {
+		return "", false
+	}
+	diagnostic := lineAndDiagnostic[separator+2:]
+	const securePrefix = "secure repository-reviews database files: "
+	if strings.HasPrefix(diagnostic, securePrefix) {
+		return diagnostic, true
+	}
+	preamble, diagnostic, found := strings.Cut(diagnostic, " = ")
+	if !found || !safeRepositoryReviewSQLiteAssertionPreamble(preamble) ||
+		!strings.HasPrefix(diagnostic, securePrefix) {
+		return "", false
+	}
+	return diagnostic, true
+}
+
+func safeRepositoryReviewSQLiteAssertionPreamble(preamble string) bool {
+	if len(preamble) == 0 || len(preamble) > 96 || preamble != strings.TrimSpace(preamble) ||
+		!strings.HasSuffix(preamble, " error") {
+		return false
+	}
+	for _, character := range preamble {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' ||
+			character == ' ' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func repositoryReviewSQLiteCompanionErrorPath(
+	diagnostic string,
+) (path, companion string, needsContinuation, ok bool) {
+	const (
+		securePrefix = "secure repository-reviews database files: "
+		notExist     = ": no such file or directory"
+	)
+	errorText := strings.TrimPrefix(diagnostic, securePrefix)
+	if errorText == diagnostic || errorText == "" {
+		return "", "", false, false
+	}
+	if strings.HasPrefix(errorText, "open ") && strings.HasSuffix(errorText, notExist) {
+		path = strings.TrimSuffix(strings.TrimPrefix(errorText, "open "), notExist)
+		return path, "", false, path != ""
+	}
+	if errorText == "private file changed while securing" {
+		return "", "", true, true
+	}
+	const changedWhileOpening = " changed while opening"
+	if strings.HasSuffix(errorText, changedWhileOpening) {
+		companion = strings.TrimSuffix(errorText, changedWhileOpening)
+		if companion == "repository-reviews.db-wal" || companion == "repository-reviews.db-shm" {
+			return "", companion, true, true
+		}
+	}
+	return "", "", false, false
+}
+
+func safeRepositoryReviewSQLiteCompanionPath(path, failedTest string) (string, bool) {
+	if path == "" || strings.ContainsRune(path, '\x00') || !filepath.IsAbs(path) ||
+		filepath.Clean(path) != path {
+		return "", false
+	}
+	tempRoot := filepath.Clean(os.TempDir())
+	relative, err := filepath.Rel(tempRoot, path)
+	if err != nil || relative == "." || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	if len(parts) != 9 || parts[1] != "base-picoclaw-home" || parts[2] != ".tmp" ||
+		parts[4] != "tmp" || parts[6] != "001" || parts[7] != "repository_reviews" ||
+		(parts[8] != "repository-reviews.db-wal" && parts[8] != "repository-reviews.db-shm") {
+		return "", false
+	}
+	const (
+		coveragePrefix   = "picoclaw-coverage-delta-"
+		apiRuntimePrefix = "picoclaw-api-test-runtime-"
+	)
+	testPrefix, ok := repositoryReviewCoverageTempDirPrefix(failedTest)
+	if !ok {
+		return "", false
+	}
+	valid := strings.HasPrefix(parts[0], coveragePrefix) &&
+		coverageCanonicalUint32Decimal(strings.TrimPrefix(parts[0], coveragePrefix)) &&
+		strings.HasPrefix(parts[3], apiRuntimePrefix) &&
+		coverageCanonicalUint32Decimal(strings.TrimPrefix(parts[3], apiRuntimePrefix)) &&
+		strings.HasPrefix(parts[5], testPrefix) &&
+		coverageCanonicalUint32Decimal(strings.TrimPrefix(parts[5], testPrefix))
+	return parts[8], valid
+}
+
+func repositoryReviewCoverageTempDirPrefix(failedTest string) (string, bool) {
+	if !safeRepositoryReviewCoverageTestName(failedTest) {
+		return "", false
+	}
+	// testing.T.TempDir truncates the test name to 64 bytes before dropping
+	// path separators, then os.MkdirTemp appends one uint32 decimal suffix.
+	// Test identities admitted above are ASCII, so byte truncation is exact.
+	pattern := failedTest
+	if len(pattern) > 64 {
+		pattern = pattern[:64]
+	}
+	return strings.ReplaceAll(pattern, "/", ""), true
+}
+
+func isKnownRepositoryReviewAutoContinueCompletionTimeout(out []byte) bool {
+	const (
+		failedTest       = "TestRepositoryReviewAutomationAutoContinueReusesResolvedCommit"
+		failedPackage    = "github.com/sipeed/picoclaw/web/backend/api"
+		diagnosticPrefix = "repository_review_automations_test.go:1897: automation "
+		diagnosticSuffix = " did not reach completed"
+	)
+	var (
+		failureMarkers  []string
+		diagnostics     []string
+		packageFailures int
+		failurePackage  string
+	)
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "--- FAIL:") {
+			name, ok := coverageFailedTestName(line)
+			if !ok {
+				return false
+			}
+			failureMarkers = append(failureMarkers, name)
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "FAIL" {
+			packageFailures++
+			failurePackage = fields[1]
+		}
+		if coverageGoTestDiagnostic(line) {
+			diagnostics = append(diagnostics, line)
+		}
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") ||
+			strings.Contains(line, "[build failed]") || strings.Contains(line, "[setup failed]") {
+			return false
+		}
+	}
+	if scanner.Err() != nil || len(failureMarkers) != 1 || failureMarkers[0] != failedTest ||
+		packageFailures != 1 || failurePackage != failedPackage || len(diagnostics) != 1 ||
+		!strings.HasPrefix(diagnostics[0], diagnosticPrefix) ||
+		!strings.HasSuffix(diagnostics[0], diagnosticSuffix) {
+		return false
+	}
+	automationID := strings.TrimSuffix(
+		strings.TrimPrefix(diagnostics[0], diagnosticPrefix),
+		diagnosticSuffix,
+	)
+	return isCoverageGeneratedRepositoryReviewAutomationID(automationID)
+}
+
+func isCoverageGeneratedRepositoryReviewAutomationID(id string) bool {
+	const prefix = "rra_"
+	if !strings.HasPrefix(id, prefix) || len(id) != len(prefix)+26 {
+		return false
+	}
+	for _, character := range strings.TrimPrefix(id, prefix) {
+		if character < 'a' || character > 'z' {
+			if character < '2' || character > '7' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isKnownEvolutionDraftPersistenceTimeout(out []byte) bool {
+	const (
+		failedTest    = "TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator"
+		failedPackage = "github.com/sipeed/picoclaw/pkg/agent"
+		diagnostic    = "evolution_bridge_test.go:596: timed out waiting for 1 drafts at "
+	)
+	var (
+		failureMarkers  []string
+		diagnostics     []string
+		packageFailures int
+		failurePackage  string
+	)
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "--- FAIL:") {
+			name, ok := coverageFailedTestName(line)
+			if !ok {
+				return false
+			}
+			failureMarkers = append(failureMarkers, name)
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "FAIL" {
+			packageFailures++
+			failurePackage = fields[1]
+		}
+		if coverageGoTestDiagnostic(line) {
+			diagnostics = append(diagnostics, line)
+		}
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") ||
+			strings.Contains(line, "[build failed]") || strings.Contains(line, "[setup failed]") {
+			return false
+		}
+	}
+	if scanner.Err() != nil || len(failureMarkers) != 1 || failureMarkers[0] != failedTest ||
+		packageFailures != 1 || failurePackage != failedPackage || len(diagnostics) != 1 ||
+		!strings.HasPrefix(diagnostics[0], diagnostic) {
+		return false
+	}
+	return isSafeEvolutionDraftTimeoutPath(strings.TrimPrefix(diagnostics[0], diagnostic))
+}
+
+func isSafeEvolutionDraftTimeoutPath(path string) bool {
+	if path == "" || strings.ContainsRune(path, '\x00') || !filepath.IsAbs(path) ||
+		filepath.Clean(path) != path {
+		return false
+	}
+	tempRoot := filepath.Clean(os.TempDir())
+	relative, err := filepath.Rel(tempRoot, path)
+	if err != nil || relative == "." || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	if len(parts) != 8 || parts[1] != "base-picoclaw-home" || parts[2] != ".tmp" ||
+		parts[5] != "state" || parts[6] != "evolution" || parts[7] != "skill-drafts.json" {
+		return false
+	}
+	const (
+		coveragePrefix = "picoclaw-coverage-delta-"
+		testPrefix     = "TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator"
+	)
+	return strings.HasPrefix(parts[0], coveragePrefix) &&
+		coverageASCIIDigits(strings.TrimPrefix(parts[0], coveragePrefix)) &&
+		strings.HasPrefix(parts[3], testPrefix) &&
+		coverageASCIIDigits(strings.TrimPrefix(parts[3], testPrefix)) &&
+		coverageASCIIDigits(parts[4])
+}
+
+func coverageASCIIDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func coverageCanonicalUint32Decimal(value string) bool {
+	if !coverageASCIIDigits(value) || len(value) > 10 ||
+		(len(value) > 1 && value[0] == '0') {
+		return false
+	}
+	_, err := strconv.ParseUint(value, 10, 32)
+	return err == nil
 }
 
 func isKnownRepositoryModelEvaluationCancellationRace(out []byte) bool {

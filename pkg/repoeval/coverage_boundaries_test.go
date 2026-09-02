@@ -654,7 +654,7 @@ func TestStoreListSurfacesCorruptStateAndSymlinkCount(t *testing.T) {
 func TestStoreRemainingLockCancellationAndPersistenceErrors(t *testing.T) {
 	t.Run("operation lock failures", func(t *testing.T) {
 		store := NewStore(t.TempDir())
-		if err := os.Mkdir(store.root+".lock", 0o700); err != nil {
+		if err := os.Mkdir(repositoryEvaluationTestLockPath(t, store.root, "store.lock"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		calls := []func() error{

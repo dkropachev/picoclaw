@@ -47,6 +47,12 @@ selects an exact model alias.
 
 | `FR-ACCOUNT-ROUTER-010` | MUST | Authenticated `/api/account-routers` provides a name-identified standard collection with bounded typed `query`, opaque cursor paging, total and schema metadata, direct detail, create/update/delete, revision-fenced make-default, and at-most-200 explicit-ID bulk deletion. Canonical path-safe nonreserved names are their own IDs; an unsafe, dot-segment, reserved-route, or opaque-shaped persisted name receives a deterministic backend-issued base64url digest ID and remains viewable/editable without data migration. One config revision fences each mutation; candidate validation and one save preserve unrelated configuration and return restart effects. Structurally valid disabled routers persist and remain editable but are unavailable to runtime selection and cannot become default. Bulk results return successful IDs plus stable `default`, `referenced`, and `not_found` failures with safe blockers. The UI uses List/Table/Grid at `/accounts/routers` with dedicated `/new`, `/{id}`, and `/{id}/edit` routes, optional enable/disable and make-default item actions, partial-success selection reconciliation, and no compatibility handling for `/accounts/account-router/new` or index-addressed URLs. | Router administration needs stable names, safe concurrency, and directly loadable editors without mutable model-list indexes, combined credential cards, or query-wide deletion. |
 
+`FR-ACCOUNT-ROUTER-005` storage closeout MUST durably close the shared import
+horizon after the first complete `account_router_state.json` and invalidation-sidecar
+enumeration, even when it finds zero sources. Later sources are audited and
+archived under `state/legacy-json/account-router-v1/`, but MUST NOT reach the
+domain importer or finalizer; `account-router.db` remains authoritative.
+
 ## Data And State Model
 
 Router config shape:

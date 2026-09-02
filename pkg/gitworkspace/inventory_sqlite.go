@@ -395,11 +395,12 @@ func validateInventorySchema(ctx context.Context, conn *sql.Conn) error {
 			return err
 		}
 	}
-	allowed := make([]string, 0, len(inventorySchemaObjects)+3)
+	allowed := make([]string, 0, len(inventorySchemaObjects)+4)
 	for _, object := range inventorySchemaObjects {
 		allowed = append(allowed, object.name)
 	}
-	allowed = append(allowed, "storage_imports", "storage_import_issues", "storage_imports_archive_status_idx")
+	allowed = append(allowed, "storage_imports", "storage_import_issues", "storage_import_horizons",
+		"storage_imports_archive_status_idx")
 	placeholders := "?"
 	arguments := make([]any, 0, len(allowed))
 	for index, name := range allowed {

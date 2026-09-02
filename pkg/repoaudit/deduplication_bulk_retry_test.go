@@ -189,7 +189,7 @@ func TestRetryDeduplicationsRejectsInvalidStoreInputs(t *testing.T) {
 	}
 
 	store := NewStore(t.TempDir())
-	if err = os.MkdirAll(store.root+".lock", 0o700); err != nil {
+	if err = os.MkdirAll(repositoryReviewTestLockPath(t, store.root, "store.lock"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err = store.RetryDeduplications("owner/repo", []string{"source"}); err == nil {

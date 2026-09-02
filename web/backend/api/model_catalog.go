@@ -216,14 +216,21 @@ func validateCatalogSchema(ctx context.Context, conn *sql.Conn) error {
 	}
 	var unexpected int
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema
-        WHERE tbl_name IN ('model_catalogs', 'model_catalog_models')
-          AND type IN ('index', 'trigger')
-          AND name NOT LIKE 'sqlite_autoindex_%'
-          AND name NOT IN ('model_catalogs_provider_idx', 'model_catalog_models_identity_idx')`).Scan(&unexpected); err != nil {
+	        WHERE name NOT LIKE 'sqlite_%'
+	          AND name NOT IN (
+	              'model_catalogs',
+	              'model_catalog_models',
+	              'model_catalogs_provider_idx',
+	              'model_catalog_models_identity_idx',
+	              'storage_imports',
+	              'storage_import_issues',
+	              'storage_import_horizons',
+	              'storage_imports_archive_status_idx'
+	          )`).Scan(&unexpected); err != nil {
 		return err
 	}
 	if unexpected != 0 {
-		return errors.New("model catalog schema has unexpected indexes or triggers")
+		return errors.New("model catalog schema has unexpected objects")
 	}
 	var catalogCount, modelCount int
 	var extraBytes int64

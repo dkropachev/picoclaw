@@ -67,6 +67,46 @@ Handle support tickets carefully.
 	}
 }
 
+func TestFirstMeaningfulParagraphSkipsMarkdownScaffolding(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "empty", content: " \r\n\t", want: ""},
+		{
+			name: "headings and fenced block before prose",
+			content: "# Agent\r\n\r\n```text\r\nprivate example\r\n```\r\n## Details" +
+				"\r\n\r\n- First capability\r\n* Second capability\r\nplain conclusion",
+			want: "First capability Second capability plain conclusion",
+		},
+		{
+			name:    "whitespace line inside paragraph",
+			content: " first line \n   \n second line ",
+			want:    "first line second line",
+		},
+		{
+			name:    "only markdown scaffolding",
+			content: "# Heading\n\n```\nexample\n```\n\n## Tail",
+			want:    "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := firstMeaningfulParagraph(test.content); got != test.want {
+				t.Fatalf("first meaningful paragraph = %q, want %q", got, test.want)
+			}
+		})
+	}
+	if got := firstNonEmptyLine(" \r\n\t"); got != "" {
+		t.Fatalf("blank first non-empty line = %q, want empty", got)
+	}
+	registry := &AgentRegistry{agents: map[string]*AgentInstance{"nil": nil}}
+	if got := registry.workspaceForAgentIDLocked("nil"); got != "" {
+		t.Fatalf("nil agent workspace = %q, want empty", got)
+	}
+}
+
 func TestAgentRegistry_ListSpawnableAgentsRespectsPermissions(t *testing.T) {
 	cfg := testCfg(t, []config.AgentConfig{
 		{

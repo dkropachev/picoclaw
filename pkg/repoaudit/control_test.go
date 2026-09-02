@@ -623,7 +623,7 @@ func TestAutomationStoreRejectsSymlinkAndNonRegularStorage(t *testing.T) {
 		if err := os.WriteFile(target, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(target, store.root+".lock"); err != nil {
+		if err := os.Symlink(target, repositoryReviewTestLockPath(t, store.root, "store.lock")); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, err := store.GetAutomation(context.Background(), "rra_lock"); err == nil {

@@ -125,6 +125,35 @@ func TestOpenRejectsTooNewAndInvalidSchema(t *testing.T) {
 	})
 }
 
+func TestOpenRejectsUnrelatedSchemaObjects(t *testing.T) {
+	for name, statement := range map[string]string{
+		"table": `CREATE TABLE rogue_launcher_state(id INTEGER PRIMARY KEY) STRICT`,
+		"view":  `CREATE VIEW rogue_launcher_view AS SELECT id FROM dashboard_credentials`,
+		"index": `CREATE INDEX rogue_launcher_import_idx ON storage_imports(source_id)`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), DBFilename)
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(statement); err != nil {
+				_ = store.Close()
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if reopened, err := Open(path); !errors.Is(err, sqlitestore.ErrInvalidSchema) {
+				if reopened != nil {
+					_ = reopened.Close()
+				}
+				t.Fatalf("Open() error = %v, want ErrInvalidSchema", err)
+			}
+		})
+	}
+}
+
 func TestOpenPreservesUnversionedDatabaseAndArchivesLegacyConfig(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, DBFilename)

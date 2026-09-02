@@ -606,6 +606,32 @@ func TestModelCatalogSQLiteRejectsTooNewAndInvalidSchema(t *testing.T) {
 	}
 }
 
+func TestModelCatalogSQLiteRejectsUnrelatedSchemaObjects(t *testing.T) {
+	for name, statement := range map[string]string{
+		"table": `CREATE TABLE rogue_catalog_state(id INTEGER PRIMARY KEY) STRICT`,
+		"view":  `CREATE VIEW rogue_catalog_view AS SELECT catalog_id FROM model_catalogs`,
+		"index": `CREATE INDEX rogue_catalog_import_idx ON storage_imports(source_id)`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			useCatalogTestHome(t)
+			database, err := openCatalogDatabase(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.ExecContext(t.Context(), statement); err != nil {
+				_ = database.Close()
+				t.Fatal(err)
+			}
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadCatalogs(); !errors.Is(err, sqlitestore.ErrInvalidSchema) {
+				t.Fatalf("loadCatalogs() error = %v, want ErrInvalidSchema", err)
+			}
+		})
+	}
+}
+
 func TestModelCatalogSQLiteRejectsInvalidRelationalDataOnReopen(t *testing.T) {
 	t.Run("noncanonical metadata", func(t *testing.T) {
 		useCatalogTestHome(t)
@@ -1214,8 +1240,8 @@ func TestModelCatalogLegacySQLiteAuthoritativeAndHelperValidation(t *testing.T) 
         WHERE component = ?`, catalogDatabaseComponent).Scan(&code); err != nil {
 		t.Fatalf("read authoritative issue: %v", err)
 	}
-	if code != "sqlite-authoritative" {
-		t.Fatalf("issue code = %q, want sqlite-authoritative", code)
+	if code != "late-source" {
+		t.Fatalf("issue code = %q, want late-source", code)
 	}
 
 	if err := saveCatalogs(nil); err == nil {

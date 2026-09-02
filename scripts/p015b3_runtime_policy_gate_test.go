@@ -391,6 +391,14 @@ func TestP015B3ARuntimePolicyGateRejectsSyntheticMutations(t *testing.T) {
 			issues:      p015B3StrictConstructorIssues,
 		},
 		{
+			name: "reload drops cumulative mutation roots",
+			path: "pkg/agent/agent.go",
+			old: "currentFileMutationProtectedRoots := cloneAgentRuntimeFileMutationProtectedRoots(\n" +
+				"\t\tal.fileMutationProtectedRoots,\n\t)",
+			replacement: "currentFileMutationProtectedRoots := []string(nil)",
+			issues:      p015B3StrictConstructorIssues,
+		},
+		{
 			name:        "tool registry diagnostic cap",
 			path:        "pkg/agent/instance.go",
 			old:         "tools.NewToolRegistryWithDiagnosticPolicy(diagnosticPolicy)",
@@ -2226,6 +2234,46 @@ func p015B3ProviderGenerationIssues(files map[string]*p015B3ParsedFile) []string
 
 func p015B3StrictConstructorIssues(files map[string]*p015B3ParsedFile) []string {
 	var issues []string
+	if file := files["pkg/agent/agent.go"]; file == nil {
+		issues = append(issues, "pkg/agent/agent.go is missing")
+	} else if function := p015B3Functions(file)["(*AgentLoop).reloadProviderAndConfig"]; function == nil {
+		issues = append(issues, "reloadProviderAndConfig is missing")
+	} else {
+		var snapshot, lock, unlock token.Pos
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			switch current := node.(type) {
+			case *ast.AssignStmt:
+				if len(current.Lhs) != 1 || len(current.Rhs) != 1 {
+					return true
+				}
+				left, leftOK := current.Lhs[0].(*ast.Ident)
+				call, callOK := current.Rhs[0].(*ast.CallExpr)
+				if !leftOK || !callOK || left.Name != "currentFileMutationProtectedRoots" ||
+					p015B3Callee(call) != "cloneAgentRuntimeFileMutationProtectedRoots" ||
+					len(call.Args) != 1 ||
+					p015B3Render(file.fileSet, call.Args[0]) != "al.fileMutationProtectedRoots" {
+					return true
+				}
+				snapshot = current.Pos()
+			case *ast.CallExpr:
+				callee := p015B3Render(file.fileSet, current.Fun)
+				if callee == "al.mu.RLock" && (snapshot == token.NoPos || current.Pos() < snapshot) {
+					lock = current.Pos()
+				}
+				if callee == "al.mu.RUnlock" && snapshot != token.NoPos && current.Pos() > snapshot &&
+					(unlock == token.NoPos || current.Pos() < unlock) {
+					unlock = current.Pos()
+				}
+			}
+			return true
+		})
+		if snapshot == token.NoPos || lock == token.NoPos || unlock == token.NoPos ||
+			!(lock < snapshot && snapshot < unlock) {
+			issues = append(issues,
+				"reload mutation-root snapshot is not cloned under the AgentLoop read lock",
+			)
+		}
+	}
 	constructorCounts := make(map[string]int)
 	requireCalls := []struct {
 		path      string
@@ -2294,11 +2342,11 @@ func p015B3StrictConstructorIssues(files map[string]*p015B3ParsedFile) []string 
 			arguments: [][]string{
 				{
 					"cfg", "provider", "executionPolicy", "diagnosticPolicy", "providerGeneration",
-					"cloneAgentRuntimeFileMutationProtectedRoots(al.fileMutationProtectedRoots)",
+					"currentFileMutationProtectedRoots",
 				},
 				{
 					"cfg", "provider", "executionPolicy", "diagnosticPolicy", "nil",
-					"cloneAgentRuntimeFileMutationProtectedRoots(al.fileMutationProtectedRoots)",
+					"currentFileMutationProtectedRoots",
 				},
 			},
 		},
@@ -2315,6 +2363,7 @@ func p015B3StrictConstructorIssues(files map[string]*p015B3ParsedFile) []string 
 					"diagnosticPolicy",
 					"providerGeneration.bindingsForAgent(\"main\")",
 					"cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots)",
+					"identityGeneration",
 				},
 				{
 					"ac",
@@ -2325,6 +2374,7 @@ func p015B3StrictConstructorIssues(files map[string]*p015B3ParsedFile) []string 
 					"diagnosticPolicy",
 					"providerGeneration.bindingsForAgent(id)",
 					"cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots)",
+					"identityGeneration",
 				},
 			},
 		},

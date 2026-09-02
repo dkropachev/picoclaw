@@ -114,6 +114,13 @@ type LocalRepairRunnerConfig struct {
 	// ProtectedRoots are runtime-owned namespaces that repair file tools may
 	// neither inspect nor mutate when a managed checkout overlaps them.
 	ProtectedRoots []string
+	// ProtectedIdentities is the immutable runtime-generation snapshot shared
+	// with ordinary file tools and apply_patch.
+	ProtectedIdentities    *tools.FileIdentityCatalog
+	PreparedMutationPolicy *tools.PreparedFileMutationPolicy
+	// PreparedApplyPatchRoots is the immutable volatile-root snapshot paired
+	// with PreparedMutationPolicy for the same runtime generation.
+	PreparedApplyPatchRoots *tools.PreparedApplyPatchVolatileRoots
 }
 
 // LocalRepairRequest contains no raw workspace path. The exact pin is resolved
@@ -139,18 +146,21 @@ type LocalRepairResult struct {
 // LocalRepairRunner runs an isolated edit-only model loop over an exact pinned
 // checkout. It owns neither durable conversation state nor publication.
 type LocalRepairRunner struct {
-	workspaces      PinnedWorkspaceAcquirer
-	provider        providers.LLMProvider
-	model           string
-	maxIterations   int
-	maxTokens       int
-	temperature     float64
-	reasoningEffort string
-	providerSlot    chan struct{}
-	runtimeLoop     *AgentLoop
-	generationID    uint64
-	strictRuntime   bool
-	protectedRoots  []string
+	workspaces              PinnedWorkspaceAcquirer
+	provider                providers.LLMProvider
+	model                   string
+	maxIterations           int
+	maxTokens               int
+	temperature             float64
+	reasoningEffort         string
+	providerSlot            chan struct{}
+	runtimeLoop             *AgentLoop
+	generationID            uint64
+	strictRuntime           bool
+	protectedRoots          []string
+	protectedIdentities     *tools.FileIdentityCatalog
+	preparedMutationPolicy  *tools.PreparedFileMutationPolicy
+	preparedApplyPatchRoots *tools.PreparedApplyPatchVolatileRoots
 }
 
 func NewLocalRepairRunner(config LocalRepairRunnerConfig) (*LocalRepairRunner, error) {
@@ -159,6 +169,12 @@ func NewLocalRepairRunner(config LocalRepairRunnerConfig) (*LocalRepairRunner, e
 	}
 	if localRepairNil(config.Provider) {
 		return nil, errors.New("local repair provider is required")
+	}
+	if config.PreparedMutationPolicy != nil && len(config.ProtectedRoots) != 0 {
+		return nil, errors.New("prepared local repair policy has source fields")
+	}
+	if (config.PreparedMutationPolicy == nil) != (config.PreparedApplyPatchRoots == nil) {
+		return nil, errors.New("prepared local repair policies must be paired")
 	}
 	model := strings.TrimSpace(config.Model)
 	if model == "" || model != config.Model || !validLocalRepairIdentity(model, 1024) {
@@ -187,15 +203,18 @@ func NewLocalRepairRunner(config LocalRepairRunnerConfig) (*LocalRepairRunner, e
 		return nil, err
 	}
 	return &LocalRepairRunner{
-		workspaces:      config.Workspaces,
-		provider:        config.Provider,
-		model:           model,
-		maxIterations:   maxIterations,
-		maxTokens:       maxTokens,
-		temperature:     config.Temperature,
-		reasoningEffort: reasoningEffort,
-		providerSlot:    make(chan struct{}, 1),
-		protectedRoots:  append([]string(nil), config.ProtectedRoots...),
+		workspaces:              config.Workspaces,
+		provider:                config.Provider,
+		model:                   model,
+		maxIterations:           maxIterations,
+		maxTokens:               maxTokens,
+		temperature:             config.Temperature,
+		reasoningEffort:         reasoningEffort,
+		providerSlot:            make(chan struct{}, 1),
+		protectedRoots:          append([]string(nil), config.ProtectedRoots...),
+		protectedIdentities:     config.ProtectedIdentities,
+		preparedMutationPolicy:  config.PreparedMutationPolicy,
+		preparedApplyPatchRoots: config.PreparedApplyPatchRoots,
 	}, nil
 }
 
@@ -302,10 +321,17 @@ func (runner *LocalRepairRunner) runPinned(
 		}
 	}()
 
-	guard, err := newLocalRepairPathGuard(before, request.Pin, runner.protectedRoots)
+	guard, err := newLocalRepairPathGuardWithPolicy(
+		before,
+		request.Pin,
+		runner.protectedRoots,
+		runner.protectedIdentities,
+		runner.preparedMutationPolicy,
+	)
 	if err != nil {
 		return LocalRepairResult{}, fmt.Errorf("%w: %v", ErrLocalRepairPin, err)
 	}
+	guard.preparedApplyPatchRoots = runner.preparedApplyPatchRoots
 	result.WorkspaceID = before.ID
 	profile, err := newLocalRepairProviderProfile(
 		runner.maxTokens,
@@ -483,9 +509,14 @@ func compareLocalRepairWorkspace(
 }
 
 type localRepairPathGuard struct {
-	root           string
-	gitRoot        string
-	protectedRoots []localRepairProtectedRoot
+	root                    string
+	gitRoot                 string
+	protectedRoots          []localRepairProtectedRoot
+	protectedIdentities     *tools.FileIdentityCatalog
+	preparedMutationPolicy  *tools.PreparedFileMutationPolicy
+	preparedApplyPatchRoots *tools.PreparedApplyPatchVolatileRoots
+	// Deterministic package-test seam after path inspection, before open.
+	beforeFileOpen func()
 }
 
 type localRepairProtectedRoot struct {
@@ -498,6 +529,30 @@ func newLocalRepairPathGuard(
 	pin gitworkspace.PinnedAcquireRequest,
 	protectedRootSets ...[]string,
 ) (*localRepairPathGuard, error) {
+	var configured []string
+	if len(protectedRootSets) > 0 {
+		configured = protectedRootSets[0]
+	}
+	return newLocalRepairPathGuardWithPolicy(workspace, pin, configured, nil)
+}
+
+func newLocalRepairPathGuardWithPolicy(
+	workspace gitworkspace.WorkspaceInfo,
+	pin gitworkspace.PinnedAcquireRequest,
+	configured []string,
+	protectedIdentities *tools.FileIdentityCatalog,
+	preparedPolicies ...*tools.PreparedFileMutationPolicy,
+) (*localRepairPathGuard, error) {
+	if len(preparedPolicies) > 1 {
+		return nil, errors.New("multiple prepared file-mutation policies")
+	}
+	var preparedPolicy *tools.PreparedFileMutationPolicy
+	if len(preparedPolicies) == 1 {
+		preparedPolicy = preparedPolicies[0]
+	}
+	if preparedPolicy != nil && len(configured) != 0 {
+		return nil, errors.New("prepared local repair path guard has source fields")
+	}
 	if err := validateLocalRepairWorkspaceInfo(workspace, pin); err != nil {
 		return nil, err
 	}
@@ -518,11 +573,13 @@ func newLocalRepairPathGuard(
 	if err != nil || filepath.Clean(gitRoot) != filepath.Clean(gitPath) {
 		return nil, errors.New("pinned checkout Git directory is substituted")
 	}
-	var configured []string
-	if len(protectedRootSets) > 0 {
-		configured = append([]string(nil), protectedRootSets[0]...)
+	if preparedPolicy != nil {
+		overlaps, overlapErr := preparedPolicy.OverlapsPath(root)
+		if overlapErr != nil || overlaps {
+			return nil, errors.New("pinned checkout overlaps protected runtime state")
+		}
 	}
-	protectedRoots, err := prepareLocalRepairProtectedRoots(configured)
+	protectedRoots, err := prepareLocalRepairProtectedRoots(append([]string(nil), configured...))
 	if err != nil {
 		return nil, err
 	}
@@ -536,6 +593,7 @@ func newLocalRepairPathGuard(
 	}
 	return &localRepairPathGuard{
 		root: root, gitRoot: filepath.Clean(gitRoot), protectedRoots: protectedRoots,
+		protectedIdentities: protectedIdentities, preparedMutationPolicy: preparedPolicy,
 	}, nil
 }
 
@@ -589,6 +647,23 @@ func (guard *localRepairPathGuard) validateMutation(path string) error {
 	return err
 }
 
+func (guard *localRepairPathGuard) fileMutationPolicy() tools.FileMutationPolicy {
+	if guard == nil {
+		return tools.FileMutationPolicy{}
+	}
+	if guard.preparedMutationPolicy != nil {
+		return tools.FileMutationPolicy{Prepared: guard.preparedMutationPolicy}
+	}
+	roots := make([]string, 0, len(guard.protectedRoots))
+	for _, root := range guard.protectedRoots {
+		roots = append(roots, root.lexical)
+	}
+	return tools.FileMutationPolicy{
+		ProtectedRoots:      roots,
+		ProtectedIdentities: guard.protectedIdentities,
+	}
+}
+
 func (guard *localRepairPathGuard) validate(path string, mutation bool) (string, error) {
 	if guard == nil || guard.root == "" || guard.gitRoot == "" {
 		return "", errors.New("repair path guard is unavailable")
@@ -636,10 +711,31 @@ func (guard *localRepairPathGuard) validate(path string, mutation bool) (string,
 			return "", fmt.Errorf("inspect mutable path: %w", statErr)
 		}
 	}
-	return candidate, nil
+	return resolved, nil
 }
 
 func (guard *localRepairPathGuard) protected(candidate, resolved string) (bool, error) {
+	if guard.preparedMutationPolicy != nil {
+		protected, err := guard.preparedMutationPolicy.ProtectsPath(resolved)
+		if err != nil || protected {
+			return protected, err
+		}
+	}
+	if guard.protectedIdentities != nil {
+		candidateInfo, candidateErr := os.Stat(resolved)
+		if candidateErr != nil && !os.IsNotExist(candidateErr) {
+			return false, candidateErr
+		}
+		if candidateErr == nil && candidateInfo.Mode().IsRegular() {
+			protected, identityErr := guard.protectedIdentities.ProtectsPath(
+				resolved,
+				candidateInfo,
+			)
+			if identityErr != nil || protected {
+				return protected, identityErr
+			}
+		}
+	}
 	for _, root := range guard.protectedRoots {
 		current, err := resolveLocalRepairPath(root.lexical)
 		if err != nil || filepath.Clean(current) != filepath.Clean(root.canonical) {
@@ -663,6 +759,54 @@ func (guard *localRepairPathGuard) protected(candidate, resolved string) (bool, 
 		}
 	}
 	return false, nil
+}
+
+// validateOpenedRegular binds the path-policy decision to the actual handle
+// before a local-repair tool reads any bytes. The namespace is resolved again
+// after open and must still name the same ordinary inode observed at preflight.
+func (guard *localRepairPathGuard) validateOpenedRegular(
+	candidate string,
+	resolved string,
+	expected os.FileInfo,
+	file *os.File,
+) error {
+	if guard == nil || candidate == "" || resolved == "" || expected == nil || file == nil {
+		return errors.New("opened repair file is unavailable")
+	}
+	actual, err := file.Stat()
+	if err != nil || !actual.Mode().IsRegular() || actual.Mode()&os.ModeSymlink != 0 ||
+		expected.Mode() != actual.Mode() || !os.SameFile(expected, actual) {
+		return errors.New("opened repair file changed")
+	}
+	current, err := resolveLocalRepairPath(candidate)
+	if err != nil || filepath.Clean(current) != filepath.Clean(resolved) {
+		return errors.New("repair file namespace changed")
+	}
+	currentInfo, err := os.Stat(current)
+	if err != nil || currentInfo.Mode() != actual.Mode() || !os.SameFile(currentInfo, actual) {
+		return errors.New("repair file namespace changed")
+	}
+	if denied, protectedErr := guard.protected(candidate, current); protectedErr != nil || denied {
+		return errors.New("opened repair file is protected")
+	}
+	if guard.protectedIdentities != nil {
+		protected, identityErr := guard.protectedIdentities.ProtectsOpenedFile(file, expected)
+		if identityErr != nil || protected {
+			return errors.New("opened repair file is protected")
+		}
+	}
+	if guard.preparedMutationPolicy != nil {
+		protected, preparedErr := guard.preparedMutationPolicy.ProtectsOpenedPath(
+			candidate,
+			current,
+			file,
+			expected,
+		)
+		if preparedErr != nil || protected {
+			return errors.New("opened repair file is protected")
+		}
+	}
+	return nil
 }
 
 func resolveLocalRepairPath(path string) (string, error) {
@@ -733,11 +877,20 @@ func newLocalRepairToolRegistryWithDiagnosticPolicy(
 		kind:     localRepairToolRead,
 		metrics:  metrics,
 	})
+	list, listErr := tools.NewListDirToolWithPolicy(
+		guard.root,
+		true,
+		guard.fileMutationPolicy(),
+	)
+	if listErr != nil {
+		list = tools.NewListDirTool(guard.root, true)
+	}
 	registry.Register(&localRepairGuardedTool{
-		delegate: tools.NewListDirTool(guard.root, true),
-		guard:    guard,
-		kind:     localRepairToolList,
-		metrics:  metrics,
+		delegate:        list,
+		guard:           guard,
+		kind:            localRepairToolList,
+		metrics:         metrics,
+		constructionErr: listErr,
 	})
 	registry.Register(&localRepairGuardedTool{
 		delegate: newLocalRepairRevisionEditTool(guard),
@@ -745,15 +898,33 @@ func newLocalRepairToolRegistryWithDiagnosticPolicy(
 		kind:     localRepairToolEdit,
 		metrics:  metrics,
 	})
-	registry.Register(&localRepairGuardedTool{
-		delegate: tools.NewApplyPatchToolWithPathGuard(
+	patchRoots := guard.fileMutationPolicy().ProtectedRoots
+	patch, patchErr := tools.NewApplyPatchToolWithPermissionsAndPolicy(
+		guard.root,
+		true,
+		true,
+		true,
+		tools.ApplyPatchPreflightPolicy{
+			ProtectedRoots:                 append([]string(nil), patchRoots...),
+			ProtectedIdentities:            guard.protectedIdentities,
+			PreparedVolatileProtectedRoots: guard.preparedApplyPatchRoots,
+			PreparedMutationPolicy:         guard.preparedMutationPolicy,
+			PathGuard:                      guard.validateMutation,
+		},
+	)
+	if patchErr != nil {
+		// Keep the fixed capability schema while failing every execution closed.
+		patch = tools.NewApplyPatchToolWithPathGuard(
 			guard.root,
 			true,
-			guard.validateMutation,
-		),
-		guard:   guard,
-		kind:    localRepairToolPatch,
-		metrics: metrics,
+			func(string) error { return errors.New("local repair patch policy is unavailable") },
+		)
+	}
+	registry.Register(&localRepairGuardedTool{
+		delegate: patch,
+		guard:    guard,
+		kind:     localRepairToolPatch,
+		metrics:  metrics,
 	})
 	return registry
 }
@@ -768,10 +939,11 @@ const (
 )
 
 type localRepairGuardedTool struct {
-	delegate tools.Tool
-	guard    *localRepairPathGuard
-	kind     localRepairToolKind
-	metrics  *localRepairMetricsCollector
+	delegate        tools.Tool
+	guard           *localRepairPathGuard
+	kind            localRepairToolKind
+	metrics         *localRepairMetricsCollector
+	constructionErr error
 }
 
 func (tool *localRepairGuardedTool) Name() string { return tool.delegate.Name() }
@@ -797,7 +969,7 @@ func (tool *localRepairGuardedTool) Execute(
 			tool.metrics.observeTool(tool.kind, result, time.Since(startedAt))
 		}
 	}()
-	if tool == nil || tool.delegate == nil || tool.guard == nil {
+	if tool == nil || tool.delegate == nil || tool.guard == nil || tool.constructionErr != nil {
 		return tools.ErrorResult("local repair tool is unavailable")
 	}
 	if err := ctx.Err(); err != nil {

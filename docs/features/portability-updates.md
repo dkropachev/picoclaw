@@ -31,7 +31,7 @@ compatible with low-cost hardware.
 | `FR-PORT-001` | MUST | Makefile and release builds produce core binaries for supported Linux, Darwin, Windows, FreeBSD, Android ARM64, ARM, RISC-V, and LoongArch targets, and pull-request CI executes the complete Makefile `build-all` matrix before merge. Linux/MIPSLE, every NetBSD target, FreeBSD/ARM (32-bit), and FreeBSD/RISC-V are unsupported and absent from applicable build and release matrices; FreeBSD AMD64 and ARM64 remain supported release targets. | Portability is a project-level promise, architecture-specific type errors must fail before reaching `main`, and SQLite-backed runtime storage must not silently fall back to legacy persistence on targets unsupported by its dependency stack. |
 | `FR-PORT-002` | MUST | Launcher builds include frontend assets and backend binary packaging for supported desktop targets. | Web UI distribution must be reproducible. |
 | `FR-PORT-003` | MUST | Updater downloads release assets, validates target platform naming, retries transient HTTP failures, and reports clear status. | Updates must be safe and diagnosable. |
-| `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. Repository-wide pull-request tests bound ordinary `go test` package parallelism to four, while coverage-delta serializes instrumented package processes, so concurrent SQLite mappings and large counter binaries cannot exhaust or truncate a small runner disk. Coverage excludes only exact tests that start a second repository-wide grader or config-lock process from the already fully instrumented binary; ordinary and race CI execute those cross-process contracts directly, while base and head coverage apply the same exact-name exclusion. Coverage-delta execution strips inherited product, credential, home, XDG/AppData, Git, temporary-directory, and user-bus authority; gives each compared Git ref a distinct `HOME`, PicoClaw home, workspace, SQLite database, and freshly built core binary throughout; withholds the default-path config while historical unit coverage preserves fallback-`HOME` semantics; publishes a valid loopback config before integration suites; and compares uncovered-statement debt rather than percentage or covered-statement count. Global debt cannot increase, impacted feature debt retains a ten-statement tolerance, and deletion is not a regression when it adds no uncovered debt. A base coverage command may retry exactly once only when its output proves one known cleanup-only TempDir race: the agent panic worker's `sessions` cleanup or the asynchronous workflow handler's `workflow_runs/wr_` cleanup. The classifier rejects assertions, panics, build failures, another failing test, or the wrong package; every head failure and every repeated or unrecognized base failure is final. | CI/release builds must be repeatable, state created by one ref must not alter or deadlock another ref's tests or reach an operator installation, tests that intentionally override `HOME` must retain fallback-home semantics, repository-wide SQLite and instrumented package sets must fit bounded runner resources, structural removals must not be mistaken for lost test coverage, and a synchronization fix in the PR cannot repair an asynchronous cleanup race in the immutable historical base. |
+| `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. Repository-wide pull-request tests bound ordinary `go test` package parallelism to four, while coverage-delta serializes instrumented package processes, so concurrent SQLite mappings and large counter binaries cannot exhaust or truncate a small runner disk. Coverage excludes only exact tests that start a second repository-wide grader or config-lock process from the already fully instrumented binary; ordinary and race CI execute those cross-process contracts directly, while base and head coverage apply the same exact-name exclusion. Coverage-delta execution strips inherited product, credential, home, XDG/AppData, Git, temporary-directory, and user-bus authority; gives each compared Git ref a distinct `HOME`, PicoClaw home, workspace, SQLite database, and freshly built core binary throughout; withholds the default-path config while historical unit coverage preserves fallback-`HOME` semantics; publishes a valid loopback config before integration suites; and compares uncovered-statement debt rather than percentage or covered-statement count. Its plan is derived from the head: a suite newly added by the head runs for head coverage, while the immutable base omits only that exact absent suite; an absent head suite or a present non-directory suite on either ref remains a hard failure. Global debt cannot increase, impacted feature debt retains a ten-statement tolerance, and deletion is not a regression when it adds no uncovered debt. A base coverage command may retry exactly once only when its output proves one closed known historical failure: either cleanup-only TempDir race (the agent panic worker's `sessions` cleanup or the asynchronous workflow handler's `workflow_runs/wr_` cleanup), either exact repository-evaluation cancellation conflict, the provider-backed evolution draft test timing out on its one draft inside the exact base coverage sandbox, the repository-review auto-continuation test timing out at its exact immutable-base assertion before one generated `rra_` identity reaches completed, or one sole repository-review API test proving that `repository-reviews.db-wal` or `repository-reviews.db-shm` disappeared during open, identity recheck, or final private-file validation inside that failing test's bound immutable-base sandbox. The SQLite classifier is callsite- and line-independent but binds the exact package, repository-review test hierarchy, test source family, error shape, companion identity, and Go test temporary path. It rejects assertions, panics, build failures, another failing test, the wrong package, a malformed dynamic identity, a detached continuation, or a near-miss path; every head failure and every repeated or unrecognized base failure is final. | CI/release builds must be repeatable, state created by one ref must not alter or deadlock another ref's tests or reach an operator installation, tests that intentionally override `HOME` must retain fallback-home semantics, repository-wide SQLite and instrumented package sets must fit bounded runner resources, structural removals must not be mistaken for lost test coverage, and a synchronization fix in the PR cannot repair an asynchronous cleanup race in the immutable historical base. |
 | `FR-PORT-005` | SHOULD | Memory benchmark tools measure ingestion/evaluation behavior without affecting runtime packages. | Low-resource goals need measurable support. |
 
 ## Data And State Model
@@ -84,10 +84,20 @@ Owns: TEST scripts/portability_requirements_test.go *
    before executing code from either ref. It then compares each scoped profile's
    uncovered-statement debt (`total statements - covered statements`), allowing
    code removal when debt does not grow even if percentage or covered count
-   falls. If and only if one coverage command reports the exact cleanup-only
-   base-only agent-session or workflow-run TempDir race, rerun that complete
-   base command once; do not retry head, an assertion, timeout, panic, build
-   failure, unrelated test or package, or repeated race.
+   falls. If and only if one base coverage command reports a closed, exact
+   historical signature—the agent-session or workflow-run TempDir cleanup race,
+   either repository-evaluation cancellation conflict, the provider-backed
+   evolution draft timeout in its exact coverage sandbox, the repository-review
+   auto-continuation completion timeout for one canonical generated identity, or
+   one sole repository-review API failure proving that either
+   `repository-reviews.db-wal` or `repository-reviews.db-shm` disappeared while
+   being opened, identity-rechecked, or privately validated inside the failing
+   test's bound immutable-base sandbox—rerun that complete base command once.
+   This SQLite classifier is independent of the assertion callsite and line but
+   binds the package, repository-review test hierarchy, source family, error
+   shape, companion, and Go test temporary path. Do not retry head, an unrelated
+   or additional assertion, a detached or near-miss continuation, panic, build
+   failure, unrelated test or package, or any repeated failure.
 
 ## Cross-Feature Behavior
 
@@ -110,11 +120,19 @@ credentialed release publishing.
 - Coverage comparison fails on any global uncovered-debt increase or an impacted
   feature increase beyond ten statements; a percentage or covered-count drop
   caused only by deleting code is not a failure.
-- Coverage comparison retries an exact recognized baseline race at most once:
-  either supported TempDir cleanup signature or one of the two pinned repository
-  model-evaluation cancellation signatures. The classifier rejects any extra
-  test diagnostic, failure marker, or failed package and preserves the second
-  attempt's result; all head, unrecognized, or repeated failures remain visible.
+- Coverage comparison retries an exact recognized baseline flake at most once:
+  either supported TempDir cleanup signature, one of the two pinned repository
+  model-evaluation cancellation signatures, the exact provider-backed evolution
+  draft timeout inside the base coverage sandbox, the exact repository-review
+  auto-continuation completion timeout for a generated `rra_` identity, or the
+  sole repository-review API failure proving a WAL/SHM companion disappearance
+  during open, identity recheck, or final private-file validation inside the
+  failing test's bound base coverage sandbox. The SQLite case is callsite- and
+  line-independent while remaining package-, test-hierarchy-, source-family-,
+  error-shape-, companion-, and path-bound. The classifier rejects any extra test
+  diagnostic, failure marker, failed package, malformed dynamic identity, detached
+  continuation, or near-miss path and preserves the second attempt's result; all
+  head, unrecognized, or repeated failures remain visible.
 
 ## Acceptance Evidence
 

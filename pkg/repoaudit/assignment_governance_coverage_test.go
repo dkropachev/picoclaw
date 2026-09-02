@@ -101,7 +101,7 @@ func TestRepositoryReviewAssignmentGovernanceLockAndContextErrors(t *testing.T) 
 	} {
 		t.Run(name, func(t *testing.T) {
 			store := NewStore(t.TempDir())
-			if err := os.MkdirAll(store.root+".lock", 0o700); err != nil {
+			if err := os.MkdirAll(repositoryReviewTestLockPath(t, store.root, "store.lock"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			if err := call(store); err == nil {

@@ -100,7 +100,13 @@ func (s Store) AcquireValidationSlot(ctx context.Context) (func(), error) {
 	}
 	for {
 		for slot := 0; slot < RepositoryValidationConcurrency; slot++ {
-			lockPath := fmt.Sprintf("%s.validation-slot-%02d.lock", s.root, slot)
+			lockPath, lockPathErr := repositoryReviewLockPath(
+				s.root,
+				fmt.Sprintf("validation-slot-%02d.lock", slot),
+			)
+			if lockPathErr != nil {
+				return nil, lockPathErr
+			}
 			release, acquired, err := tryLockRepositoryReviewIssueFile(lockPath)
 			if err != nil {
 				return nil, err

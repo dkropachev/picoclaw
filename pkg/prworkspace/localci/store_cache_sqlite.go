@@ -145,6 +145,7 @@ func validatePassingCacheSchema(ctx context.Context, conn *sql.Conn) error {
               'passing_cache_execution_idx',
               'storage_imports',
               'storage_import_issues',
+              'storage_import_horizons',
               'storage_imports_archive_status_idx'
           )`).Scan(&unexpected); err != nil {
 		return err

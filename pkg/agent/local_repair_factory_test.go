@@ -16,6 +16,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 type controllerRepairFactoryProvider struct {
@@ -220,6 +221,52 @@ func TestP015B3ALocalRepairControllerLeaseBoundary(t *testing.T) {
 	if len(seen) != baselineProviderCalls+1 ||
 		seen[len(seen)-1] != (logger.DiagnosticPolicy{}) {
 		t.Fatalf("compatibility repair policies = %#v, want final zero", seen)
+	}
+}
+
+func TestControllerLocalRepairCarriesEveryRuntimeStorageBoundaryAndSharedCatalog(t *testing.T) {
+	workspace := t.TempDir()
+	evolutionRoot := filepath.Join(t.TempDir(), "configured-evolution")
+	cfg := &config.Config{
+		Agents:    config.AgentsConfig{Defaults: config.AgentDefaults{Workspace: workspace}},
+		Evolution: config.EvolutionConfig{StateDir: evolutionRoot},
+	}
+	cfg.Events.Ingress.Enabled = true
+	cfg.Events.Ingress.DatabasePath = filepath.Join("eventing", "events.db")
+	candidate := controllerRepairFactoryCandidate("account-a", "coding", "openai", "coding")
+	catalog, err := tools.NewFileIdentityCatalog(tools.FileIdentityCatalogOptions{
+		ExactPaths: []string{filepath.Join(workspace, "missing-runtime.json")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &AgentInstance{
+		ID: "repairer", Workspace: workspace, Model: "coding",
+		Candidates: []providers.FallbackCandidate{candidate}, Provider: &controllerRepairFactoryProvider{},
+		MaxIterations: 2, MaxTokens: 512,
+		fileMutationIdentityCatalog: catalog,
+	}
+	loop := newControllerRepairFactoryLoop(t, cfg, agent)
+	runner, err := loop.NewControllerLocalRepairRunner("repairer", "route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.protectedIdentities != catalog {
+		t.Fatal("controller local repair copied or omitted the generation identity catalog")
+	}
+	evidenceRoot := filepath.Join(workspace, "eventing", "pr-workspace-local-ci", "evidence")
+	for _, want := range []string{
+		filepath.Join(workspace, "cron"),
+		filepath.Join(workspace, "state", "workflows.db"),
+		filepath.Join(workspace, "workflow_runs"),
+		evidenceRoot,
+		filepath.Join(workspace, "repository_reviews"),
+		filepath.Join(workspace, "repository_evaluations"),
+		filepath.Join(evolutionRoot, "evolution.db"),
+	} {
+		if !slices.Contains(runner.protectedRoots, want) {
+			t.Fatalf("controller local repair omitted protected root %q: %#v", want, runner.protectedRoots)
+		}
 	}
 }
 

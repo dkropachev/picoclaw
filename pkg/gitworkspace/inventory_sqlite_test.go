@@ -195,7 +195,7 @@ func TestGitWorkspaceInventoryEmptyFirstOpenRejectsLateLegacySource(t *testing.T
 	if err := database.QueryRow(`SELECT
 	    (SELECT skipped_count FROM storage_imports WHERE component = ? AND source_id = ?),
 	    (SELECT COUNT(*) FROM storage_import_issues
-	      WHERE component = ? AND source_id = ? AND issue_code = 'sqlite-authoritative')`,
+	      WHERE component = ? AND source_id = ? AND issue_code = 'late-source')`,
 		inventoryDatabaseComponent,
 		inventoryLegacySourceID,
 		inventoryDatabaseComponent,

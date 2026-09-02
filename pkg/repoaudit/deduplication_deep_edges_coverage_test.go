@@ -2,6 +2,7 @@ package repoaudit
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -66,8 +67,8 @@ func dedupDeepSaveFailureStore(
 	store.loadForTest = func(string) (RepositoryState, error) {
 		return dedupDeepCloneState(t, state), nil
 	}
-	if err := os.WriteFile(store.root, []byte("not-a-directory"), 0o600); err != nil {
-		t.Fatal(err)
+	store.openForTest = func(context.Context) (*sql.DB, error) {
+		return nil, errors.New("injected repository review save failure")
 	}
 	return store
 }
@@ -286,7 +287,11 @@ func TestDeduplicationDeepSlotAndSnapshotCoverage(t *testing.T) {
 	release()
 	unsafeWorkspace := t.TempDir()
 	unsafeStore := NewStore(unsafeWorkspace)
-	lockPath := filepath.Join(unsafeWorkspace, storeDirectory) + ".deduplication-slot-00.lock"
+	lockPath := repositoryReviewTestLockPath(
+		t,
+		unsafeStore.root,
+		"deduplication-slot-00.lock",
+	)
 	symlinkErr := os.Symlink(filepath.Join(unsafeWorkspace, "missing"), lockPath)
 	if symlinkErr != nil {
 		t.Fatal(symlinkErr)
@@ -504,7 +509,8 @@ func TestDeduplicationDeepStoreInjectionCoverage(t *testing.T) {
 
 	lockWorkspace := t.TempDir()
 	lockFailure := NewStore(lockWorkspace)
-	if err := os.Symlink(filepath.Join(lockWorkspace, "missing"), lockFailure.root+".lock"); err != nil {
+	lockPath := repositoryReviewTestLockPath(t, lockFailure.root, "store.lock")
+	if err := os.Symlink(filepath.Join(lockWorkspace, "missing"), lockPath); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, _, err := lockFailure.ClaimDeduplicationJob(repository, "job", time.Minute); err == nil {

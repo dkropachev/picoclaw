@@ -26,8 +26,13 @@ func (s Store) TryLockIssueGenerationAttempt(
 		!validBoundedText(generationID, maxIssueGenerationIDBytes) {
 		return nil, false, errors.New("invalid repository review issue generation lock")
 	}
-	lockPath := s.root + ".issue-generation-" +
-		stableID("", repository, draftID, generationID) + ".lock"
+	lockPath, err := repositoryReviewLockPath(
+		s.root,
+		"issue-generation-"+stableID("", repository, draftID, generationID)+".lock",
+	)
+	if err != nil {
+		return nil, false, err
+	}
 	return tryLockRepositoryReviewIssueFile(lockPath)
 }
 
@@ -45,7 +50,13 @@ func (s Store) AcquireIssueGenerationSlot(
 	}
 	for {
 		for slot := 0; slot < maximum; slot++ {
-			lockPath := fmt.Sprintf("%s.issue-writer-slot-%02d.lock", s.root, slot)
+			lockPath, lockPathErr := repositoryReviewLockPath(
+				s.root,
+				fmt.Sprintf("issue-writer-slot-%02d.lock", slot),
+			)
+			if lockPathErr != nil {
+				return nil, lockPathErr
+			}
 			release, acquired, err := tryLockRepositoryReviewIssueFile(lockPath)
 			if err != nil {
 				return nil, err
@@ -66,8 +77,9 @@ func (s Store) AcquireIssueGenerationSlot(
 
 func tryLockRepositoryReviewIssueFile(lockPath string) (func(), bool, error) {
 	if info, err := os.Lstat(lockPath); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return nil, false, errors.New("repository review issue lock must be a regular file")
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() ||
+			info.Mode().Perm()&0o077 != 0 {
+			return nil, false, errors.New("repository review issue lock must be a private regular file")
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, false, err
@@ -77,6 +89,10 @@ func tryLockRepositoryReviewIssueFile(lockPath string) (func(), bool, error) {
 	}
 	file, err := repositoryReviewOpenLockFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
+		return nil, false, err
+	}
+	if err := secureRepositoryReviewLockFile(lockPath, file); err != nil {
+		_ = file.Close()
 		return nil, false, err
 	}
 	if err := repositoryReviewFlock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {

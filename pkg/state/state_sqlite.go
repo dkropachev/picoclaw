@@ -112,58 +112,40 @@ func runtimeStoreOptions(workspace string) (sqlitestore.Options, error) {
 		}},
 		Validate: validateRuntimeSchema,
 	}
-	hasLegacy, err := runtimeLegacyStatePresent(workspace)
-	if err != nil {
-		return sqlitestore.Options{}, err
-	}
-	if hasLegacy {
-		options.Legacy = &sqlitestore.LegacyOptions{
-			SourceRoot: workspace,
-			ArchiveRoot: filepath.Join(
-				workspace,
-				"state",
-				"legacy-json",
-				runtimeLegacyArchiveLabel,
-			),
-			Sources: func() ([]sqlitestore.LegacySource, error) {
-				return []sqlitestore.LegacySource{
-					{
-						ID:       runtimeRootSourceID,
-						Relative: "state.json",
-						MaxBytes: runtimeLegacyMaxBytes,
-					},
-					{
-						ID:       runtimeDirectorySourceID,
-						Relative: "state/state.json",
-						MaxBytes: runtimeLegacyMaxBytes,
-					},
-				}, nil
-			},
-			Import:        importLegacyRuntimeState,
-			MaxBytes:      runtimeLegacyMaxBytes,
-			MaxSources:    2,
-			MaxTotalBytes: runtimeLegacyMaxBytes * 2,
-		}
+	options.Legacy = &sqlitestore.LegacyOptions{
+		SourceRoot: workspace,
+		ArchiveRoot: filepath.Join(
+			workspace,
+			"state",
+			"legacy-json",
+			runtimeLegacyArchiveLabel,
+		),
+		Sources: func() ([]sqlitestore.LegacySource, error) {
+			candidates := []sqlitestore.LegacySource{
+				{ID: runtimeRootSourceID, Relative: "state.json", MaxBytes: runtimeLegacyMaxBytes},
+				{ID: runtimeDirectorySourceID, Relative: "state/state.json", MaxBytes: runtimeLegacyMaxBytes},
+			}
+			sources := make([]sqlitestore.LegacySource, 0, len(candidates))
+			for _, candidate := range candidates {
+				_, statErr := os.Lstat(filepath.Join(
+					workspace, filepath.FromSlash(candidate.Relative),
+				))
+				if os.IsNotExist(statErr) {
+					continue
+				}
+				if statErr != nil {
+					return nil, statErr
+				}
+				sources = append(sources, candidate)
+			}
+			return sources, nil
+		},
+		Import:        importLegacyRuntimeState,
+		MaxBytes:      runtimeLegacyMaxBytes,
+		MaxSources:    2,
+		MaxTotalBytes: runtimeLegacyMaxBytes * 2,
 	}
 	return options, nil
-}
-
-func runtimeLegacyStatePresent(workspace string) (bool, error) {
-	for _, relative := range []string{
-		"state.json",
-		"state/state.json",
-		"state/legacy-json/runtime-state-v1/state.json",
-		"state/legacy-json/runtime-state-v1/state/state.json",
-	} {
-		_, err := os.Lstat(filepath.Join(workspace, filepath.FromSlash(relative)))
-		if err == nil {
-			return true, nil
-		}
-		if !os.IsNotExist(err) {
-			return false, err
-		}
-	}
-	return false, nil
 }
 
 func validateRuntimeSchema(ctx context.Context, conn *sql.Conn) error {
@@ -186,6 +168,7 @@ func validateRuntimeSchema(ctx context.Context, conn *sql.Conn) error {
               'runtime_state',
               'storage_imports',
               'storage_import_issues',
+              'storage_import_horizons',
               'storage_imports_archive_status_idx'
           )`).Scan(&unexpected); err != nil {
 		return err

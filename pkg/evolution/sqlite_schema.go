@@ -329,7 +329,8 @@ func validateEvolutionSchema(ctx context.Context, conn *sql.Conn) error {
               'evolution_record_attempt_snapshots', 'evolution_record_attempt_snapshot_skills',
               'evolution_skill_drafts', 'evolution_skill_draft_strings',
 			  'evolution_skill_profiles', 'evolution_skill_profile_strings',
-			  'evolution_skill_profile_versions', 'storage_imports', 'storage_import_issues'
+			  'evolution_skill_profile_versions', 'storage_imports', 'storage_import_issues',
+			  'storage_import_horizons'
           )`).Scan(&unexpected); err != nil {
 		return err
 	}

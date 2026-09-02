@@ -333,7 +333,7 @@ func TestPRWorkspaceCheckpointEmptyFirstOpenRejectsLateLegacySource(t *testing.T
 	if err := database.QueryRow(`SELECT
 	    (SELECT skipped_count FROM storage_imports WHERE component = ?),
 	    (SELECT COUNT(*) FROM storage_import_issues
-	      WHERE component = ? AND issue_code = 'sqlite-authoritative')`,
+	      WHERE component = ? AND issue_code = 'late-source')`,
 		prWorkspaceCheckpointComponent,
 		prWorkspaceCheckpointComponent,
 	).Scan(&skipped, &issues); err != nil {

@@ -268,6 +268,12 @@ func TestValidationWorkerPersistsSafeStageFailureCodes(t *testing.T) {
 		if triggerErr != nil || closeErr != nil {
 			t.Fatalf("install validation completion fault: trigger=%v close=%v", triggerErr, closeErr)
 		}
+		// This case deliberately installs schema that production open now rejects.
+		// Use the package's explicit fault seam so the test still reaches the
+		// completion-write sanitizer instead of testing schema validation again.
+		store.openForTest = func(context.Context) (*sql.DB, error) {
+			return sql.Open("sqlite", store.database)
+		}
 		result, err := store.ProcessPendingValidationJobs(
 			t.Context(), state.Repository, RepositoryValidationProcessOptions{
 				Evidence: func(context.Context, RepositoryFinding, []string) ([]RepositoryValidationEvidence, error) {

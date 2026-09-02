@@ -131,6 +131,10 @@ func newAgentLoop(
 		cloneAgentRuntimeFileMutationProtectedRoots(al.fileMutationProtectedRoots),
 	)
 	al.registry = registry
+	al.fileMutationProtectedRoots = agentRegistryCumulativeFileMutationProtectedRoots(
+		registry,
+		al.fileMutationProtectedRoots,
+	)
 
 	// Set up shared fallback chain with rate limiting.
 	cooldown := providers.NewCooldownTracker()

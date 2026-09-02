@@ -21,23 +21,58 @@ const (
 // detached by NewApplyPatchToolWithPermissionsAndPolicy.
 type ApplyPatchPreflightPolicy struct {
 	ProtectedRoots []string
+	// ProtectedIdentities is one immutable generation-shared snapshot used to
+	// reject hardlink aliases of dynamic runtime files outside lexical roots.
+	ProtectedIdentities *FileIdentityCatalog
 	// VolatileProtectedRoots are strict runtime-owned namespaces. Unlike
 	// ProtectedRoots, they never exempt a workspace nested beneath the root,
 	// and their leaf inode may be created or replaced between executions.
 	VolatileProtectedRoots []string
+	// PreparedVolatileProtectedRoots reuses one immutable generation-wide
+	// volatile-root policy. It is mutually exclusive with the source slice.
+	PreparedVolatileProtectedRoots *PreparedApplyPatchVolatileRoots
+	// PreparedMutationPolicy shares the generation-wide sibling-prefix/root
+	// predicate used by write/edit/append tools. Apply-patch still snapshots its
+	// volatile roots independently for transaction fencing.
+	PreparedMutationPolicy *PreparedFileMutationPolicy
 	PathGuard              func(string) error
 	TransactionStateRoot   string
 	WriteAllowRoots        []string
 }
 
+// PreparedApplyPatchVolatileRoots is one immutable set of strict runtime
+// roots shared by every apply_patch tool in a runtime generation.
+type PreparedApplyPatchVolatileRoots struct {
+	roots []applyPatchProtectedRoot
+}
+
+func NewPreparedApplyPatchVolatileRoots(
+	workspace string,
+	roots []string,
+) (*PreparedApplyPatchVolatileRoots, error) {
+	prepared, err := prepareApplyPatchProtectedRootsWithMode(
+		workspace,
+		roots,
+		false,
+		false,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedApplyPatchVolatileRoots{roots: prepared}, nil
+}
+
 type ApplyPatchTool struct {
-	workspace      string
-	restrict       bool
-	allowPaths     []*regexp.Regexp
-	allowCreate    bool
-	allowUpdate    bool
-	pathGuard      func(string) error
-	protectedRoots []applyPatchProtectedRoot
+	workspace              string
+	restrict               bool
+	allowPaths             []*regexp.Regexp
+	allowCreate            bool
+	allowUpdate            bool
+	pathGuard              func(string) error
+	protectedRoots         []applyPatchProtectedRoot
+	volatileRoots          *PreparedApplyPatchVolatileRoots
+	protectedIdentities    *FileIdentityCatalog
+	preparedMutationPolicy *PreparedFileMutationPolicy
 
 	transactionStateRoot applyPatchTransactionStateRoot
 	transactionStateErr  error
@@ -117,25 +152,32 @@ func NewApplyPatchToolWithPermissionsAndPolicy(
 	if err != nil {
 		return nil, err
 	}
-	volatileProtected, err := prepareApplyPatchProtectedRootsWithMode(
-		workspace,
-		append([]string(nil), policy.VolatileProtectedRoots...),
-		false,
-		false,
-	)
-	if err != nil {
-		return nil, err
+	volatileProtected := policy.PreparedVolatileProtectedRoots
+	if volatileProtected != nil {
+		if len(policy.VolatileProtectedRoots) != 0 {
+			return nil, errors.New("prepared apply-patch volatile roots have source fields")
+		}
+	} else {
+		volatileProtected, err = NewPreparedApplyPatchVolatileRoots(
+			workspace,
+			append([]string(nil), policy.VolatileProtectedRoots...),
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
-	protected = append(protected, volatileProtected...)
 	return &ApplyPatchTool{
-		workspace:            workspace,
-		restrict:             restrict,
-		allowPaths:           cloneApplyPatchPatterns(allowPaths),
-		allowCreate:          allowCreate,
-		allowUpdate:          allowUpdate,
-		pathGuard:            policy.PathGuard,
-		protectedRoots:       protected,
-		transactionStateRoot: transactionState,
+		workspace:              workspace,
+		restrict:               restrict,
+		allowPaths:             cloneApplyPatchPatterns(allowPaths),
+		allowCreate:            allowCreate,
+		allowUpdate:            allowUpdate,
+		pathGuard:              policy.PathGuard,
+		protectedRoots:         protected,
+		volatileRoots:          volatileProtected,
+		protectedIdentities:    policy.ProtectedIdentities,
+		preparedMutationPolicy: policy.PreparedMutationPolicy,
+		transactionStateRoot:   transactionState,
 	}, nil
 }
 

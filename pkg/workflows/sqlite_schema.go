@@ -378,22 +378,16 @@ func workflowStoreOptions(workspace string) (sqlitestore.Options, error) {
 	if err != nil {
 		return sqlitestore.Options{}, err
 	}
-	var legacy *sqlitestore.LegacyOptions
-	// Fresh workspaces have nothing to migrate. Avoid imposing legacy-source
-	// mode requirements on their user-authored workspace root. Once any source
-	// or archive exists, hardened migration owns the full validation boundary.
-	if len(legacySources) != 0 || workflowLegacyArchiveExists(archiveRoot) {
-		legacy = &sqlitestore.LegacyOptions{
-			SourceRoot:  canonical,
-			ArchiveRoot: archiveRoot,
-			Sources: func() ([]sqlitestore.LegacySource, error) {
-				return append([]sqlitestore.LegacySource(nil), legacySources...), nil
-			},
-			Import:        importWorkflowLegacySource,
-			MaxBytes:      maximumWorkflowLegacySourceBytes,
-			MaxSources:    maximumWorkflowLegacySources,
-			MaxTotalBytes: maximumWorkflowLegacyTotalBytes,
-		}
+	legacy := &sqlitestore.LegacyOptions{
+		SourceRoot:  canonical,
+		ArchiveRoot: archiveRoot,
+		Sources: func() ([]sqlitestore.LegacySource, error) {
+			return append([]sqlitestore.LegacySource(nil), legacySources...), nil
+		},
+		Import:        importWorkflowLegacySource,
+		MaxBytes:      maximumWorkflowLegacySourceBytes,
+		MaxSources:    maximumWorkflowLegacySources,
+		MaxTotalBytes: maximumWorkflowLegacyTotalBytes,
 	}
 	return sqlitestore.Options{
 		Component: workflowDatabaseComponent,
@@ -423,11 +417,6 @@ func workflowStoreOptions(workspace string) (sqlitestore.Options, error) {
 		Validate: validateWorkflowSchema,
 		Legacy:   legacy,
 	}, nil
-}
-
-func workflowLegacyArchiveExists(path string) bool {
-	_, err := os.Lstat(path)
-	return err == nil || !os.IsNotExist(err)
 }
 
 func openWorkflowDatabase(ctx context.Context, workspace string) (*sql.DB, error) {
@@ -482,11 +471,12 @@ func validateWorkflowSchema(ctx context.Context, conn *sql.Conn) error {
 			return err
 		}
 	}
-	allowed := make([]string, 0, len(objects)+3)
+	allowed := make([]string, 0, len(objects)+4)
 	for _, object := range objects {
 		allowed = append(allowed, object.name)
 	}
-	allowed = append(allowed, "storage_imports", "storage_import_issues", "storage_imports_archive_status_idx")
+	allowed = append(allowed, "storage_imports", "storage_import_issues", "storage_import_horizons",
+		"storage_imports_archive_status_idx")
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(allowed)), ",")
 	arguments := make([]any, len(allowed))
 	for index := range allowed {

@@ -232,17 +232,21 @@ func validateSchema(ctx context.Context, conn *sql.Conn) error {
 		}
 	}
 	var unexpected int
-	if err := conn.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sqlite_master
-	          WHERE tbl_name IN ('dashboard_credentials', 'launcher_auth_legacy_imports')
-	            AND type IN ('index', 'trigger')
-	            AND name NOT LIKE 'sqlite_autoindex_%'
-	            AND name != 'launcher_auth_legacy_imports_status_idx'`,
-	).Scan(&unexpected); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema
+		WHERE name NOT LIKE 'sqlite_%'
+		  AND name NOT IN (
+		      'dashboard_credentials',
+		      'launcher_auth_legacy_imports',
+		      'launcher_auth_legacy_imports_status_idx',
+		      'storage_imports',
+		      'storage_import_issues',
+		      'storage_import_horizons',
+		      'storage_imports_archive_status_idx'
+		  )`).Scan(&unexpected); err != nil {
 		return err
 	}
 	if unexpected != 0 {
-		return errors.New("launcher auth schema has unexpected indexes or triggers")
+		return errors.New("launcher auth schema has unexpected objects")
 	}
 	return nil
 }

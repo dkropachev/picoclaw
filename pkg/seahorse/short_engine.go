@@ -411,7 +411,8 @@ func (e *Engine) ClearSession(ctx context.Context, sessionKey string) error {
 
 // Bootstrap reconciles a session's messages with the database.
 // Called once at startup for each known session.
-// Bootstrap reconciles JSONL history with SQLite by ingesting only the delta.
+// Bootstrap reconciles canonical session history with Seahorse SQLite rows by
+// ingesting only the delta.
 // Simple approach: find longest matching prefix and append delta.
 // If any mismatch is detected, clear and rebuild.
 func (e *Engine) Bootstrap(ctx context.Context, sessionKey string, messages []Message) error {
@@ -437,7 +438,7 @@ func (e *Engine) Bootstrap(ctx context.Context, sessionKey string, messages []Me
 	}
 
 	// Migration repair path: old SeaHorse rows may be missing reasoning_content
-	// even though the canonical JSONL history already has it. Backfill those
+	// even though canonical session history already has it. Backfill those
 	// rows in place so we do not treat this as edited history and leave stale
 	// summaries/context behind after a partial raw-message rebuild.
 	repairedReasoning, err := e.repairBootstrapReasoningContent(ctx, dbMsgs, messages)

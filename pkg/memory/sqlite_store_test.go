@@ -72,7 +72,8 @@ func TestSQLiteStoreFreshSchemaHardeningAndReopen(t *testing.T) {
 		wantObjects = append(wantObjects, object.name)
 	}
 	wantObjects = append(wantObjects,
-		"storage_imports", "storage_import_issues", "storage_imports_archive_status_idx",
+		"storage_imports", "storage_import_issues", "storage_import_horizons",
+		"storage_imports_archive_status_idx",
 	)
 	sort.Strings(wantObjects)
 	schemaRows, queryErr := store.SQLDB().Query(`SELECT name FROM sqlite_schema

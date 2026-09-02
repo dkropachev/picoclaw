@@ -178,7 +178,8 @@ func TestRepositoryReviewFileAttributionValidationAndMergeBoundaries(t *testing.
 	}
 
 	lockFailure := NewStore(t.TempDir())
-	if mkdirLockErr := os.MkdirAll(lockFailure.root+".lock", 0o700); mkdirLockErr != nil {
+	lockPath := repositoryReviewTestLockPath(t, lockFailure.root, "store.lock")
+	if mkdirLockErr := os.MkdirAll(lockPath, 0o700); mkdirLockErr != nil {
 		t.Fatal(mkdirLockErr)
 	}
 	if _, lockMergeErr := lockFailure.MergeRepositoryReviewFileAttributions(

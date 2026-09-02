@@ -1808,7 +1808,8 @@ func TestValidationWorkerRemainingRestartAndFailureCoverage(t *testing.T) {
 		}
 
 		broken := NewStore(t.TempDir())
-		if err := os.MkdirAll(broken.root+".validation-slot-00.lock", 0o700); err != nil {
+		lockPath := repositoryReviewTestLockPath(t, broken.root, "validation-slot-00.lock")
+		if err := os.MkdirAll(lockPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := broken.AcquireValidationSlot(t.Context()); err == nil {
@@ -1954,7 +1955,7 @@ func TestRepositoryLifecycleMutationLockAndLoadFailures(t *testing.T) {
 	for _, test := range operations {
 		t.Run(test.name+" lock", func(t *testing.T) {
 			store := NewStore(t.TempDir())
-			if err := os.MkdirAll(store.root+".lock", 0o700); err != nil {
+			if err := os.MkdirAll(repositoryReviewTestLockPath(t, store.root, "store.lock"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			if err := test.call(store); err == nil {
@@ -2911,10 +2912,11 @@ func TestMappingWorkerRemainingErrorAndHelperBranches(t *testing.T) {
 			"wait.go",
 			"wait.signal",
 		)
-		if err := os.Remove(store.root + ".lock"); err != nil && !os.IsNotExist(err) {
+		lockPath := repositoryReviewTestLockPath(t, store.root, "store.lock")
+		if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		if err := os.MkdirAll(store.root+".lock", 0o700); err != nil {
+		if err := os.MkdirAll(repositoryReviewTestLockPath(t, store.root, "store.lock"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.ProcessPendingMappingJobs(
@@ -3094,7 +3096,12 @@ func TestMappingWorkerRemainingErrorAndHelperBranches(t *testing.T) {
 	}
 
 	brokenSlots := NewStore(t.TempDir())
-	if err := os.MkdirAll(brokenSlots.root+".validation-slot-00.lock", 0o700); err != nil {
+	brokenSlotPath := repositoryReviewTestLockPath(
+		t,
+		brokenSlots.root,
+		"validation-slot-00.lock",
+	)
+	if err := os.MkdirAll(brokenSlotPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := brokenSlots.processValidationJob(

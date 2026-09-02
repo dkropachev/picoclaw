@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
@@ -105,6 +106,43 @@ func newAgentRegistryWithRuntimePolicies(
 	if protectedRootErr != nil {
 		panic(fmt.Sprintf("build workspace file-mutation policy: %v", protectedRootErr))
 	}
+	gitRoots, gitRootErr := agentGitWorkspaceFileMutationProtectedRoots(cfg)
+	if gitRootErr != nil {
+		panic(fmt.Sprintf("build Git workspace file-mutation policy: %v", gitRootErr))
+	}
+	fileMutationProtectedRoots = append(fileMutationProtectedRoots, gitRoots...)
+	agentConfigs := cfg.Agents.List
+	mutationWorkspaces, workspaceErr := agentRegistryFileMutationWorkspaces(cfg, agentConfigs)
+	if workspaceErr != nil {
+		panic(fmt.Sprintf("build registry file-mutation workspaces: %v", workspaceErr))
+	}
+	for _, workspace := range mutationWorkspaces {
+		fileMutationProtectedRoots, protectedRootErr = appendAgentCompleteWorkspaceFileMutationProtectedRoots(
+			fileMutationProtectedRoots,
+			workspace,
+			cfg,
+		)
+		if protectedRootErr != nil {
+			panic(fmt.Sprintf("build registry file-mutation policy: %v", protectedRootErr))
+		}
+	}
+	localCIRoots := mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg)
+	fileMutationProtectedRoots = append(
+		fileMutationProtectedRoots,
+		localCIRoots...,
+	)
+	identityExactRoots := cloneAgentRuntimeFileMutationProtectedRoots(
+		fileMutationProtectedRoots,
+	)
+	identityGeneration, identityErr := newAgentFileMutationIdentityGeneration(
+		mutationWorkspaces,
+		cfg,
+		identityExactRoots,
+		fileMutationProtectedRoots,
+	)
+	if identityErr != nil {
+		panic(fmt.Sprintf("build registry file-mutation identity catalog: %v", identityErr))
+	}
 	registry := &AgentRegistry{
 		cfg:               cfg,
 		agents:            make(map[string]*AgentInstance),
@@ -117,8 +155,6 @@ func newAgentRegistryWithRuntimePolicies(
 		registry.borrowedProviders = providerGeneration.providerSet()
 	}
 	defer (&agentRegistryConstructionGuard{registry: registry}).cleanupPanic()
-
-	agentConfigs := cfg.Agents.List
 	if len(agentConfigs) == 0 {
 		implicitAgent := &config.AgentConfig{
 			ID:      "main",
@@ -133,6 +169,7 @@ func newAgentRegistryWithRuntimePolicies(
 			diagnosticPolicy,
 			providerGeneration.bindingsForAgent("main"),
 			cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots),
+			identityGeneration,
 		)
 		if providerGeneration != nil {
 			direct := providerGeneration.directForAgent("main")
@@ -158,6 +195,7 @@ func newAgentRegistryWithRuntimePolicies(
 				diagnosticPolicy,
 				providerGeneration.bindingsForAgent(id),
 				cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots),
+				identityGeneration,
 			)
 			if providerGeneration != nil {
 				direct := providerGeneration.directForAgent(id)
@@ -184,6 +222,70 @@ func newAgentRegistryWithRuntimePolicies(
 	}
 
 	return registry
+}
+
+func agentRegistryFileMutationWorkspaces(
+	cfg *config.Config,
+	agentConfigs []config.AgentConfig,
+) ([]string, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("configuration is unavailable")
+	}
+	candidates := make([]string, 0, len(agentConfigs)+2)
+	if configured := cfg.WorkspacePath(); configured != "" {
+		candidates = append(candidates, configured)
+	}
+	if len(agentConfigs) == 0 {
+		if implicit := resolveAgentWorkspace(nil, &cfg.Agents.Defaults); implicit != "" {
+			candidates = append(candidates, implicit)
+		}
+	} else {
+		for index := range agentConfigs {
+			workspace := resolveAgentWorkspace(&agentConfigs[index], &cfg.Agents.Defaults)
+			if workspace != "" {
+				candidates = append(candidates, workspace)
+			}
+		}
+	}
+	return normalizeAgentFileMutationWorkspaces(candidates)
+}
+
+// agentRegistryCumulativeFileMutationProtectedRoots captures the complete
+// published generation. Reload uses it as the base for the next generation so
+// retired workspaces and custom state roots never become writable by a later
+// model generation.
+func agentRegistryCumulativeFileMutationProtectedRoots(
+	registry *AgentRegistry,
+	previous []string,
+) []string {
+	roots := append([]string(nil), previous...)
+	seen := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		seen[agentFileMutationWorkspaceKey(filepath.Clean(root))] = struct{}{}
+	}
+	if registry == nil {
+		return roots
+	}
+	registry.mu.RLock()
+	agents := make([]*AgentInstance, 0, len(registry.agents))
+	for _, agent := range registry.agents {
+		agents = append(agents, agent)
+	}
+	registry.mu.RUnlock()
+	for _, agent := range agents {
+		if agent == nil {
+			continue
+		}
+		for _, root := range agent.fileMutationProtectedRoots {
+			key := agentFileMutationWorkspaceKey(filepath.Clean(root))
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
+	return roots
 }
 
 // CloseCandidate closes an unpublished registry and every internally-created

@@ -37,7 +37,13 @@ func (s Store) AcquireDeduplicationSlot(ctx context.Context) (func(), error) {
 	}
 	for {
 		for slot := 0; slot < DeduplicationConcurrency; slot++ {
-			lockPath := fmt.Sprintf("%s.deduplication-slot-%02d.lock", s.root, slot)
+			lockPath, lockPathErr := repositoryReviewLockPath(
+				s.root,
+				fmt.Sprintf("deduplication-slot-%02d.lock", slot),
+			)
+			if lockPathErr != nil {
+				return nil, lockPathErr
+			}
 			release, acquired, err := tryLockRepositoryReviewIssueFile(lockPath)
 			if err != nil {
 				return nil, err

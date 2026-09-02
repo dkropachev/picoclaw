@@ -19,3 +19,7 @@ func fileMutationPathKey(path string) string {
 	}
 	return strings.ToLower(volume + `\` + strings.Join(components, `\`))
 }
+
+func fileMutationDistinctPathKey(path string) string {
+	return fileMutationPathKey(path)
+}

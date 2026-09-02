@@ -64,13 +64,17 @@ type AgentInstance struct {
 	// keys to per-candidate LLMProvider instances. Stable identities let account
 	// routers keep separate credentials even when accounts use the same provider
 	// and model.
-	CandidateProviders map[string]providers.LLMProvider
-	AccountRouter      *accountrouter.Router
-	ImageAccountRouter *accountrouter.Router
-	LightAccountRouter *accountrouter.Router
-	ModelRouter        *modelrouter.Router
-	ConfigurationError error
-	executionPolicy    isolation.ExecutionPolicy
+	CandidateProviders          map[string]providers.LLMProvider
+	AccountRouter               *accountrouter.Router
+	ImageAccountRouter          *accountrouter.Router
+	LightAccountRouter          *accountrouter.Router
+	ModelRouter                 *modelrouter.Router
+	ConfigurationError          error
+	executionPolicy             isolation.ExecutionPolicy
+	fileMutationIdentityCatalog *tools.FileIdentityCatalog
+	fileMutationProtectedRoots  []string
+	preparedFileMutationPolicy  *tools.PreparedFileMutationPolicy
+	preparedApplyPatchRoots     *tools.PreparedApplyPatchVolatileRoots
 
 	managedCalibrationCache map[string]workflowManagedCalibrationCacheEntry
 }
@@ -296,6 +300,7 @@ func newAgentInstanceWithRuntimePolicies(
 	diagnosticPolicy logger.DiagnosticPolicy,
 	initialCandidateProviders map[string]providers.LLMProvider,
 	fileMutationProtectedRoots []string,
+	identityGenerations ...*agentFileMutationIdentityGeneration,
 ) *AgentInstance {
 	construction := &agentInstanceConstructionGuard{}
 	defer construction.cleanupPanic()
@@ -353,51 +358,86 @@ func newAgentInstanceWithRuntimePolicies(
 	toolsRegistry.SetAllowlist(agentToolAllowlist)
 	readPathPatterns := cloneToolPathPatterns(allowReadPaths)
 	writePathPatterns := cloneToolPathPatterns(allowWritePaths)
-	fileMutationProtectedRoots = append(
-		cloneAgentRuntimeFileMutationProtectedRoots(fileMutationProtectedRoots),
-		mustAgentWorkspaceFileMutationProtectedRoots(workspace)...,
-	)
-	fileMutationProtectedRoots = append(
-		fileMutationProtectedRoots,
-		mustAgentWorkspaceAccountRouterProtectedRoots(workspace)...,
-	)
-	fileMutationProtectedRoots = append(
-		fileMutationProtectedRoots,
-		agentSessionFileMutationProtectedRoots(workspace)...,
-	)
-	fileMutationProtectedRoots = append(
-		fileMutationProtectedRoots,
-		agentCronFileMutationProtectedRoots(workspace)...,
-	)
-	evolutionProtectedRoots, evolutionRootsErr := agentEvolutionFileMutationProtectedRoots(
-		workspace,
-		cfg.Evolution.StateDir,
-	)
-	if evolutionRootsErr != nil {
-		panic(fmt.Sprintf("build evolution file-mutation policy: %v", evolutionRootsErr))
+	if len(identityGenerations) > 1 {
+		panic("build file-mutation identity catalog: multiple generations")
 	}
-	fileMutationProtectedRoots = append(fileMutationProtectedRoots, evolutionProtectedRoots...)
-	workflowProtectedRoots, workflowProtectedErr := agentWorkflowRuntimeFileMutationProtectedRoots(workspace)
-	if workflowProtectedErr != nil {
-		panic(fmt.Sprintf("build workflow file-mutation policy: %v", workflowProtectedErr))
+	var identityGeneration *agentFileMutationIdentityGeneration
+	if len(identityGenerations) == 1 {
+		identityGeneration = identityGenerations[0]
 	}
-	fileMutationProtectedRoots = append(fileMutationProtectedRoots, workflowProtectedRoots...)
-	fileMutationProtectedRoots = append(
-		fileMutationProtectedRoots,
-		mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg)...,
-	)
-	var protectedRootErr error
-	fileMutationProtectedRoots, protectedRootErr = appendAgentWorkspaceSQLiteProtectedRoots(
-		fileMutationProtectedRoots,
-		cfg,
-	)
-	if protectedRootErr != nil {
-		panic(fmt.Sprintf("build workspace file-mutation policy: %v", protectedRootErr))
+	var fileMutationIdentityCatalog *tools.FileIdentityCatalog
+	var preparedFileMutationPolicy *tools.PreparedFileMutationPolicy
+	var preparedApplyPatchRoots *tools.PreparedApplyPatchVolatileRoots
+	if identityGeneration != nil && identityGeneration.preparedPolicy != nil &&
+		identityGeneration.preparedApplyPatchRoots != nil {
+		fileMutationProtectedRoots = identityGeneration.fileMutationProtectedRoots
+		fileMutationIdentityCatalog = identityGeneration.sharedCatalog
+		preparedFileMutationPolicy = identityGeneration.preparedPolicy
+		preparedApplyPatchRoots = identityGeneration.preparedApplyPatchRoots
+	} else {
+		fileMutationProtectedRoots = cloneAgentRuntimeFileMutationProtectedRoots(
+			fileMutationProtectedRoots,
+		)
+		var protectedRootErr error
+		fileMutationProtectedRoots, protectedRootErr = appendAgentCompleteWorkspaceFileMutationProtectedRoots(
+			fileMutationProtectedRoots,
+			workspace,
+			cfg,
+		)
+		if protectedRootErr != nil {
+			panic(fmt.Sprintf("build complete workspace file-mutation policy: %v", protectedRootErr))
+		}
+		fileMutationProtectedRoots = append(
+			fileMutationProtectedRoots,
+			mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg)...,
+		)
+		fileMutationProtectedRoots, protectedRootErr = appendAgentWorkspaceSQLiteProtectedRoots(
+			fileMutationProtectedRoots,
+			cfg,
+		)
+		if protectedRootErr != nil {
+			panic(fmt.Sprintf("build workspace file-mutation policy: %v", protectedRootErr))
+		}
+		var identityCatalogErr error
+		fileMutationIdentityCatalog, identityCatalogErr = identityGeneration.catalog(
+			workspace,
+			cfg,
+			fileMutationProtectedRoots,
+		)
+		if identityCatalogErr != nil {
+			panic(fmt.Sprintf("build file-mutation identity catalog: %v", identityCatalogErr))
+		}
+		prefixWorkspaces := append(
+			[]string{workspace},
+			agentFileMutationWorkspacesFromProtectedRoots(fileMutationProtectedRoots)...,
+		)
+		protectedPrefixes, prefixErr := agentAccountRouterFileMutationProtectedPrefixes(
+			prefixWorkspaces,
+		)
+		if prefixErr != nil {
+			panic(fmt.Sprintf("build file-mutation sibling-prefix policy: %v", prefixErr))
+		}
+		preparedFileMutationPolicy, protectedRootErr = tools.NewPreparedFileMutationPolicy(
+			workspace,
+			tools.FileMutationPolicy{
+				ProtectedRoots:           fileMutationProtectedRoots,
+				ProtectedSiblingPrefixes: protectedPrefixes,
+				ProtectedIdentities:      fileMutationIdentityCatalog,
+			},
+		)
+		if protectedRootErr != nil {
+			panic(fmt.Sprintf("prepare file-mutation policy: %v", protectedRootErr))
+		}
+		preparedApplyPatchRoots, protectedRootErr = tools.NewPreparedApplyPatchVolatileRoots(
+			workspace,
+			fileMutationProtectedRoots,
+		)
+		if protectedRootErr != nil {
+			panic(fmt.Sprintf("prepare apply-patch file-mutation policy: %v", protectedRootErr))
+		}
 	}
 	fileMutationPolicy := tools.FileMutationPolicy{
-		ProtectedRoots: cloneAgentRuntimeFileMutationProtectedRoots(
-			fileMutationProtectedRoots,
-		),
+		Prepared: preparedFileMutationPolicy,
 	}
 	applyPatchCandidate := mayUseCodexCompatibleTools &&
 		(cfg.Tools.IsToolEnabled("edit_file") || cfg.Tools.IsToolEnabled("write_file"))
@@ -459,9 +499,7 @@ func newAgentInstanceWithRuntimePolicies(
 			return tools.NewEditFileToolWithPolicy(
 				workspace,
 				restrict,
-				tools.FileMutationPolicy{ProtectedRoots: append(
-					[]string(nil), fileMutationPolicy.ProtectedRoots...,
-				)},
+				fileMutationPolicy,
 				cloneToolPathPatterns(writePathPatterns),
 			)
 		}
@@ -482,9 +520,7 @@ func newAgentInstanceWithRuntimePolicies(
 			return tools.NewAppendFileToolWithPolicy(
 				workspace,
 				restrict,
-				tools.FileMutationPolicy{ProtectedRoots: append(
-					[]string(nil), fileMutationPolicy.ProtectedRoots...,
-				)},
+				fileMutationPolicy,
 				cloneToolPathPatterns(writePathPatterns),
 			)
 		}
@@ -514,9 +550,7 @@ func newAgentInstanceWithRuntimePolicies(
 			writeTool, err := tools.NewWriteFileToolWithPolicy(
 				workspace,
 				restrict,
-				tools.FileMutationPolicy{ProtectedRoots: append(
-					[]string(nil), fileMutationPolicy.ProtectedRoots...,
-				)},
+				fileMutationPolicy,
 				cloneToolPathPatterns(writePathPatterns),
 			)
 			if err != nil {
@@ -554,10 +588,10 @@ func newAgentInstanceWithRuntimePolicies(
 					ProtectedRoots: append(
 						[]string(nil), applyPatchProtectedRoots...,
 					),
-					VolatileProtectedRoots: append(
-						[]string(nil), fileMutationProtectedRoots...,
-					),
-					TransactionStateRoot: applyPatchTransactionRoot,
+					PreparedVolatileProtectedRoots: preparedApplyPatchRoots,
+					PreparedMutationPolicy:         preparedFileMutationPolicy,
+					ProtectedIdentities:            fileMutationIdentityCatalog,
+					TransactionStateRoot:           applyPatchTransactionRoot,
 				},
 				cloneToolPathPatterns(writePathPatterns),
 			)
@@ -861,42 +895,46 @@ func newAgentInstanceWithRuntimePolicies(
 	}
 
 	return &AgentInstance{
-		ID:                        agentID,
-		Name:                      agentName,
-		AccountRef:                accountRef,
-		Model:                     model,
-		Fallbacks:                 fallbacks,
-		ToolAdaptation:            toolAdaptation,
-		Workspace:                 workspace,
-		MaxIterations:             maxIter,
-		MaxTokens:                 maxTokens,
-		Temperature:               temperature,
-		ThinkingLevel:             thinkingLevel,
-		ThinkingLevelConfigured:   thinkingLevelConfigured,
-		ContextWindow:             contextWindow,
-		SummarizeMessageThreshold: summarizeMessageThreshold,
-		SummarizeTokenPercent:     summarizeTokenPercent,
-		Provider:                  provider,
-		Sessions:                  sessions,
-		ContextBuilder:            contextBuilder,
-		Tools:                     toolsRegistry,
-		Definition:                definition,
-		Subagents:                 subagents,
-		SkillsFilter:              skillsFilter,
-		MCPServerAllowlist:        agentMCPServerAllowlist,
-		Candidates:                candidates,
-		ImageCandidates:           imageCandidates,
-		Router:                    router,
-		LightCandidates:           lightCandidates,
-		LightProvider:             lightProvider,
-		CandidateProviders:        candidateProviders,
-		AccountRouter:             accountRouter,
-		ImageAccountRouter:        imageAccountRouter,
-		LightAccountRouter:        lightAccountRouter,
-		ModelRouter:               modelRouter,
-		ConfigurationError:        configurationErr,
-		executionPolicy:           executionPolicy,
-		managedCalibrationCache:   make(map[string]workflowManagedCalibrationCacheEntry),
+		ID:                          agentID,
+		Name:                        agentName,
+		AccountRef:                  accountRef,
+		Model:                       model,
+		Fallbacks:                   fallbacks,
+		ToolAdaptation:              toolAdaptation,
+		Workspace:                   workspace,
+		MaxIterations:               maxIter,
+		MaxTokens:                   maxTokens,
+		Temperature:                 temperature,
+		ThinkingLevel:               thinkingLevel,
+		ThinkingLevelConfigured:     thinkingLevelConfigured,
+		ContextWindow:               contextWindow,
+		SummarizeMessageThreshold:   summarizeMessageThreshold,
+		SummarizeTokenPercent:       summarizeTokenPercent,
+		Provider:                    provider,
+		Sessions:                    sessions,
+		ContextBuilder:              contextBuilder,
+		Tools:                       toolsRegistry,
+		Definition:                  definition,
+		Subagents:                   subagents,
+		SkillsFilter:                skillsFilter,
+		MCPServerAllowlist:          agentMCPServerAllowlist,
+		Candidates:                  candidates,
+		ImageCandidates:             imageCandidates,
+		Router:                      router,
+		LightCandidates:             lightCandidates,
+		LightProvider:               lightProvider,
+		CandidateProviders:          candidateProviders,
+		AccountRouter:               accountRouter,
+		ImageAccountRouter:          imageAccountRouter,
+		LightAccountRouter:          lightAccountRouter,
+		ModelRouter:                 modelRouter,
+		ConfigurationError:          configurationErr,
+		executionPolicy:             executionPolicy,
+		fileMutationIdentityCatalog: fileMutationIdentityCatalog,
+		fileMutationProtectedRoots:  fileMutationProtectedRoots,
+		preparedFileMutationPolicy:  preparedFileMutationPolicy,
+		preparedApplyPatchRoots:     preparedApplyPatchRoots,
+		managedCalibrationCache:     make(map[string]workflowManagedCalibrationCacheEntry),
 	}
 }
 

@@ -174,7 +174,31 @@ func validateEvaluationDatabaseSchema(ctx context.Context, conn *sql.Conn) error
 			return err
 		}
 	}
+	if err := validateEvaluationSchemaObjectSet(ctx, conn); err != nil {
+		return err
+	}
 	return validateEvaluationAggregateRows(ctx, conn)
+}
+
+func validateEvaluationSchemaObjectSet(ctx context.Context, conn *sql.Conn) error {
+	var unexpected int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema
+		WHERE type IN ('table', 'index', 'view', 'trigger')
+		  AND name NOT LIKE 'sqlite_%'
+		  AND name NOT IN (
+		    'repository_evaluations', 'repository_evaluation_models',
+		    'repository_evaluation_runs', 'repository_evaluations_updated_idx',
+		    'repository_evaluations_status_idx', 'repository_evaluations_repository_idx',
+		    'repository_evaluations_profile_idx',
+		    'storage_imports', 'storage_import_issues', 'storage_import_horizons',
+		    'storage_imports_archive_status_idx'
+		  )`).Scan(&unexpected); err != nil {
+		return err
+	}
+	if unexpected != 0 {
+		return errors.New("repository evaluation database has unexpected schema objects")
+	}
+	return nil
 }
 
 func validateEvaluationAggregateRows(ctx context.Context, conn *sql.Conn) error {

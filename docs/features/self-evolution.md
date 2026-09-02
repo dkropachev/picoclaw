@@ -37,6 +37,11 @@ provider-supplied default model.
 | `FR-EVO-007` | MUST | Model-backed success judging, pattern clustering, and draft generation use the default agent's runtime-resolved candidate: account routing chooses a concrete account, the configured exact alias or model-router result resolves for that account, and its per-account override selects the concrete upstream model. Evolution invokes only that candidate's provider and model; it never reads a provider default or treats an alias as an upstream model ID. If no runnable explicit target exists, the component takes its configured deterministic fallback without a provider call, while normal agent startup still reports `no model configured` for an absent required selection. | Background learning must use the same reviewed model policy as foreground turns and must not silently select a different upstream default. |
 | `FR-EVO-008` | MUST | The configured evolution state directory owns one private `evolution.db` with normalized ordered evidence, drafts, profiles, and version history. First open transactionally imports bounded legacy record, draft, and profile files, records digest-only skip audits, archives committed sources, and performs no JSON/JSONL dual writes. | Concurrent hot/cold paths need one durable authority and safe automatic upgrade. |
 
+`FR-EVO-008` storage MUST durably close the shared legacy import horizon after
+the first complete evolution-source enumeration, including an empty result.
+Later record, draft, or profile sources are safely audited and archived, but
+MUST NOT be domain-imported or finalized; `evolution.db` remains authoritative.
+
 ## Data And State Model
 
 `<state-dir>/evolution.db` includes typed learning records, normalized ordered

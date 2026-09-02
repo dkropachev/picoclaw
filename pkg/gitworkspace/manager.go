@@ -2395,7 +2395,13 @@ func normalizeGenericAcquireRef(ctx context.Context, raw string) (string, error)
 	if ref == "HEAD" || validPinnedCommit(strings.ToLower(ref)) {
 		return ref, nil
 	}
-	if _, err := runGit(ctx, "", "check-ref-format", "--branch", ref); err != nil {
+	if _, err := runPinnedGit(
+		ctx,
+		"",
+		pinnedGitEnvironment(os.DevNull, os.DevNull),
+		"check-ref-format",
+		"refs/heads/"+ref,
+	); err != nil {
 		return "", errors.New("git workspace ref is invalid")
 	}
 	return ref, nil

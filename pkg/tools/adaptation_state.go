@@ -736,17 +736,21 @@ func validateToolAdaptationSchemaWithLimits(
 	}
 	var unexpected int
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema
-        WHERE tbl_name IN ('tool_adaptation_observations', 'tool_adaptation_outcomes')
-          AND type IN ('index', 'trigger')
-          AND name NOT LIKE 'sqlite_autoindex_%'
-          AND name NOT IN (
-              'tool_adaptation_observations_time_idx',
-              'tool_adaptation_outcomes_time_idx'
-          )`).Scan(&unexpected); err != nil {
+	        WHERE name NOT LIKE 'sqlite_%'
+	          AND name NOT IN (
+	              'tool_adaptation_observations',
+	              'tool_adaptation_outcomes',
+	              'tool_adaptation_observations_time_idx',
+	              'tool_adaptation_outcomes_time_idx',
+	              'storage_imports',
+	              'storage_import_issues',
+	              'storage_import_horizons',
+	              'storage_imports_archive_status_idx'
+	          )`).Scan(&unexpected); err != nil {
 		return err
 	}
 	if unexpected != 0 {
-		return errors.New("tool adaptation schema has unexpected indexes or triggers")
+		return errors.New("tool adaptation schema has unexpected objects")
 	}
 	var observations, outcomes int
 	if err := conn.QueryRowContext(ctx, `SELECT

@@ -55,6 +55,14 @@ do not replace canonical session storage.
 | `FR-SESSION-013` | MUST | Supported Seahorse generations use one distinct canonical `sessions/seahorse.db` per agent, bootstrap only from strict snapshots, reject path/physical aliases, publish tools only after complete startup, and close exact generation resources on failure/reload. | Derived context must not leak across agents/generations. |
 | `FR-SESSION-014` | MUST | The workspace's last external channel, last chat ID, and shared update timestamp persist as a typed singleton in `<workspace>/state/runtime.db`. Field-specific immediate transactions preserve independent updates across managers/processes. First open imports bounded `state/state.json` before `state.json`, records safe code/digest audits, archives exact sources under `state/legacy-json/runtime-state-v1/`, retries pending archives without re-import, refuses changed committed sources, and never dual-writes JSON. | Delivery continuity must survive restart without stale whole-file updates or unsafe agent-editable authority. |
 
+Under `FR-SESSION-004` and `FR-SESSION-014`, each session or runtime database
+MUST durably close its shared import horizon after the first complete legacy
+enumeration, including an empty result. Later session JSON/JSONL, metadata,
+thread/handoff, delete-manifest, or runtime-state sources are safely audited
+and archived under their exact component archive, but MUST NOT be imported,
+finalized, or applied as deletions; `sessions.db` and `runtime.db` remain
+authoritative.
+
 ## Data And State Model
 
 Authoritative state lives in `sessions.db`:

@@ -285,7 +285,7 @@ func validateSessionsRelationships(ctx context.Context, conn *sql.Conn) error {
 
 func validateSessionsObjectSet(ctx context.Context, conn *sql.Conn) error {
 	allowed := map[string]struct{}{
-		"storage_imports": {}, "storage_import_issues": {},
+		"storage_imports": {}, "storage_import_issues": {}, "storage_import_horizons": {},
 		"storage_imports_archive_status_idx": {},
 	}
 	for _, object := range sessionsSchemaObjects {

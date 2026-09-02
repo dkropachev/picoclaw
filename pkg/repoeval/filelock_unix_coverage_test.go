@@ -23,7 +23,7 @@ func TestRepositoryEvaluationFileLockFailureBranches(t *testing.T) {
 
 	t.Run("irregular", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "state")
-		if err := os.Mkdir(root+".lock", 0o700); err != nil {
+		if err := os.Mkdir(repositoryEvaluationTestLockPath(t, root, "store.lock"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := lockRepositoryEvaluationStore(root); err == nil {
@@ -32,7 +32,7 @@ func TestRepositoryEvaluationFileLockFailureBranches(t *testing.T) {
 	})
 	t.Run("broad permissions", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "state")
-		if err := os.WriteFile(root+".lock", nil, 0o644); err != nil {
+		if err := os.WriteFile(repositoryEvaluationTestLockPath(t, root, "store.lock"), nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := lockRepositoryEvaluationStore(root); err == nil {
@@ -52,6 +52,23 @@ func TestRepositoryEvaluationFileLockFailureBranches(t *testing.T) {
 		t.Cleanup(func() { repositoryEvaluationOpenLockFile = originalOpen })
 		if _, err := lockRepositoryEvaluationStore(filepath.Join(t.TempDir(), "state")); err == nil {
 			t.Fatal("lock ignored open error")
+		}
+	})
+	t.Run("secure", func(t *testing.T) {
+		repositoryEvaluationOpenLockFile = originalOpen
+		decoy, err := os.CreateTemp(t.TempDir(), "decoy-lock-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		repositoryEvaluationOpenLockFile = func(string, int, os.FileMode) (*os.File, error) {
+			return decoy, nil
+		}
+		t.Cleanup(func() { repositoryEvaluationOpenLockFile = originalOpen })
+		if _, err := lockRepositoryEvaluationStore(filepath.Join(t.TempDir(), "state")); err == nil {
+			t.Fatal("lock accepted a file opened under a different identity")
+		}
+		if _, err := decoy.Stat(); err == nil {
+			t.Fatal("rejected lock file was not closed")
 		}
 	})
 	t.Run("flock", func(t *testing.T) {
@@ -89,7 +106,7 @@ func TestRepositoryEvaluationControllerLockBranches(t *testing.T) {
 
 	t.Run("irregular", func(t *testing.T) {
 		store := NewStore(t.TempDir())
-		if err := os.Mkdir(store.root+".controller.lock", 0o700); err != nil {
+		if err := os.Mkdir(repositoryEvaluationTestLockPath(t, store.root, "controller.lock"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.LockController(); err == nil {
@@ -98,7 +115,8 @@ func TestRepositoryEvaluationControllerLockBranches(t *testing.T) {
 	})
 	t.Run("broad permissions", func(t *testing.T) {
 		store := NewStore(t.TempDir())
-		if err := os.WriteFile(store.root+".controller.lock", nil, 0o644); err != nil {
+		lockPath := repositoryEvaluationTestLockPath(t, store.root, "controller.lock")
+		if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.LockController(); err == nil {
@@ -134,6 +152,23 @@ func TestRepositoryEvaluationControllerLockBranches(t *testing.T) {
 		t.Cleanup(func() { repositoryEvaluationOpenLockFile = originalOpen })
 		if _, err := NewStore(t.TempDir()).LockController(); err == nil {
 			t.Fatal("controller ignored open error")
+		}
+	})
+	t.Run("secure", func(t *testing.T) {
+		repositoryEvaluationOpenLockFile = originalOpen
+		decoy, err := os.CreateTemp(t.TempDir(), "decoy-lock-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		repositoryEvaluationOpenLockFile = func(string, int, os.FileMode) (*os.File, error) {
+			return decoy, nil
+		}
+		t.Cleanup(func() { repositoryEvaluationOpenLockFile = originalOpen })
+		if _, err := NewStore(t.TempDir()).LockController(); err == nil {
+			t.Fatal("controller accepted a file opened under a different identity")
+		}
+		if _, err := decoy.Stat(); err == nil {
+			t.Fatal("rejected controller lock file was not closed")
 		}
 	})
 	t.Run("flock errors and unlock", func(t *testing.T) {

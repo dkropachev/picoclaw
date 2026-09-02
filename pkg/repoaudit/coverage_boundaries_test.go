@@ -1605,7 +1605,7 @@ func TestRepositoryReviewPublicMutationsRejectUnsafeStore(t *testing.T) {
 	if err := os.WriteFile(target, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, unsafe.root+".lock"); err != nil {
+	if err := os.Symlink(target, repositoryReviewTestLockPath(t, unsafe.root, "store.lock")); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 	state := repositoryReviewCoverageState("owner/repo")
@@ -1711,7 +1711,7 @@ func TestRepositoryReviewLockFileBoundaries(t *testing.T) {
 	})
 	t.Run("controller irregular lock", func(t *testing.T) {
 		store := NewStore(t.TempDir())
-		if err := os.MkdirAll(store.root+".controller.lock", 0o700); err != nil {
+		if err := os.MkdirAll(repositoryReviewTestLockPath(t, store.root, "controller.lock"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.LockAutomationController(); err == nil {
@@ -1720,7 +1720,7 @@ func TestRepositoryReviewLockFileBoundaries(t *testing.T) {
 	})
 	t.Run("store irregular lock", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "reviews")
-		if err := os.MkdirAll(root+".lock", 0o700); err != nil {
+		if err := os.MkdirAll(repositoryReviewTestLockPath(t, root, "store.lock"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := lockRepositoryReviewStore(root); err == nil {
@@ -1748,7 +1748,7 @@ func TestRepositoryReviewAutomationPublicMutationsRejectUnsafeStore(t *testing.T
 	if err := os.WriteFile(target, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, store.root+".lock"); err != nil {
+	if err := os.Symlink(target, repositoryReviewTestLockPath(t, store.root, "store.lock")); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 	fixture := validAutomationForTest("rra_unsafe", "Unsafe")

@@ -43,11 +43,12 @@ type LegacyOptions struct {
 	// determines whether parsed records were actually imported. It replaces
 	// the provisional per-source accounting atomically before commit.
 	FinalizeResults LegacyResultFinalizer
-	// Seal closes the subsystem's legacy import horizon after deterministic
-	// enumeration and import. It runs on every successful open, including when
-	// no source exists or no source is newly imported, inside the same
-	// BEGIN IMMEDIATE transaction and before schema validation. Implementations
-	// must be idempotent.
+	// Seal performs optional subsystem-specific import closeout after
+	// deterministic enumeration. It composes with the shared durable horizon
+	// and runs on every successful open, including when no source exists or the
+	// shared horizon is already closed, inside the same BEGIN IMMEDIATE
+	// transaction and before schema validation. Implementations must be
+	// idempotent.
 	Seal          LegacySealer
 	MaxBytes      int64
 	MaxSources    int
@@ -114,8 +115,8 @@ type LegacyResultFinalizer func(
 	LegacyFinalizeInput,
 ) (map[string]ImportResult, error)
 
-// LegacySealer durably marks a subsystem's SQLite database authoritative once
-// its first complete legacy enumeration has succeeded.
+// LegacySealer performs subsystem-specific closeout alongside the shared
+// storage_import_horizons record.
 type LegacySealer func(context.Context, *sql.Conn) error
 
 const storageImportsSchema = `CREATE TABLE IF NOT EXISTS storage_imports (
@@ -149,8 +150,13 @@ const storageImportIssuesSchema = `CREATE TABLE IF NOT EXISTS storage_import_iss
 const storageImportsArchiveIndexSchema = `CREATE INDEX IF NOT EXISTS storage_imports_archive_status_idx
     ON storage_imports(component, archive_status, source_id);`
 
+const storageImportHorizonsSchema = `CREATE TABLE IF NOT EXISTS storage_import_horizons (
+    component    TEXT PRIMARY KEY,
+    completed_at INTEGER NOT NULL
+) STRICT;`
+
 const importSchema = storageImportsSchema + "\n" + storageImportIssuesSchema + "\n" +
-	storageImportsArchiveIndexSchema
+	storageImportsArchiveIndexSchema + "\n" + storageImportHorizonsSchema
 
 func createImportSchema(ctx context.Context, conn *sql.Conn) error {
 	_, err := conn.ExecContext(ctx, importSchema)
@@ -165,6 +171,7 @@ func validateImportSchema(ctx context.Context, conn *sql.Conn) error {
 	}{
 		{typeName: "table", name: "storage_imports", schema: storageImportsSchema},
 		{typeName: "table", name: "storage_import_issues", schema: storageImportIssuesSchema},
+		{typeName: "table", name: "storage_import_horizons", schema: storageImportHorizonsSchema},
 		{typeName: "index", name: "storage_imports_archive_status_idx", schema: storageImportsArchiveIndexSchema},
 	} {
 		if err := ValidateSchemaObject(
@@ -177,7 +184,9 @@ func validateImportSchema(ctx context.Context, conn *sql.Conn) error {
 			return err
 		}
 	}
-	for _, table := range []string{"storage_imports", "storage_import_issues"} {
+	for _, table := range []string{
+		"storage_imports", "storage_import_issues", "storage_import_horizons",
+	} {
 		if err := ValidateUniqueIndexSet(ctx, conn, table); err != nil {
 			return err
 		}
@@ -213,6 +222,12 @@ func importLegacySources(
 	if options.Sources == nil || options.Import == nil {
 		return legacyImportSummary{}, fmt.Errorf("%s legacy migration is incomplete", component)
 	}
+	if options.Finalize != nil && options.FinalizeResults != nil {
+		return legacyImportSummary{}, fmt.Errorf(
+			"finalize %s legacy import: multiple finalizers are configured",
+			component,
+		)
+	}
 	maximumSources, maximumTotalBytes, err := legacyEnumerationBounds(options)
 	if err != nil {
 		return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
@@ -228,8 +243,8 @@ func importLegacySources(
 		)
 	}
 	if len(sources) > 0 {
-		if err := validateLegacyRoots(options); err != nil {
-			return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
+		if rootErr := validateLegacyRoots(options); rootErr != nil {
+			return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, rootErr)
 		}
 	}
 	sources = append([]LegacySource(nil), sources...)
@@ -242,6 +257,10 @@ func importLegacySources(
 		}
 		return sources[left].ID < sources[right].ID
 	})
+	horizonClosed, err := legacyImportHorizonClosed(ctx, conn, component)
+	if err != nil {
+		return legacyImportSummary{}, err
+	}
 	seenID := make(map[string]struct{}, len(sources))
 	seenRelative := make(map[string]struct{}, len(sources))
 	var totalBytes int64
@@ -327,19 +346,37 @@ func importLegacySources(
 					source.ID,
 				)
 			}
+			if _, updateErr := conn.ExecContext(ctx, `UPDATE storage_imports
+			    SET archive_status = 'pending', archived_at = NULL
+			    WHERE component = ? AND source_id = ? AND archive_status = 'complete'`,
+				component, source.ID); updateErr != nil {
+				return legacyImportSummary{}, fmt.Errorf(
+					"rearm %s legacy archive %s: %w", component, source.ID, updateErr,
+				)
+			}
 			continue
 		case !errors.Is(err, sql.ErrNoRows):
 			return legacyImportSummary{}, fmt.Errorf("read %s import record: %w", component, err)
 		}
 
-		result, err := options.Import(ctx, conn, input)
-		if err != nil {
-			return legacyImportSummary{}, fmt.Errorf(
-				"import %s legacy source %s: %w",
-				component,
-				source.ID,
-				err,
-			)
+		var result ImportResult
+		if horizonClosed {
+			result = ImportResult{
+				Skipped: 1,
+				Issues: []ImportIssue{{
+					Code: "late-source", RecordDigest: input.Digest,
+				}},
+			}
+		} else {
+			result, err = options.Import(ctx, conn, input)
+			if err != nil {
+				return legacyImportSummary{}, fmt.Errorf(
+					"import %s legacy source %s: %w",
+					component,
+					source.ID,
+					err,
+				)
+			}
 		}
 		if err := validateImportResult(result); err != nil {
 			return legacyImportSummary{}, fmt.Errorf(
@@ -395,13 +432,8 @@ func importLegacySources(
 			summary.SourcesWithSkips++
 		}
 	}
-	if options.Finalize != nil && options.FinalizeResults != nil {
-		return legacyImportSummary{}, fmt.Errorf(
-			"finalize %s legacy import: multiple finalizers are configured",
-			component,
-		)
-	}
-	if len(summary.NewSourceIDs) > 0 && (options.Finalize != nil || options.FinalizeResults != nil) {
+	if !horizonClosed && len(summary.NewSourceIDs) > 0 &&
+		(options.Finalize != nil || options.FinalizeResults != nil) {
 		if summary.Imported > int64(maximumLegacyRecordCount) ||
 			summary.Skipped > int64(maximumLegacyRecordCount) {
 			return legacyImportSummary{}, fmt.Errorf(
@@ -443,7 +475,33 @@ func importLegacySources(
 			return legacyImportSummary{}, fmt.Errorf("seal %s legacy import: %w", component, err)
 		}
 	}
+	if !horizonClosed {
+		if _, err := conn.ExecContext(ctx, `INSERT INTO storage_import_horizons(
+		    component, completed_at
+		) VALUES (?, ?)`, component, legacyNow(options).UnixNano()); err != nil {
+			return legacyImportSummary{}, fmt.Errorf(
+				"close %s legacy import horizon: %w", component, err,
+			)
+		}
+	}
 	return summary, nil
+}
+
+func legacyImportHorizonClosed(
+	ctx context.Context,
+	conn *sql.Conn,
+	component string,
+) (bool, error) {
+	var completedAt int64
+	err := conn.QueryRowContext(ctx, `SELECT completed_at
+	    FROM storage_import_horizons WHERE component = ?`, component).Scan(&completedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read %s legacy import horizon: %w", component, err)
+	}
+	return true, nil
 }
 
 func replaceFinalizedImportResults(

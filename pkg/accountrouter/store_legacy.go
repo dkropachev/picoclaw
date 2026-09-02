@@ -29,9 +29,6 @@ type legacyAccountRouterEntry struct {
 }
 
 func (s *Store) legacyOptions() *sqlitestore.LegacyOptions {
-	if !s.hasLegacyState() {
-		return nil
-	}
 	return &sqlitestore.LegacyOptions{
 		SourceRoot:    s.sourceRoot,
 		ArchiveRoot:   s.archiveRoot,
@@ -73,12 +70,21 @@ func (s *Store) legacySources() ([]sqlitestore.LegacySource, error) {
 	if s == nil || strings.TrimSpace(s.sourceRelative) == "" {
 		return nil, errors.New("account-router legacy source identity is unavailable")
 	}
-	sources := []sqlitestore.LegacySource{{
-		ID:       accountRouterLegacySourceID,
-		Relative: filepath.ToSlash(s.sourceRelative),
-		MaxBytes: accountRouterLegacyMaxBytes,
-	}}
+	sources := make([]sqlitestore.LegacySource, 0, 1)
+	primaryPath := filepath.Join(s.sourceRoot, filepath.FromSlash(s.sourceRelative))
+	if _, err := os.Lstat(primaryPath); err == nil {
+		sources = append(sources, sqlitestore.LegacySource{
+			ID:       accountRouterLegacySourceID,
+			Relative: filepath.ToSlash(s.sourceRelative),
+			MaxBytes: accountRouterLegacyMaxBytes,
+		})
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
 	entries, err := os.ReadDir(s.sourceRoot)
+	if os.IsNotExist(err) {
+		return sources, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -97,10 +103,14 @@ func (s *Store) legacySources() ([]sqlitestore.LegacySource, error) {
 			ID:       accountRouterLegacySidecarPrefix + hex.EncodeToString(digest[:8]),
 			Relative: relative,
 			MaxBytes: 1 << 20,
+			Order:    1,
 		})
 	}
-	sort.Slice(sources[1:], func(left, right int) bool {
-		return sources[left+1].Relative < sources[right+1].Relative
+	sort.Slice(sources, func(left, right int) bool {
+		if sources[left].Order != sources[right].Order {
+			return sources[left].Order < sources[right].Order
+		}
+		return sources[left].Relative < sources[right].Relative
 	})
 	return sources, nil
 }

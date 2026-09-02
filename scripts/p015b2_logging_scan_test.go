@@ -400,6 +400,9 @@ func (scanner *p015ParsedLoggingFile) classifyCall(
 	}
 	importPath, imported := scanner.importedSelector(selector)
 	if !imported {
+		if scanner.reviewedDirEntryInfoCall(selector, call) {
+			return p015LoggingSite{}, false
+		}
 		if p015EmitterLikeMethod(selector.Sel.Name, len(call.Args)) {
 			if scanner.allowedUnresolvedEmitterCall(owner, call) {
 				return p015LoggingSite{}, false
@@ -474,6 +477,38 @@ func (scanner *p015ParsedLoggingFile) classifyCall(
 		), true
 	}
 	return p015LoggingSite{}, false
+}
+
+// reviewedDirEntryInfoCall recognizes only the zero-argument metadata method
+// on an explicitly typed os.DirEntry or io/fs.DirEntry parameter. Info is
+// emitter-shaped but cannot log; keeping this type-aware avoids broad name- or
+// owner-based exceptions that could hide a real logger facade.
+func (scanner *p015ParsedLoggingFile) reviewedDirEntryInfoCall(
+	selector *ast.SelectorExpr,
+	call *ast.CallExpr,
+) bool {
+	if scanner == nil || selector == nil || call == nil || selector.Sel.Name != "Info" ||
+		len(call.Args) != 0 || call.Ellipsis != token.NoPos {
+		return false
+	}
+	receiver, ok := p015UnwrapParens(selector.X).(*ast.Ident)
+	if !ok || receiver.Obj == nil {
+		return false
+	}
+	field, ok := receiver.Obj.Decl.(*ast.Field)
+	if !ok {
+		return false
+	}
+	receiverType, ok := p015UnwrapParens(field.Type).(*ast.SelectorExpr)
+	if !ok || receiverType.Sel.Name != "DirEntry" {
+		return false
+	}
+	packageName, ok := p015UnwrapParens(receiverType.X).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	importPath := scanner.imports[packageName.Name]
+	return importPath == "os" || importPath == "io/fs"
 }
 
 type p015GatewayConsoleCallShape struct {

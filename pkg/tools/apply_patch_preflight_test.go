@@ -992,6 +992,104 @@ func TestApplyPatchPreflightVolatileProtectedRootAllowsRuntimeReplacement(t *tes
 	}
 }
 
+func TestApplyPatchPreflightSharesDetachedPreparedVolatileRoots(t *testing.T) {
+	workspace := t.TempDir()
+	protected := filepath.Join(workspace, "runtime.db")
+	if err := os.WriteFile(protected, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	roots := []string{protected}
+	prepared, err := NewPreparedApplyPatchVolatileRoots(workspace, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots[0] = filepath.Join(workspace, "ordinary.txt")
+	first, err := NewApplyPatchToolWithPermissionsAndPolicy(
+		workspace,
+		true,
+		true,
+		true,
+		ApplyPatchPreflightPolicy{PreparedVolatileProtectedRoots: prepared},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewApplyPatchToolWithPermissionsAndPolicy(
+		workspace,
+		true,
+		true,
+		true,
+		ApplyPatchPreflightPolicy{PreparedVolatileProtectedRoots: prepared},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.volatileRoots != prepared || second.volatileRoots != prepared {
+		t.Fatal("apply_patch copied the prepared volatile-root policy")
+	}
+	result := first.Execute(context.Background(), map[string]any{
+		"patch": "*** Begin Patch\n*** Update File: runtime.db\n@@\n-before\n+changed\n*** End Patch",
+	})
+	if result == nil || !result.IsError {
+		t.Fatalf("prepared volatile root mutation = %#v", result)
+	}
+	alias := filepath.Join(workspace, "runtime.alias")
+	if err := os.Link(protected, alias); err != nil {
+		t.Skipf("hardlinks unavailable: %v", err)
+	}
+	result = second.Execute(context.Background(), map[string]any{
+		"patch": "*** Begin Patch\n*** Update File: runtime.alias\n@@\n-before\n+changed\n*** End Patch",
+	})
+	if result == nil || !result.IsError {
+		t.Fatalf("prepared volatile-root hardlink mutation = %#v", result)
+	}
+	if mixed, mixedErr := NewApplyPatchToolWithPermissionsAndPolicy(
+		workspace,
+		true,
+		true,
+		true,
+		ApplyPatchPreflightPolicy{
+			VolatileProtectedRoots:         []string{protected},
+			PreparedVolatileProtectedRoots: prepared,
+		},
+	); mixedErr == nil || mixed != nil {
+		t.Fatalf("mixed prepared/source volatile roots = %#v, %v", mixed, mixedErr)
+	}
+}
+
+func TestApplyPatchPreflightSharesPreparedSiblingPrefixPolicy(t *testing.T) {
+	workspace := t.TempDir()
+	prepared, err := NewPreparedFileMutationPolicy(workspace, FileMutationPolicy{
+		ProtectedSiblingPrefixes: []FileMutationSiblingPrefix{{
+			Parent: workspace,
+			Prefix: "account_router_state.json.auth-invalidation.",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := newApplyPatchPreflightTestTool(t, workspace, true, true, ApplyPatchPreflightPolicy{
+		PreparedMutationPolicy: prepared,
+	})
+	target := "account_router_state.json.auth-invalidation.0123456789abcdef0123456789abcdef"
+	result := executeApplyPatch(t, tool, context.Background(),
+		"*** Begin Patch\n*** Add File: "+target+"\n+forged\n*** End Patch",
+	)
+	requireApplyPatchError(t, result, "protected")
+	if _, err := os.Stat(filepath.Join(workspace, target)); !os.IsNotExist(err) {
+		t.Fatalf("prepared sibling prefix was created: %v", err)
+	}
+	result = executeApplyPatch(t, tool, context.Background(),
+		"*** Begin Patch\n*** Add File: ordinary.txt\n+allowed\n*** End Patch",
+	)
+	if result == nil || result.IsError {
+		t.Fatalf("ordinary patch denied by sibling prefix: %#v", result)
+	}
+	if tool.preparedMutationPolicy != prepared {
+		t.Fatal("apply_patch copied or dropped prepared mutation policy")
+	}
+}
+
 func TestApplyPatchPreflightPolicyRejectsInvalidRuntimeRoots(t *testing.T) {
 	workspace := t.TempDir()
 	transactionRoot := filepath.Join(t.TempDir(), "apply-patch-transactions")

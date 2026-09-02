@@ -8,18 +8,33 @@ import (
 )
 
 type (
-	ReadFileTool       = fstools.ReadFileTool
-	ReadFileLinesTool  = fstools.ReadFileLinesTool
-	WriteFileTool      = fstools.WriteFileTool
-	ListDirTool        = fstools.ListDirTool
-	EditFileTool       = fstools.EditFileTool
-	AppendFileTool     = fstools.AppendFileTool
-	LoadImageTool      = fstools.LoadImageTool
-	SendFileTool       = fstools.SendFileTool
-	FileMutationPolicy = fstools.FileMutationPolicy
+	ReadFileTool               = fstools.ReadFileTool
+	ReadFileLinesTool          = fstools.ReadFileLinesTool
+	WriteFileTool              = fstools.WriteFileTool
+	ListDirTool                = fstools.ListDirTool
+	EditFileTool               = fstools.EditFileTool
+	AppendFileTool             = fstools.AppendFileTool
+	LoadImageTool              = fstools.LoadImageTool
+	SendFileTool               = fstools.SendFileTool
+	FileMutationPolicy         = fstools.FileMutationPolicy
+	FileMutationSiblingPrefix  = fstools.FileMutationSiblingPrefix
+	PreparedFileMutationPolicy = fstools.PreparedFileMutationPolicy
+	FileIdentityCatalog        = fstools.FileIdentityCatalog
+	FileIdentityCatalogOptions = fstools.FileIdentityCatalogOptions
 )
 
 const MaxReadFileSize = fstools.MaxReadFileSize
+
+func NewFileIdentityCatalog(options FileIdentityCatalogOptions) (*FileIdentityCatalog, error) {
+	return fstools.NewFileIdentityCatalog(options)
+}
+
+func NewPreparedFileMutationPolicy(
+	workspace string,
+	policy FileMutationPolicy,
+) (*PreparedFileMutationPolicy, error) {
+	return fstools.NewPreparedFileMutationPolicy(workspace, policy)
+}
 
 func NewReadFileTool(
 	workspace string,
@@ -48,6 +63,22 @@ func NewReadFileLinesTool(
 	return fstools.NewReadFileLinesTool(workspace, restrict, maxReadFileSize, allowPaths...)
 }
 
+func NewReadFileLinesToolWithPolicy(
+	workspace string,
+	restrict bool,
+	maxReadFileSize int,
+	policy FileMutationPolicy,
+	allowPaths ...[]*regexp.Regexp,
+) (*ReadFileLinesTool, error) {
+	return fstools.NewReadFileLinesToolWithPolicy(
+		workspace,
+		restrict,
+		maxReadFileSize,
+		policy,
+		allowPaths...,
+	)
+}
+
 func NewWriteFileTool(
 	workspace string,
 	restrict bool,
@@ -71,6 +102,15 @@ func NewListDirTool(
 	allowPaths ...[]*regexp.Regexp,
 ) *ListDirTool {
 	return fstools.NewListDirTool(workspace, restrict, allowPaths...)
+}
+
+func NewListDirToolWithPolicy(
+	workspace string,
+	restrict bool,
+	policy FileMutationPolicy,
+	allowPaths ...[]*regexp.Regexp,
+) (*ListDirTool, error) {
+	return fstools.NewListDirToolWithPolicy(workspace, restrict, policy, allowPaths...)
 }
 
 func NewEditFileTool(
