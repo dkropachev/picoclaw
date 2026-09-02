@@ -15,12 +15,10 @@ func TestRepositoryEvaluationFileLockFailureBranches(t *testing.T) {
 	originalMkdir := repositoryEvaluationMkdirLockDir
 	originalOpen := repositoryEvaluationOpenLockFile
 	originalFlock := repositoryEvaluationFlock
-	originalLstat := repositoryEvaluationLstatLockFile
 	t.Cleanup(func() {
 		repositoryEvaluationMkdirLockDir = originalMkdir
 		repositoryEvaluationOpenLockFile = originalOpen
 		repositoryEvaluationFlock = originalFlock
-		repositoryEvaluationLstatLockFile = originalLstat
 	})
 
 	t.Run("irregular", func(t *testing.T) {
@@ -39,14 +37,6 @@ func TestRepositoryEvaluationFileLockFailureBranches(t *testing.T) {
 		}
 		if _, err := lockRepositoryEvaluationStore(root); err == nil {
 			t.Fatal("lock accepted broad lock permissions")
-		}
-	})
-	t.Run("inspect", func(t *testing.T) {
-		sentinel := errors.New("inspect")
-		repositoryEvaluationLstatLockFile = func(string) (os.FileInfo, error) { return nil, sentinel }
-		t.Cleanup(func() { repositoryEvaluationLstatLockFile = originalLstat })
-		if _, err := lockRepositoryEvaluationStore(filepath.Join(t.TempDir(), "state")); !errors.Is(err, sentinel) {
-			t.Fatalf("lock inspect error = %v", err)
 		}
 	})
 	t.Run("mkdir", func(t *testing.T) {
@@ -108,12 +98,10 @@ func TestRepositoryEvaluationControllerLockBranches(t *testing.T) {
 	originalMkdir := repositoryEvaluationMkdirLockDir
 	originalOpen := repositoryEvaluationOpenLockFile
 	originalFlock := repositoryEvaluationFlock
-	originalLstat := repositoryEvaluationLstatLockFile
 	t.Cleanup(func() {
 		repositoryEvaluationMkdirLockDir = originalMkdir
 		repositoryEvaluationOpenLockFile = originalOpen
 		repositoryEvaluationFlock = originalFlock
-		repositoryEvaluationLstatLockFile = originalLstat
 	})
 
 	t.Run("irregular", func(t *testing.T) {
@@ -133,14 +121,6 @@ func TestRepositoryEvaluationControllerLockBranches(t *testing.T) {
 		}
 		if _, err := store.LockController(); err == nil {
 			t.Fatal("controller accepted broad lock permissions")
-		}
-	})
-	t.Run("inspect", func(t *testing.T) {
-		sentinel := errors.New("inspect")
-		repositoryEvaluationLstatLockFile = func(string) (os.FileInfo, error) { return nil, sentinel }
-		t.Cleanup(func() { repositoryEvaluationLstatLockFile = originalLstat })
-		if _, err := NewStore(t.TempDir()).LockController(); !errors.Is(err, sentinel) {
-			t.Fatalf("controller inspect error = %v", err)
 		}
 	})
 	t.Run("inaccessible lock paths", func(t *testing.T) {

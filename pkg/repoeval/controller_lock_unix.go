@@ -19,7 +19,7 @@ func (s Store) LockController() (func(), error) {
 	if lockPathErr != nil {
 		return nil, lockPathErr
 	}
-	if info, inspectErr := repositoryEvaluationLstatLockFile(lockPath); inspectErr == nil {
+	if info, inspectErr := os.Lstat(lockPath); inspectErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
 			return nil, errors.New("repository evaluation controller lock must be a private regular file")
 		}

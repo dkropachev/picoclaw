@@ -22,7 +22,7 @@ func lockRepositoryEvaluationStore(root string) (func(), error) {
 	if lockPathErr != nil {
 		return nil, lockPathErr
 	}
-	if info, inspectErr := repositoryEvaluationLstatLockFile(lockPath); inspectErr == nil {
+	if info, inspectErr := os.Lstat(lockPath); inspectErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return nil, errors.New("repository evaluation lock must be a regular file")
 		}
