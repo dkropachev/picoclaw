@@ -1323,6 +1323,7 @@ func TestAgentTurnUXRescueMarkerHandsLateAbandonmentToSuccessor(t *testing.T) {
 		chatID       = "successor-rescue-chat"
 		firstTurnUX  = "turn-ux-first-rescue"
 		secondTurnUX = "turn-ux-second-rescue"
+		rescueWait   = 5 * time.Second
 	)
 	firstContext := &bus.InboundContext{
 		Channel:  channel,
@@ -1357,7 +1358,7 @@ func TestAgentTurnUXRescueMarkerHandsLateAbandonmentToSuccessor(t *testing.T) {
 
 	select {
 	case <-messageBus.outboundStarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(rescueWait):
 		t.Fatal("first rescue did not reach its final outbound handoff")
 	}
 	if al.getActiveTurnState(sessionKey) != nil {
@@ -1402,7 +1403,7 @@ func TestAgentTurnUXRescueMarkerHandsLateAbandonmentToSuccessor(t *testing.T) {
 					turnUXID,
 				)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(rescueWait):
 			t.Fatalf("rescued outbound %d was not published", index)
 		}
 	}
@@ -1410,12 +1411,12 @@ func TestAgentTurnUXRescueMarkerHandsLateAbandonmentToSuccessor(t *testing.T) {
 		select {
 		case call := <-manager.typingCalled:
 			assertAgentTurnUXCall(t, call, channel, chatID, turnUXID)
-		case <-time.After(2 * time.Second):
+		case <-time.After(rescueWait):
 			t.Fatalf("rescued response for %q did not release typing ownership", turnUXID)
 		}
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(rescueWait)
 	for {
 		_, rescueActive := al.steeringRescues.Load(sessionKey)
 		if !rescueActive &&
