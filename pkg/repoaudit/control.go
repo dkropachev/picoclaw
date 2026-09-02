@@ -438,6 +438,11 @@ func (s Store) CreateAutomation(
 	if err := normalizeAutomation(&automation); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
+	if purging, err := s.repositoryReviewPurgeConfigured(automation.Repository); err != nil {
+		return RepositoryReviewAutomation{}, err
+	} else if purging {
+		return RepositoryReviewAutomation{}, ErrRepositoryReviewPurgeInProgress
+	}
 	if automation.ProfileID != "" {
 		if err := s.validateAutomationProfileSnapshotUnlocked(automation); err != nil {
 			return RepositoryReviewAutomation{}, err
@@ -523,6 +528,11 @@ func (s Store) UpdateAutomation(
 	return cloneAutomation(candidate), nil
 }
 
+// DeleteAutomation is the legacy configuration-only storage primitive.
+// Product/API removal must use DeleteAutomationAndHistory so a repository
+// assignment cannot leave an undiscoverable ledger behind.
+//
+// Deprecated: use DeleteAutomationAndHistory.
 func (s Store) DeleteAutomation(ctx context.Context, id string, expectedVersion int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -570,8 +580,26 @@ func (s Store) DeleteAutomation(ctx context.Context, id string, expectedVersion 
 }
 
 func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, error) {
+	return s.loadAutomationState(id, true)
+}
+
+func (s Store) loadAutomationIgnoringPurge(id string) (RepositoryReviewAutomation, bool, error) {
+	return s.loadAutomationState(id, false)
+}
+
+func (s Store) loadAutomationState(
+	id string,
+	enforcePurgeFence bool,
+) (RepositoryReviewAutomation, bool, error) {
 	if !validAutomationID(id) {
 		return RepositoryReviewAutomation{}, false, fmt.Errorf("%w: invalid ID", ErrInvalidAutomation)
+	}
+	if enforcePurgeFence {
+		if _, purging, purgeErr := s.loadPurgeIntentForAutomation(id); purgeErr != nil {
+			return RepositoryReviewAutomation{}, false, purgeErr
+		} else if purging {
+			return RepositoryReviewAutomation{}, false, ErrRepositoryReviewPurgeInProgress
+		}
 	}
 	database, err := s.openDatabase(context.Background())
 	if err != nil {

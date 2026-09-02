@@ -1031,6 +1031,16 @@ func (s Store) GetByID(id string) (RepositoryState, bool, error) {
 	if !valid || len(suffix) != 64 || !validHexDigest(suffix) {
 		return RepositoryState{}, false, nil
 	}
+	unlock, err := s.lock("repository-review-state-id:" + id)
+	if err != nil {
+		return RepositoryState{}, false, err
+	}
+	defer unlock()
+	if _, purging, purgeErr := s.loadPurgeFenceForStateID(id); purgeErr != nil {
+		return RepositoryState{}, false, purgeErr
+	} else if purging {
+		return RepositoryState{}, false, ErrRepositoryReviewPurgeInProgress
+	}
 	database, err := s.openDatabase(context.Background())
 	if err != nil {
 		return RepositoryState{}, false, err
@@ -1047,6 +1057,11 @@ func (s Store) GetByID(id string) (RepositoryState, bool, error) {
 }
 
 func (s Store) ListSummaries() ([]RepositorySummary, error) {
+	unlock, err := s.lock("repository-review-list-summaries")
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	return s.listSummaries(10_000)
 }
 
@@ -1084,6 +1099,11 @@ func (s Store) listSummaries(maximum int) ([]RepositorySummary, error) {
 			return nil, err
 		}
 		summary.UpdatedAt = time.Unix(0, updated).UTC()
+		if _, purging, purgeErr := s.loadPurgeFence(summary.Repository); purgeErr != nil {
+			return nil, purgeErr
+		} else if purging {
+			return nil, ErrRepositoryReviewPurgeInProgress
+		}
 		summaries = append(summaries, summary)
 	}
 	return summaries, rows.Err()
@@ -1426,6 +1446,15 @@ func (s Store) ClaimIssueDraftPublication(
 }
 
 func (s Store) List() ([]RepositoryState, error) {
+	unlock, err := s.lock("repository-review-list")
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return s.listStates(true)
+}
+
+func (s Store) listStates(enforcePurgeFence bool) ([]RepositoryState, error) {
 	database, err := s.openDatabase(context.Background())
 	if err != nil {
 		return nil, err
@@ -1448,12 +1477,28 @@ func (s Store) List() ([]RepositoryState, error) {
 		if err != nil {
 			return nil, err
 		}
+		if enforcePurgeFence {
+			if _, purging, purgeErr := s.loadPurgeFence(state.Repository); purgeErr != nil {
+				return nil, purgeErr
+			} else if purging {
+				return nil, ErrRepositoryReviewPurgeInProgress
+			}
+		}
 		states = append(states, state)
 	}
 	return states, rows.Err()
 }
 
 func (s Store) load(repository string) (RepositoryState, error) {
+	if _, purging, err := s.loadPurgeFence(repository); err != nil {
+		return RepositoryState{}, err
+	} else if purging {
+		return RepositoryState{}, ErrRepositoryReviewPurgeInProgress
+	}
+	return s.loadIgnoringPurge(repository)
+}
+
+func (s Store) loadIgnoringPurge(repository string) (RepositoryState, error) {
 	if s.loadForTest != nil {
 		return s.loadForTest(repository)
 	}

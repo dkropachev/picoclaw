@@ -87,10 +87,12 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 	if err := json.Unmarshal(create.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Automation.ID == "" || created.Automation.Status != repoaudit.RepositoryReviewAutomationIdle ||
+	if created.Automation.ID == "" ||
+		created.Automation.Status != repoaudit.RepositoryReviewAutomationIdle ||
 		created.Automation.ProfileID != profile.ID ||
 		created.Automation.ProfileVersion != profile.Version ||
-		created.Automation.Ref != "main" || created.Automation.Target != "all" ||
+		created.Automation.Ref != "main" ||
+		created.Automation.Target != "all" ||
 		len(created.Automation.ReviewerModels) != 1 ||
 		created.Automation.ReviewerModels[0] != profile.ReviewerModel ||
 		created.Automation.CompareModels {
@@ -102,7 +104,10 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 	}
 
 	list := httptest.NewRecorder()
-	mux.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/repository-reviews/automations", nil))
+	mux.ServeHTTP(
+		list,
+		httptest.NewRequest(http.MethodGet, "/api/repository-reviews/automations", nil),
+	)
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), created.Automation.ID) {
 		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
 	}
@@ -132,10 +137,132 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 	}
 	deleted := repositoryReviewAutomationMutation(t, mux, http.MethodDelete,
 		"/api/repository-reviews/automations/"+created.Automation.ID,
-		map[string]any{"expected_version": changed.Automation.Version})
+		map[string]any{
+			"expected_version":            changed.Automation.Version,
+			"expected_repository_version": 0,
+			"expected_ledger_fence": repositoryReviewPurgeFenceForTest(
+				t,
+				workspace,
+				changed.Automation,
+			),
+			"confirm_repository": changed.Automation.Repository,
+		})
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
+}
+
+func TestRepositoryReviewAutomationHistoryPurgeContract(t *testing.T) {
+	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	state := completeRepositoryReviewAPIMappingJobs(
+		t, workspace, seedRepositoryReviewAPIState(t, workspace),
+	)
+	store := repoaudit.NewStore(workspace)
+	automationInput := testRepositoryReviewAutomation()
+	automationInput.Repository = state.Repository
+	automation, err := store.CreateAutomation(t.Context(), automationInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	detail := httptest.NewRecorder()
+	mux.ServeHTTP(detail, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations/"+automation.ID,
+		nil,
+	))
+	if detail.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	if !strings.Contains(detail.Body.String(), `"can_purge_history":true`) ||
+		!strings.Contains(detail.Body.String(), `"can_remove_repository":true`) ||
+		!strings.Contains(detail.Body.String(), `"purge_blockers":[]`) {
+		t.Fatalf("detail omitted authoritative purge capabilities: %s", detail.Body.String())
+	}
+	var projected struct {
+		Repository   repoaudit.RepositorySummary `json:"repository"`
+		Capabilities struct {
+			CanPurgeHistory     bool                                     `json:"can_purge_history"`
+			CanRemoveRepository bool                                     `json:"can_remove_repository"`
+			PurgeBlockers       []repoaudit.RepositoryReviewPurgeBlocker `json:"purge_blockers"`
+			PurgeSummary        repoaudit.RepositoryReviewPurgeSummary   `json:"purge_summary"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(detail.Body.Bytes(), &projected); err != nil {
+		t.Fatal(err)
+	}
+	if projected.Repository.Version != state.Version ||
+		!projected.Capabilities.CanPurgeHistory || !projected.Capabilities.CanRemoveRepository ||
+		len(projected.Capabilities.PurgeBlockers) != 0 ||
+		projected.Capabilities.PurgeSummary.RepositoryVersion != state.Version {
+		t.Fatalf("purge detail = %#v", projected)
+	}
+
+	stale := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/purge-history",
+		map[string]any{
+			"expected_version":            automation.Version,
+			"expected_repository_version": state.Version + 1,
+			"expected_ledger_fence":       projected.Capabilities.PurgeSummary.LedgerFence,
+			"confirm_repository":          automation.Repository,
+		},
+	)
+	if stale.Code != http.StatusConflict ||
+		!strings.Contains(stale.Body.String(), "stale_repository_review_automation") {
+		t.Fatalf("stale purge status=%d body=%s", stale.Code, stale.Body.String())
+	}
+
+	purged := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/purge-history",
+		map[string]any{
+			"expected_version":            automation.Version,
+			"expected_repository_version": state.Version,
+			"expected_ledger_fence":       projected.Capabilities.PurgeSummary.LedgerFence,
+			"confirm_repository":          automation.Repository,
+		},
+	)
+	if purged.Code != http.StatusOK ||
+		!strings.Contains(purged.Body.String(), `"outcome":"history_purged"`) {
+		t.Fatalf("purge status=%d body=%s", purged.Code, purged.Body.String())
+	}
+	if _, found, getErr := store.Get(state.Repository); getErr != nil || found {
+		t.Fatalf("purged ledger found=%v err=%v", found, getErr)
+	}
+	reset, found, getErr := store.GetAutomation(t.Context(), automation.ID)
+	if getErr != nil || !found || reset.Status != repoaudit.RepositoryReviewAutomationIdle ||
+		len(
+			reset.RunIDs,
+		) != 0 || reset.Progress.Findings != 0 || reset.Version != automation.Version+1 {
+		t.Fatalf("reset automation=%#v found=%v err=%v", reset, found, getErr)
+	}
+	after := httptest.NewRecorder()
+	mux.ServeHTTP(after, httptest.NewRequest(
+		http.MethodGet, "/api/repository-reviews/automations/"+automation.ID, nil,
+	))
+	if after.Code != http.StatusOK ||
+		!strings.Contains(after.Body.String(), `"can_purge_history":false`) ||
+		!strings.Contains(after.Body.String(), `"can_remove_repository":true`) ||
+		!strings.Contains(after.Body.String(), `"purge_blockers":[]`) ||
+		!strings.Contains(after.Body.String(), `"repository_version":0`) {
+		t.Fatalf("post-purge capabilities status=%d body=%s", after.Code, after.Body.String())
+	}
+}
+
+func repositoryReviewPurgeFenceForTest(
+	t *testing.T,
+	workspace string,
+	automation repoaudit.RepositoryReviewAutomation,
+) string {
+	t.Helper()
+	eligibility, err := repoaudit.NewStore(workspace).
+		RepositoryReviewPurgeEligibilityForAutomation(automation)
+	if err != nil || eligibility.Summary.LedgerFence == "" {
+		t.Fatalf("purge eligibility=%#v err=%v", eligibility, err)
+	}
+	return eligibility.Summary.LedgerFence
 }
 
 func TestRepositoryReviewEffectiveWorkflowTimeout(t *testing.T) {
@@ -322,7 +449,8 @@ func TestRepositoryReviewAutomationCollectionFields(t *testing.T) {
 			t.Fatalf("field %q was not resolved", field)
 		}
 	}
-	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok || value.Number != 25 {
+	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok ||
+		value.Number != 25 {
 		t.Fatalf("progress field=%#v ok=%v", value, ok)
 	}
 	if value, ok := repositoryReviewAutomationCollectionField(automation, "raw_findings"); !ok ||
@@ -330,7 +458,8 @@ func TestRepositoryReviewAutomationCollectionFields(t *testing.T) {
 		t.Fatalf("raw findings field=%#v ok=%v", value, ok)
 	}
 	automation.Progress = repoaudit.RepositoryReviewProgress{}
-	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok || value.Number != 0 {
+	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok ||
+		value.Number != 0 {
 		t.Fatalf("zero progress field=%#v ok=%v", value, ok)
 	}
 	if _, ok := repositoryReviewAutomationCollectionField(automation, "missing"); ok {
@@ -463,7 +592,11 @@ func TestRepositoryReviewAutomationScopeChangeClearsCommitPlan(t *testing.T) {
 		equivalentBody,
 	)
 	if equivalentResponse.Code != http.StatusOK {
-		t.Fatalf("equivalent scope update status=%d body=%s", equivalentResponse.Code, equivalentResponse.Body.String())
+		t.Fatalf(
+			"equivalent scope update status=%d body=%s",
+			equivalentResponse.Code,
+			equivalentResponse.Body.String(),
+		)
 	}
 	var equivalent struct {
 		Automation repoaudit.RepositoryReviewAutomation `json:"automation"`
@@ -708,7 +841,10 @@ func TestRepositoryReviewUnmappedModelStillConsumesGlobalTokenBudget(t *testing.
 		t.Fatal(err)
 	}
 	controller.mu.Lock()
-	controller.active[automation.ID] = &repositoryReviewActiveRun{runID: "wr_unmapped", store: store}
+	controller.active[automation.ID] = &repositoryReviewActiveRun{
+		runID: "wr_unmapped",
+		store: store,
+	}
 	controller.mu.Unlock()
 	stopErr := controller.recordUsage(automation.ID, "wr_unmapped", workflows.AgentUsage{
 		Model: "unexpected-fallback", PromptTokens: 7, CompletionTokens: 3, TotalTokens: 10,
@@ -740,7 +876,9 @@ func TestRepositoryReviewGuardReservationUsesConservativeAutomationPrice(t *test
 	}
 }
 
-func TestRepositoryReviewModelOutcomeUsesRequestedReviewerAndAcknowledgedZeroFindingCoverage(t *testing.T) {
+func TestRepositoryReviewModelOutcomeUsesRequestedReviewerAndAcknowledgedZeroFindingCoverage(
+	t *testing.T,
+) {
 	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
 	controller := handler.repositoryReviewControllerInstance()
@@ -792,11 +930,14 @@ func TestRepositoryReviewModelOutcomeUsesRequestedReviewerAndAcknowledgedZeroFin
 	if updated.ModelCoverageSketches["cheap"] == "" {
 		t.Fatal("durable model coverage sketch was not stored")
 	}
-	updated.ScopeSelection = &repoaudit.RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
+	updated.ScopeSelection = &repoaudit.RepositoryReviewScopeSelection{
+		IncludePrefixes: []string{"pkg"},
+	}
 	updated.CampaignID = repoaudit.NewRepositoryReviewCampaignID()
 	updated.CampaignRecoveryPending = true
 	if projected := projectRepositoryReviewAutomation(updated); projected.ModelCoverageSketches != nil ||
-		projected.ScopeSelection != nil || projected.CampaignID != "" ||
+		projected.ScopeSelection != nil ||
+		projected.CampaignID != "" ||
 		projected.CampaignRecoveryPending ||
 		!projected.Progress.ScopeFrozen {
 		t.Fatalf(
@@ -1091,7 +1232,9 @@ func TestRepositoryReviewAutomationStartPersistsResolvedCommitBeforeBatch(t *tes
 	}
 }
 
-func TestRepositoryReviewAutomationStartAfterConfigurationResetCreatesCampaignDespiteHistory(t *testing.T) {
+func TestRepositoryReviewAutomationStartAfterConfigurationResetCreatesCampaignDespiteHistory(
+	t *testing.T,
+) {
 	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
 	controller := handler.repositoryReviewControllerInstance()
@@ -1139,7 +1282,9 @@ func TestRepositoryReviewAutomationStartAfterConfigurationResetCreatesCampaignDe
 	}
 	select {
 	case observed := <-started:
-		ledger, found, ledgerErr := store.Get(repoaudit.CanonicalRepositoryIdentity(observed.Repository))
+		ledger, found, ledgerErr := store.Get(
+			repoaudit.CanonicalRepositoryIdentity(observed.Repository),
+		)
 		if ledgerErr != nil || !found || ledger.CurrentCampaign == nil ||
 			ledger.CurrentCampaign.ID != observed.CampaignID || observed.CampaignID == "" {
 			t.Fatalf("reset start batch=%#v ledger=%#v found=%v err=%v",
@@ -1223,11 +1368,13 @@ func TestRepositoryReviewAutomationLegacyRecoveryCannotFallThroughWithoutScope(t
 	controller := handler.repositoryReviewControllerInstance()
 	previousRunners := newWorkflowRuntimeRunners
 	t.Cleanup(func() { newWorkflowRuntimeRunners = previousRunners })
-	profileRunner := &repositoryReviewRecoveryProfileRunner{profile: workflows.RepositoryReviewModelProfile{
-		Revision: "sha256:resolved-profile", AccountRef: "resolved-account",
-		ReviewerModels:         []string{"fallback-a", "fallback-b"},
-		IncludeDefaultReviewer: true, MaxContentBytes: 282624,
-	}}
+	profileRunner := &repositoryReviewRecoveryProfileRunner{
+		profile: workflows.RepositoryReviewModelProfile{
+			Revision: "sha256:resolved-profile", AccountRef: "resolved-account",
+			ReviewerModels:         []string{"fallback-a", "fallback-b"},
+			IncludeDefaultReviewer: true, MaxContentBytes: 282624,
+		},
+	}
 	newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
 		return workflowRuntimeRunners{Agents: profileRunner}
 	}
@@ -1258,8 +1405,14 @@ func TestRepositoryReviewAutomationLegacyRecoveryCannotFallThroughWithoutScope(t
 		)
 		if boundErr != nil || requiredErr != nil || effectiveMax != 282624 || required != 4 ||
 			resolved.AccountRef != "resolved-account" {
-			t.Fatalf("resolved recovery profile=%#v max=%d required=%d bound_err=%v required_err=%v",
-				resolved, effectiveMax, required, boundErr, requiredErr)
+			t.Fatalf(
+				"resolved recovery profile=%#v max=%d required=%d bound_err=%v required_err=%v",
+				resolved,
+				effectiveMax,
+				required,
+				boundErr,
+				requiredErr,
+			)
 		}
 		if automation.CampaignID != "" || automation.ActiveRunID != "" || resolvedCommit != commit {
 			t.Fatalf("legacy recovery preflight saw mutated automation: %#v", automation)
@@ -1434,7 +1587,9 @@ func TestRepositoryReviewAutomationChangedCommitOrProfileResetStartsCleanCampaig
 				workflows.RepositoryReviewModelProfile,
 			) (repoaudit.RepositoryReviewAutomation, error) {
 				recoveryCalls.Add(1)
-				return repoaudit.RepositoryReviewAutomation{}, errors.New("legacy recovery must not run")
+				return repoaudit.RepositoryReviewAutomation{}, errors.New(
+					"legacy recovery must not run",
+				)
 			}
 			started := make(chan repoaudit.RepositoryReviewAutomation, 1)
 			controller.runBatch = func(
@@ -1476,7 +1631,8 @@ func TestRepositoryReviewAutomationChangedCommitOrProfileResetStartsCleanCampaig
 			}
 			select {
 			case observed := <-started:
-				if observed.CampaignID != resumed.CampaignID || observed.ResolvedCommitSHA != test.selection {
+				if observed.CampaignID != resumed.CampaignID ||
+					observed.ResolvedCommitSHA != test.selection {
 					t.Fatalf("clean campaign batch=%#v", observed)
 				}
 			case <-time.After(repositoryReviewAutomationAsyncTestTimeout):
@@ -1486,7 +1642,9 @@ func TestRepositoryReviewAutomationChangedCommitOrProfileResetStartsCleanCampaig
 	}
 }
 
-func TestRepositoryReviewAutomationContinuationStartsCleanCampaignAfterRuntimeProfileDrift(t *testing.T) {
+func TestRepositoryReviewAutomationContinuationStartsCleanCampaignAfterRuntimeProfileDrift(
+	t *testing.T,
+) {
 	for _, test := range []struct {
 		name   string
 		action string
@@ -1610,7 +1768,12 @@ func TestRepositoryReviewAutomationContinuationStartsCleanCampaignAfterRuntimePr
 				var found bool
 				automation, found, err = store.GetAutomation(t.Context(), automation.ID)
 				if err != nil || !found {
-					t.Fatalf("automation after profile failure=%#v found=%v err=%v", automation, found, err)
+					t.Fatalf(
+						"automation after profile failure=%#v found=%v err=%v",
+						automation,
+						found,
+						err,
+					)
 				}
 				newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
 					return workflowRuntimeRunners{Agents: &repositoryReviewRecoveryProfileRunner{
@@ -1697,10 +1860,12 @@ func TestRepositoryReviewAutomationLegacyRecoveryReplaysAfterScopeCASConflict(t 
 	controller := handler.repositoryReviewControllerInstance()
 	previousRunners := newWorkflowRuntimeRunners
 	t.Cleanup(func() { newWorkflowRuntimeRunners = previousRunners })
-	profileRunner := &repositoryReviewRecoveryProfileRunner{profile: workflows.RepositoryReviewModelProfile{
-		Revision: "sha256:resolved-profile", AccountRef: "resolved-account",
-		ReviewerModels: []string{"cheap"}, MaxContentBytes: 65536,
-	}}
+	profileRunner := &repositoryReviewRecoveryProfileRunner{
+		profile: workflows.RepositoryReviewModelProfile{
+			Revision: "sha256:resolved-profile", AccountRef: "resolved-account",
+			ReviewerModels: []string{"cheap"}, MaxContentBytes: 65536,
+		},
+	}
 	newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
 		return workflowRuntimeRunners{Agents: profileRunner}
 	}
@@ -1768,7 +1933,8 @@ func TestRepositoryReviewAutomationLegacyRecoveryReplaysAfterScopeCASConflict(t 
 		return candidateStore.UpdateAutomation(
 			ctx, automation.ID, automation.Version,
 			func(candidate *repoaudit.RepositoryReviewAutomation) error {
-				if candidate.CampaignID != automation.CampaignID || candidate.ScopeSelection == nil ||
+				if candidate.CampaignID != automation.CampaignID ||
+					candidate.ScopeSelection == nil ||
 					candidate.ScopePlan.Hash != scopePlan.Hash {
 					return repoaudit.ErrConflict
 				}
@@ -2121,7 +2287,8 @@ func TestRepositoryReviewAutomationCommitOptionsNormalizeLegacyTarget(t *testing
 	if response.Code != http.StatusOK {
 		t.Fatalf("legacy commit options status=%d body=%s", response.Code, response.Body.String())
 	}
-	if resolvedTarget.Repository != "https://github.com/owner/repo.git" || resolvedTarget.Ref != "" {
+	if resolvedTarget.Repository != "https://github.com/owner/repo.git" ||
+		resolvedTarget.Ref != "" {
 		t.Fatalf("legacy resolution target=%#v", resolvedTarget)
 	}
 	var options repositoryReviewCommitOptionsResponse
@@ -2185,7 +2352,11 @@ func TestRepositoryReviewAutomationResumeRechecksTipAfterCommitOptions(t *testin
 		),
 	)
 	if optionsResponse.Code != http.StatusOK {
-		t.Fatalf("commit options status=%d body=%s", optionsResponse.Code, optionsResponse.Body.String())
+		t.Fatalf(
+			"commit options status=%d body=%s",
+			optionsResponse.Code,
+			optionsResponse.Body.String(),
+		)
 	}
 	var options repositoryReviewCommitOptionsResponse
 	if unmarshalErr := json.Unmarshal(optionsResponse.Body.Bytes(), &options); unmarshalErr != nil {
@@ -2209,7 +2380,13 @@ func TestRepositoryReviewAutomationResumeRechecksTipAfterCommitOptions(t *testin
 	if err != nil || !found || current.Status != repoaudit.RepositoryReviewAutomationPaused ||
 		current.ResolvedCommitSHA != rememberedCommit || current.Version != automation.Version ||
 		batchCalls.Load() != 0 || resolveCalls.Load() != 2 {
-		t.Fatalf("current=%#v found=%v err=%v batch calls=%d", current, found, err, batchCalls.Load())
+		t.Fatalf(
+			"current=%#v found=%v err=%v batch calls=%d",
+			current,
+			found,
+			err,
+			batchCalls.Load(),
+		)
 	}
 }
 
@@ -2512,7 +2689,13 @@ func TestRepositoryReviewAutomationResumeRejectsMalformedCustomCommit(t *testing
 	if err != nil || !found || current.Status != repoaudit.RepositoryReviewAutomationPaused ||
 		current.ResolvedCommitSHA != input.ResolvedCommitSHA || current.Version != automation.Version ||
 		resolveCalls.Load() != 0 {
-		t.Fatalf("current=%#v found=%v err=%v resolver calls=%d", current, found, err, resolveCalls.Load())
+		t.Fatalf(
+			"current=%#v found=%v err=%v resolver calls=%d",
+			current,
+			found,
+			err,
+			resolveCalls.Load(),
+		)
 	}
 }
 
@@ -2649,7 +2832,8 @@ func TestRepositoryReviewAutomationPauseLatchDoesNotTransferToNewRun(t *testing.
 	controller.active["rra_pause_race"] = &repositoryReviewActiveRun{runID: "wr_new"}
 
 	controller.latchManualPause("rra_pause_race", "wr_old")
-	if active := controller.active["rra_pause_race"]; active.pauseReason != "" || active.pauseDetail != "" {
+	if active := controller.active["rra_pause_race"]; active.pauseReason != "" ||
+		active.pauseDetail != "" {
 		t.Fatalf("old pause transferred to new run: %#v", active)
 	}
 
@@ -2864,7 +3048,9 @@ func TestRepositoryReviewRestartReconciliationPreservesManualStopIntent(t *testi
 	}
 }
 
-func TestRepositoryReviewBudgetResetKeepsLifetimeComparisonWithoutResurrectingGuardCost(t *testing.T) {
+func TestRepositoryReviewBudgetResetKeepsLifetimeComparisonWithoutResurrectingGuardCost(
+	t *testing.T,
+) {
 	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
 	store, err := handler.repositoryReviewStore()
@@ -2884,7 +3070,8 @@ func TestRepositoryReviewBudgetResetKeepsLifetimeComparisonWithoutResurrectingGu
 		"/api/repository-reviews/automations/"+automation.ID+"/resume",
 		map[string]any{"expected_version": automation.Version, "reset_budget": true},
 	)
-	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "unknown field") {
+	if response.Code != http.StatusBadRequest ||
+		!strings.Contains(response.Body.String(), "unknown field") {
 		t.Fatalf("legacy reset status=%d body=%s", response.Code, response.Body.String())
 	}
 }
@@ -2896,8 +3083,13 @@ func TestRepositoryReviewAutomationRejectsCallerCampaignRecoveryAuthority(t *tes
 		t, mux, http.MethodPost, "/api/repository-reviews/automations",
 		map[string]any{"campaign_recovery_pending": true},
 	)
-	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "unknown field") {
-		t.Fatalf("caller recovery authority status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusBadRequest ||
+		!strings.Contains(response.Body.String(), "unknown field") {
+		t.Fatalf(
+			"caller recovery authority status=%d body=%s",
+			response.Code,
+			response.Body.String(),
+		)
 	}
 }
 
@@ -3088,28 +3280,31 @@ func TestRepositoryReviewModelOptionsSupportCredentialOnlyAccountRouter(t *testi
 		},
 	}}
 
-	accounts := repositoryReviewAccountOptions(cfg, codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{
-		{
-			ID: "github-copilot:gh-copilot", Provider: "github-copilot",
-			CredentialStatus: "invalid", LimitsStatus: "unavailable",
-		},
-		{
-			ID: "openai:work", Provider: "openai",
-			CredentialStatus: "available", LimitsStatus: "available",
-		},
-		{
-			ID: "openai:backup", Provider: "openai",
-			CredentialStatus: "available", LimitsStatus: "error", LimitsError: "telemetry_offline",
-		},
-		{
-			ID: "openai:overflow", Provider: "openai",
-			CredentialStatus: "available", LimitsStatus: "available",
-		},
-		{
-			ID: "openai:expired", Provider: "openai",
-			CredentialStatus: "available", LimitsStatus: "error", LimitsError: "token_expired",
-		},
-	}})
+	accounts := repositoryReviewAccountOptions(
+		cfg,
+		codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{
+			{
+				ID: "github-copilot:gh-copilot", Provider: "github-copilot",
+				CredentialStatus: "invalid", LimitsStatus: "unavailable",
+			},
+			{
+				ID: "openai:work", Provider: "openai",
+				CredentialStatus: "available", LimitsStatus: "available",
+			},
+			{
+				ID: "openai:backup", Provider: "openai",
+				CredentialStatus: "available", LimitsStatus: "error", LimitsError: "telemetry_offline",
+			},
+			{
+				ID: "openai:overflow", Provider: "openai",
+				CredentialStatus: "available", LimitsStatus: "available",
+			},
+			{
+				ID: "openai:expired", Provider: "openai",
+				CredentialStatus: "available", LimitsStatus: "error", LimitsError: "token_expired",
+			},
+		}},
+	)
 	availableRefs := make([]string, 0, len(accounts))
 	for _, account := range accounts {
 		if account.Available {
@@ -3121,7 +3316,8 @@ func TestRepositoryReviewModelOptionsSupportCredentialOnlyAccountRouter(t *testi
 	for _, option := range options {
 		byAlias[option.Alias] = option
 	}
-	if review := byAlias["review"]; !review.Available || !review.Default || review.BlockedReason != "" {
+	if review := byAlias["review"]; !review.Available || !review.Default ||
+		review.BlockedReason != "" {
 		t.Fatalf("credential-router review option=%#v", review)
 	}
 	if partial := byAlias["partial"]; !partial.Available || partial.BlockedReason != "" {
@@ -3218,7 +3414,10 @@ func TestRepositoryReviewPricingIgnoresUnreachableAccountRouterBlocks(t *testing
 		},
 	}}
 
-	if refs := repositoryReviewRuntimeAccountRefs(cfg); !reflect.DeepEqual(refs, []string{"priced"}) {
+	if refs := repositoryReviewRuntimeAccountRefs(cfg); !reflect.DeepEqual(
+		refs,
+		[]string{"priced"},
+	) {
 		t.Fatalf("reachable account refs=%#v", refs)
 	}
 	options := repositoryReviewModelOptions(cfg)
@@ -3292,7 +3491,8 @@ func TestRepositoryReviewCentralPricingHelperBoundaries(t *testing.T) {
 	})
 
 	t.Run("equivalent alias recursion", func(t *testing.T) {
-		if price, found := repositoryReviewEquivalentAliasPrice(nil, "root", nil); price != nil || found {
+		if price, found := repositoryReviewEquivalentAliasPrice(nil, "root", nil); price != nil ||
+			found {
 			t.Fatalf("nil equivalent pricing=(%#v,%v)", price, found)
 		}
 		cfg := config.DefaultConfig()
@@ -3355,9 +3555,13 @@ func TestRepositoryReviewModelOptionsInheritSubscriptionPriceAndRejectUnsafeOver
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.AccountRef = "review-router"
 	cfg.ModelAliases = []config.ModelAliasConfig{
-		{Name: "subscription-review", Model: "openai/subscription", AccountOverrides: map[string]string{
-			"unsafe": "codex-cli/codex",
-		}},
+		{
+			Name:  "subscription-review",
+			Model: "openai/subscription",
+			AccountOverrides: map[string]string{
+				"unsafe": "codex-cli/codex",
+			},
+		},
 		{Name: "metered-review", Model: "openai/metered"},
 	}
 	cfg.ModelList = []*config.ModelConfig{
@@ -3420,7 +3624,10 @@ func TestRepositoryReviewCheckpointRequiresDurableRecordOrVerifiedNoop(t *testin
 		Status: workflows.RunStatusSucceeded, Outputs: map[string]any{"remainingFiles": 0},
 	}
 	recordFailure := &workflows.Run{Steps: map[string]workflows.StepExecution{
-		"find_bugs/plan":   {Status: workflows.RunStatusSucceeded, Outputs: map[string]any{"pendingCount": 1}},
+		"find_bugs/plan": {
+			Status:  workflows.RunStatusSucceeded,
+			Outputs: map[string]any{"pendingCount": 1},
+		},
 		"find_bugs/record": {Status: workflows.RunStatusSucceeded, Error: "disk write failed"},
 		"find_bugs/result": {Status: workflows.RunStatusSucceeded},
 	}}
@@ -3469,7 +3676,10 @@ func TestRepositoryReviewCheckpointRequiresDurableRecordOrVerifiedNoop(t *testin
 		}
 	}
 	noop := &workflows.Run{Steps: map[string]workflows.StepExecution{
-		"find_bugs/plan": {Status: workflows.RunStatusSucceeded, Outputs: map[string]any{"pendingCount": 0}},
+		"find_bugs/plan": {
+			Status:  workflows.RunStatusSucceeded,
+			Outputs: map[string]any{"pendingCount": 0},
+		},
 		"find_bugs/result": {
 			Status:  workflows.RunStatusSucceeded,
 			Outputs: map[string]any{"run": map[string]any{"remaining_files": 0}},
@@ -3560,7 +3770,11 @@ func TestRepositoryReviewCheckpointRequiresDurableRecordOrVerifiedNoop(t *testin
 				Outputs: map[string]any{"remainingFiles": contradiction.project},
 			},
 		) {
-			t.Fatalf("contradictory durable=%d projected=%d checkpointed", contradiction.durable, contradiction.project)
+			t.Fatalf(
+				"contradictory durable=%d projected=%d checkpointed",
+				contradiction.durable,
+				contradiction.project,
+			)
 		}
 	}
 	for _, contradiction := range []struct {
