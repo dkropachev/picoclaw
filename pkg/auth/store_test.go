@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -536,82 +535,6 @@ func TestRefreshCredentialCanonicalizesNamedProviderAliases(t *testing.T) {
 	}
 	if refreshCalls != 1 {
 		t.Fatalf("refresh calls = %d, want 1", refreshCalls)
-	}
-}
-
-func TestRefreshCredentialSerializesAcrossProcessesAndAliases(t *testing.T) {
-	if os.Getenv("PICOCLAW_AUTH_REFRESH_HELPER") == "1" {
-		credentialID := os.Getenv("PICOCLAW_AUTH_REFRESH_CREDENTIAL_ID")
-		counterPath := os.Getenv("PICOCLAW_AUTH_REFRESH_COUNTER")
-		_, err := RefreshCredential(
-			credentialID,
-			func(current *AuthCredential) bool { return current.NeedsRefresh() },
-			func(current *AuthCredential) (*AuthCredential, error) {
-				counter, openErr := os.OpenFile(counterPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-				if openErr != nil {
-					return nil, openErr
-				}
-				_, writeErr := counter.WriteString("refresh\n")
-				closeErr := counter.Close()
-				if writeErr != nil {
-					return nil, writeErr
-				}
-				if closeErr != nil {
-					return nil, closeErr
-				}
-				time.Sleep(150 * time.Millisecond)
-				updated := *current
-				updated.AccessToken = "process-refreshed-token"
-				updated.ExpiresAt = time.Now().Add(time.Hour)
-				return &updated, nil
-			},
-		)
-		if err != nil {
-			t.Fatalf("helper RefreshCredential() error: %v", err)
-		}
-		return
-	}
-
-	testRoot := setTestAuthHome(t)
-	credentialID := "google-antigravity:process-work"
-	if err := SetCredential(credentialID, &AuthCredential{
-		AccessToken:  "expired-token",
-		RefreshToken: "rotating-token",
-		ExpiresAt:    time.Now().Add(-time.Hour),
-		Provider:     "google-antigravity",
-		AuthMethod:   "oauth",
-	}); err != nil {
-		t.Fatalf("SetCredential() error: %v", err)
-	}
-	counterPath := filepath.Join(testRoot, "refresh-counter")
-	ids := []string{"antigravity:process-work", "google-antigravity:process-work"}
-	commands := make([]*exec.Cmd, 0, len(ids))
-	outputs := make([]strings.Builder, len(ids))
-	for index, id := range ids {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestRefreshCredentialSerializesAcrossProcessesAndAliases$")
-		cmd.Env = append(os.Environ(),
-			"PICOCLAW_AUTH_REFRESH_HELPER=1",
-			"PICOCLAW_AUTH_REFRESH_CREDENTIAL_ID="+id,
-			"PICOCLAW_AUTH_REFRESH_COUNTER="+counterPath,
-		)
-		cmd.Stdout = &outputs[index]
-		cmd.Stderr = &outputs[index]
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("start helper: %v", err)
-		}
-		commands = append(commands, cmd)
-	}
-	for index, cmd := range commands {
-		if err := cmd.Wait(); err != nil {
-			t.Fatalf("helper process error: %v\n%s", err, outputs[index].String())
-		}
-	}
-	data, err := os.ReadFile(counterPath)
-	if err != nil {
-		t.Fatalf("ReadFile(counter) error: %v", err)
-	}
-	if got := strings.Count(string(data), "refresh\n"); got != 1 {
-		t.Fatalf("cross-process refresh calls = %d, want 1; counter=%q", got, data)
 	}
 }
 

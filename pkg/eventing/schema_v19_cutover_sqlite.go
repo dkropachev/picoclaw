@@ -195,7 +195,12 @@ func legacyPRTablesV19(ctx context.Context, conn *sql.Conn) ([]string, error) {
 }
 
 func foreignKeyParentsV19(ctx context.Context, conn *sql.Conn, table string) (map[string]struct{}, error) {
-	rows, err := conn.QueryContext(ctx, "PRAGMA foreign_key_list("+quoteSQLiteStringLiteral(table)+")")
+	rows, err := conn.QueryContext(
+		ctx,
+		`SELECT id, seq, "table", "from", "to", on_update, on_delete, match
+		   FROM pragma_foreign_key_list(?)`,
+		table,
+	)
 	if err != nil {
 		return nil, err
 	}

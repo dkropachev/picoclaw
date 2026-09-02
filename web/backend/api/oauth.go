@@ -18,6 +18,7 @@ import (
 	picoagent "github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -79,7 +80,7 @@ var (
 	oauthLoadStore                = auth.LoadStore
 	oauthFetchAntigravityProject  = providers.FetchAntigravityProjectID
 	oauthFetchGoogleUserEmailFunc = fetchGoogleUserEmail
-	oauthInvalidateCredentialAuth = accountrouter.InvalidateCredentialAuthFailure
+	oauthInvalidateCredentialAuth = accountrouter.InvalidateCredentialAuthFailureForWorkspace
 )
 
 type oauthFlow struct {
@@ -948,6 +949,15 @@ func (h *Handler) invalidateAccountRouterCredentialAuth(credentialID string) {
 		})
 		return
 	}
+	if database.RuntimeClient() != nil {
+		if err := oauthInvalidateCredentialAuth(cfg.WorkspacePath(), credentialID); err != nil {
+			logger.WarnCF("oauth", "Could not invalidate account router authentication health", map[string]any{
+				"credential_id": credentialID,
+				"error":         err.Error(),
+			})
+		}
+		return
+	}
 
 	workspaces := make(map[string]bool, len(cfg.Agents.List)+1)
 	addWorkspace := func(workspace string) {
@@ -965,14 +975,13 @@ func (h *Handler) invalidateAccountRouterCredentialAuth(credentialID string) {
 	}
 
 	for workspace := range workspaces {
-		statePath := accountrouter.DatabasePath(workspace)
-		if err := oauthInvalidateCredentialAuth(statePath, credentialID); err != nil {
+		if err := oauthInvalidateCredentialAuth(workspace, credentialID); err != nil {
 			// Credential persistence is already durable. Router recovery is a
 			// best-effort follow-up and must not turn a successful renewal into
 			// a misleading login failure.
 			logger.WarnCF("oauth", "Could not invalidate account router authentication health", map[string]any{
 				"credential_id": credentialID,
-				"state_path":    statePath,
+				"workspace":     workspace,
 				"error":         err.Error(),
 			})
 		}

@@ -11,7 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -61,6 +62,9 @@ type RepositoryReviewProfile struct {
 }
 
 func (s Store) ListProfiles(ctx context.Context) ([]RepositoryReviewProfile, error) {
+	if s.broker != nil {
+		return s.brokerListProfiles(ctx)
+	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		return nil, contextErr
 	}
@@ -76,6 +80,9 @@ func (s Store) ListProfiles(ctx context.Context) ([]RepositoryReviewProfile, err
 }
 
 func (s Store) GetProfile(ctx context.Context, id string) (RepositoryReviewProfile, bool, error) {
+	if s.broker != nil {
+		return s.brokerGetProfile(ctx, id)
+	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		return RepositoryReviewProfile{}, false, contextErr
 	}
@@ -98,6 +105,9 @@ func (s Store) CreateProfile(
 	ctx context.Context,
 	profile RepositoryReviewProfile,
 ) (RepositoryReviewProfile, error) {
+	if s.broker != nil {
+		return s.brokerCreateProfile(ctx, profile)
+	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		return RepositoryReviewProfile{}, contextErr
 	}
@@ -153,6 +163,9 @@ func (s Store) UpdateProfile(
 	expectedVersion int64,
 	mutate func(*RepositoryReviewProfile) error,
 ) (RepositoryReviewProfile, error) {
+	if s.broker != nil {
+		return s.brokerUpdateProfile(ctx, id, expectedVersion, mutate)
+	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		return RepositoryReviewProfile{}, contextErr
 	}
@@ -210,6 +223,9 @@ func (s Store) UpdateProfile(
 // the profile. The catalog-wide lock makes this safe against concurrent create,
 // update, and delete operations in other processes.
 func (s Store) IsProfileAssigned(ctx context.Context, id string) (bool, error) {
+	if s.broker != nil {
+		return s.brokerProfileAssigned(ctx, id)
+	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		return false, contextErr
 	}
@@ -229,6 +245,9 @@ func (s Store) IsProfileAssigned(ctx context.Context, id string) (bool, error) {
 }
 
 func (s Store) DeleteProfile(ctx context.Context, id string, expectedVersion int64) error {
+	if s.broker != nil {
+		return s.brokerDeleteProfile(ctx, id, expectedVersion)
+	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		return contextErr
 	}
@@ -261,11 +280,11 @@ func (s Store) DeleteProfile(ctx context.Context, id string, expectedVersion int
 	if assigned {
 		return ErrProfileAssigned
 	}
-	database, err := s.openDatabase(ctx)
+	database, release, err := s.acquireDatabase(ctx)
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer release()
 	return sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
 		result, deleteErr := conn.ExecContext(ctx,
 			`DELETE FROM repository_review_profiles WHERE profile_id = ? AND version = ?`,
@@ -327,11 +346,11 @@ func MaterializeRepositoryReviewAutomation(
 }
 
 func (s Store) listProfilesUnlocked(maximum int) ([]RepositoryReviewProfile, error) {
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	defer database.Close()
+	defer release()
 	rows, err := database.Query(`
 		SELECT profile_id FROM repository_review_profiles
 	 ORDER BY updated_at_unix_nano DESC, profile_id ASC
@@ -359,14 +378,17 @@ func (s Store) listProfilesUnlocked(maximum int) ([]RepositoryReviewProfile, err
 }
 
 func (s Store) loadProfile(id string) (RepositoryReviewProfile, bool, error) {
+	if s.broker != nil {
+		return s.brokerGetProfile(context.Background(), id)
+	}
 	if !validProfileID(id) {
 		return RepositoryReviewProfile{}, false, fmt.Errorf("%w: invalid ID", ErrInvalidProfile)
 	}
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return RepositoryReviewProfile{}, false, err
 	}
-	defer database.Close()
+	defer release()
 	profile, err := loadRepositoryReviewProfileRow(context.Background(), database, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RepositoryReviewProfile{}, false, nil
@@ -378,6 +400,9 @@ func (s Store) loadProfile(id string) (RepositoryReviewProfile, bool, error) {
 }
 
 func (s Store) saveProfile(profile RepositoryReviewProfile) error {
+	if s.broker != nil {
+		return database.NewError(database.CodeUnsupported, "repository review profile save is not broker-routed")
+	}
 	if err := normalizeProfile(&profile); err != nil {
 		return err
 	}
@@ -388,11 +413,11 @@ func (s Store) saveProfile(profile RepositoryReviewProfile) error {
 	if int64(len(encoded)) > maxProfileFileBytes {
 		return errors.New("repository review profile exceeds its size limit")
 	}
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer release()
 	return saveRepositoryReviewProfileDatabase(context.Background(), database, profile)
 }
 
@@ -464,6 +489,9 @@ func cloneProfile(profile RepositoryReviewProfile) RepositoryReviewProfile {
 }
 
 func (s Store) profileAssignedUnlocked(id string) (bool, error) {
+	if s.broker != nil {
+		return s.brokerProfileAssigned(context.Background(), id)
+	}
 	automations, err := s.listAutomationsUnlocked(maxAutomationCount)
 	if err != nil {
 		return false, err
@@ -477,6 +505,12 @@ func (s Store) profileAssignedUnlocked(id string) (bool, error) {
 }
 
 func (s Store) profileActiveUnlocked(id string) (bool, error) {
+	if s.broker != nil {
+		return false, database.NewError(
+			database.CodeUnsupported,
+			"repository review profile activity is not broker-routed",
+		)
+	}
 	automations, err := s.listAutomationsUnlocked(maxAutomationCount)
 	if err != nil {
 		return false, err

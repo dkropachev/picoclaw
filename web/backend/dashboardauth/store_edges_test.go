@@ -16,8 +16,8 @@ func TestStoreConstructorsAndPasswordStateEdges(t *testing.T) {
 	if openErr != nil {
 		t.Fatalf("New() error = %v", openErr)
 	}
-	if store.DBPath() != filepath.Join(dir, DBFilename) {
-		t.Fatalf("DBPath() = %q", store.DBPath())
+	if store.StoreID() != "launcher.auth" {
+		t.Fatalf("StoreID() = %q", store.StoreID())
 	}
 	initialized, stateErr := store.IsInitialized(t.Context())
 	if stateErr != nil || initialized {
@@ -78,14 +78,14 @@ func TestStoreConstructorRejectsInvalidLauncherConfigPath(t *testing.T) {
 		store.Close()
 		t.Fatal("NewWithLauncherConfig() accepted a noncanonical config name")
 	}
-	if store, err := OpenWithLauncherConfig(filepath.Join(dir, DBFilename), badConfig); err == nil {
+	if store, err := OpenWithLauncherConfig(filepath.Join(dir, databaseFilename), badConfig); err == nil {
 		store.Close()
 		t.Fatal("OpenWithLauncherConfig() accepted a noncanonical config name")
 	}
 }
 
 func TestVerifyPasswordRejectsMalformedStoredHash(t *testing.T) {
-	store, openErr := Open(filepath.Join(t.TempDir(), DBFilename))
+	store, openErr := Open(filepath.Join(t.TempDir(), databaseFilename))
 	if openErr != nil {
 		t.Fatal(openErr)
 	}

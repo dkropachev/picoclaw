@@ -18,7 +18,36 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
+	dblayer "github.com/sipeed/picoclaw/pkg/database"
 )
+
+func TestOnlineFenceRejectsEventingUpgradeButAllowsFreshInitialization(t *testing.T) {
+	home := t.TempDir()
+	outdatedPath := filepath.Join(home, "outdated.db")
+	outdated, err := sqliteprovider.OpenStore(outdatedPath, 5*time.Second)
+	require.NoError(t, err)
+	_, err = outdated.Exec(`CREATE TABLE retained (id TEXT PRIMARY KEY)`)
+	require.NoError(t, err)
+	require.NoError(t, sqliteprovider.SetSchemaVersion(t.Context(), outdated, 19))
+	require.NoError(t, outdated.Close())
+	fence, err := dblayer.AcquireOnlineFence(home)
+	require.NoError(t, err)
+	defer fence.Close()
+	opened, err := Open(t.Context(), outdatedPath)
+	if opened != nil || dblayer.CodeOf(err) != dblayer.CodeMigrationRequired {
+		t.Fatalf("outdated online Open() = %#v, %v", opened, err)
+	}
+
+	fresh, err := Open(t.Context(), filepath.Join(home, "fresh.db"))
+	require.NoError(t, err)
+	defer fresh.Close()
+	version, err := sqliteprovider.SchemaVersion(t.Context(), fresh.db)
+	if err != nil || version != schemaVersion {
+		t.Fatalf("fresh eventing version = %d, %v", version, err)
+	}
+}
 
 type mutableClock struct {
 	mu  sync.Mutex
@@ -191,43 +220,6 @@ func TestStoreRejectsSQLiteURIPath(t *testing.T) {
 	}
 }
 
-func TestSQLiteFileURLPortableEncoding(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		path       string
-		volume     string
-		wantPrefix string
-	}{
-		{
-			name:       "posix",
-			path:       "/tmp/literal?name/events.db",
-			wantPrefix: "file:///tmp/literal%3Fname/events.db",
-		},
-		{
-			name:       "windows drive",
-			path:       "C:/Users/Test User/events.db",
-			volume:     "C:",
-			wantPrefix: "file:///C:/Users/Test%20User/events.db",
-		},
-		{
-			name:       "windows UNC",
-			path:       "//server/share/event data/events.db",
-			volume:     "//server/share",
-			wantPrefix: "file:////server/share/event%20data/events.db",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			databaseURL, err := sqliteFileURL(test.path, test.volume)
-			require.NoError(t, err)
-			assert.Equal(t, test.wantPrefix, databaseURL.String())
-		})
-	}
-}
-
 func assertConnectionPragmas(t *testing.T, store *Store, busyTimeout time.Duration) {
 	t.Helper()
 	var journalMode string
@@ -239,7 +231,7 @@ func assertConnectionPragmas(t *testing.T, store *Store, busyTimeout time.Durati
 	require.NoError(t, store.db.QueryRow("PRAGMA synchronous").Scan(&synchronous))
 	assert.Equal(t, 1, foreignKeys)
 	assert.Equal(t, int(busyTimeout.Milliseconds()), gotBusyTimeout)
-	assert.Equal(t, 1, synchronous)
+	assert.Equal(t, 2, synchronous)
 }
 
 func TestStoreCrossInstanceDeduplicationAndClaims(t *testing.T) {

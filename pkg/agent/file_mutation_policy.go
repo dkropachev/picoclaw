@@ -12,19 +12,13 @@ import (
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database/artifacts"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 const (
-	agentLauncherAuthDatabaseName = "launcher-auth.db"
-	agentAuthDatabaseName         = "auth.db"
-	agentModelCatalogDatabaseName = "model-catalogs.db"
-	agentToolAdaptationDatabase   = "tool-adaptation.db"
-	agentLocalCICacheDatabaseName = "cache.db"
 	agentRepositoryReviewStateDir = "repository_reviews"
 	agentRepositoryEvalStateDir   = "repository_evaluations"
-	agentGitInventoryDatabase     = "inventory.db"
-	agentCheckpointDatabase       = "checkpoints.db"
 	agentCheckpointMaximumSources = 10_000
 	agentCheckpointArchiveEntries = agentCheckpointMaximumSources + 16
 	agentCheckpointArchiveDepth   = 4
@@ -46,12 +40,12 @@ func agentWorkflowRuntimeFileMutationProtectedRoots(workspace string) ([]string,
 	if err != nil {
 		return nil, fmt.Errorf("resolve workflow workspace: %w", err)
 	}
-	database := filepath.Join(workspace, "state", "workflows.db")
-	return []string{
+	roots, err := agentProviderArtifactRoots(workspace, nil, "workflows")
+	if err != nil {
+		return nil, err
+	}
+	return normalizeProtectedRoots(append(roots,
 		filepath.Join(workspace, "state"),
-		database,
-		database + "-wal",
-		database + "-shm",
 		filepath.Join(workspace, "legacy-json"),
 		filepath.Join(workspace, "workflow_runs"),
 		filepath.Join(workspace, "workflow_validations"),
@@ -60,7 +54,46 @@ func agentWorkflowRuntimeFileMutationProtectedRoots(workspace string) ([]string,
 		filepath.Join(workspace, "workflow_state", "mutation.lock"),
 		filepath.Join(workspace, "workflow_state", "publish-transaction.json"),
 		filepath.Join(workspace, "workflow_state", "template-transaction.json"),
-	}, nil
+	)), nil
+}
+
+func normalizeProtectedRoots(roots []string) []string {
+	slices.Sort(roots)
+	return slices.Compact(roots)
+}
+
+func agentProviderArtifactRoots(
+	workspace string,
+	configure func(*config.Config),
+	domains ...string,
+) ([]string, error) {
+	home, err := filepath.Abs(filepath.Clean(config.GetHome()))
+	if err != nil {
+		return nil, fmt.Errorf("resolve provider catalog home: %w", err)
+	}
+	cfg := &config.Config{Agents: config.AgentsConfig{
+		Defaults: config.AgentDefaults{Workspace: workspace},
+	}}
+	if configure != nil {
+		configure(cfg)
+	}
+	catalog, err := artifacts.New(home, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("build workspace provider artifact catalog: %w", err)
+	}
+	return catalog.ProtectedRootsForDomains(domains...), nil
+}
+
+func mustAgentProviderArtifactRoots(
+	workspace string,
+	configure func(*config.Config),
+	domains ...string,
+) []string {
+	roots, err := agentProviderArtifactRoots(workspace, configure, domains...)
+	if err != nil {
+		panic(fmt.Sprintf("build provider artifact policy: %v", err))
+	}
+	return roots
 }
 
 // agentRuntimeFileMutationProtectedRoots freezes model-facing filesystem
@@ -87,27 +120,26 @@ func agentRuntimeFileMutationProtectedRoots(
 		return nil, fmt.Errorf("resolve active config path: %w", err)
 	}
 
-	protected := make([]string, 0, 64)
-	protected = append(protected,
-		filepath.Join(home, "auth.json"),
-		filepath.Join(home, "model_catalogs.json"),
-		filepath.Join(home, "tool_adaptation_state.json"),
-	)
-	for _, databaseName := range []string{
-		agentLauncherAuthDatabaseName,
-		agentAuthDatabaseName,
-		agentModelCatalogDatabaseName,
-		agentToolAdaptationDatabase,
-	} {
-		database := filepath.Join(home, databaseName)
-		protected = append(protected, database, database+"-wal", database+"-shm")
+	var activeConfig *config.Config
+	if len(activeConfigs) > 0 {
+		activeConfig = activeConfigs[0]
 	}
-	authLockDirectory := filepath.Join(home, agentAuthDatabaseName+".locks")
-	protected = append(
-		protected,
-		authLockDirectory,
-		filepath.Join(authLockDirectory, "store.lock"),
-	)
+	catalogConfig := activeConfig
+	if catalogConfig == nil {
+		catalogConfig, err = config.LoadConfig(configPath)
+	}
+	if catalogConfig == nil || err != nil {
+		// Filesystem mutation protection must remain constructible while the
+		// active config is being atomically replaced or repaired. Fall back to
+		// the canonical-home catalog; caller-specific workspace roots are added
+		// from the already validated in-memory config when one is available.
+		catalogConfig = &config.Config{}
+	}
+	providerArtifacts, err := artifacts.New(home, catalogConfig)
+	if err != nil {
+		return nil, fmt.Errorf("build provider artifact catalog: %w", err)
+	}
+	protected := providerArtifacts.ProtectedRoots()
 
 	activeArchiveRoot := filepath.Join(filepath.Dir(configPath), "legacy-json")
 	homeArchiveRoot := filepath.Join(home, "legacy-json")
@@ -136,9 +168,7 @@ func agentRuntimeFileMutationProtectedRoots(
 		),
 	)
 
-	wecomDatabase := filepath.Join(home, "channels", "wecom", agentWecomReqIDDatabaseName)
 	wecomArchiveRoot := filepath.Join(home, "legacy-json", "wecom-reqid-v1")
-	protected = append(protected, agentSQLiteFileMutationProtectedRoots(wecomDatabase)...)
 	protected = append(protected,
 		filepath.Join(home, "wecom", "reqid-store.json"),
 		wecomArchiveRoot,
@@ -146,19 +176,13 @@ func agentRuntimeFileMutationProtectedRoots(
 	)
 
 	weixinRoot := filepath.Join(home, "channels", "weixin")
-	weixinDatabase := filepath.Join(weixinRoot, agentWeixinStateDatabaseName)
 	weixinArchiveRoot := filepath.Join(weixinRoot, "legacy-json", "weixin-state-v1")
-	protected = append(protected, agentSQLiteFileMutationProtectedRoots(weixinDatabase)...)
 	protected = append(protected,
 		filepath.Join(weixinRoot, "sync"),
 		filepath.Join(weixinRoot, "context-tokens"),
 		weixinArchiveRoot,
 	)
-	var activeConfig *config.Config
-	if len(activeConfigs) > 0 {
-		activeConfig = activeConfigs[0]
-	}
-	gitRoots, err := agentGitWorkspaceFileMutationProtectedRoots(activeConfig)
+	gitRoots, err := agentGitWorkspaceFileMutationProtectedRoots(catalogConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -166,34 +190,33 @@ func agentRuntimeFileMutationProtectedRoots(
 }
 
 func agentGitWorkspaceFileMutationProtectedRoots(activeConfig *config.Config) ([]string, error) {
+	home, err := filepath.Abs(filepath.Clean(config.GetHome()))
+	if err != nil {
+		return nil, fmt.Errorf("resolve Git workspace provider home: %w", err)
+	}
+	providerCatalog, err := artifacts.New(home, activeConfig)
+	if err != nil {
+		return nil, fmt.Errorf("build Git workspace provider artifact catalog: %w", err)
+	}
 	gitWorkspaceRoot := activeConfig.GitWorkspaceRootPath()
-	gitWorkspaceRoot, err := filepath.Abs(filepath.Clean(gitWorkspaceRoot))
+	gitWorkspaceRoot, err = filepath.Abs(filepath.Clean(gitWorkspaceRoot))
 	if err != nil {
 		return nil, fmt.Errorf("resolve Git workspace runtime root: %w", err)
 	}
-	gitInventory := filepath.Join(gitWorkspaceRoot, agentGitInventoryDatabase)
 	checkpointRoot := filepath.Join(
 		gitWorkspaceRoot,
 		".pr-workspace-implementation",
 		"active",
 	)
-	checkpointDatabase := filepath.Join(checkpointRoot, agentCheckpointDatabase)
 	checkpointArchiveRoot := filepath.Join(checkpointRoot, "legacy-json")
-	protected := make([]string, 0, 18)
-	for _, database := range []string{gitInventory, checkpointDatabase} {
-		protected = append(protected, database, database+"-wal", database+"-shm")
-	}
+	protected := providerCatalog.ProtectedRootsForDomains(
+		"git-workspace-inventory",
+		"pr-workspace-checkpoints",
+	)
 	protected = append(protected,
-		filepath.Join(gitWorkspaceRoot, "inventory.json"),
 		filepath.Join(gitWorkspaceRoot, "inventory.lock"),
 		filepath.Join(gitWorkspaceRoot, ".locks"),
 		filepath.Join(gitWorkspaceRoot, "legacy-json"),
-		filepath.Join(
-			gitWorkspaceRoot,
-			"legacy-json",
-			"git-workspaces-v1",
-			"inventory.json",
-		),
 		checkpointRoot,
 		checkpointArchiveRoot,
 	)
@@ -205,7 +228,7 @@ func agentGitWorkspaceFileMutationProtectedRoots(activeConfig *config.Config) ([
 		return nil, err
 	}
 	protected = append(protected, checkpointFiles...)
-	return protected, nil
+	return normalizeProtectedRoots(protected), nil
 }
 
 func agentCheckpointRetainedStateFiles(checkpointRoot, archiveRoot string) ([]string, error) {
@@ -595,10 +618,11 @@ func agentWorkspaceFileMutationProtectedRoots(workspace string) ([]string, error
 		return nil, fmt.Errorf("resolve agent workspace: %w", err)
 	}
 	stateRoot := filepath.Join(workspace, "state")
-	database := filepath.Join(stateRoot, "runtime.db")
 	archiveRoot := filepath.Join(stateRoot, "legacy-json", "runtime-state-v1")
-	roots := make([]string, 0, 11)
-	roots = append(roots, agentSQLiteFileMutationProtectedRoots(database)...)
+	roots, err := agentProviderArtifactRoots(workspace, nil, "runtime-state")
+	if err != nil {
+		return nil, err
+	}
 	roots = append(roots,
 		// The root-level legacy source lies outside stateRoot and must remain
 		// protected until its first authoritative SQLite open archives it.
@@ -608,18 +632,7 @@ func agentWorkspaceFileMutationProtectedRoots(workspace string) ([]string, error
 		filepath.Join(archiveRoot, "state.json"),
 		filepath.Join(archiveRoot, "state", "state.json"),
 	)
-	return roots, nil
-}
-
-func agentSQLiteFileMutationProtectedRoots(database string) []string {
-	lockDirectory := database + ".locks"
-	return []string{
-		database,
-		database + "-wal",
-		database + "-shm",
-		lockDirectory,
-		filepath.Join(lockDirectory, "store.lock"),
-	}
+	return normalizeProtectedRoots(roots), nil
 }
 
 func mustAgentWorkspaceFileMutationProtectedRoots(workspace string) []string {
@@ -642,11 +655,13 @@ func agentEvolutionFileMutationProtectedRoots(workspace, stateDir string) ([]str
 	if err != nil {
 		return nil, fmt.Errorf("resolve evolution state directory: %w", err)
 	}
-	database := filepath.Join(root, "evolution.db")
-	return []string{
-		database,
-		database + "-wal",
-		database + "-shm",
+	roots, err := agentProviderArtifactRoots(workspace, func(cfg *config.Config) {
+		cfg.Evolution.StateDir = stateDir
+	}, "evolution")
+	if err != nil {
+		return nil, err
+	}
+	return normalizeProtectedRoots(append(roots,
 		filepath.Join(root, "legacy-json"),
 		filepath.Join(root, "learning-records.jsonl"),
 		filepath.Join(root, "task-records.jsonl"),
@@ -654,7 +669,7 @@ func agentEvolutionFileMutationProtectedRoots(workspace, stateDir string) ([]str
 		filepath.Join(root, "skill-drafts.json"),
 		filepath.Join(root, "profiles"),
 		filepath.Join(root, "backups"),
-	}, nil
+	)), nil
 }
 
 func mustAgentRuntimeFileMutationProtectedRoots(
@@ -672,28 +687,15 @@ func agentLocalCIEvidenceFileMutationProtectedRoots(cfg *config.Config) ([]strin
 	if cfg == nil || !cfg.Events.Ingress.Enabled {
 		return nil, nil
 	}
-	ingress := config.EffectiveEventIngressConfig(cfg, cfg.WorkspacePath())
-	databasePath, err := filepath.Abs(filepath.Clean(ingress.DatabasePath))
+	home, err := filepath.Abs(filepath.Clean(config.GetHome()))
 	if err != nil {
-		return nil, fmt.Errorf("resolve local CI event database path: %w", err)
+		return nil, err
 	}
-	evidenceRoot := filepath.Join(
-		filepath.Dir(databasePath),
-		"pr-workspace-local-ci",
-		"evidence",
-	)
-	cacheDatabase := filepath.Join(evidenceRoot, agentLocalCICacheDatabaseName)
-	return []string{
-		// The namespace protects immutable evidence plus active and archived
-		// legacy cache indexes. Exact database paths additionally catch an
-		// existing hardlink alias outside this namespace.
-		evidenceRoot,
-		cacheDatabase,
-		cacheDatabase + "-wal",
-		cacheDatabase + "-shm",
-		filepath.Join(evidenceRoot, "cache"),
-		filepath.Join(evidenceRoot, "legacy-json"),
-	}, nil
+	providerCatalog, err := artifacts.New(home, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeProtectedRoots(providerCatalog.ProtectedRootsForDomains("local-ci")), nil
 }
 
 func mustAgentLocalCIEvidenceFileMutationProtectedRoots(cfg *config.Config) []string {
@@ -713,22 +715,43 @@ func agentWorkspaceAccountRouterProtectedRoots(workspace string) ([]string, erro
 	if err != nil {
 		return nil, fmt.Errorf("resolve account-router workspace: %w", err)
 	}
-	database := filepath.Join(workspace, "state", "account-router.db")
-	lockDirectory := database + ".locks"
 	legacySource := filepath.Join(workspace, "account_router_state.json")
 	archiveRoot := filepath.Join(workspace, "state", "legacy-json", "account-router-v1")
-	roots := []string{
-		database,
-		database + "-wal",
-		database + "-shm",
-		lockDirectory,
-		filepath.Join(lockDirectory, "store.lock"),
+	roots, err := agentProviderArtifactRoots(workspace, nil, "account-routing")
+	if err != nil {
+		return nil, err
+	}
+	roots = append(roots,
 		legacySource,
 		archiveRoot,
 		filepath.Join(archiveRoot, "account_router_state.json"),
+	)
+	entries, err := os.ReadDir(workspace)
+	if os.IsNotExist(err) {
+		entries = nil
+	} else if err != nil {
+		return nil, fmt.Errorf("enumerate account-router legacy state: %w", err)
 	}
-	slices.Sort(roots)
-	return slices.Compact(roots), nil
+	for _, entry := range entries {
+		if agentAccountRouterLegacySidecarName(entry.Name()) {
+			roots = append(roots, filepath.Join(workspace, entry.Name()))
+		}
+	}
+	if err := filepath.WalkDir(archiveRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if os.IsNotExist(walkErr) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if path != archiveRoot && !entry.IsDir() {
+			roots = append(roots, path)
+		}
+		return nil
+	}); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("enumerate account-router archives: %w", err)
+	}
+	return normalizeProtectedRoots(roots), nil
 }
 
 func agentAccountRouterLegacySidecarName(name string) bool {
@@ -766,32 +789,22 @@ func mustAgentWorkspaceAccountRouterProtectedRoots(workspace string) []string {
 }
 
 func agentSessionFileMutationProtectedRoots(workspace string) []string {
-	database := filepath.Join(workspace, "sessions", "sessions.db")
-	return []string{
-		filepath.Join(workspace, "sessions"),
-		filepath.Join(workspace, "threads"),
-		database,
-		database + "-wal",
-		database + "-shm",
+	return normalizeProtectedRoots(append(mustAgentProviderArtifactRoots(workspace, nil, "sessions"),
 		// Protect the namespace so a model cannot pre-create the archive parent
 		// as a file before the first migration needs it.
 		filepath.Join(workspace, "legacy-json"),
-	}
+	))
 }
 
 func agentCronFileMutationProtectedRoots(workspace string) []string {
 	root := filepath.Join(workspace, "cron")
-	database := filepath.Join(root, "jobs.db")
 	archiveRoot := filepath.Join(root, "legacy-json")
-	return []string{
+	return normalizeProtectedRoots(append(mustAgentProviderArtifactRoots(workspace, nil, "cron"),
 		root,
-		database,
-		database + "-wal",
-		database + "-shm",
 		filepath.Join(root, "jobs.json"),
 		archiveRoot,
 		filepath.Join(archiveRoot, "cron-jobs-v1", "jobs.json"),
-	}
+	))
 }
 
 func appendAgentWorkspaceSQLiteProtectedRoots(
@@ -809,30 +822,12 @@ func appendAgentWorkspaceSQLiteProtectedRoots(
 }
 
 func appendAgentRepositoryFileMutationProtectedRoots(roots []string, workspace string) []string {
-	stores := []struct {
-		directory string
-		database  string
-	}{
-		{directory: agentRepositoryReviewStateDir, database: "repository-reviews.db"},
-		{directory: agentRepositoryEvalStateDir, database: "evaluations.db"},
-	}
-	for _, store := range stores {
-		directory := store.directory
-		candidate := filepath.Join(workspace, directory)
-		duplicate := false
-		for _, existing := range roots {
-			if existing == candidate {
-				duplicate = true
-				break
-			}
-		}
-		if !duplicate {
-			roots = append(roots, candidate)
-		}
-		database := filepath.Join(candidate, store.database)
-		roots = append(roots, agentSQLiteFileMutationProtectedRoots(database)...)
-	}
-	return roots
+	return append(roots, mustAgentProviderArtifactRoots(
+		workspace,
+		nil,
+		"repository-reviews",
+		"repository-evaluations",
+	)...)
 }
 
 func appendAgentCompleteWorkspaceFileMutationProtectedRoots(
@@ -1080,13 +1075,17 @@ func agentFileMutationIdentityCatalogTrees(
 				filepath.Join(evolutionRoot, "legacy-json", "evolution-v1"),
 			)
 		}
-		for _, database := range []string{
-			filepath.Join(workspace, "sessions", "sessions.db"),
-			filepath.Join(workspace, agentRepositoryReviewStateDir, "repository-reviews.db"),
-			filepath.Join(workspace, agentRepositoryEvalStateDir, "evaluations.db"),
-		} {
-			exclusions = append(exclusions, database, database+"-wal", database+"-shm")
+		workspaceArtifacts, workspaceErr := agentProviderArtifactRoots(
+			workspace,
+			nil,
+			"sessions",
+			"repository-reviews",
+			"repository-evaluations",
+		)
+		if workspaceErr != nil {
+			return nil, nil, workspaceErr
 		}
+		exclusions = append(exclusions, agentProviderDatabaseExclusions(workspaceArtifacts...)...)
 	}
 	if cfg != nil {
 		localCIRoots, localCIErr := agentLocalCIEvidenceFileMutationProtectedRoots(cfg)
@@ -1101,16 +1100,32 @@ func agentFileMutationIdentityCatalogTrees(
 			)
 		}
 	}
-	for _, database := range []string{
-		filepath.Join(gitWorkspaceRoot, agentGitInventoryDatabase),
-		filepath.Join(checkpointRoot, agentCheckpointDatabase),
-	} {
-		exclusions = append(exclusions, database, database+"-wal", database+"-shm")
+	providerCatalog, err := artifacts.New(home, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build file-identity provider catalog: %w", err)
 	}
+	exclusions = append(exclusions, agentProviderDatabaseExclusions(
+		providerCatalog.ProtectedRootsForDomains(
+			"git-workspace-inventory",
+			"pr-workspace-checkpoints",
+		)...,
+	)...)
 	retainedTrees, retainedExclusions := agentFileMutationRetainedCatalogRoots(exactRoots)
 	trees = append(trees, retainedTrees...)
 	exclusions = append(exclusions, retainedExclusions...)
 	return trees, exclusions, nil
+}
+
+func agentProviderDatabaseExclusions(roots ...string) []string {
+	exclusions := make([]string, 0, len(roots))
+	for _, root := range roots {
+		base := strings.ToLower(filepath.Base(root))
+		if strings.HasSuffix(base, ".db") || strings.HasSuffix(base, ".db-wal") ||
+			strings.HasSuffix(base, ".db-shm") || strings.HasSuffix(base, ".db-journal") {
+			exclusions = append(exclusions, filepath.Clean(root))
+		}
+	}
+	return normalizeProtectedRoots(exclusions)
 }
 
 // agentFileMutationWorkspacesFromProtectedRoots preserves the workspace set

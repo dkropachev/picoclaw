@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 )
 
 func TestModelCatalogSQLiteSchemaPragmasPermissionsAndReopen(t *testing.T) {
@@ -881,7 +881,8 @@ func TestModelCatalogSQLiteRejectsCorruptAndUnsafeFirstOpen(t *testing.T) {
 		if err := os.Symlink(target, filepath.Join(home, catalogDatabaseFilename)); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		if _, err := loadCatalogs(); err == nil || !strings.Contains(err.Error(), "regular file") {
+		if _, err := loadCatalogs(); err == nil ||
+			(!strings.Contains(err.Error(), "regular file") && !strings.Contains(err.Error(), "unsafe member")) {
 			t.Fatalf("loadCatalogs() database symlink error = %v", err)
 		}
 		if data, err := os.ReadFile(target); err != nil || string(data) != "keep" {

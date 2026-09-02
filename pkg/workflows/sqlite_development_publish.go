@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/fileutil"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 //nolint:govet // Each publish phase keeps errors scoped to its exact boundary.

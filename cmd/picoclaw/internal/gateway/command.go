@@ -6,9 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/gateway"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/netbind"
 	"github.com/sipeed/picoclaw/pkg/utils"
@@ -67,7 +65,12 @@ func NewGatewayCommand() *cobra.Command {
 				}()
 			}
 
-			return gateway.Run(debug, internal.GetPicoclawHome(), internal.GetConfigPath(), allowEmpty)
+			if os.Getenv(gatewayRuntimeChildEnvironment) != "" {
+				_ = os.Unsetenv(gatewayRuntimeChildEnvironment)
+				return runAuthenticatedGatewayRuntime(cmd.Context(), debug, allowEmpty)
+			}
+
+			return runSupervisedGateway(cmd, debug, noTruncate, allowEmpty)
 		},
 	}
 

@@ -15,13 +15,15 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
@@ -44,6 +46,11 @@ const (
 	maximumAdaptationError        = 16 << 10
 	maximumAdaptationAuditIssues  = 512
 )
+
+// ToolAdaptationStoreID is the opaque broker catalog identity for learned tool
+// behavior. Application surfaces expose this identifier instead of a provider
+// path or filename.
+const ToolAdaptationStoreID database.StoreID = "global.tool-adaptation"
 
 const toolAdaptationObservationsSchema = `CREATE TABLE tool_adaptation_observations (
     provider                 TEXT NOT NULL,
@@ -153,9 +160,15 @@ type toolAdaptationStateStore struct {
 	outcomes     map[string]ToolAdaptationToolOutcome
 	loaded       bool
 	pathOverride string
+	persistent   bool
+	database     *sql.DB
+	lastErr      error
 }
 
-var globalToolAdaptationState = &toolAdaptationStateStore{}
+var (
+	globalToolAdaptationState               = &toolAdaptationStateStore{}
+	allowUnfencedAdaptationProviderForTests atomic.Bool
+)
 
 var (
 	adaptationOpenSQLite   = sqlitestore.Open
@@ -184,10 +197,51 @@ func ObserveToolAdaptationCache(
 	toolDefs []providers.ToolDefinition,
 	usage *providers.UsageInfo,
 ) (ToolAdaptationObservation, bool) {
+	if database.RuntimeClient() != nil {
+		var response adaptationObservationResponse
+		if err := adaptationBrokerCall(
+			"observe-cache",
+			adaptationObservationRequest{
+				StoreID: ToolAdaptationStoreID, Profile: profile, VisibleToolSurface: visibleToolSurface,
+				ToolDefinitions: toolDefs, Usage: usage,
+			},
+			&response,
+			true,
+		); err == nil {
+			return response.Observation, response.Found
+		} else {
+			warnAdaptationBroker("Failed to persist tool adaptation state through broker", err)
+			return ToolAdaptationObservation{}, false
+		}
+	}
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedAdaptationProviderForTests.Load() {
+		return ToolAdaptationObservation{}, false
+	}
 	return globalToolAdaptationState.observe(profile, visibleToolSurface, toolDefs, usage)
 }
 
 func LatestToolAdaptationObservation(profile ToolAdaptationProfile) (ToolAdaptationObservation, bool) {
+	if database.RuntimeClient() != nil {
+		var response adaptationObservationResponse
+		if err := adaptationBrokerCall(
+			"latest-observation",
+			adaptationProfileRequest{StoreID: ToolAdaptationStoreID, Profile: profile},
+			&response,
+			false,
+		); err == nil {
+			return response.Observation, response.Found
+		} else {
+			warnAdaptationBroker("Failed to read tool adaptation state through broker", err)
+			return ToolAdaptationObservation{}, false
+		}
+	}
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedAdaptationProviderForTests.Load() {
+		return ToolAdaptationObservation{}, false
+	}
 	return globalToolAdaptationState.latest(profile)
 }
 
@@ -199,6 +253,29 @@ func ObserveToolAdaptationToolOutcome(
 	errorSummary string,
 	duration time.Duration,
 ) (ToolAdaptationToolOutcome, bool) {
+	if database.RuntimeClient() != nil {
+		var response adaptationOutcomeResponse
+		if err := adaptationBrokerCall(
+			"observe-outcome",
+			adaptationOutcomeRequest{
+				StoreID: ToolAdaptationStoreID, Profile: profile,
+				VisibleToolSurface: visibleToolSurface, ToolName: toolName,
+				Success: success, ErrorSummary: errorSummary, DurationNanosecond: int64(duration),
+			},
+			&response,
+			true,
+		); err == nil {
+			return response.Outcome, response.Found
+		} else {
+			warnAdaptationBroker("Failed to persist tool adaptation outcome through broker", err)
+			return ToolAdaptationToolOutcome{}, false
+		}
+	}
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedAdaptationProviderForTests.Load() {
+		return ToolAdaptationToolOutcome{}, false
+	}
 	return globalToolAdaptationState.observeToolOutcome(
 		profile,
 		visibleToolSurface,
@@ -210,10 +287,56 @@ func ObserveToolAdaptationToolOutcome(
 }
 
 func LatestToolAdaptationToolOutcomes(profile ToolAdaptationProfile) []ToolAdaptationToolOutcome {
+	if database.RuntimeClient() != nil {
+		outcomes := make([]ToolAdaptationToolOutcome, 0)
+		offset, revision := 0, ""
+		for {
+			var response adaptationOutcomesResponse
+			if err := adaptationBrokerCall(
+				"latest-outcomes-page",
+				adaptationOutcomesPageRequest{
+					StoreID: ToolAdaptationStoreID, Profile: profile,
+					Offset: offset, Revision: revision,
+				},
+				&response,
+				false,
+			); err != nil {
+				warnAdaptationBroker("Failed to read tool adaptation outcomes through broker", err)
+				return nil
+			}
+			if !validAdaptationRevision(response.Revision) ||
+				(revision != "" && response.Revision != revision) ||
+				response.Next < offset || len(response.Outcomes) > adaptationPageItems ||
+				len(outcomes) > maximumAdaptationOutcomes-len(response.Outcomes) {
+				warnAdaptationBroker(
+					"Failed to read tool adaptation outcomes through broker",
+					database.NewError(database.CodeIntegrity, "tool adaptation page is invalid"),
+				)
+				return nil
+			}
+			outcomes = append(outcomes, response.Outcomes...)
+			if response.Done {
+				return outcomes
+			}
+			if response.Next <= offset || len(response.Outcomes) == 0 {
+				return nil
+			}
+			offset, revision = response.Next, response.Revision
+		}
+	}
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedAdaptationProviderForTests.Load() {
+		return nil
+	}
 	return globalToolAdaptationState.latestToolOutcomes(profile)
 }
 
-func ToolAdaptationStatePath() string {
+func warnAdaptationBroker(message string, err error) {
+	logger.WarnCF("tools", message, map[string]any{"error": err.Error()})
+}
+
+func toolAdaptationStatePath() string {
 	return filepath.Join(config.GetHome(), toolAdaptationDatabaseFilename)
 }
 
@@ -294,7 +417,7 @@ func (s *toolAdaptationStateStore) latest(profile ToolAdaptationProfile) (ToolAd
 		s.warnLocked("Failed to read tool adaptation state", err)
 		return ToolAdaptationObservation{}, false
 	}
-	defer db.Close()
+	defer s.releaseDatabaseLocked(db)
 	observation, err := queryObservation(context.Background(), db, profile)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ToolAdaptationObservation{}, false
@@ -357,7 +480,7 @@ func (s *toolAdaptationStateStore) latestToolOutcomes(profile ToolAdaptationProf
 		s.warnLocked("Failed to read tool adaptation state", err)
 		return nil
 	}
-	defer db.Close()
+	defer s.releaseDatabaseLocked(db)
 	outcomes, err := queryOutcomes(context.Background(), db, profile)
 	if err != nil {
 		s.warnLocked("Failed to read tool adaptation state", err)
@@ -390,7 +513,7 @@ func (s *toolAdaptationStateStore) writeObservationLockedWithLimit(
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer s.releaseDatabaseLocked(db)
 	return adaptationImmediate(ctx, db, func(conn *sql.Conn) error {
 		var exists, count int
 		if err := conn.QueryRowContext(ctx, `SELECT
@@ -459,7 +582,7 @@ func (s *toolAdaptationStateStore) incrementOutcomeLockedWithLimit(
 	if openErr != nil {
 		return ToolAdaptationToolOutcome{}, openErr
 	}
-	defer db.Close()
+	defer s.releaseDatabaseLocked(db)
 	var result ToolAdaptationToolOutcome
 	transactionErr := adaptationImmediate(ctx, db, func(conn *sql.Conn) error {
 		var exists, count int
@@ -634,11 +757,53 @@ func queryOutcomes(
 }
 
 func (s *toolAdaptationStateStore) openLocked(ctx context.Context) (*sql.DB, error) {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedAdaptationProviderForTests.Load() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"tool-adaptation provider access requires database owner authority",
+		)
+	}
+	if s.persistent && s.database != nil {
+		return s.database, nil
+	}
 	databasePath, sourceRoot, legacyRelative, err := s.storagePathsLocked()
 	if err != nil {
 		return nil, err
 	}
-	return adaptationOpenSQLite(ctx, databasePath, toolAdaptationStoreOptions(sourceRoot, legacyRelative))
+	db, err := adaptationOpenSQLite(
+		ctx,
+		databasePath,
+		toolAdaptationStoreOptions(sourceRoot, legacyRelative),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if s.persistent {
+		s.database = db
+	}
+	return db, nil
+}
+
+func (s *toolAdaptationStateStore) releaseDatabaseLocked(db *sql.DB) {
+	if db != nil && (!s.persistent || db != s.database) {
+		_ = db.Close()
+	}
+}
+
+func (s *toolAdaptationStateStore) close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.database == nil {
+		return nil
+	}
+	db := s.database
+	s.database = nil
+	return db.Close()
 }
 
 func (s *toolAdaptationStateStore) storagePathsLocked() (string, string, string, error) {
@@ -656,7 +821,7 @@ func (s *toolAdaptationStateStore) storagePathsLocked() (string, string, string,
 		}
 		return absolute, root, legacyToolAdaptationFilename, nil
 	}
-	databasePath, err := adaptationAbsPath(ToolAdaptationStatePath())
+	databasePath, err := adaptationAbsPath(toolAdaptationStatePath())
 	if err != nil {
 		return "", "", "", err
 	}
@@ -1076,7 +1241,7 @@ func (s *toolAdaptationStateStore) loadLocked() {
 		s.warnLocked("Failed to read tool adaptation state", err)
 		return
 	}
-	defer db.Close()
+	defer s.releaseDatabaseLocked(db)
 	loadObservationsErr := adaptationLoadObservations(db, s.observations)
 	if loadObservationsErr != nil {
 		s.warnLocked("Failed to read tool adaptation state", loadObservationsErr)
@@ -1182,7 +1347,7 @@ func (s *toolAdaptationStateStore) saveLockedWithLimits(
 	if openErr != nil {
 		return openErr
 	}
-	defer db.Close()
+	defer s.releaseDatabaseLocked(db)
 	observations := canonicalObservationValues(s.observations)
 	outcomes := canonicalOutcomeValues(s.outcomes)
 	if maximumObservations < 0 || maximumOutcomes < 0 ||
@@ -1329,16 +1494,37 @@ func canonicalOutcomeValues(values map[string]ToolAdaptationToolOutcome) []ToolA
 func (s *toolAdaptationStateStore) statePathLocked() string {
 	databasePath, _, _, err := s.storagePathsLocked()
 	if err != nil {
-		return ToolAdaptationStatePath()
+		return toolAdaptationStatePath()
 	}
 	return databasePath
 }
 
 func (s *toolAdaptationStateStore) warnLocked(message string, err error) {
+	s.lastErr = err
 	logger.WarnCF("tools", message, map[string]any{
 		"path":  s.statePathLocked(),
 		"error": err.Error(),
 	})
+}
+
+func (s *toolAdaptationStateStore) clearError() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.lastErr = nil
+	s.mu.Unlock()
+}
+
+func (s *toolAdaptationStateStore) consumeError() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := s.lastErr
+	s.lastErr = nil
+	return err
 }
 
 func normalizeToolAdaptationProfile(profile ToolAdaptationProfile) ToolAdaptationProfile {

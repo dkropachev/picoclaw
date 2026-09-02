@@ -46,7 +46,9 @@ func TestP015B2BLifecycleBudgetFallbackPreservesExactEffectiveBudget(t *testing.
 		sessionCanary = "P015B2B_BUDGET_SESSION_790b2ea4"
 		contentCanary = "P015B2B_BUDGET_CONTENT_bed01892"
 	)
-	engine, err := seahorse.NewEngine(seahorse.Config{DBPath: t.TempDir() + "/budget.db"}, nil)
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: t.TempDir() + "/budget.db",
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
@@ -134,7 +136,9 @@ func TestP015B2BLifecycleSeahorseBootstrapFailureIsBestEffortAndSealed(t *testin
 	const sessionCanary = "P015B2B_BOOTSTRAP_SESSION_288cad11"
 	var methodCalls atomic.Int64
 	hostile := &p015B2BLifecycleHostileError{calls: &methodCalls}
-	engine, err := seahorse.NewEngine(seahorse.Config{DBPath: t.TempDir() + "/bootstrap.db"}, nil)
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: t.TempDir() + "/bootstrap.db",
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}

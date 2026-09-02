@@ -8,8 +8,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	launcherapi "github.com/sipeed/picoclaw/web/backend/api"
 )
 
@@ -33,7 +37,9 @@ type expectedCounts struct {
 }
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout, os.Stderr, backfillFileAttributions); err != nil {
+	if err := runWithPreparation(
+		os.Args[1:], os.Stdout, os.Stderr, backfillFileAttributions, prepareBackfillRuntime,
+	); err != nil {
 		fatal(err)
 	}
 }
@@ -47,6 +53,7 @@ type backfillFileAttributionsFunc func(
 
 var (
 	backfillFileAttributions backfillFileAttributionsFunc = launcherapi.BackfillRepositoryReviewFileAttributions
+	prepareBackfillRuntime   prepareBackfillFunc          = prepareBackfillDatabase
 	exitProcess                                           = os.Exit
 )
 
@@ -55,6 +62,18 @@ func run(
 	stdout io.Writer,
 	stderr io.Writer,
 	backfill backfillFileAttributionsFunc,
+) error {
+	return runWithPreparation(args, stdout, stderr, backfill, nil)
+}
+
+type prepareBackfillFunc func(context.Context, string) (func(), error)
+
+func runWithPreparation(
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	backfill backfillFileAttributionsFunc,
+	prepare prepareBackfillFunc,
 ) error {
 	if stdout == nil || stderr == nil || backfill == nil {
 		return errors.New("command output and backfill operation are required")
@@ -130,6 +149,15 @@ func run(
 	if *workspace == "" || *automationID == "" {
 		return errors.New("--workspace and --automation are required")
 	}
+	if prepare != nil {
+		cleanup, prepareErr := prepare(context.Background(), *workspace)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+	}
 	report, err := backfill(
 		context.Background(),
 		*workspace,
@@ -167,6 +195,39 @@ func run(
 		return err
 	}
 	return nil
+}
+
+func prepareBackfillDatabase(ctx context.Context, _ string) (func(), error) {
+	home, err := database.PrepareHome(config.GetHome())
+	if err != nil {
+		return nil, err
+	}
+	executable := strings.TrimSpace(os.Getenv("PICOCLAW_EXECUTABLE"))
+	if executable == "" {
+		executable, err = exec.LookPath("picoclaw")
+		if err != nil {
+			return nil, errors.New("picoclaw executable is required to start the database supervisor")
+		}
+	}
+	configPath := strings.TrimSpace(os.Getenv(config.EnvConfig))
+	if configPath == "" {
+		configPath = filepath.Join(home, "config.json")
+	}
+	client, err := database.EnsureSupervisor(ctx, database.EnsureOptions{
+		Home: home, Executable: executable, ConfigPath: configPath,
+	})
+	if err != nil {
+		return nil, err
+	}
+	fence, err := database.AcquireOnlineFence(home)
+	if err != nil {
+		return nil, err
+	}
+	database.InstallProcessClient(client)
+	return func() {
+		database.InstallProcessClient(nil)
+		_ = fence.Close()
+	}, nil
 }
 
 func compareExpectedCounts(

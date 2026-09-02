@@ -13,7 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -30,6 +31,8 @@ const (
 var errDuplicateLegacyInventoryIdentity = errors.New(
 	"legacy git workspace inventory contains a duplicate JSON identity",
 )
+
+var errInventoryGenerationConflict = errors.New("git workspace inventory generation conflict")
 
 const inventoryMetaSchema = `CREATE TABLE inventory_meta (
     singleton  INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -313,6 +316,12 @@ var inventorySchemaObjects = []struct {
 func (m *Manager) openInventoryDatabase(ctx context.Context) (*sql.DB, error) {
 	if m == nil {
 		return nil, errors.New("git workspace manager is not configured")
+	}
+	if m.broker != nil || !inventoryProviderAuthorityHeld() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"git workspace inventory provider requires database fencing",
+		)
 	}
 	freshDatabase := false
 	return sqlitestore.Open(ctx, m.databasePath(), sqlitestore.Options{
@@ -1067,7 +1076,7 @@ func rewriteInventoryState(ctx context.Context, conn *sql.Conn, state *storeStat
 		return err
 	}
 	if current != expected {
-		return errors.New("git workspace inventory generation conflict")
+		return errInventoryGenerationConflict
 	}
 	if _, err := conn.ExecContext(ctx, `DELETE FROM inventory_history`); err != nil {
 		return err
@@ -1100,7 +1109,7 @@ func rewriteInventoryState(ctx context.Context, conn *sql.Conn, state *storeStat
 	}
 	changed, err := result.RowsAffected()
 	if err != nil || changed != 1 {
-		return errors.New("git workspace inventory generation conflict")
+		return errInventoryGenerationConflict
 	}
 	return nil
 }

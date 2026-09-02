@@ -19,6 +19,8 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
+	"github.com/sipeed/picoclaw/pkg/internal/sessiondb"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
@@ -47,11 +49,15 @@ var (
 )
 
 type Store struct {
-	Dir         string
-	Workspace   string
-	ThreadsDir  string
-	HandoffsDir string
-	testHooks   *threadStoreTestHooks
+	Dir              string
+	Workspace        string
+	ThreadsDir       string
+	HandoffsDir      string
+	testHooks        *threadStoreTestHooks
+	brokerClient     *database.Client
+	brokerStore      *memory.SQLiteStore
+	brokerStoreID    database.StoreID
+	brokerResolveErr error
 }
 
 // threadStoreTestHooks provides deterministic scheduling points for package
@@ -193,17 +199,52 @@ func ResolveHandoffsDir(workspace string) string {
 
 func NewStoreFromWorkspace(workspace string) Store {
 	workspace = ResolveWorkspace(workspace)
-	return Store{
-		Dir:         filepath.Join(workspace, "sessions"),
-		Workspace:   workspace,
-		ThreadsDir:  filepath.Join(workspace, "threads"),
-		HandoffsDir: filepath.Join(workspace, "threads", "handoffs"),
+	store := Store{
+		Dir:          filepath.Join(workspace, "sessions"),
+		Workspace:    workspace,
+		ThreadsDir:   filepath.Join(workspace, "threads"),
+		HandoffsDir:  filepath.Join(workspace, "threads", "handoffs"),
+		brokerClient: database.RuntimeClient(),
 	}
+	if store.brokerClient != nil {
+		store.brokerStoreID, store.brokerResolveErr = memory.ResolveBrokerStoreID(
+			context.Background(), store.brokerClient, store.Dir,
+		)
+	}
+	return store
 }
 
 func (s Store) openSessionStore() (*memory.SQLiteStore, error) {
 	s = s.withDefaults()
-	return memory.NewSQLiteStore(s.Dir)
+	return memory.NewStore(s.Dir)
+}
+
+func (s Store) borrowSessionStore() (*memory.SQLiteStore, func(), error) {
+	if s.brokerStore != nil {
+		return s.brokerStore, func() {}, nil
+	}
+	if s.brokerClient != nil {
+		return nil, func() {}, database.NewError(
+			database.CodeUnavailable,
+			"thread broker operation is unavailable",
+		)
+	}
+	store, err := s.openSessionStore()
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return store, func() { _ = store.Close() }, nil
+}
+
+func threadSessionAdapter(store *memory.SQLiteStore) sessiondb.Adapter {
+	if store == nil {
+		return sessiondb.Adapter{}
+	}
+	return sessiondb.Bind(store.ThreadStore())
+}
+
+func threadSessionDatabase(store *memory.SQLiteStore) *sql.DB {
+	return threadSessionAdapter(store).Database()
 }
 
 type ordinarySessionState struct {
@@ -226,11 +267,11 @@ func (s Store) readOrdinarySessionState(
 		}
 		return ordinarySessionState{}, nil
 	}
-	store, err := s.openSessionStore()
+	store, release, err := s.borrowSessionStore()
 	if err != nil {
 		return ordinarySessionState{}, err
 	}
-	defer store.Close()
+	defer release()
 	canonicalKey, history, meta, modifiedAt, found, err := store.ReadSessionStateStrict(
 		ctx,
 		sessionKey,
@@ -278,6 +319,9 @@ func rejectReviewThreadSessionScope(scope *session.SessionScope) error {
 }
 
 func (s Store) Search(opts SearchOptions) ([]Thread, error) {
+	if s.brokerClient != nil {
+		return s.brokerSearch(context.Background(), opts)
+	}
 	items, err := s.list(ListOptions{IncludeDropped: opts.IncludeDropped})
 	if err != nil {
 		return nil, err
@@ -333,6 +377,9 @@ func (s Store) ListAll(opts ListOptions) ([]Thread, error) {
 }
 
 func (s Store) list(opts ListOptions) ([]Thread, error) {
+	if s.brokerClient != nil {
+		return s.brokerList(context.Background(), opts)
+	}
 	s = s.withDefaults()
 	metas, err := s.listThreadMetas()
 	if err != nil {
@@ -364,16 +411,47 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 		s.Dir = ResolveSessionsDir(cfg.Agents.Defaults.Workspace)
 	}
 	allocation := AllocatePicoThread(cfg, req.ID)
+	if s.brokerClient != nil {
+		storeID, err := s.resolvedBrokerStoreID(ctx)
+		if err != nil {
+			return Thread{}, err
+		}
+		var response threadBrokerResponse
+		err = s.callBroker(
+			ctx, threadOperationCreatePico,
+			threadCreatePicoRequest{
+				StoreID: storeID, Allocation: allocation,
+				Request: cloneCreateRequest(req),
+			},
+			&response, true,
+		)
+		if err != nil {
+			return Thread{}, err
+		}
+		if !response.Found || response.Thread == nil {
+			return Thread{}, database.NewError(database.CodeIntegrity, "thread broker response is invalid")
+		}
+		return cloneThread(*response.Thread), nil
+	}
+	return s.createPicoThreadWithAllocation(ctx, allocation, req)
+}
+
+func (s Store) createPicoThreadWithAllocation(
+	ctx context.Context,
+	allocation PicoAllocation,
+	req CreateRequest,
+) (Thread, error) {
+	s = s.withDefaults()
 	if allocation.SessionID == "" || allocation.Key == "" {
 		return Thread{}, errors.New("threads: failed to allocate pico thread")
 	}
 
-	sessionStore, err := s.openSessionStore()
+	sessionStore, release, err := s.borrowSessionStore()
 	if err != nil {
 		return Thread{}, err
 	}
 
-	defer sessionStore.Close()
+	defer release()
 	now := time.Now().UTC()
 	sourceQuery := strings.TrimSpace(firstNonEmpty(req.SourceQuery, req.Title, "New thread"))
 	threadType := NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+sourceQuery)))
@@ -388,7 +466,9 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 		Registration: firstNonEmpty(req.Registration, RegistrationManual),
 		CreatedAt:    now, UpdatedAt: now,
 	}
-	err = sessionStore.Immediate(contextOrBackground(ctx), func(ctx context.Context, conn *sql.Conn) error {
+	err = threadSessionAdapter(
+		sessionStore,
+	).Immediate(contextOrBackground(ctx), func(ctx context.Context, conn *sql.Conn) error {
 		seconds, nanos := threadTimeParts(now)
 		if _, err := conn.ExecContext(ctx, `INSERT INTO sessions (
             session_key, summary, created_seconds, created_nanos, updated_seconds, updated_nanos, version
@@ -460,6 +540,9 @@ func (s Store) Get(id string) (Thread, bool, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return Thread{}, false, nil
+	}
+	if s.brokerClient != nil {
+		return s.brokerGet(context.Background(), id)
 	}
 	metas, err := s.listThreadMetas()
 	if err != nil {

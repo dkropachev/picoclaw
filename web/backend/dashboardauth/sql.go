@@ -1,8 +1,7 @@
 package dashboardauth
 
 const (
-	// DBFilename is the SQLite database file stored under the PicoClaw home directory.
-	DBFilename = "launcher-auth.db"
+	databaseFilename = "launcher-auth.db"
 
 	// bcryptCost is deliberately high enough to slow brute-force attempts.
 	bcryptCost = 12

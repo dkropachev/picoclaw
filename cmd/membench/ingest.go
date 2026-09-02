@@ -24,8 +24,8 @@ func IngestSeahorse(ctx context.Context, samples []LocomoSample, dbPath string) 
 		return "", nil
 	}
 
-	engine, err := seahorse.NewEngine(seahorse.Config{
-		DBPath: dbPath,
+	engine, err := seahorse.NewOfflineEngine(seahorse.OfflineConfig{
+		DatabasePath: dbPath,
 	}, noopFn)
 	if err != nil {
 		return nil, fmt.Errorf("create seahorse engine: %w", err)

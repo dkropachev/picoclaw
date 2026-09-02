@@ -14,10 +14,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 )
 
 // SQLiteRunStore is the durable workflow store. FileRunStore remains an alias
@@ -25,9 +27,17 @@ import (
 // move to SQLite without a second persistence path.
 type SQLiteRunStore = FileRunStore
 
+var allowUnfencedWorkflowProviderForTests atomic.Bool
+
 // NewSQLiteRunStore validates and opens the workspace database eagerly.
 func NewSQLiteRunStore(workspace string) (*SQLiteRunStore, error) {
 	store := NewFileRunStore(workspace)
+	if store.usesWorkflowBroker() {
+		if _, err := store.workflowBrokerClient(); err != nil {
+			return nil, err
+		}
+		return store, nil
+	}
 	ctx := context.Background()
 	db, err := store.borrowDatabase(ctx)
 	if err != nil {
@@ -46,8 +56,8 @@ func validateBorrowedWorkflowDatabase(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	defer conn.Close()
-	var version int
-	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+	version, err := sqliteprovider.SchemaVersion(ctx, conn)
+	if err != nil {
 		return err
 	}
 	if version > 1 {
@@ -59,21 +69,8 @@ func validateBorrowedWorkflowDatabase(ctx context.Context, db *sql.DB) error {
 	if err := validateWorkflowSchema(ctx, conn); err != nil {
 		return err
 	}
-	var integrity string
-	if err := conn.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil {
-		return err
-	}
-	if integrity != "ok" {
-		return errors.New("workflow database integrity check failed")
-	}
-	var foreignKeyViolation int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(
-		&foreignKeyViolation,
-	); err != nil {
-		return err
-	}
-	if foreignKeyViolation != 0 {
-		return errors.New("workflow database foreign key check failed")
+	if err := sqliteprovider.CheckIntegrity(ctx, conn); err != nil {
+		return fmt.Errorf("workflow database integrity check failed: %w", err)
 	}
 	return nil
 }
@@ -89,14 +86,12 @@ func (s *FileRunStore) workspaceDir() string {
 	return strings.TrimSuffix(root, string(os.PathSeparator)+"workflow_runs")
 }
 
-const workflowDatabaseIdleCloseDelay = 100 * time.Millisecond
-
 type workflowDatabasePool struct {
-	mu        sync.Mutex
-	workspace string
-	db        *sql.DB
-	users     int
-	timer     *time.Timer
+	mu         sync.Mutex
+	workspace  string
+	db         *sql.DB
+	users      int
+	persistent bool
 }
 
 var workflowDatabasePools sync.Map
@@ -125,16 +120,11 @@ func borrowWorkflowDatabase(
 func (pool *workflowDatabasePool) borrow(ctx context.Context) (*sql.DB, error) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
-	if pool.timer != nil {
-		pool.timer.Stop()
-		pool.timer = nil
-	}
 	if pool.db == nil {
 		db, err := openWorkflowDatabase(ctx, pool.workspace)
 		if err != nil {
 			return nil, workflowDatabaseError("open", err)
 		}
-		db.SetMaxIdleConns(0)
 		pool.db = db
 	}
 	pool.users++
@@ -147,19 +137,38 @@ func (pool *workflowDatabasePool) release() {
 	if pool.users > 0 {
 		pool.users--
 	}
-	if pool.users != 0 || pool.db == nil {
-		return
-	}
-	pool.timer = time.AfterFunc(workflowDatabaseIdleCloseDelay, func() {
-		pool.mu.Lock()
-		defer pool.mu.Unlock()
-		pool.timer = nil
-		if pool.users != 0 || pool.db == nil {
-			return
-		}
+	// Broker-owned runtime pools remain stable for the runtime generation.
+	// Standalone embedders and tests have no broker shutdown callback, so close
+	// synchronously at the operation boundary to avoid retaining mappings after
+	// their temporary storage root is removed.
+	if pool.users == 0 && pool.db != nil && !pool.persistent {
 		_ = pool.db.Close()
 		pool.db = nil
-	})
+	}
+}
+
+func (pool *workflowDatabasePool) retainUntilClose() {
+	pool.mu.Lock()
+	pool.persistent = true
+	pool.mu.Unlock()
+}
+
+func (pool *workflowDatabasePool) close() error {
+	if pool == nil {
+		return nil
+	}
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if pool.users != 0 {
+		return fmt.Errorf("workflow database still has %d active users", pool.users)
+	}
+	pool.persistent = false
+	if pool.db == nil {
+		return nil
+	}
+	err := pool.db.Close()
+	pool.db = nil
+	return err
 }
 
 func (s *FileRunStore) borrowDatabase(ctx context.Context) (*sql.DB, error) {
@@ -177,12 +186,10 @@ func (s *FileRunStore) releaseDatabase() {
 	}
 }
 
-// Close releases this store's validated database handle. Most runtime owners
-// retain a store for their process lifetime; tests and short-lived embedders
-// may close it explicitly.
+// Close releases this logical store reference. The database broker owns the
+// physical pool and retains it until broker shutdown, so callers never close a
+// live SQLite generation as an operation becomes idle.
 func (s *FileRunStore) Close() error {
-	// Database pools are shared by every store for one workspace and close
-	// automatically after the last active operation becomes idle.
 	return nil
 }
 
@@ -1422,6 +1429,9 @@ func (s *FileRunStore) ClaimHumanTask(
 	taskID string,
 	req HumanTaskResumeRequest,
 ) (*Run, WorkflowHumanTask, bool, error) {
+	if s.usesWorkflowBroker() {
+		return s.brokerClaimHumanTask(ctx, runID, taskID, req)
+	}
 	runID = strings.TrimSpace(runID)
 	taskID = strings.TrimSpace(taskID)
 	if runID == "" || taskID == "" {
@@ -1448,6 +1458,9 @@ func (s *FileRunStore) RenewHumanTaskClaim(
 	token string,
 	lease time.Duration,
 ) error {
+	if s.usesWorkflowBroker() {
+		return s.brokerRenewHumanTaskClaim(ctx, runID, taskID, token, lease)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1471,6 +1484,9 @@ func (s *FileRunStore) CancelHumanTask(
 	taskID string,
 	reason string,
 ) (*Run, error) {
+	if s.usesWorkflowBroker() {
+		return s.brokerCancelHumanTask(ctx, runID, taskID, reason)
+	}
 	reason, err := NormalizeWorkflowCancelReason(reason)
 	if err != nil {
 		return nil, err
@@ -1493,6 +1509,9 @@ func (s *FileRunStore) CancelHumanTask(
 }
 
 func (s *FileRunStore) AppendEvent(ctx context.Context, event RunEvent) error {
+	if s.usesWorkflowBroker() {
+		return s.brokerAppendEvent(ctx, event)
+	}
 	_, err := withWorkflowDB(ctx, s, "append event", func(db *sql.DB) (struct{}, error) {
 		return workflowImmediate(ctx, db, func(conn *sql.Conn) (struct{}, error) {
 			return struct{}{}, appendWorkflowEventConn(ctx, conn, event)
@@ -1502,6 +1521,9 @@ func (s *FileRunStore) AppendEvent(ctx context.Context, event RunEvent) error {
 }
 
 func (s *FileRunStore) Events(ctx context.Context, runID string) ([]RunEvent, error) {
+	if s.usesWorkflowBroker() {
+		return s.brokerEvents(ctx, runID)
+	}
 	runID = strings.TrimSpace(runID)
 	return withWorkflowDB(ctx, s, "list events", func(db *sql.DB) ([]RunEvent, error) {
 		conn, err := db.Conn(ctx)
@@ -1514,6 +1536,9 @@ func (s *FileRunStore) Events(ctx context.Context, runID string) ([]RunEvent, er
 }
 
 func (s *FileRunStore) DeleteRun(ctx context.Context, runID string) error {
+	if s.usesWorkflowBroker() {
+		return s.brokerDeleteRun(ctx, runID)
+	}
 	runID = strings.TrimSpace(runID)
 	if runID == "" || safeID(runID) == "unknown" {
 		return fmt.Errorf("run id is required")
@@ -1535,6 +1560,9 @@ func (s *FileRunStore) DeleteRun(ctx context.Context, runID string) error {
 }
 
 func (s *FileRunStore) PruneTerminalRuns(ctx context.Context, olderThan time.Time) (int, error) {
+	if s.usesWorkflowBroker() {
+		return s.brokerPruneTerminalRuns(ctx, olderThan)
+	}
 	return withWorkflowDB(ctx, s, "prune runs", func(db *sql.DB) (int, error) {
 		return workflowImmediate(ctx, db, func(conn *sql.Conn) (int, error) {
 			seconds, nanos, err := workflowTimestamp(olderThan)

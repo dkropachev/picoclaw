@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 )
 
 const adversarialSecondLineID = "pdln_fedcba9876543210fedcba9876543210"

@@ -12,6 +12,17 @@ import (
 )
 
 func lockRepositoryReviewStore(root string) (func(), error) {
+	return lockRepositoryReviewStoreMode(root, false)
+}
+
+func tryLockRepositoryReviewStore(root string) (func(), error) {
+	return lockRepositoryReviewStoreMode(root, true)
+}
+
+func lockRepositoryReviewStoreMode(root string, nonblocking bool) (func(), error) {
+	if err := reviewProviderAuthorityError(); err != nil {
+		return nil, err
+	}
 	lockPath, err := repositoryReviewLockPath(root, "store.lock")
 	if err != nil {
 		return nil, err
@@ -35,15 +46,22 @@ func lockRepositoryReviewStore(root string) (func(), error) {
 		return nil, err
 	}
 	var overlapped windows.Overlapped
+	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK)
+	if nonblocking {
+		flags |= windows.LOCKFILE_FAIL_IMMEDIATELY
+	}
 	if err := windows.LockFileEx(
 		windows.Handle(file.Fd()),
-		windows.LOCKFILE_EXCLUSIVE_LOCK,
+		flags,
 		0,
 		1,
 		0,
 		&overlapped,
 	); err != nil {
 		_ = file.Close()
+		if nonblocking && errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return nil, ErrConflict
+		}
 		return nil, fmt.Errorf("lock repository review store: %w", err)
 	}
 	return func() {

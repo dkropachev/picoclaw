@@ -2,6 +2,7 @@ package accountrouter
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -42,11 +44,13 @@ type Router struct {
 	Name       string
 	Config     config.AccountRouterConfig
 	Accounts   map[string]Account
-	StatePath  string
 	ConfigHash string
 
-	store *Store
-	now   func() time.Time
+	store     *Store
+	now       func() time.Time
+	broker    *database.Client
+	storeID   database.StoreID
+	brokerErr error
 }
 
 type Selection struct {
@@ -117,33 +121,89 @@ type Store struct {
 	st             State
 	initErr        error
 	now            func() time.Time
+	retainedDB     *sql.DB
+	retainedUnlock func()
 }
 
 var stores sync.Map
 
-func New(name string, routerConfig *config.AccountRouterConfig, accounts map[string]Account, statePath string) *Router {
-	router, err := NewSQLite(name, routerConfig, accounts, statePath)
+func newRouter(
+	name string,
+	routerConfig *config.AccountRouterConfig,
+	accounts map[string]Account,
+	statePath string,
+) *Router {
+	router, err := newSQLiteRouter(name, routerConfig, accounts, statePath)
 	if err != nil {
 		return nil
 	}
 	return router
 }
 
-// NewSQLite constructs an account router using a normalized SQLite store and
+// NewForWorkspace constructs an account router against the workspace's opaque
+// account-routing store. Runtime mode resolves only the trusted StoreID.
+func NewForWorkspace(
+	name string,
+	routerConfig *config.AccountRouterConfig,
+	accounts map[string]Account,
+	workspace string,
+) *Router {
+	if database.RuntimeClient() == nil && !database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedAccountRouterProviderForTests.Load() {
+		return nil
+	}
+	statePath := ""
+	if database.RuntimeClient() == nil {
+		statePath = databasePath(workspace)
+	}
+	return newRouter(name, routerConfig, accounts, statePath)
+}
+
+// newSQLiteRouter constructs a standalone/offline account router and
 // reports path, migration, schema, or integrity failures directly.
-func NewSQLite(
+func newSQLiteRouter(
 	name string,
 	routerConfig *config.AccountRouterConfig,
 	accounts map[string]Account,
 	statePath string,
 ) (*Router, error) {
-	if routerConfig == nil || strings.TrimSpace(name) == "" || strings.TrimSpace(statePath) == "" {
+	if routerConfig == nil || strings.TrimSpace(name) == "" {
+		return nil, errors.New("account router configuration and state path are required")
+	}
+	if client := database.RuntimeClient(); client != nil {
+		storeID, err := resolveAccountRouterBrokerStoreID()
+		if err != nil {
+			return nil, err
+		}
+		router := newRouterWithStore(name, routerConfig, accounts, nil)
+		router.broker = client
+		router.storeID = storeID
+		return router, nil
+	}
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedAccountRouterProviderForTests.Load() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"account-router local constructor requires database owner fencing",
+		)
+	}
+	if strings.TrimSpace(statePath) == "" {
 		return nil, errors.New("account router configuration and state path are required")
 	}
 	store, err := getStore(statePath)
 	if err != nil {
 		return nil, err
 	}
+	return newRouterWithStore(name, routerConfig, accounts, store), nil
+}
+
+func newRouterWithStore(
+	name string,
+	routerConfig *config.AccountRouterConfig,
+	accounts map[string]Account,
+	store *Store,
+) *Router {
 	cfg := *routerConfig
 	cfg.Blocks = append([]config.AccountRouterBlock(nil), routerConfig.Blocks...)
 	for i := range cfg.Blocks {
@@ -159,21 +219,38 @@ func NewSQLite(
 		account.Candidates = append([]providers.FallbackCandidate(nil), account.Candidates...)
 		cleanAccounts[key] = account
 	}
-	return &Router{
+	router := &Router{
 		Name:       strings.TrimSpace(name),
 		Config:     cfg,
 		Accounts:   cleanAccounts,
-		StatePath:  store.path,
 		ConfigHash: hashRouterConfig(cfg),
 		store:      store,
 		now:        time.Now,
-	}, nil
+	}
+	return router
+}
+
+// StoreID returns the opaque account-routing store identity in broker mode.
+// Standalone/offline routers return the zero identity.
+func (r *Router) StoreID() database.StoreID {
+	if r == nil {
+		return ""
+	}
+	return r.storeID
 }
 
 func (r *Router) Select(sessionKey string, reason SelectReason) Selection {
 	if r == nil {
 		return Selection{}
 	}
+	if r.usesAccountRouterBroker() {
+		return r.brokerSelect(sessionKey, reason)
+	}
+	selection, _ := r.selectLocal(sessionKey, reason)
+	return selection
+}
+
+func (r *Router) selectLocal(sessionKey string, reason SelectReason) (Selection, error) {
 	selection := Selection{
 		RouterName:                         r.Name,
 		SessionKey:                         sessionKey,
@@ -184,10 +261,10 @@ func (r *Router) Select(sessionKey string, reason SelectReason) Selection {
 		accountAuthInvalidationGenerations: map[string]string{},
 	}
 	if !r.Config.Enabled {
-		return selection
+		return selection, nil
 	}
 
-	_ = r.store.update(func(st *State) {
+	err := r.store.update(func(st *State) {
 		rs := routerState(st, r.Name, r.ConfigHash, r.knownAccountNames())
 		now := r.now()
 		pruneRouterState(rs, now, r.ConfigHash, r.knownAccountNames())
@@ -217,11 +294,15 @@ func (r *Router) Select(sessionKey string, reason SelectReason) Selection {
 		rs.UpdatedAt = now
 	})
 
-	return selection
+	return selection, err
 }
 
 func (r *Router) RecordFallbackResult(selection Selection, result *providers.FallbackResult, err error) {
-	r.recordFallbackResult(selection, result, err, false)
+	if r != nil && r.usesAccountRouterBroker() {
+		r.brokerRecordFallbackResult(selection, result, err, false)
+		return
+	}
+	_ = r.recordFallbackResult(selection, result, err, false)
 }
 
 // RecordPrivateFallbackResult updates health and usage accounting without
@@ -231,16 +312,36 @@ func (r *Router) RecordPrivateFallbackResult(
 	result *providers.FallbackResult,
 	err error,
 ) {
-	r.recordFallbackResult(selection, result, err, true)
+	if r != nil && r.usesAccountRouterBroker() {
+		r.brokerRecordFallbackResult(selection, result, err, true)
+		return
+	}
+	_ = r.recordFallbackResult(selection, result, err, true)
 }
 
 // SessionKeys returns a detached snapshot of persisted session identities for
 // one router. It exposes no session contents and is intended for invariance
 // checks and diagnostics.
 func SessionKeys(statePath, routerName string) ([]string, error) {
+	if database.RuntimeClient() != nil {
+		return SessionKeysForStore(AccountRoutingStoreID, routerName)
+	}
+	if !database.ProviderTestAuthorityHeld() && !allowUnfencedAccountRouterProviderForTests.Load() {
+		return nil, database.NewError(
+			database.CodeUnavailable,
+			"account-router database broker client is unavailable",
+		)
+	}
 	store, err := getStore(statePath)
 	if err != nil {
 		return nil, err
+	}
+	return sessionKeysFromStore(store, routerName)
+}
+
+func sessionKeysFromStore(store *Store, routerName string) ([]string, error) {
+	if store == nil {
+		return nil, errors.New("account router store is unavailable")
 	}
 	if err := store.refresh(); err != nil {
 		return nil, err
@@ -261,6 +362,9 @@ func SessionKeys(statePath, routerName string) ([]string, error) {
 
 // AccountStateSnapshot returns a detached health/accounting snapshot.
 func (r *Router) AccountStateSnapshot(account string) (AccountState, bool) {
+	if r != nil && r.usesAccountRouterBroker() {
+		return r.brokerAccountStateSnapshot(account)
+	}
 	if r == nil || r.store == nil || r.store.refresh() != nil {
 		return AccountState{}, false
 	}
@@ -278,11 +382,11 @@ func (r *Router) recordFallbackResult(
 	result *providers.FallbackResult,
 	err error,
 	private bool,
-) {
+) error {
 	if r == nil || selection.RouterName == "" || selection.RouterName != r.Name {
-		return
+		return nil
 	}
-	_ = r.store.update(func(st *State) {
+	return r.store.update(func(st *State) {
 		rs := routerState(st, r.Name, r.ConfigHash, r.knownAccountNames())
 		now := r.now()
 		pruneRouterState(rs, now, r.ConfigHash, r.knownAccountNames())

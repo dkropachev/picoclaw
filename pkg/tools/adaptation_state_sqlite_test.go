@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 func TestToolAdaptationSQLiteSchemaPragmasPermissionsAndReopen(t *testing.T) {
@@ -135,9 +135,9 @@ func TestToolAdaptationSQLiteSchemaPragmasPermissionsAndReopen(t *testing.T) {
 		t.Fatalf("create WAL evidence: %v", err)
 	}
 	for _, path := range []string{
-		ToolAdaptationStatePath(),
-		ToolAdaptationStatePath() + "-wal",
-		ToolAdaptationStatePath() + "-shm",
+		toolAdaptationStatePath(),
+		toolAdaptationStatePath() + "-wal",
+		toolAdaptationStatePath() + "-shm",
 	} {
 		info, statErr := os.Stat(path)
 		if statErr != nil {
@@ -154,7 +154,7 @@ func TestToolAdaptationSQLiteSchemaPragmasPermissionsAndReopen(t *testing.T) {
 		t.Fatalf("Close() error = %v", closeErr)
 	}
 
-	reopened := &toolAdaptationStateStore{pathOverride: ToolAdaptationStatePath()}
+	reopened := &toolAdaptationStateStore{pathOverride: toolAdaptationStatePath()}
 	latest, found := reopened.latest(profile)
 	if !found || latest.PromptTokens != 1000 || latest.CachedTokens != 250 ||
 		!latest.ObservedAt.Equal(observation.ObservedAt) {
@@ -572,7 +572,8 @@ func TestToolAdaptationSQLiteRejectsTooNewCorruptAndUnsafeState(t *testing.T) {
 		store.mu.Lock()
 		_, err := store.openLocked(t.Context())
 		store.mu.Unlock()
-		if err == nil || !strings.Contains(err.Error(), "regular file") {
+		if err == nil ||
+			(!strings.Contains(err.Error(), "regular file") && !strings.Contains(err.Error(), "unsafe member")) {
 			t.Fatalf("openLocked() error = %v, want regular-file error", err)
 		}
 	})

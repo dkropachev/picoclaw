@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 )
 
 type accountRouterQueryerFunc func(context.Context, string, ...any) (*sql.Rows, error)

@@ -41,6 +41,11 @@ const (
 	// EnvGatewayHost overrides the host address for the gateway server.
 	// Default: "localhost"
 	EnvGatewayHost = "PICOCLAW_GATEWAY_HOST"
+
+	// EnvGatewaySupervisorPID is inherited only by the authenticated private
+	// runtime child so its public PID metadata remains stable across child
+	// restarts. Users must not set it directly.
+	EnvGatewaySupervisorPID = "PICOCLAW_GATEWAY_SUPERVISOR_PID"
 )
 
 func GetHome() string {

@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 //nolint:govet // Narrow test assertions intentionally use independent error scopes.
@@ -867,17 +867,9 @@ func TestAuthSQLitePathsUseConfiguredHome(t *testing.T) {
 	if resolved != authDatabasePath() {
 		t.Fatalf("resolved auth path = %q, want %q", resolved, authDatabasePath())
 	}
-	refreshLock, err := credentialRefreshLockPath("OpenAI:Work")
-	if err != nil {
-		t.Fatal(err)
-	}
 	lockDirectory, err := resolvedAuthLockDirectoryPath()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if filepath.Dir(refreshLock) != lockDirectory ||
-		!strings.HasPrefix(filepath.Base(refreshLock), "refresh-") {
-		t.Fatalf("credential refresh lock path = %q, want child of %q", refreshLock, lockDirectory)
 	}
 	storeLock, err := authStoreLockPath()
 	if err != nil {
@@ -912,11 +904,7 @@ func TestAuthSQLiteLockDirectoryAndFilesArePrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	refreshLock, err := credentialRefreshLockPath("openai")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{storeLock + ".lock", refreshLock + ".lock"} {
+	for _, path := range []string{storeLock + ".lock"} {
 		if info, statErr := os.Stat(path); statErr != nil || info.Mode().Perm() != 0o600 {
 			t.Fatalf("auth lock %s mode = %v, %v", filepath.Base(path), info, statErr)
 		}
@@ -1352,9 +1340,11 @@ func TestAuthSQLiteRemainingCoverageBoundaries(t *testing.T) {
 		if err := os.WriteFile(lockDirectory, []byte("not a directory"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := lockCredentialRefresh("openai"); err == nil {
-			t.Fatal("lockCredentialRefresh accepted a file lock directory")
+		unlockRefresh, err := lockCredentialRefresh("openai")
+		if err != nil {
+			t.Fatalf("process-local refresh lock consulted filesystem: %v", err)
 		}
+		unlockRefresh()
 		if _, err := openAuthLockFile(
 			filepath.Join(t.TempDir(), strings.Repeat("x", 5000)),
 		); err == nil {

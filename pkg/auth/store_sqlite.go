@@ -15,8 +15,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -183,6 +184,15 @@ func authStoreLockPath() (string, error) {
 }
 
 func openAuthDatabase(ctx context.Context) (*sql.DB, error) {
+	if !authProviderAccessAuthorized() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"auth provider access requires database owner authority",
+		)
+	}
+	if db, err := retainedAuthBrokerDatabase(); db != nil || err != nil {
+		return db, err
+	}
 	unlock, err := lockAuthDatabaseAccess()
 	if err != nil {
 		return nil, err
@@ -192,6 +202,15 @@ func openAuthDatabase(ctx context.Context) (*sql.DB, error) {
 }
 
 func openAuthDatabaseForWrite(ctx context.Context) (*sql.DB, func(), error) {
+	if !authProviderAccessAuthorized() {
+		return nil, nil, database.NewError(
+			database.CodeUnauthorized,
+			"auth provider access requires database owner authority",
+		)
+	}
+	if db, err := retainedAuthBrokerDatabase(); db != nil || err != nil {
+		return db, func() {}, err
+	}
 	unlock, err := lockAuthDatabaseAccess()
 	if err != nil {
 		return nil, nil, err
@@ -205,12 +224,23 @@ func openAuthDatabaseForWrite(ctx context.Context) (*sql.DB, func(), error) {
 }
 
 func openAuthDatabaseUnlocked(ctx context.Context) (*sql.DB, error) {
+	if !authProviderAccessAuthorized() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"auth provider access requires database owner authority",
+		)
+	}
 	path, err := resolvedAuthDatabasePath()
 	if err != nil {
 		return nil, fmt.Errorf("resolve auth database path: %w", err)
 	}
 	root := filepath.Dir(path)
 	return sqlitestore.Open(ctx, path, authStoreOptions(root))
+}
+
+func authProviderAccessAuthorized() bool {
+	return database.BrokerAuthorityHeld() || database.MigrationFenceHeld() ||
+		database.ProviderTestAuthorityHeld() || allowUnfencedAuthProviderForTests.Load()
 }
 
 func lockAuthDatabaseAccess() (func(), error) {
@@ -890,7 +920,7 @@ func existingCredentialIDs(ctx context.Context, conn *sql.Conn) ([]string, error
 }
 
 func closeAuthDatabase(db *sql.DB) {
-	if db != nil {
+	if db != nil && db != authBrokerRetainedDatabase.Load() {
 		_ = db.Close()
 	}
 }

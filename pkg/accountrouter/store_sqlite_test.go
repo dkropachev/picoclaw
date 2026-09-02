@@ -15,17 +15,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 //nolint:govet // Narrow test assertions intentionally use independent error scopes.
 func TestAccountRouterSQLiteSchemaPragmasPermissionsAndFacade(t *testing.T) {
 	workspace := privateAccountRouterWorkspace(t)
-	databasePath := DatabasePath(workspace)
+	databasePath := databasePath(workspace)
 	now := time.Date(2500, time.January, 2, 3, 4, 5, 678901234, time.UTC)
-	router, err := NewSQLite(
+	router, err := newSQLiteRouter(
 		"router-main",
 		testAccountRouterConfig(),
 		testAccountRouterAccounts(),
@@ -138,8 +138,8 @@ func TestAccountRouterSQLiteSchemaPragmasPermissionsAndFacade(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace, accountRouterLegacyFilename)); !os.IsNotExist(err) {
 		t.Fatalf("mutable legacy JSON was written: %v", err)
 	}
-	if router.StatePath != databasePath {
-		t.Fatalf("StatePath = %q, want %q", router.StatePath, databasePath)
+	if router.store == nil || router.store.path != databasePath {
+		t.Fatalf("local provider path = %#v, want %q", router.store, databasePath)
 	}
 }
 
@@ -299,7 +299,7 @@ func TestAccountRouterLegacyStateAndInvalidationMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	router, err := NewSQLite(
+	router, err := newSQLiteRouter(
 		"unrelated-router",
 		testAccountRouterConfig(),
 		testAccountRouterAccounts(),
@@ -309,8 +309,8 @@ func TestAccountRouterLegacyStateAndInvalidationMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	databasePath := strings.TrimSuffix(legacyPath, ".json") + ".db"
-	if router.StatePath != databasePath {
-		t.Fatalf("facade database = %q", router.StatePath)
+	if router.store == nil || router.store.path != databasePath {
+		t.Fatalf("local provider path = %#v", router.store)
 	}
 	migrated := router.store.st.Routers["router-main"]
 	if migrated == nil || migrated.Accounts["credential:openai:work"] == nil ||
@@ -358,7 +358,7 @@ func TestAccountRouterLegacyStateAndInvalidationMigration(t *testing.T) {
 		}
 	}
 	stores.Delete(databasePath)
-	if _, err := NewSQLite(
+	if _, err := newSQLiteRouter(
 		"unrelated-router", testAccountRouterConfig(), testAccountRouterAccounts(), legacyPath,
 	); err != nil {
 		t.Fatalf("idempotent reopen = %v", err)
@@ -377,7 +377,7 @@ func TestAccountRouterRejectsUnsafeLegacyCorruptAndFutureDatabases(t *testing.T)
 			if err := os.Chmod(path, 0o622); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := NewSQLite(
+			if _, err := newSQLiteRouter(
 				"router",
 				testAccountRouterConfig(),
 				testAccountRouterAccounts(),
@@ -397,7 +397,7 @@ func TestAccountRouterRejectsUnsafeLegacyCorruptAndFutureDatabases(t *testing.T)
 		if err := os.Symlink(outside, path); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		if _, err := NewSQLite(
+		if _, err := newSQLiteRouter(
 			"router",
 			testAccountRouterConfig(),
 			testAccountRouterAccounts(),
@@ -413,7 +413,12 @@ func TestAccountRouterRejectsUnsafeLegacyCorruptAndFutureDatabases(t *testing.T)
 		if err := os.WriteFile(path, []byte("not SQLite"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := NewSQLite("router", testAccountRouterConfig(), testAccountRouterAccounts(), path); err == nil {
+		if _, err := newSQLiteRouter(
+			"router",
+			testAccountRouterConfig(),
+			testAccountRouterAccounts(),
+			path,
+		); err == nil {
 			t.Fatal("corrupt database was accepted")
 		}
 	})
@@ -424,7 +429,7 @@ func TestAccountRouterRejectsUnsafeLegacyCorruptAndFutureDatabases(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			root := privateAccountRouterWorkspace(t)
 			path := filepath.Join(root, "router.db")
-			router, err := NewSQLite("router", testAccountRouterConfig(), testAccountRouterAccounts(), path)
+			router, err := newSQLiteRouter("router", testAccountRouterConfig(), testAccountRouterAccounts(), path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -438,7 +443,7 @@ func TestAccountRouterRejectsUnsafeLegacyCorruptAndFutureDatabases(t *testing.T)
 				t.Fatal(err)
 			}
 			stores.Delete(path)
-			_, err = NewSQLite("router", testAccountRouterConfig(), testAccountRouterAccounts(), path)
+			_, err = newSQLiteRouter("router", testAccountRouterConfig(), testAccountRouterAccounts(), path)
 			if err == nil {
 				t.Fatalf("%s database was accepted", name)
 			}
@@ -453,7 +458,7 @@ func TestAccountRouterSerializesAcrossProcesses(t *testing.T) {
 	if os.Getenv("PICOCLAW_ACCOUNT_ROUTER_HELPER") == "1" {
 		path := os.Getenv("PICOCLAW_ACCOUNT_ROUTER_PATH")
 		sessionID := os.Getenv("PICOCLAW_ACCOUNT_ROUTER_SESSION")
-		router, err := NewSQLite(
+		router, err := newSQLiteRouter(
 			"router-main", testAccountRouterConfig(), testAccountRouterAccounts(), path,
 		)
 		if err != nil {

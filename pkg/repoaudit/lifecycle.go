@@ -95,6 +95,12 @@ type RepositoryIssueSnapshotUpdate struct {
 // AcquireValidationSlot enforces the workspace-wide four-validator limit
 // across launcher processes. The OS releases a held slot after process loss.
 func (s Store) AcquireValidationSlot(ctx context.Context) (func(), error) {
+	if s.broker != nil {
+		return s.brokerAcquireNamedLease(ctx, reviewLeaseValidationSlot, reviewNamedLeaseRequest{})
+	}
+	if err := s.localProviderError(); err != nil {
+		return nil, err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

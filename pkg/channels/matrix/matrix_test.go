@@ -17,8 +17,30 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/media"
 )
+
+func TestMatrixCryptoInitializationRequiresBroker(t *testing.T) {
+	previous := database.RuntimeClient()
+	database.InstallProcessClient(nil)
+	t.Cleanup(func() { database.InstallProcessClient(previous) })
+	settings := &config.MatrixSettings{
+		Homeserver:       "https://matrix.invalid",
+		UserID:           "@picoclaw:matrix.invalid",
+		AccessToken:      *config.NewSecureString("token"),
+		CryptoPassphrase: "secret",
+	}
+	channel, err := newMatrixChannel(
+		&config.Channel{}, settings, nil, database.StoreID("channel.matrix.default"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := channel.initCrypto(t.Context()); database.CodeOf(err) != database.CodeUnavailable {
+		t.Fatalf("initCrypto() error = %v", err)
+	}
+}
 
 func TestTypingLoopStoppedBeforeStartDoesNotSendTyping(t *testing.T) {
 	requests := make(chan struct{}, 1)

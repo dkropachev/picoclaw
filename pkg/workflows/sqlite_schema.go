@@ -11,7 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -420,6 +421,14 @@ func workflowStoreOptions(workspace string) (sqlitestore.Options, error) {
 }
 
 func openWorkflowDatabase(ctx context.Context, workspace string) (*sql.DB, error) {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedWorkflowProviderForTests.Load() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"workflow provider access requires database owner fencing",
+		)
+	}
 	path, err := workflowDatabasePath(workspace)
 	if err != nil {
 		return nil, err

@@ -288,10 +288,11 @@ func TestCompareExpectedCountsAllFields(t *testing.T) {
 
 func TestMainAndFatalWrappers(t *testing.T) {
 	originalArgs, originalStdout, originalStderr := os.Args, os.Stdout, os.Stderr
-	originalBackfill, originalExit := backfillFileAttributions, exitProcess
+	originalBackfill, originalPrepare, originalExit := backfillFileAttributions, prepareBackfillRuntime, exitProcess
 	t.Cleanup(func() {
 		os.Args, os.Stdout, os.Stderr = originalArgs, originalStdout, originalStderr
 		backfillFileAttributions, exitProcess = originalBackfill, originalExit
+		prepareBackfillRuntime = originalPrepare
 	})
 	stdout, err := os.CreateTemp(t.TempDir(), "stdout")
 	if err != nil {
@@ -306,6 +307,9 @@ func TestMainAndFatalWrappers(t *testing.T) {
 		launcherapi.RepositoryReviewFileAttributionBackfillOptions,
 	) (launcherapi.RepositoryReviewFileAttributionBackfillReport, error) {
 		return launcherapi.RepositoryReviewFileAttributionBackfillReport{Digest: "sha256:main"}, nil
+	}
+	prepareBackfillRuntime = func(context.Context, string) (func(), error) {
+		return func() {}, nil
 	}
 	main()
 	if closeErr := stdout.Close(); closeErr != nil {

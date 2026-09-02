@@ -15,9 +15,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const storeDirectory = "repository_reviews"
@@ -37,9 +40,10 @@ const (
 )
 
 var (
-	ErrConflict    = errors.New("repository review state changed")
-	ErrInvalidPlan = errors.New("invalid repository review plan")
-	storeLocks     sync.Map
+	ErrConflict                         = errors.New("repository review state changed")
+	ErrInvalidPlan                      = errors.New("invalid repository review plan")
+	storeLocks                          sync.Map
+	allowUnfencedReviewProviderForTests atomic.Bool
 )
 
 type Store struct {
@@ -49,19 +53,82 @@ type Store struct {
 	now         func() time.Time
 	loadForTest func(string) (RepositoryState, error)
 	openForTest func(context.Context) (*sql.DB, error)
+	broker      *database.Client
+	brokerErr   error
+	storeID     database.StoreID
+	brokerState *auditBrokerClientState
+	retained    *retainedReviewDatabase
+	// brokerOwned makes lock conflicts fail immediately inside the broker. The
+	// IPC request context cannot safely wait on a process-local or OS mutex while
+	// broker shutdown is draining workers.
+	brokerOwned bool
 }
 
 // NewSQLiteStore opens repository-review persistence lazily at the first
 // operation. The returned value is safe to copy; mutations remain version
 // fenced in repository-reviews.db.
 func NewSQLiteStore(workspace string) Store {
+	if client := reviewBrokerClient(); client != nil {
+		storeID, err := resolveReviewBrokerStoreID(context.Background(), client, workspace)
+		return Store{
+			workspace: workspace, now: time.Now, broker: client,
+			storeID: storeID, brokerErr: err, brokerState: &auditBrokerClientState{},
+		}
+	}
+	if !database.ProviderTestAuthorityHeld() && !allowUnfencedReviewProviderForTests.Load() {
+		return Store{
+			workspace: workspace,
+			now:       time.Now,
+			brokerErr: database.NewError(
+				database.CodeUnavailable,
+				"repository review database broker client is unavailable",
+			),
+		}
+	}
+	return newSQLiteStoreLocal(workspace)
+}
+
+func newSQLiteStoreLocal(workspace string) Store {
+	if !reviewLocalProviderAuthorized() {
+		return Store{
+			workspace: workspace,
+			now:       time.Now,
+			brokerErr: database.NewError(
+				database.CodeUnauthorized,
+				"repository review provider access requires database owner fencing",
+			),
+		}
+	}
 	root := filepath.Join(workspace, storeDirectory)
 	return Store{
 		workspace: workspace,
 		root:      root,
 		database:  filepath.Join(root, repositoryReviewDatabaseFilename),
 		now:       time.Now,
+		storeID:   ReviewStoreID,
 	}
+}
+
+func reviewLocalProviderAuthorized() bool {
+	return database.BrokerAuthorityHeld() || database.MigrationFenceHeld() ||
+		database.ProviderTestAuthorityHeld() || allowUnfencedReviewProviderForTests.Load()
+}
+
+func (s Store) localProviderError() error {
+	if s.brokerErr != nil {
+		return s.brokerErr
+	}
+	return reviewProviderAuthorityError()
+}
+
+func reviewProviderAuthorityError() error {
+	if !reviewLocalProviderAuthorized() {
+		return database.NewError(
+			database.CodeUnauthorized,
+			"repository review provider access requires database owner fencing",
+		)
+	}
+	return nil
 }
 
 // NewStore is retained for source compatibility. Repository reviews are
@@ -1026,6 +1093,9 @@ func (s Store) Get(repository string) (RepositoryState, bool, error) {
 }
 
 func (s Store) GetByID(id string) (RepositoryState, bool, error) {
+	if s.broker != nil {
+		return s.brokerGetByID(id)
+	}
 	id = strings.TrimSpace(id)
 	suffix, valid := strings.CutPrefix(id, "rrp_")
 	if !valid || len(suffix) != 64 || !validHexDigest(suffix) {
@@ -1041,11 +1111,11 @@ func (s Store) GetByID(id string) (RepositoryState, bool, error) {
 	} else if purging {
 		return RepositoryState{}, false, ErrRepositoryReviewPurgeInProgress
 	}
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return RepositoryState{}, false, err
 	}
-	defer database.Close()
+	defer release()
 	state, err := loadRepositoryStateRow(context.Background(), database, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RepositoryState{}, false, nil
@@ -1057,6 +1127,9 @@ func (s Store) GetByID(id string) (RepositoryState, bool, error) {
 }
 
 func (s Store) ListSummaries() ([]RepositorySummary, error) {
+	if s.broker != nil {
+		return s.brokerListSummaries()
+	}
 	unlock, err := s.lock("repository-review-list-summaries")
 	if err != nil {
 		return nil, err
@@ -1066,11 +1139,11 @@ func (s Store) ListSummaries() ([]RepositorySummary, error) {
 }
 
 func (s Store) listSummaries(maximum int) ([]RepositorySummary, error) {
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	defer database.Close()
+	defer release()
 	rows, err := database.Query(`
 		SELECT schema_version, state_id, repository, version, review_version, last_commit_sha,
 		       finding_count, repository_finding_count, open_finding_count, issue_draft_count,
@@ -1446,6 +1519,9 @@ func (s Store) ClaimIssueDraftPublication(
 }
 
 func (s Store) List() ([]RepositoryState, error) {
+	if s.broker != nil {
+		return s.brokerListStates()
+	}
 	unlock, err := s.lock("repository-review-list")
 	if err != nil {
 		return nil, err
@@ -1455,11 +1531,11 @@ func (s Store) List() ([]RepositoryState, error) {
 }
 
 func (s Store) listStates(enforcePurgeFence bool) ([]RepositoryState, error) {
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	defer database.Close()
+	defer release()
 	rows, err := database.Query(`
 		SELECT state_id FROM repository_review_states
 	 ORDER BY updated_at_unix_nano DESC, state_id ASC`)
@@ -1490,6 +1566,9 @@ func (s Store) listStates(enforcePurgeFence bool) ([]RepositoryState, error) {
 }
 
 func (s Store) load(repository string) (RepositoryState, error) {
+	if s.broker != nil {
+		return s.brokerLoadState(repository)
+	}
 	if _, purging, err := s.loadPurgeFence(repository); err != nil {
 		return RepositoryState{}, err
 	} else if purging {
@@ -1522,11 +1601,11 @@ func (s Store) loadIgnoringPurge(repository string) (RepositoryState, error) {
 		MappingJobs:             []RepositoryMappingJob{},
 		ValidationJobs:          []RepositoryValidationJob{},
 	}
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return RepositoryState{}, err
 	}
-	defer database.Close()
+	defer release()
 	loaded, err := loadRepositoryStateRow(context.Background(), database, state.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return state, nil
@@ -1538,14 +1617,17 @@ func (s Store) loadIgnoringPurge(repository string) (RepositoryState, error) {
 }
 
 func (s Store) save(state *RepositoryState) error {
+	if s.broker != nil {
+		return s.brokerSaveState(state)
+	}
 	if err := prepareRepositoryStateForPersistence(state); err != nil {
 		return err
 	}
-	database, err := s.openDatabase(context.Background())
+	database, release, err := s.acquireDatabase(context.Background())
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer release()
 	return saveRepositoryStateDatabase(context.Background(), database, state)
 }
 
@@ -1582,11 +1664,29 @@ func validHexDigest(value string) bool {
 }
 
 func (s Store) lock(repository string) (func(), error) {
+	if s.broker != nil {
+		return s.brokerLock(repository)
+	}
+	if err := s.localProviderError(); err != nil {
+		return nil, err
+	}
 	key := s.root + "\x00" + strings.TrimSpace(repository)
 	value, _ := storeLocks.LoadOrStore(key, &sync.Mutex{})
 	mutex := value.(*sync.Mutex)
-	mutex.Lock()
-	unlockFile, err := lockRepositoryReviewStore(s.root)
+	if s.brokerOwned {
+		if !mutex.TryLock() {
+			return nil, ErrConflict
+		}
+	} else {
+		mutex.Lock()
+	}
+	var unlockFile func()
+	var err error
+	if s.brokerOwned {
+		unlockFile, err = tryLockRepositoryReviewStore(s.root)
+	} else {
+		unlockFile, err = lockRepositoryReviewStore(s.root)
+	}
 	if err != nil {
 		mutex.Unlock()
 		return nil, err
@@ -1597,7 +1697,23 @@ func (s Store) lock(repository string) (func(), error) {
 	}, nil
 }
 
+func (s Store) StoreID() database.StoreID {
+	if s.brokerErr != nil {
+		return ""
+	}
+	if s.broker != nil {
+		return s.storeID
+	}
+	if s.storeID != "" {
+		return s.storeID
+	}
+	return ReviewStoreID
+}
+
 func (s Store) clock() time.Time {
+	if s.broker != nil {
+		return s.brokerClock()
+	}
 	if s.now == nil {
 		return time.Now().UTC()
 	}

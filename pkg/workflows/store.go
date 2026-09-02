@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -98,6 +100,9 @@ type FileRunStore struct {
 	workspace string
 	database  *workflowDatabasePool
 	poolOnce  sync.Once
+	broker    *database.Client
+	storeID   database.StoreID
+	brokerErr error
 }
 
 const (
@@ -109,6 +114,40 @@ const (
 //
 // Deprecated: use NewSQLiteRunStore.
 func NewFileRunStore(workspace string) *FileRunStore {
+	if client := database.RuntimeClient(); client != nil {
+		store := &FileRunStore{
+			root: filepath.Join(workspace, "workflow_runs"), workspace: workspace,
+		}
+		store.broker = client
+		store.storeID, store.brokerErr = resolveWorkflowBrokerStoreID(
+			context.Background(), client, workspace,
+		)
+		return store
+	}
+	if database.ProviderTestAuthorityHeld() || allowUnfencedWorkflowProviderForTests.Load() {
+		return newLocalFileRunStore(workspace)
+	}
+	return &FileRunStore{
+		workspace: workspace,
+		brokerErr: database.NewError(
+			database.CodeUnavailable,
+			"workflow database broker client is unavailable",
+		),
+	}
+}
+
+func newLocalFileRunStore(workspace string) *FileRunStore {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedWorkflowProviderForTests.Load() {
+		return &FileRunStore{
+			workspace: workspace,
+			brokerErr: database.NewError(
+				database.CodeUnauthorized,
+				"workflow local store requires database owner fencing",
+			),
+		}
+	}
 	return &FileRunStore{
 		root:      filepath.Join(workspace, "workflow_runs"),
 		workspace: workspace,
@@ -116,7 +155,19 @@ func NewFileRunStore(workspace string) *FileRunStore {
 	}
 }
 
+// StoreID returns the opaque logical identity carried by a broker-backed store.
+// Standalone stores return the zero identity and retain their local behavior.
+func (s *FileRunStore) StoreID() database.StoreID {
+	if s == nil {
+		return ""
+	}
+	return s.storeID
+}
+
 func (s *FileRunStore) CreateRun(ctx context.Context, run *Run) error {
+	if s.usesWorkflowBroker() {
+		return s.brokerCreateRun(context.Background(), workflowRPCOperationCreateRun, run, 0)
+	}
 	persistenceCtx := context.Background()
 	_, err := withWorkflowDB(persistenceCtx, s, "create run", func(db *sql.DB) (struct{}, error) {
 		_, err := workflowImmediate(persistenceCtx, db, func(conn *sql.Conn) (struct{}, error) {
@@ -132,6 +183,11 @@ func (s *FileRunStore) CreateRun(ctx context.Context, run *Run) error {
 }
 
 func (s *FileRunStore) CreateRunIfUnderLimit(ctx context.Context, run *Run, maxConcurrent int) error {
+	if s.usesWorkflowBroker() {
+		return s.brokerCreateRun(
+			context.Background(), workflowRPCOperationCreateRunUnderLimit, run, maxConcurrent,
+		)
+	}
 	persistenceCtx := context.Background()
 	_, err := withWorkflowDB(persistenceCtx, s, "create run under limit", func(db *sql.DB) (struct{}, error) {
 		return workflowImmediate(persistenceCtx, db, func(conn *sql.Conn) (struct{}, error) {
@@ -164,6 +220,9 @@ func (s *FileRunStore) createRunLocked(run *Run) error {
 }
 
 func (s *FileRunStore) UpdateRun(ctx context.Context, run *Run) error {
+	if s.usesWorkflowBroker() {
+		return s.brokerUpdateRun(context.Background(), run)
+	}
 	if run == nil || strings.TrimSpace(run.ID) == "" {
 		return fmt.Errorf("run is required")
 	}
@@ -553,6 +612,9 @@ func isExternalDispatchID(id string) bool {
 
 //nolint:govet // Transaction callback errors stay scoped to the exact mutation.
 func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Run, error) {
+	if s.usesWorkflowBroker() {
+		return s.brokerCancelRun(ctx, runID, reason)
+	}
 	runID = strings.TrimSpace(runID)
 	reason, err := NormalizeWorkflowCancelReason(reason)
 	if err != nil {
@@ -635,6 +697,9 @@ func (s *FileRunStore) cancelChildRuns(ctx context.Context, parentRunID, reason 
 }
 
 func (s *FileRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
+	if s.usesWorkflowBroker() {
+		return s.brokerGetRun(ctx, workflowRPCOperationGetRun, runID, 0)
+	}
 	runID = strings.TrimSpace(runID)
 	run, err := withWorkflowDB(ctx, s, "get run", func(db *sql.DB) (*Run, error) {
 		conn, err := db.Conn(ctx)
@@ -658,6 +723,9 @@ func (s *FileRunStore) GetRunBounded(
 	runID string,
 	maximumBytes int64,
 ) (*Run, error) {
+	if s.usesWorkflowBroker() {
+		return s.brokerGetRun(ctx, workflowRPCOperationGetRunBounded, runID, maximumBytes)
+	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		return nil, contextErr
 	}
@@ -680,6 +748,9 @@ func (s *FileRunStore) GetRunBounded(
 }
 
 func (s *FileRunStore) ListRuns(ctx context.Context) ([]Run, error) {
+	if s.usesWorkflowBroker() {
+		return s.brokerListRuns(ctx)
+	}
 	return withWorkflowDB(ctx, s, "list runs", func(db *sql.DB) ([]Run, error) {
 		conn, err := db.Conn(ctx)
 		if err != nil {
@@ -721,6 +792,9 @@ func (s *FileRunStore) ListHumanTasks(
 	ctx context.Context,
 	runID string,
 ) ([]WorkflowHumanTask, error) {
+	if s.usesWorkflowBroker() {
+		return s.brokerListHumanTasks(ctx, runID)
+	}
 	runID = strings.TrimSpace(runID)
 	run, err := s.GetRun(ctx, runID)
 	if err != nil {

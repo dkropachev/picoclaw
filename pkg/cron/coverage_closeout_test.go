@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 )
 
 type cronQueryerFunc func(context.Context, string, ...any) (*sql.Rows, error)
@@ -58,7 +58,7 @@ func TestCronSQLiteStorageAndValidationBoundaryMatrix(t *testing.T) {
 		t.Fatal("mutate accepted file parent")
 	}
 
-	service, err := NewSQLiteCronService(filepath.Join(root, "valid.db"), nil)
+	service, err := newLocalCronService(filepath.Join(root, "valid.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestCronSQLiteStorageAndValidationBoundaryMatrix(t *testing.T) {
 //nolint:govet // Schema cases intentionally use independent error scopes.
 func TestCronLegacyImportAndSchemaFailureMatrix(t *testing.T) {
 	root := t.TempDir()
-	service, err := NewSQLiteCronService(filepath.Join(root, "jobs.db"), nil)
+	service, err := newLocalCronService(filepath.Join(root, "jobs.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestCronLegacyImportAndSchemaFailureMatrix(t *testing.T) {
 	for _, index := range []string{"cron_jobs_position_idx", "cron_jobs_due_idx"} {
 		t.Run(index, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), index+".db")
-			instance, err := NewSQLiteCronService(path, nil)
+			instance, err := newLocalCronService(path, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -220,7 +220,7 @@ func TestCronServiceLifecycleAndPublicBoundaryMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service, err := NewSQLiteCronService(filepath.Join(t.TempDir(), "jobs.db"), nil)
+	service, err := newLocalCronService(filepath.Join(t.TempDir(), "jobs.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestCronServiceLifecycleAndPublicBoundaryMatrix(t *testing.T) {
 
 //nolint:govet // Terminal cases intentionally use independent error scopes.
 func TestCronExecuteJobTerminalStateBoundaryMatrix(t *testing.T) {
-	service, err := NewSQLiteCronService(filepath.Join(t.TempDir(), "jobs.db"), nil)
+	service, err := newLocalCronService(filepath.Join(t.TempDir(), "jobs.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +430,7 @@ func TestCronServiceFailureAndAdmissionBoundaryMatrix(t *testing.T) {
 	cancel()
 	blockedService.runLoop(canceled, make(chan struct{}))
 
-	service, err := NewSQLiteCronService(filepath.Join(t.TempDir(), "jobs.db"), nil)
+	service, err := newLocalCronService(filepath.Join(t.TempDir(), "jobs.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

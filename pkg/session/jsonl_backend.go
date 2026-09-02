@@ -16,7 +16,7 @@ import (
 )
 
 // JSONLBackend is the deprecated source-compatible adapter name.
-// NewSQLiteBackend supplies its authoritative SQLite store.
+// NewPersistentBackend supplies its authoritative typed store.
 // Write errors are logged rather than returned, matching the fire-and-forget
 // contract of SessionManager that the agent loop relies on.
 type JSONLBackend struct {
@@ -69,9 +69,9 @@ func NewJSONLBackend(store memory.Store) *JSONLBackend {
 	return &JSONLBackend{store: store}
 }
 
-// NewSQLiteBackend opens the authoritative sessions database in dir.
-func NewSQLiteBackend(dir string) (*SQLiteBackend, error) {
-	store, err := memory.NewSQLiteStore(dir)
+// NewPersistentBackend opens the authoritative sessions store for dir.
+func NewPersistentBackend(dir string) (*SQLiteBackend, error) {
+	store, err := memory.NewStore(dir)
 	if err != nil {
 		return nil, err
 	}

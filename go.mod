@@ -6,6 +6,7 @@ require (
 	fyne.io/systray v1.12.2
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.22.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.0
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/SevereCloud/vksdk/v3 v3.3.1
 	github.com/adhocore/gronx v1.20.0
 	github.com/anthropics/anthropic-sdk-go v1.55.1

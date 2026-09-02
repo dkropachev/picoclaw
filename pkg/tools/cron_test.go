@@ -96,7 +96,7 @@ func (s *stubJobExecutor) PublishResponseIfNeeded(
 func newTestCronToolWithExecutorAndConfig(t *testing.T, executor JobExecutor, cfg *config.Config) *CronTool {
 	t.Helper()
 	storePath := filepath.Join(t.TempDir(), "cron.json")
-	cronService := cron.NewCronService(storePath, nil)
+	cronService := cron.NewForWorkspace(storePath, nil)
 	msgBus := bus.NewMessageBus()
 	tool, err := NewCronTool(cronService, executor, msgBus, t.TempDir(), true, 0, cfg)
 	if err != nil {

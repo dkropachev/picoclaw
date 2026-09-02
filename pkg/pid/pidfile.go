@@ -52,6 +52,20 @@ func generateToken() string {
 // It returns an error if another gateway instance appears to be running
 // (a valid PID file exists with a live process).
 func WritePidFile(homePath, host string, port int) (*PidFileData, error) {
+	return writePidFile(homePath, host, port, os.Getpid())
+}
+
+// WriteSupervisedPidFile publishes the stable gateway-supervisor PID while the
+// authenticated runtime child owns the network listener. The caller must be a
+// direct child of that supervisor, preventing arbitrary PID substitution.
+func WriteSupervisedPidFile(homePath, host string, port, supervisorPID int) (*PidFileData, error) {
+	if supervisorPID <= 0 || supervisorPID != os.Getppid() {
+		return nil, errors.New("invalid gateway supervisor PID")
+	}
+	return writePidFile(homePath, host, port, supervisorPID)
+}
+
+func writePidFile(homePath, host string, port, ownerPID int) (*PidFileData, error) {
 	pidMu.Lock()
 	defer pidMu.Unlock()
 
@@ -59,7 +73,7 @@ func WritePidFile(homePath, host string, port int) (*PidFileData, error) {
 
 	// Check for existing PID file → singleton enforcement.
 	if data, err := readPidFileUnlocked(pidPath); err == nil {
-		if os.Getpid() != data.PID {
+		if ownerPID != data.PID {
 			logger.Infof("found pid file (PID: %d, version: %s)", data.PID, data.Version)
 			// PID 1 is typically init/systemd on the host or the entrypoint
 			// inside a container. When a container stops and leaves behind a
@@ -83,7 +97,7 @@ func WritePidFile(homePath, host string, port int) (*PidFileData, error) {
 	}
 
 	data := &PidFileData{
-		PID:     os.Getpid(),
+		PID:     ownerPID,
 		Version: config.GetVersion(),
 		Port:    port,
 		Host:    host,

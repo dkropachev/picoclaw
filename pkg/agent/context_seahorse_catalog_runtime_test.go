@@ -95,8 +95,13 @@ func TestSeahorseCatalogRuntimeReloadBuildsFreshFactoryTopologyAfterClosingA(t *
 	gamma := requireSeahorseCatalogRuntimeAgent(t, registryB, "gamma")
 	for _, agent := range []*AgentInstance{beta, gamma} {
 		assertSeahorseCatalogRuntimeRoots(t, agent, true)
-		if _, err := os.Stat(filepath.Join(agent.Workspace, "sessions", "seahorse.db")); err != nil {
-			t.Fatalf("agent %q Seahorse DB: %v", agent.ID, err)
+		if _, err := os.Lstat(
+			filepath.Join(agent.Workspace, "sessions", "seahorse.db"),
+		); !errors.Is(
+			err,
+			os.ErrNotExist,
+		) {
+			t.Fatalf("agent %q reconstructed a Seahorse DB path: %v", agent.ID, err)
 		}
 	}
 	betaGrep, _ := beta.Tools.GetRegistered(seahorse.ShortGrepToolName)

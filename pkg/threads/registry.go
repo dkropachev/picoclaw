@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 )
@@ -236,12 +237,12 @@ func readThreadMetaSQL(
 }
 
 func (s Store) readThreadMeta(id string) (ThreadMeta, error) {
-	store, err := s.openSessionStore()
+	store, release, err := s.borrowSessionStore()
 	if err != nil {
 		return ThreadMeta{}, err
 	}
-	defer store.Close()
-	meta, found, _, err := readThreadMetaSQL(context.Background(), store.SQLDB(), id)
+	defer release()
+	meta, found, _, err := readThreadMetaSQL(context.Background(), threadSessionDatabase(store), id)
 	if err != nil {
 		return ThreadMeta{}, err
 	}
@@ -252,6 +253,13 @@ func (s Store) readThreadMeta(id string) (ThreadMeta, error) {
 }
 
 func (s Store) GetMeta(id string) (ThreadMeta, bool, error) {
+	if s.brokerClient != nil {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return ThreadMeta{}, false, nil
+		}
+		return s.brokerGetMeta(context.Background(), id)
+	}
 	meta, err := s.readThreadMeta(strings.TrimSpace(id))
 	if errors.Is(err, os.ErrNotExist) {
 		return ThreadMeta{}, false, nil
@@ -260,13 +268,13 @@ func (s Store) GetMeta(id string) (ThreadMeta, bool, error) {
 }
 
 func (s Store) writeThreadMeta(meta ThreadMeta) error {
-	store, err := s.openSessionStore()
+	store, release, err := s.borrowSessionStore()
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer release()
 	meta = normalizeThreadMeta(meta)
-	return store.Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
+	return threadSessionAdapter(store).Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
 		resolvedPrimary, found, err := resolveSessionKeySQL(ctx, conn, meta.PrimarySessionKey)
 		if err != nil {
 			return err
@@ -316,12 +324,14 @@ func (s Store) setSessionThreadLink(
 	threadID string,
 	attachedAt time.Time,
 ) error {
-	store, err := s.openSessionStore()
+	store, release, err := s.borrowSessionStore()
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	return store.Immediate(contextOrBackground(ctx), func(ctx context.Context, conn *sql.Conn) error {
+	defer release()
+	return threadSessionAdapter(
+		store,
+	).Immediate(contextOrBackground(ctx), func(ctx context.Context, conn *sql.Conn) error {
 		key, found, err := resolveSessionKeySQL(ctx, conn, sessionKey)
 		if err != nil || !found {
 			return firstThreadError(err, errSessionMissing)
@@ -351,17 +361,19 @@ func (s Store) setSessionThreadLink(
 }
 
 func (s Store) listThreadMetas() ([]ThreadMeta, error) {
-	store, err := s.openSessionStore()
+	store, release, err := s.borrowSessionStore()
 	if err != nil {
 		return nil, err
 	}
-	defer store.Close()
-	if err := store.Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
+	defer release()
+	if err := threadSessionAdapter(
+		store,
+	).Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
 		return migrateUnregisteredPicoSessionsSQL(ctx, conn)
 	}); err != nil {
 		return nil, err
 	}
-	rows, err := store.SQLDB().Query(`SELECT thread_id FROM threads
+	rows, err := threadSessionDatabase(store).Query(`SELECT thread_id FROM threads
         ORDER BY updated_seconds DESC, updated_nanos DESC, thread_id`)
 	if err != nil {
 		return nil, err
@@ -380,7 +392,7 @@ func (s Store) listThreadMetas() ([]ThreadMeta, error) {
 	}
 	items := make([]ThreadMeta, 0, len(ids))
 	for _, id := range ids {
-		meta, found, _, err := readThreadMetaSQL(context.Background(), store.SQLDB(), id)
+		meta, found, _, err := readThreadMetaSQL(context.Background(), threadSessionDatabase(store), id)
 		if err != nil {
 			return nil, err
 		}
@@ -718,12 +730,29 @@ func insertThreadSQL(ctx context.Context, conn *sql.Conn, meta ThreadMeta) error
 }
 
 func (s Store) CreateThread(ctx context.Context, request CreateRequest) (Thread, error) {
+	if s.brokerClient != nil {
+		storeID, err := s.resolvedBrokerStoreID(ctx)
+		if err != nil {
+			return Thread{}, err
+		}
+		thread, found, err := s.brokerThreadMutation(
+			ctx, threadOperationCreate,
+			threadCreateRequest{StoreID: storeID, Request: cloneCreateRequest(request)},
+		)
+		if err != nil {
+			return Thread{}, err
+		}
+		if !found {
+			return Thread{}, database.NewError(database.CodeIntegrity, "thread broker response is invalid")
+		}
+		return thread, nil
+	}
 	ctx = contextOrBackground(ctx)
-	store, err := s.openSessionStore()
+	store, release, err := s.borrowSessionStore()
 	if err != nil {
 		return Thread{}, err
 	}
-	defer store.Close()
+	defer release()
 	now := time.Now().UTC()
 	id := strings.TrimSpace(request.ID)
 	if id == "" {
@@ -733,18 +762,18 @@ func (s Store) CreateThread(ctx context.Context, request CreateRequest) (Thread,
 	if primary == "" {
 		return Thread{}, errors.New("threads: primary session key is empty")
 	}
-	if resolved, found, err := resolveSessionKeySQL(ctx, store.SQLDB(), primary); err != nil {
+	if resolved, found, err := resolveSessionKeySQL(ctx, threadSessionDatabase(store), primary); err != nil {
 		return Thread{}, err
 	} else if found {
 		primary = resolved
-		if err := rejectReviewSessionDB(ctx, store.SQLDB(), primary); err != nil {
+		if err := rejectReviewSessionDB(ctx, threadSessionDatabase(store), primary); err != nil {
 			return Thread{}, err
 		}
 	}
 	if s.testHooks != nil && s.testHooks.afterCreatePreflight != nil {
 		s.testHooks.afterCreatePreflight()
 	}
-	err = store.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	err = threadSessionAdapter(store).Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		resolved, found, err := resolveSessionKeySQL(ctx, conn, primary)
 		if err != nil {
 			return err
@@ -804,13 +833,25 @@ func (s Store) CreateThread(ctx context.Context, request CreateRequest) (Thread,
 }
 
 func (s Store) UpdateThread(id string, request UpdateRequest) (Thread, bool, error) {
-	store, err := s.openSessionStore()
+	if s.brokerClient != nil {
+		storeID, err := s.resolvedBrokerStoreID(context.Background())
+		if err != nil {
+			return Thread{}, false, err
+		}
+		return s.brokerThreadMutation(
+			context.Background(), threadOperationUpdate,
+			threadUpdateRequest{
+				StoreID: storeID, ID: id, Request: cloneUpdateRequest(request),
+			},
+		)
+	}
+	store, release, err := s.borrowSessionStore()
 	if err != nil {
 		return Thread{}, false, err
 	}
-	defer store.Close()
+	defer release()
 	found := false
-	err = store.Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
+	err = threadSessionAdapter(store).Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
 		meta, exists, version, err := readThreadMetaSQL(ctx, conn, strings.TrimSpace(id))
 		if err != nil || !exists {
 			return err
@@ -971,6 +1012,29 @@ func (s Store) AttachCurrent(
 	ctx context.Context,
 	request AttachRequest,
 ) (Thread, ThreadHandoff, error) {
+	if s.brokerClient != nil {
+		storeID, err := s.resolvedBrokerStoreID(ctx)
+		if err != nil {
+			return Thread{}, ThreadHandoff{}, err
+		}
+		var response threadBrokerResponse
+		err = s.callBroker(
+			ctx, threadOperationAttach,
+			threadAttachRequest{
+				StoreID: storeID, Request: cloneAttachRequest(request),
+			},
+			&response, true,
+		)
+		if err != nil {
+			return Thread{}, ThreadHandoff{}, err
+		}
+		if !response.Found || response.Thread == nil || response.Handoff == nil {
+			return Thread{}, ThreadHandoff{}, database.NewError(
+				database.CodeIntegrity, "thread broker response is invalid",
+			)
+		}
+		return cloneThread(*response.Thread), *response.Handoff, nil
+	}
 	ctx = contextOrBackground(ctx)
 	if err := rejectReviewThreadSessionScope(request.Scope); err != nil {
 		return Thread{}, ThreadHandoff{}, err
@@ -978,33 +1042,37 @@ func (s Store) AttachCurrent(
 	if strings.TrimSpace(request.ThreadID) == "" || strings.TrimSpace(request.SessionKey) == "" {
 		return Thread{}, ThreadHandoff{}, errors.New("threads: attach identity is invalid")
 	}
-	store, err := s.openSessionStore()
+	store, release, err := s.borrowSessionStore()
 	if err != nil {
 		return Thread{}, ThreadHandoff{}, err
 	}
-	defer store.Close()
-	preflightMeta, found, _, err := readThreadMetaSQL(ctx, store.SQLDB(), request.ThreadID)
+	defer release()
+	preflightMeta, found, _, err := readThreadMetaSQL(ctx, threadSessionDatabase(store), request.ThreadID)
 	if err != nil {
 		return Thread{}, ThreadHandoff{}, err
 	}
 	if !found {
 		return Thread{}, ThreadHandoff{}, os.ErrNotExist
 	}
-	if origin, originFound, err := resolveSessionKeySQL(ctx, store.SQLDB(), request.SessionKey); err != nil {
+	if origin, originFound, err := resolveSessionKeySQL(
+		ctx,
+		threadSessionDatabase(store),
+		request.SessionKey,
+	); err != nil {
 		return Thread{}, ThreadHandoff{}, err
 	} else if originFound {
-		if err := rejectReviewSessionDB(ctx, store.SQLDB(), origin); err != nil {
+		if err := rejectReviewSessionDB(ctx, threadSessionDatabase(store), origin); err != nil {
 			return Thread{}, ThreadHandoff{}, err
 		}
 	}
 	if target, targetFound, err := resolveSessionKeySQL(
 		ctx,
-		store.SQLDB(),
+		threadSessionDatabase(store),
 		preflightMeta.PrimarySessionKey,
 	); err != nil {
 		return Thread{}, ThreadHandoff{}, err
 	} else if targetFound {
-		if err := rejectReviewSessionDB(ctx, store.SQLDB(), target); err != nil {
+		if err := rejectReviewSessionDB(ctx, threadSessionDatabase(store), target); err != nil {
 			return Thread{}, ThreadHandoff{}, err
 		}
 	}
@@ -1012,7 +1080,7 @@ func (s Store) AttachCurrent(
 		s.testHooks.afterAttachPreflight()
 	}
 	var handoff ThreadHandoff
-	err = store.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	err = threadSessionAdapter(store).Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		meta, found, version, err := readThreadMetaSQL(ctx, conn, request.ThreadID)
 		if err != nil {
 			return err
@@ -1125,12 +1193,31 @@ func firstThreadError(actual, fallback error) error {
 }
 
 func (s Store) DetachCurrent(sessionKey string) error {
-	store, err := s.openSessionStore()
+	if s.brokerClient != nil {
+		storeID, err := s.resolvedBrokerStoreID(context.Background())
+		if err != nil {
+			return err
+		}
+		var response threadBrokerResponse
+		err = s.callBroker(
+			context.Background(), threadOperationDetach,
+			threadDetachRequest{StoreID: storeID, SessionKey: sessionKey},
+			&response, true,
+		)
+		if err != nil {
+			return err
+		}
+		if !response.OK {
+			return database.NewError(database.CodeIntegrity, "thread broker response is invalid")
+		}
+		return nil
+	}
+	store, release, err := s.borrowSessionStore()
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	return store.Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
+	defer release()
+	return threadSessionAdapter(store).Immediate(context.Background(), func(ctx context.Context, conn *sql.Conn) error {
 		key, found, err := resolveSessionKeySQL(ctx, conn, sessionKey)
 		if err != nil || !found {
 			return err
@@ -1169,38 +1256,59 @@ func readHandoffSQL(
 }
 
 func (s Store) ReturnToOrigin(handoffID string) (ThreadHandoff, bool, error) {
-	store, err := s.openSessionStore()
+	if s.brokerClient != nil {
+		storeID, err := s.resolvedBrokerStoreID(context.Background())
+		if err != nil {
+			return ThreadHandoff{}, false, err
+		}
+		var response threadBrokerResponse
+		err = s.callBroker(
+			context.Background(), threadOperationReturnOrigin,
+			threadIDRequest{StoreID: storeID, ID: handoffID},
+			&response, false,
+		)
+		if err != nil || !response.Found {
+			return ThreadHandoff{}, response.Found, err
+		}
+		if response.Handoff == nil {
+			return ThreadHandoff{}, false, database.NewError(
+				database.CodeIntegrity, "thread broker response is invalid",
+			)
+		}
+		return *response.Handoff, true, nil
+	}
+	store, release, err := s.borrowSessionStore()
 	if err != nil {
 		return ThreadHandoff{}, false, err
 	}
-	defer store.Close()
-	handoff, found, err := readHandoffSQL(context.Background(), store.SQLDB(), handoffID)
+	defer release()
+	handoff, found, err := readHandoffSQL(context.Background(), threadSessionDatabase(store), handoffID)
 	if err != nil || !found {
 		return handoff, found, err
 	}
 	if _, found, err := resolveSessionKeySQL(
-		context.Background(), store.SQLDB(), handoff.OriginSessionKey,
+		context.Background(), threadSessionDatabase(store), handoff.OriginSessionKey,
 	); err != nil || !found {
 		return ThreadHandoff{}, false, err
 	}
 	if origin, _, err := resolveSessionKeySQL(
-		context.Background(), store.SQLDB(), handoff.OriginSessionKey,
+		context.Background(), threadSessionDatabase(store), handoff.OriginSessionKey,
 	); err != nil {
 		return ThreadHandoff{}, false, err
-	} else if err := rejectReviewSessionDB(context.Background(), store.SQLDB(), origin); err != nil {
+	} else if err := rejectReviewSessionDB(context.Background(), threadSessionDatabase(store), origin); err != nil {
 		return ThreadHandoff{}, false, err
 	}
 	targetMeta, threadFound, _, err := readThreadMetaSQL(
-		context.Background(), store.SQLDB(), handoff.TargetThreadID,
+		context.Background(), threadSessionDatabase(store), handoff.TargetThreadID,
 	)
 	if err != nil || !threadFound {
 		return ThreadHandoff{}, false, err
 	}
 	if target, found, err := resolveSessionKeySQL(
-		context.Background(), store.SQLDB(), targetMeta.PrimarySessionKey,
+		context.Background(), threadSessionDatabase(store), targetMeta.PrimarySessionKey,
 	); err != nil || !found {
 		return ThreadHandoff{}, false, err
-	} else if err := rejectReviewSessionDB(context.Background(), store.SQLDB(), target); err != nil {
+	} else if err := rejectReviewSessionDB(context.Background(), threadSessionDatabase(store), target); err != nil {
 		return ThreadHandoff{}, false, err
 	}
 	return handoff, true, nil

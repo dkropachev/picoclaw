@@ -12,7 +12,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,30 +25,77 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
-	_ "modernc.org/sqlite"
 
+	"github.com/sipeed/picoclaw/internal/sqlbridge"
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/identity"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 const (
-	sqliteDriver   = "sqlite"
-	whatsappDBName = "store.db"
-
 	reconnectInitial    = 5 * time.Second
 	reconnectMax        = 5 * time.Minute
 	reconnectMultiplier = 2.0
 )
 
+const (
+	whatsappMigrationAfterUpgrade = "after-upgrade"
+	whatsappMigrationAfterVersion = "after-version"
+)
+
+var whatsappMigrationCheckpoint = func(string) error { return nil }
+
+// MigrateDatabase upgrades the WhatsApp library schema while the caller holds
+// the exclusive offline migration fence.
+func MigrateDatabase(ctx context.Context, path string) error {
+	if !database.MigrationFenceHeld() {
+		return database.NewError(database.CodeConflict, "WhatsApp migration requires the exclusive database fence")
+	}
+	return sqliteprovider.MigrateStagedOffline(
+		ctx,
+		path,
+		5*time.Second,
+		1,
+		migrateWhatsAppDatabaseStage,
+	)
+}
+
+func migrateWhatsAppDatabaseStage(ctx context.Context, path string) error {
+	db, err := sqliteprovider.OpenStore(path, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := sqliteprovider.ConfigureOffline(ctx, db, 5*time.Second); err != nil {
+		_ = db.Close()
+		return err
+	}
+	logger := waLog.Stdout("WhatsApp migration", "WARN", true)
+	container := sqlstore.NewWithDB(db, sqliteprovider.DriverName(), logger)
+	defer container.Close()
+	if err := container.Upgrade(ctx); err != nil {
+		return err
+	}
+	if err := whatsappMigrationCheckpoint(whatsappMigrationAfterUpgrade); err != nil {
+		return err
+	}
+	if err := sqliteprovider.SetSchemaVersion(ctx, db, 1); err != nil {
+		return err
+	}
+	return whatsappMigrationCheckpoint(whatsappMigrationAfterVersion)
+}
+
 // WhatsAppNativeChannel implements the WhatsApp channel using whatsmeow (in-process, no external bridge).
 type WhatsAppNativeChannel struct {
 	*channels.BaseChannel
 	config       *config.WhatsAppSettings
-	storePath    string
+	storeID      database.StoreID
 	client       *whatsmeow.Client
 	container    *sqlstore.Container
 	mu           sync.Mutex
@@ -61,29 +107,29 @@ type WhatsAppNativeChannel struct {
 	wg           sync.WaitGroup // tracks background goroutines (QR handler, reconnect)
 }
 
-// NewWhatsAppNativeChannel creates a WhatsApp channel that uses whatsmeow for connection.
-// storePath is the directory for the SQLite session store (e.g. workspace/whatsapp).
+// NewWhatsAppNativeChannel creates a WhatsApp channel that uses the broker's
+// opaque allow-listed store identity for whatsmeow persistence.
 func NewWhatsAppNativeChannel(
 	bc *config.Channel,
 	name string,
 	cfg *config.WhatsAppSettings,
 	bus *bus.MessageBus,
-	storePath string,
+	storeID database.StoreID,
 ) (channels.Channel, error) {
-	base := channels.NewBaseChannel(name, cfg, bus, bc.AllowFrom, channels.WithMaxMessageLength(65536))
-	if storePath == "" {
-		storePath = "whatsapp"
+	if !storeID.Valid() {
+		return nil, database.NewError(database.CodeInvalid, "WhatsApp StoreID is invalid")
 	}
+	base := channels.NewBaseChannel(name, cfg, bus, bc.AllowFrom, channels.WithMaxMessageLength(65536))
 	c := &WhatsAppNativeChannel{
 		BaseChannel: base,
 		config:      cfg,
-		storePath:   storePath,
+		storeID:     storeID,
 	}
 	return c, nil
 }
 
 func (c *WhatsAppNativeChannel) Start(ctx context.Context) error {
-	logger.InfoCF("whatsapp", "Starting WhatsApp native channel (whatsmeow)", map[string]any{"store": c.storePath})
+	logger.InfoC("whatsapp", "Starting WhatsApp native channel (whatsmeow)")
 
 	// Reset lifecycle state from any previous Stop() so a restarted channel
 	// behaves correctly.  Use reconnectMu to be consistent with eventHandler
@@ -93,26 +139,26 @@ func (c *WhatsAppNativeChannel) Start(ctx context.Context) error {
 	c.reconnecting = false
 	c.reconnectMu.Unlock()
 
-	if err := os.MkdirAll(c.storePath, 0o700); err != nil {
-		return fmt.Errorf("create session store dir: %w", err)
+	brokerClient := database.RuntimeClient()
+	if brokerClient == nil {
+		return database.NewError(
+			database.CodeUnavailable,
+			"WhatsApp database broker client is unavailable",
+		)
 	}
-
-	dbPath := filepath.Join(c.storePath, whatsappDBName)
-	connStr := "file:" + dbPath + "?_foreign_keys=on"
-
-	db, err := sql.Open(sqliteDriver, connStr)
+	dsn, err := sqlbridge.EncodeDSN(c.storeID, sqlbridge.ModeRuntime)
 	if err != nil {
-		return fmt.Errorf("open whatsapp store: %w", err)
+		return fmt.Errorf("resolve whatsapp store: %w", err)
 	}
+	connector, err := sqlbridge.NewDriver(sqlbridge.NewBrokerRPC(brokerClient)).OpenConnector(dsn)
+	if err != nil {
+		return fmt.Errorf("connect whatsapp store: %w", err)
+	}
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	if _, err = db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("enable foreign keys: %w", err)
-	}
-
 	waLogger := waLog.Stdout("WhatsApp", "WARN", true)
-	container := sqlstore.NewWithDB(db, sqliteDriver, waLogger)
+	container := sqlstore.NewWithDB(db, sqliteprovider.DriverName(), waLogger)
 	if err = container.Upgrade(ctx); err != nil {
 		_ = db.Close()
 		return fmt.Errorf("open whatsapp store: %w", err)

@@ -13,15 +13,20 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (
+	modelCatalogBrokerDomain  = "model-catalogs"
+	modelCatalogBrokerVersion = 1
+
 	catalogDatabaseFilename   = "model-catalogs.db"
 	legacyCatalogFilename     = "model_catalogs.json"
 	catalogDatabaseComponent  = "model-catalogs"
@@ -41,6 +46,11 @@ const (
 	maximumCatalogExtraBytes = int64(16 << 20)
 	maximumCatalogAuditItems = 512
 )
+
+var allowUnfencedModelCatalogProviderForTests atomic.Bool
+
+// ModelCatalogStoreID is the opaque identity used by launcher catalog clients.
+const ModelCatalogStoreID database.StoreID = "global.model-catalogs"
 
 const modelCatalogsSchema = `CREATE TABLE model_catalogs (
     catalog_id       TEXT PRIMARY KEY,
@@ -149,12 +159,33 @@ func maskAPIKeyValue(key string) string {
 }
 
 func openCatalogDatabase(ctx context.Context) (*sql.DB, error) {
+	if !modelCatalogProviderAccessAuthorized() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"model-catalog provider access requires database owner authority",
+		)
+	}
 	path, err := resolvedCatalogDatabasePath()
 	if err != nil {
 		return nil, fmt.Errorf("resolve model catalog database path: %w", err)
 	}
+	return openCatalogDatabaseAt(ctx, path)
+}
+
+func openCatalogDatabaseAt(ctx context.Context, path string) (*sql.DB, error) {
+	if !modelCatalogProviderAccessAuthorized() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"model-catalog provider access requires database owner authority",
+		)
+	}
 	root := filepath.Dir(path)
 	return sqlitestore.Open(ctx, path, catalogStoreOptions(root))
+}
+
+func modelCatalogProviderAccessAuthorized() bool {
+	return database.BrokerAuthorityHeld() || database.MigrationFenceHeld() ||
+		database.ProviderTestAuthorityHeld() || allowUnfencedModelCatalogProviderForTests.Load()
 }
 
 func catalogStoreOptions(root string) sqlitestore.Options {
@@ -293,12 +324,78 @@ func loadCatalogs() (*CatalogStore, error) {
 }
 
 func loadCatalogsContext(ctx context.Context) (*CatalogStore, error) {
+	if client := database.RuntimeClient(); client != nil {
+		store := &CatalogStore{Entries: make(map[string]*CatalogEntry)}
+		catalogCursor, modelCursor, totalModels, revision := 0, 0, 0, ""
+		for {
+			var response modelCatalogPageResponse
+			if err := client.Call(
+				ctx,
+				modelCatalogBrokerDomain,
+				modelCatalogBrokerVersion,
+				modelCatalogOperationLoadPage,
+				modelCatalogPageRequest{
+					StoreID: ModelCatalogStoreID, CatalogCursor: catalogCursor,
+					ModelCursor: modelCursor, Revision: revision,
+				},
+				&response,
+			); err != nil {
+				return nil, err
+			}
+			if len(response.Revision) != sha256.Size*2 ||
+				(revision != "" && response.Revision != revision) || len(response.Entries) > 1 ||
+				response.NextCatalogCursor < catalogCursor ||
+				(response.NextCatalogCursor == catalogCursor && response.NextModelCursor <= modelCursor &&
+					!response.Done) || response.NextCatalogCursor > maximumCatalogs {
+				return nil, database.NewError(database.CodeIntegrity, "model catalog page is invalid")
+			}
+			for _, fragment := range response.Entries {
+				if fragment == nil || fragment.ID == "" {
+					return nil, database.NewError(database.CodeIntegrity, "model catalog page is invalid")
+				}
+				existing := store.Entries[fragment.ID]
+				if existing == nil {
+					if len(store.Entries) >= maximumCatalogs || modelCursor != 0 {
+						return nil, database.NewError(database.CodeIntegrity, "model catalog page is invalid")
+					}
+					fragmentCopy := *fragment
+					fragmentCopy.Models = nil
+					if fragment.Models != nil {
+						fragmentCopy.Models = make([]CatalogModel, 0, len(fragment.Models))
+					}
+					existing = &fragmentCopy
+					store.Entries[fragment.ID] = existing
+				} else if !sameCatalogPageHeader(existing, fragment) {
+					return nil, database.NewError(database.CodeIntegrity, "model catalog page changed")
+				}
+				if len(fragment.Models) > maximumCatalogModels-totalModels {
+					return nil, database.NewError(database.CodeIntegrity, "model catalog page exceeds limits")
+				}
+				existing.Models = append(existing.Models, fragment.Models...)
+				totalModels += len(fragment.Models)
+			}
+			if response.Done {
+				return store, nil
+			}
+			revision = response.Revision
+			catalogCursor, modelCursor = response.NextCatalogCursor, response.NextModelCursor
+		}
+	}
 	db, err := openCatalogDatabase(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
+	return loadCatalogsFromDatabase(ctx, db)
+}
 
+func sameCatalogPageHeader(left, right *CatalogEntry) bool {
+	return left != nil && right != nil && left.ID == right.ID && left.Provider == right.Provider &&
+		left.APIBase == right.APIBase && left.APIKeyMask == right.APIKeyMask &&
+		left.FetchedAt == right.FetchedAt && (left.Models == nil) == (right.Models == nil)
+}
+
+func loadCatalogsFromDatabase(ctx context.Context, db *sql.DB) (*CatalogStore, error) {
 	rows, err := db.QueryContext(ctx, `SELECT
 		c.catalog_id, c.provider, c.api_base, c.api_key_mask,
 		c.fetched_at_unix_seconds, c.fetched_at_nanosecond, c.models_is_null,
@@ -378,6 +475,33 @@ func loadCatalogsContext(ctx context.Context) (*CatalogStore, error) {
 }
 
 func saveCatalogs(store *CatalogStore) error {
+	if client := database.RuntimeClient(); client != nil {
+		var response modelCatalogMutationResponse
+		request := modelCatalogSaveAllRequest{StoreID: ModelCatalogStoreID, Store: store}
+		if err := validateModelCatalogBrokerWrite(request); err != nil {
+			return err
+		}
+		err := client.CallWithOptions(
+			context.Background(),
+			modelCatalogBrokerDomain,
+			modelCatalogBrokerVersion,
+			modelCatalogOperationSaveAll,
+			request,
+			&response,
+			database.CallOptions{Mutation: true},
+		)
+		if err != nil {
+			return err
+		}
+		if !response.Updated {
+			return database.NewError(database.CodeIntegrity, "model catalog mutation response is invalid")
+		}
+		return nil
+	}
+	return saveCatalogsToDatabase(context.Background(), nil, store)
+}
+
+func saveCatalogsToDatabase(ctx context.Context, db *sql.DB, store *CatalogStore) error {
 	if store == nil || len(store.Entries) > maximumCatalogs {
 		return errors.New("model catalog store is invalid")
 	}
@@ -413,18 +537,22 @@ func saveCatalogs(store *CatalogStore) error {
 		totalExtraBytes += extraBytes
 		writes = append(writes, catalogWrite{entry: normalized, extras: extras})
 	}
-	db, err := openCatalogDatabase(context.Background())
-	if err != nil {
-		return err
+	owned := db == nil
+	if owned {
+		var err error
+		db, err = openCatalogDatabase(ctx)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
 	}
-	defer db.Close()
-	return sqlitestore.Immediate(context.Background(), db, func(conn *sql.Conn) error {
-		if _, err := conn.ExecContext(context.Background(), `DELETE FROM model_catalogs`); err != nil {
+	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		if _, err := conn.ExecContext(ctx, `DELETE FROM model_catalogs`); err != nil {
 			return err
 		}
 		for _, write := range writes {
 			if err := insertCatalogEntry(
-				context.Background(),
+				ctx,
 				conn,
 				write.entry,
 				write.extras,
@@ -454,6 +582,51 @@ func boolIntCatalog(value bool) int {
 // SaveCatalog persists a fetched model list for a given provider+key combination.
 // If a catalog with the same key already exists, it is updated atomically.
 func SaveCatalog(provider, apiBase, apiKey string, models []CatalogModel) error {
+	if client := database.RuntimeClient(); client != nil {
+		var response modelCatalogMutationResponse
+		request := modelCatalogSaveRequest{
+			StoreID: ModelCatalogStoreID, Provider: provider, APIBase: apiBase,
+			APIKey: apiKey, Models: models,
+		}
+		if err := validateModelCatalogBrokerWrite(request); err != nil {
+			return err
+		}
+		err := client.CallWithOptions(
+			context.Background(),
+			modelCatalogBrokerDomain,
+			modelCatalogBrokerVersion,
+			modelCatalogOperationSave,
+			request,
+			&response,
+			database.CallOptions{Mutation: true},
+		)
+		if err != nil {
+			return err
+		}
+		if !response.Updated {
+			return database.NewError(database.CodeIntegrity, "model catalog mutation response is invalid")
+		}
+		return nil
+	}
+	return saveCatalogToDatabase(context.Background(), nil, provider, apiBase, apiKey, models)
+}
+
+func validateModelCatalogBrokerWrite(value any) error {
+	raw, err := database.MarshalCanonical(value)
+	if err != nil || len(raw) > modelCatalogWriteBytes {
+		return database.NewError(database.CodeInvalid, "model catalog mutation exceeds transport limits")
+	}
+	return nil
+}
+
+func saveCatalogToDatabase(
+	ctx context.Context,
+	db *sql.DB,
+	provider,
+	apiBase,
+	apiKey string,
+	models []CatalogModel,
+) error {
 	provider = providers.NormalizeProvider(provider)
 	apiBase = strings.TrimRight(strings.TrimSpace(apiBase), "/")
 	entry := &CatalogEntry{
@@ -472,15 +645,18 @@ func SaveCatalog(provider, apiBase, apiKey string, models []CatalogModel) error 
 	if incomingExtraBytes > maximumCatalogExtraBytes {
 		return errors.New("model catalog entry exceeds its metadata limit")
 	}
-	db, err := openCatalogDatabase(context.Background())
-	if err != nil {
-		return err
+	owned := db == nil
+	if owned {
+		db, err = openCatalogDatabase(ctx)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
 	}
-	defer db.Close()
-	return sqlitestore.Immediate(context.Background(), db, func(conn *sql.Conn) error {
+	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
 		var catalogExists, catalogCount, modelCount, replacedModelCount int
 		var extraBytes, replacedExtraBytes int64
-		if err := conn.QueryRowContext(context.Background(), `SELECT
+		if err := conn.QueryRowContext(ctx, `SELECT
             EXISTS(SELECT 1 FROM model_catalogs WHERE catalog_id = ?),
             (SELECT COUNT(*) FROM model_catalogs),
             (SELECT COUNT(*) FROM model_catalog_models),
@@ -510,7 +686,7 @@ func SaveCatalog(provider, apiBase, apiKey string, models []CatalogModel) error 
 		if err != nil {
 			return err
 		}
-		if _, err := conn.ExecContext(context.Background(), `INSERT INTO model_catalogs (
+		if _, err := conn.ExecContext(ctx, `INSERT INTO model_catalogs (
 			catalog_id, provider, api_base, api_key_mask, fetched_at_unix_seconds,
 			fetched_at_nanosecond, models_is_null, version
 		) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
@@ -533,13 +709,13 @@ func SaveCatalog(provider, apiBase, apiKey string, models []CatalogModel) error 
 			return err
 		}
 		if _, err := conn.ExecContext(
-			context.Background(),
+			ctx,
 			`DELETE FROM model_catalog_models WHERE catalog_id = ?`,
 			normalized.ID,
 		); err != nil {
 			return err
 		}
-		return insertCatalogModels(context.Background(), conn, normalized.ID, normalized.Models, extras)
+		return insertCatalogModels(ctx, conn, normalized.ID, normalized.Models, extras)
 	})
 }
 
@@ -993,15 +1169,48 @@ func (h *Handler) handleDeleteCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, openErr := openCatalogDatabase(r.Context())
-	if openErr != nil {
-		http.Error(w, fmt.Sprintf("Failed to load catalogs: %v", openErr), http.StatusInternalServerError)
+	deleted, err := deleteCatalog(r.Context(), id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to load catalogs: %v", err), http.StatusInternalServerError)
 		return
 	}
+	if !deleted {
+		http.Error(w, "catalog not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func deleteCatalog(ctx context.Context, id string) (bool, error) {
+	if client := database.RuntimeClient(); client != nil {
+		var response modelCatalogDeleteResponse
+		if err := client.CallWithOptions(
+			ctx,
+			modelCatalogBrokerDomain,
+			modelCatalogBrokerVersion,
+			modelCatalogOperationDelete,
+			modelCatalogDeleteRequest{StoreID: ModelCatalogStoreID, ID: id},
+			&response,
+			database.CallOptions{Mutation: true},
+		); err != nil {
+			return false, err
+		}
+		return response.Deleted, nil
+	}
+	db, err := openCatalogDatabase(ctx)
+	if err != nil {
+		return false, err
+	}
 	defer db.Close()
+	return deleteCatalogFromDatabase(ctx, db, id)
+}
+
+func deleteCatalogFromDatabase(ctx context.Context, db *sql.DB, id string) (bool, error) {
 	var deleted bool
-	transactionErr := sqlitestore.Immediate(r.Context(), db, func(conn *sql.Conn) error {
-		result, err := conn.ExecContext(r.Context(), `DELETE FROM model_catalogs WHERE catalog_id = ?`, id)
+	err := sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
+		result, err := conn.ExecContext(ctx, `DELETE FROM model_catalogs WHERE catalog_id = ?`, id)
 		if err != nil {
 			return err
 		}
@@ -1012,15 +1221,5 @@ func (h *Handler) handleDeleteCatalog(w http.ResponseWriter, r *http.Request) {
 		deleted = count == 1
 		return nil
 	})
-	if transactionErr != nil {
-		http.Error(w, fmt.Sprintf("Failed to save catalogs: %v", transactionErr), http.StatusInternalServerError)
-		return
-	}
-	if !deleted {
-		http.Error(w, "catalog not found", http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	return deleted, err
 }

@@ -228,7 +228,19 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	}
 
 	// Enforce singleton: write PID file with generated token.
-	pidData, err := pid.WritePidFile(homePath, pidProbeHost, cfg.Gateway.Port)
+	var pidData *pid.PidFileData
+	if supervisorPIDText := strings.TrimSpace(os.Getenv(config.EnvGatewaySupervisorPID)); supervisorPIDText != "" {
+		supervisorPID, parseErr := strconv.Atoi(supervisorPIDText)
+		if parseErr != nil {
+			err = fmt.Errorf("invalid gateway supervisor authority")
+		} else {
+			pidData, err = pid.WriteSupervisedPidFile(
+				homePath, pidProbeHost, cfg.Gateway.Port, supervisorPID,
+			)
+		}
+	} else {
+		pidData, err = pid.WritePidFile(homePath, pidProbeHost, cfg.Gateway.Port)
+	}
 	if err != nil {
 		logger.WarnSafeCF(
 			logger.ComponentGateway,
@@ -242,7 +254,7 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 		}
 		return fmt.Errorf("singleton check failed: %w", err)
 	}
-	defer pid.RemovePidFile(homePath)
+	defer pid.RemovePidFileIfPID(homePath, pidData.PID)
 	closeListeners := true
 	defer func() {
 		if !closeListeners {
@@ -1854,9 +1866,7 @@ func setupCronTool(
 	cfg *config.Config,
 	executionPolicy isolation.ExecutionPolicy,
 ) (*cron.CronService, error) {
-	cronStorePath := filepath.Join(workspace, "cron", "jobs.db")
-
-	cronService := cron.NewCronService(cronStorePath, nil)
+	cronService := cron.NewForWorkspace(workspace, nil)
 	cronService.SetJobAdmission(func(
 		ctx context.Context,
 		_ *cron.CronJob,

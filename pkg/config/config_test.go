@@ -527,6 +527,18 @@ func TestGitWorkspacesConfig_EffectiveValuesPreferConfigured(t *testing.T) {
 	assert.Equal(t, 180*time.Second, cfg.GitWorkspaces.EffectiveDropDelay())
 }
 
+func TestGitWorkspaceRootPathResolvesRelativeConfigAgainstPicoHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(EnvHome, home)
+	cfg := &Config{
+		Agents:        AgentsConfig{Defaults: AgentDefaults{Workspace: "workspace"}},
+		GitWorkspaces: GitWorkspacesConfig{RootDir: "git-state"},
+	}
+	assert.Equal(t, filepath.Join(home, "git-state"), cfg.GitWorkspaceRootPath())
+	cfg.GitWorkspaces.RootDir = ""
+	assert.Equal(t, filepath.Join(home, "workspace", ".git-workspaces"), cfg.GitWorkspaceRootPath())
+}
+
 func TestEvolutionConfig_EffectiveMode(t *testing.T) {
 	tests := []struct {
 		name string

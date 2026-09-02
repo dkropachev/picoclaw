@@ -1414,7 +1414,7 @@ func initSessionStore(dir string) session.SessionStore {
 			),
 		)
 	}
-	store, err := session.NewSQLiteBackend(dir)
+	store, err := session.NewPersistentBackend(dir)
 	if err != nil {
 		// Directory paths can contain user-controlled identities. Keep the
 		// fail-closed panic literal secret-safe; lower storage callers that can

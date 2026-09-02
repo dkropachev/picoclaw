@@ -1289,7 +1289,7 @@ const toolAdaptationResponse = {
       resolved: {
         provider: "openai",
         model: "gpt-4o-mini",
-        state_path: "/tmp/tool-adaptation-state.json",
+        store_id: "global.tool-adaptation",
         visible_tool_surface: "codex",
         pinned_tool_surface: "codex",
         surface_evidence: "heuristic",
@@ -1313,7 +1313,7 @@ const toolAdaptationResponse = {
         provider: "openai",
         model:
           "very-long-model-name-with-reasoning-context-and-tool-capabilities",
-        state_path: "/tmp/tool-adaptation-state.json",
+        store_id: "global.tool-adaptation",
         visible_tool_surface: "simple",
         pinned_tool_surface: "simple",
         surface_evidence: "config",

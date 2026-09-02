@@ -11,9 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +18,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	_ "modernc.org/sqlite"
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
+	dblayer "github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -35,6 +33,9 @@ type Store struct {
 	now             func() time.Time
 	redactor        *Redactor
 	maxPayloadBytes int
+	broker          *dblayer.Client
+	storeID         dblayer.StoreID
+	brokerErr       error
 
 	closed   atomic.Bool
 	close    sync.Once
@@ -50,6 +51,8 @@ var (
 	_ RevisionRoutingDispatchCreator = (*Store)(nil)
 	_ RoutingLeaseRenewer            = (*Store)(nil)
 	_ DispatchLeaseRenewer           = (*Store)(nil)
+
+	allowUnfencedProviderForTests atomic.Bool
 )
 
 // Open creates or opens a durable eventing store at path.
@@ -57,6 +60,56 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
+	resolved := optionsFrom(options)
+	if client := dblayer.RuntimeClient(); client != nil {
+		storeID, err := resolveEventingBrokerStoreID(ctx, client, path)
+		if err != nil {
+			return nil, err
+		}
+		return &Store{
+			now: resolved.now, redactor: NewRedactor(resolved.additionalKeys, resolved.secretValues),
+			maxPayloadBytes: resolved.maxPayloadBytes, broker: client, storeID: storeID,
+		}, nil
+	}
+	if dblayer.ProviderTestAuthorityHeld() || allowUnfencedProviderForTests.Load() {
+		return openLocal(ctx, path, options...)
+	}
+	return nil, dblayer.NewError(
+		dblayer.CodeUnavailable,
+		"eventing database broker client is unavailable",
+	)
+}
+
+// OpenForWorkspace resolves a configured workspace through the typed broker
+// catalog. It never derives or submits a database filename.
+func OpenForWorkspace(ctx context.Context, workspace string, options ...Option) (*Store, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	client := dblayer.RuntimeClient()
+	if client == nil {
+		return nil, dblayer.NewError(dblayer.CodeUnavailable, "eventing database broker client is unavailable")
+	}
+	selector, err := eventingWorkspaceIDSelector(workspace)
+	if err != nil {
+		return nil, err
+	}
+	storeID, err := resolveEventingStoreSelector(ctx, client, selector)
+	if err != nil {
+		return nil, err
+	}
+	resolved := optionsFrom(options)
+	return &Store{
+		now: resolved.now, redactor: NewRedactor(resolved.additionalKeys, resolved.secretValues),
+		maxPayloadBytes: resolved.maxPayloadBytes, broker: client, storeID: storeID,
+	}, nil
+}
+
+func openLocal(ctx context.Context, path string, options ...Option) (*Store, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	resolved := optionsFrom(options)
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("eventing database path is required")
@@ -68,31 +121,44 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 		return nil, fmt.Errorf("eventing database path contains a NUL byte")
 	}
 
-	resolved := optionsFrom(options)
 	fileBacked := path != ":memory:"
+	currentOnlineStore := false
 	if fileBacked {
-		parent := filepath.Dir(path)
-		if err := os.MkdirAll(parent, 0o700); err != nil {
-			return nil, fmt.Errorf("create eventing database directory: %w", err)
+		if !dblayer.BrokerAuthorityHeld() && !dblayer.MigrationFenceHeld() &&
+			!dblayer.ProviderTestAuthorityHeld() &&
+			!allowUnfencedProviderForTests.Load() {
+			return nil, dblayer.NewError(
+				dblayer.CodeUnauthorized,
+				"eventing provider access requires broker or migration ownership",
+			)
 		}
-		file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-		if err != nil {
-			return nil, fmt.Errorf("securely create eventing database: %w", err)
-		}
-		if err := file.Chmod(0o600); err != nil {
-			_ = file.Close()
-			return nil, fmt.Errorf("secure eventing database permissions: %w", err)
-		}
-		if err := file.Close(); err != nil {
-			return nil, fmt.Errorf("close prepared eventing database: %w", err)
+		if dblayer.OnlineFenceHeld() {
+			inspection, inspectErr := sqliteprovider.Inspect(ctx, path, resolved.busyTimeout)
+			if inspectErr != nil {
+				return nil, fmt.Errorf("inspect eventing database: %w", inspectErr)
+			}
+			if inspection.Exists && !inspection.Empty {
+				switch {
+				case inspection.Version < schemaVersion:
+					return nil, dblayer.NewError(
+						dblayer.CodeMigrationRequired,
+						"offline database migration is required",
+					)
+				case inspection.Version > schemaVersion:
+					return nil, fmt.Errorf(
+						"%w: database=%d supported=%d",
+						ErrSchemaTooNew,
+						inspection.Version,
+						schemaVersion,
+					)
+				default:
+					currentOnlineStore = true
+				}
+			}
 		}
 	}
 
-	dsn, err := sqliteDSN(path, resolved)
-	if err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sqliteprovider.OpenStore(path, resolved.busyTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("open eventing database: %w", err)
 	}
@@ -107,22 +173,27 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 		redactor:        NewRedactor(resolved.additionalKeys, resolved.secretValues),
 		maxPayloadBytes: resolved.maxPayloadBytes,
 	}
-	if err := store.configure(ctx, resolved.busyTimeout, !fileBacked); err != nil {
+	if configureErr := store.configure(ctx, resolved.busyTimeout, !fileBacked); configureErr != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, configureErr
 	}
 	if fileBacked {
-		if err := os.Chmod(path, 0o600); err != nil {
+		if secureErr := sqliteprovider.SecureGeneration(path); secureErr != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("secure eventing database permissions: %w", err)
+			return nil, fmt.Errorf("secure eventing database permissions: %w", secureErr)
 		}
 	}
-	if err := store.migrate(ctx); err != nil {
+	if currentOnlineStore {
+		err = store.validateCurrentSchema(ctx)
+	} else {
+		err = store.migrate(ctx)
+	}
+	if err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	if fileBacked {
-		if err := os.Chmod(path, 0o600); err != nil {
+		if err := sqliteprovider.SecureGeneration(path); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("secure eventing database permissions: %w", err)
 		}
@@ -130,102 +201,34 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 	return store, nil
 }
 
+func (s *Store) validateCurrentSchema(ctx context.Context) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := validateLegacyPRSchemaAbsentV19(ctx, conn); err != nil {
+		return err
+	}
+	if err := validateRetainedSchemaV19(ctx, conn); err != nil {
+		return err
+	}
+	if err := validateSchemaV19PRWorkspace(ctx, conn); err != nil {
+		return fmt.Errorf("validate pull request workspace schema v19: %w", err)
+	}
+	return sqliteprovider.CheckIntegrity(ctx, conn)
+}
+
 // OpenStore is an explicit alias for Open.
 func OpenStore(ctx context.Context, path string, options ...Option) (*Store, error) {
 	return Open(ctx, path, options...)
 }
 
-func sqliteDSN(path string, options storeOptions) (string, error) {
-	if path == ":memory:" {
-		// A replacement connection would also lose the in-memory schema, so the
-		// file-backed reconnect guarantee does not apply to this test-only mode.
-		return path, nil
-	}
-
-	absolutePath, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("resolve eventing database path: %w", err)
-	}
-	query := url.Values{}
-	query.Add("_pragma", "foreign_keys(1)")
-	query.Add("_pragma", "busy_timeout("+strconv.FormatInt(options.busyTimeout.Milliseconds(), 10)+")")
-	query.Add("_pragma", "synchronous(NORMAL)")
-	databaseURL, err := sqliteFileURL(
-		filepath.ToSlash(absolutePath),
-		filepath.ToSlash(filepath.VolumeName(absolutePath)),
-	)
-	if err != nil {
-		return "", err
-	}
-	databaseURL.RawQuery = query.Encode()
-	return databaseURL.String(), nil
-}
-
-func sqliteFileURL(slashPath, slashVolume string) (*url.URL, error) {
-	if strings.HasPrefix(slashVolume, "//") {
-		authorityAndShare := strings.TrimPrefix(slashVolume, "//")
-		server, share, ok := strings.Cut(authorityAndShare, "/")
-		if !ok || server == "" || share == "" || !strings.HasPrefix(slashPath, slashVolume) {
-			return nil, fmt.Errorf("resolve eventing UNC database path %q", slashPath)
-		}
-		// Keep the URI authority empty. SQLite rejects remote authorities unless
-		// compiled with SQLITE_ALLOW_URI_AUTHORITY; file:////server/share keeps
-		// the UNC server and share in the path for the Windows VFS.
-		return &url.URL{Scheme: "file", Path: slashPath}, nil
-	}
-	if slashVolume != "" && !strings.HasPrefix(slashPath, "/") {
-		// A Windows drive path must be emitted as file:///C:/..., not with the
-		// drive parsed as a URI authority.
-		slashPath = "/" + slashPath
-	}
-	return &url.URL{Scheme: "file", Path: slashPath}, nil
-}
-
 func (s *Store) configure(ctx context.Context, busyTimeout time.Duration, memory bool) error {
-	var journalMode string
-	if err := s.db.QueryRowContext(ctx, "PRAGMA journal_mode = WAL").Scan(&journalMode); err != nil {
-		return fmt.Errorf("enable eventing WAL: %w", err)
+	if !memory && dblayer.MigrationFenceHeld() {
+		return sqliteprovider.ConfigureOffline(ctx, s.db, busyTimeout)
 	}
-	if !memory && !strings.EqualFold(journalMode, "wal") {
-		return fmt.Errorf("enable eventing WAL: SQLite selected %q", journalMode)
-	}
-
-	var foreignKeys, configuredBusyTimeout, synchronous int
-	if err := s.db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
-		return fmt.Errorf("verify eventing foreign keys: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&configuredBusyTimeout); err != nil {
-		return fmt.Errorf("verify eventing busy timeout: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&synchronous); err != nil {
-		return fmt.Errorf("verify eventing synchronous mode: %w", err)
-	}
-	if memory {
-		// The non-URI :memory: path cannot carry per-connection options.
-		if _, err := s.db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
-			return fmt.Errorf("configure in-memory eventing foreign keys: %w", err)
-		}
-		if _, err := s.db.ExecContext(ctx, "PRAGMA busy_timeout = "+
-			strconv.FormatInt(busyTimeout.Milliseconds(), 10)); err != nil {
-			return fmt.Errorf("configure in-memory eventing busy timeout: %w", err)
-		}
-		if _, err := s.db.ExecContext(ctx, "PRAGMA synchronous = NORMAL"); err != nil {
-			return fmt.Errorf("configure in-memory eventing synchronous mode: %w", err)
-		}
-		return nil
-	}
-	if foreignKeys != 1 {
-		return fmt.Errorf("verify eventing foreign keys: got %d, want 1", foreignKeys)
-	}
-	if configuredBusyTimeout != int(busyTimeout.Milliseconds()) {
-		return fmt.Errorf("verify eventing busy timeout: got %d, want %d",
-			configuredBusyTimeout, busyTimeout.Milliseconds())
-	}
-	// SQLite represents NORMAL as 1.
-	if synchronous != 1 {
-		return fmt.Errorf("verify eventing synchronous mode: got %d, want 1", synchronous)
-	}
-	return nil
+	return sqliteprovider.Configure(ctx, s.db, busyTimeout, memory)
 }
 
 func (s *Store) migrate(ctx context.Context) (err error) {
@@ -235,7 +238,11 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 	}
 	defer conn.Close()
 
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+	begin := "BEGIN IMMEDIATE"
+	if dblayer.MigrationFenceHeld() {
+		begin = "BEGIN EXCLUSIVE"
+	}
+	if _, err = conn.ExecContext(ctx, begin); err != nil {
 		return fmt.Errorf("begin eventing migration: %w", err)
 	}
 	defer func() {
@@ -244,9 +251,9 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 		}
 	}()
 
-	var version int
-	if err = conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return fmt.Errorf("read eventing schema version: %w", err)
+	version, versionErr := sqliteprovider.SchemaVersion(ctx, conn)
+	if versionErr != nil {
+		return fmt.Errorf("read eventing schema version: %w", versionErr)
 	}
 	if version > schemaVersion {
 		return fmt.Errorf("%w: database=%d supported=%d", ErrSchemaTooNew, version, schemaVersion)
@@ -293,8 +300,11 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 	if err = validateSchemaV19PRWorkspace(ctx, conn); err != nil {
 		return fmt.Errorf("validate pull request workspace schema v19: %w", err)
 	}
-	if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 20"); err != nil {
+	if err = sqliteprovider.SetSchemaVersion(ctx, conn, schemaVersion); err != nil {
 		return fmt.Errorf("record eventing schema v20: %w", err)
+	}
+	if err = sqliteprovider.CheckIntegrity(ctx, conn); err != nil {
+		return fmt.Errorf("validate eventing migration integrity: %w", err)
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)
@@ -474,7 +484,9 @@ func validateSchemaTableColumns(
 ) error {
 	rows, err := conn.QueryContext(
 		ctx,
-		"PRAGMA table_xinfo("+quoteSQLiteStringLiteral(table)+")",
+		`SELECT cid, name, type, "notnull", dflt_value, pk, hidden
+		   FROM pragma_table_xinfo(?)`,
+		table,
 	)
 	if err != nil {
 		return fmt.Errorf("inspect eventing table %s columns: %w", table, err)
@@ -600,7 +612,8 @@ func readSchemaIndexes(
 ) ([]schemaIndexMetadata, error) {
 	rows, err := conn.QueryContext(
 		ctx,
-		"PRAGMA index_list("+quoteSQLiteStringLiteral(table)+")",
+		`SELECT seq, name, "unique", origin, partial FROM pragma_index_list(?)`,
+		table,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("inspect eventing table %s indexes: %w", table, err)
@@ -635,7 +648,8 @@ func readSchemaIndexColumns(
 ) ([]schemaIndexColumn, error) {
 	rows, err := conn.QueryContext(
 		ctx,
-		"PRAGMA index_xinfo("+quoteSQLiteStringLiteral(index)+")",
+		`SELECT seqno, cid, name, desc, coll, key FROM pragma_index_xinfo(?)`,
+		index,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("inspect eventing index %s columns: %w", index, err)
@@ -718,10 +732,6 @@ func equalSchemaIndexColumns(left, right []schemaIndexColumn) bool {
 		}
 	}
 	return true
-}
-
-func quoteSQLiteStringLiteral(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func validateSchemaDefinition(object, actual, expected string) error {
@@ -969,6 +979,9 @@ func (s *Store) Close() error {
 	}
 	s.close.Do(func() {
 		s.closed.Store(true)
+		if s.broker != nil {
+			return
+		}
 		if s.db == nil {
 			s.closeErr = ErrClosed
 			return
@@ -982,10 +995,52 @@ func (s *Store) ready(ctx context.Context) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
-	if s == nil || s.db == nil || s.closed.Load() {
+	if s == nil || s.closed.Load() || (s.db == nil && s.broker == nil) {
 		return ErrClosed
 	}
 	return nil
+}
+
+// StoreID returns the opaque eventing store identity in broker mode.
+func (s *Store) StoreID() dblayer.StoreID {
+	if s == nil {
+		return ""
+	}
+	return s.storeID
+}
+
+func resolveEventingBrokerStoreID(
+	ctx context.Context,
+	client *dblayer.Client,
+	databasePath string,
+) (dblayer.StoreID, error) {
+	if client == nil {
+		return "", dblayer.NewError(dblayer.CodeUnavailable, "eventing broker client is unavailable")
+	}
+	selector, err := eventingWorkspaceSelector(databasePath)
+	if err != nil {
+		return "", err
+	}
+	return resolveEventingStoreSelector(ctx, client, selector)
+}
+
+func resolveEventingStoreSelector(
+	ctx context.Context,
+	client *dblayer.Client,
+	selector string,
+) (dblayer.StoreID, error) {
+	var response eventingResolveResponse
+	err := client.Call(
+		ctx, BrokerDomain, BrokerVersion, eventingOpResolveStore,
+		eventingResolveRequest{WorkspaceSelector: selector}, &response,
+	)
+	if err != nil {
+		return "", err
+	}
+	if !response.StoreID.Valid() {
+		return "", dblayer.NewError(dblayer.CodeIntegrity, "eventing broker StoreID is invalid")
+	}
+	return response.StoreID, nil
 }
 
 func (s *Store) currentTime() (time.Time, error) {
@@ -1011,6 +1066,11 @@ func (s *Store) dbError(err error) error {
 
 // Insert validates, redacts, and atomically deduplicates an envelope.
 func (s *Store) Insert(ctx context.Context, input Envelope) (InsertResult, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpInsert, eventingBrokerRequest{Envelope: input}, &out, true)
+		return out.Insert, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return InsertResult{}, err
 	}
@@ -1082,6 +1142,11 @@ func (s *Store) Insert(ctx context.Context, input Envelope) (InsertResult, error
 
 // Get retrieves an event by ID.
 func (s *Store) Get(ctx context.Context, id string) (StoredEvent, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpGet, eventingBrokerRequest{ID: id}, &out, false)
+		return out.Event, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return StoredEvent{}, err
 	}
@@ -1122,7 +1187,14 @@ func (s *Store) getWith(ctx context.Context, queryer rowQueryer, query string, a
 }
 
 // List returns a newest-first keyset page.
+//
+//nolint:dupl // Full and metadata pages intentionally preserve distinct public result types.
 func (s *Store) List(ctx context.Context, filter EventFilter) (EventPage, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpList, eventingBrokerRequest{EventFilter: filter}, &out, false)
+		return out.EventPage, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return EventPage{}, err
 	}
@@ -1164,6 +1236,11 @@ func (s *Store) GetEventMetadata(
 	ctx context.Context,
 	id string,
 ) (StoredEventMetadata, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpGetEventMetadata, eventingBrokerRequest{ID: id}, &out, false)
+		return out.EventMetadata, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return StoredEventMetadata{}, err
 	}
@@ -1180,6 +1257,11 @@ func (s *Store) GetEventMetadata(
 // GetEventPayload retrieves an independent copy of the exact stored,
 // already-redacted JSON payload.
 func (s *Store) GetEventPayload(ctx context.Context, id string) ([]byte, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpGetEventPayload, eventingBrokerRequest{ID: id}, &out, false)
+		return out.EventPayload, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
@@ -1196,10 +1278,17 @@ func (s *Store) GetEventPayload(ctx context.Context, id string) ([]byte, error) 
 
 // ListEventMetadata returns a newest-first page without selecting payload
 // blobs or worker fencing credentials.
+//
+//nolint:dupl // Full and metadata pages intentionally preserve distinct public result types.
 func (s *Store) ListEventMetadata(
 	ctx context.Context,
 	filter EventFilter,
 ) (EventMetadataPage, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpListEventMetadata, eventingBrokerRequest{EventFilter: filter}, &out, false)
+		return out.EventMetadataPage, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return EventMetadataPage{}, err
 	}
@@ -1360,6 +1449,17 @@ func (s *Store) ClaimRouting(
 	limit int,
 	lease time.Duration,
 ) ([]StoredEvent, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpClaimRouting,
+			eventingBrokerRequest{WorkerLabel: workerLabel, Limit: limit, Lease: lease},
+			&out,
+			true,
+		)
+		return out.Events, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
@@ -1430,6 +1530,16 @@ func (s *Store) RenewRoutingLease(
 	id, leaseToken string,
 	lease time.Duration,
 ) error {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		return s.brokerCall(
+			ctx,
+			eventingOpRenewRouting,
+			eventingBrokerRequest{ID: id, LeaseToken: leaseToken, Lease: lease},
+			&out,
+			true,
+		)
+	}
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
@@ -1465,6 +1575,16 @@ func (s *Store) RenewRoutingLease(
 
 // AckRouting marks owned, live routing work successful.
 func (s *Store) AckRouting(ctx context.Context, id, leaseToken string) error {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		return s.brokerCall(
+			ctx,
+			eventingOpAckRouting,
+			eventingBrokerRequest{ID: id, LeaseToken: leaseToken},
+			&out,
+			true,
+		)
+	}
 	return s.finishRouting(ctx, id, leaseToken, RoutingSucceeded, time.Time{}, "")
 }
 
@@ -1476,11 +1596,31 @@ func (s *Store) NackRouting(
 	availableAt time.Time,
 	detail string,
 ) error {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		return s.brokerCall(
+			ctx,
+			eventingOpNackRouting,
+			eventingBrokerRequest{ID: id, LeaseToken: leaseToken, AvailableAt: availableAt, Detail: detail},
+			&out,
+			true,
+		)
+	}
 	return s.finishRouting(ctx, id, leaseToken, RoutingPending, availableAt, detail)
 }
 
 // DeadRouting marks owned, live routing work permanently dead.
 func (s *Store) DeadRouting(ctx context.Context, id, leaseToken, detail string) error {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		return s.brokerCall(
+			ctx,
+			eventingOpDeadRouting,
+			eventingBrokerRequest{ID: id, LeaseToken: leaseToken, Detail: detail},
+			&out,
+			true,
+		)
+	}
 	return s.finishRouting(ctx, id, leaseToken, RoutingDead, time.Time{}, detail)
 }
 
@@ -1530,6 +1670,17 @@ func (s *Store) CreateDispatchForRoutingClaim(
 	ctx context.Context,
 	eventID, leaseToken, workflowRef string,
 ) (Dispatch, bool, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpCreateDispatchClaim,
+			eventingBrokerRequest{ID: eventID, LeaseToken: leaseToken, WorkflowRef: workflowRef},
+			&out,
+			true,
+		)
+		return out.Dispatch, out.DispatchCreated, err
+	}
 	return s.createDispatchForRoutingClaim(
 		ctx,
 		eventID,
@@ -1546,6 +1697,22 @@ func (s *Store) CreateRevisionedDispatchForRoutingClaim(
 	ctx context.Context,
 	eventID, leaseToken, workflowRef, workflowRevision string,
 ) (Dispatch, bool, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpCreateRevisionedDispatchClaim,
+			eventingBrokerRequest{
+				ID:               eventID,
+				LeaseToken:       leaseToken,
+				WorkflowRef:      workflowRef,
+				WorkflowRevision: workflowRevision,
+			},
+			&out,
+			true,
+		)
+		return out.Dispatch, out.DispatchCreated, err
+	}
 	workflowRevision = strings.TrimSpace(workflowRevision)
 	if workflowRevision == "" {
 		return Dispatch{}, false, fmt.Errorf("workflow revision is required")
@@ -1679,6 +1846,17 @@ func (s *Store) CreateDispatch(
 	ctx context.Context,
 	eventID, workflowRef string,
 ) (Dispatch, bool, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpCreateDispatch,
+			eventingBrokerRequest{ID: eventID, WorkflowRef: workflowRef},
+			&out,
+			true,
+		)
+		return out.Dispatch, out.DispatchCreated, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return Dispatch{}, false, err
 	}
@@ -1726,6 +1904,11 @@ func (s *Store) CreateDispatch(
 
 // GetDispatch retrieves one dispatch by ID.
 func (s *Store) GetDispatch(ctx context.Context, id string) (Dispatch, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpGetDispatch, eventingBrokerRequest{ID: id}, &out, false)
+		return out.Dispatch, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return Dispatch{}, err
 	}
@@ -1743,6 +1926,11 @@ func (s *Store) GetDispatchMetadata(
 	ctx context.Context,
 	id string,
 ) (DispatchMetadata, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpGetDispatchMetadata, eventingBrokerRequest{ID: id}, &out, false)
+		return out.DispatchMetadata, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return DispatchMetadata{}, err
 	}
@@ -1790,6 +1978,17 @@ func (s *Store) ClaimDispatches(
 	limit int,
 	lease time.Duration,
 ) ([]Dispatch, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpClaimDispatches,
+			eventingBrokerRequest{WorkerLabel: workerLabel, Limit: limit, Lease: lease},
+			&out,
+			true,
+		)
+		return out.Dispatches, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
@@ -1856,6 +2055,16 @@ func (s *Store) ClaimDispatches(
 
 // LinkDispatchRun records that the deterministic workflow run has started.
 func (s *Store) LinkDispatchRun(ctx context.Context, id, leaseToken, runID string) error {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		return s.brokerCall(
+			ctx,
+			eventingOpLinkDispatchRun,
+			eventingBrokerRequest{ID: id, LeaseToken: leaseToken, RunID: runID},
+			&out,
+			true,
+		)
+	}
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
@@ -1891,6 +2100,16 @@ func (s *Store) RenewDispatchLease(
 	id, leaseToken string,
 	lease time.Duration,
 ) error {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		return s.brokerCall(
+			ctx,
+			eventingOpRenewDispatch,
+			eventingBrokerRequest{ID: id, LeaseToken: leaseToken, Lease: lease},
+			&out,
+			true,
+		)
+	}
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
@@ -1930,6 +2149,16 @@ func (s *Store) FinishDispatch(
 	status DispatchStatus,
 	detail string,
 ) error {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		return s.brokerCall(
+			ctx,
+			eventingOpFinishDispatch,
+			eventingBrokerRequest{ID: id, LeaseToken: leaseToken, DispatchStatus: status, Detail: detail},
+			&out,
+			true,
+		)
+	}
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
@@ -1963,6 +2192,16 @@ func (s *Store) NackDispatch(
 	availableAt time.Time,
 	detail string,
 ) error {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		return s.brokerCall(
+			ctx,
+			eventingOpNackDispatch,
+			eventingBrokerRequest{ID: id, LeaseToken: leaseToken, AvailableAt: availableAt, Detail: detail},
+			&out,
+			true,
+		)
+	}
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
@@ -1996,7 +2235,14 @@ func (s *Store) NackDispatch(
 }
 
 // ListDispatches returns a newest-first keyset page.
+//
+//nolint:dupl // Full and metadata pages intentionally preserve distinct public result types.
 func (s *Store) ListDispatches(ctx context.Context, filter DispatchFilter) (DispatchPage, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpListDispatches, eventingBrokerRequest{DispatchFilter: filter}, &out, false)
+		return out.DispatchPage, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return DispatchPage{}, err
 	}
@@ -2026,10 +2272,23 @@ func (s *Store) ListDispatches(ctx context.Context, filter DispatchFilter) (Disp
 
 // ListDispatchMetadata returns a newest-first page without selecting worker
 // owner/lease-token credentials.
+//
+//nolint:dupl // Full and metadata pages intentionally preserve distinct public result types.
 func (s *Store) ListDispatchMetadata(
 	ctx context.Context,
 	filter DispatchFilter,
 ) (DispatchMetadataPage, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpListDispatchMetadata,
+			eventingBrokerRequest{DispatchFilter: filter},
+			&out,
+			false,
+		)
+		return out.DispatchMetadataPage, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return DispatchMetadataPage{}, err
 	}
@@ -2098,6 +2357,11 @@ func buildDispatchListPlan(columns string, filter DispatchFilter) (listPlan, err
 // Replay creates a fresh inbox item linked to an existing event. The replay
 // gets a new identity and dedupe key, leaving the original immutable.
 func (s *Store) Replay(ctx context.Context, id string) (InsertResult, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpReplay, eventingBrokerRequest{ID: id}, &out, true)
+		return out.Insert, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return InsertResult{}, err
 	}
@@ -2121,6 +2385,11 @@ func (s *Store) Replay(ctx context.Context, id string) (InsertResult, error) {
 // Prune removes terminal events older than before. Pending/claimed routing and
 // events with any non-terminal dispatch are retained.
 func (s *Store) Prune(ctx context.Context, before time.Time, limit int) (int64, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpPrune, eventingBrokerRequest{Before: before, Limit: limit}, &out, true)
+		return out.Count, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return 0, err
 	}

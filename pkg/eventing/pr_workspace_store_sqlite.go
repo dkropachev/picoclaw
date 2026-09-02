@@ -187,6 +187,10 @@ func marshalPRWorkspaceRecordPersistence(value any) ([]byte, error) {
 // source/connector pair. The cursor is independent of any PR workspace so a
 // migration can establish it before the first workspace exists.
 func (s *Store) SetPRWorkspaceIngressCutover(ctx context.Context, watermark PRIngressCutoverWatermark) error {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		return s.brokerCall(ctx, eventingOpSetPRCutover, eventingBrokerRequest{Watermark: watermark}, &out, true)
+	}
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
@@ -241,6 +245,17 @@ func (s *Store) GetPRWorkspaceIngressCutover(
 	ctx context.Context,
 	source, connector string,
 ) (PRIngressCutoverWatermark, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(
+			ctx,
+			eventingOpGetPRCutover,
+			eventingBrokerRequest{Source: source, Connector: connector},
+			&out,
+			false,
+		)
+		return out.Watermark, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return PRIngressCutoverWatermark{}, err
 	}
@@ -293,6 +308,11 @@ func (s *Store) CreatePRWorkspace(
 	ctx context.Context,
 	input PRWorkspaceCreate,
 ) (PRWorkspaceAggregate, bool, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpCreatePRWorkspace, eventingBrokerRequest{PRCreate: input}, &out, true)
+		return out.PRAggregate, out.PRCreated, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return PRWorkspaceAggregate{}, false, err
 	}
@@ -490,6 +510,11 @@ func (s *Store) CreatePRWorkspace(
 
 // GetPRWorkspace returns a transactionally consistent aggregate projection.
 func (s *Store) GetPRWorkspace(ctx context.Context, workspaceID string) (PRWorkspaceAggregate, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpGetPRWorkspace, eventingBrokerRequest{WorkspaceID: workspaceID}, &out, false)
+		return out.PRAggregate, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return PRWorkspaceAggregate{}, err
 	}
@@ -529,6 +554,11 @@ func (s *Store) GetPRWorkspace(ctx context.Context, workspaceID string) (PRWorks
 // ListPRWorkspaces returns current workspace projections in stable newest-first
 // keyset order.
 func (s *Store) ListPRWorkspaces(ctx context.Context, filter PRWorkspaceFilter) (PRWorkspacePage, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpListPRWorkspaces, eventingBrokerRequest{PRFilter: filter}, &out, false)
+		return out.PRPage, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return PRWorkspacePage{}, err
 	}
@@ -636,6 +666,11 @@ func (s *Store) ApplyPRWorkspaceMutation(
 	ctx context.Context,
 	input PRWorkspaceMutation,
 ) (PRWorkspaceMutationResult, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpApplyPRMutation, eventingBrokerRequest{PRMutation: input}, &out, true)
+		return out.PRMutationResult, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return PRWorkspaceMutationResult{}, err
 	}
@@ -760,6 +795,11 @@ func (s *Store) ApplyPRWorkspacePatch(
 	ctx context.Context,
 	input PRWorkspacePatchMutation,
 ) (PRWorkspacePatchResult, error) {
+	if s.usesEventingBroker() {
+		var out eventingBrokerResponse
+		err := s.brokerCall(ctx, eventingOpApplyPRPatch, eventingBrokerRequest{PRPatch: input}, &out, true)
+		return out.PRPatchResult, err
+	}
 	if err := s.ready(ctx); err != nil {
 		return PRWorkspacePatchResult{}, err
 	}

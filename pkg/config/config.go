@@ -2830,10 +2830,17 @@ func (c *Config) WorkspacePath() string {
 }
 
 func (c *Config) GitWorkspaceRootPath() string {
+	var root string
 	if c == nil {
-		return filepath.Join(GetHome(), pkg.WorkspaceName, ".git-workspaces")
+		root = filepath.Join(pkg.WorkspaceName, ".git-workspaces")
+	} else {
+		root = c.GitWorkspaces.EffectiveRootDir(c.WorkspacePath())
 	}
-	return c.GitWorkspaces.EffectiveRootDir(c.WorkspacePath())
+	root = expandHome(root)
+	if !filepath.IsAbs(root) {
+		root = filepath.Join(GetHome(), root)
+	}
+	return filepath.Clean(root)
 }
 
 func expandHome(path string) string {

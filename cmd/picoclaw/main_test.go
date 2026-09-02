@@ -20,6 +20,7 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	codecmd "github.com/sipeed/picoclaw/cmd/picoclaw/internal/code"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 type rootTestExitError struct {
@@ -60,6 +61,7 @@ func TestNewPicoclawCommand(t *testing.T) {
 		"config",
 		"code",
 		"cron",
+		"database",
 		"events",
 		"gateway",
 		"mcp",
@@ -184,6 +186,26 @@ func TestCodeJSONProcessOutputIsOnePureObject(t *testing.T) {
 	assert.ErrorIs(t, decoder.Decode(&trailing), io.EOF)
 }
 
+func TestSpoofedGatewayRuntimeFailsBeforeDatabaseStateCreation(t *testing.T) {
+	home := t.TempDir()
+	command := exec.Command(os.Args[0], "-test.run=^TestPicoclawMainProcessHelper$")
+	command.Env = append(
+		os.Environ(),
+		"PICOCLAW_MAIN_PROCESS_HELPER=runtime-spoof",
+		"PICOCLAW_GATEWAY_RUNTIME_CHILD=1",
+		"PICOCLAW_DATABASE_AUTHORITY=",
+		config.EnvHome+"="+home,
+		"NO_COLOR=1",
+		"TERM=dumb",
+	)
+	err := command.Run()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 1, exitErr.ExitCode())
+	_, statErr := os.Lstat(filepath.Join(home, database.StateDirectoryName))
+	assert.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
 func TestPicoclawMainPlainProcessModes(t *testing.T) {
 	for _, test := range []struct {
 		name          string
@@ -295,6 +317,8 @@ func TestPicoclawMainProcessHelper(t *testing.T) {
 		os.Args = []string{"picoclaw", "version"}
 	case "plain-error":
 		os.Args = []string{"picoclaw", "--definitely-invalid"}
+	case "runtime-spoof":
+		os.Args = []string{"picoclaw", "gateway"}
 	default:
 		return
 	}

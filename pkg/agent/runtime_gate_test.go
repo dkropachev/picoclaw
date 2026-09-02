@@ -1606,7 +1606,7 @@ func TestInboundMessageRetainsRoutingGenerationWhileWaitingForWorker(t *testing.
 		t.Fatal("queued generation A message executed with generation B provider")
 	default:
 	}
-	storeA, err := memory.NewSQLiteStore(filepath.Join(agentA.Workspace, "sessions"))
+	storeA, err := memory.NewStore(filepath.Join(agentA.Workspace, "sessions"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1622,7 +1622,7 @@ func TestInboundMessageRetainsRoutingGenerationWhileWaitingForWorker(t *testing.
 	if !ok {
 		t.Fatal("generation B beta agent not found")
 	}
-	storeB, err := memory.NewSQLiteStore(filepath.Join(agentB.Workspace, "sessions"))
+	storeB, err := memory.NewStore(filepath.Join(agentB.Workspace, "sessions"))
 	if err != nil {
 		t.Fatal(err)
 	}

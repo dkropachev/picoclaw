@@ -26,6 +26,7 @@ import (
 	codecmd "github.com/sipeed/picoclaw/cmd/picoclaw/internal/code"
 	configcmd "github.com/sipeed/picoclaw/cmd/picoclaw/internal/config"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/cron"
+	databasecmd "github.com/sipeed/picoclaw/cmd/picoclaw/internal/database"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/events"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/gateway"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/mcp"
@@ -37,6 +38,7 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/version"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/workflow"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/updater"
 )
@@ -143,6 +145,7 @@ picoclaw --no-color status`,
 		gateway.NewGatewayCommand(),
 		status.NewStatusCommand(),
 		cron.NewCronCommand(),
+		databasecmd.NewDatabaseCommand(),
 		codecmd.NewCodeCommand(),
 		events.NewEventsCommand(),
 		workflow.NewWorkflowCommand(),
@@ -211,6 +214,41 @@ func main() {
 	}
 
 	cmd := NewPicoclawCommand()
+	var commandStorageFence *database.Fence
+	runtimeChild, runtimeChildErr := gateway.PrepareGatewayRuntimeInvocation(context.Background())
+	if runtimeChildErr != nil {
+		syncCliUIColor(cmd)
+		fmt.Fprint(os.Stderr, cliui.FormatCLIError(runtimeChildErr.Error(), cmd))
+		os.Exit(1)
+	}
+	if !runtimeChild && commandNeedsDatabaseFence(os.Args) && invocationFlagsValid(os.Args[1:]) {
+		var fenceErr error
+		commandStorageFence, fenceErr = database.AcquireOnlineFence(internal.GetPicoclawHome())
+		if fenceErr != nil {
+			syncCliUIColor(cmd)
+			fmt.Fprint(os.Stderr, cliui.FormatCLIError(fenceErr.Error(), cmd))
+			os.Exit(1)
+		}
+		executable, executableErr := os.Executable()
+		if executableErr != nil {
+			_ = commandStorageFence.Close()
+			syncCliUIColor(cmd)
+			fmt.Fprint(os.Stderr, cliui.FormatCLIError(executableErr.Error(), cmd))
+			os.Exit(1)
+		}
+		client, ensureErr := database.EnsureSupervisor(context.Background(), database.EnsureOptions{
+			Home:       internal.GetPicoclawHome(),
+			Executable: executable,
+			ConfigPath: internal.GetConfigPath(),
+		})
+		if ensureErr != nil {
+			_ = commandStorageFence.Close()
+			syncCliUIColor(cmd)
+			fmt.Fprint(os.Stderr, cliui.FormatCLIError(ensureErr.Error(), cmd))
+			os.Exit(1)
+		}
+		database.InstallProcessClient(client)
+	}
 	if codecmd.IsCodeInvocation(os.Args) {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
@@ -218,6 +256,9 @@ func main() {
 	}
 	last, err := cmd.ExecuteC()
 	if err != nil {
+		if commandStorageFence != nil {
+			_ = commandStorageFence.Close()
+		}
 		exitCode, handled := commandFailure(err)
 		if machineJSON && !handled {
 			_ = json.NewEncoder(os.Stdout).Encode(codecmd.Result{
@@ -232,6 +273,33 @@ func main() {
 		}
 		os.Exit(exitCode)
 	}
+	if commandStorageFence != nil {
+		_ = commandStorageFence.Close()
+	}
+}
+
+func invocationFlagsValid(arguments []string) bool {
+	probe := NewPicoclawCommand()
+	command, remaining, err := probe.Find(arguments)
+	if err != nil || command == nil {
+		return false
+	}
+	return command.ParseFlags(remaining) == nil
+}
+
+func commandNeedsDatabaseFence(arguments []string) bool {
+	for _, argument := range arguments[1:] {
+		if strings.HasPrefix(argument, "-") {
+			continue
+		}
+		switch argument {
+		case "database", "version", "help", "completion":
+			return false
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func commandFailure(err error) (int, bool) {

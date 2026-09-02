@@ -2,18 +2,18 @@ package auth
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 type AuthCredential struct {
@@ -55,8 +55,9 @@ const (
 )
 
 var (
-	authDatabaseAccessMu   sync.Mutex
-	credentialRefreshLocks sync.Map
+	authDatabaseAccessMu              sync.Mutex
+	credentialRefreshLocks            sync.Map
+	allowUnfencedAuthProviderForTests atomic.Bool
 )
 
 func (c *AuthCredential) IsExpired() bool {
@@ -263,6 +264,49 @@ func normalizeStore(store *AuthStore) {
 }
 
 func LoadStore() (*AuthStore, error) {
+	if useAuthBroker() {
+		store := &AuthStore{Credentials: make(map[string]*AuthCredential)}
+		cursor, revision := "", ""
+		for {
+			var response authLoadPageResponse
+			err := callAuthBroker(
+				"load-page",
+				authLoadPageRequest{
+					StoreID: GlobalAuthStoreID, Cursor: cursor, Revision: revision,
+				},
+				&response,
+				false,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if !validAuthRevision(response.Revision) ||
+				(revision != "" && response.Revision != revision) || len(response.Items) > authBrokerPageItems {
+				return nil, database.NewError(database.CodeIntegrity, "auth page is invalid")
+			}
+			for _, item := range response.Items {
+				if item.CredentialID == "" || item.Credential == nil ||
+					canonicalCredentialID(item.CredentialID) != item.CredentialID {
+					return nil, database.NewError(database.CodeIntegrity, "auth page is invalid")
+				}
+				if _, duplicate := store.Credentials[item.CredentialID]; duplicate ||
+					len(store.Credentials) >= maximumAuthCredentials {
+					return nil, database.NewError(database.CodeIntegrity, "auth page exceeds limits")
+				}
+				store.Credentials[item.CredentialID] = cloneCredential(item.Credential)
+			}
+			if response.Done {
+				if response.Next != "" {
+					return nil, database.NewError(database.CodeIntegrity, "auth page is invalid")
+				}
+				return store, nil
+			}
+			if response.Next == "" || response.Next <= cursor || len(response.Items) == 0 {
+				return nil, database.NewError(database.CodeIntegrity, "auth page is invalid")
+			}
+			cursor, revision = response.Next, response.Revision
+		}
+	}
 	ctx := context.Background()
 	db, err := openAuthDatabase(ctx)
 	if err != nil {
@@ -273,6 +317,17 @@ func LoadStore() (*AuthStore, error) {
 }
 
 func SaveStore(store *AuthStore) error {
+	if useAuthBroker() {
+		var response authMutationResponse
+		request := authStoreRequest{StoreID: GlobalAuthStoreID, Store: store}
+		raw, err := database.MarshalCanonical(request)
+		if err != nil || len(raw) > authBrokerWriteBytes {
+			return database.NewError(database.CodeInvalid, "auth mutation exceeds transport limits")
+		}
+		return callAuthBroker(
+			"save", request, &response, true,
+		)
+	}
 	normalized, err := normalizedAuthStore(store)
 	if err != nil {
 		return err
@@ -340,6 +395,18 @@ func replaceAuthStore(
 }
 
 func GetCredential(provider string) (*AuthCredential, error) {
+	if useAuthBroker() {
+		var response authCredentialResponse
+		err := callAuthBroker(
+			"get",
+			authCredentialRequest{
+				StoreID: GlobalAuthStoreID, CredentialID: canonicalCredentialID(provider),
+			},
+			&response,
+			false,
+		)
+		return response.Credential, err
+	}
 	ctx := context.Background()
 	db, err := openAuthDatabase(ctx)
 	if err != nil {
@@ -366,6 +433,17 @@ func getCredentialAfterWriters(credentialID string) (*AuthCredential, error) {
 }
 
 func SetCredential(provider string, cred *AuthCredential) error {
+	if useAuthBroker() {
+		var response authMutationResponse
+		return callAuthBroker(
+			"set",
+			authCredentialRequest{
+				StoreID: GlobalAuthStoreID, CredentialID: canonicalCredentialID(provider), Credential: cred,
+			},
+			&response,
+			true,
+		)
+	}
 	canonical := canonicalCredentialID(provider)
 	normalized, err := normalizeCredentialForStorage(canonical, cred)
 	if err != nil {
@@ -410,6 +488,19 @@ func persistCredentialIfCurrentDetailed(
 	}
 	if replacement == nil {
 		return nil, false, fmt.Errorf("replacement credential is required")
+	}
+	if useAuthBroker() {
+		var response authCredentialResponse
+		err := callAuthBroker(
+			"compare-and-set",
+			authCASRequest{
+				StoreID: GlobalAuthStoreID, CredentialID: canonicalCredentialID(credentialID),
+				Source: source, Replacement: replacement,
+			},
+			&response,
+			true,
+		)
+		return response.Credential, response.Committed, err
 	}
 
 	ctx := context.Background()
@@ -468,38 +559,16 @@ func lockCredentialRefresh(credentialID string) (func(), error) {
 	localLockValue, _ := credentialRefreshLocks.LoadOrStore(canonical, &sync.Mutex{})
 	localLock := localLockValue.(*sync.Mutex)
 	localLock.Lock()
-
-	lockPath, err := credentialRefreshLockPath(canonical)
-	if err != nil {
-		localLock.Unlock()
-		return nil, err
-	}
-	unlockFile, err := lockAuthPath(lockPath)
-	if err != nil {
-		localLock.Unlock()
-		return nil, err
-	}
 	return func() {
-		unlockFile()
 		localLock.Unlock()
 	}, nil
 }
 
-func credentialRefreshLockPath(credentialID string) (string, error) {
-	canonical := canonicalCredentialID(credentialID)
-	lockID := sha256.Sum256([]byte(canonical))
-	lockDirectory, err := resolvedAuthLockDirectoryPath()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(lockDirectory, fmt.Sprintf("refresh-%x", lockID)), nil
-}
-
-// RefreshCredential serializes network work for one credential across
-// PicoClaw goroutines and processes. Its refresh lock is independent from the
-// auth-store write lock, so a UI renewal can replace the credential while the
-// network request is in flight. The final compare-and-swap then keeps that UI
-// renewal authoritative.
+// RefreshCredential serializes network work for one credential within this
+// client process. Other clients may perform the same network refresh, but the
+// broker-side compare-and-swap keeps one authoritative stored result. The
+// process-local refresh lock is independent from broker writes, so a UI renewal
+// can replace the credential while the network request is in flight.
 //
 // shouldRefresh decides whether the current credential still needs network
 // work. If refresh fails after an external writer replaces the credential
@@ -573,15 +642,39 @@ func RefreshCredentialDetailed(
 	}, nil
 }
 
-// UpdateCredential serializes a credential read-modify-write transaction
-// across goroutines and PicoClaw processes. The callback runs while the auth
-// store is locked so token refresh cannot race a launcher credential change.
+// UpdateCredential applies a broker-versioned read-modify-write operation.
+// Concurrent clients may evaluate callbacks, but only a replacement based on
+// the authoritative credential version can commit.
 func UpdateCredential(
 	provider string,
 	update func(current *AuthCredential) (*AuthCredential, error),
 ) (*AuthCredential, error) {
 	if update == nil {
 		return nil, fmt.Errorf("credential update callback is required")
+	}
+	if useAuthBroker() {
+		current, err := GetCredential(provider)
+		if err != nil {
+			return nil, err
+		}
+		replacement, err := update(cloneCredential(current))
+		if err != nil {
+			return nil, err
+		}
+		if replacement == nil {
+			return nil, fmt.Errorf("credential update returned nil")
+		}
+		var response authCredentialResponse
+		err = callAuthBroker(
+			"update",
+			authCASRequest{
+				StoreID: GlobalAuthStoreID, CredentialID: canonicalCredentialID(provider),
+				Source: current, Replacement: replacement,
+			},
+			&response,
+			true,
+		)
+		return response.Credential, err
 	}
 	ctx := context.Background()
 	db, unlock, err := openAuthDatabaseForWrite(ctx)
@@ -635,6 +728,17 @@ func UpdateCredential(
 }
 
 func DeleteCredential(provider string) error {
+	if useAuthBroker() {
+		var response authMutationResponse
+		return callAuthBroker(
+			"delete",
+			authCredentialRequest{
+				StoreID: GlobalAuthStoreID, CredentialID: canonicalCredentialID(provider),
+			},
+			&response,
+			true,
+		)
+	}
 	ctx := context.Background()
 	db, unlock, err := openAuthDatabaseForWrite(ctx)
 	if err != nil {
@@ -654,6 +758,12 @@ func DeleteCredential(provider string) error {
 }
 
 func DeleteAllCredentials() error {
+	if useAuthBroker() {
+		var response authMutationResponse
+		return callAuthBroker(
+			"delete-all", authEmptyRequest{StoreID: GlobalAuthStoreID}, &response, true,
+		)
+	}
 	ctx := context.Background()
 	db, unlock, err := openAuthDatabaseForWrite(ctx)
 	if err != nil {

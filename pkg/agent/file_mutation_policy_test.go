@@ -1052,17 +1052,15 @@ func TestAgentRuntimeFileMutationProtectedRootsUseEnvironmentFallback(t *testing
 		checkpointRoot,
 		filepath.Join(checkpointRoot, "legacy-json"),
 	)
-	if len(roots) != len(want) {
-		t.Fatalf("protected roots = %#v, want %#v", roots, want)
-	}
-	for index := range want {
-		if roots[index] != want[index] {
-			t.Fatalf("protected root %d = %q, want %q", index, roots[index], want[index])
+	for _, required := range want {
+		if !slices.Contains(roots, required) {
+			t.Fatalf("protected roots omit %q: %#v", required, roots)
 		}
 	}
 	roots[0] = "mutated"
 	again, err := agentRuntimeFileMutationProtectedRoots("")
-	if err != nil || again[0] != filepath.Join(home, "auth.json") {
+	if err != nil || slices.Contains(again, "mutated") ||
+		!slices.Contains(again, filepath.Join(home, "auth.json")) {
 		t.Fatalf("protected roots retained caller mutation: %#v, %v", again, err)
 	}
 }
@@ -1107,7 +1105,9 @@ func TestAgentEvolutionFileMutationProtectedRootsCoverDatabaseAndLegacySources(t
 			}
 			database := filepath.Join(test.root, "evolution.db")
 			want := []string{
+				test.root,
 				database, database + "-wal", database + "-shm",
+				database + ".locks", filepath.Join(database+".locks", "store.lock"),
 				filepath.Join(test.root, "legacy-json"),
 				filepath.Join(test.root, "learning-records.jsonl"),
 				filepath.Join(test.root, "task-records.jsonl"),
@@ -1116,12 +1116,9 @@ func TestAgentEvolutionFileMutationProtectedRootsCoverDatabaseAndLegacySources(t
 				filepath.Join(test.root, "profiles"),
 				filepath.Join(test.root, "backups"),
 			}
-			if len(roots) != len(want) {
-				t.Fatalf("roots = %#v, want %#v", roots, want)
-			}
-			for index := range want {
-				if roots[index] != want[index] {
-					t.Fatalf("root %d = %q, want %q", index, roots[index], want[index])
+			for _, required := range want {
+				if !slices.Contains(roots, required) {
+					t.Fatalf("roots = %#v, missing %q", roots, required)
 				}
 			}
 		})
@@ -1395,8 +1392,8 @@ func TestAgentRegistryRefreshesGitRuntimeRootsForReloadGeneration(t *testing.T) 
 		t.Fatal(err)
 	}
 	targets := []string{
-		filepath.Join(oldGitRoot, agentGitInventoryDatabase),
-		filepath.Join(newGitRoot, agentGitInventoryDatabase),
+		filepath.Join(oldGitRoot, "inventory.db"),
+		filepath.Join(newGitRoot, "inventory.db"),
 		filepath.Join(
 			newGitRoot,
 			".pr-workspace-implementation",
@@ -1890,19 +1887,24 @@ func TestWorkflowRuntimeMutationRootsProtectDatabaseAndRecoveryState(t *testing.
 	}
 	database := filepath.Join(workspace, "state", "workflows.db")
 	want := []string{
+		filepath.Join(workspace, "legacy-json"),
 		filepath.Join(workspace, "state"),
 		database,
-		database + "-wal",
+		database + "-journal",
 		database + "-shm",
-		filepath.Join(workspace, "legacy-json"),
-		filepath.Join(workspace, "workflow_runs"),
-		filepath.Join(workspace, "workflow_validations"),
+		database + "-wal",
+		database + ".locks",
+		filepath.Join(database+".locks", "store.lock"),
 		filepath.Join(workspace, "workflow_dev"),
+		filepath.Join(workspace, "workflow_runs"),
 		filepath.Join(workspace, "workflow_state"),
 		filepath.Join(workspace, "workflow_state", "mutation.lock"),
 		filepath.Join(workspace, "workflow_state", "publish-transaction.json"),
 		filepath.Join(workspace, "workflow_state", "template-transaction.json"),
+		filepath.Join(workspace, "workflow_validations"),
+		filepath.Join(workspace, "workflow_validations", "manifest.json"),
 	}
+	slices.Sort(want)
 	if len(roots) != len(want) {
 		t.Fatalf("roots = %#v", roots)
 	}

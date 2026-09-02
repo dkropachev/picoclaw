@@ -14,7 +14,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -116,6 +117,12 @@ type legacyCronStore struct {
 }
 
 func newCronSQLiteStorage(locator string) (*cronSQLiteStorage, error) {
+	if !cronLocalProviderAuthorized() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"cron provider access requires database owner fencing",
+		)
+	}
 	if strings.TrimSpace(locator) == "" || strings.ContainsRune(locator, '\x00') {
 		return nil, errors.New("cron store path is required")
 	}
@@ -148,6 +155,12 @@ func newCronSQLiteStorage(locator string) (*cronSQLiteStorage, error) {
 }
 
 func (s *cronSQLiteStorage) open(ctx context.Context) (*sql.DB, error) {
+	if !cronLocalProviderAuthorized() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"cron provider access requires database owner fencing",
+		)
+	}
 	return sqlitestore.Open(ctx, s.databasePath, sqlitestore.Options{
 		Component: cronDatabaseComponent,
 		Migrations: []sqlitestore.Migration{{

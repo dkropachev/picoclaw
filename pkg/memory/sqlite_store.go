@@ -12,37 +12,76 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
+	"github.com/sipeed/picoclaw/pkg/internal/sessiondb"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 // SQLiteStore is the authoritative session, thread, and handoff database.
 // JSONLStore remains a deprecated type alias for one compatibility cycle.
 type SQLiteStore struct {
-	db   *sql.DB
-	dir  string
-	path string
+	db           *sql.DB
+	dir          string
+	threadHandle sessiondb.Handle
+	brokerClient *database.Client
+	storeID      database.StoreID
 }
 
+const SessionsStoreID database.StoreID = "workspace.sessions"
+
+var allowUnfencedSessionsProviderForTests atomic.Bool
+
 // JSONLStore is retained for source compatibility. It is SQLite-backed.
-// Deprecated: use SQLiteStore and NewSQLiteStore.
+// Deprecated: use SQLiteStore and NewStore.
 type JSONLStore = SQLiteStore
 
-// NewSQLiteStore opens <dir>/sessions.db and imports legacy session/thread
-// files on the first authoritative open.
-func NewSQLiteStore(dir string) (*SQLiteStore, error) {
+// NewStore resolves a runtime directory to an opaque trusted session StoreID;
+// explicit offline adapters retain local migration behavior.
+func NewStore(dir string) (*SQLiteStore, error) {
 	return openSQLiteStore(context.Background(), dir)
 }
 
 // NewJSONLStore is a source-compatible facade backed by SQLite.
-// Deprecated: use NewSQLiteStore.
-func NewJSONLStore(dir string) (*JSONLStore, error) { return NewSQLiteStore(dir) }
+// Deprecated: use NewStore.
+func NewJSONLStore(dir string) (*JSONLStore, error) { return NewStore(dir) }
 
 func openSQLiteStore(ctx context.Context, dir string) (*SQLiteStore, error) {
+	if client := database.RuntimeClient(); client != nil {
+		storeID, err := ResolveBrokerStoreID(contextOrBackground(ctx), client, dir)
+		if err != nil {
+			return nil, err
+		}
+		store := &SQLiteStore{brokerClient: client, storeID: storeID}
+		if err := store.pingBroker(contextOrBackground(ctx)); err != nil {
+			return nil, err
+		}
+		return store, nil
+	}
+	if database.ProviderTestAuthorityHeld() || allowUnfencedSessionsProviderForTests.Load() {
+		return openLocalSQLiteStore(ctx, dir)
+	}
+	return nil, database.NewError(
+		database.CodeUnavailable,
+		"sessions database broker client is unavailable",
+	)
+}
+
+func openLocalSQLiteStore(ctx context.Context, dir string) (*SQLiteStore, error) {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedSessionsProviderForTests.Load() {
+		return nil, database.NewError(
+			database.CodeUnauthorized,
+			"sessions local store requires database owner fencing",
+		)
+	}
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return nil, errors.New("memory: sessions directory is required")
@@ -51,7 +90,7 @@ func openSQLiteStore(ctx context.Context, dir string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("memory: resolve sessions directory: %w", err)
 	}
-	path := filepath.Join(absDir, SessionsDatabaseFilename)
+	path := filepath.Join(absDir, sessionsDatabaseFilename)
 	legacy, err := newSessionsLegacyOptions(absDir)
 	if err != nil {
 		return nil, err
@@ -66,29 +105,29 @@ func openSQLiteStore(ctx context.Context, dir string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &SQLiteStore{db: db, dir: absDir, path: path}, nil
+	return &SQLiteStore{
+		db: db, dir: absDir, threadHandle: sessiondb.Register(db), storeID: SessionsStoreID,
+	}, nil
 }
 
-// DBPath returns the canonical SQLite database path.
-func (s *SQLiteStore) DBPath() string {
+// StoreID returns the opaque broker catalog identity for sessions and threads.
+func (s *SQLiteStore) StoreID() database.StoreID {
 	if s == nil {
 		return ""
 	}
-	return s.path
+	return s.storeID
 }
 
-// SQLDB returns the live database handle for the adjacent thread subsystem.
-// Callers must not close or retain it beyond the owning SQLiteStore lifetime.
-func (s *SQLiteStore) SQLDB() *sql.DB {
+// ThreadStore returns an opaque capability for the adjacent typed thread
+// adapter. It exposes no provider handle, SQL callback, path, or filename.
+func (s *SQLiteStore) ThreadStore() sessiondb.Handle {
 	if s == nil {
-		return nil
+		return sessiondb.Handle{}
 	}
-	return s.db
+	return s.threadHandle
 }
 
-// Immediate exposes one transaction boundary to the adjacent thread store.
-// The callback must not retain conn or re-enter this store.
-func (s *SQLiteStore) Immediate(
+func (s *SQLiteStore) immediate(
 	ctx context.Context,
 	callback func(context.Context, *sql.Conn) error,
 ) error {
@@ -387,8 +426,26 @@ func (s *SQLiteStore) AddFullMessage(
 	if messageutil.IsTransientAssistantThoughtMessage(message) {
 		return nil
 	}
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationAdd,
+			sessionAddRequest{
+				StoreID: s.StoreID(), Key: sessionKey,
+				Message: cloneProviderMessages([]providers.Message{message})[0],
+			},
+			&response, true,
+		)
+		if err != nil {
+			return err
+		}
+		if !response.OK {
+			return database.NewError(database.CodeIntegrity, "session broker response is invalid")
+		}
+		return nil
+	}
 	ctx = contextOrBackground(ctx)
-	return s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	return s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		key, found, err := resolveSessionKeyConn(ctx, conn, sessionKey, false)
 		if err != nil {
 			return err
@@ -423,6 +480,33 @@ func (s *SQLiteStore) AddFullMessage(
 }
 
 func (s *SQLiteStore) GetHistory(ctx context.Context, sessionKey string) ([]providers.Message, error) {
+	if s != nil && s.brokerClient != nil {
+		result := make([]providers.Message, 0)
+		offset := 0
+		for {
+			var response sessionBrokerResponse
+			err := s.callSessionBroker(
+				ctx, sessionOperationHistory,
+				sessionHistoryRequest{
+					StoreID: s.StoreID(), Key: sessionKey,
+					Offset: offset, Limit: sessionHistoryPageLimit,
+				},
+				&response, false,
+			)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, cloneProviderMessages(response.History)...)
+			if response.Next == "" {
+				return result, nil
+			}
+			next, err := strconv.Atoi(response.Next)
+			if err != nil || next <= offset {
+				return nil, database.NewError(database.CodeIntegrity, "session broker page is invalid")
+			}
+			offset = next
+		}
+	}
 	ctx = contextOrBackground(ctx)
 	tx, err := s.beginRead(ctx)
 	if err != nil {
@@ -444,6 +528,14 @@ func (s *SQLiteStore) GetHistory(ctx context.Context, sessionKey string) ([]prov
 }
 
 func (s *SQLiteStore) GetSummary(ctx context.Context, sessionKey string) (string, error) {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationGetSummary,
+			sessionKeyRequest{StoreID: s.StoreID(), Key: sessionKey}, &response, false,
+		)
+		return response.Summary, err
+	}
 	ctx = contextOrBackground(ctx)
 	tx, err := s.beginRead(ctx)
 	if err != nil {
@@ -463,8 +555,23 @@ func (s *SQLiteStore) GetSummary(ctx context.Context, sessionKey string) (string
 }
 
 func (s *SQLiteStore) SetSummary(ctx context.Context, sessionKey, summary string) error {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationSetSummary,
+			sessionSummaryRequest{StoreID: s.StoreID(), Key: sessionKey, Summary: summary},
+			&response, true,
+		)
+		if err != nil {
+			return err
+		}
+		if !response.OK {
+			return database.NewError(database.CodeIntegrity, "session broker response is invalid")
+		}
+		return nil
+	}
 	ctx = contextOrBackground(ctx)
-	return s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	return s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		key, found, err := resolveSessionKeyConn(ctx, conn, sessionKey, false)
 		if err != nil {
 			return err
@@ -497,9 +604,27 @@ func (s *SQLiteStore) SetHistory(
 	sessionKey string,
 	history []providers.Message,
 ) error {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationSetHistory,
+			sessionHistoryMutationRequest{
+				StoreID: s.StoreID(), Key: sessionKey,
+				History: cloneProviderMessages(history),
+			},
+			&response, true,
+		)
+		if err != nil {
+			return err
+		}
+		if !response.OK {
+			return database.NewError(database.CodeIntegrity, "session broker response is invalid")
+		}
+		return nil
+	}
 	ctx = contextOrBackground(ctx)
 	history = messageutil.FilterInvalidHistoryMessages(history)
-	return s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	return s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		key, found, err := resolveSessionKeyConn(ctx, conn, sessionKey, false)
 		if err != nil {
 			return err
@@ -532,8 +657,25 @@ func (s *SQLiteStore) SetHistory(
 }
 
 func (s *SQLiteStore) TruncateHistory(ctx context.Context, sessionKey string, keepLast int) error {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationTruncate,
+			sessionHistoryMutationRequest{
+				StoreID: s.StoreID(), Key: sessionKey, KeepLast: keepLast,
+			},
+			&response, true,
+		)
+		if err != nil {
+			return err
+		}
+		if !response.OK {
+			return database.NewError(database.CodeIntegrity, "session broker response is invalid")
+		}
+		return nil
+	}
 	ctx = contextOrBackground(ctx)
-	return s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	return s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		key, found, err := resolveSessionKeyConn(ctx, conn, sessionKey, false)
 		if err != nil || !found {
 			return err
@@ -590,11 +732,48 @@ func (s *SQLiteStore) TruncateHistory(ctx context.Context, sessionKey string, ke
 }
 
 // Compact is a no-op because SQLite has no logically skipped message prefix.
-func (s *SQLiteStore) Compact(ctx context.Context, _ string) error {
+func (s *SQLiteStore) Compact(ctx context.Context, key string) error {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		return s.callSessionBroker(
+			ctx, sessionOperationCompact,
+			sessionKeyRequest{StoreID: s.StoreID(), Key: key}, &response, true,
+		)
+	}
 	return contextOrBackground(ctx).Err()
 }
 
 func (s *SQLiteStore) ListSessions() []string {
+	if s != nil && s.brokerClient != nil {
+		result := make([]string, 0)
+		after := ""
+		for {
+			var response sessionBrokerResponse
+			err := s.callSessionBroker(
+				context.Background(), sessionOperationList,
+				sessionListRequest{
+					StoreID: s.StoreID(), After: after, Limit: sessionListPageLimit,
+				},
+				&response, false,
+			)
+			if err != nil {
+				return nil
+			}
+			for _, key := range response.Sessions {
+				if !validSessionKey(key) || after != "" && key <= after {
+					return nil
+				}
+				result = append(result, key)
+			}
+			if response.Next == "" {
+				return result
+			}
+			if len(response.Sessions) == 0 || response.Next != response.Sessions[len(response.Sessions)-1] {
+				return nil
+			}
+			after = response.Next
+		}
+	}
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -621,6 +800,14 @@ func (s *SQLiteStore) ResolveSessionKey(
 	ctx context.Context,
 	sessionKey string,
 ) (string, bool, error) {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationResolve,
+			sessionKeyRequest{StoreID: s.StoreID(), Key: sessionKey}, &response, false,
+		)
+		return response.CanonicalKey, response.Found, err
+	}
 	ctx = contextOrBackground(ctx)
 	tx, err := s.beginRead(ctx)
 	if err != nil {
@@ -781,6 +968,14 @@ func readSessionMetaConn(
 }
 
 func (s *SQLiteStore) GetSessionMeta(ctx context.Context, sessionKey string) (SessionMeta, error) {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationGetMeta,
+			sessionKeyRequest{StoreID: s.StoreID(), Key: sessionKey}, &response, false,
+		)
+		return cloneSessionMeta(response.Meta), err
+	}
 	ctx = contextOrBackground(ctx)
 	tx, err := s.beginRead(ctx)
 	if err != nil {
@@ -948,9 +1143,27 @@ func (s *SQLiteStore) UpsertSessionMeta(
 	scope json.RawMessage,
 	aliases []string,
 ) error {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationUpsertMeta,
+			sessionMetaRequest{
+				StoreID: s.StoreID(), Key: sessionKey,
+				Scope: append([]byte(nil), scope...), Aliases: append([]string(nil), aliases...),
+			},
+			&response, true,
+		)
+		if err != nil {
+			return err
+		}
+		if !response.OK {
+			return database.NewError(database.CodeIntegrity, "session broker response is invalid")
+		}
+		return nil
+	}
 	ctx = contextOrBackground(ctx)
 	aliases = normalizeAliases(sessionKey, aliases)
-	return s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	return s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		now := time.Now().UTC()
 		if err := ensureSessionConn(ctx, conn, sessionKey, now); err != nil {
 			return err
@@ -977,6 +1190,16 @@ func (s *SQLiteStore) ReadSessionState(
 	ctx context.Context,
 	sessionKey string,
 ) ([]providers.Message, SessionMeta, time.Time, error) {
+	if s != nil && s.brokerClient != nil {
+		_, history, meta, modified, found, err := s.ReadSessionStateStrict(ctx, sessionKey)
+		if err != nil {
+			return nil, SessionMeta{}, time.Time{}, err
+		}
+		if !found {
+			return []providers.Message{}, SessionMeta{Key: strings.TrimSpace(sessionKey)}, time.Time{}, nil
+		}
+		return history, meta, modified, nil
+	}
 	ctx = contextOrBackground(ctx)
 	tx, err := s.beginRead(ctx)
 	if err != nil {
@@ -1005,6 +1228,62 @@ func (s *SQLiteStore) ReadSessionStateStrict(
 	ctx context.Context,
 	sessionKey string,
 ) (string, []providers.Message, SessionMeta, time.Time, bool, error) {
+	if s != nil && s.brokerClient != nil {
+		for attempt := 0; attempt < sessionCallbackRetries; attempt++ {
+			var first sessionBrokerResponse
+			err := s.callSessionBroker(
+				ctx, sessionOperationReadState,
+				sessionReadStateRequest{
+					StoreID: s.StoreID(), Key: sessionKey,
+					Offset: 0, Limit: sessionHistoryPageLimit,
+				},
+				&first, false,
+			)
+			if err != nil {
+				return "", nil, SessionMeta{}, time.Time{}, false, err
+			}
+			history := cloneProviderMessages(first.History)
+			next := first.Next
+			conflict := false
+			for next != "" {
+				offset, parseErr := strconv.Atoi(next)
+				if parseErr != nil || offset != len(history) {
+					return "", nil, SessionMeta{}, time.Time{}, false,
+						database.NewError(database.CodeIntegrity, "session broker page is invalid")
+				}
+				var page sessionBrokerResponse
+				err = s.callSessionBroker(
+					ctx, sessionOperationReadState,
+					sessionReadStateRequest{
+						StoreID: s.StoreID(), Key: sessionKey,
+						Offset: offset, Limit: sessionHistoryPageLimit,
+						ExpectedRevision: first.Revision,
+					},
+					&page, false,
+				)
+				if database.CodeOf(err) == database.CodeConflict {
+					conflict = true
+					break
+				}
+				if err != nil || page.Revision != first.Revision || page.CanonicalKey != first.CanonicalKey {
+					if err == nil {
+						err = database.NewError(database.CodeIntegrity, "session broker page is invalid")
+					}
+					return "", nil, SessionMeta{}, time.Time{}, false, err
+				}
+				history = append(history, cloneProviderMessages(page.History)...)
+				next = page.Next
+			}
+			if conflict {
+				continue
+			}
+			meta := cloneSessionMeta(first.Meta)
+			meta.Revision = first.Revision
+			return first.CanonicalKey, history, meta, first.ModifiedAt, first.Found, nil
+		}
+		return "", nil, SessionMeta{}, time.Time{}, false,
+			database.NewError(database.CodeConflict, "session changed during pagination")
+	}
 	ctx = contextOrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return "", nil, SessionMeta{}, time.Time{}, false, err
@@ -1045,12 +1324,34 @@ func (s *SQLiteStore) ReplaceSessionSnapshot(
 	ctx context.Context,
 	replacement SessionSnapshotReplacement,
 ) error {
+	if s != nil && s.brokerClient != nil {
+		replacementCopy := replacement
+		replacementCopy.History = cloneProviderMessages(replacement.History)
+		replacementCopy.Scope = append([]byte(nil), replacement.Scope...)
+		replacementCopy.Aliases = append([]string(nil), replacement.Aliases...)
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationReplaceSnapshot,
+			sessionSnapshotRequest{StoreID: s.StoreID(), Replacement: &replacementCopy},
+			&response, true,
+		)
+		if database.CodeOf(err) == database.CodeConflict {
+			return ErrSnapshotConflict
+		}
+		if err != nil {
+			return err
+		}
+		if !response.OK {
+			return database.NewError(database.CodeIntegrity, "session broker response is invalid")
+		}
+		return nil
+	}
 	ctx = contextOrBackground(ctx)
 	if err := validateSnapshotReplacement(replacement); err != nil {
 		return err
 	}
 	replacement.History = messageutil.FilterInvalidHistoryMessages(replacement.History)
-	return s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	return s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		meta, exists, err := readSessionMetaConn(ctx, conn, replacement.Key)
 		if err != nil {
 			return err
@@ -1119,8 +1420,42 @@ func (s *SQLiteStore) AdmitSessionMeta(
 	if strings.TrimSpace(sessionKey) == "" || sessionKey != strings.TrimSpace(sessionKey) || admit == nil {
 		return false, errors.New("memory: session metadata admission is invalid")
 	}
+	if s != nil && s.brokerClient != nil {
+		for attempt := 0; attempt < sessionCallbackRetries; attempt++ {
+			var current sessionBrokerResponse
+			if err := s.callSessionBroker(
+				ctx, sessionOperationReadMutationMeta,
+				sessionKeyRequest{StoreID: s.StoreID(), Key: sessionKey},
+				&current, false,
+			); err != nil {
+				return false, err
+			}
+			decision, err := admit(cloneSessionMeta(current.Meta), current.Found)
+			if err != nil || !decision.Update {
+				return false, err
+			}
+			decision.Scope = append(json.RawMessage(nil), decision.Scope...)
+			decision.Aliases = append([]string(nil), decision.Aliases...)
+			var applied sessionBrokerResponse
+			err = s.callSessionBroker(
+				ctx, sessionOperationApplyAdmission,
+				sessionApplyAdmissionRequest{
+					StoreID: s.StoreID(), RequestedKey: sessionKey,
+					CanonicalKey: current.CanonicalKey, Existed: current.Found,
+					Expected: cloneSessionMeta(current.Meta), ExpectedRevision: current.Revision,
+					Decision: decision,
+				},
+				&applied, true,
+			)
+			if database.CodeOf(err) == database.CodeConflict {
+				continue
+			}
+			return applied.Changed, err
+		}
+		return false, database.NewError(database.CodeConflict, "session metadata changed concurrently")
+	}
 	updated := false
-	err := s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	err := s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		key, found, err := resolveSessionKeyConn(ctx, conn, sessionKey, true)
 		if err != nil {
 			return err
@@ -1388,9 +1723,21 @@ func (s *SQLiteStore) PromoteAliasHistory(
 	scope json.RawMessage,
 	aliases []string,
 ) (bool, error) {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationPromoteAlias,
+			sessionMetaRequest{
+				StoreID: s.StoreID(), Key: sessionKey,
+				Scope: append([]byte(nil), scope...), Aliases: append([]string(nil), aliases...),
+			},
+			&response, true,
+		)
+		return response.Promoted, err
+	}
 	ctx = contextOrBackground(ctx)
 	promoted := false
-	err := s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	err := s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		now := time.Now().UTC()
 		if err := ensureSessionConn(ctx, conn, sessionKey, now); err != nil {
 			return err
@@ -1449,7 +1796,42 @@ func (s *SQLiteStore) UpdateSessionMetaStrict(
 	if strings.TrimSpace(sessionKey) == "" || sessionKey != strings.TrimSpace(sessionKey) || update == nil {
 		return "", false, errors.New("memory: strict session metadata update is invalid")
 	}
-	err = s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	if s != nil && s.brokerClient != nil {
+		for attempt := 0; attempt < sessionCallbackRetries; attempt++ {
+			var current sessionBrokerResponse
+			if err := s.callSessionBroker(
+				ctx, sessionOperationReadMutationMeta,
+				sessionKeyRequest{StoreID: s.StoreID(), Key: sessionKey},
+				&current, false,
+			); err != nil {
+				return "", false, err
+			}
+			replacement := cloneSessionMeta(current.Meta)
+			if err := update(&replacement, current.State); err != nil {
+				return "", false, err
+			}
+			var applied sessionBrokerResponse
+			err := s.callSessionBroker(
+				ctx, sessionOperationApplyMeta,
+				sessionApplyMetaRequest{
+					StoreID: s.StoreID(), RequestedKey: sessionKey,
+					CanonicalKey: current.CanonicalKey, Existed: current.Found,
+					Expected: cloneSessionMeta(current.Meta), ExpectedRevision: current.Revision,
+					Replacement: replacement,
+				},
+				&applied, true,
+			)
+			if database.CodeOf(err) == database.CodeConflict {
+				continue
+			}
+			if err != nil {
+				return "", false, err
+			}
+			return applied.CanonicalKey, applied.Found, nil
+		}
+		return "", false, database.NewError(database.CodeConflict, "session metadata changed concurrently")
+	}
+	err = s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		key, found, err := resolveSessionKeyConn(ctx, conn, sessionKey, true)
 		if err != nil {
 			return err
@@ -1463,6 +1845,16 @@ func (s *SQLiteStore) UpdateSessionMetaStrict(
 			return err
 		}
 		existed = found
+		if found {
+			history, historyErr := readMessagesConn(ctx, conn, key)
+			if historyErr != nil {
+				return historyErr
+			}
+			meta.Revision, err = snapshotRevision(key, history, meta)
+			if err != nil {
+				return err
+			}
+		}
 		before := cloneSessionMeta(meta)
 		if err := update(&meta, SessionMetaMutationState{
 			SessionExists: found, MetadataExists: found,
@@ -1501,9 +1893,26 @@ func (s *SQLiteStore) CompareAndSwapSessionMetaStrict(
 	expected SessionMeta,
 	replacement *SessionMeta,
 ) (bool, error) {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		var replacementCopy *SessionMeta
+		if replacement != nil {
+			clonedReplacement := cloneSessionMeta(*replacement)
+			replacementCopy = &clonedReplacement
+		}
+		err := s.callSessionBroker(
+			ctx, sessionOperationCompareSwapMeta,
+			sessionMetaCASRequest{
+				StoreID: s.StoreID(), Key: sessionKey,
+				Expected: cloneSessionMeta(expected), Replacement: replacementCopy,
+			},
+			&response, true,
+		)
+		return response.Changed, err
+	}
 	ctx = contextOrBackground(ctx)
 	changed := false
-	err := s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	err := s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		key, found, err := resolveSessionKeyConn(ctx, conn, sessionKey, true)
 		if err != nil || !found {
 			return err
@@ -1544,9 +1953,20 @@ func (s *SQLiteStore) CompareAndDeleteEmptySessionStrict(
 	sessionKey string,
 	expected SessionMeta,
 ) (bool, error) {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationCompareDelete,
+			sessionMetaCASRequest{
+				StoreID: s.StoreID(), Key: sessionKey, Expected: cloneSessionMeta(expected),
+			},
+			&response, true,
+		)
+		return response.Changed, err
+	}
 	ctx = contextOrBackground(ctx)
 	deleted := false
-	err := s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	err := s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		key, found, err := resolveSessionKeyConn(ctx, conn, sessionKey, true)
 		if err != nil || !found {
 			return err
@@ -1574,8 +1994,16 @@ func (s *SQLiteStore) CompareAndDeleteEmptySessionStrict(
 }
 
 func (s *SQLiteStore) EnsureSessionHistory(ctx context.Context, sessionKey string) error {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationEnsure,
+			sessionKeyRequest{StoreID: s.StoreID(), Key: sessionKey}, &response, true,
+		)
+		return err
+	}
 	ctx = contextOrBackground(ctx)
-	return s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	return s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		return ensureSessionConn(ctx, conn, strings.TrimSpace(sessionKey), time.Now().UTC())
 	})
 }
@@ -1606,13 +2034,24 @@ func normalizeDeleteKeys(keys []string) ([]string, error) {
 }
 
 func (s *SQLiteStore) DeleteSessions(ctx context.Context, sessionKeys []string) (bool, error) {
+	if s != nil && s.brokerClient != nil {
+		var response sessionBrokerResponse
+		err := s.callSessionBroker(
+			ctx, sessionOperationDelete,
+			sessionDeleteRequest{
+				StoreID: s.StoreID(), Keys: append([]string(nil), sessionKeys...),
+			},
+			&response, true,
+		)
+		return response.Changed, err
+	}
 	ctx = contextOrBackground(ctx)
 	keys, err := normalizeDeleteKeys(sessionKeys)
 	if err != nil {
 		return false, err
 	}
 	deleted := false
-	err = s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	err = s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		canonical := make([]string, 0, len(keys))
 		seen := make(map[string]struct{})
 		for _, key := range keys {
@@ -1651,13 +2090,59 @@ func (s *SQLiteStore) DeleteSessionsWithAliasesMatching(
 	matchSession func(SessionMeta, bool) bool,
 	matchAlias func(SessionMeta, string) bool,
 ) (bool, error) {
+	if s != nil && s.brokerClient != nil {
+		keys, err := normalizeDeleteKeys(sessionKeys)
+		if err != nil {
+			return false, err
+		}
+		deleteSet := make(map[string]struct{})
+		for _, requested := range keys {
+			key, found, err := s.ResolveSessionKey(ctx, requested)
+			if err != nil {
+				return false, err
+			}
+			if !found {
+				continue
+			}
+			meta, err := s.GetSessionMeta(ctx, key)
+			if err != nil {
+				return false, err
+			}
+			if matchSession == nil || matchSession(cloneSessionMeta(meta), true) {
+				deleteSet[key] = struct{}{}
+			}
+			if matchAlias != nil {
+				for _, alias := range meta.Aliases {
+					if !matchAlias(cloneSessionMeta(meta), alias) {
+						continue
+					}
+					shadow, shadowFound, err := s.ResolveSessionKey(ctx, alias)
+					if err != nil {
+						return false, err
+					}
+					if shadowFound && shadow == alias {
+						deleteSet[shadow] = struct{}{}
+					}
+				}
+			}
+		}
+		selected := make([]string, 0, len(deleteSet))
+		for key := range deleteSet {
+			selected = append(selected, key)
+		}
+		sort.Strings(selected)
+		if len(selected) == 0 {
+			return false, nil
+		}
+		return s.DeleteSessions(ctx, selected)
+	}
 	ctx = contextOrBackground(ctx)
 	keys, err := normalizeDeleteKeys(sessionKeys)
 	if err != nil {
 		return false, err
 	}
 	deleted := false
-	err = s.Immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	err = s.immediate(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		deleteSet := make(map[string]struct{})
 		for _, requested := range keys {
 			key, found, err := resolveSessionKeyConn(ctx, conn, requested, true)
@@ -1703,9 +2188,15 @@ func (s *SQLiteStore) DeleteSessionsWithAliasesMatching(
 }
 
 func (s *SQLiteStore) Close() error {
+	if s != nil && s.brokerClient != nil {
+		s.brokerClient = nil
+		return nil
+	}
 	if s == nil || s.db == nil {
 		return nil
 	}
+	sessiondb.Unregister(s.threadHandle)
+	s.threadHandle = sessiondb.Handle{}
 	err := s.db.Close()
 	s.db = nil
 	return err

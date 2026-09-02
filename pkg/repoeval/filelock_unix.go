@@ -18,6 +18,17 @@ var (
 )
 
 func lockRepositoryEvaluationStore(root string) (func(), error) {
+	return lockRepositoryEvaluationStoreMode(root, false)
+}
+
+func tryLockRepositoryEvaluationStore(root string) (func(), error) {
+	return lockRepositoryEvaluationStoreMode(root, true)
+}
+
+func lockRepositoryEvaluationStoreMode(root string, nonblocking bool) (func(), error) {
+	if err := evaluationProviderAuthorityError(); err != nil {
+		return nil, err
+	}
 	lockPath, lockPathErr := repositoryEvaluationLockPath(root, "store.lock")
 	if lockPathErr != nil {
 		return nil, lockPathErr
@@ -43,8 +54,15 @@ func lockRepositoryEvaluationStore(root string) (func(), error) {
 		_ = file.Close()
 		return nil, err
 	}
-	if err := repositoryEvaluationFlock(int(file.Fd()), unix.LOCK_EX); err != nil {
+	operation := unix.LOCK_EX
+	if nonblocking {
+		operation |= unix.LOCK_NB
+	}
+	if err := repositoryEvaluationFlock(int(file.Fd()), operation); err != nil {
 		_ = file.Close()
+		if nonblocking && (errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN)) {
+			return nil, ErrConflict
+		}
 		return nil, fmt.Errorf("lock repository evaluation store: %w", err)
 	}
 	return func() {

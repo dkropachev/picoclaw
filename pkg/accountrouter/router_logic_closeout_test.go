@@ -142,7 +142,7 @@ func TestAccountRouterPureStateAndSelectionBoundaryMatrix(t *testing.T) {
 		New("router", testAccountRouterConfig(), accounts, "\x00") != nil {
 		t.Fatal("New accepted invalid input")
 	}
-	created, err := NewSQLite("router", testAccountRouterConfig(), map[string]Account{
+	created, err := newSQLiteRouter("router", testAccountRouterConfig(), map[string]Account{
 		"":       {Candidates: []providers.FallbackCandidate{candidate("blank")}},
 		"empty":  {},
 		" good ": {Candidates: []providers.FallbackCandidate{candidate("good")}},

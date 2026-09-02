@@ -133,7 +133,7 @@ export interface ToolAdaptationProfileOverride {
 export interface ToolAdaptationResolvedState {
   provider: string
   model: string
-  state_path: string
+  store_id: string
   visible_tool_surface: VisibleToolSurface
   pinned_tool_surface: VisibleToolSurface
   surface_evidence: "disabled" | "config" | "heuristic" | "learned" | string

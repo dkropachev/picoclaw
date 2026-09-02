@@ -237,7 +237,7 @@ func (h *Handler) findPicoSQLiteSessions(
 	ctx context.Context,
 	dir string,
 ) ([]picoSQLiteSessionRef, error) {
-	store, err := memory.NewSQLiteStore(dir)
+	store, err := memory.NewStore(dir)
 	if err != nil {
 		return nil, err
 	}

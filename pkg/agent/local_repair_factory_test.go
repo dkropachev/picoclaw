@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -397,7 +396,8 @@ func TestNewControllerLocalRepairRunnerUsesBlankAccountAffinity(t *testing.T) {
 	accountB := controllerRepairFactoryCandidate("account-b", "coding", "openai", "gpt-b")
 	providerA := &controllerRepairFactoryProvider{name: "account-a"}
 	providerB := &controllerRepairFactoryProvider{name: "account-b"}
-	statePath := filepath.Join(t.TempDir(), "account-router-state.json")
+	routerWorkspace := t.TempDir()
+	statePath := filepath.Join(routerWorkspace, "state", "account-router.db")
 	routerConfig := config.AccountRouterConfig{
 		Name:    "accounts",
 		Enabled: true,
@@ -409,14 +409,14 @@ func TestNewControllerLocalRepairRunnerUsesBlankAccountAffinity(t *testing.T) {
 			Strategy: config.AccountRouterStrategyBlind,
 		}},
 	}
-	router := accountrouter.New(
+	router := accountrouter.NewForWorkspace(
 		routerConfig.Name,
 		&routerConfig,
 		map[string]accountrouter.Account{
 			"account-a": {Candidates: []providers.FallbackCandidate{accountA}},
 			"account-b": {Candidates: []providers.FallbackCandidate{accountB}},
 		},
-		statePath,
+		routerWorkspace,
 	)
 	agent := &AgentInstance{
 		ID:                 "repairer",
@@ -433,10 +433,6 @@ func TestNewControllerLocalRepairRunnerUsesBlankAccountAffinity(t *testing.T) {
 	if !loop.ControllerLocalRepairReady("repairer") {
 		t.Fatal("account-router controller repair readiness = false")
 	}
-	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("readiness wrote account affinity state: Stat() error = %v", err)
-	}
-
 	runner, err := loop.NewControllerLocalRepairRunner("repairer", "route")
 	if err != nil {
 		t.Fatalf("NewControllerLocalRepairRunner() error = %v", err)
@@ -445,7 +441,7 @@ func TestNewControllerLocalRepairRunnerUsesBlankAccountAffinity(t *testing.T) {
 		t.Fatal("blank-affinity initial selection did not choose the first blind account")
 	}
 
-	sessionKeys, err := accountrouter.SessionKeys(router.StatePath, routerConfig.Name)
+	sessionKeys, err := accountrouter.SessionKeys(statePath, routerConfig.Name)
 	if err != nil {
 		t.Fatalf("read account router sessions: %v", err)
 	}

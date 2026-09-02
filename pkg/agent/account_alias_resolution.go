@@ -338,8 +338,7 @@ func buildAccountRouterWithAliases(
 			RPM:        rpm,
 		}
 	}
-	statePath := accountrouter.DatabasePath(workspace)
-	return accountrouter.New(accountRef, routerCfg, accounts, statePath)
+	return accountrouter.NewForWorkspace(accountRef, routerCfg, accounts, workspace)
 }
 
 func lookupAccountRouterConfig(

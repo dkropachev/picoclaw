@@ -14,10 +14,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
+	"github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -36,6 +38,8 @@ const (
 	weixinStateKindCursor = "cursor"
 	weixinStateKindTokens = "tokens"
 )
+
+var allowUnfencedWeixinProviderForTests atomic.Bool
 
 var errWeixinLegacyTokenLimit = errors.New("legacy Weixin context-token count exceeds its limit")
 
@@ -90,6 +94,16 @@ type weixinStateStore struct {
 	legacyKind string
 	canonical  bool
 	now        func() time.Time
+	broker     *database.Client
+	storeID    database.StoreID
+	retained   *retainedWeixinDatabase
+}
+
+type retainedWeixinDatabase struct {
+	mu     sync.RWMutex
+	db     *sql.DB
+	unlock func()
+	closed bool
 }
 
 type weixinLegacyToken struct {
@@ -109,6 +123,34 @@ func newWeixinStateStore(locator, kind string) (*weixinStateStore, error) {
 	}
 	if strings.TrimSpace(locator) == "" {
 		return nil, errors.New("Weixin state path is required")
+	}
+	if client := weixinBrokerClient(); client != nil {
+		store, err := newBrokerWeixinStateStore(locator, kind, client)
+		if err != nil {
+			return nil, err
+		}
+		if err := store.brokerPreflight(context.Background()); err != nil {
+			return nil, err
+		}
+		return store, nil
+	}
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedWeixinProviderForTests.Load() {
+		return nil, database.NewError(
+			database.CodeUnavailable,
+			"Weixin database broker client is unavailable",
+		)
+	}
+	return newWeixinStateStoreLocal(locator, kind)
+}
+
+func newWeixinStateStoreLocal(locator, kind string) (*weixinStateStore, error) {
+	if kind != weixinStateKindCursor && kind != weixinStateKindTokens {
+		return nil, errors.New("Weixin state kind is invalid")
+	}
+	if strings.ContainsRune(locator, '\x00') || strings.TrimSpace(locator) == "" {
+		return nil, errors.New("Weixin state path is invalid")
 	}
 	resolved, err := filepath.Abs(filepath.Clean(locator))
 	if err != nil {
@@ -145,13 +187,40 @@ func newWeixinStateStore(locator, kind string) (*weixinStateStore, error) {
 	}, nil
 }
 
+func newRetainedWeixinStateStore(home string) (*weixinStateStore, error) {
+	home, err := filepath.Abs(filepath.Clean(home))
+	if err != nil || strings.TrimSpace(home) == "" {
+		return nil, errors.New("Weixin state home is invalid")
+	}
+	store, err := newWeixinStateStoreLocal(
+		filepath.Join(home, "channels", "weixin", "sync", "default.json"),
+		weixinStateKindCursor,
+	)
+	if err != nil {
+		return nil, err
+	}
+	store.storeID = WeixinStoreID
+	db, unlock, err := store.open(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	store.retained = &retainedWeixinDatabase{db: db, unlock: unlock}
+	return store, nil
+}
+
 func (s *weixinStateStore) loadCursor(ctx context.Context) (string, error) {
-	db, unlock, err := s.open(ctx)
+	if s != nil && s.broker != nil {
+		return s.brokerLoadCursor(ctx)
+	}
+	return s.loadCursorLocal(ctx)
+}
+
+func (s *weixinStateStore) loadCursorLocal(ctx context.Context) (string, error) {
+	db, release, err := s.acquire(ctx)
 	if err != nil {
 		return "", err
 	}
-	defer unlock()
-	defer db.Close()
+	defer release()
 	var cursor string
 	err = db.QueryRowContext(
 		ctx,
@@ -166,19 +235,28 @@ func (s *weixinStateStore) loadCursor(ctx context.Context) (string, error) {
 
 func (s *weixinStateStore) saveCursor(ctx context.Context, cursor string) error {
 	if err := validateWeixinStateValue(cursor, true); err != nil {
+		if s != nil && s.broker != nil {
+			return database.NewError(database.CodeInvalid, "Weixin cursor is invalid")
+		}
 		return err
 	}
+	if s != nil && s.broker != nil {
+		return s.brokerSaveCursor(ctx, cursor)
+	}
+	return s.saveCursorLocal(ctx, cursor)
+}
+
+func (s *weixinStateStore) saveCursorLocal(ctx context.Context, cursor string) error {
 	now := s.now().UTC()
 	seconds, nanoseconds, err := weixinStateTimestampValues(now)
 	if err != nil {
 		return err
 	}
-	db, unlock, err := s.open(ctx)
+	db, release, err := s.acquire(ctx)
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	defer db.Close()
+	defer release()
 	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
 		if err := ensureWeixinAccount(ctx, conn, s.accountKey, seconds, nanoseconds); err != nil {
 			return err
@@ -204,12 +282,18 @@ func (s *weixinStateStore) saveCursor(ctx context.Context, cursor string) error 
 }
 
 func (s *weixinStateStore) loadTokens(ctx context.Context) (map[string]string, error) {
-	db, unlock, err := s.open(ctx)
+	if s != nil && s.broker != nil {
+		return s.brokerLoadTokens(ctx)
+	}
+	return s.loadTokensLocal(ctx)
+}
+
+func (s *weixinStateStore) loadTokensLocal(ctx context.Context) (map[string]string, error) {
+	db, release, err := s.acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer unlock()
-	defer db.Close()
+	defer release()
 	rows, err := db.QueryContext(ctx, `SELECT user_id, context_token
         FROM weixin_context_tokens WHERE account_key = ? ORDER BY user_id`, s.accountKey)
 	if err != nil {
@@ -233,32 +317,97 @@ func (s *weixinStateStore) loadTokens(ctx context.Context) (map[string]string, e
 	return tokens, nil
 }
 
+func (s *weixinStateStore) loadTokensPageLocal(
+	ctx context.Context,
+	afterUserID string,
+	limit int,
+) (map[string]string, string, error) {
+	if limit < 1 || limit > weixinBrokerTokenPageSize {
+		return nil, "", errors.New("Weixin token page limit is invalid")
+	}
+	db, release, err := s.acquire(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	defer release()
+	rows, err := db.QueryContext(ctx, `SELECT user_id, context_token
+	    FROM weixin_context_tokens
+	    WHERE account_key = ? AND user_id > ?
+	    ORDER BY user_id LIMIT ?`, s.accountKey, afterUserID, limit+1)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	tokens := make(map[string]string, limit)
+	ordered := make([]string, 0, limit+1)
+	for rows.Next() {
+		var userID, token string
+		if err := rows.Scan(&userID, &token); err != nil {
+			return nil, "", err
+		}
+		ordered = append(ordered, userID)
+		if len(ordered) <= limit {
+			tokens[userID] = token
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	nextAfter := ""
+	if len(ordered) > limit {
+		nextAfter = ordered[limit-1]
+	}
+	if len(tokens) == 0 {
+		tokens = nil
+	}
+	return tokens, nextAfter, nil
+}
+
 func (s *weixinStateStore) saveTokens(ctx context.Context, tokens map[string]string) error {
 	if len(tokens) > weixinStateMaxTokens {
+		if s != nil && s.broker != nil {
+			return database.NewError(database.CodeInvalid, "Weixin token count is invalid")
+		}
 		return errors.New("Weixin context-token count exceeds its limit")
 	}
 	userIDs := make([]string, 0, len(tokens))
 	for userID, token := range tokens {
 		if err := validateWeixinStateValue(userID, false); err != nil {
+			if s != nil && s.broker != nil {
+				return database.NewError(database.CodeInvalid, "Weixin token value is invalid")
+			}
 			return err
 		}
 		if err := validateWeixinStateValue(token, true); err != nil {
+			if s != nil && s.broker != nil {
+				return database.NewError(database.CodeInvalid, "Weixin token value is invalid")
+			}
 			return err
 		}
 		userIDs = append(userIDs, userID)
 	}
 	sort.Strings(userIDs)
+	if s != nil && s.broker != nil {
+		return s.brokerSaveTokens(ctx, tokens)
+	}
+	return s.saveTokensLocal(ctx, tokens, userIDs)
+}
+
+func (s *weixinStateStore) saveTokensLocal(
+	ctx context.Context,
+	tokens map[string]string,
+	userIDs []string,
+) error {
 	now := s.now().UTC()
 	seconds, nanoseconds, err := weixinStateTimestampValues(now)
 	if err != nil {
 		return err
 	}
-	db, unlock, err := s.open(ctx)
+	db, release, err := s.acquire(ctx)
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	defer db.Close()
+	defer release()
 	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
 		if err := ensureWeixinAccount(ctx, conn, s.accountKey, seconds, nanoseconds); err != nil {
 			return err
@@ -301,22 +450,34 @@ func (s *weixinStateStore) saveTokens(ctx context.Context, tokens map[string]str
 
 func (s *weixinStateStore) saveToken(ctx context.Context, userID, token string) error {
 	if err := validateWeixinStateValue(userID, false); err != nil {
+		if s != nil && s.broker != nil {
+			return database.NewError(database.CodeInvalid, "Weixin token value is invalid")
+		}
 		return err
 	}
 	if err := validateWeixinStateValue(token, true); err != nil {
+		if s != nil && s.broker != nil {
+			return database.NewError(database.CodeInvalid, "Weixin token value is invalid")
+		}
 		return err
 	}
+	if s != nil && s.broker != nil {
+		return s.brokerSaveToken(ctx, userID, token)
+	}
+	return s.saveTokenLocal(ctx, userID, token)
+}
+
+func (s *weixinStateStore) saveTokenLocal(ctx context.Context, userID, token string) error {
 	now := s.now().UTC()
 	seconds, nanoseconds, err := weixinStateTimestampValues(now)
 	if err != nil {
 		return err
 	}
-	db, unlock, err := s.open(ctx)
+	db, release, err := s.acquire(ctx)
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	defer db.Close()
+	defer release()
 	return sqlitestore.Immediate(ctx, db, func(conn *sql.Conn) error {
 		if err := ensureWeixinAccount(ctx, conn, s.accountKey, seconds, nanoseconds); err != nil {
 			return err
@@ -366,6 +527,14 @@ func deleteRemovedWeixinTokens(
 }
 
 func (s *weixinStateStore) open(ctx context.Context) (*sql.DB, func(), error) {
+	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+		!database.ProviderTestAuthorityHeld() &&
+		!allowUnfencedWeixinProviderForTests.Load() {
+		return nil, nil, database.NewError(
+			database.CodeUnauthorized,
+			"Weixin provider access requires database owner authority",
+		)
+	}
 	lock := weixinStateLocalLock(s.path)
 	lock.Lock()
 	unlockFile, err := lockWeixinStateDatabase(s.path)
@@ -383,6 +552,71 @@ func (s *weixinStateStore) open(ctx context.Context) (*sql.DB, func(), error) {
 		return nil, nil, err
 	}
 	return db, unlock, nil
+}
+
+func (s *weixinStateStore) acquire(ctx context.Context) (*sql.DB, func(), error) {
+	if s != nil && s.retained != nil {
+		return s.retained.acquire()
+	}
+	db, unlock, err := s.open(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return db, func() {
+		_ = db.Close()
+		unlock()
+	}, nil
+}
+
+func (retained *retainedWeixinDatabase) acquire() (*sql.DB, func(), error) {
+	if retained == nil {
+		return nil, nil, errors.New("Weixin state store is unavailable")
+	}
+	retained.mu.RLock()
+	if retained.closed || retained.db == nil {
+		retained.mu.RUnlock()
+		return nil, nil, errors.New("Weixin state store is closed")
+	}
+	return retained.db, retained.mu.RUnlock, nil
+}
+
+func (retained *retainedWeixinDatabase) close() error {
+	if retained == nil {
+		return nil
+	}
+	retained.mu.Lock()
+	defer retained.mu.Unlock()
+	if retained.closed {
+		return nil
+	}
+	retained.closed = true
+	var closeErr error
+	if retained.db != nil {
+		closeErr = retained.db.Close()
+		retained.db = nil
+	}
+	if retained.unlock != nil {
+		retained.unlock()
+		retained.unlock = nil
+	}
+	return closeErr
+}
+
+func (s *weixinStateStore) Close() error {
+	if s == nil || s.retained == nil {
+		return nil
+	}
+	return s.retained.close()
+}
+
+func (s *weixinStateStore) StoreID() database.StoreID {
+	if s == nil {
+		return ""
+	}
+	if s.storeID != "" {
+		return s.storeID
+	}
+	return WeixinStoreID
 }
 
 func (s *weixinStateStore) options() sqlitestore.Options {

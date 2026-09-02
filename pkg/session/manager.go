@@ -39,7 +39,7 @@ func NewSessionManager(storage string) *SessionManager {
 	if strings.TrimSpace(storage) == "" {
 		return manager
 	}
-	backend, err := NewSQLiteBackend(storage)
+	backend, err := NewPersistentBackend(storage)
 	if err != nil {
 		panic("open SQLite-backed SessionManager")
 	}

@@ -19,7 +19,7 @@ func TestSaveStore_FilePermissions(t *testing.T) {
 	tmpDir := t.TempDir()
 	storePath := filepath.Join(tmpDir, "cron", "jobs.json")
 
-	cs := NewCronService(storePath, nil)
+	cs := NewForWorkspace(storePath, nil)
 
 	_, err := cs.AddJob("test", CronSchedule{Kind: "every", EveryMS: int64Ptr(60000)}, "hello", "cli", "direct")
 	if err != nil {
@@ -44,7 +44,7 @@ func int64Ptr(v int64) *int64 {
 func setupService(t *testing.T, handler JobHandler) (*CronService, string) {
 	t.Helper()
 	tmpFile := filepath.Join(t.TempDir(), fmt.Sprintf("test_cron_%d.json", time.Now().UnixNano()))
-	cs := NewCronService(tmpFile, handler)
+	cs := NewForWorkspace(tmpFile, handler)
 	return cs, cs.storePath
 }
 
@@ -298,7 +298,7 @@ func TestCronService_StopBeforeRuntimeAdmissionPreservesDueJob(t *testing.T) {
 	admissionEntered := make(chan struct{})
 	admissionReturned := make(chan struct{})
 	var admissionOnce sync.Once
-	cs := NewCronService(storePath, func(*CronJob) (string, error) {
+	cs := NewForWorkspace(storePath, func(*CronJob) (string, error) {
 		handlerCalled <- struct{}{}
 		return "unexpected", nil
 	})
@@ -354,7 +354,7 @@ func TestCronService_StopBeforeRuntimeAdmissionPreservesDueJob(t *testing.T) {
 		t.Fatalf("due job LastRunAtMS = %v, want nil", persisted.State.LastRunAtMS)
 	}
 
-	reopened := NewCronService(storePath, nil)
+	reopened := NewForWorkspace(storePath, nil)
 	durable, ok := reopened.GetJob(job.ID)
 	if !ok || durable.State.NextRunAtMS == nil {
 		t.Fatalf("durable due job after stopped admission = %#v, want pending job", durable)
@@ -363,7 +363,7 @@ func TestCronService_StopBeforeRuntimeAdmissionPreservesDueJob(t *testing.T) {
 
 func TestCronService_RestartExecutesOverdueDurableOneShot(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "cron", "jobs.json")
-	cs := NewCronService(storePath, nil)
+	cs := NewForWorkspace(storePath, nil)
 	at := time.Now().Add(20 * time.Millisecond).UnixMilli()
 	job, err := cs.AddJob(
 		"overdue after restart",
@@ -378,7 +378,7 @@ func TestCronService_RestartExecutesOverdueDurableOneShot(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 
 	executed := make(chan string, 1)
-	restarted := NewCronService(storePath, func(job *CronJob) (string, error) {
+	restarted := NewForWorkspace(storePath, func(job *CronJob) (string, error) {
 		executed <- job.ID
 		return "ok", nil
 	})
@@ -410,7 +410,7 @@ func TestCronService_PersistenceIntegrity(t *testing.T) {
 	tmpFile := filepath.Join(t.TempDir(), "persist_test.json")
 
 	// write a job and persist
-	cs1 := NewCronService(tmpFile, nil)
+	cs1 := NewForWorkspace(tmpFile, nil)
 	databasePath := cs1.storePath
 	at := int64(2000000000000)
 	cs1.AddJob("PersistMe", CronSchedule{Kind: "at", AtMS: &at}, "payload", "ch1", "")
@@ -421,7 +421,7 @@ func TestCronService_PersistenceIntegrity(t *testing.T) {
 	}
 
 	// reload and check data integrity
-	cs2 := NewCronService(tmpFile, nil)
+	cs2 := NewForWorkspace(tmpFile, nil)
 	if err := cs2.Load(); err != nil {
 		t.Fatalf("Failed to load store: %v", err)
 	}
@@ -441,7 +441,7 @@ func TestCronService_PersistenceIntegrity(t *testing.T) {
 	if err := os.WriteFile(databasePath, []byte("not sqlite"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cs3 := NewCronService(tmpFile, nil)
+	cs3 := NewForWorkspace(tmpFile, nil)
 	err := cs3.loadStore()
 	if err == nil {
 		t.Error("Should return error when loading invalid SQLite")

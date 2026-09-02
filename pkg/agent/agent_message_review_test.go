@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/audio/asr"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/internal/sessiondb"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -358,27 +359,28 @@ func seedReviewGuardThreadRedirect(
 	}
 	now := time.Now().UTC()
 	seconds, nanos := now.Unix(), now.Nanosecond()
-	if err := lower.Immediate(t.Context(), func(ctx context.Context, conn *sql.Conn) error {
-		if _, err := conn.ExecContext(ctx, `INSERT INTO threads (
+	if err := sessiondb.Bind(lower.ThreadStore()).
+		Immediate(t.Context(), func(ctx context.Context, conn *sql.Conn) error {
+			if _, err := conn.ExecContext(ctx, `INSERT INTO threads (
             thread_id, ui_session_id, primary_session_key, agent_id, owner_identity,
             title, thread_type, source_query, registration, created_seconds,
             created_nanos, updated_seconds, updated_nanos, version
         ) VALUES (?, ?, ?, 'main', 'test', 'review redirect', 'general', '',
             'manual', ?, ?, ?, ?, 1)`, threadID, threadID, targetKey,
-			seconds, nanos, seconds, nanos); err != nil {
-			return err
-		}
-		if _, err := conn.ExecContext(ctx, `INSERT INTO thread_sessions (
+				seconds, nanos, seconds, nanos); err != nil {
+				return err
+			}
+			if _, err := conn.ExecContext(ctx, `INSERT INTO thread_sessions (
             thread_id, sequence, session_key, is_primary
         ) VALUES (?, 0, ?, 1), (?, 1, ?, 0)`,
-			threadID, targetKey, threadID, originKey); err != nil {
-			return err
-		}
-		_, err := conn.ExecContext(ctx, `INSERT INTO session_thread_links (
+				threadID, targetKey, threadID, originKey); err != nil {
+				return err
+			}
+			_, err := conn.ExecContext(ctx, `INSERT INTO session_thread_links (
             session_key, thread_id, attached_seconds, attached_nanos
         ) VALUES (?, ?, ?, ?)`, originKey, threadID, seconds, nanos)
-		return err
-	}); err != nil {
+			return err
+		}); err != nil {
 		t.Fatalf("seed typed thread redirect: %v", err)
 	}
 }

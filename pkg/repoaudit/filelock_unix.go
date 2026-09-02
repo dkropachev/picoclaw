@@ -18,6 +18,17 @@ var (
 )
 
 func lockRepositoryReviewStore(root string) (func(), error) {
+	return lockRepositoryReviewStoreMode(root, false)
+}
+
+func tryLockRepositoryReviewStore(root string) (func(), error) {
+	return lockRepositoryReviewStoreMode(root, true)
+}
+
+func lockRepositoryReviewStoreMode(root string, nonblocking bool) (func(), error) {
+	if err := reviewProviderAuthorityError(); err != nil {
+		return nil, err
+	}
 	lockPath, lockPathErr := repositoryReviewLockPath(root, "store.lock")
 	if lockPathErr != nil {
 		return nil, lockPathErr
@@ -41,8 +52,15 @@ func lockRepositoryReviewStore(root string) (func(), error) {
 		_ = file.Close()
 		return nil, err
 	}
-	if err := repositoryReviewFlock(int(file.Fd()), unix.LOCK_EX); err != nil {
+	operation := unix.LOCK_EX
+	if nonblocking {
+		operation |= unix.LOCK_NB
+	}
+	if err := repositoryReviewFlock(int(file.Fd()), operation); err != nil {
 		_ = file.Close()
+		if nonblocking && (errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN)) {
+			return nil, ErrConflict
+		}
 		return nil, fmt.Errorf("lock repository review store: %w", err)
 	}
 	return func() {
