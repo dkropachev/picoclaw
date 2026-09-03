@@ -229,6 +229,29 @@ func RemovePidFileIfPID(homePath string, expectedPID int) bool {
 	return true
 }
 
+// RemovePidFileIfMatch deletes the PID file only when both its process and
+// bearer identity match the caller's exact runtime generation. This prevents a
+// stopped in-process generation from deleting a replacement generation's file
+// when both share the launcher PID.
+func RemovePidFileIfMatch(homePath string, expectedPID int, expectedToken string) bool {
+	if expectedPID <= 0 || expectedToken == "" {
+		return false
+	}
+
+	pidMu.Lock()
+	defer pidMu.Unlock()
+
+	pidPath := pidFilePath(homePath)
+	data, err := readPidFileUnlocked(pidPath)
+	if err != nil || data.PID != expectedPID || data.Token != expectedToken {
+		return false
+	}
+	if err := os.Remove(pidPath); err != nil {
+		return false
+	}
+	return true
+}
+
 // readPidFileUnlocked reads the PID file without acquiring the lock.
 // Caller must hold pidMu.
 func readPidFileUnlocked(pidPath string) (*PidFileData, error) {

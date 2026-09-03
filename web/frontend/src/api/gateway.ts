@@ -3,7 +3,13 @@ import { launcherFetch } from "@/api/http"
 // API client for gateway process management.
 
 interface GatewayStatusResponse {
-  gateway_status: "running" | "starting" | "restarting" | "stopped" | "error"
+  gateway_status:
+    | "running"
+    | "starting"
+    | "restarting"
+    | "stopping"
+    | "stopped"
+    | "error"
   gateway_start_allowed?: boolean
   gateway_start_reason?: string
   gateway_restart_required?: boolean

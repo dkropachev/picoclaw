@@ -67,6 +67,19 @@ func gatewayProbeHost(bindHost string) string {
 }
 
 func (h *Handler) gatewayProxyURL() *url.URL {
+	if h != nil && h.embedGateway {
+		gateway.mu.Lock()
+		if gateway.runtimeStatus == "running" && gateway.embedded != nil && gateway.pidData != nil {
+			host := gatewayProbeHost(gateway.pidData.Host)
+			port := gateway.pidData.Port
+			gateway.mu.Unlock()
+			return &url.URL{
+				Scheme: "http",
+				Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+			}
+		}
+		gateway.mu.Unlock()
+	}
 	cfg, err := config.LoadConfig(h.configPath)
 	port := 18790
 	bindHost := ""

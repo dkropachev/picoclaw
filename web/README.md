@@ -1,7 +1,9 @@
 # PicoClaw Web
 
-`web/` contains the standalone WebUI launcher for PicoClaw.
-It is not just a frontend: it is a small launcher service that bundles a React dashboard, exposes a backend API, manages launcher authentication, and starts or attaches to the `picoclaw gateway` process.
+`web/` contains the single-process WebUI launcher for PicoClaw.
+It is not just a frontend: it bundles a React dashboard, exposes a backend API,
+manages launcher authentication, and hosts the Gateway runtime in the launcher
+process.
 
 ![PicoClaw Launcher](./picoclaw-launcher.png)
 
@@ -10,7 +12,7 @@ It is not just a frontend: it is a small launcher service that bundles a React d
 - A browser-based chat UI backed by the Pico channel WebSocket proxy.
 - A dashboard for accounts, model configs, channels, agent tools, skills, logs, and runtime settings.
 - A launcher process that can auto-open the browser, show a system tray menu, and persist launcher-specific settings.
-- A controlled way to start, stop, restart, and inspect the `picoclaw gateway` subprocess.
+- A controlled way to start, stop, restart, and inspect the in-process Gateway runtime.
 - A single-binary deployment target where the frontend is embedded into the Go backend.
 
 ## Architecture
@@ -25,17 +27,18 @@ This directory is a small monorepo:
   - Vite + React 19 + TanStack Router SPA.
   - Provides the launcher dashboard and chat UI.
 
-At runtime the recommended single-node bundle contains two processes:
+At runtime the recommended single-node bundle contains one PicoClaw process:
 
 1. The launcher starts the web backend on port `18800` by default.
 2. The launcher serves the dashboard and handles dashboard authentication.
-3. When allowed, it starts or attaches to `picoclaw gateway -E`.
-4. The frontend talks only to the launcher backend.
-5. The launcher proxies chat traffic to the gateway through `/pico/ws`.
+3. When allowed, it starts the Gateway runtime inside that same process.
+4. The Gateway runtime opens its own internal listener, on loopback by default.
+5. The frontend talks only to the launcher backend, which proxies chat traffic
+   through `/pico/ws`.
 
-The frontend, API, and Gateway therefore deploy together without becoming one
-failure-prone in-process runtime. Persistent state uses local SQLite databases
-under the PicoClaw home/workspace; no separate database server is required.
+The Gateway runtime has an independently controlled lifecycle, but it is not a
+child process. Persistent state uses local SQLite databases under the PicoClaw
+home/workspace; no separate database server is required.
 
 ## Dashboard Capabilities
 
@@ -107,14 +110,16 @@ The launcher looks for the main PicoClaw binary in this order:
 2. A `picoclaw` binary in the same directory as the launcher
 3. `picoclaw` from `PATH`
 
-If onboarding or gateway startup cannot find the main binary, set `PICOCLAW_BINARY` explicitly.
+If onboarding cannot find the main binary, set `PICOCLAW_BINARY` explicitly.
 
 ### Gateway Management
 
-The launcher manages `picoclaw gateway -E`.
+The launcher hosts the Gateway runtime directly. It does not start or attach to
+a separate `picoclaw gateway` process.
 
-On startup it tries to auto-start or attach to the gateway, but only when
-startup preconditions pass. The main checks are:
+On startup it tries to start the embedded runtime when its startup preconditions
+pass. An empty default model alias is allowed so configuration and non-model
+services remain available. When a model alias is selected, the main checks are:
 
 - `agents.defaults.account_ref` selects an enabled concrete account or account
   router
@@ -124,13 +129,16 @@ startup preconditions pass. The main checks are:
 - the selected account has usable credentials
 - local/runtime-probed models are reachable
 
-When a gateway process is started by the launcher, the launcher:
+For the launcher-hosted Gateway runtime, the launcher:
 
-- captures stdout and stderr into an in-memory ring buffer
+- records lifecycle diagnostics in an in-memory ring buffer
 - tracks transient states such as `starting`, `restarting`, and `stopping`
 - marks restart-required when the default account, model alias/mapping, agent
   policy, or enabled tool set changed since boot
 - ensures the Pico channel is configured before startup
+- cancels and joins the current runtime before starting a replacement; if clean
+  retirement cannot be proved, it requires a launcher restart instead of
+  overlapping generations
 
 ### Launcher Authentication
 
@@ -171,28 +179,29 @@ When public access is enabled:
 - trusted proxy deployments should overwrite or sanitize forwarding headers such as `X-Forwarded-For` and `X-Real-IP` instead of passing through user-supplied values
 - remote browser clients continue to use launcher-managed same-origin proxy paths
 - an explicit `PICOCLAW_GATEWAY_HOST` remains authoritative, allowing the
-  managed Gateway to stay on loopback even while the launcher is public
+  in-process Gateway listener to stay on loopback even while the launcher is
+  public
 
 Unauthenticated `GET`/`HEAD` requests to `/health` and `/ready` report launcher
-availability. They intentionally do not depend on the optional Gateway child or
-model configuration, so configuration and recovery remain observable while the
-Gateway is stopped.
+availability. They intentionally do not depend on Gateway runtime or model
+configuration, so configuration and recovery remain observable while the
+Gateway runtime is stopped.
 
 ## Build And Run
 
 ### Docker Single-Node Bundle
 
-The default Compose service builds the frontend and both Go binaries into one
-launcher image, persists the complete PicoClaw home, and maps only the Web/API
-port to host loopback:
+The default Compose service runs one launcher process, persists the complete
+PicoClaw home, and maps only the Web/API port to host loopback:
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d --remove-orphans
 ```
 
-Open <http://localhost:18800>. The Gateway child remains on container loopback;
-browser chat reaches it through the authenticated launcher proxy. To expose the
-launcher on a LAN, first complete `/launcher-setup` locally, then set
+Open <http://localhost:18800>. The same launcher process hosts an internal
+Gateway listener on container loopback; browser chat reaches it through the
+authenticated launcher proxy. To expose the launcher on a LAN, first complete
+`/launcher-setup` locally, then set
 `PICOCLAW_LAUNCHER_BIND=0.0.0.0` and use a firewall, TLS proxy, and CIDR policy.
 To expose the Gateway listener for HTTP callbacks or advanced integrations,
 apply the explicit override:
@@ -211,7 +220,8 @@ The Compose project name is fixed to `picoclaw`, so launcher/headless
 because its Compose file also lives in a directory named `docker`.
 
 The minimal launcher image does not include Node.js, Python, or `uv` at runtime.
-The separate headless Compose file retains minimal agent and Gateway profiles.
+The separate headless Compose file retains minimal agent and standalone Gateway
+profiles as explicit opt-in alternatives to the launcher.
 The existing full MCP Compose file supplies Node.js, Python, and `uv` for its
 agent and headless Gateway profiles, but does not currently define a launcher
 service.
@@ -397,9 +407,9 @@ Sign in again with the dashboard password on `/launcher-login`.
 
 ### "Start Gateway" stays disabled
 
-The launcher only allows gateway startup when the configured default account
-and exact model alias are usable.
-Check these in the dashboard:
+The launcher allows the embedded Gateway runtime to start in limited mode when
+no default model alias is selected. If an alias is selected and startup remains
+disabled, check these in the dashboard:
 
 - a default account or account router is selected
 - an exact model alias or enabled model router is selected
@@ -407,10 +417,11 @@ Check these in the dashboard:
 - the account has credentials or OAuth state
 - local models such as Ollama or vLLM are reachable
 
-If the alias is empty, startup reports `no model configured`. It does not choose
-a provider default, a fetched model, or the model stored on an account entry.
+If the alias is empty, runtime startup remains available, but model-dependent
+requests report `no model configured`. The launcher does not choose a provider
+default, a fetched model, or the model stored on an account entry.
 
-### The launcher cannot find `picoclaw`
+### Launcher onboarding cannot find `picoclaw`
 
 Set the main binary explicitly:
 
@@ -418,7 +429,8 @@ Set the main binary explicitly:
 export PICOCLAW_BINARY=/absolute/path/to/picoclaw
 ```
 
-This affects onboarding and gateway subprocess startup.
+This affects the external `picoclaw onboard` bootstrap only. Gateway startup is
+in-process and does not use `PICOCLAW_BINARY`.
 
 ### The backend starts but the UI is blank in development
 

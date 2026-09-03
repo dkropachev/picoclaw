@@ -350,6 +350,9 @@ func (h *Handler) gatewayActiveSessionKeys(cfg *config.Config) map[string]bool {
 }
 
 func (h *Handler) activeTurnsGatewayPidData(cfg *config.Config) *ppid.PidFileData {
+	if h.embedGateway {
+		return h.gatewayPIDDataForProxy(nil)
+	}
 	if pidData := h.sanitizeGatewayPidData(ppid.ReadPidFileWithCheck(globalConfigDir()), cfg); pidData != nil {
 		return pidData
 	}

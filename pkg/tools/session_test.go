@@ -448,3 +448,55 @@ func TestSessionOwnerErrorIsRedacted(t *testing.T) {
 	require.NotContains(t, ErrProcessSessionOwnerInvalid.Error(), "session-a")
 	require.False(t, strings.Contains(ErrSessionNotFound.Error(), "owner"))
 }
+
+func TestSessionManagerActiveCountSnapshotsLiveProcesses(t *testing.T) {
+	var absent *SessionManager
+	if got := absent.ActiveCount(); got != 0 {
+		t.Fatalf("nil ActiveCount() = %d, want 0", got)
+	}
+
+	manager := NewSessionManager()
+	defer manager.Stop()
+	if got := manager.ActiveCount(); got != 0 {
+		t.Fatalf("empty ActiveCount() = %d, want 0", got)
+	}
+	running := newManagedTestSession("running", 101, "running", time.Now().Unix())
+	done := newManagedTestSession("done", 102, "done", time.Now().Unix())
+	manager.sessions["running"] = &managedProcessSession{session: running}
+	manager.sessions["done"] = &managedProcessSession{session: done}
+	manager.sessions["nil"] = nil
+	if got := manager.ActiveCount(); got != 1 {
+		t.Fatalf("ActiveCount() = %d, want 1", got)
+	}
+	running.processExited = true
+	if got := manager.ActiveCount(); got != 0 {
+		t.Fatalf("terminal ActiveCount() = %d, want 0", got)
+	}
+}
+
+func TestActiveProcessSessionCountUsesCurrentGlobalManager(t *testing.T) {
+	replacement := NewSessionManager()
+	sessionManagerMu.Lock()
+	original := globalSessionManager
+	globalSessionManager = replacement
+	sessionManagerMu.Unlock()
+	t.Cleanup(func() {
+		sessionManagerMu.Lock()
+		globalSessionManager = original
+		sessionManagerMu.Unlock()
+		replacement.Stop()
+	})
+
+	owner := testProcessSessionOwner("count-agent", "count-session")
+	session := newManagedTestSession("counted", 303, "running", time.Now().Unix())
+	if err := replacement.Add(owner, session); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if got := ActiveProcessSessionCount(); got != 1 {
+		t.Fatalf("ActiveProcessSessionCount() = %d, want 1", got)
+	}
+	session.SetStatus("done")
+	if got := ActiveProcessSessionCount(); got != 0 {
+		t.Fatalf("terminal ActiveProcessSessionCount() = %d, want 0", got)
+	}
+}

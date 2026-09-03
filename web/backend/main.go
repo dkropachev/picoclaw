@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	coregateway "github.com/sipeed/picoclaw/pkg/gateway"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/netbind"
 	"github.com/sipeed/picoclaw/web/backend/api"
@@ -50,14 +51,31 @@ var (
 	servers    []*http.Server
 	serverAddr string
 	// browserLaunchURL is opened by openBrowser() (auto-open + tray "open console").
-	browserLaunchURL string
-	apiHandler       *api.Handler
+	browserLaunchURL    string
+	apiHandler          *api.Handler
+	launcherServeErrors = make(chan error, 1)
 
 	noBrowser *bool
 )
 
 func shouldEnableLauncherFileLogging(enableConsole, debug bool) bool {
 	return !enableConsole || debug
+}
+
+func runEmbeddedGatewayRuntime(ctx context.Context, options api.EmbeddedGatewayRunOptions) error {
+	runErr := coregateway.RunContext(ctx, coregateway.RunOptions{
+		Debug:               options.Debug,
+		HomePath:            options.HomePath,
+		ConfigPath:          options.ConfigPath,
+		AllowEmptyStartup:   options.AllowEmptyStartup,
+		ManageLogLevel:      options.ManageLogLevel,
+		GatewayHostOverride: options.GatewayHostOverride,
+		OnReady:             options.OnReady,
+	})
+	if errors.Is(runErr, coregateway.ErrRuntimeNotRetired) {
+		return errors.Join(api.ErrEmbeddedGatewayRuntimeNotRetired, runErr)
+	}
+	return runErr
 }
 
 func shouldEnableLocalAutoLogin(noBrowser bool, probeHost string) bool {
@@ -609,6 +627,13 @@ func main() {
 
 	// API Routes (e.g. /api/status)
 	apiHandler = api.NewHandler(absPath)
+	apiHandler.EmbedGateway(runEmbeddedGatewayRuntime)
+	apiHandler.SetGatewayFatalHandler(func(runtimeErr error) {
+		select {
+		case launcherServeErrors <- fmt.Errorf("embedded Gateway terminal failure: %w", runtimeErr):
+		default:
+		}
+	})
 	apiHandler.SetDebug(debug)
 	if _, err = apiHandler.EnsurePicoChannel(); err != nil {
 		logger.ErrorC("web", fmt.Sprintf("Warning: failed to ensure pico channel on startup: %v", err))
@@ -687,12 +712,6 @@ func main() {
 
 	// Auto-open browser will be handled by the launcher runtime.
 
-	// Auto-start gateway after backend starts listening.
-	go func() {
-		time.Sleep(1 * time.Second)
-		apiHandler.TryAutoStartGateway()
-	}()
-
 	// Start the server(s) in goroutines.
 	servers = make([]*http.Server, 0, len(listeners))
 	for _, ln := range listeners {
@@ -702,12 +721,27 @@ func main() {
 		go func(s *http.Server, l net.Listener) {
 			logger.InfoC("web", fmt.Sprintf("Server listening on %s", l.Addr().String()))
 			if serveErr := s.Serve(l); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-				logger.Fatalf("Server failed to start on %s: %v", l.Addr().String(), serveErr)
+				select {
+				case launcherServeErrors <- fmt.Errorf(
+					"launcher server %s failed: %w", l.Addr().String(), serveErr,
+				):
+				default:
+				}
 			}
 		}(srv, ln)
 	}
-
 	defer shutdownApp()
+
+	var sigChan chan os.Signal
+	if enableConsole {
+		sigChan = make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(sigChan)
+	}
+
+	// Listeners are open and their serve loops are scheduled; start the
+	// in-process Gateway without an unjoined delayed-start goroutine.
+	apiHandler.TryAutoStartGateway()
 
 	// Start system tray or run in console mode
 	if enableConsole {
@@ -719,15 +753,15 @@ func main() {
 			}
 		}
 
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
 		// Main event loop - wait for signals or config changes
 		for {
 			select {
 			case <-sigChan:
 				logger.Info("Shutting down...")
 
+				return
+			case serveErr := <-launcherServeErrors:
+				logger.ErrorC("web", serveErr.Error())
 				return
 			}
 		}
