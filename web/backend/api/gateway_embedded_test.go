@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
-	coregateway "github.com/sipeed/picoclaw/pkg/gateway"
 	ppid "github.com/sipeed/picoclaw/pkg/pid"
 )
 
@@ -64,7 +63,7 @@ func TestEmbeddedGatewayStartsWithoutCommandAndPublishesLauncherIdentity(t *test
 		Port:  18790,
 	}
 	runnerStarted := make(chan struct{})
-	gatewayRunEmbedded = func(ctx context.Context, options coregateway.RunOptions) error {
+	gatewayRunEmbedded = func(ctx context.Context, options EmbeddedGatewayRunOptions) error {
 		options.OnReady(readyData)
 		close(runnerStarted)
 		<-ctx.Done()
@@ -123,7 +122,7 @@ func TestEmbeddedGatewayStopWaitsForRuntimeRetirement(t *testing.T) {
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(releaseRetirement) })
 	})
-	gatewayRunEmbedded = func(ctx context.Context, _ coregateway.RunOptions) error {
+	gatewayRunEmbedded = func(ctx context.Context, _ EmbeddedGatewayRunOptions) error {
 		close(runnerStarted)
 		<-ctx.Done()
 		close(cancelObserved)
@@ -178,7 +177,7 @@ func TestEmbeddedGatewayConcurrentRestartsSerializeAndRotateGeneration(t *testin
 	var runCount atomic.Int32
 	var active atomic.Int32
 	var maxActive atomic.Int32
-	gatewayRunEmbedded = func(ctx context.Context, options coregateway.RunOptions) error {
+	gatewayRunEmbedded = func(ctx context.Context, options EmbeddedGatewayRunOptions) error {
 		ordinal := runCount.Add(1)
 		currentActive := active.Add(1)
 		defer active.Add(-1)
@@ -242,8 +241,8 @@ func TestEmbeddedGatewayConcurrentRestartsSerializeAndRotateGeneration(t *testin
 	finalRuntime := gateway.embedded
 	var finalPIDData *ppid.PidFileData
 	if gateway.pidData != nil {
-		copy := *gateway.pidData
-		finalPIDData = &copy
+		pidData := *gateway.pidData
+		finalPIDData = &pidData
 	}
 	gateway.mu.Unlock()
 
@@ -282,7 +281,7 @@ func TestEmbeddedGatewayDirtyShutdownBlocksReplacement(t *testing.T) {
 
 	started := make(chan struct{})
 	var runCount atomic.Int32
-	gatewayRunEmbedded = func(ctx context.Context, options coregateway.RunOptions) error {
+	gatewayRunEmbedded = func(ctx context.Context, options EmbeddedGatewayRunOptions) error {
 		runCount.Add(1)
 		options.OnReady(ppid.PidFileData{
 			PID:   os.Getpid(),
@@ -292,14 +291,14 @@ func TestEmbeddedGatewayDirtyShutdownBlocksReplacement(t *testing.T) {
 		})
 		close(started)
 		<-ctx.Done()
-		return coregateway.ErrRuntimeNotRetired
+		return ErrEmbeddedGatewayRuntimeNotRetired
 	}
 
 	if _, err := h.startEmbeddedGateway("starting"); err != nil {
 		t.Fatalf("startEmbeddedGateway() error = %v", err)
 	}
 	waitForEmbeddedGatewayTestValue(t, started, "dirty embedded generation")
-	if _, running, err := h.stopEmbeddedGateway(); !running || !errors.Is(err, coregateway.ErrRuntimeNotRetired) {
+	if _, running, err := h.stopEmbeddedGateway(); !running || !errors.Is(err, ErrEmbeddedGatewayRuntimeNotRetired) {
 		t.Fatalf(
 			"stopEmbeddedGateway() = (running=%v, err=%v), want (true, ErrRuntimeNotRetired)",
 			running,
@@ -329,7 +328,7 @@ func TestEmbeddedGatewayPIDValidationRejectsStaleGenerationIdentity(t *testing.T
 
 	ready := make(chan ppid.PidFileData, 2)
 	var runCount atomic.Int32
-	gatewayRunEmbedded = func(ctx context.Context, options coregateway.RunOptions) error {
+	gatewayRunEmbedded = func(ctx context.Context, options EmbeddedGatewayRunOptions) error {
 		ordinal := runCount.Add(1)
 		data := ppid.PidFileData{
 			PID:   os.Getpid(),
@@ -391,7 +390,7 @@ func TestEmbeddedGatewayPIDValidationRejectsStaleGenerationIdentity(t *testing.T
 func TestEmbeddedGatewayStopRejectsLateReadyPublication(t *testing.T) {
 	h := newEmbeddedGatewayTestHandler(t)
 	started := make(chan struct{})
-	gatewayRunEmbedded = func(ctx context.Context, options coregateway.RunOptions) error {
+	gatewayRunEmbedded = func(ctx context.Context, options EmbeddedGatewayRunOptions) error {
 		close(started)
 		<-ctx.Done()
 		options.OnReady(ppid.PidFileData{
@@ -420,7 +419,7 @@ func TestEmbeddedGatewayStopRejectsLateReadyPublication(t *testing.T) {
 func TestEmbeddedGatewayShutdownFenceClosesAdmission(t *testing.T) {
 	h := newEmbeddedGatewayTestHandler(t)
 	started := make(chan struct{})
-	gatewayRunEmbedded = func(ctx context.Context, options coregateway.RunOptions) error {
+	gatewayRunEmbedded = func(ctx context.Context, options EmbeddedGatewayRunOptions) error {
 		options.OnReady(ppid.PidFileData{
 			PID: os.Getpid(), Token: "live-ready", Host: "127.0.0.1", Port: 18790,
 		})
@@ -455,7 +454,7 @@ func TestEmbeddedGatewayShutdownTimeoutTerminatesHost(t *testing.T) {
 	embeddedGatewayStopLimit = 20 * time.Millisecond
 	started := make(chan struct{})
 	release := make(chan struct{})
-	gatewayRunEmbedded = func(context.Context, coregateway.RunOptions) error {
+	gatewayRunEmbedded = func(context.Context, EmbeddedGatewayRunOptions) error {
 		close(started)
 		<-release
 		return nil
@@ -468,14 +467,15 @@ func TestEmbeddedGatewayShutdownTimeoutTerminatesHost(t *testing.T) {
 	}
 	waitForEmbeddedGatewayTestValue(t, started, "embedded runner start")
 	_, running, stopErr := h.stopEmbeddedGateway()
-	if !running || !errors.Is(stopErr, coregateway.ErrRuntimeNotRetired) {
+	if !running || !errors.Is(stopErr, ErrEmbeddedGatewayRuntimeNotRetired) {
 		t.Fatalf(
 			"timed stop = (running=%v, err=%v), want ErrRuntimeNotRetired",
 			running,
 			stopErr,
 		)
 	}
-	if fatalErr := waitForEmbeddedGatewayTestValue(t, fatal, "launcher terminal failure"); !errors.Is(fatalErr, coregateway.ErrRuntimeNotRetired) {
+	fatalErr := waitForEmbeddedGatewayTestValue(t, fatal, "launcher terminal failure")
+	if !errors.Is(fatalErr, ErrEmbeddedGatewayRuntimeNotRetired) {
 		t.Fatalf("fatal error = %v, want ErrRuntimeNotRetired", fatalErr)
 	}
 	close(release)

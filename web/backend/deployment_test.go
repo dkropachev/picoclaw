@@ -148,8 +148,12 @@ func TestLauncherHostsGatewayInProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(web/backend/main.go) error = %v", err)
 	}
-	if !strings.Contains(string(mainSource), "apiHandler.EmbedGateway()") {
+	mainContents := string(mainSource)
+	if !strings.Contains(mainContents, "apiHandler.EmbedGateway(runEmbeddedGatewayRuntime)") {
 		t.Fatal("launcher does not enable in-process Gateway hosting")
+	}
+	if !strings.Contains(mainContents, "coregateway.RunContext") {
+		t.Fatal("launcher does not inject the context-owned Gateway runtime")
 	}
 
 	embeddedSource, err := os.ReadFile(filepath.Join(root, "web/backend/api/gateway_embedded.go"))
@@ -157,8 +161,8 @@ func TestLauncherHostsGatewayInProcess(t *testing.T) {
 		t.Fatalf("ReadFile(gateway_embedded.go) error = %v", err)
 	}
 	contents := string(embeddedSource)
-	if !strings.Contains(contents, "coregateway.RunContext") {
-		t.Fatal("embedded Gateway supervisor does not call the context-owned runtime")
+	if strings.Contains(contents, "pkg/gateway") {
+		t.Fatal("embedded Gateway supervisor imports core Gateway and recreates the storage-test cycle")
 	}
 	if strings.Contains(contents, "exec.Command") {
 		t.Fatal("embedded Gateway supervisor starts an OS child process")

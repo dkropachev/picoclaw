@@ -23,6 +23,7 @@ type Handler struct {
 	serverTrustedProxyCIDRs                     []string
 	debug                                       bool
 	embedGateway                                bool
+	embeddedGatewayRunner                       EmbeddedGatewayRunner
 	gatewayFatal                                func(error)
 	oauthMu                                     sync.Mutex
 	oauthFlows                                  map[string]*oauthFlow
@@ -124,8 +125,11 @@ func (h *Handler) SetDebug(debug bool) {
 
 // EmbedGateway configures launcher gateway lifecycle operations to host the
 // runtime inside this process instead of spawning a picoclaw child command.
-func (h *Handler) EmbedGateway() {
+func (h *Handler) EmbedGateway(runner ...EmbeddedGatewayRunner) {
 	h.embedGateway = true
+	if len(runner) > 0 {
+		h.embeddedGatewayRunner = runner[0]
+	}
 }
 
 // SetGatewayFatalHandler installs the launcher-owned terminal failure sink for

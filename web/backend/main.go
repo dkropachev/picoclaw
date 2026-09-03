@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	coregateway "github.com/sipeed/picoclaw/pkg/gateway"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/netbind"
 	"github.com/sipeed/picoclaw/web/backend/api"
@@ -59,6 +60,22 @@ var (
 
 func shouldEnableLauncherFileLogging(enableConsole, debug bool) bool {
 	return !enableConsole || debug
+}
+
+func runEmbeddedGatewayRuntime(ctx context.Context, options api.EmbeddedGatewayRunOptions) error {
+	runErr := coregateway.RunContext(ctx, coregateway.RunOptions{
+		Debug:               options.Debug,
+		HomePath:            options.HomePath,
+		ConfigPath:          options.ConfigPath,
+		AllowEmptyStartup:   options.AllowEmptyStartup,
+		ManageLogLevel:      options.ManageLogLevel,
+		GatewayHostOverride: options.GatewayHostOverride,
+		OnReady:             options.OnReady,
+	})
+	if errors.Is(runErr, coregateway.ErrRuntimeNotRetired) {
+		return errors.Join(api.ErrEmbeddedGatewayRuntimeNotRetired, runErr)
+	}
+	return runErr
 }
 
 func shouldEnableLocalAutoLogin(noBrowser bool, probeHost string) bool {
@@ -610,7 +627,7 @@ func main() {
 
 	// API Routes (e.g. /api/status)
 	apiHandler = api.NewHandler(absPath)
-	apiHandler.EmbedGateway()
+	apiHandler.EmbedGateway(runEmbeddedGatewayRuntime)
 	apiHandler.SetGatewayFatalHandler(func(runtimeErr error) {
 		select {
 		case launcherServeErrors <- fmt.Errorf("embedded Gateway terminal failure: %w", runtimeErr):

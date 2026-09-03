@@ -11,10 +11,30 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
-	coregateway "github.com/sipeed/picoclaw/pkg/gateway"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	ppid "github.com/sipeed/picoclaw/pkg/pid"
 )
+
+// ErrEmbeddedGatewayRuntimeNotRetired means the hosted runtime could not prove
+// that all of its resources stopped before control returned to the launcher.
+var ErrEmbeddedGatewayRuntimeNotRetired = errors.New("embedded gateway runtime was not fully retired")
+
+// EmbeddedGatewayRunOptions is the dependency boundary between the launcher
+// API and the core Gateway runtime. Keeping this contract here lets storage
+// integration tests import the API without creating a package cycle.
+type EmbeddedGatewayRunOptions struct {
+	Debug               bool
+	HomePath            string
+	ConfigPath          string
+	AllowEmptyStartup   bool
+	ManageLogLevel      bool
+	GatewayHostOverride string
+	OnReady             func(ppid.PidFileData)
+}
+
+// EmbeddedGatewayRunner hosts one Gateway generation until its context is
+// canceled. The launcher injects the core runtime implementation from main.
+type EmbeddedGatewayRunner func(context.Context, EmbeddedGatewayRunOptions) error
 
 type embeddedGatewayRuntime struct {
 	generation uint64
@@ -24,7 +44,9 @@ type embeddedGatewayRuntime struct {
 }
 
 var (
-	gatewayRunEmbedded       = coregateway.RunContext
+	gatewayRunEmbedded EmbeddedGatewayRunner = func(context.Context, EmbeddedGatewayRunOptions) error {
+		return errors.New("embedded gateway runtime runner is not configured")
+	}
 	embeddedGatewayStopLimit = 60 * time.Second
 )
 
@@ -123,7 +145,7 @@ func (h *Handler) startEmbeddedGatewayOperation(initialStatus string) (int, erro
 	gateway.logs.Append(fmt.Sprintf("Gateway runtime starting inside launcher PID %d", os.Getpid()))
 	gateway.mu.Unlock()
 
-	options := coregateway.RunOptions{
+	options := EmbeddedGatewayRunOptions{
 		Debug:             h.debug,
 		HomePath:          globalConfigDir(),
 		ConfigPath:        h.configPath,
@@ -140,9 +162,9 @@ func (h *Handler) startEmbeddedGatewayOperation(initialStatus string) (int, erro
 				gateway.embeddedGeneration == runtime.generation &&
 				!gateway.hostClosing && runtimeCtx.Err() == nil &&
 				(gateway.runtimeStatus == "starting" || gateway.runtimeStatus == "restarting") {
-				copy := pidData
-				runtime.pidData = &copy
-				gateway.pidData = &copy
+				readyData := pidData
+				runtime.pidData = &readyData
+				gateway.pidData = &readyData
 				setGatewayRuntimeStatusLocked("running")
 				gateway.logs.Append(fmt.Sprintf(
 					"Gateway runtime ready inside launcher PID %d on %s:%d",
@@ -159,8 +181,12 @@ func (h *Handler) startEmbeddedGatewayOperation(initialStatus string) (int, erro
 		},
 	}
 
+	runner := h.embeddedGatewayRunner
+	if runner == nil {
+		runner = gatewayRunEmbedded
+	}
 	go func() {
-		runErr := runEmbeddedGatewaySafely(runtimeCtx, options)
+		runErr := runEmbeddedGatewaySafely(runtimeCtx, options, runner)
 		gateway.mu.Lock()
 		if gateway.embedded == runtime &&
 			gateway.embeddedGeneration == runtime.generation {
@@ -169,7 +195,7 @@ func (h *Handler) startEmbeddedGatewayOperation(initialStatus string) (int, erro
 			gateway.pidData = nil
 			gateway.bootDefaultModel = ""
 			gateway.bootConfigSignature = ""
-			if errors.Is(runErr, coregateway.ErrRuntimeNotRetired) {
+			if errors.Is(runErr, ErrEmbeddedGatewayRuntimeNotRetired) {
 				gateway.embeddedBlocked = true
 			}
 			if runErr != nil {
@@ -185,7 +211,7 @@ func (h *Handler) startEmbeddedGatewayOperation(initialStatus string) (int, erro
 		gateway.mu.Unlock()
 		runtime.done <- runErr
 		close(runtime.done)
-		if errors.Is(runErr, coregateway.ErrRuntimeNotRetired) && h.gatewayFatal != nil {
+		if errors.Is(runErr, ErrEmbeddedGatewayRuntimeNotRetired) && h.gatewayFatal != nil {
 			h.gatewayFatal(runErr)
 		}
 		if runErr != nil {
@@ -198,16 +224,20 @@ func (h *Handler) startEmbeddedGatewayOperation(initialStatus string) (int, erro
 	return os.Getpid(), nil
 }
 
-func runEmbeddedGatewaySafely(ctx context.Context, options coregateway.RunOptions) (runErr error) {
+func runEmbeddedGatewaySafely(
+	ctx context.Context,
+	options EmbeddedGatewayRunOptions,
+	runner EmbeddedGatewayRunner,
+) (runErr error) {
 	defer func() {
 		if recover() != nil {
 			runErr = errors.Join(
-				coregateway.ErrRuntimeNotRetired,
+				ErrEmbeddedGatewayRuntimeNotRetired,
 				errors.New("embedded gateway runtime panicked"),
 			)
 		}
 	}()
-	return gatewayRunEmbedded(ctx, options)
+	return runner(ctx, options)
 }
 
 func (h *Handler) stopEmbeddedGateway() (int, bool, error) {
@@ -240,7 +270,7 @@ func (h *Handler) stopEmbeddedGatewayOperation() (int, bool, error) {
 		return pID, true, nil
 	case <-timer.C:
 		timeoutErr := errors.Join(
-			coregateway.ErrRuntimeNotRetired,
+			ErrEmbeddedGatewayRuntimeNotRetired,
 			errors.New("timed out waiting for embedded gateway shutdown; restart the launcher"),
 		)
 		gateway.mu.Lock()
@@ -302,7 +332,11 @@ func (h *Handler) beginEmbeddedGatewayShutdown() {
 func (h *Handler) handleEmbeddedGatewayStart(w http.ResponseWriter) {
 	ready, reason, err := h.gatewayStartReady()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to validate gateway start conditions: %v", err), http.StatusInternalServerError)
+		http.Error(
+			w,
+			fmt.Sprintf("Failed to validate gateway start conditions: %v", err),
+			http.StatusInternalServerError,
+		)
 		return
 	}
 	if !ready {
@@ -315,7 +349,11 @@ func (h *Handler) handleEmbeddedGatewayStart(w http.ResponseWriter) {
 	}
 	pid, err := h.startEmbeddedGateway("starting")
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to start embedded gateway: %v", err), http.StatusInternalServerError)
+		http.Error(
+			w,
+			fmt.Sprintf("Failed to start embedded gateway: %v", err),
+			http.StatusInternalServerError,
+		)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -360,8 +398,8 @@ func (h *Handler) gatewayPIDDataForProxy(candidate *ppid.PidFileData) *ppid.PidF
 		gateway.runtimeStatus != "running" || gateway.hostClosing {
 		return nil
 	}
-	copy := *gateway.embedded.pidData
-	return &copy
+	pidData := *gateway.embedded.pidData
+	return &pidData
 }
 
 func gatewayRuntimeAliveLocked() bool {
