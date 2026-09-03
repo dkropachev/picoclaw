@@ -63,7 +63,8 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 - `Owns: CODE` maps production files to the feature spec that must change with
   those files.
 - `MUST` requirements require unit or integration evidence.
-- Global and feature-owned Go uncovered-statement debt cannot regress in PRs;
-  deleting legacy code may lower the percentage or covered-statement count
-  without increasing that debt. Changed executable production lines must be
-  covered.
+- New feature-owned Go code must reach 95% coverage, and distinct changed
+  executable blocks must reach 90%. Existing impacted features and scoped global
+  coverage pass when uncovered-statement debt does not increase or the exact
+  coverage ratio does not regress. Deleting covered legacy code may lower the
+  percentage or covered-statement count when debt does not grow.
