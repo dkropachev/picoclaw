@@ -17,6 +17,13 @@ func runTray() {
 
 // onReady is called when the system tray is ready
 func onReady() {
+	go func() {
+		if serveErr := <-launcherServeErrors; serveErr != nil {
+			logger.ErrorC("web", serveErr.Error())
+			systray.Quit()
+		}
+	}()
+
 	// Set icon and tooltip
 	systray.SetIcon(getIcon())
 	systray.SetTooltip(fmt.Sprintf(T(AppTooltip), appName))

@@ -815,6 +815,7 @@ func p015MethodValueKey(file, owner string, ordinal int, selector string) string
 // These exact scalar/boolean DTO selections are data, not callable methods.
 // File, qualified owner, owner-local ordinal, and selector are all pinned.
 var p015ReviewedNonLoggingMethodValues = map[string]struct{}{
+	p015MethodValueKey("pkg/gateway/gateway.go", "github.com/sipeed/picoclaw/pkg/gateway.RunContext", 1, "options.Debug"):                                                 {},
 	p015MethodValueKey("pkg/agent/events_runtime.go", "github.com/sipeed/picoclaw/pkg/agent.runtimeCorrelationFromHookMeta", 1, "meta.TracePath"):                                 {},
 	p015MethodValueKey("pkg/agent/evolution_bridge.go", "github.com/sipeed/picoclaw/pkg/agent.toEvolutionToolExecutions", 1, "record.ErrorSummary"):                               {},
 	p015MethodValueKey("pkg/agent/hook_process.go", "github.com/sipeed/picoclaw/pkg/agent.(*ProcessHook).call", 1, "resp.Error"):                                                  {},

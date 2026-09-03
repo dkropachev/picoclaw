@@ -36,6 +36,13 @@ func getSessionManager() *SessionManager {
 	return globalSessionManager
 }
 
+// ActiveProcessSessionCount reports live background exec sessions across the
+// process. An in-process Gateway must not publish a replacement generation
+// while one still carries an older execution policy.
+func ActiveProcessSessionCount() int {
+	return getSessionManager().ActiveCount()
+}
+
 type ExecTool struct {
 	workingDir          string
 	timeout             time.Duration

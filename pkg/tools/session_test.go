@@ -448,3 +448,23 @@ func TestSessionOwnerErrorIsRedacted(t *testing.T) {
 	require.NotContains(t, ErrProcessSessionOwnerInvalid.Error(), "session-a")
 	require.False(t, strings.Contains(ErrSessionNotFound.Error(), "owner"))
 }
+
+func TestSessionManagerActiveCountSnapshotsLiveProcesses(t *testing.T) {
+	manager := NewSessionManager()
+	defer manager.Stop()
+	if got := manager.ActiveCount(); got != 0 {
+		t.Fatalf("empty ActiveCount() = %d, want 0", got)
+	}
+	running := newManagedTestSession("running", 101, "running", time.Now().Unix())
+	done := newManagedTestSession("done", 102, "done", time.Now().Unix())
+	manager.sessions["running"] = &managedProcessSession{session: running}
+	manager.sessions["done"] = &managedProcessSession{session: done}
+	manager.sessions["nil"] = nil
+	if got := manager.ActiveCount(); got != 1 {
+		t.Fatalf("ActiveCount() = %d, want 1", got)
+	}
+	running.processExited = true
+	if got := manager.ActiveCount(); got != 0 {
+		t.Fatalf("terminal ActiveCount() = %d, want 0", got)
+	}
+}

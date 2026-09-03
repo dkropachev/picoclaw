@@ -22,6 +22,8 @@ type Handler struct {
 	serverAllowLocalhostBypass                  bool
 	serverTrustedProxyCIDRs                     []string
 	debug                                       bool
+	embedGateway                                bool
+	gatewayFatal                                func(error)
 	oauthMu                                     sync.Mutex
 	oauthFlows                                  map[string]*oauthFlow
 	oauthState                                  map[string]string
@@ -120,6 +122,18 @@ func (h *Handler) SetDebug(debug bool) {
 	h.debug = debug
 }
 
+// EmbedGateway configures launcher gateway lifecycle operations to host the
+// runtime inside this process instead of spawning a picoclaw child command.
+func (h *Handler) EmbedGateway() {
+	h.embedGateway = true
+}
+
+// SetGatewayFatalHandler installs the launcher-owned terminal failure sink for
+// an embedded runtime that could not prove complete resource retirement.
+func (h *Handler) SetGatewayFatalHandler(handler func(error)) {
+	h.gatewayFatal = handler
+}
+
 // RegisterRoutes binds all API endpoint handlers to the ServeMux.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Config CRUD
@@ -183,6 +197,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 // Shutdown gracefully shuts down the handler, stopping the gateway if it was started by this handler.
 func (h *Handler) Shutdown() {
+	h.beginEmbeddedGatewayShutdown()
 	h.stopRepositoryModelEvaluationController()
 	h.stopRepositoryReviewController()
 	h.cancelMCPOAuthFlows()

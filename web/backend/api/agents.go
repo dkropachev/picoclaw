@@ -616,7 +616,7 @@ func agentEffectsForConfig(cfg *config.Config) agentEffects {
 	gateway.mu.Lock()
 	bootSignature := gateway.bootConfigSignature
 	runtimeStatus := gateway.runtimeStatus
-	if runtimeStatus == "running" && !isCmdProcessAliveLocked(gateway.cmd) {
+	if runtimeStatus == "running" && !gatewayRuntimeAliveLocked() {
 		runtimeStatus = "stopped"
 	}
 	gateway.mu.Unlock()

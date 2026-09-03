@@ -70,6 +70,13 @@ const (
 	logFile   = "gateway.log"
 )
 
+// ErrRuntimeNotRetired means graceful shutdown could not prove that every
+// in-process gateway resource was released. An embedding host must restart the
+// whole process rather than overlap a replacement runtime with leaked state.
+var ErrRuntimeNotRetired = errors.New("gateway runtime was not fully retired")
+
+var gatewayActiveProcessSessionCount = tools.ActiveProcessSessionCount
+
 type services struct {
 	CronService                        *cron.CronService
 	HeartbeatService                   *heartbeat.HeartbeatService
@@ -95,6 +102,7 @@ type services struct {
 	agentActivityRelease               func()
 	repositoryReviewPublicationHandler *repositoryReviewPublicationHandler
 	repositoryReviewPublicationRelease func()
+	embeddedReplacementUnsafe          bool
 	VoiceAgentCancel                   context.CancelFunc
 	manualReloadChan                   chan struct{}
 	reloading                          atomic.Bool
@@ -140,31 +148,108 @@ func (p *startupBlockedProvider) Chat(
 	return nil, fmt.Errorf("%s", p.reason)
 }
 
-// Run starts the gateway runtime using the configuration loaded from configPath.
-func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runErr error) {
+// RunOptions configures a gateway runtime hosted by another process component.
+// The caller owns process-wide logging and signal handling; canceling Context
+// performs the same graceful runtime shutdown as a standalone termination
+// signal.
+type RunOptions struct {
+	Debug               bool
+	HomePath            string
+	ConfigPath          string
+	AllowEmptyStartup   bool
+	GatewayHostOverride string
+	ManageLogLevel      bool
+	OnReady             func(pid.PidFileData)
+}
+
+type runConfiguration struct {
+	context    context.Context
+	standalone bool
+	host       string
+	logLevel   bool
+	onReady    func(pid.PidFileData)
+}
+
+// RunOption configures the ownership boundary of a gateway runtime. External
+// callers normally use Run or RunContext rather than constructing options.
+type RunOption func(*runConfiguration)
+
+// RunContext starts a gateway runtime inside an existing process. It leaves
+// process-wide logging and signal ownership with the host and shuts down when
+// ctx is canceled.
+func RunContext(ctx context.Context, options RunOptions) error {
+	if ctx == nil {
+		return errors.New("gateway runtime context is required")
+	}
+	return Run(
+		options.Debug,
+		options.HomePath,
+		options.ConfigPath,
+		options.AllowEmptyStartup,
+		func(configuration *runConfiguration) {
+			configuration.context = ctx
+			configuration.standalone = false
+			configuration.host = options.GatewayHostOverride
+			configuration.logLevel = options.ManageLogLevel
+			configuration.onReady = options.OnReady
+		},
+	)
+}
+
+// Run starts the standalone gateway runtime using the configuration loaded
+// from configPath. Standalone mode owns process-wide logging and OS signals.
+func Run(
+	debug bool,
+	homePath,
+	configPath string,
+	allowEmptyStartup bool,
+	runOptions ...RunOption,
+) (runErr error) {
+	configuration := runConfiguration{
+		context: context.Background(), standalone: true, logLevel: true,
+	}
+	for _, option := range runOptions {
+		if option != nil {
+			option(&configuration)
+		}
+	}
+	parentCtx := configuration.context
+	standalone := configuration.standalone
+	if parentCtx == nil {
+		return errors.New("gateway runtime context is required")
+	}
+	if parentCtx.Err() != nil {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
 	startedAt := time.Now()
-	panicPath := filepath.Join(homePath, logPath, panicFile)
-	panicFunc, err := logger.InitPanic(panicPath)
-	if err != nil {
-		return fmt.Errorf("error initializing panic log: %w", err)
-	}
-	defer panicFunc()
+	if standalone {
+		panicPath := filepath.Join(homePath, logPath, panicFile)
+		panicFunc, err := logger.InitPanic(panicPath)
+		if err != nil {
+			return fmt.Errorf("error initializing panic log: %w", err)
+		}
+		defer panicFunc()
 
-	if err = logger.EnableFileLogging(filepath.Join(homePath, logPath, logFile)); err != nil {
-		logger.FatalSafeCF(
-			logger.ComponentLogger,
-			logger.DiagnosticMessageLoggerErrorEnablingFileLogging,
-			logger.NewSafeFields(
-				gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
-			),
-		)
+		if err = logger.EnableFileLogging(filepath.Join(homePath, logPath, logFile)); err != nil {
+			logger.FatalSafeCF(
+				logger.ComponentLogger,
+				logger.DiagnosticMessageLoggerErrorEnablingFileLogging,
+				logger.NewSafeFields(
+					gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+				),
+			)
+		}
+		defer logger.DisableFileLogging()
 	}
-	defer logger.DisableFileLogging()
 
-	if debug {
-		logger.SetLevel(logger.DEBUG)
-	} else {
-		logger.SetLevelFromString(config.ResolveGatewayLogLevel(configPath))
+	if configuration.logLevel {
+		if debug {
+			logger.SetLevel(logger.DEBUG)
+		} else {
+			logger.SetLevelFromString(config.ResolveGatewayLogLevel(configPath))
+		}
 	}
 	defer func() {
 		if runErr != nil {
@@ -186,6 +271,7 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	if err != nil {
 		return fmt.Errorf("error loading config: %w", err)
 	}
+	applyGatewayHostOverride(cfg, configuration.host)
 
 	if err = preCheckConfig(cfg); err != nil {
 		return fmt.Errorf("config pre-check failed: %w", err)
@@ -203,12 +289,14 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 		))
 	} else {
 		effectiveLogLevel := config.EffectiveGatewayLogLevel(cfg)
-		logger.SetLevelFromString(effectiveLogLevel)
-		logger.InfoSafeCF(
-			logger.ComponentLogger,
-			logger.DiagnosticMessageLoggerLogLevelSet,
-			logger.NewSafeFields(gatewayDiagnosticLogLevelField(effectiveLogLevel)),
-		)
+		if configuration.logLevel {
+			logger.SetLevelFromString(effectiveLogLevel)
+			logger.InfoSafeCF(
+				logger.ComponentLogger,
+				logger.DiagnosticMessageLoggerLogLevelSet,
+				logger.NewSafeFields(gatewayDiagnosticLogLevelField(effectiveLogLevel)),
+			)
+		}
 	}
 
 	bindPlan, listenResult, err := openGatewayListeners(cfg.Gateway.Host, cfg.Gateway.Port)
@@ -242,7 +330,7 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 		}
 		return fmt.Errorf("singleton check failed: %w", err)
 	}
-	defer pid.RemovePidFile(homePath)
+	defer pid.RemovePidFileIfMatch(homePath, pidData.PID, pidData.Token)
 	closeListeners := true
 	defer func() {
 		if !closeListeners {
@@ -272,8 +360,26 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	var runningServices *services
 	startupResourcesOwned := true
 	defer func() {
+		if recover() != nil {
+			cleanupErr := cleanupFailedGatewayStartup(
+				runningServices, agentLoop, provider, msgBus, !standalone,
+			)
+			runErr = errors.Join(
+				ErrRuntimeNotRetired,
+				errors.New("gateway runtime panicked"),
+				cleanupErr,
+			)
+			return
+		}
 		if startupResourcesOwned {
-			cleanupFailedGatewayStartup(runningServices, agentLoop, provider, msgBus)
+			cleanupErr := cleanupFailedGatewayStartup(
+				runningServices, agentLoop, provider, msgBus, !standalone,
+			)
+			if errors.Is(runErr, context.Canceled) && parentCtx.Err() != nil {
+				runErr = cleanupErr
+			} else {
+				runErr = errors.Join(runErr, cleanupErr)
+			}
 		}
 	}()
 	if err = agentLoop.ActivateEvolution(); err != nil {
@@ -307,7 +413,7 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	)
 
 	startupCtx, releaseStartup, err := agentLoop.AcquireRuntimeStartupUse(
-		context.Background(),
+		ctx,
 		cfg,
 	)
 	if err != nil {
@@ -322,9 +428,13 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 			msgBus,
 			pidData.Token,
 			listenResult,
+			ctx,
 		)
 	}()
 	if err != nil {
+		return err
+	}
+	if err = ctx.Err(); err != nil {
 		return err
 	}
 
@@ -377,9 +487,9 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 		gatewayConsoleC002StopHint,
 		newGatewayConsoleNoFields(),
 	))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	if configuration.onReady != nil {
+		configuration.onReady(*pidData)
+	}
 
 	go agentLoop.Run(ctx)
 
@@ -395,21 +505,33 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	}
 	defer stopWatch()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	var sigChan <-chan os.Signal
+	if standalone {
+		standaloneSignals := make(chan os.Signal, 1)
+		signal.Notify(standaloneSignals, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(standaloneSignals)
+		sigChan = standaloneSignals
+	}
 
 	for {
 		select {
 		case <-sigChan:
+			cancel()
+		case <-ctx.Done():
 			logger.InfoSafeCF(
 				logger.ComponentGateway,
 				logger.DiagnosticMessageGatewayShuttingDown,
 				logger.NewSafeFields(),
 			)
+			return shutdownGateway(runningServices, agentLoop, provider, msgBus, true, !standalone)
+		case serveErr := <-runningServices.ChannelManager.HTTPServerErrors():
 			cancel()
-			shutdownGateway(runningServices, agentLoop, provider, msgBus, true)
-			return nil
+			shutdownErr := shutdownGateway(
+				runningServices, agentLoop, provider, msgBus, true, !standalone,
+			)
+			return errors.Join(fmt.Errorf("gateway HTTP server failed: %w", serveErr), shutdownErr)
 		case newCfg := <-configReloadChan:
+			applyGatewayHostOverride(newCfg, configuration.host)
 			if !runningServices.reloading.CompareAndSwap(false, true) {
 				logger.WarnSafeCF(
 					logger.ComponentConfig,
@@ -418,7 +540,10 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 				)
 				continue
 			}
-			err := executeReload(ctx, agentLoop, newCfg, &provider, runningServices, msgBus, allowEmptyStartup, debug)
+			err := executeReload(
+				ctx, agentLoop, newCfg, &provider, runningServices, msgBus,
+				allowEmptyStartup, debug, configuration.logLevel,
+			)
 			if err != nil {
 				logger.ErrorSafeCF(
 					logger.ComponentConfig,
@@ -446,6 +571,7 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 				runningServices.reloading.Store(false)
 				continue
 			}
+			applyGatewayHostOverride(newCfg, configuration.host)
 			if err = newCfg.ValidateModelList(); err != nil {
 				logger.ErrorSafeCF(
 					logger.ComponentConfig,
@@ -457,7 +583,10 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 				runningServices.reloading.Store(false)
 				continue
 			}
-			err = executeReload(ctx, agentLoop, newCfg, &provider, runningServices, msgBus, allowEmptyStartup, debug)
+			err = executeReload(
+				ctx, agentLoop, newCfg, &provider, runningServices, msgBus,
+				allowEmptyStartup, debug, configuration.logLevel,
+			)
 			if err != nil {
 				logger.ErrorSafeCF(
 					logger.ComponentConfig,
@@ -535,8 +664,9 @@ func cleanupFailedGatewayStartup(
 	agentLoop *agent.AgentLoop,
 	provider providers.LLMProvider,
 	msgBus *bus.MessageBus,
-) {
-	shutdownGateway(runningServices, agentLoop, provider, msgBus, true)
+	embedded ...bool,
+) error {
+	return shutdownGateway(runningServices, agentLoop, provider, msgBus, true, embedded...)
 }
 
 func preCheckConfig(cfg *config.Config) error {
@@ -553,6 +683,15 @@ func preCheckConfig(cfg *config.Config) error {
 		return fmt.Errorf("invalid event channel adapters: %w", err)
 	}
 	return nil
+}
+
+func applyGatewayHostOverride(cfg *config.Config, value string) {
+	if cfg == nil {
+		return
+	}
+	if value = strings.TrimSpace(value); value != "" {
+		cfg.Gateway.Host = value
+	}
 }
 
 type gatewayStartupStatus struct {
@@ -608,6 +747,7 @@ func executeReload(
 	msgBus *bus.MessageBus,
 	allowEmptyStartup bool,
 	debug bool,
+	manageLogLevels ...bool,
 ) (err error) {
 	startedAt := time.Now()
 	publishGatewayEvent(agentLoop, runtimeevents.KindGatewayReloadStarted, startedAt, nil)
@@ -620,7 +760,10 @@ func executeReload(
 		publishGatewayEvent(agentLoop, runtimeevents.KindGatewayReloadCompleted, startedAt, nil)
 	}()
 
-	err = handleConfigReload(ctx, agentLoop, newCfg, provider, runningServices, msgBus, allowEmptyStartup, debug)
+	err = handleConfigReload(
+		ctx, agentLoop, newCfg, provider, runningServices, msgBus,
+		allowEmptyStartup, debug, manageLogLevels...,
+	)
 	return err
 }
 
@@ -663,9 +806,14 @@ func setupAndStartServices(
 	msgBus *bus.MessageBus,
 	authToken string,
 	listenResult netbind.OpenResult,
+	lifecycleContexts ...context.Context,
 ) (*services, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	lifecycleCtx := context.Background()
+	if len(lifecycleContexts) > 0 && lifecycleContexts[0] != nil {
+		lifecycleCtx = lifecycleContexts[0]
 	}
 	if err := validateEventAutomationRuntime(ctx, cfg, agentLoop); err != nil {
 		return nil, fmt.Errorf("validate event automation runtime: %w", err)
@@ -750,6 +898,7 @@ func setupAndStartServices(
 			newGatewayConsoleNoFields(),
 		))
 	}
+	runningServices.embeddedReplacementUnsafe = embeddedGatewayReplacementUnsafe(enabledChannels)
 
 	runningServices.authToken = authToken
 	runningServices.HealthServer = health.NewServer(listenResult.ProbeHost, cfg.Gateway.Port, authToken)
@@ -796,7 +945,7 @@ func setupAndStartServices(
 	if err = prepareEventHTTPRoutesForConfig(runningServices, cfg); err != nil {
 		return runningServices, err
 	}
-	if err = validateEventAutomationStorage(context.Background(), cfg); err != nil {
+	if err = validateEventAutomationStorage(ctx, cfg); err != nil {
 		return runningServices, fmt.Errorf("validate event automation storage: %w", err)
 	}
 
@@ -861,6 +1010,9 @@ func setupAndStartServices(
 			))
 		}
 	}
+	if err = lifecycleCtx.Err(); err != nil {
+		return runningServices, err
+	}
 	if err = runningServices.HeartbeatService.Start(); err != nil {
 		return runningServices, fmt.Errorf("error starting heartbeat service: %w", err)
 	}
@@ -872,6 +1024,9 @@ func setupAndStartServices(
 	// Cron is deliberately the final service started. Its durable store may
 	// contain overdue jobs, so starting it before later fallible initialization
 	// could execute work for a gateway that never becomes ready.
+	if err = lifecycleCtx.Err(); err != nil {
+		return runningServices, err
+	}
 	if err = runningServices.CronService.Start(); err != nil {
 		return runningServices, fmt.Errorf("error starting cron service: %w", err)
 	}
@@ -881,6 +1036,15 @@ func setupAndStartServices(
 	))
 
 	return runningServices, nil
+}
+
+func embeddedGatewayReplacementUnsafe(enabledChannels []string) bool {
+	for _, channelName := range enabledChannels {
+		if channelName != config.ChannelPico {
+			return true
+		}
+	}
+	return false
 }
 
 func stopAndCleanupServices(
@@ -986,7 +1150,8 @@ func shutdownGateway(
 	provider providers.LLMProvider,
 	msgBus *bus.MessageBus,
 	fullShutdown bool,
-) {
+	embedded ...bool,
+) error {
 	publishGatewayEvent(agentLoop, runtimeevents.KindGatewayShutdown, time.Time{}, nil)
 
 	producerErr := stopRuntimeProducers(runningServices, gracefulShutdownTimeout)
@@ -1051,6 +1216,22 @@ func shutdownGateway(
 			)
 		}
 	}
+	var processSessionErr error
+	isEmbedded := len(embedded) > 0 && embedded[0]
+	if activeSessions := gatewayActiveProcessSessionCount(); isEmbedded && activeSessions > 0 {
+		processSessionErr = fmt.Errorf(
+			"%w: %d background process sessions remain active",
+			ErrRuntimeNotRetired,
+			activeSessions,
+		)
+	}
+	var channelRetirementErr error
+	if isEmbedded && runningServices != nil && runningServices.embeddedReplacementUnsafe {
+		channelRetirementErr = fmt.Errorf(
+			"%w: enabled channel adapters require launcher process retirement",
+			ErrRuntimeNotRetired,
+		)
+	}
 
 	// Keep the terminal runtime pause held. Resuming it after closing the
 	// provider would allow a blocked background admission onto closed state.
@@ -1058,7 +1239,9 @@ func shutdownGateway(
 		runStopErr == nil &&
 		runtimeDrainErr == nil &&
 		admissionCloseErr == nil &&
-		dependencyErr == nil
+		dependencyErr == nil &&
+		processSessionErr == nil &&
+		channelRetirementErr == nil
 	if safeToClose {
 		if fullShutdown && msgBus != nil {
 			msgBus.Close()
@@ -1074,6 +1257,19 @@ func shutdownGateway(
 		logger.DiagnosticMessageGatewayStopped,
 		logger.NewSafeFields(),
 	)
+	if !safeToClose {
+		return errors.Join(
+			ErrRuntimeNotRetired,
+			producerErr,
+			runStopErr,
+			runtimeDrainErr,
+			admissionCloseErr,
+			dependencyErr,
+			processSessionErr,
+			channelRetirementErr,
+		)
+	}
+	return nil
 }
 
 func handleConfigReload(
@@ -1085,6 +1281,7 @@ func handleConfigReload(
 	msgBus *bus.MessageBus,
 	allowEmptyStartup bool,
 	debug bool,
+	manageLogLevels ...bool,
 ) error {
 	return handleConfigReloadWithServiceOps(
 		ctx,
@@ -1099,6 +1296,7 @@ func handleConfigReload(
 			stop:    stopAndCleanupServices,
 			restart: restartServices,
 		},
+		manageLogLevels...,
 	)
 }
 
@@ -1117,6 +1315,7 @@ func handleConfigReloadWithServiceOps(
 	allowEmptyStartup bool,
 	debug bool,
 	serviceOps configReloadServiceOps,
+	manageLogLevels ...bool,
 ) error {
 	logger.InfoSafeCF(
 		logger.ComponentConfig,
@@ -1500,7 +1699,8 @@ func handleConfigReloadWithServiceOps(
 	)
 
 	// Debug mode permanently overrides the config log level to DEBUG.
-	if !debug {
+	manageLogLevel := len(manageLogLevels) == 0 || manageLogLevels[0]
+	if !debug && manageLogLevel {
 		// Update log level last so that reload-related info/warn logs above are not suppressed.
 		effectiveLogLevel := config.EffectiveGatewayLogLevel(newCfg)
 		logger.SetLevelFromString(effectiveLogLevel)

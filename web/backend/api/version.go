@@ -105,6 +105,9 @@ func (h *Handler) resolveSystemVersionInfoUncached(ctx context.Context) systemVe
 	}
 
 	fallback := fallbackSystemVersionInfo()
+	if h != nil && h.embedGateway {
+		return fallback
+	}
 
 	execPath := strings.TrimSpace(findPicoclawBinaryForInfo())
 	if execPath == "" {
@@ -155,7 +158,14 @@ func fallbackSystemVersionInfoFromConfig() systemVersionResponse {
 func resolveGatewayBinaryForVersionInfo() string {
 	gateway.mu.Lock()
 	cmd := gateway.cmd
+	embedded := gateway.embedded != nil
 	gateway.mu.Unlock()
+	if embedded {
+		// The embedded runtime is built into the launcher, whose linked build
+		// metadata is the authoritative version; there is no gateway binary to
+		// execute.
+		return ""
+	}
 
 	if cmd != nil {
 		if execPath := strings.TrimSpace(cmd.Path); execPath != "" {
@@ -170,15 +180,12 @@ func gatewayVersionState() (int, bool) {
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
 
-	if gateway.cmd == nil || gateway.cmd.Process == nil {
-		return 0, false
-	}
-	pid := gateway.cmd.Process.Pid
+	pid := gatewayRuntimePIDLocked()
 	if pid <= 0 {
 		return 0, false
 	}
 
-	return pid, isCmdProcessAliveLocked(gateway.cmd)
+	return pid, gatewayRuntimeAliveLocked()
 }
 
 func (c *systemVersionCache) get(gatewayPID int, gatewayAlive bool) (systemVersionResponse, bool) {
