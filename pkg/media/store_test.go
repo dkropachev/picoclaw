@@ -923,6 +923,76 @@ func TestStartStopLifecycle(t *testing.T) {
 	store.Stop()
 }
 
+func TestStopWaitsForCleanerRetirement(t *testing.T) {
+	store := NewFileMediaStoreWithCleanup(MediaCleanerConfig{
+		Enabled:  true,
+		MaxAge:   time.Minute,
+		Interval: time.Hour,
+	})
+	cleanerExited := make(chan struct{})
+	store.cleanerMu.Lock()
+	store.cleanerDone = cleanerExited
+	store.cleanerMu.Unlock()
+
+	stopReturned := make(chan struct{})
+	go func() {
+		store.Stop()
+		close(stopReturned)
+	}()
+	select {
+	case <-store.stop:
+	case <-time.After(time.Second):
+		t.Fatal("Stop() did not signal cleaner cancellation")
+	}
+	select {
+	case <-stopReturned:
+		t.Fatal("Stop() returned before the cleaner retired")
+	default:
+	}
+
+	close(cleanerExited)
+	select {
+	case <-stopReturned:
+	case <-time.After(time.Second):
+		t.Fatal("Stop() did not return after cleaner retirement")
+	}
+	store.Stop()
+}
+
+func TestBackgroundCleanerExpiresEntriesBeforeStop(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	store := NewFileMediaStoreWithCleanup(MediaCleanerConfig{
+		Enabled:  true,
+		MaxAge:   time.Minute,
+		Interval: time.Millisecond,
+	})
+	store.nowFunc = func() time.Time { return now.Add(-2 * time.Minute) }
+	path := createTempFile(t, dir, "background-expired.jpg")
+	ref, err := store.Store(path, MediaMeta{Source: "test"}, "background")
+	if err != nil {
+		t.Fatalf("Store() error = %v", err)
+	}
+	store.nowFunc = func() time.Time { return now }
+	store.Start()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err = store.Resolve(ref); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			store.Stop()
+			t.Fatal("background cleaner did not expire the media entry")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	store.Stop()
+	if _, err = os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expired media path stat error = %v, want not-exist", err)
+	}
+}
+
 func TestCleanExpiredZeroMaxAge(t *testing.T) {
 	store := NewFileMediaStoreWithCleanup(MediaCleanerConfig{
 		Enabled:  true,
