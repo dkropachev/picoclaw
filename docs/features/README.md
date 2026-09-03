@@ -36,6 +36,7 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Runtime events and observability       | [runtime-events.md](runtime-events.md)                             |
 | Durable external event automation      | [event-automation.md](event-automation.md)                         |
 | Portability, updates, and packaging    | [portability-updates.md](portability-updates.md)                   |
+| Database protocol foundation           | [database-layer.md](database-layer.md)                             |
 | SQLite runtime storage                 | [sqlite-storage.md](sqlite-storage.md)                             |
 | Workflows and reusable automation      | [workflows.md](workflows.md)                                       |
 | Git workspaces and checkout retention  | [git-workspaces.md](git-workspaces.md)                             |
