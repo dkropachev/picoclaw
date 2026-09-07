@@ -86,8 +86,10 @@ Owns: TEST pkg/database/protocol_coverage_test.go *
 
 This stage changes no active persistence path. `FR-DATABASE-IPC` now supplies
 the dormant local transport and single-owner server lifecycle behind these
-values. Later PRs add physical providers, catalogs, migration, CLI composition,
-and domain adoption without changing their application-facing meaning.
+values. `FR-DATABASE-PROVIDER-CATALOG` supplies a separate dormant internal
+logical-to-physical inventory without exposing its candidate paths or activating
+a provider. Later PRs add providers, readiness, migration, CLI composition, and
+domain adoption without changing their application-facing meaning.
 
 ## Failure And Edge Cases
 

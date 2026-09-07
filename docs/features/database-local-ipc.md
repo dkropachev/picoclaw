@@ -113,10 +113,11 @@ Owns: TEST pkg/database/windows_acl_policy_test.go *
 ## Cross-Feature Behavior
 
 This feature consumes the canonical values and frames from `FR-DATABASE` but
-does not activate them for any application. Provider, catalog, migration,
-supervisor, CLI, gateway, and domain-adapter PRs follow separately. The optional
-catalog fingerprint field is syntax-validated here but remains empty until a
-later catalog assembly supplies it.
+does not activate them for any application. `FR-DATABASE-PROVIDER-CATALOG`
+derives a dormant internal inventory from this feature's canonical-home identity
+but does not connect that inventory to `StartServer`. Provider, readiness,
+migration, supervisor, CLI, gateway, and domain-adapter PRs follow separately;
+the optional catalog fingerprint remains empty until that later composition.
 
 ## Failure And Edge Cases
 

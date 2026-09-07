@@ -144,6 +144,11 @@ Owns: INTEGRATION storage-json
 
 ## Cross-Feature Behavior
 
+`FR-DATABASE-PROVIDER-CATALOG` adds only a dormant internal inventory of future
+provider candidates. The subsystem-local SQLite stores defined here remain the
+active persistence authority; this catalog stage opens no store and creates no
+second owner.
+
 Each owning subsystem defines its own relational schema, normalization rules,
 version fences, and compatibility constructors. Workspace protection treats
 database directories, database/WAL/SHM files, and legacy archives as
