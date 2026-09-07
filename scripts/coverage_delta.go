@@ -73,6 +73,7 @@ const (
 	newFeatureMinimumCoveragePercent   = 95
 	changedCodeMinimumCoveragePercent  = 90
 	coverageNestedBenchmarkSkipPattern = `^Test(GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath|WorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig)$`
+	coverageGoTestCount                = 1
 	coverageGoTestParallelism          = 1
 )
 
@@ -599,6 +600,8 @@ func runGoCoverage(
 	args := []string{
 		"test",
 		"-buildvcs=false",
+		"-count",
+		strconv.Itoa(coverageGoTestCount),
 		"-p",
 		strconv.Itoa(coverageGoTestParallelism),
 	}
@@ -702,6 +705,8 @@ func runScriptCoverage(
 		args := []string{
 			"test",
 			"-buildvcs=false",
+			"-count",
+			strconv.Itoa(coverageGoTestCount),
 			"-tags",
 			scriptCoverageBuildTags(tags),
 			"-covermode=atomic",

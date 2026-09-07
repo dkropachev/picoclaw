@@ -266,6 +266,9 @@ func TestCoverageNestedBenchmarkSkipPatternIsExact(t *testing.T) {
 
 func TestCoverageGoTestParallelismIsBounded(t *testing.T) {
 	t.Parallel()
+	if coverageGoTestCount != 1 {
+		t.Fatalf("coverage Go test count = %d, want 1", coverageGoTestCount)
+	}
 	if coverageGoTestParallelism != 1 {
 		t.Fatalf("coverage Go test parallelism = %d, want 1", coverageGoTestParallelism)
 	}
