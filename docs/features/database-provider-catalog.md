@@ -11,13 +11,15 @@ database provider. Given an existing canonical PicoClaw home and one validated
 configuration snapshot, it deterministically inventories opaque logical store
 IDs, their provider-private candidate generation paths, legacy-input roots, and
 required-store policy. A provider-neutral logical facade projects only store
-ID, domain, and required-store policy from that inventory.
+ID, domain, and required-store policy from that inventory. An internal catalog
+can also derive an opaque deterministic fingerprint binding its complete
+physical inventory to the exact configuration revision used to create it.
 
 This stage does not bind or open a database provider, inspect schema readiness,
-claim a physical generation, publish a catalog fingerprint, start a broker, or
-change an application persistence path. The logical facade is the internal
-catalog's only production importer, and no production package consumes the
-facade yet.
+claim a physical generation, publish its fingerprint through IPC, start a
+broker, load configuration, or change an application persistence path. The
+logical facade is the internal catalog's only production importer, and no
+production package consumes the facade yet.
 
 ## Reconstruction Notes
 
@@ -25,9 +27,10 @@ facade yet.
   without making filesystem locations part of the database protocol or an
   application API.
 - Core types/functions: internal `Options`, `Spec`, and `Catalog` values,
-  `Build`, `Project`, exact lookup, detached snapshots, deterministic dynamic
-  channel identities, and the logical `catalog.Options`, `Entry`, `Catalog`,
-  `New`, `Entries`, `Lookup`, `Entry`, `LookupChannel`, and `Contains` facade.
+  `Build`, `Project`, `Catalog.Fingerprint`, exact lookup, detached snapshots,
+  deterministic dynamic channel identities, and the logical `catalog.Options`,
+  `Entry`, `Catalog`, `New`, `Entries`, `Lookup`, `Entry`, `LookupChannel`, and
+  `Contains` facade.
 - Runtime ordering: accept the already trusted canonical home, resolve every
   configured path in its declared context, generate canonical slash-separated
   store IDs, canonicalize existing leaves when building, reject catalog
@@ -36,7 +39,9 @@ facade yet.
 - Non-obvious constraints: a catalog path is a candidate provider identity, not
   authority to open it; missing generation and legacy leaves are valid; legacy
   directory roots may intentionally contain catalogued generations; a future
-  provider must revalidate the final generation identity at its point of use.
+  provider must revalidate the final generation identity at its point of use;
+  and a fingerprint is only a versioned equality token, never provider or
+  catalog authority.
 
 ## Requirements
 
@@ -46,8 +51,9 @@ facade yet.
 | `FR-DATABASE-PROVIDER-CATALOG-002` | MUST | The catalog derives fixed, workspace, agent-workspace, or enabled-channel entries. | Every ID follows the `FR-DATABASE` lowercase slash-segment contract. Fixed IDs use their declared names; additional workspaces use `workspace/<path-digest>/<store>`; Matrix and WhatsApp use `channel/<type>/<slug>-<digest>`. Entries are ID-sorted, exact-looked-up, and returned only as detached copies, including detached legacy-root slices. | Construction mutates only a new process-local snapshot. | Invalid, padded, duplicate, empty-segment, traversal-like, oversized, or nondeterministic identities fail closed; caller mutation of a returned `Spec` cannot alter retained catalog state. | Logical authority must remain stable, provider-neutral, and safe to transmit later without revealing a path. |
 | `FR-DATABASE-PROVIDER-CATALOG-003` | MUST | Catalog construction resolves a candidate generation or legacy input from trusted configuration and explicit `Options` context. | Home-scoped stores resolve beneath the canonical home; primary workspace stores resolve from the configured/default primary workspace; additional workspace stores resolve from each distinct configured agent workspace; Git inventory/checkpoints resolve from the effective Git-workspace root; event, evolution, Matrix, and WhatsApp overrides resolve in their documented workspace or explicit user-home context. A relative config path is anchored to the canonical home, and its directory supplies launcher legacy context. `Project` produces absolute cleaned identities without inspecting mutable leaves, while `Build` canonicalizes every existing ancestor and leaf. | Resolution performs metadata reads only. | Surrounding whitespace, NUL bytes, ambiguous platform spellings, implicit `~` expansion, unsafe existing ancestors, symlink/reparse aliases, an existing generation that is not regular, or an existing legacy leaf that is neither a regular file nor a directory fails closed. Missing candidate generation and legacy leaves remain representable. | Relative configuration has meaning only within an explicit trusted context, and inventory must not create state while resolving it. |
 | `FR-DATABASE-PROVIDER-CATALOG-004` | MUST | The complete candidate inventory is validated before publication. | Logical IDs are unique. Each database, WAL, SHM, and rollback-journal namespace is reserved together; lexical, platform case-folded, ancestor/descendant, and existing same-file or hardlink aliases across generation reservations are rejected. A generation member whose platform path key exactly equals any declared legacy root, or whose existing file is a hardlink alias of an existing legacy file, is rejected. Exact or existing same-file legacy roots across stores are rejected; ancestor/descendant legacy overlap remains allowed, and a legacy directory may contain a catalogued generation because downstream enumeration must exclude generation members explicitly. | Validation retains no filesystem handle and changes no file. | A main path aliasing another main or sidecar, overlapping generation namespaces, an irregular generation member, a duplicate legacy identity, or an exact generation-to-legacy identity aborts the whole catalog. | One future provider owner cannot safely assign two logical authorities to one physical generation or mistake a live generation for legacy input. |
-| `FR-DATABASE-PROVIDER-CATALOG-005` | MUST | Repository code attempts to consume or extend this foundation. | `pkg/database/catalog/catalog.go` is the only production file permitted to import `internal/storecatalog`, and no production file may import `pkg/database/catalog`; exact-file architecture guards enforce both boundaries. A future provider must consume the complete trusted internal `Spec` and revalidate ownership, type, link count, canonical path, and generation identity immediately before and after opening rather than treating either snapshot as a capability. | This stage publishes no process-global catalog and opens no provider handle. | Any other internal-catalog importer, any logical-facade consumer, direct application consumption, public path projection, provider fallback, readiness claim, fingerprint publication, or use of a stale catalog path as sufficient authority is rejected or remains unavailable. | Landing an inert logical projection separately must not create a second database owner or weaken the protocol's opaque `StoreID` boundary. |
+| `FR-DATABASE-PROVIDER-CATALOG-005` | MUST | Repository code attempts to consume or extend this foundation. | `pkg/database/catalog/catalog.go` is the only production file permitted to import `internal/storecatalog`, and no production file may import `pkg/database/catalog`; exact-file architecture guards enforce both boundaries. A future provider must consume the complete trusted internal `Spec` and revalidate ownership, type, link count, canonical path, and generation identity immediately before and after opening rather than treating either snapshot or fingerprint as a capability. | This stage publishes no process-global catalog or IPC fingerprint and opens no provider handle. | Any other internal-catalog importer, any logical-facade consumer, direct application consumption, public path projection, provider fallback, readiness claim, IPC fingerprint publication, or use of a stale catalog path or matching digest as sufficient authority is rejected or remains unavailable. | Landing inert catalog metadata separately must not create a second database owner or weaken the protocol's opaque `StoreID` boundary. |
 | `FR-DATABASE-PROVIDER-CATALOG-006` | MUST | Privileged future infrastructure constructs or queries the provider-neutral logical facade using an existing canonical home, one validated immutable configuration snapshot, and explicit path-resolution context. | Construction uses `Project`, not `Build`, and publishes an ID-sorted immutable snapshot containing exactly logical `StoreID`, domain, and required-store policy. A domain is at most 64 bytes and contains only lowercase ASCII letters, digits, and non-edge hyphens. `Entries` returns a detached slice; `Lookup` accepts only an exact canonical catalog ID; `Entry` returns a detached exact-ID record; `LookupChannel` derives a supported Matrix or WhatsApp ID and then requires that enabled entry to exist; `Contains` accepts only a valid ID in the exact snapshot. Nil receivers remain safe. | Construction retains no configuration pointer, internal `Spec`, candidate path, legacy root, or filesystem handle and changes no filesystem or application state. Query methods mutate nothing. | Nil or invalid options, empty inventory, invalid or duplicate projected ID, invalid domain, projection failure, malformed, padded, path-shaped, URI/DSN-shaped, disabled, unsupported, or unknown lookup identity fails without returning physical locations or provider diagnostics. Existing generation members and sidecars are not inspected for the logical projection. | Future commands and composition need deterministic logical selection without gaining physical provider authority or reconstructing database filenames. |
+| `FR-DATABASE-PROVIDER-CATALOG-007` | MUST | Trusted future composition asks one constructed internal `Catalog` to fingerprint the exact configuration revision from which that inventory was derived. | `Fingerprint` returns lowercase `sha256:` plus 64 hexadecimal digits. The digest uses a fixed version tag and unambiguous length/count framing to bind the canonical catalog home, exact configuration revision, ID-sorted complete specs, each ID/domain/candidate path/required flag, and every retained legacy root in its declared order. The accepted revision is exactly `missing` or lowercase `sha256:` plus 64 hexadecimal digits; input is never trimmed. Before hashing, the detached inventory must satisfy the same lexical ID, platform-path, generation-namespace, and legacy-alias rules as `Project`. | Fingerprinting clones and sorts detached specs, mutates neither retained catalog nor caller state, performs no filesystem or configuration read, and retains no digest state. | A nil or empty catalog; invalid revision, home, store ID, domain, candidate path, or legacy path; duplicate ID or legacy identity; generation overlap; or exact generation-to-legacy alias returns one generic error without echoing input. A matching fingerprint grants no catalog, path, provider, readiness, migration, transport, or application authority. | A later broker generation needs one collision-resistant equality token identifying which complete catalog inventory belongs to which atomic configuration revision without publishing physical fields. |
 
 ## Data And State Model
 
@@ -67,6 +73,13 @@ and required-store policy.
 Required is catalog policy, not a computed readiness state. The facade retains
 no internal catalog, configuration, database-generation identity, legacy root,
 or provider handle, and its returned entry slices are detached.
+
+An internal catalog fingerprint is a derived value only. Its SHA-256 preimage
+is domain-separated and length-framed; it includes the canonical home, exact
+configuration revision, and every provider-private field in the complete
+inventory. Paths and legacy roots influence equality but never appear in the
+returned token or its generic validation error. The catalog retains no
+fingerprint cache, and callers cannot use a matching token to obtain a `Spec`.
 
 Path contexts are fixed as follows:
 
@@ -89,8 +102,10 @@ rules do not make any candidate exist and do not authorize reading its contents.
 ## Surface Ownership
 
 Owns: CODE internal/storecatalog/catalog.go
+Owns: CODE internal/storecatalog/fingerprint.go
 Owns: CODE internal/storecatalog/path_*.go
 Owns: TEST internal/storecatalog/*_test.go *
+Owns: TEST internal/storecatalog/fingerprint_test.go *
 Owns: CODE pkg/database/catalog/catalog.go
 Owns: TEST pkg/database/catalog/catalog_test.go *
 Owns: TEST pkg/database/catalog/import_guard_test.go *
@@ -103,6 +118,7 @@ Owns: TEST pkg/database/catalog/import_guard_test.go *
 | Internal Go API | `Project(options)` | Produce the same logical inventory and absolute candidate paths without inspecting mutable generation or legacy leaves. | `FR-DATABASE-PROVIDER-CATALOG-001`, `FR-DATABASE-PROVIDER-CATALOG-002`, `FR-DATABASE-PROVIDER-CATALOG-003` |
 | Internal Go value | `Catalog`, `Spec` | Retain one ID-sorted immutable inventory and expose detached exact-lookup snapshots only inside the repository. | `FR-DATABASE-PROVIDER-CATALOG-002` |
 | Internal Go API | `ChannelStoreID(type, name)` | Derive deterministic Matrix or WhatsApp slash-namespaced IDs; unsupported channel types produce no ID. | `FR-DATABASE-PROVIDER-CATALOG-002` |
+| Internal Go API | `Catalog.Fingerprint(configRevision)` | Derive a versioned opaque equality binding for the complete physical inventory and exact configuration revision without reading or publishing either source. | `FR-DATABASE-PROVIDER-CATALOG-007` |
 | Provider-neutral Go value | `catalog.Entry`, `catalog.Catalog` | Retain only detached logical ID, domain, and required-store policy without physical provider fields or readiness. | `FR-DATABASE-PROVIDER-CATALOG-006` |
 | Provider-neutral Go API | `catalog.New`, `Entries`, `Lookup`, `Entry`, `LookupChannel`, `Contains` | Project and query exact logical membership without inspecting generation members or exposing internal specs. | `FR-DATABASE-PROVIDER-CATALOG-006` |
 | Architecture gates | Internal-catalog and logical-facade import guards | Permit the exact facade implementation to consume the internal inventory while keeping the facade itself unconsumed until a separately specified owner composition lands. | `FR-DATABASE-PROVIDER-CATALOG-005` |
@@ -126,11 +142,18 @@ Owns: TEST pkg/database/catalog/import_guard_test.go *
    hardlinked legacy duplicates while preserving directory containment.
 6. Sort specs by logical ID, build the exact lookup index, and retain detached
    legacy-root slices.
-7. When constructing the logical facade, call `Project`, copy only ID, domain,
+7. When fingerprinting, validate the exact configuration revision, canonical
+   home, absolute platform-safe paths, domains, IDs, lexical generation
+   reservations, and legacy identities against a detached complete spec set.
+   Sort the clone by logical ID, then feed the version tag, canonical home,
+   revision, spec count, every scalar spec field, each required byte, and every
+   ordered legacy root through unsigned 64-bit big-endian length/count frames
+   into SHA-256.
+8. When constructing the logical facade, call `Project`, copy only ID, domain,
    and required-store policy into its own sorted exact-ID index, then discard
    every internal spec and physical field. Resolve lookups by exact membership;
    never trim, normalize, or interpret caller input as a path or DSN.
-8. A later provider repeats final path, owner, type, link, and generation checks
+9. A later provider repeats final path, owner, type, link, and generation checks
    around its open; it never infers authority from this earlier snapshot alone.
 
 ## Cross-Feature Behavior
@@ -141,10 +164,12 @@ keeps physical candidates internal and exposes only its dormant logical facade;
 neither catalog connects to the IPC server. The base `pkg/database`
 protocol/IPC package stays below both catalogs in the dependency graph and
 never imports its `catalog` subpackage, avoiding the cycle through
-`internal/storecatalog`. `FR-DATABASE-SQLITE-CONTROL` remains separate and
-unconsumed. `FR-SQLITE` remains the active subsystem-owned persistence behavior
-until later provider, readiness, migration, supervisor, and domain-adapter
-features explicitly replace it.
+`internal/storecatalog`. The internal fingerprint uses the format accepted by
+`FR-DATABASE-IPC`, but this stage neither supplies it to `StartServer` nor
+publishes it in broker status. `FR-DATABASE-SQLITE-CONTROL` remains separate
+and unconsumed. `FR-SQLITE` remains the active subsystem-owned persistence
+behavior until later provider, readiness, migration, supervisor, and
+domain-adapter features explicitly replace it.
 
 ## Failure And Edge Cases
 
@@ -158,6 +183,13 @@ features explicitly replace it.
   ID is authority, and channel derivation alone does not prove membership.
 - The logical facade does not retain or return internal physical specs, and a
   projection failure does not expose a candidate path through its result.
+- Fingerprints are stable across retained spec order but deliberately change
+  with the configuration revision, catalog home, any scalar spec field, the
+  required-store policy, legacy-root value, or legacy-root order.
+- Invalid fingerprint input yields no partial digest and does not echo a
+  revision, domain, store ID, or path.
+- Fingerprinting repeats lexical catalog collision validation without inspecting
+  whether any generation or legacy path currently exists.
 - A disappearing existing leaf fails or is represented as missing without
   following a replacement symlink; it never authorizes a later open.
 - Legacy directories may contain catalogued database files. Later legacy
@@ -175,6 +207,7 @@ features explicitly replace it.
 | `FR-DATABASE-PROVIDER-CATALOG-004` | [internal/storecatalog/catalog_test.go](../../internal/storecatalog/catalog_test.go), [internal/storecatalog/catalog_boundaries_test.go](../../internal/storecatalog/catalog_boundaries_test.go), [internal/storecatalog/catalog_security_test.go](../../internal/storecatalog/catalog_security_test.go) |
 | `FR-DATABASE-PROVIDER-CATALOG-005` | [internal/storecatalog/import_guard_test.go](../../internal/storecatalog/import_guard_test.go), [pkg/database/catalog/import_guard_test.go](../../pkg/database/catalog/import_guard_test.go) |
 | `FR-DATABASE-PROVIDER-CATALOG-006` | [pkg/database/catalog/catalog_test.go](../../pkg/database/catalog/catalog_test.go), [pkg/database/catalog/import_guard_test.go](../../pkg/database/catalog/import_guard_test.go) |
+| `FR-DATABASE-PROVIDER-CATALOG-007` | [internal/storecatalog/fingerprint_test.go](../../internal/storecatalog/fingerprint_test.go), [internal/storecatalog/import_guard_test.go](../../internal/storecatalog/import_guard_test.go) |
 
 ## Implementation Anchors
 
@@ -182,6 +215,8 @@ features explicitly replace it.
 - [internal/storecatalog/catalog_test.go](../../internal/storecatalog/catalog_test.go)
 - [internal/storecatalog/catalog_boundaries_test.go](../../internal/storecatalog/catalog_boundaries_test.go)
 - [internal/storecatalog/catalog_security_test.go](../../internal/storecatalog/catalog_security_test.go)
+- [internal/storecatalog/fingerprint.go](../../internal/storecatalog/fingerprint.go)
+- [internal/storecatalog/fingerprint_test.go](../../internal/storecatalog/fingerprint_test.go)
 - [internal/storecatalog/import_guard_test.go](../../internal/storecatalog/import_guard_test.go)
 - [pkg/database/catalog/catalog.go](../../pkg/database/catalog/catalog.go)
 - [pkg/database/catalog/catalog_test.go](../../pkg/database/catalog/catalog_test.go)
