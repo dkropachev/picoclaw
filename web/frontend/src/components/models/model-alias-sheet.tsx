@@ -44,7 +44,7 @@ import {
   SelectTrigger,
 } from "@/components/ui/select"
 
-const DISABLED_MODEL_VALUE = "__picoclaw_alias_disabled__"
+export const DISABLED_MODEL_VALUE = "__picoclaw_alias_disabled__"
 
 interface OverrideRow {
   accountRef: string
@@ -52,7 +52,7 @@ interface OverrideRow {
   disabled: boolean
 }
 
-interface ModelAvailability {
+export interface ModelAvailability {
   id: string
   accountRefs: string[]
 }
@@ -91,7 +91,7 @@ interface ModelSelectProps {
   onValueChange: (value: string) => void
 }
 
-function ModelSelect({
+export function ModelAliasModelSelect({
   value,
   options,
   allAccountRefs,
@@ -488,7 +488,7 @@ export function ModelAliasDialog({
             )}
             required
           >
-            <ModelSelect
+            <ModelAliasModelSelect
               value={model}
               options={modelOptions}
               allAccountRefs={concreteAccountRefs}
@@ -631,7 +631,7 @@ export function ModelAliasDialog({
                             ))}
                         </SelectContent>
                       </Select>
-                      <ModelSelect
+                      <ModelAliasModelSelect
                         value={selectedValue}
                         options={rowOptions}
                         allAccountRefs={[override.accountRef]}

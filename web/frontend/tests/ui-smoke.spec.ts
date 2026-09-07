@@ -5771,6 +5771,31 @@ async function mockLauncherApis(
             )
       }
 
+      const modelAliasDetailMatch = path.match(
+        /^\/api\/model-aliases\/([^/]+)$/,
+      )
+      if (method === "GET" && modelAliasDetailMatch) {
+        const name = decodeURIComponent(modelAliasDetailMatch[1])
+        const models = (options.modelResponse ??
+          modelResponse) as typeof modelResponse
+        const alias = models.model_aliases.find(
+          (candidate) => candidate.name === name,
+        )
+        return alias
+          ? json(route, {
+              model_alias: alias,
+              config_revision: "model-alias-revision-1",
+            })
+          : json(
+              route,
+              {
+                code: "model_alias_not_found",
+                message: "Model alias not found",
+              },
+              404,
+            )
+      }
+
       const workflowDefinitionDetailMatch = path.match(
         /^\/api\/workflows\/definitions\/([^/]+)$/,
       )
@@ -5946,7 +5971,7 @@ async function mockLauncherApis(
             next_cursor: "",
             canonical_query: "ALL ORDER BY name ASC",
             query_schema: mockCollectionSchemas.aliases,
-            config_revision: models.revision,
+            config_revision: "model-alias-revision-1",
           })
         }
         case "/api/model-routers": {
@@ -9293,7 +9318,213 @@ test("sidebar navigation survives collection query canonicalization", async ({
   expect(errors).toEqual([])
 })
 
-test("collection rows use gesture selection and contextual actions", async ({
+test("bare model alias route opens its editor and returns to the preserved list", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const search = new URLSearchParams({
+    q: "ALL ORDER BY name ASC",
+    view: "grid",
+  })
+
+  await gotoMockedRoute(page, `/models/aliases/code?${search.toString()}`)
+
+  await expect(
+    page.getByRole("heading", { name: "Edit model alias" }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("combobox", { name: "Default upstream model" }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("textbox", { name: "Default upstream model" }),
+  ).toHaveCount(0)
+  await expect(
+    page.locator('[data-slot="collection-selection-bar"]'),
+  ).toHaveCount(0)
+  expect(new URL(page.url()).searchParams.get("q")).toBe(
+    "ALL ORDER BY name ASC",
+  )
+  expect(new URL(page.url()).searchParams.get("view")).toBe("grid")
+
+  await page.getByRole("button", { name: "Cancel", exact: true }).click()
+
+  await expect(page).toHaveURL(/\/models\/aliases(?:\?|$)/)
+  await expect(
+    page.getByRole("heading", { name: "Model aliases", exact: true }),
+  ).toBeVisible()
+  expect(new URL(page.url()).searchParams.get("q")).toBe(
+    "ALL ORDER BY name ASC",
+  )
+  expect(new URL(page.url()).searchParams.get("view")).toBe("grid")
+  expect(errors).toEqual([])
+})
+
+test("model alias editor searches the advertised model union and annotates availability", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/models/aliases/code", {
+    modelResponse: {
+      ...modelResponse,
+      model_aliases: modelResponse.model_aliases.map((alias) =>
+        alias.name === "code"
+          ? { ...alias, model: "configured-but-unreported" }
+          : alias,
+      ),
+    },
+  })
+
+  const defaultModel = page.getByRole("combobox", {
+    name: "Default upstream model",
+  })
+  await expect(defaultModel).toBeEnabled()
+  await defaultModel.click()
+
+  const sharedModel = page.getByRole("option", { name: /^gpt-5\.4/ })
+  await expect(sharedModel.getByText("All accounts (2)")).toBeVisible()
+  await expect(
+    page
+      .getByRole("option", { name: /^gpt-4o-mini/ })
+      .getByText(/Missing: gpt-4o/),
+  ).toBeVisible()
+  const accountSpecificModel = page.getByRole("option", {
+    name: /^gpt-5\.5-sol/,
+  })
+  await expect(
+    accountSpecificModel.getByText(/Missing: gpt-4o-mini/),
+  ).toBeVisible()
+  await expect(
+    page
+      .getByRole("option", { name: /^configured-but-unreported/ })
+      .getByText("Not reported by any account"),
+  ).toBeVisible()
+
+  const search = page.getByPlaceholder("Search models...")
+  await expect(search).toBeFocused()
+  await search.fill("gpt-5.5-sol")
+  await expect(accountSpecificModel).toBeVisible()
+  await expect(sharedModel).toHaveCount(0)
+  await page.keyboard.press("Escape")
+
+  await page.getByRole("button", { name: "Add override" }).click()
+  await page.getByRole("combobox", { name: "Override model" }).last().click()
+  await expect(
+    page.getByRole("option", { name: "Disabled for this account" }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("option", { name: /^gpt-4o-mini All accounts \(1\)/ }),
+  ).toBeVisible()
+  expect(errors).toEqual([])
+})
+
+test("model alias editor advances its revision across consecutive saves", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/models/aliases/code")
+  const revisions: string[] = []
+  await page.route("**/api/model-aliases/code", async (route) => {
+    const request = route.request()
+    if (request.method() !== "PUT") {
+      return route.fallback()
+    }
+    const body = request.postDataJSON() as {
+      expected_config_revision: string
+      model_alias: (typeof modelResponse.model_aliases)[number]
+    }
+    revisions.push(body.expected_config_revision)
+    return json(route, {
+      model_alias: body.model_alias,
+      config_revision: `model-alias-revision-${revisions.length + 1}`,
+      effects: { gateway_effect: "none" },
+    })
+  })
+
+  const save = page.getByRole("button", { name: "Save", exact: true })
+  await save.click()
+  await expect.poll(() => revisions).toEqual(["model-alias-revision-1"])
+  await expect(save).toBeEnabled()
+  await save.click()
+  await expect
+    .poll(() => revisions)
+    .toEqual(["model-alias-revision-1", "model-alias-revision-2"])
+  expect(errors).toEqual([])
+})
+
+test("model alias editor saves model overrides and disabled accounts separately", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/models/aliases/code")
+  const payloads: Array<{
+    model_alias: (typeof modelResponse.model_aliases)[number]
+  }> = []
+  await page.route("**/api/model-aliases/code", async (route) => {
+    const request = route.request()
+    if (request.method() !== "PUT") return route.fallback()
+    const body = request.postDataJSON() as {
+      model_alias: (typeof modelResponse.model_aliases)[number]
+    }
+    payloads.push(body)
+    return json(route, {
+      model_alias: body.model_alias,
+      config_revision: "model-alias-revision-2",
+      effects: { gateway_effect: "none" },
+    })
+  })
+
+  await page.getByRole("combobox", { name: "Override model" }).click()
+  await page.getByRole("option", { name: "Disabled for this account" }).click()
+  const addOverride = page.getByRole("button", { name: "Add override" })
+  await expect(addOverride).toBeEnabled()
+  await addOverride.click()
+  await page.getByRole("combobox", { name: "Override model" }).last().click()
+  await page
+    .getByRole("option", { name: /^gpt-5\.4 All accounts/ })
+    .last()
+    .click()
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+
+  await expect.poll(() => payloads).toHaveLength(1)
+  expect(payloads[0].model_alias.account_overrides).toEqual({
+    "gpt-4o-mini": "gpt-5.4",
+  })
+  expect(payloads[0].model_alias.disabled_accounts).toEqual(["gpt-4o"])
+  expect(errors).toEqual([])
+})
+
+test("model alias editor disables model choices when no concrete account is enabled", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/models/aliases/code", {
+    modelResponse: {
+      ...modelResponse,
+      models: modelResponse.models.map((model) => ({
+        ...model,
+        enabled: false,
+      })),
+    },
+  })
+
+  await expect(
+    page.getByText(
+      "No enabled accounts are available. Add or restore one on the Accounts page before choosing models or overrides.",
+    ),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("combobox", { name: "Default upstream model" }),
+  ).toBeDisabled()
+  await expect(
+    page.getByRole("button", { name: "Add override" }),
+  ).toBeDisabled()
+  await expect(
+    page.getByRole("combobox", { name: "Override model" }),
+  ).toBeDisabled()
+  expect(errors).toEqual([])
+})
+
+test("collection rows use gesture selection and activation opens edit UI", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
@@ -9317,6 +9548,12 @@ test("collection rows use gesture selection and contextual actions", async ({
 
   await rows.nth(0).dblclick()
   await expect(page).toHaveURL(/\/models\/aliases\/code(?:\?|$)/)
+  await expect(
+    page.getByRole("heading", { name: "Edit model alias" }),
+  ).toBeVisible()
+  await expect(
+    page.locator('[data-slot="collection-selection-bar"]'),
+  ).toHaveCount(0)
   expect(errors).toEqual([])
 })
 

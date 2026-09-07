@@ -1,12 +1,18 @@
-import { IconEdit, IconPlus } from "@tabler/icons-react"
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
+import { IconEdit, IconPlus, IconTrash } from "@tabler/icons-react"
+import {
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query"
 import { type FormEvent, useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { CollectionAPIError } from "@/api/collection"
 import {
   type ModelAlias,
+  type ModelAliasMutationResponse,
   type ModelAliasSummary,
+  type ModelInfo,
   type ModelRouterBlock,
   type ModelRouterConfig,
   type ModelRouterSummary,
@@ -14,6 +20,7 @@ import {
   bulkDeleteModelRouters,
   createModelAlias,
   createModelRouter,
+  fetchUpstreamModels,
   getModelAlias,
   getModelRouter,
   getModels,
@@ -41,13 +48,18 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { Textarea } from "@/components/ui/textarea"
 import {
   type CollectionRouteSearch,
   normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
+
+import {
+  DISABLED_MODEL_VALUE,
+  ModelAliasModelSelect,
+  type ModelAvailability,
+} from "./model-alias-sheet"
 
 const aliasDefaultQuery = "ORDER BY name ASC"
 const routerDefaultQuery = "ORDER BY name ASC"
@@ -321,87 +333,6 @@ export function ModelRoutersCollectionPage({
   )
 }
 
-export function ModelAliasDetailPage({
-  name,
-  onBack,
-  onEdit,
-}: {
-  name: string
-  onBack: () => void
-  onEdit: () => void
-}) {
-  const query = useQuery({
-    queryKey: ["model-alias", name],
-    queryFn: ({ signal }) => getModelAlias(name, signal),
-    retry: false,
-  })
-  const alias = query.data?.model_alias
-  return (
-    <CollectionDetailShell
-      title={alias?.name ?? "Model alias"}
-      identity={<span className="font-mono text-xs">{name}</span>}
-      loading={query.isLoading}
-      error={
-        query.error &&
-        !(
-          query.error instanceof CollectionAPIError &&
-          query.error.status === 404
-        )
-          ? query.error.message
-          : undefined
-      }
-      notFound={
-        query.error instanceof CollectionAPIError && query.error.status === 404
-      }
-      onBack={onBack}
-      onRetry={() => void query.refetch()}
-      backLabel="All model aliases"
-      actions={
-        alias ? (
-          <Button type="button" size="sm" onClick={onEdit}>
-            <IconEdit /> Edit
-          </Button>
-        ) : undefined
-      }
-    >
-      {alias && <ModelAliasDetails alias={alias} />}
-    </CollectionDetailShell>
-  )
-}
-
-function ModelAliasDetails({ alias }: { alias: ModelAlias }) {
-  const overrides = Object.entries(alias.account_overrides ?? {})
-  return (
-    <div className="space-y-6">
-      <DetailList
-        values={[
-          ["Default model", alias.model],
-          ["Account overrides", String(overrides.length)],
-          ["Disabled accounts", String(alias.disabled_accounts?.length ?? 0)],
-        ]}
-      />
-      {overrides.length > 0 && (
-        <section>
-          <h2 className="mb-2 text-sm font-semibold">Account overrides</h2>
-          <DetailList values={overrides} />
-        </section>
-      )}
-      {(alias.disabled_accounts?.length ?? 0) > 0 && (
-        <section>
-          <h2 className="mb-2 text-sm font-semibold">Disabled accounts</h2>
-          <div className="flex flex-wrap gap-2">
-            {alias.disabled_accounts?.map((account) => (
-              <Badge key={account} variant="outline" className="font-mono">
-                {account}
-              </Badge>
-            ))}
-          </div>
-        </section>
-      )}
-    </div>
-  )
-}
-
 export function ModelRouterDetailPage({
   name,
   onBack,
@@ -506,8 +437,9 @@ export function ModelAliasEditorPage({
 }: {
   name?: string
   onBack: () => void
-  onSaved: (name: string) => void
+  onSaved: (name: string) => void | Promise<void>
 }) {
+  const queryClient = useQueryClient()
   const detail = useQuery({
     queryKey: ["model-alias", name],
     queryFn: ({ signal }) => getModelAlias(name ?? "", signal),
@@ -523,6 +455,16 @@ export function ModelAliasEditorPage({
       ])
       return { collection, models }
     },
+    retry: false,
+  })
+  const concreteAccountRefs = useMemo(
+    () => concreteModelAccountRefs(context.data?.models.models ?? []),
+    [context.data?.models.models],
+  )
+  const availability = useQuery({
+    queryKey: ["model-alias-editor-upstream-models", concreteAccountRefs],
+    queryFn: ({ signal }) => loadModelAvailability(concreteAccountRefs, signal),
+    enabled: context.isSuccess && concreteAccountRefs.length > 0,
     retry: false,
   })
   return (
@@ -545,7 +487,13 @@ export function ModelAliasEditorPage({
         detail.error.status === 404
       }
       onBack={onBack}
-      onRetry={() => void Promise.all([detail.refetch(), context.refetch()])}
+      onRetry={() =>
+        void Promise.all([
+          detail.refetch(),
+          context.refetch(),
+          ...(concreteAccountRefs.length > 0 ? [availability.refetch()] : []),
+        ])
+      }
       backLabel="All model aliases"
     >
       {context.data && (!name || detail.data) && (
@@ -556,8 +504,25 @@ export function ModelAliasEditorPage({
             context.data.collection.config_revision
           }
           templates={context.data.models.model_alias_catalog ?? []}
+          concreteAccountRefs={concreteAccountRefs}
+          availability={availability.data?.models ?? []}
+          availabilityIssues={availability.data?.issues ?? []}
+          loadingAvailability={
+            concreteAccountRefs.length > 0 && availability.isLoading
+          }
           onCancel={onBack}
-          onSaved={onSaved}
+          onSaved={async (response) => {
+            const savedName = response.model_alias.name
+            await queryClient.cancelQueries({
+              queryKey: ["model-alias", savedName],
+              exact: true,
+            })
+            queryClient.setQueryData(["model-alias", savedName], {
+              model_alias: response.model_alias,
+              config_revision: response.config_revision,
+            })
+            await onSaved(savedName)
+          }}
         />
       )}
     </CollectionDetailShell>
@@ -568,23 +533,28 @@ function ModelAliasForm({
   initial,
   revision,
   templates,
+  concreteAccountRefs,
+  availability,
+  availabilityIssues,
+  loadingAvailability,
   onCancel,
   onSaved,
 }: {
   initial?: ModelAlias
   revision: string
   templates: Array<{ name: string; description: string }>
+  concreteAccountRefs: string[]
+  availability: ModelAvailability[]
+  availabilityIssues: string[]
+  loadingAvailability: boolean
   onCancel: () => void
-  onSaved: (name: string) => void
+  onSaved: (response: ModelAliasMutationResponse) => void | Promise<void>
 }) {
   const { t } = useTranslation()
   const [aliasName, setAliasName] = useState(initial?.name ?? "")
   const [model, setModel] = useState(initial?.model ?? "")
-  const [overrides, setOverrides] = useState(
-    formatOverrides(initial?.account_overrides),
-  )
-  const [disabled, setDisabled] = useState(
-    (initial?.disabled_accounts ?? []).join("\n"),
+  const [overrides, setOverrides] = useState<ModelAliasOverrideRow[]>(() =>
+    modelAliasOverrideRows(initial),
   )
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
@@ -593,10 +563,32 @@ function ModelAliasForm({
   useEffect(() => {
     setAliasName(initial?.name ?? "")
     setModel(initial?.model ?? "")
-    setOverrides(formatOverrides(initial?.account_overrides))
-    setDisabled((initial?.disabled_accounts ?? []).join("\n"))
+    setOverrides(modelAliasOverrideRows(initial))
     setCurrentRevision(revision)
   }, [initial, revision])
+
+  const hasConcreteAccounts = concreteAccountRefs.length > 0
+  const availableAccountRefs = useMemo(
+    () =>
+      concreteAccountRefs.filter(
+        (accountRef) =>
+          !overrides.some((override) => override.accountRef === accountRef),
+      ),
+    [concreteAccountRefs, overrides],
+  )
+  const modelOptions = useMemo(
+    () => withConfiguredModel(availability, model),
+    [availability, model],
+  )
+
+  const addOverride = () => {
+    const accountRef = availableAccountRefs[0]
+    if (!accountRef) return
+    setOverrides((current) => [
+      ...current,
+      { accountRef, model: "", disabled: false },
+    ])
+  }
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -605,28 +597,32 @@ function ModelAliasForm({
       setError("Alias name and default model are required.")
       return
     }
-    let accountOverrides: Record<string, string>
-    try {
-      accountOverrides = parseOverrides(overrides)
-    } catch (parseError) {
-      setError(
-        parseError instanceof Error ? parseError.message : "Invalid overrides",
+    if (
+      overrides.some(
+        (override) =>
+          !override.accountRef.trim() ||
+          (!override.disabled && !override.model.trim()),
       )
+    ) {
+      setError("Every account override needs a model or must be disabled.")
       return
     }
+    const accountOverrides = Object.fromEntries(
+      overrides
+        .filter((override) => !override.disabled)
+        .map((override) => [override.accountRef.trim(), override.model.trim()]),
+    )
+    const disabledAccounts = overrides
+      .filter((override) => override.disabled)
+      .map((override) => override.accountRef.trim())
     const payload: ModelAlias = {
       name: nextName,
       model: model.trim(),
       ...(Object.keys(accountOverrides).length > 0
         ? { account_overrides: accountOverrides }
         : {}),
-      ...(disabled.trim()
-        ? {
-            disabled_accounts: disabled
-              .split(/\r?\n/)
-              .map((value) => value.trim())
-              .filter(Boolean),
-          }
+      ...(disabledAccounts.length > 0
+        ? { disabled_accounts: disabledAccounts }
         : {}),
     }
     setSaving(true)
@@ -643,7 +639,8 @@ function ModelAliasForm({
         response.effects.gateway_effect === "restart_required" ||
           gateway?.restartRequired === true,
       )
-      onSaved(nextName)
+      setCurrentRevision(response.config_revision)
+      await onSaved(response)
     } catch (saveError) {
       if (saveError instanceof CollectionAPIError && saveError.status === 409) {
         try {
@@ -696,35 +693,175 @@ function ModelAliasForm({
           autoComplete="off"
         />
       </Field>
-      <Field label="Default upstream model" required>
-        <Input
-          value={model}
-          aria-label="Default upstream model"
-          disabled={saving}
-          onChange={(event) => setModel(event.target.value)}
-        />
-      </Field>
       <Field
-        label="Account overrides"
-        hint="One account=model mapping per line."
+        label="Default upstream model"
+        hint="Used for accounts without an override. Search the models advertised by enabled accounts."
+        required
       >
-        <Textarea
-          value={overrides}
-          aria-label="Account overrides"
-          disabled={saving}
-          className="min-h-28 font-mono text-xs"
-          onChange={(event) => setOverrides(event.target.value)}
+        <ModelAliasModelSelect
+          value={model}
+          ariaLabel="Default upstream model"
+          options={modelOptions}
+          allAccountRefs={concreteAccountRefs}
+          disabled={saving || loadingAvailability || !hasConcreteAccounts}
+          placeholder={
+            loadingAvailability ? "Loading models..." : "Select a model"
+          }
+          disabledLabel="Disabled for this account"
+          onValueChange={setModel}
         />
       </Field>
-      <Field label="Disabled accounts" hint="One account reference per line.">
-        <Textarea
-          value={disabled}
-          aria-label="Disabled accounts"
-          disabled={saving}
-          className="min-h-24 font-mono text-xs"
-          onChange={(event) => setDisabled(event.target.value)}
-        />
-      </Field>
+      {!loadingAvailability && !hasConcreteAccounts && (
+        <p
+          role="status"
+          className="border-border bg-muted text-muted-foreground rounded-lg border px-3 py-2 text-xs"
+        >
+          No enabled accounts are available. Add or restore one on the Accounts
+          page before choosing models or overrides.
+        </p>
+      )}
+      {availabilityIssues.length > 0 && (
+        <div className="bg-muted text-muted-foreground rounded-lg px-3 py-2 text-xs">
+          <p className="text-foreground font-medium">
+            Some accounts did not return a model list
+          </p>
+          {availabilityIssues.map((issue) => (
+            <p key={issue} className="mt-1 break-words">
+              {issue}
+            </p>
+          ))}
+        </div>
+      )}
+      <section className="space-y-3" aria-labelledby="model-alias-overrides">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 id="model-alias-overrides" className="text-sm font-medium">
+              Account overrides
+            </h2>
+            <p className="text-muted-foreground mt-0.5 text-xs">
+              Choose another model or disable this alias for a concrete account.
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={addOverride}
+            disabled={
+              saving || loadingAvailability || availableAccountRefs.length === 0
+            }
+          >
+            <IconPlus /> Add override
+          </Button>
+        </div>
+        {overrides.length === 0 ? (
+          <p className="border-border text-muted-foreground rounded-lg border border-dashed px-3 py-4 text-xs">
+            Every account currently uses the default model.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {overrides.map((override, index) => {
+              const rowAccountRefs = [
+                ...new Set([
+                  override.accountRef,
+                  ...concreteAccountRefs.filter(
+                    (accountRef) =>
+                      !overrides.some(
+                        (row, rowIndex) =>
+                          rowIndex !== index && row.accountRef === accountRef,
+                      ),
+                  ),
+                ]),
+              ].filter(Boolean)
+              return (
+                <div
+                  key={`${override.accountRef}-${index}`}
+                  className="border-border grid gap-2 rounded-lg border p-3 sm:grid-cols-[minmax(0,0.75fr)_minmax(0,1.25fr)_auto]"
+                >
+                  <Select
+                    value={override.accountRef}
+                    disabled={
+                      saving || loadingAvailability || !hasConcreteAccounts
+                    }
+                    onValueChange={(accountRef) =>
+                      setOverrides((current) =>
+                        current.map((row, rowIndex) =>
+                          rowIndex === index
+                            ? {
+                                ...row,
+                                accountRef,
+                                model: row.disabled ? row.model : "",
+                              }
+                            : row,
+                        ),
+                      )
+                    }
+                  >
+                    <SelectTrigger
+                      className="w-full min-w-0"
+                      aria-label="Override account"
+                    >
+                      <span className="truncate">{override.accountRef}</span>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {rowAccountRefs.map((accountRef) => (
+                        <SelectItem key={accountRef} value={accountRef}>
+                          {accountRef}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <ModelAliasModelSelect
+                    value={
+                      override.disabled ? DISABLED_MODEL_VALUE : override.model
+                    }
+                    options={withConfiguredModel(availability, override.model)}
+                    allAccountRefs={[override.accountRef]}
+                    placeholder="Select model or disable"
+                    ariaLabel="Override model"
+                    disabled={
+                      saving || loadingAvailability || !hasConcreteAccounts
+                    }
+                    allowDisabled
+                    disabledLabel="Disabled for this account"
+                    onValueChange={(nextValue) =>
+                      setOverrides((current) =>
+                        current.map((row, rowIndex) =>
+                          rowIndex === index
+                            ? {
+                                ...row,
+                                disabled: nextValue === DISABLED_MODEL_VALUE,
+                                model:
+                                  nextValue === DISABLED_MODEL_VALUE
+                                    ? ""
+                                    : nextValue,
+                              }
+                            : row,
+                        ),
+                      )
+                    }
+                  />
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    disabled={saving}
+                    onClick={() =>
+                      setOverrides((current) =>
+                        current.filter((_row, rowIndex) => rowIndex !== index),
+                      )
+                    }
+                    aria-label="Remove override"
+                    title="Remove override"
+                  >
+                    <IconTrash />
+                  </Button>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </section>
       {error && (
         <p className="text-destructive text-sm" role="alert">
           {error}
@@ -1091,26 +1228,101 @@ function DetailList({ values }: { values: Array<[string, string]> }) {
   )
 }
 
-function formatOverrides(overrides?: Record<string, string>) {
-  return Object.entries(overrides ?? {})
-    .map(([account, model]) => `${account}=${model}`)
-    .join("\n")
+interface ModelAliasOverrideRow {
+  accountRef: string
+  model: string
+  disabled: boolean
 }
 
-function parseOverrides(value: string): Record<string, string> {
-  const result: Record<string, string> = {}
-  for (const line of value.split(/\r?\n/)) {
-    if (!line.trim()) continue
-    const separator = line.indexOf("=")
-    if (separator < 1 || !line.slice(separator + 1).trim()) {
-      throw new Error(`Invalid account override: ${line}`)
-    }
-    const account = line.slice(0, separator).trim()
-    if (result[account] != null)
-      throw new Error(`Duplicate account override: ${account}`)
-    result[account] = line.slice(separator + 1).trim()
+function modelAliasOverrideRows(alias?: ModelAlias): ModelAliasOverrideRow[] {
+  const rows = Object.entries(alias?.account_overrides ?? {}).map(
+    ([accountRef, model]) => ({ accountRef, model, disabled: false }),
+  )
+  for (const accountRef of alias?.disabled_accounts ?? []) {
+    rows.push({ accountRef, model: "", disabled: true })
   }
-  return result
+  return rows.sort((a, b) => a.accountRef.localeCompare(b.accountRef))
+}
+
+function withConfiguredModel(
+  availability: ModelAvailability[],
+  configuredModel: string,
+): ModelAvailability[] {
+  const model = configuredModel.trim()
+  if (!model || availability.some((option) => option.id === model)) {
+    return availability
+  }
+  return [...availability, { id: model, accountRefs: [] }].sort((a, b) =>
+    a.id.localeCompare(b.id),
+  )
+}
+
+function concreteModelAccountRefs(models: ModelInfo[]): string[] {
+  return [
+    ...new Set(
+      models
+        .filter(
+          (model) =>
+            model.enabled !== false &&
+            model.provider !== "router" &&
+            model.router == null &&
+            model.provider !== "model-router" &&
+            model.model_router == null,
+        )
+        .map((model) => model.model_name.trim())
+        .filter(Boolean),
+    ),
+  ].sort((a, b) => a.localeCompare(b))
+}
+
+async function loadModelAvailability(
+  accountRefs: string[],
+  signal: AbortSignal,
+): Promise<{ models: ModelAvailability[]; issues: string[] }> {
+  const results = await Promise.all(
+    accountRefs.map(async (accountRef) => {
+      try {
+        const response = await fetchUpstreamModels(
+          { account_ref: accountRef },
+          signal,
+        )
+        return {
+          accountRef,
+          models: response.models
+            .map((model) => model.id.trim())
+            .filter(Boolean),
+          issue: response.issues?.map((issue) => issue.error).join("; ") ?? "",
+        }
+      } catch (error) {
+        if (signal.aborted) throw error
+        return {
+          accountRef,
+          models: [] as string[],
+          issue:
+            error instanceof Error ? error.message : "Failed to load models",
+        }
+      }
+    }),
+  )
+  const accountsByModel = new Map<string, Set<string>>()
+  for (const result of results) {
+    for (const model of result.models) {
+      const accounts = accountsByModel.get(model) ?? new Set<string>()
+      accounts.add(result.accountRef)
+      accountsByModel.set(model, accounts)
+    }
+  }
+  return {
+    models: [...accountsByModel.entries()]
+      .map(([id, accounts]) => ({
+        id,
+        accountRefs: [...accounts].sort((a, b) => a.localeCompare(b)),
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    issues: results
+      .filter((result) => result.issue)
+      .map((result) => `${result.accountRef}: ${result.issue}`),
+  }
 }
 
 function parseRouterTargets(router?: ModelRouterConfig) {

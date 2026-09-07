@@ -18,7 +18,6 @@
         "selection",
         "bulk-delete",
         "create",
-        "detail",
         "edit"
       ],
       "views": ["list", "table", "grid"],
@@ -26,8 +25,7 @@
       "routes": {
         "list": "/models/aliases",
         "new": "/models/aliases/new",
-        "detail": "/models/aliases/:name",
-        "edit": "/models/aliases/:name/edit"
+        "edit": "/models/aliases/:name"
       }
     },
     {

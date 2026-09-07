@@ -2177,6 +2177,18 @@ export async function installCollectionVisualMocks(
         }
       }
 
+      if (method === "POST" && path === "/api/accounts/models/fetch") {
+        const body = request.postDataJSON() as { account_ref?: string }
+        const models =
+          body.account_ref === "openai-primary"
+            ? ["gpt-5.6-codex", "gpt-5.6-mini"]
+            : []
+        return json(route, {
+          models: models.map((id) => ({ id, owned_by: "openai" })),
+          total: models.length,
+        })
+      }
+
       if (method !== "GET") {
         if (path === `${reviewRoot}/findings-processing/retry`) {
           const body = request.postDataJSON() as { source_ids?: unknown }
