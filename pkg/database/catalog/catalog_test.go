@@ -343,3 +343,90 @@ func TestProjectedCatalogDropsPhysicalMetadataAndCopiesOrder(t *testing.T) {
 		t.Fatal("catalog retained physical metadata")
 	}
 }
+
+func TestRequiredStoresNilAndNoRequiredPolicy(t *testing.T) {
+	var nilCatalog *Catalog
+	if required := nilCatalog.RequiredStores(); required != nil {
+		t.Fatalf("nil catalog required stores = %#v", required)
+	}
+
+	optional, err := newProjectedCatalog([]storecatalog.Spec{
+		{ID: "workspace/optional", Domain: "optional"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if required := optional.RequiredStores(); required != nil {
+		t.Fatalf("optional-only required stores = %#v", required)
+	}
+}
+
+func TestRequiredStoresFiltersSortsAndDetaches(t *testing.T) {
+	catalog, err := newProjectedCatalog([]storecatalog.Spec{
+		{ID: "workspace/zeta", Domain: "zeta", Required: true},
+		{ID: "global/optional", Domain: "optional"},
+		{ID: "global/auth", Domain: "auth", Required: true},
+		{ID: "workspace/alpha", Domain: "alpha", Required: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []StoreID{"global/auth", "workspace/alpha", "workspace/zeta"}
+	first := catalog.RequiredStores()
+	if !slices.Equal(first, want) {
+		t.Fatalf("RequiredStores() = %#v, want %#v", first, want)
+	}
+	if !slices.IsSorted(first) {
+		t.Fatalf("RequiredStores() is not sorted: %#v", first)
+	}
+
+	first[0] = "forged/id"
+	if repeated := catalog.RequiredStores(); !slices.Equal(repeated, want) {
+		t.Fatalf("caller mutation changed required stores: %#v", repeated)
+	}
+	if entry, found := catalog.Entry("global/optional"); !found || entry.Required {
+		t.Fatalf("optional entry changed: %#v, %t", entry, found)
+	}
+}
+
+func TestRequiredStoresMatchNewSnapshotAndBindRequiredPolicy(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Workflows.Enabled = false
+	options := logicalCatalogTestOptions(t, cfg)
+
+	direct, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, fingerprint, err := NewSnapshot(options, "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint == "" {
+		t.Fatal("NewSnapshot returned empty fingerprint")
+	}
+	if !slices.Equal(direct.RequiredStores(), snapshot.RequiredStores()) {
+		t.Fatalf(
+			"New required stores %#v differ from NewSnapshot %#v",
+			direct.RequiredStores(), snapshot.RequiredStores(),
+		)
+	}
+
+	before := snapshot.RequiredStores()
+	cfg.Workflows.Enabled = true
+	enabled, enabledFingerprint, err := NewSnapshot(options, "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enabledFingerprint == fingerprint {
+		t.Fatalf("required-policy change retained fingerprint %q", fingerprint)
+	}
+	after := enabled.RequiredStores()
+	if slices.Contains(before, StoreID("workspace/workflows")) ||
+		!slices.Contains(after, StoreID("workspace/workflows")) || len(after) != len(before)+1 {
+		t.Fatalf("workflow required policy before=%#v after=%#v", before, after)
+	}
+	if !slices.IsSorted(after) {
+		t.Fatalf("required stores after policy change are not sorted: %#v", after)
+	}
+}
