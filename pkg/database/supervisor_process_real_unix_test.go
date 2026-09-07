@@ -14,8 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/config"
 	"golang.org/x/sys/unix"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 const supervisorImmediateExitEnvironment = "PICOCLAW_DATABASE_TEST_IMMEDIATE_PROCESS_EXIT"

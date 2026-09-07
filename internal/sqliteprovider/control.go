@@ -1,6 +1,5 @@
-// Package sqliteprovider owns SQLite-specific control statements and schema
-// catalog queries for the future single-owner database provider. This
-// foundation neither registers a driver nor opens a database connection.
+// This file owns SQLite-specific control statements and schema catalog queries
+// for the single-owner database provider.
 package sqliteprovider
 
 import (
