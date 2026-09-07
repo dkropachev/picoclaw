@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
+	matrixsqlite "github.com/sipeed/picoclaw/internal/channelstore/matrixstore/sqliteadapter"
 	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/internal/storecatalog"
-	"github.com/sipeed/picoclaw/pkg/channels/matrix"
 	"github.com/sipeed/picoclaw/pkg/config"
 	dblayer "github.com/sipeed/picoclaw/pkg/database"
 )
@@ -365,7 +365,7 @@ func TestDatabaseServePreflightsConfiguredMatrixBridge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	migrateErr := matrix.MigrateCryptoDatabase(
+	migrateErr := matrixsqlite.MigrateDatabase(
 		t.Context(),
 		filepath.Join(matrixRoot, "store.db"),
 	)

@@ -20,8 +20,6 @@ import (
 // exported locator in the same package is still rejected.
 var sanctionedPublicDatabaseBoundaries = map[string]string{
 	"cmd/membench/ingest.go: exported function IngestSeahorse exposes physical database locator":                              "development-only benchmark fixture importer",
-	"pkg/channels/matrix/database_migration.go: exported function MigrateCryptoDatabase exposes physical database locator":    "offline Matrix library migration adapter",
-	"pkg/channels/whatsapp_native/whatsapp_native.go: exported function MigrateDatabase exposes physical database locator":    "offline WhatsApp library migration adapter",
 	"pkg/cron/service.go: exported function NewOfflineService exposes physical database locator":                              "offline cron migration adapter",
 	"pkg/eventing/database_migration.go: exported function RunOfflineDatabaseMigration exposes physical database locator":     "offline domain migration adapter",
 	"pkg/evolution/database_migration.go: exported function RunOfflineDatabaseMigration exposes physical database locator":    "offline domain migration adapter",
@@ -30,8 +28,8 @@ var sanctionedPublicDatabaseBoundaries = map[string]string{
 	"pkg/seahorse/database_migration.go: exported function RunOfflineDatabaseMigration exposes physical database locator":     "offline domain migration adapter",
 	"web/backend/dashboardauth/broker.go: exported function RunOfflineDatabaseMigration exposes physical database locator":    "offline domain migration adapter",
 	"pkg/migrate/sources/openclaw/openclaw_config.go: exported type OpenClawIMessageConfig exposes physical database locator": "external legacy configuration schema, not a PicoClaw store API",
-	"pkg/config/config.go: exported type MatrixSettings exposes physical database locator":                                    "trusted broker-loaded temporary Matrix bridge configuration",
-	"pkg/config/config.go: exported type WhatsAppSettings exposes physical database locator":                                  "trusted broker-loaded temporary WhatsApp bridge configuration",
+	"pkg/config/config.go: exported type MatrixSettings exposes physical database locator":                                    "trusted broker-loaded Matrix storage configuration",
+	"pkg/config/config.go: exported type WhatsAppSettings exposes physical database locator":                                  "trusted broker-loaded WhatsApp storage configuration",
 	"pkg/config/events.go: exported type EventIngressConfig exposes physical database locator":                                "trusted broker-loaded dynamic event catalog configuration",
 }
 

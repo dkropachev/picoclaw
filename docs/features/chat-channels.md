@@ -51,6 +51,7 @@ the standalone headless Gateway is an explicit alternative deployment.
 | `FR-CHANNEL-018` | MUST | Launcher Gateway lifecycle starts, stops, and restarts one context-owned runtime inside the launcher process; it never discovers, attaches to, signals, or kills a separate Gateway process. Each embedded generation publishes same-process PID/bearer metadata only after its internal listener is ready, cancellation joins graceful cleanup, and failed or timed-out retirement blocks replacement and terminates the launcher instead of leaving untracked work. In-process replacement is admitted only for no enabled channel adapters or the fully joined built-in Pico adapter; any other enabled adapter requires process retirement so package-global or incompletely joined third-party state cannot overlap a new generation. The standalone headless Gateway remains an explicit opt-in command outside launcher ownership and retains normal OS signal behavior. Tests use test-owned homes, configs, workspaces, event databases, and ephemeral loopback ports and leave no PID file. | Launcher lifecycle tests must prove generation-safe in-process ownership without ambient same-UID authority over an operator Gateway, while headless deployments remain independently operable. |
 | `FR-CHANNEL-019` | MUST | Every Gateway operator-log record in the closed G cohort uses one direct fixed-level SafeCF call with a fixed component/message and sealed typed fields. Config/home paths, worker/channel/model/provider/workspace identities, errors, log levels, counts, and booleans use distinct bounded projections; arbitrary methods, maps, formatted values, and transcriber display methods never enter a sink. The 23 intentional stdout progress sites retain their exact lifecycle position, cardinality, indentation, and newline behavior through a private fixed-site renderer that accepts only sealed nonnegative counts or a validated port; it emits no host, health address, channel-name set, or dynamic reason. The renderer is non-emitting and every admitted call is the direct closed `fmt.Print(renderGatewayConsole(...))` shape. Stable source and independent signature ledgers freeze all 54 logger and 23 console identities; the sole `InitPanic` crash artifact remains separately tracked and functional PR-text formatters remain outside operator output. | Gateway startup, reload, shutdown, event automation, and repair process private paths, identities, configuration, provider errors, and operator progress; diagnostics must stay useful without leaking them or silently deleting console behavior. |
 | `FR-CHANNEL-020` | MUST | WeCom request-to-chat routes and Weixin account cursors plus ordered user context tokens persist through their opaque typed channel store clients. Broker-side commands provide full-range seconds/nanoseconds, bounded identities and sources, transactional replacement or expiry cleanup, exact schema validation, and no mutable JSON write or fallback. Existing WeCom `wecom/reqid-store.json` or Weixin `channels/weixin/{sync,context-tokens}/*.json` makes ordinary startup report `MigrationRequired`; only `picoclaw database migrate` deterministically imports selected valid records, records payload-free skips, and archives exact sources without overwrite under the component's `legacy-json/*-v1/` tree. Invalid or unavailable storage fails channel readiness instead of restoring JSON authority. | Route continuity and Weixin synchronization must survive restarts and concurrent clients without stale whole-state overwrites, duplicate-key ambiguity, secret-bearing diagnostics, or agent-editable runtime authority. |
+| `FR-CHANNEL-021` | MUST | Matrix encryption/state and native WhatsApp device/Signal state persist through closed typed channel-store clients. Broker adapters alone invoke the upstream storage implementations and preserve their codecs, bounded list paging, bulk writes, and atomic decryption updates. Runtime channel packages cannot import `database/sql`, a SQL driver, or the SQLite provider; carry a DSN; submit SQL; or request schema operations. Existing and missing stores that need an upstream schema change report `MigrationRequired`, and only fenced offline migration invokes library upgrades. | Channel libraries must retain restart-safe encrypted state without restoring a raw-SQL escape hatch around broker ownership or weakening Signal transaction atomicity. |
 
 For `FR-CHANNEL-011`, a retained provider generation means the complete
 de-duplicated bootstrap, named-agent, account-routed, fallback, image, and light
@@ -78,6 +79,7 @@ message context, media references, and Gateway log/status runtime state.
 Owns: CODE cmd/picoclaw/internal/gateway/**
 Owns: CODE pkg/bus/**
 Owns: CODE pkg/channels/**
+Owns: CODE internal/channelstore/**
 Owns: CODE pkg/gateway/channel_matrix.go
 Owns: CODE pkg/gateway/diagnostic_fields.go
 Owns: CODE pkg/gateway/events.go
@@ -111,6 +113,7 @@ Owns: HTTP POST /api/pico*
 Owns: HTTP GET /pico/*
 Owns: HTTP HEAD /pico/*
 Owns: TEST pkg/channels/*
+Owns: TEST internal/channelstore/**
 Owns: TEST pkg/gateway/gateway_test.go *
 Owns: TEST pkg/gateway/embedded_runtime_test.go *
 Owns: TEST pkg/gateway/listen_test.go *
@@ -226,12 +229,11 @@ AgentLoop generation. Repository Reviews owns that protected runtime route and
 its durable effects; it adds no channel adapter, inbound message, typing state,
 or outbound chat delivery behavior.
 
-Matrix and WhatsApp temporarily adapt their upstream libraries through the
-private broker RPC SQL driver. The runtime bridge accepts only their allow-listed
-logical store IDs and rejects DDL, mutating PRAGMAs, `ATTACH`, `DETACH`, and
-`VACUUM`; it never receives a filesystem path or opens SQLite. All other channel
-stores use typed domain clients, and library schema upgrades run only in fenced
-offline migration mode.
+Matrix and WhatsApp adapt their upstream libraries through closed typed storage
+clients. The broker resolves only their allow-listed logical store IDs and owns
+the upstream codecs and transaction boundaries. Channel runtime code has no SQL,
+DSN, provider-control, or schema-operation surface, and library schema upgrades
+run only in fenced offline migration mode.
 
 ## Failure And Edge Cases
 
@@ -314,6 +316,7 @@ offline migration mode.
 | `FR-CHANNEL-018` | [web/backend/api/gateway_process_ops_test.go](../../web/backend/api/gateway_process_ops_test.go), [web/backend/api/testmain_runtime_test.go](../../web/backend/api/testmain_runtime_test.go), [web/backend/api/gateway_binary_integration_test.go](../../web/backend/api/gateway_binary_integration_test.go) |
 | `FR-CHANNEL-019` | [pkg/gateway/p015b2c_logging_test.go](../../pkg/gateway/p015b2c_logging_test.go), [pkg/gateway/p015b2c_startup_logging_test.go](../../pkg/gateway/p015b2c_startup_logging_test.go), [pkg/gateway/p015b2c_startup_runtime_test.go](../../pkg/gateway/p015b2c_startup_runtime_test.go), [pkg/gateway/p015b2c_reload_logging_test.go](../../pkg/gateway/p015b2c_reload_logging_test.go), [pkg/gateway/p015b2c_reload_runtime_test.go](../../pkg/gateway/p015b2c_reload_runtime_test.go), [pkg/gateway/p015b2c_shutdown_logging_test.go](../../pkg/gateway/p015b2c_shutdown_logging_test.go), [pkg/gateway/p015b2c_shutdown_runtime_test.go](../../pkg/gateway/p015b2c_shutdown_runtime_test.go), [pkg/gateway/gateway_console_test.go](../../pkg/gateway/gateway_console_test.go), [pkg/gateway/p015b2c_console_lifecycle_test.go](../../pkg/gateway/p015b2c_console_lifecycle_test.go), [scripts/p015b2_logging_gate_test.go](../../scripts/p015b2_logging_gate_test.go), [scripts/p015b2_logging_scan_test.go](../../scripts/p015b2_logging_scan_test.go), [scripts/p015b2c_security_output_guard_test.go](../../scripts/p015b2c_security_output_guard_test.go) |
 | `FR-CHANNEL-020` | [pkg/channels/wecom/reqid_store_test.go](../../pkg/channels/wecom/reqid_store_test.go), [pkg/channels/weixin/state_sqlite_test.go](../../pkg/channels/weixin/state_sqlite_test.go) |
+| `FR-CHANNEL-021` | [internal/channelstore/matrixstore/store_integration_test.go](../../internal/channelstore/matrixstore/store_integration_test.go), [internal/channelstore/whatsappstore/client_native_integration_test.go](../../internal/channelstore/whatsappstore/client_native_integration_test.go), [pkg/database/architecture_test.go](../../pkg/database/architecture_test.go) |
 
 ## Implementation Anchors
 
@@ -328,6 +331,8 @@ offline migration mode.
 - [pkg/channels/deltachat/handler.go](../../pkg/channels/deltachat/handler.go)
 - [pkg/channels/wecom/reqid_store.go](../../pkg/channels/wecom/reqid_store.go)
 - [pkg/channels/weixin/state_sqlite.go](../../pkg/channels/weixin/state_sqlite.go)
+- [internal/channelstore/matrixstore](../../internal/channelstore/matrixstore)
+- [internal/channelstore/whatsappstore](../../internal/channelstore/whatsappstore)
 - [web/backend/api/channels.go](../../web/backend/api/channels.go)
 - [web/frontend/src/components/channels/channel-config-page.tsx](../../web/frontend/src/components/channels/channel-config-page.tsx)
 - [web/frontend/src/hooks/use-sidebar-channels.ts](../../web/frontend/src/hooks/use-sidebar-channels.ts)

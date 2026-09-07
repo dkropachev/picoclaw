@@ -26,7 +26,7 @@ migrator.
 - Core types/functions: supervisor discovery/ensure/shutdown, broker server and
   client, `StoreID`, catalog registration and readiness, typed request/response
   envelopes, provider interface, structured error codes, migration planner and
-  executor, and the private Matrix/WhatsApp SQL compatibility driver.
+  executor, and the typed Matrix/WhatsApp storage clients and broker adapters.
 - Runtime ordering: canonicalize the home, fence duplicate supervisors, publish
   authenticated discovery, start the broker, load and validate the store
   catalog, establish readiness for every required store, then initialize
@@ -35,8 +35,8 @@ migrator.
   aliases fail closed; normal startup may initialize only a missing empty store;
   a mutation is not replayed unless its domain operation declares stable
   idempotency; uncertain commit returns `OutcomeUnknown`; migration snapshots a
-  complete database generation before recovery; and the Matrix/WhatsApp raw SQL
-  bridge is temporary, private, and never accepts a filesystem path.
+  complete database generation before recovery; and Matrix/WhatsApp runtime
+  packages cannot express SQL, a DSN, provider controls, or schema work.
 
 ## Requirements
 
@@ -101,13 +101,12 @@ as observed through SQLite recovery rules; no workflow manually deletes live
 sidecars. Imported legacy inputs are archived only after their schema and import
 ledger commit atomically.
 
-Matrix and WhatsApp may temporarily use a private RPC-backed
-`database/sql/driver`. Its DSN carries only an allow-listed logical store ID.
-Runtime mode rejects DDL, mutating PRAGMAs, `ATTACH`, `DETACH`, and `VACUUM`;
-offline migration mode permits only the library schema work required for those
-two domains. Seahorse uses the normal typed domain client. The bridge is tracked
-for removal by
-[`[Task] Remove Matrix/WhatsApp raw SQL broker bridge`](https://github.com/dkropachev/picoclaw/issues/303).
+Matrix and WhatsApp use closed typed storage operations against their
+allow-listed logical store IDs. Their broker-side adapters own the upstream
+library codecs, persistence calls, and transaction boundaries. Runtime
+packages cannot submit statements or request DDL, PRAGMAs, `ATTACH`, `DETACH`,
+or `VACUUM`; library schema upgrades run only through fenced offline migration.
+Seahorse uses the same typed-domain pattern.
 
 ## Surface Ownership
 
@@ -128,7 +127,7 @@ Owns: TEST cmd/picoclaw/internal/database/*
 | CLI | `picoclaw database status` | Attach to or ensure the supervisor and report broker epoch plus per-store readiness without opening a physical store. | `FR-DATABASE-001`, `FR-DATABASE-005`, `FR-DATABASE-006` |
 | CLI | `picoclaw database migrate [--store ID...] [--backup-dir DIR] [--dry-run]` | Select only trusted catalog IDs, require exclusive fencing, plan or perform mandatory-backed-up offline migration, and retain the backup on success or failure. `--backup-dir` chooses a backup parent, never a database input. | `FR-DATABASE-001`, `FR-DATABASE-003`, `FR-DATABASE-005`, `FR-DATABASE-009` |
 | CLI | `picoclaw database shutdown` | Authenticate to the canonical-home supervisor, stop its runtime child, drain broker work, checkpoint/close provider pools cleanly, and remove discovery only after ownership ends. | `FR-DATABASE-001`, `FR-DATABASE-004`, `FR-DATABASE-009` |
-| Compatibility API | Private Matrix/WhatsApp RPC SQL driver | Accept only allow-listed logical IDs; reject runtime DDL and provider-control statements; permit bounded library upgrades only in fenced offline migration mode. | `FR-DATABASE-002`, `FR-DATABASE-003`, `FR-DATABASE-005`, `FR-DATABASE-009` |
+| Internal adapter API | Typed Matrix and WhatsApp storage domains | Accept only allow-listed logical IDs and closed library-level operations; keep codecs and atomic mutations broker-owned, with library upgrades available only to fenced offline migration. | `FR-DATABASE-002`, `FR-DATABASE-003`, `FR-DATABASE-005`, `FR-DATABASE-009` |
 
 ## Algorithms And Ordering
 
@@ -213,8 +212,8 @@ automation state.
 
 Launcher management ensures the supervisor before dashboard authentication and
 uses typed auth/catalog clients. Chat channels and gateway services run only in
-the hidden runtime and use typed clients, except for the temporary Matrix and
-WhatsApp bridge. Session memory, threads, workflows, event automation,
+the hidden runtime and use typed clients, including Matrix and WhatsApp.
+Session memory, threads, workflows, event automation,
 scheduling, account routing, evolution, reviews, evaluations, local CI, and
 Seahorse retain domain models and validation while their SQL codecs, migrations,
 and transactions move into broker-side adapters.
@@ -241,9 +240,9 @@ legacy state.
 - Frame length is checked before allocation. Large collections paginate;
   cancellation and deadline do not imply a mutation rollback unless the broker
   can prove it.
-- Cross-store atomic requests, arbitrary paths/DSNs, runtime DDL through the
-  bridge, unsupported provider controls, and raw SQL domain operations fail
-  closed.
+- Cross-store atomic requests, arbitrary paths/DSNs, channel-runtime SQL
+  capabilities, unsupported provider controls, and raw SQL domain operations
+  fail closed.
 - Migration never starts without exclusive fencing and a complete durable
   backup. Crash, integrity failure, archive conflict, too-new schema, corrupt
   generation, or failed reopen retains the backup and does not advertise the
@@ -257,6 +256,7 @@ legacy state.
 | --- | --- |
 | `FR-DATABASE-001`, `FR-DATABASE-004` | `pkg/database/supervisor_test.go`, `pkg/database/server_unix_test.go` |
 | `FR-DATABASE-002`, `FR-DATABASE-003`, `FR-DATABASE-008` | `pkg/database/architecture_test.go`, `pkg/database/public_api_test.go`, `pkg/database/catalog/catalog_test.go` |
+| `FR-DATABASE-002`, `FR-DATABASE-003`, `FR-DATABASE-005`, `FR-DATABASE-008` | [internal/channelstore/matrixstore/store_integration_test.go](../../internal/channelstore/matrixstore/store_integration_test.go), [internal/channelstore/whatsappstore/client_native_integration_test.go](../../internal/channelstore/whatsappstore/client_native_integration_test.go) |
 | `FR-DATABASE-005`, `FR-DATABASE-009` | `pkg/database/migration/migration_test.go`, `cmd/picoclaw/internal/database/command_test.go` |
 | `FR-DATABASE-006`, `FR-DATABASE-007` | `pkg/database/protocol_test.go`, `pkg/database/server_unix_test.go` |
 | `FR-DATABASE-001` through `FR-DATABASE-009` | `pkg/database/server_unix_test.go`, `pkg/database/migration/migration_test.go`, `cmd/picoclaw/internal/database/command_test.go` |
@@ -267,8 +267,8 @@ workflow/session/event/auth/review/channel stress; broker epoch preservation and
 replacement; authenticated IPC ACLs, bounds, cancellation, stale epochs,
 idempotent replay, and uncertain outcomes; mandatory-backup migration fencing,
 crash rollback, hot-WAL recovery, too-new and corrupt generations, archive
-replay, and the retained large workflow fixture; Matrix/WhatsApp bridge
-conformance; and end-to-end launcher-before-auth, hidden-runtime, review
+replay, and the retained large workflow fixture; Matrix/WhatsApp typed-store
+conformance and restart persistence; and end-to-end launcher-before-auth, hidden-runtime, review
 Continue, and runtime-stop behavior.
 
 ## Implementation Anchors
@@ -282,4 +282,6 @@ Continue, and runtime-stop behavior.
 - `pkg/database/migration/migration.go`
 - `pkg/database/architecture_test.go`
 - `cmd/picoclaw/internal/database/command.go`
+- `internal/channelstore/matrixstore`
+- `internal/channelstore/whatsappstore`
 - [SQLite Runtime Storage](sqlite-storage.md)

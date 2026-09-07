@@ -3,7 +3,7 @@ package matrix
 import (
 	"context"
 
-	"github.com/sipeed/picoclaw/internal/sqlbridge"
+	"github.com/sipeed/picoclaw/internal/channelstore/matrixstore"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -29,8 +29,8 @@ func init() {
 					"Matrix database broker client is unavailable",
 				)
 			}
-			storeID, lookupErr := sqlbridge.ResolveChannelStore(
-				context.Background(), database.RuntimeClient(), config.ChannelMatrix, channelName,
+			storeID, lookupErr := matrixstore.ResolveStore(
+				context.Background(), database.RuntimeClient(), channelName,
 			)
 			if lookupErr != nil {
 				return nil, lookupErr

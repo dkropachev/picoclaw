@@ -53,7 +53,7 @@ migrator.
 | `FR-SQLITE-002` | MUST | Ordinary startup inspects a current, outdated, legacy, too-new, malformed, corrupt, or unavailable generation. | A current generation whose exact tables, indexes, views, triggers, import ledger, and horizon objects validate becomes `ready`; outdated or legacy state returns `MigrationRequired`; integrity failure and unavailability retain their distinct provider-neutral readiness. | Ordinary startup performs no schema upgrade, legacy import, archive transition, recovery rewrite, or destructive cleanup. | Too-new, malformed, unrelated-schema-object, or corrupt state fails closed; no JSON/file fallback or automatic upgrade is attempted. | Storage changes require an exclusive backed-up maintenance boundary. |
 | `FR-SQLITE-003` | MUST | Multiple catalog entries, clients, or runtime generations address SQLite state. | The provider publishes one pool per canonical physical store and reuses it for all broker-side domain operations until broker shutdown. | Runtime stop/restart changes no pool, journal mode, or physical generation. | Physical aliases and duplicate registrations fail closed; independent open/close, workflow idle teardown, and zero-idle pool policy are unsupported. | Connection-local settings and generation ownership remain sound only under one long-lived pool authority. |
 | `FR-SQLITE-004` | MUST | The exclusive offline migrator upgrades a schema, imports legacy data, backs up, recovers, or archives a store. | It snapshots and fsyncs the whole matching generation and affected inputs, recovers through SQLite, checks integrity/foreign keys, deterministically imports bounded inputs by dependency order and relative identity, finalizes exact per-source accounting so provisional counts/issues cannot survive commit, runs any idempotent domain sealer, and closes the shared import horizon even after a complete zero-source enumeration, and commits schema plus import ledger atomically under exclusive rollback-journal mode. Exact imported inputs—including the aggregate Git-workspace inventory and individually audited candidate checkpoints—are archived without overwrite after commit; the provider then returns to WAL, checkpoints, cleanly reopens, and revalidates. | Only the migrator changes schema/import state; domain rows, payload-free safe issue codes/digests and final counts, the sealed horizon, and ledger commit atomically, while archive completion remains crash-recoverable. The required timestamped backup is retained on success or failure. | Missing exclusivity, unsafe or unbounded enumeration, incomplete accounting, snapshot/fsync failure, too-new/corrupt state, migration/seal failure, changed input, archive conflict, failed checkpoint/reopen, or validation mismatch leaves the store unready and the backup recoverable. | Provider-specific upgrade and recovery must preserve ordered relationships, become authoritative after a complete enumeration, and remain atomic, durable, and reversible. |
-| `FR-SQLITE-005` | MUST | Production source needs a SQLite driver, physical DSN, PRAGMA, database/WAL/SHM/rollback-journal operation, schema codec, transaction, or provider diagnostic. | Only the broker's SQLite provider performs the physical operation; broker-side domain adapters own SQL and map every result to typed domain data and backend-neutral errors. | No application-facing object retains a raw handle, SQL callback, path, DSN, driver error, or provider control. | Static architecture tests reject `modernc.org/sqlite`, `sql.Open`, SQLite DSNs, PRAGMAs, and database-generation file operations outside the provider; the private Matrix/WhatsApp RPC driver is limited to logical IDs and does not open SQLite. | The SQLite implementation must remain replaceable and impossible to bypass. |
+| `FR-SQLITE-005` | MUST | Production source needs a SQLite driver, physical DSN, PRAGMA, database/WAL/SHM/rollback-journal operation, schema codec, transaction, or provider diagnostic. | Only the broker's SQLite provider performs the physical operation; broker-side domain adapters own SQL and map every result to typed domain data and backend-neutral errors. | No application-facing object retains a raw handle, SQL callback, path, DSN, driver error, or provider control. | Static architecture tests reject `modernc.org/sqlite`, `sql.Open`, SQLite DSNs, PRAGMAs, and database-generation file operations outside the provider, and reject every SQL-capable import or raw transport shape in Matrix/WhatsApp runtime code. | The SQLite implementation must remain replaceable and impossible to bypass. |
 | `FR-SQLITE-006` | MUST | A clean integration runtime exercises every persistent subsystem, including Git-workspace inventory and PR-candidate checkpoints, and then starts the owners a second time. | The trusted provider catalog and exact private generation inventory are stable; every surviving JSON/JSONL source, retained archive, history slot, invalidation sidecar, or immutable artifact is explicitly allow-listed, and the second startup creates no additional candidate path. | The suite writes representative typed rows, reopens broker-owned stores, mutates inventory through `Manager.Acquire`/`Stats`, and imports and version-fences one checkpoint through offline migration. | Unexpected mutable candidates, unregistered SQLite generations, unsafe archive ancestry, missing/extra stores including inventory/checkpoint stores, non-private modes, payload-bearing diagnostics, or a changed second-start inventory fail the merge gate. | A subsystem must not reintroduce mutable JSON persistence or a second physical SQLite owner after focused tests pass. |
 
 ## Data And State Model
@@ -125,7 +125,7 @@ Owns: INTEGRATION storage-json
 | Internal adapter API | Typed domain operation against one logical store | Own schema-aware query/mutation code and transaction boundaries, accept typed inputs, and return typed outputs or provider-neutral errors. | `FR-SQLITE-005` |
 | Internal adapter API | Git-workspace inventory logical store | Preserve typed repository/workspace inventory, ordered development-line and rotation evidence, histories, exact aggregate legacy accounting, and its sealed import horizon without exposing a physical location. | `FR-SQLITE-004`, `FR-SQLITE-005` |
 | Internal adapter API | PR-candidate checkpoint logical store | Preserve typed mutable checkpoints and independently audited legacy checkpoint inputs with exact per-source ledger and archive outcomes without exposing a physical location. | `FR-SQLITE-004`, `FR-SQLITE-005` |
-| Compatibility API | Private Matrix/WhatsApp RPC `database/sql/driver` | Carry only allow-listed logical store IDs to broker-side adapters; reject runtime DDL, mutating PRAGMAs, `ATTACH`, `DETACH`, and `VACUUM`; never import or open SQLite. | `FR-SQLITE-002`, `FR-SQLITE-005` |
+| Internal adapter API | Matrix/WhatsApp typed storage handlers | Resolve only cataloged channel stores, delegate closed library operations inside the broker, retain transaction boundaries, and leave every library schema upgrade to offline migration. | `FR-SQLITE-002`, `FR-SQLITE-005` |
 | File | Provider-private database generation | Database and matching WAL/SHM/rollback-journal artifacts are visible only to the provider, migrator, backup/recovery workflow, and provider artifact catalog. | `FR-SQLITE-001` through `FR-SQLITE-005` |
 | Integration suite | `storage-json` | Exercise the catalog-owned store inventory, retained legacy/archive allow-list, provider permissions, inventory/checkpoint relationships, malicious near-miss candidates, and second-start stability. | `FR-SQLITE-006` |
 
@@ -197,8 +197,8 @@ reviews/evaluations, evolution, local-CI cache, Seahorse, WeCom, Weixin, Matrix,
 WhatsApp, Git-workspace inventory, and PR-candidate checkpoints all consume
 catalog IDs. Agent mutation protection asks the provider catalog for protected
 artifacts—including inventory/checkpoint legacy inputs, locks, and retained
-archives—and never reconstructs SQLite filenames. Matrix and WhatsApp retain
-only the temporary private RPC SQL bridge; Seahorse uses a normal typed client.
+archives—and never reconstructs SQLite filenames. Matrix, WhatsApp, and
+Seahorse all use typed domain clients.
 
 The provider projection also seeds the Agent feature's generation-wide
 physical-file identity catalog for the configured/default workspace and every
@@ -249,8 +249,8 @@ current catalog projection.
 - Backup, snapshot, fsync, recovery, integrity, migration, archive, checkpoint,
   clean-close, or reopen failure preserves backup material and leaves readiness
   non-ready.
-- The private compatibility driver cannot broaden its allow-list, carry a path,
-  run DDL in runtime mode, or become a general application SQL API.
+- Matrix and WhatsApp runtime packages cannot import SQL/provider capabilities,
+  carry a path or DSN, submit a statement, or request schema operations.
 
 ## Acceptance Evidence
 
@@ -261,6 +261,7 @@ current catalog projection.
 | `FR-SQLITE-004` | `pkg/database/migration/migration_test.go`, `cmd/picoclaw/internal/database/command_test.go` |
 | `FR-SQLITE-004`, `FR-SQLITE-005` | [pkg/gitworkspace/inventory_sqlite_test.go](../../pkg/gitworkspace/inventory_sqlite_test.go), [pkg/gateway/pr_workspace_candidate_checkpoint_test.go](../../pkg/gateway/pr_workspace_candidate_checkpoint_test.go) |
 | `FR-SQLITE-005` | `pkg/database/architecture_test.go`, `pkg/database/public_api_test.go`, `pkg/database/protocol_test.go` |
+| `FR-SQLITE-002`, `FR-SQLITE-003`, `FR-SQLITE-005` | [internal/channelstore/matrixstore/sqliteadapter/handler_test.go](../../internal/channelstore/matrixstore/sqliteadapter/handler_test.go), [internal/channelstore/whatsappstore/client_native_integration_test.go](../../internal/channelstore/whatsappstore/client_native_integration_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | `pkg/database/server_unix_test.go`, `pkg/database/migration/migration_test.go` |
 | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-004` | [internal/sqlitestore/open_test.go](../../internal/sqlitestore/open_test.go), [internal/sqlitestore/hardening_test.go](../../internal/sqlitestore/hardening_test.go), [internal/sqlitestore/legacy_finalize_results_test.go](../../internal/sqlitestore/legacy_finalize_results_test.go) |
 | `FR-SQLITE-006` | [pkg/gateway/runtime_storage_json_allowlist_integration_test.go](../../pkg/gateway/runtime_storage_json_allowlist_integration_test.go), [pkg/gateway/runtime_storage_legacy_migration_integration_test.go](../../pkg/gateway/runtime_storage_legacy_migration_integration_test.go), [pkg/gitworkspace/runtime_storage_legacy_relations_integration_test.go](../../pkg/gitworkspace/runtime_storage_legacy_relations_integration_test.go), [integration/suites/storage-json](../../integration/suites/storage-json) |
@@ -272,6 +273,8 @@ current catalog projection.
 - `internal/sqliteprovider/staged_migration.go`
 - `internal/sqlitestore/open.go`
 - `internal/sqlitestore/legacy.go`
+- `internal/channelstore/matrixstore/sqliteadapter`
+- `internal/channelstore/whatsappstore/sqliteadapter`
 - `pkg/database/catalog/catalog.go`
 - `pkg/database/migration/migration.go`
 - `pkg/database/architecture_test.go`

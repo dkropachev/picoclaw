@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sipeed/picoclaw/internal/sqlbridge"
 	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
 	dblayer "github.com/sipeed/picoclaw/pkg/database"
@@ -59,7 +58,7 @@ func TestDatabaseCommandConfigurationAndWorkspaceBoundaries(t *testing.T) {
 }
 
 func TestPreflightHelpersUseTypedStoreTargets(t *testing.T) {
-	var brokerCalls, bridgeCalls atomic.Int64
+	var brokerCalls atomic.Int64
 	broker := dblayer.HandlerFunc(func(_ context.Context, request dblayer.Request) (any, error) {
 		brokerCalls.Add(1)
 		if request.Domain != "domain" || request.Version != 1 || request.Operation != "preflight" {
@@ -79,25 +78,8 @@ func TestPreflightHelpersUseTypedStoreTargets(t *testing.T) {
 	if err := preflightBrokerTarget(t.Context(), broker, "domain", "preflight", "global/auth"); err != nil {
 		t.Fatal(err)
 	}
-
-	bridge := dblayer.HandlerFunc(func(_ context.Context, request dblayer.Request) (any, error) {
-		bridgeCalls.Add(1)
-		if request.Domain != sqlbridge.RPCDomain || request.Version != sqlbridge.RPCVersion ||
-			request.Operation != sqlbridge.RPCOperationPing {
-			t.Fatalf("SQL bridge preflight request = %#v", request)
-		}
-		var payload sqlbridge.PingRequest
-		if err := dblayer.UnmarshalCanonical(request.Payload, &payload); err != nil ||
-			payload.Target.StoreID != "channel/matrix/main" || payload.Target.Mode != sqlbridge.ModeRuntime {
-			t.Fatalf("SQL bridge preflight payload = %#v, %v", payload, err)
-		}
-		return sqlbridge.PingResponse{}, nil
-	})
-	if err := preflightSQLBridge(t.Context(), bridge, "channel/matrix/main"); err != nil {
-		t.Fatal(err)
-	}
-	if brokerCalls.Load() != 1 || bridgeCalls.Load() != 1 {
-		t.Fatalf("preflight calls = broker:%d bridge:%d", brokerCalls.Load(), bridgeCalls.Load())
+	if brokerCalls.Load() != 1 {
+		t.Fatalf("preflight calls = broker:%d", brokerCalls.Load())
 	}
 }
 
@@ -197,7 +179,8 @@ func TestDatabaseServeOwnsTypedDomainRouter(t *testing.T) {
 		"launcher-auth", "auth", "model-catalogs", "workflows", "cron", "account-routing",
 		"sessions", "eventing", "evolution", "repository-reviews", "repository-evaluations",
 		"runtime-state", "seahorse", localci.CacheBrokerDomain, "channel-wecom", "channel-weixin",
-		"tool-adaptation", sqlbridge.RPCDomain, "git-workspace-inventory", "pr-workspace-checkpoints",
+		"tool-adaptation", "channel-matrix", "channel-whatsapp",
+		"git-workspace-inventory", "pr-workspace-checkpoints",
 	} {
 		err := client.Call(
 			t.Context(), domain, 1, "coverage-unsupported", dblayer.EmptyPayload{}, &response,

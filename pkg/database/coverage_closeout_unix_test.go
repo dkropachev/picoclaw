@@ -81,6 +81,39 @@ func TestCoverageUnixCleanupExistingSocketSuccess(t *testing.T) {
 	}
 }
 
+func TestCoverageUnixTransportErrorBoundaries(t *testing.T) {
+	root := shortCoverageUnixTempDir(t)
+	if listener, err := listenLocal(filepath.Join(root, "missing", "broker.sock")); err == nil {
+		_ = listener.Close()
+		t.Fatal("listener beneath a missing parent unexpectedly opened")
+	}
+
+	endpoint := filepath.Join(root, "protected", "broker.sock")
+	if err := os.Mkdir(filepath.Dir(endpoint), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: endpoint, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err = listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(filepath.Dir(endpoint), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err = cleanupEndpoint(endpoint); err == nil {
+		t.Fatal("cleanup beneath a non-writable parent unexpectedly succeeded")
+	}
+	if err = os.Chmod(filepath.Dir(endpoint), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = cleanupEndpoint(endpoint); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func coverageResponseClient(
 	t *testing.T,
 	respond func(RequestEnvelope) ResponseEnvelope,

@@ -9,7 +9,6 @@ package whatsapp
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"strings"
@@ -20,14 +19,12 @@ import (
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/sipeed/picoclaw/internal/sqlbridge"
-	"github.com/sipeed/picoclaw/internal/sqliteprovider"
+	"github.com/sipeed/picoclaw/internal/channelstore/whatsappstore"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -43,76 +40,13 @@ const (
 	reconnectMultiplier = 2.0
 )
 
-const (
-	whatsappMigrationAfterUpgrade = "after-upgrade"
-	whatsappMigrationAfterVersion = "after-version"
-)
-
-// MigrateDatabase upgrades the WhatsApp library schema while the caller holds
-// the exclusive offline migration fence.
-func MigrateDatabase(ctx context.Context, path string) error {
-	return migrateWhatsAppDatabaseWithCheckpoint(ctx, path, nil)
-}
-
-func migrateWhatsAppDatabaseWithCheckpoint(
-	ctx context.Context,
-	path string,
-	checkpoint func(string) error,
-) error {
-	if !database.MigrationFenceHeld() {
-		return database.NewError(database.CodeConflict, "WhatsApp migration requires the exclusive database fence")
-	}
-	if checkpoint == nil {
-		checkpoint = func(string) error { return nil }
-	}
-	return sqliteprovider.MigrateStagedOffline(
-		ctx,
-		path,
-		5*time.Second,
-		1,
-		func(ctx context.Context, stagedPath string) error {
-			return migrateWhatsAppDatabaseStage(ctx, stagedPath, checkpoint)
-		},
-	)
-}
-
-func migrateWhatsAppDatabaseStage(
-	ctx context.Context,
-	path string,
-	checkpoint func(string) error,
-) error {
-	db, err := sqliteprovider.OpenStore(path, 5*time.Second)
-	if err != nil {
-		return err
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	if err := sqliteprovider.ConfigureOffline(ctx, db, 5*time.Second); err != nil {
-		_ = db.Close()
-		return err
-	}
-	logger := waLog.Stdout("WhatsApp migration", "WARN", true)
-	container := sqlstore.NewWithDB(db, sqliteprovider.DriverName(), logger)
-	defer container.Close()
-	if err := container.Upgrade(ctx); err != nil {
-		return err
-	}
-	if err := checkpoint(whatsappMigrationAfterUpgrade); err != nil {
-		return err
-	}
-	if err := sqliteprovider.SetSchemaVersion(ctx, db, 1); err != nil {
-		return err
-	}
-	return checkpoint(whatsappMigrationAfterVersion)
-}
-
 // WhatsAppNativeChannel implements the WhatsApp channel using whatsmeow (in-process, no external bridge).
 type WhatsAppNativeChannel struct {
 	*channels.BaseChannel
 	config       *config.WhatsAppSettings
 	storeID      database.StoreID
 	client       *whatsmeow.Client
-	container    *sqlstore.Container
+	container    *whatsappstore.Container
 	mu           sync.Mutex
 	runCtx       context.Context
 	runCancel    context.CancelFunc
@@ -161,21 +95,9 @@ func (c *WhatsAppNativeChannel) Start(ctx context.Context) error {
 			"WhatsApp database broker client is unavailable",
 		)
 	}
-	dsn, err := sqlbridge.EncodeDSN(c.storeID, sqlbridge.ModeRuntime)
-	if err != nil {
-		return fmt.Errorf("resolve whatsapp store: %w", err)
-	}
-	connector, err := sqlbridge.NewDriver(sqlbridge.NewBrokerRPC(brokerClient)).OpenConnector(dsn)
-	if err != nil {
-		return fmt.Errorf("connect whatsapp store: %w", err)
-	}
-	db := sql.OpenDB(connector)
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
 	waLogger := waLog.Stdout("WhatsApp", "WARN", true)
-	container := sqlstore.NewWithDB(db, sqliteprovider.DriverName(), waLogger)
-	if err = container.Upgrade(ctx); err != nil {
-		_ = db.Close()
+	container, err := whatsappstore.NewContainer(brokerClient, c.storeID, waLogger)
+	if err != nil {
 		return fmt.Errorf("open whatsapp store: %w", err)
 	}
 
@@ -410,8 +332,8 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	senderID := evt.Info.Sender.String()
 	chatID := evt.Info.Chat.String()
 	content := evt.Message.GetConversation()
-	if content == "" && evt.Message.ExtendedTextMessage != nil {
-		content = evt.Message.ExtendedTextMessage.GetText()
+	if extendedText := evt.Message.GetExtendedTextMessage(); content == "" && extendedText != nil {
+		content = extendedText.GetText()
 	}
 	content = utils.SanitizeMessageContent(content)
 

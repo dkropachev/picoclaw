@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/channelstore/whatsappstore/sqliteadapter"
 	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/pkg/database"
 )
@@ -21,7 +22,7 @@ func TestMigrateWhatsAppDatabaseInstallsCurrentLibrarySchema(t *testing.T) {
 	path := filepath.Join(home, "whatsapp", "store.db")
 	fence := acquireWhatsAppMigrationFence(t, home)
 	defer fence.Close()
-	if err := MigrateDatabase(t.Context(), path); err != nil {
+	if err := sqliteadapter.MigrateDatabase(t.Context(), path); err != nil {
 		t.Fatal(err)
 	}
 	ready, err := sqliteprovider.HasSchemaObjects(
@@ -45,18 +46,18 @@ func TestMigrateWhatsAppDatabaseFailureLeavesOriginalGeneration(t *testing.T) {
 	fence := acquireWhatsAppMigrationFence(t, home)
 	defer fence.Close()
 	createWhatsAppMigrationOriginal(t, path)
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	before, readBeforeErr := os.ReadFile(path)
+	if readBeforeErr != nil {
+		t.Fatal(readBeforeErr)
 	}
 	injected := errors.New("injected after WhatsApp library upgrade")
 	checkpoint := func(phase string) error {
-		if phase == whatsappMigrationAfterUpgrade {
+		if phase == sqliteadapter.MigrationAfterUpgrade {
 			return injected
 		}
 		return nil
 	}
-	if err := migrateWhatsAppDatabaseWithCheckpoint(t.Context(), path, checkpoint); !errors.Is(err, injected) {
+	if err := sqliteadapter.MigrateDatabaseWithCheckpoint(t.Context(), path, checkpoint); !errors.Is(err, injected) {
 		t.Fatalf("WhatsApp migration error = %v", err)
 	}
 	after, err := os.ReadFile(path)
@@ -87,12 +88,12 @@ func TestMigrateWhatsAppDatabaseCrashBeforeCutoverLeavesOriginalGeneration(t *te
 		}
 		defer fence.Close()
 		checkpoint := func(phase string) error {
-			if phase == whatsappMigrationAfterVersion {
+			if phase == sqliteadapter.MigrationAfterVersion {
 				os.Exit(92)
 			}
 			return nil
 		}
-		_ = migrateWhatsAppDatabaseWithCheckpoint(t.Context(), path, checkpoint)
+		_ = sqliteadapter.MigrateDatabaseWithCheckpoint(t.Context(), path, checkpoint)
 		os.Exit(93)
 	}
 
@@ -141,7 +142,7 @@ func assertNoWhatsAppGenerationSidecars(t *testing.T, path string) {
 }
 
 func TestMigrateWhatsAppDatabaseRequiresExclusiveFence(t *testing.T) {
-	err := MigrateDatabase(t.Context(), filepath.Join(t.TempDir(), "store.db"))
+	err := sqliteadapter.MigrateDatabase(t.Context(), filepath.Join(t.TempDir(), "store.db"))
 	if database.CodeOf(err) != database.CodeConflict ||
 		!strings.Contains(err.Error(), "exclusive") {
 		t.Fatalf("unfenced WhatsApp migration error = %v", err)

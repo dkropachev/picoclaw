@@ -1,4 +1,4 @@
-package matrix
+package sqliteadapter
 
 import (
 	"bytes"
@@ -19,7 +19,7 @@ func TestMigrateCryptoDatabaseInstallsCurrentLibrarySchemas(t *testing.T) {
 	path := filepath.Join(home, "matrix", "store.db")
 	fence := acquireMatrixMigrationFence(t, home)
 	defer fence.Close()
-	if err := MigrateCryptoDatabase(t.Context(), path); err != nil {
+	if err := MigrateDatabase(t.Context(), path); err != nil {
 		t.Fatal(err)
 	}
 	ready, err := sqliteprovider.HasSchemaObjects(
@@ -49,12 +49,12 @@ func TestMigrateCryptoDatabaseFailureLeavesOriginalGeneration(t *testing.T) {
 	}
 	injected := errors.New("injected after Matrix state upgrade")
 	checkpoint := func(phase string) error {
-		if phase == matrixMigrationAfterState {
+		if phase == MigrationAfterState {
 			return injected
 		}
 		return nil
 	}
-	if err := migrateCryptoDatabaseWithCheckpoint(t.Context(), path, checkpoint); !errors.Is(err, injected) {
+	if err := MigrateDatabaseWithCheckpoint(t.Context(), path, checkpoint); !errors.Is(err, injected) {
 		t.Fatalf("Matrix migration error = %v", err)
 	}
 	after, err := os.ReadFile(path)
@@ -85,12 +85,12 @@ func TestMigrateCryptoDatabaseCrashBeforeCutoverLeavesOriginalGeneration(t *test
 		}
 		defer fence.Close()
 		checkpoint := func(phase string) error {
-			if phase == matrixMigrationAfterVersion {
+			if phase == MigrationAfterVersion {
 				os.Exit(82)
 			}
 			return nil
 		}
-		_ = migrateCryptoDatabaseWithCheckpoint(t.Context(), path, checkpoint)
+		_ = MigrateDatabaseWithCheckpoint(t.Context(), path, checkpoint)
 		os.Exit(83)
 	}
 
@@ -139,7 +139,7 @@ func assertNoMatrixGenerationSidecars(t *testing.T, path string) {
 }
 
 func TestMigrateCryptoDatabaseRequiresExclusiveFence(t *testing.T) {
-	err := MigrateCryptoDatabase(t.Context(), filepath.Join(t.TempDir(), "store.db"))
+	err := MigrateDatabase(t.Context(), filepath.Join(t.TempDir(), "store.db"))
 	if database.CodeOf(err) != database.CodeConflict ||
 		!strings.Contains(err.Error(), "exclusive") {
 		t.Fatalf("unfenced Matrix migration error = %v", err)

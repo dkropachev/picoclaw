@@ -12,13 +12,13 @@ import (
 	"strings"
 	"time"
 
+	whatsappsqlite "github.com/sipeed/picoclaw/internal/channelstore/whatsappstore/sqliteadapter"
 	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/internal/storecatalog"
 	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/channels/wecom"
 	"github.com/sipeed/picoclaw/pkg/channels/weixin"
-	whatsapp "github.com/sipeed/picoclaw/pkg/channels/whatsapp_native"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/cron"
 	"github.com/sipeed/picoclaw/pkg/database"
@@ -368,7 +368,7 @@ func applyDomainMigrationAdapter(ctx context.Context, spec storecatalog.Spec) er
 	case "channel-matrix":
 		return migrateMatrixDatabase(ctx, spec.Path)
 	case "channel-whatsapp":
-		return whatsapp.MigrateDatabase(ctx, spec.Path)
+		return whatsappsqlite.MigrateDatabase(ctx, spec.Path)
 	case "git-workspace-inventory":
 		return gitworkspace.RunOfflineDatabaseMigration(ctx, filepath.Dir(spec.Path))
 	case "pr-workspace-checkpoints":

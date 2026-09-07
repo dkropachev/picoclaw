@@ -5,9 +5,9 @@ package migration
 import (
 	"context"
 
-	"github.com/sipeed/picoclaw/pkg/channels/matrix"
+	matrixsqlite "github.com/sipeed/picoclaw/internal/channelstore/matrixstore/sqliteadapter"
 )
 
 func migrateMatrixDatabase(ctx context.Context, path string) error {
-	return matrix.MigrateCryptoDatabase(ctx, path)
+	return matrixsqlite.MigrateDatabase(ctx, path)
 }

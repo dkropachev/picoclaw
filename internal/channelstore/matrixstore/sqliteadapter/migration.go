@@ -1,9 +1,8 @@
-package matrix
+package sqliteadapter
 
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/dbutil"
@@ -16,18 +15,20 @@ import (
 )
 
 const (
-	matrixMigrationAfterState   = "after-state"
-	matrixMigrationAfterCrypto  = "after-crypto"
-	matrixMigrationAfterVersion = "after-version"
+	MigrationAfterState   = "after-state"
+	MigrationAfterCrypto  = "after-crypto"
+	MigrationAfterVersion = "after-version"
 )
 
-// MigrateCryptoDatabase upgrades Matrix state and crypto schemas while the
+// MigrateDatabase installs the Matrix state and crypto schemas while the
 // caller holds the exclusive offline migration fence.
-func MigrateCryptoDatabase(ctx context.Context, path string) error {
-	return migrateCryptoDatabaseWithCheckpoint(ctx, path, nil)
+func MigrateDatabase(ctx context.Context, path string) error {
+	return MigrateDatabaseWithCheckpoint(ctx, path, nil)
 }
 
-func migrateCryptoDatabaseWithCheckpoint(
+// MigrateDatabaseWithCheckpoint is the fault-injection form used by migration
+// conformance tests. It performs the same staged, atomic migration.
+func MigrateDatabaseWithCheckpoint(
 	ctx context.Context,
 	path string,
 	checkpoint func(string) error,
@@ -41,26 +42,26 @@ func migrateCryptoDatabaseWithCheckpoint(
 	return sqliteprovider.MigrateStagedOffline(
 		ctx,
 		path,
-		5*time.Second,
+		busyTimeout,
 		1,
 		func(ctx context.Context, stagedPath string) error {
-			return migrateCryptoDatabaseStage(ctx, stagedPath, checkpoint)
+			return migrateDatabaseStage(ctx, stagedPath, checkpoint)
 		},
 	)
 }
 
-func migrateCryptoDatabaseStage(
+func migrateDatabaseStage(
 	ctx context.Context,
 	path string,
 	checkpoint func(string) error,
 ) (returnErr error) {
-	db, openErr := sqliteprovider.OpenStore(path, 5*time.Second)
+	db, openErr := sqliteprovider.OpenStore(path, busyTimeout)
 	if openErr != nil {
 		return openErr
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	if err := sqliteprovider.ConfigureOffline(ctx, db, 5*time.Second); err != nil {
+	if err := sqliteprovider.ConfigureOffline(ctx, db, busyTimeout); err != nil {
 		_ = db.Close()
 		return err
 	}
@@ -75,7 +76,7 @@ func migrateCryptoDatabaseStage(
 	if err := stateStore.Upgrade(ctx); err != nil {
 		return err
 	}
-	if err := checkpoint(matrixMigrationAfterState); err != nil {
+	if err := checkpoint(MigrationAfterState); err != nil {
 		return err
 	}
 	cryptoStore := crypto.NewSQLCryptoStore(
@@ -88,11 +89,11 @@ func migrateCryptoDatabaseStage(
 	if err := cryptoStore.DB.Upgrade(ctx); err != nil {
 		return err
 	}
-	if err := checkpoint(matrixMigrationAfterCrypto); err != nil {
+	if err := checkpoint(MigrationAfterCrypto); err != nil {
 		return err
 	}
 	if err := sqliteprovider.SetSchemaVersion(ctx, db, 1); err != nil {
 		return err
 	}
-	return checkpoint(matrixMigrationAfterVersion)
+	return checkpoint(MigrationAfterVersion)
 }

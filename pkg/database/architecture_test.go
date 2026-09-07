@@ -1,6 +1,7 @@
 package database_test
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -183,9 +184,180 @@ func remove(path string) { _ = os.Remove(path) }`)
 	}
 }
 
+func TestChannelRuntimeHasNoSQLCapability(t *testing.T) {
+	t.Parallel()
+
+	root := repositoryRoot(t)
+	bridgeEntries, err := os.ReadDir(filepath.Join(root, "internal", "sqlbridge"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	for _, entry := range bridgeEntries {
+		if filepath.Ext(entry.Name()) == ".go" {
+			t.Fatalf("removed raw SQL compatibility bridge still contains %s", entry.Name())
+		}
+	}
+	runtimeRoots := []string{
+		"pkg/channels/matrix",
+		"pkg/channels/whatsapp_native",
+		"internal/channelstore/matrixstore",
+		"internal/channelstore/whatsappstore",
+	}
+	var violations []string
+	for _, relativeRoot := range runtimeRoots {
+		path := filepath.Join(root, filepath.FromSlash(relativeRoot))
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		err := filepath.WalkDir(path, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			relative, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			relative = filepath.ToSlash(relative)
+			if entry.IsDir() {
+				if strings.Contains(relative, "/sqliteadapter") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			source, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			for _, violation := range channelRuntimeSQLViolations(source) {
+				violations = append(violations, relative+": "+violation)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	sort.Strings(violations)
+	if len(violations) != 0 {
+		t.Fatal("channel runtime SQL capability violations:\n" + strings.Join(violations, "\n"))
+	}
+}
+
+func TestChannelRuntimeSQLDetectorRejectsRawStorageCapabilities(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{
+		`package bad; import "database/sql"; var _ *sql.DB`,
+		`package bad; import "database/sql/driver"; var _ driver.Driver`,
+		`package bad; import _ "modernc.org/sqlite"`,
+		`package bad; import _ "github.com/mattn/go-sqlite3"`,
+		`package bad; import "github.com/sipeed/picoclaw/internal/sqlbridge"`,
+		`package bad; import "github.com/sipeed/picoclaw/internal/sqliteprovider"`,
+		`package bad; const dsn = "file:channel.db"`,
+		`package bad; const command = "PRAGMA journal_mode=WAL"`,
+		`package bad; const command = "CREATE TABLE escaped(id INTEGER)"`,
+		`package bad; type request struct { Statement string }`,
+		`package bad; type request struct { Command string }`,
+		`package bad; type request struct { Query string; Arguments []any }`,
+	}
+	for _, source := range tests {
+		if violations := channelRuntimeSQLViolations([]byte(source)); len(violations) == 0 {
+			t.Fatalf("mutated channel runtime passed SQL capability detector: %s", source)
+		}
+	}
+}
+
+func channelRuntimeSQLViolations(source []byte) []string {
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, "source.go", source, parser.SkipObjectResolution)
+	if err != nil {
+		return []string{fmt.Sprintf("parse source: %v", err)}
+	}
+	var violations []string
+	seen := make(map[string]struct{})
+	add := func(node ast.Node, message string) {
+		violation := fmt.Sprintf("line %d: %s", fileSet.Position(node.Pos()).Line, message)
+		if _, duplicate := seen[violation]; duplicate {
+			return
+		}
+		seen[violation] = struct{}{}
+		violations = append(violations, violation)
+	}
+	for _, declaration := range file.Imports {
+		path, unquoteErr := strconv.Unquote(declaration.Path.Value)
+		if unquoteErr != nil {
+			add(declaration, "invalid import path")
+			continue
+		}
+		lowerPath := strings.ToLower(path)
+		switch {
+		case path == "database/sql", path == "database/sql/driver",
+			strings.Contains(lowerPath, "sqlite"),
+			path == "github.com/sipeed/picoclaw/internal/sqlbridge":
+			add(declaration, "SQL-capable import in channel runtime")
+		}
+	}
+	rawFieldNames := map[string]struct{}{
+		"arguments": {}, "command": {}, "command_text": {}, "dsn": {}, "parameters": {},
+		"params": {}, "pragma": {}, "query": {}, "raw_sql": {}, "sql": {}, "sql_text": {},
+		"statement": {},
+	}
+	ast.Inspect(file, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.Field:
+			for _, name := range typed.Names {
+				if _, raw := rawFieldNames[strings.ToLower(name.Name)]; raw {
+					add(name, "raw SQL transport field in channel runtime")
+				}
+			}
+		case *ast.Ident:
+			if strings.Contains(strings.ToLower(typed.Name), "dsn") {
+				add(typed, "DSN identifier in channel runtime")
+			}
+		case *ast.BasicLit:
+			if typed.Kind != token.STRING {
+				break
+			}
+			value, unquoteErr := strconv.Unquote(typed.Value)
+			if unquoteErr != nil {
+				break
+			}
+			upper := strings.ToUpper(strings.TrimSpace(value))
+			if looksLikeChannelRuntimeSQL(upper) {
+				add(typed, "raw SQL literal in channel runtime")
+			}
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "file:") {
+				add(typed, "DSN literal in channel runtime")
+			}
+		}
+		return true
+	})
+	sort.Strings(violations)
+	return violations
+}
+
+func looksLikeChannelRuntimeSQL(upper string) bool {
+	for _, prefix := range []string{
+		"INSERT INTO ", "DELETE FROM ", "CREATE TABLE ", "CREATE INDEX ",
+		"CREATE VIEW ", "CREATE TRIGGER ", "ALTER TABLE ", "DROP TABLE ",
+		"DROP INDEX ", "DROP VIEW ", "DROP TRIGGER ", "REPLACE INTO ",
+		"PRAGMA ", "ATTACH ", "DETACH ", "VACUUM",
+	} {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+	return strings.HasPrefix(upper, "SELECT ") && strings.Contains(upper, " FROM ") ||
+		strings.HasPrefix(upper, "UPDATE ") && strings.Contains(upper, " SET ")
+}
+
 type databaseBoundaryPolicy struct {
 	providerOwned         bool
-	bridgeOwned           bool
 	generationOwned       bool
 	providerIdentityOwned bool
 }
@@ -194,16 +366,13 @@ func databaseBoundaryPolicyFor(relative string) databaseBoundaryPolicy {
 	directory := filepath.ToSlash(filepath.Dir(relative))
 	providerOwned := directory == sqliteProviderDirectory ||
 		strings.HasPrefix(directory, sqliteProviderDirectory+"/")
-	bridgeOwned := relative == "pkg/channels/matrix/matrix.go" ||
-		relative == "pkg/channels/whatsapp_native/whatsapp_native.go" ||
-		strings.HasPrefix(relative, "internal/sqlbridge/") ||
-		strings.HasPrefix(relative, "internal/sqlitestore/")
+	legacyStoreOwned := strings.HasPrefix(relative, "internal/sqlitestore/")
 
 	// These packages project or maintain physical generations on behalf of the
 	// provider. They are deliberately narrower than a general database-package
 	// exemption: ordinary domain stores must use a logical StoreID and broker
 	// operations instead of inspecting files themselves.
-	generationOwned := providerOwned || bridgeOwned ||
+	generationOwned := providerOwned || legacyStoreOwned ||
 		strings.HasPrefix(relative, "pkg/database/migration/") ||
 		strings.HasPrefix(relative, "pkg/database/artifacts/") ||
 		relative == "pkg/database/catalog/readiness.go" ||
@@ -216,20 +385,22 @@ func databaseBoundaryPolicyFor(relative string) databaseBoundaryPolicy {
 
 	maintenanceOwned := strings.HasPrefix(relative, "pkg/database/migration/") ||
 		strings.HasSuffix(relative, "/database_migration.go")
+	typedChannelSQLiteAdapter := strings.HasPrefix(
+		relative,
+		"internal/channelstore/matrixstore/sqliteadapter/",
+	) || strings.HasPrefix(relative, "internal/channelstore/whatsappstore/sqliteadapter/")
 	return databaseBoundaryPolicy{
 		providerOwned:         providerOwned,
-		bridgeOwned:           bridgeOwned,
 		generationOwned:       generationOwned,
-		providerIdentityOwned: providerOwned || bridgeOwned || maintenanceOwned,
+		providerIdentityOwned: providerOwned || legacyStoreOwned || maintenanceOwned || typedChannelSQLiteAdapter,
 	}
 }
 
-func databaseBoundaryViolations(source []byte, providerOwned, bridgeOwned bool) []string {
+func databaseBoundaryViolations(source []byte, providerOwned, legacyStoreOwned bool) []string {
 	return databaseBoundaryViolationsWithPolicy(source, databaseBoundaryPolicy{
 		providerOwned:         providerOwned,
-		bridgeOwned:           bridgeOwned,
-		generationOwned:       providerOwned || bridgeOwned,
-		providerIdentityOwned: providerOwned || bridgeOwned,
+		generationOwned:       providerOwned || legacyStoreOwned,
+		providerIdentityOwned: providerOwned || legacyStoreOwned,
 	})
 }
 
@@ -263,8 +434,8 @@ func databaseBoundaryViolationsWithPolicy(source []byte, policy databaseBoundary
 		if path == "modernc.org/sqlite" && !policy.providerOwned {
 			addViolation(declaration, "SQLite driver import outside provider")
 		}
-		if path == "database/sql/driver" && !policy.providerOwned && !policy.bridgeOwned {
-			addViolation(declaration, "database/sql/driver import outside private bridge")
+		if path == "database/sql/driver" && !policy.providerOwned {
+			addViolation(declaration, "database/sql/driver import outside provider")
 		}
 		name := filepath.Base(path)
 		if declaration.Name != nil {
@@ -293,7 +464,7 @@ func databaseBoundaryViolationsWithPolicy(source []byte, policy databaseBoundary
 	}
 	ast.Inspect(file, func(node ast.Node) bool {
 		literal, isLiteral := node.(*ast.BasicLit)
-		if isLiteral && literal.Kind == token.STRING && !policy.providerOwned && !policy.bridgeOwned {
+		if isLiteral && literal.Kind == token.STRING && !policy.providerOwned {
 			value, unquoteErr := strconv.Unquote(literal.Value)
 			if unquoteErr == nil && isSQLiteControlLiteral(value) {
 				addViolation(literal, "SQLite provider control outside provider")
@@ -309,8 +480,7 @@ func databaseBoundaryViolationsWithPolicy(source []byte, policy databaseBoundary
 		}
 		if _, imported := sqlAliases[identifier.Name]; imported &&
 			(selector.Sel.Name == "Open" || selector.Sel.Name == "OpenDB") {
-			allowedBridgeOpen := policy.bridgeOwned && selector.Sel.Name == "OpenDB"
-			if !policy.providerOwned && !allowedBridgeOpen {
+			if !policy.providerOwned {
 				addViolation(selector, "database/sql "+selector.Sel.Name+" outside provider")
 			}
 		}

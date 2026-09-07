@@ -2,7 +2,6 @@ package matrix
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"html"
 	"io"
@@ -18,14 +17,12 @@ import (
 	"github.com/gomarkdown/markdown"
 	mdhtml "github.com/gomarkdown/markdown/html"
 	"github.com/gomarkdown/markdown/parser"
-	"go.mau.fi/util/dbutil"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/crypto/cryptohelper"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
-	"github.com/sipeed/picoclaw/internal/sqlbridge"
-	"github.com/sipeed/picoclaw/internal/sqliteprovider"
+	"github.com/sipeed/picoclaw/internal/channelstore/matrixstore"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -344,37 +341,43 @@ func (c *MatrixChannel) initCrypto(ctx context.Context) error {
 			"Matrix database broker client is unavailable",
 		)
 	}
-	dsn, err := sqlbridge.EncodeDSN(c.cryptoStore, sqlbridge.ModeRuntime)
+	resp, err := c.client.Whoami(ctx)
 	if err != nil {
-		return fmt.Errorf("resolve Matrix crypto store: %w", err)
+		return fmt.Errorf("get Matrix identity via whoami: %w", err)
 	}
-	connector, err := sqlbridge.NewDriver(sqlbridge.NewBrokerRPC(client)).OpenConnector(dsn)
-	if err != nil {
-		return fmt.Errorf("connect Matrix crypto store: %w", err)
+	if resp.UserID == "" || resp.UserID != c.client.UserID {
+		return database.NewError(database.CodeIntegrity, "Matrix whoami identity is invalid")
 	}
-	db := sql.OpenDB(connector)
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-
-	// Wrap with dbutil for dialect support
-	wrappedDB, err := dbutil.NewWithDB(db, sqliteprovider.DriverName())
-	if err != nil {
-		_ = db.Close()
-		return fmt.Errorf("wrap database: %w", err)
+	configuredDeviceID := c.client.DeviceID
+	switch {
+	case configuredDeviceID == "" && resp.DeviceID == "":
+		return database.NewError(database.CodeIntegrity, "Matrix whoami device identity is unavailable")
+	case configuredDeviceID == "":
+		c.client.DeviceID = resp.DeviceID
+	case resp.DeviceID != "" && resp.DeviceID != configuredDeviceID:
+		return database.NewError(database.CodeIntegrity, "Matrix whoami device identity does not match configuration")
 	}
 
-	cryptoHelper, err := cryptohelper.NewCryptoHelper(c.client, []byte(c.config.CryptoPassphrase), wrappedDB)
+	typedStore, err := matrixstore.New(
+		client,
+		c.cryptoStore,
+		c.client.DeviceID,
+		[]byte(c.config.CryptoPassphrase),
+	)
+	if err != nil {
+		return fmt.Errorf("create Matrix typed store: %w", err)
+	}
+	c.client.StateStore = typedStore
+	c.client.Store = typedStore
+	c.syncer.OnEvent(c.client.StateStoreSyncHandler)
+
+	cryptoHelper, err := cryptohelper.NewCryptoHelper(
+		c.client,
+		[]byte(c.config.CryptoPassphrase),
+		typedStore,
+	)
 	if err != nil {
 		return fmt.Errorf("create crypto helper: %w", err)
-	}
-
-	if c.client.DeviceID == "" {
-		resp, whoamiErr := c.client.Whoami(ctx)
-		if whoamiErr != nil {
-			_ = db.Close()
-			return fmt.Errorf("get device ID via whoami: %w", whoamiErr)
-		}
-		c.client.DeviceID = resp.DeviceID
 	}
 
 	if err = cryptoHelper.Init(ctx); err != nil {

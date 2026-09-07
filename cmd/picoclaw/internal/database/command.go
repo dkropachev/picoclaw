@@ -18,7 +18,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
-	"github.com/sipeed/picoclaw/internal/sqlbridge"
+	"github.com/sipeed/picoclaw/internal/channelstore/matrixstore"
+	matrixsqlite "github.com/sipeed/picoclaw/internal/channelstore/matrixstore/sqliteadapter"
+	"github.com/sipeed/picoclaw/internal/channelstore/whatsappstore"
+	whatsappsqlite "github.com/sipeed/picoclaw/internal/channelstore/whatsappstore/sqliteadapter"
 	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	authstore "github.com/sipeed/picoclaw/pkg/auth"
@@ -304,8 +307,13 @@ func newServeCommand() *cobra.Command {
 			wecomHandler := wecom.NewBrokerHandler(canonicalHome)
 			weixinHandler := weixin.NewBrokerHandler(canonicalHome)
 			adaptationHandler := tools.NewAdaptationBrokerHandler(canonicalHome)
-			bridgeHandler, err := sqlbridge.NewBrokerHandler(canonicalHome, cfg)
+			matrixHandler, err := matrixsqlite.NewBrokerHandler(canonicalHome, cfg)
 			if err != nil {
+				return err
+			}
+			whatsappHandler, err := whatsappsqlite.NewBrokerHandler(canonicalHome, cfg)
+			if err != nil {
+				_ = matrixHandler.Close()
 				return err
 			}
 			gitInventoryHandler := newLazyDomainHandler(func() (dblayer.Handler, func() error, error) {
@@ -334,7 +342,7 @@ func newServeCommand() *cobra.Command {
 						reviewHandler.Close(), evaluationHandler.Close(), seahorseHandler.Close(),
 						localCIHandler.Close(),
 						wecomHandler.Close(), weixinHandler.Close(),
-						adaptationHandler.Close(), bridgeHandler.Close(),
+						adaptationHandler.Close(), matrixHandler.Close(), whatsappHandler.Close(),
 						gitInventoryHandler.Close(), checkpointHandler.Close(),
 						dbcatalog.CloseProbePools(canonicalHome),
 					)
@@ -380,8 +388,10 @@ func newServeCommand() *cobra.Command {
 					return weixinHandler.Handle(ctx, request)
 				case "tool-adaptation":
 					return adaptationHandler.Handle(ctx, request)
-				case sqlbridge.RPCDomain:
-					return bridgeHandler.Handle(ctx, request)
+				case matrixstore.Domain:
+					return matrixHandler.Handle(ctx, request)
+				case whatsappstore.Domain:
+					return whatsappHandler.Handle(ctx, request)
 				case gitworkspace.BrokerDomain:
 					return gitInventoryHandler.Handle(ctx, request)
 				case gateway.PRWorkspaceCheckpointBrokerDomain:
@@ -472,8 +482,16 @@ func newServeCommand() *cobra.Command {
 						return preflightBrokerTarget(
 							ctx, weixinHandler, "channel-weixin", "preflight", entry.ID,
 						)
-					case "channel-matrix", "channel-whatsapp":
-						return preflightSQLBridge(ctx, bridgeHandler, entry.ID)
+					case matrixstore.Domain:
+						return preflightBrokerTarget(
+							ctx, matrixHandler, matrixstore.Domain,
+							matrixstore.PreflightOperation, entry.ID,
+						)
+					case whatsappstore.Domain:
+						return preflightBrokerTarget(
+							ctx, whatsappHandler, whatsappstore.Domain,
+							whatsappstore.PreflightOperation, entry.ID,
+						)
 					case gitworkspace.BrokerDomain:
 						return preflightBrokerTarget(
 							ctx, gitInventoryHandler, gitworkspace.BrokerDomain, "preflight", entry.ID,
@@ -596,25 +614,6 @@ func preflightBrokerTarget(
 	}
 	_, err = handler.Handle(ctx, dblayer.Request{
 		Domain: domain, Version: 1, Operation: operation, Payload: payload,
-	})
-	return err
-}
-
-func preflightSQLBridge(
-	ctx context.Context,
-	handler dblayer.Handler,
-	storeID dblayer.StoreID,
-) error {
-	payload, err := dblayer.MarshalCanonical(sqlbridge.PingRequest{Target: sqlbridge.Target{
-		StoreID: storeID,
-		Mode:    sqlbridge.ModeRuntime,
-	}})
-	if err != nil {
-		return dblayer.NewError(dblayer.CodeInternal, "database readiness payload failed")
-	}
-	_, err = handler.Handle(ctx, dblayer.Request{
-		Domain: sqlbridge.RPCDomain, Version: sqlbridge.RPCVersion,
-		Operation: sqlbridge.RPCOperationPing, Payload: payload,
 	})
 	return err
 }
