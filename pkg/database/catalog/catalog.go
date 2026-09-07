@@ -110,6 +110,22 @@ func (catalog *Catalog) Entries() []Entry {
 	return append([]Entry(nil), catalog.entries...)
 }
 
+// RequiredStores returns a detached, ID-sorted snapshot of store IDs marked
+// required by this catalog's frozen admission policy. Required policy does not
+// imply that a store exists, is ready, or is authorized for provider access.
+func (catalog *Catalog) RequiredStores() []StoreID {
+	if catalog == nil {
+		return nil
+	}
+	var required []StoreID
+	for _, entry := range catalog.entries {
+		if entry.Required {
+			required = append(required, entry.ID)
+		}
+	}
+	return required
+}
+
 // Lookup validates value exactly and returns its catalog-owned StoreID.
 // Whitespace and case are never normalized.
 func (catalog *Catalog) Lookup(value string) (StoreID, error) {

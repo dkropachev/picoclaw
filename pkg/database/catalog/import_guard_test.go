@@ -87,7 +87,7 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 	allowedExports := map[string]bool{
 		"StoreID": true, "Options": true, "Entry": true, "Catalog": true, "New": true,
 		"NewSnapshot": true, "Entries": true, "Lookup": true, "LookupChannel": true,
-		"Contains": true,
+		"Contains": true, "RequiredStores": true,
 	}
 	forbiddenImports := map[string]bool{
 		"crypto/sha256":       true,
@@ -104,6 +104,7 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 	}
 	var violations []string
 	newSnapshotDeclarations := 0
+	requiredStoresDeclarations := 0
 	storeCatalogImports := 0
 	err := filepath.WalkDir(packageRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -186,6 +187,12 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 						))
 					}
 				}
+				if declaration.Name.Name == "RequiredStores" {
+					requiredStoresDeclarations++
+					if entry.Name() != "catalog.go" || !validRequiredStoresDeclaration(declaration) {
+						violations = append(violations, entry.Name()+": RequiredStores has an invalid surface")
+					}
+				}
 			}
 		}
 		ast.Inspect(parsed, func(node ast.Node) bool {
@@ -205,7 +212,8 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 					"ServerOptions", "StoreReadiness", "StoreStatus", "PhysicalStoreClaims",
 					"RequireBrokerReady", "ValidateStoreStatuses", "EnsureSupervisor",
 					"MonitorSupervisor", "ConsumeSupervisorBootstrap", "ConnectInherited",
-					"ConnectWithManifest", "InstallProcessClient", "DriverName", "DSN",
+					"ConnectWithManifest", "InstallProcessClient", "BrokerStatus", "Handler",
+					"StatusProvider", "Manifest", "ControlOperationStatus", "DriverName", "DSN",
 					"ProtectedRoots", "ProtectedRootsForDomains":
 					violations = append(violations, fmt.Sprintf(
 						"%s:%d uses forbidden %s binding",
@@ -225,6 +233,11 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 			"NewSnapshot declaration count = %d, want 1", newSnapshotDeclarations,
 		))
 	}
+	if requiredStoresDeclarations != 1 {
+		violations = append(violations, fmt.Sprintf(
+			"RequiredStores declaration count = %d, want 1", requiredStoresDeclarations,
+		))
+	}
 	if storeCatalogImports != 1 {
 		violations = append(violations, fmt.Sprintf(
 			"internal store catalog import count = %d, want exact catalog.go import", storeCatalogImports,
@@ -234,6 +247,28 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 		sort.Strings(violations)
 		t.Fatalf("logical catalog exposed provider or activation surface:\n%s", strings.Join(violations, "\n"))
 	}
+}
+
+func validRequiredStoresDeclaration(declaration *ast.FuncDecl) bool {
+	if declaration == nil || declaration.Type.TypeParams != nil || declaration.Recv == nil ||
+		declaration.Type.Params == nil || declaration.Type.Results == nil ||
+		len(fieldListTypes(declaration.Type.Params)) != 0 {
+		return false
+	}
+	receivers := fieldListTypes(declaration.Recv)
+	if len(receivers) != 1 {
+		return false
+	}
+	receiver, ok := receivers[0].(*ast.StarExpr)
+	if !ok || !identType(receiver.X, "Catalog") {
+		return false
+	}
+	results := fieldListTypes(declaration.Type.Results)
+	if len(results) != 1 {
+		return false
+	}
+	slice, ok := results[0].(*ast.ArrayType)
+	return ok && slice.Len == nil && identType(slice.Elt, "StoreID")
 }
 
 func logicalCatalogForbiddenSelector(name string) bool {
