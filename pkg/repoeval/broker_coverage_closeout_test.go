@@ -155,6 +155,45 @@ func TestEvaluationBrokerMutationBulkDeleteAndErrorContracts(t *testing.T) {
 	}
 }
 
+func TestEvaluationControllerLeaseRegistrationFailureReleasesLock(t *testing.T) {
+	handler := newEvaluationStoreHandler(t.TempDir(), EvaluationStoreID)
+	if _, err := handler.open(); err != nil {
+		t.Fatal(err)
+	}
+	handler.mu.Lock()
+	handler.closed = true
+	handler.mu.Unlock()
+
+	_, err := handler.lockController(evaluationRequest(
+		t, evaluationOperationLock, evaluationTarget{StoreID: EvaluationStoreID},
+	))
+	if database.CodeOf(err) != database.CodeUnavailable {
+		t.Fatalf("closed lease registration error = %v", err)
+	}
+	release, err := handler.store.LockController()
+	if err != nil {
+		t.Fatalf("failed lease retained controller lock: %v", err)
+	}
+	release()
+
+	handler.mu.Lock()
+	handler.closed = false
+	handler.mu.Unlock()
+	if err := handler.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConfiguredEvaluationWorkspacesReturnsCatalogFailure(t *testing.T) {
+	home := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = filepath.Join(home, "workspace")
+	cfg.Events.Ingress.DatabasePath = " invalid-event-path "
+	if configured, err := configuredEvaluationWorkspaces(home, cfg); err == nil || configured != nil {
+		t.Fatalf("invalid catalog configuration = %#v, %v", configured, err)
+	}
+}
+
 //nolint:govet // Invalid-operation table assertions intentionally bind local errors.
 func TestEvaluationBrokerHandlerValidationPaginationAndLeaseLifecycle(t *testing.T) {
 	home := t.TempDir()

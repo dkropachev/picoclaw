@@ -161,10 +161,6 @@ func configuredEvaluationWorkspaces(home string, cfg *config.Config) ([]configur
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
-	trusted, err := dbcatalog.New(canonicalHome, cfg)
-	if err != nil {
-		return nil, err
-	}
 	primary, err := resolveEvaluationWorkspace(canonicalHome, cfg.Agents.Defaults.Workspace)
 	if err != nil {
 		return nil, err
@@ -184,6 +180,10 @@ func configuredEvaluationWorkspaces(home string, cfg *config.Config) ([]configur
 		}
 		inputs = append(inputs, input{workspace: workspace})
 	}
+	trusted, err := dbcatalog.New(canonicalHome, cfg)
+	if err != nil {
+		return nil, err
+	}
 	seen := make(map[string]struct{}, len(inputs))
 	selectors := make(map[string]string, len(inputs))
 	result := make([]configuredEvaluationWorkspace, 0, len(inputs))
@@ -192,22 +192,14 @@ func configuredEvaluationWorkspaces(home string, cfg *config.Config) ([]configur
 			continue
 		}
 		seen[item.workspace] = struct{}{}
-		selector, selectorErr := evaluationWorkspaceSelector(item.workspace)
-		if selectorErr != nil {
-			return nil, selectorErr
-		}
+		selector := resolvedEvaluationWorkspaceSelector(item.workspace)
 		if previous, collision := selectors[selector]; collision && previous != item.workspace {
 			return nil, database.NewError(database.CodeIntegrity, "evaluation selector collides")
 		}
 		selectors[selector] = item.workspace
 		storeID := EvaluationStoreID
 		if !item.primary {
-			storeID, selectorErr = database.ParseStoreID(
-				"workspace/" + selector + "/repository-evaluations",
-			)
-			if selectorErr != nil {
-				return nil, selectorErr
-			}
+			storeID = database.StoreID("workspace/" + selector + "/repository-evaluations")
 		}
 		if !trusted.Contains(storeID) {
 			return nil, database.NewError(database.CodeIntegrity, "evaluation store is absent from catalog")
@@ -258,8 +250,12 @@ func evaluationWorkspaceSelector(workspace string) (string, error) {
 	if resolved, resolveErr := filepath.EvalSymlinks(abs); resolveErr == nil {
 		abs = resolved
 	}
-	digest := sha256.Sum256([]byte(filepath.Clean(abs)))
-	return hex.EncodeToString(digest[:8]), nil
+	return resolvedEvaluationWorkspaceSelector(abs), nil
+}
+
+func resolvedEvaluationWorkspaceSelector(workspace string) string {
+	digest := sha256.Sum256([]byte(filepath.Clean(workspace)))
+	return hex.EncodeToString(digest[:8])
 }
 
 func evaluationRequestStoreID(request database.Request) (database.StoreID, error) {

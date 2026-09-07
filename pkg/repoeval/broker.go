@@ -479,11 +479,7 @@ func (handler *evaluationStoreHandler) lockController(request database.Request) 
 	if err != nil {
 		return nil, mapEvaluationBrokerError(err)
 	}
-	id, err := newEvaluationLeaseID()
-	if err != nil {
-		release()
-		return nil, database.NewError(database.CodeInternal, "evaluation lease identity failed")
-	}
+	id := newEvaluationLeaseID()
 	lease := &evaluationLease{release: release}
 	if err := handler.registerLease(id, lease); err != nil {
 		lease.releaseNow()
@@ -601,12 +597,10 @@ func (handler *evaluationStoreHandler) Close() error {
 	return handler.closeErr
 }
 
-func newEvaluationLeaseID() (string, error) {
+func newEvaluationLeaseID() string {
 	value := make([]byte, 16)
-	if _, err := rand.Read(value); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(value), nil
+	_, _ = rand.Read(value)
+	return hex.EncodeToString(value)
 }
 
 func mapEvaluationBrokerError(err error) error {
