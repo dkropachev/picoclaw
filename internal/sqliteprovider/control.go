@@ -1,6 +1,7 @@
-// This file owns SQLite-specific control statements and schema catalog queries
-// for the single-owner database provider.
 package sqliteprovider
+
+// SQLite control statements and schema catalog queries remain private to the
+// single-owner database provider.
 
 import (
 	"context"
