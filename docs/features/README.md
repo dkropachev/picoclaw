@@ -39,6 +39,7 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Database protocol foundation           | [database-layer.md](database-layer.md)                             |
 | Database owner-only local IPC          | [database-local-ipc.md](database-local-ipc.md)                     |
 | Database provider catalog foundation   | [database-provider-catalog.md](database-provider-catalog.md)       |
+| Database SQLite control foundation     | [database-sqlite-control.md](database-sqlite-control.md)           |
 | SQLite runtime storage                 | [sqlite-storage.md](sqlite-storage.md)                             |
 | Workflows and reusable automation      | [workflows.md](workflows.md)                                       |
 | Git workspaces and checkout retention  | [git-workspaces.md](git-workspaces.md)                             |
