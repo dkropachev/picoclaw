@@ -56,6 +56,11 @@ func TestRelativeDatabasePathsFailFromRemovedWorkingDirectory(t *testing.T) {
 	if err := rejectExistingAncestorAlias("."); err == nil {
 		t.Fatal("removed working directory was accepted as a canonical ancestor")
 	}
+	if err := startSupervisorProcess(EnsureOptions{
+		Executable: "./picoclaw-test-helper",
+	}, parent); CodeOf(err) != CodeInvalid {
+		t.Fatalf("relative supervisor executable error = %v", err)
+	}
 }
 
 func TestDatabaseHomeRejectsRealAliasAndStateBoundaries(t *testing.T) {
