@@ -33,18 +33,11 @@ type repositoryReviewFindingsProcessingHealth struct {
 	Completed  int `json:"completed"`
 }
 
-type repositoryReviewHistoricalConsolidationHealth struct {
-	Required  bool   `json:"required"`
-	Status    string `json:"status"`
-	Retryable bool   `json:"retryable"`
-}
-
 type repositoryReviewFindingHealth struct {
-	RunFindings             repositoryReviewRunFindingHealth              `json:"run_findings"`
-	RepositoryFindings      repositoryReviewRepositoryFindingHealth       `json:"repository_findings"`
-	FindingsProcessing      repositoryReviewFindingsProcessingHealth      `json:"findings_processing"`
-	HistoricalConsolidation repositoryReviewHistoricalConsolidationHealth `json:"historical_consolidation"`
-	UpdatedAt               time.Time                                     `json:"updated_at"`
+	RunFindings        repositoryReviewRunFindingHealth         `json:"run_findings"`
+	RepositoryFindings repositoryReviewRepositoryFindingHealth  `json:"repository_findings"`
+	FindingsProcessing repositoryReviewFindingsProcessingHealth `json:"findings_processing"`
+	UpdatedAt          time.Time                                `json:"updated_at"`
 }
 
 func (h *Handler) handleGetRepositoryReviewFindingHealth(
@@ -68,23 +61,12 @@ func repositoryReviewFindingHealthFor(
 	state repoaudit.RepositoryState,
 ) repositoryReviewFindingHealth {
 	result := repositoryReviewFindingHealth{
-		HistoricalConsolidation: repositoryReviewHistoricalConsolidationHealthFor(
-			state.HistoricalDeduplication,
-		),
 		UpdatedAt: latestRepositoryReviewHealthUpdate(automation, state),
 	}
 	statusIndex := newRepositoryReviewRunFindingStatusIndex(state)
 	for _, finding := range repositoryReviewCurrentDeduplicatedFindings(automation, state) {
-		projection := repoaudit.Finding{
-			ID:                   finding.ID,
-			RepositoryFindingID:  finding.RepositoryFindingID,
-			RepositoryMatchState: finding.RepositoryMatchState,
-		}
-		if persisted, found := repositoryReviewFindingByID(state, finding.ID); found {
-			projection = persisted
-		}
 		result.RunFindings.Total++
-		switch statusIndex.status(projection) {
+		switch statusIndex.status(finding) {
 		case repositoryReviewRunFindingPending:
 			result.RunFindings.Pending++
 		case repositoryReviewRunFindingProcessing:
@@ -140,36 +122,6 @@ func repositoryReviewFindingsProcessingHealthFor(
 	return result
 }
 
-func repositoryReviewHistoricalConsolidationHealthFor(
-	replay repoaudit.HistoricalDeduplicationReplay,
-) repositoryReviewHistoricalConsolidationHealth {
-	result := repositoryReviewHistoricalConsolidationHealth{Required: replay.Required}
-	// Completion remains useful health even after the durable required bit is
-	// cleared. Every other inactive replay is normalized to not_required.
-	if replay.Status == repoaudit.HistoricalDeduplicationCompleted {
-		result.Status = string(repoaudit.HistoricalDeduplicationCompleted)
-		return result
-	}
-	if !replay.Required {
-		result.Status = "not_required"
-		return result
-	}
-	switch replay.Status {
-	case repoaudit.HistoricalDeduplicationReplaying,
-		repoaudit.HistoricalDeduplicationMerging,
-		repoaudit.HistoricalDeduplicationFailed:
-		result.Status = string(replay.Status)
-	case repoaudit.HistoricalDeduplicationPending, "":
-		result.Status = string(repoaudit.HistoricalDeduplicationPending)
-	default:
-		// A corrupt or future persisted value must never escape the normalized
-		// response enum. Failed is the safe operator-attention projection.
-		result.Status = string(repoaudit.HistoricalDeduplicationFailed)
-	}
-	result.Retryable = replay.Status == repoaudit.HistoricalDeduplicationFailed
-	return result
-}
-
 func latestRepositoryReviewHealthUpdate(
 	automation repoaudit.RepositoryReviewAutomation,
 	state repoaudit.RepositoryState,
@@ -180,7 +132,7 @@ func latestRepositoryReviewHealthUpdate(
 		0,
 		2+len(state.Findings)+len(state.RepositoryFindings)+len(state.RawFindings),
 	)
-	updates = append(updates, state.UpdatedAt, state.HistoricalDeduplication.UpdatedAt)
+	updates = append(updates, state.UpdatedAt)
 	for _, finding := range state.Findings {
 		updates = append(updates, finding.UpdatedAt)
 	}

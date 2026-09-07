@@ -40,53 +40,6 @@ func TestAutomationStorePersistsCanonicalResolvedCommit(t *testing.T) {
 	}
 }
 
-func TestRepositoryReviewCampaignRecoveryPendingInvariant(t *testing.T) {
-	store := newAutomationTestStore(t)
-	base := createAutomationForTest(t, store, "rra_recovery_pending", "Recovery pending")
-	base.CampaignID = NewRepositoryReviewCampaignID()
-	base.CampaignRecoveryPending = true
-	selection := RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
-	base.ScopeSelection = &selection
-	base.ScopePlan = repositoryReviewScopeSelectionPlan()
-	base.ResolvedCommitSHA = base.ScopePlan.CommitSHA
-	base.RunIDs = []string{"run"}
-	base.StartedAt = automationTestNow
-	base.Status = RepositoryReviewAutomationPaused
-	base.PauseReason = RepositoryReviewPauseManual
-	base.PauseDetail = "Recovering exact legacy evidence."
-	if err := validateAutomation(base); err != nil {
-		t.Fatalf("valid pending recovery error = %v", err)
-	}
-	for name, mutate := range map[string]func(*RepositoryReviewAutomation){
-		"missing campaign": func(value *RepositoryReviewAutomation) { value.CampaignID = "" },
-		"missing scope":    func(value *RepositoryReviewAutomation) { value.ScopeSelection = nil },
-		"missing commit":   func(value *RepositoryReviewAutomation) { value.ResolvedCommitSHA = "" },
-		"commit mismatch": func(value *RepositoryReviewAutomation) {
-			value.ResolvedCommitSHA = strings.Repeat("d", 40)
-		},
-		"missing runs":  func(value *RepositoryReviewAutomation) { value.RunIDs = nil },
-		"missing start": func(value *RepositoryReviewAutomation) { value.StartedAt = time.Time{} },
-		"completed":     func(value *RepositoryReviewAutomation) { value.CompletedAt = automationTestNow },
-		"active":        func(value *RepositoryReviewAutomation) { value.ActiveRunID = "run" },
-		"running":       func(value *RepositoryReviewAutomation) { value.Status = RepositoryReviewAutomationRunning },
-		"stopping":      func(value *RepositoryReviewAutomation) { value.Status = RepositoryReviewAutomationStopping },
-		"idle wrong stage": func(value *RepositoryReviewAutomation) {
-			value.Status = RepositoryReviewAutomationIdle
-			value.PauseReason = ""
-			value.PauseDetail = ""
-			value.Progress.Stage = "idle"
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			candidate := base
-			mutate(&candidate)
-			if err := validateAutomation(candidate); !errors.Is(err, ErrInvalidAutomation) {
-				t.Fatalf("invalid pending recovery error = %v", err)
-			}
-		})
-	}
-}
-
 func TestAutomationLoadRemovesLegacyPriceResolutionMetadata(t *testing.T) {
 	t.Skip("legacy JSON rewrite test replaced by first-open SQLite migration coverage")
 	store := NewStore(t.TempDir())
@@ -326,7 +279,7 @@ func TestAutomationStorePersistsRuntimeProgressBudgetsAndModelComparison(t *test
 			value.EstimatedCostUSD = 0.42
 			value.Progress = RepositoryReviewProgress{
 				Stage: "reviewing", CompletedBatches: 1, TotalBatches: 4,
-				ReviewedFiles: 6, RemainingFiles: 18, UnsupportedFiles: 1, Findings: 2,
+				ReviewedFiles: 6, RemainingFiles: 18, UnsupportedFiles: 1, DeduplicatedFindings: 2,
 			}
 			value.ModelStats = map[string]RepositoryReviewModelStats{
 				"review-a": {
@@ -439,37 +392,6 @@ func TestAutomationStoreListsMostRecentlyUpdatedFirst(t *testing.T) {
 	}
 	if len(listed) != 2 || listed[0].ID != first.ID || listed[1].ID != second.ID {
 		t.Fatalf("list order = %#v", listed)
-	}
-}
-
-func TestAutomationStoreDeleteUsesCAS(t *testing.T) {
-	store := newAutomationTestStore(t)
-	created := createAutomationForTest(t, store, "rra_delete", "Delete")
-	if err := store.DeleteAutomation(
-		context.Background(),
-		created.ID,
-		created.Version+1,
-	); !errors.Is(
-		err,
-		ErrConflict,
-	) {
-		t.Fatalf("stale delete error = %v", err)
-	}
-	if err := store.DeleteAutomation(context.Background(), created.ID, created.Version); err != nil {
-		t.Fatal(err)
-	}
-	if _, found, err := store.GetAutomation(context.Background(), created.ID); err != nil || found {
-		t.Fatalf("deleted automation found=%v err=%v", found, err)
-	}
-	if err := store.DeleteAutomation(
-		context.Background(),
-		created.ID,
-		created.Version,
-	); !errors.Is(
-		err,
-		os.ErrNotExist,
-	) {
-		t.Fatalf("second delete error = %v", err)
 	}
 }
 
@@ -737,7 +659,7 @@ func TestRepositoryReviewAutomationFileProgress(t *testing.T) {
 					SelectedFiles: 10,
 				}},
 				Progress: RepositoryReviewProgress{
-					CompletedBatches: 16, TotalBatches: 32, Findings: 74,
+					CompletedBatches: 16, TotalBatches: 32, DeduplicatedFindings: 74,
 				},
 			},
 			total: 10,
@@ -781,7 +703,7 @@ func TestRepositoryReviewAutomationFileProgress(t *testing.T) {
 					ReviewedFiles: 3, UnsupportedFiles: 1, RemainingFiles: 6,
 				},
 			},
-			resolved: 4, total: 10, percent: 40,
+			resolved: 0, total: 0, percent: 0,
 		},
 		{
 			name: "legacy counters",
@@ -791,7 +713,7 @@ func TestRepositoryReviewAutomationFileProgress(t *testing.T) {
 					ReviewedFiles: 3, UnsupportedFiles: 1, RemainingFiles: 6,
 				},
 			},
-			resolved: 4, total: 10, percent: 40,
+			resolved: 0, total: 0, percent: 0,
 		},
 		{
 			name: "completed all prechecked",

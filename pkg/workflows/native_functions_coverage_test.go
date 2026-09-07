@@ -163,15 +163,6 @@ func TestNativePathClassificationAndGlobMatrix(t *testing.T) {
 	}
 }
 
-func TestRepositoryReviewPendingLimitBoundsModelChildWaves(t *testing.T) {
-	if got := nativeRepositoryReviewPendingLimit(128, 8); got != 3 {
-		t.Fatalf("eight-reviewer file limit=%d, want 3", got)
-	}
-	if got := nativeRepositoryReviewPendingLimit(24, 1); got != 24 {
-		t.Fatalf("default file limit=%d, want 24", got)
-	}
-}
-
 func TestNativeGitHubRepositoryIdentityNormalizesSupportedRemotes(t *testing.T) {
 	for _, remote := range []string{
 		"https://github.com/Owner/Repo.git",

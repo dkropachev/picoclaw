@@ -1,6 +1,5 @@
 import type {
   RepositoryReviewDeduplicationState,
-  RepositoryReviewHistoricalConsolidationStatus,
   RepositoryReviewRawFindingDisposition,
 } from "@/api/repository-reviews"
 
@@ -18,18 +17,6 @@ const dispositionLabels: Record<RepositoryReviewRawFindingDisposition, string> =
     duplicate: "Matched finding",
   }
 
-const historicalLabels: Record<
-  RepositoryReviewHistoricalConsolidationStatus,
-  string
-> = {
-  not_required: "Not required",
-  pending: "Pending",
-  replaying: "Replaying",
-  merging: "Merging",
-  failed: "Failed",
-  completed: "Completed",
-}
-
 export function repositoryReviewProcessingStateLabel(
   state: RepositoryReviewDeduplicationState,
 ): string {
@@ -40,10 +27,4 @@ export function repositoryReviewProcessingDispositionLabel(
   disposition: RepositoryReviewRawFindingDisposition,
 ): string {
   return dispositionLabels[disposition]
-}
-
-export function repositoryReviewHistoricalConsolidationLabel(
-  state: RepositoryReviewHistoricalConsolidationStatus,
-): string {
-  return historicalLabels[state]
 }

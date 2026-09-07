@@ -9,7 +9,7 @@ import {
 
 const review = {
   status: "running",
-  run_ids: ["legacy-run"],
+  run_ids: ["run-1"],
   started_at: "2026-08-28T00:00:00Z",
   progress: {
     stage: "waiting",
@@ -22,7 +22,7 @@ const review = {
     reviewed_files: 0,
     remaining_files: 0,
     unsupported_files: 0,
-    findings: 0,
+    deduplicated_findings: 0,
     finding_aggregates: 0,
     unaggregated_findings: 0,
     assignment_progress: {
@@ -67,8 +67,7 @@ const review = {
 } satisfies RepositoryReviewFileProgressSource
 
 describe("repositoryReviewFileProgress", () => {
-  // Campaign inspection did not exist in the legacy counter model, so a
-  // missing coverage envelope must not be rendered as a measured zero.
+  // A missing coverage envelope must not be rendered as a measured zero.
   it("labels exact, lower-bound, and unavailable inspection coverage", () => {
     expect(repositoryReviewInspectedFilesLabel(review)).toBe("Unknown")
     expect(
@@ -127,7 +126,7 @@ describe("repositoryReviewFileProgress", () => {
           ...review.progress,
           completed_batches: 16,
           total_batches: 32,
-          findings: 74,
+          deduplicated_findings: 74,
         },
       }),
     ).toEqual({ resolved: 0, total: 10, percent: 0 })
@@ -157,40 +156,6 @@ describe("repositoryReviewFileProgress", () => {
         progress: { ...review.progress, remaining_files: 2 },
       }),
     ).toEqual({ resolved: 1, total: 3, percent: 33 })
-  })
-
-  it("ignores a stale legacy scope plan without a frozen marker", () => {
-    expect(
-      repositoryReviewFileProgress({
-        ...review,
-        progress: {
-          ...review.progress,
-          scope_frozen: false,
-          reviewed_files: 3,
-          unsupported_files: 1,
-          remaining_files: 6,
-        },
-        scope_plan: {
-          ...review.scope_plan,
-          counts: { ...review.scope_plan.counts, selected_files: 100 },
-        },
-      }),
-    ).toEqual({ resolved: 4, total: 10, percent: 40 })
-  })
-
-  it("uses legacy fully reviewed and unsupported counters", () => {
-    expect(
-      repositoryReviewFileProgress({
-        ...review,
-        scope_plan: undefined,
-        progress: {
-          ...review.progress,
-          reviewed_files: 3,
-          unsupported_files: 1,
-          remaining_files: 6,
-        },
-      }),
-    ).toEqual({ resolved: 4, total: 10, percent: 40 })
   })
 
   it("reports completed all-prechecked campaigns as complete", () => {

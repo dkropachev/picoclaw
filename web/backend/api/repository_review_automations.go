@@ -31,7 +31,6 @@ type repositoryReviewAutomationConfigRequest struct {
 	Repository               string                                 `json:"repository"`
 	ProfileID                string                                 `json:"profile_id,omitempty"`
 	Branch                   string                                 `json:"branch,omitempty"`
-	Ref                      string                                 `json:"ref,omitempty"`
 	Target                   string                                 `json:"target"`
 	ReviewFocus              string                                 `json:"review_focus"`
 	AccountRef               string                                 `json:"account_ref,omitempty"`
@@ -146,23 +145,11 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 	)
 	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/findings",
-		h.handleGetRepositoryReviewAutomationReport,
-	)
-	mux.HandleFunc(
-		"GET /api/repository-reviews/automations/{automation_id}/run-findings",
-		h.handleListRepositoryReviewRunFindingsCollection,
-	)
-	mux.HandleFunc(
-		"GET /api/repository-reviews/automations/{automation_id}/run-findings/{finding_id}",
-		h.handleGetRepositoryReviewRunFinding,
+		h.handleListRepositoryReviewDeduplicatedFindingsCollection,
 	)
 	mux.HandleFunc(
 		"POST /api/repository-reviews/automations/{automation_id}/findings/status",
 		h.handleRetryRepositoryReviewRunFindingStatus,
-	)
-	mux.HandleFunc(
-		"GET /api/repository-reviews/automations/{automation_id}/report",
-		h.handleGetRepositoryReviewAutomationReport,
 	)
 	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/findings/{finding_id}",
@@ -205,40 +192,12 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 		h.handleRetryRepositoryReviewProcessingSource,
 	)
 	mux.HandleFunc(
-		"GET /api/repository-reviews/automations/{automation_id}/campaigns/{campaign_id}/findings-processing",
-		h.handleGetRepositoryReviewFindingsProcessing,
-	)
-	mux.HandleFunc(
-		"GET /api/repository-reviews/automations/{automation_id}/campaigns/{campaign_id}/findings-processing/sources/{source_id}",
-		h.handleGetRepositoryReviewRawSource,
-	)
-	mux.HandleFunc(
-		"POST /api/repository-reviews/automations/{automation_id}/campaigns/{campaign_id}/findings-processing/sources/{source_id}/retry",
-		h.handleRetryRepositoryReviewRawSource,
-	)
-	mux.HandleFunc(
-		"GET /api/repository-reviews/automations/{automation_id}/historical-deduplication",
-		h.handleGetRepositoryReviewHistoricalDeduplication,
-	)
-	mux.HandleFunc(
-		"POST /api/repository-reviews/automations/{automation_id}/historical-deduplication/retry",
-		h.handleRetryRepositoryReviewHistoricalDeduplication,
-	)
-	mux.HandleFunc(
-		"POST /api/repository-reviews/automations/{automation_id}/historical-deduplication/restart",
-		h.handleRestartRepositoryReviewHistoricalDeduplication,
-	)
-	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/repository-findings",
 		h.handleListRepositoryReviewRepositoryFindingsCollection,
 	)
 	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/repository-findings/{finding_id}",
 		h.handleGetRepositoryReviewAutomationRepositoryFinding,
-	)
-	mux.HandleFunc(
-		"PATCH /api/repository-reviews/automations/{automation_id}/findings/{finding_id}",
-		h.handleUpdateRepositoryReviewAutomationFinding,
 	)
 	mux.HandleFunc(
 		"PATCH /api/repository-reviews/automations/{automation_id}/repository-findings/{repository_finding_id}",
@@ -351,10 +310,7 @@ func (h *Handler) handleListRepositoryReviewAutomations(w http.ResponseWriter, r
 		return
 	}
 	for index := range automations {
-		state, found, resolveErr := store.ResolveRepositoryState(
-			automations[index].Repository,
-			automations[index].RunIDs,
-		)
+		state, found, resolveErr := store.ResolveRepositoryState(automations[index].Repository)
 		if resolveErr != nil {
 			writeRepositoryReviewAutomationError(w, resolveErr)
 			return
@@ -455,7 +411,7 @@ func repositoryReviewAutomationCollectionField(
 	case "raw_findings":
 		return collectionquery.NumberValue(float64(automation.Progress.RawFindings)), true
 	case "findings":
-		return collectionquery.NumberValue(float64(automation.Progress.Findings)), true
+		return collectionquery.NumberValue(float64(automation.Progress.DeduplicatedFindings)), true
 	case "updated":
 		return collectionquery.TimestampValue(automation.UpdatedAt), true
 	default:
@@ -565,7 +521,6 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 			if executionChanged {
 				candidate.Status = repoaudit.RepositoryReviewAutomationIdle
 				candidate.CampaignID = ""
-				candidate.CampaignRecoveryPending = false
 				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
 				candidate.ScopeSelection = nil
 				candidate.ResolvedCommitSHA = ""
@@ -813,7 +768,6 @@ func projectRepositoryReviewAutomation(
 	automation repoaudit.RepositoryReviewAutomation,
 ) repoaudit.RepositoryReviewAutomation {
 	automation.CampaignID = ""
-	automation.CampaignRecoveryPending = false
 	automation.ModelCoverageSketches = nil
 	automation.Progress.ScopeFrozen = automation.ScopeSelection != nil
 	automation.ScopeSelection = nil
@@ -824,9 +778,7 @@ func projectRepositoryReviewAutomationWithStore(
 	store repoaudit.Store,
 	automation repoaudit.RepositoryReviewAutomation,
 ) repoaudit.RepositoryReviewAutomation {
-	if state, found, err := store.ResolveRepositoryState(
-		automation.Repository, automation.RunIDs,
-	); err == nil && found {
+	if state, found, err := store.ResolveRepositoryState(automation.Repository); err == nil && found {
 		applyRepositoryReviewLiveMetrics(&automation, state)
 		automation.Progress.AssignmentProgress = repoaudit.CurrentCampaignAssignmentProgress(
 			state,
@@ -894,7 +846,7 @@ func repositoryReviewAutomationFromRequest(
 	request repositoryReviewAutomationConfigRequest,
 ) repoaudit.RepositoryReviewAutomation {
 	automation := repoaudit.RepositoryReviewAutomation{
-		Name: request.Name, Repository: request.Repository, Ref: request.Ref,
+		Name: request.Name, Repository: request.Repository, Ref: request.Branch,
 		Target: request.Target, ReviewFocus: request.ReviewFocus, AccountRef: request.AccountRef,
 		ScopePolicy:    request.ScopePolicy,
 		ReviewerModels: request.ReviewerModels, CompareModels: request.CompareModels,
@@ -1105,26 +1057,7 @@ func validRepositoryReviewGitHubSegment(value string) bool {
 func repositoryReviewBranchFromRequest(
 	request repositoryReviewAutomationConfigRequest,
 ) (string, error) {
-	branch := request.Branch
-	legacy := request.Ref
-	if branch != "" && legacy != "" {
-		normalizedBranch, err := repoaudit.NormalizeRepositoryReviewBranch(branch)
-		if err != nil {
-			return "", err
-		}
-		normalizedLegacy, err := repoaudit.NormalizeRepositoryReviewBranch(legacy)
-		if err != nil {
-			return "", err
-		}
-		if normalizedBranch != normalizedLegacy {
-			return "", fmt.Errorf("invalid repository review branch: branch and legacy ref disagree")
-		}
-		return normalizedBranch, nil
-	}
-	if branch == "" {
-		branch = legacy
-	}
-	return repoaudit.NormalizeRepositoryReviewBranch(branch)
+	return repoaudit.NormalizeRepositoryReviewBranch(request.Branch)
 }
 
 func repositoryReviewAssignedAutomationName(repository, profileName string) string {
@@ -1178,7 +1111,7 @@ func applyRepositoryReviewAutomationRequest(
 	}
 	automation.Name = request.Name
 	automation.Repository = request.Repository
-	automation.Ref = request.Ref
+	automation.Ref = request.Branch
 	automation.Target = request.Target
 	automation.ReviewFocus = request.ReviewFocus
 	automation.AccountRef = request.AccountRef
@@ -1967,11 +1900,6 @@ func writeRepositoryReviewAutomationError(w http.ResponseWriter, err error) {
 		status, code = http.StatusNotFound, "not_found"
 	case errors.Is(err, repoaudit.ErrRepositoryReviewPurgeInProgress):
 		status, code = http.StatusConflict, "repository_review_purge_in_progress"
-	case errors.Is(err, repoaudit.ErrHistoricalDeduplicationRestartRequired):
-		status, code = http.StatusConflict, "historical_consolidation_restart_required"
-	case errors.Is(err, repoaudit.ErrHistoricalDeduplicationInProgress),
-		errors.Is(err, repoaudit.ErrHistoricalDeduplicationNotQuiescent):
-		status, code = http.StatusConflict, "historical_deduplication_in_progress"
 	case errors.Is(err, errRepositoryReviewCommitSelection):
 		status, code = http.StatusConflict, "repository_review_commit_selection_required"
 	case errors.Is(err, repoaudit.ErrConflict), errors.Is(err, repoaudit.ErrAutomationActive),

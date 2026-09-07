@@ -238,7 +238,7 @@ func TestRepositoryReviewPublicationHandlerRejectsMissingToolRuntime(t *testing.
 	request := httptest.NewRequest(
 		http.MethodPost,
 		repositoryReviewPublicationRoute+state.ID+"/issue-drafts/"+draft.ID+"/publish",
-		strings.NewReader(`{"expected_version":1}`),
+		strings.NewReader(`{"expected_version":`+strconv.FormatInt(draft.Version, 10)+`}`),
 	)
 	response := httptest.NewRecorder()
 	newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
@@ -389,10 +389,206 @@ func TestRepositoryReviewPublicationHandlerCoversDurableDraftStates(t *testing.T
 	}
 }
 
-func TestRepositoryReviewPublicationHandlerRejectsNoncanonicalLegacyConflict(t *testing.T) {
+func TestRepositoryReviewPublicationRejectsPostedDraftAfterCanonicalDuplicateConflict(t *testing.T) {
 	workspace := t.TempDir()
+	store, state := seedGatewayRepositoryReviewState(t, workspace, "owner/repo")
+	original := state.Findings[0]
+	originalAggregate := state.RepositoryFindings[0]
+	file := repoaudit.FileRef{
+		Path: "second.go", BlobSHA: strings.Repeat("d", 40), SizeBytes: 80,
+		Category: "code", Mode: "100644",
+	}
+	commit := strings.Repeat("e", 40)
+	profileHash := "sha256:" + strings.Repeat("f", 64)
+	catalog := make([]repoaudit.RepositoryReviewAssignment, 0, 4)
+	for _, focus := range repoaudit.RepositoryReviewFocusIDs() {
+		assignment, err := repoaudit.NewRepositoryReviewAssignment(
+			focus, "review-model", "prompt-v1", profileHash, true,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		catalog = append(catalog, assignment)
+	}
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	if _, err := store.BeginCampaign(t.Context(), repoaudit.BeginCampaignRequest{
+		Repository: state.Repository, CampaignID: campaignID,
+		ExpectedCampaignID: state.CurrentCampaign.ID, ExpectedReviewVersion: state.ReviewVersion,
+		CommitSHA: commit, Exact: true,
+		DeduplicationSnapshot: &repoaudit.RepositoryReviewDeduplicationSnapshot{
+			ReviewerModel: "review-model", DeduplicationModel: "review-model",
+			SimilarityThreshold: repoaudit.DeduplicationDefaultThreshold,
+			CandidateLimit:      repoaudit.DeduplicationDefaultCandidateLimit,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := store.PlanAssignmentsForCampaign(
+		t.Context(), state.Repository, commit, "inventory-conflict", profileHash,
+		campaignID, catalog, []repoaudit.FileRef{file}, false, 1, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const runID = "gateway-conflict-run"
+	if _, beginErr := store.BeginRepositoryReviewRun(t.Context(), repoaudit.BeginRepositoryReviewRunRequest{
+		Plan: plan, RunID: runID, ReviewableFiles: []repoaudit.FileRef{file},
+	}); beginErr != nil {
+		t.Fatal(beginErr)
+	}
+	candidate := func(title, symbol, component string) repoaudit.FindingCandidate {
+		return repoaudit.FindingCandidate{
+			Severity: "high", Title: title, Symbol: symbol, File: file.Path,
+			Message:  "Distinct failure in " + component + ".",
+			Evidence: "Observed exact " + component + " failure.", Impact: component + " becomes unavailable.",
+			Validation: repoaudit.Validation{Status: "confirmed", Summary: "Confirmed " + component + "."},
+			MatchHints: repoaudit.MatchHints{
+				Component: component, Operation: "operate " + component,
+				FailureMode: component + " rejects valid state", Trigger: "trigger " + component,
+				ViolatedInvariant: component + " remains available",
+				ObservableOutcome: component + " request fails", RelatedSymbols: []string{symbol},
+				SourceAnchors: []string{symbol}, DistinguishingFacts: []string{"unique " + component},
+			},
+			FixEffort: gatewayRepositoryReviewFixEffort(),
+		}
+	}
+	for index, assignment := range plan.AssignmentPlans {
+		observation := repoaudit.Observation{
+			Model: "provider/review-model", ModelAlias: "review-model", Account: "gateway",
+			Reviewer: assignment.FocusID, ScopeFiles: assignment.Files,
+			RawDigest: "sha256:" + strings.Repeat(string(rune('1'+index)), 64),
+		}
+		if index == 0 {
+			observation.Findings = []repoaudit.FindingCandidate{
+				candidate("Queue stalls", "drainQueue", "queue"),
+				candidate("Cache corrupts", "loadCache", "cache"),
+			}
+		}
+		if _, checkpointErr := store.CheckpointRepositoryReviewAssignment(
+			t.Context(), repoaudit.CheckpointRepositoryReviewAssignmentRequest{
+				Plan: plan, RunID: runID, AssignmentID: assignment.AssignmentID,
+				AutomationID: "rra_gateway_conflict", AgentID: "main", ChildIndex: index + 1,
+				Digest:            "sha256:" + strings.Repeat(string(rune('5'+index)), 64),
+				AcknowledgedFiles: []repoaudit.FileRef{file}, Observation: observation,
+			},
+		); checkpointErr != nil {
+			t.Fatal(checkpointErr)
+		}
+	}
+	if _, finalizeErr := store.FinalizeRepositoryReviewRun(t.Context(), repoaudit.FinalizeRepositoryReviewRunRequest{
+		Plan: plan, RunID: runID,
+	}); finalizeErr != nil {
+		t.Fatal(finalizeErr)
+	}
+	if _, processErr := store.ProcessPendingDeduplicationJobs(
+		t.Context(), state.Repository, repoaudit.DeduplicationProcessOptions{},
+	); processErr != nil {
+		t.Fatal(processErr)
+	}
+	state, found, err := store.Get(state.Repository)
+	if err != nil || !found || len(state.Findings) != 3 {
+		t.Fatalf("canonical findings=%d found=%v err=%v", len(state.Findings), found, err)
+	}
+	var distinct, provisional repoaudit.Finding
+	for _, finding := range state.Findings {
+		switch finding.Title {
+		case "Queue stalls":
+			distinct = finding
+		case "Cache corrupts":
+			provisional = finding
+		}
+	}
+	claimMapping := func(finding repoaudit.Finding) repoaudit.RepositoryMappingJob {
+		t.Helper()
+		for _, job := range state.MappingJobs {
+			if job.ReviewFindingID != finding.ID {
+				continue
+			}
+			_, claimedJob, _, claimed, claimErr := store.ClaimMappingJob(
+				state.Repository, job.ID, repoaudit.RepositoryMappingModelSnapshot{},
+			)
+			if claimErr != nil || !claimed {
+				t.Fatalf("claim mapping %q: claimed=%v err=%v", job.ID, claimed, claimErr)
+			}
+			return claimedJob
+		}
+		t.Fatalf("mapping job missing for %q", finding.ID)
+		return repoaudit.RepositoryMappingJob{}
+	}
+	distinctJob := claimMapping(distinct)
+	state, distinctAggregate, err := store.CompleteMappingJob(
+		state.Repository, repoaudit.RepositoryMappingCompletion{
+			JobID: distinctJob.ID, CreateMatchState: repoaudit.RepositoryMatchNew,
+			DefaultBranchVerified: true,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisionalJob := claimMapping(provisional)
+	state, provisionalAggregate, err := store.CompleteMappingJob(
+		state.Repository, repoaudit.RepositoryMappingCompletion{
+			JobID: provisionalJob.ID, CreateMatchState: repoaudit.RepositoryMatchProvisional,
+			DefaultBranchVerified: true,
+			PossibleDuplicates: []repoaudit.RepositoryFindingPossibleDuplicate{
+				{CandidateID: originalAggregate.ID, Relation: "uncertain", Confidence: 0.6},
+				{CandidateID: distinctAggregate.ID, Relation: "uncertain", Confidence: 0.6},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const generationID = "rrig_gateway_conflict"
+	state, draft, reserved, err := store.ReserveIssueGeneration(repoaudit.IssueGenerationRequest{
+		Repository: state.Repository, FindingID: original.ID, GenerationID: generationID,
+		ResolvedInstructions: "Present diagnosis.", InstructionsMode: repoaudit.IssueDraftInstructionsDefault,
+		GeneratorModel: "issue-writer", GeneratorAccount: "gateway",
+	})
+	if err != nil || !reserved {
+		t.Fatalf("reserve conflict draft: reserved=%v err=%v", reserved, err)
+	}
+	state, draft, err = store.CompleteIssueGeneration(
+		state.Repository, draft.ID, generationID, "Lost update", "Diagnosis.", []string{"bug"}, "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, draft, claimed, err := store.ClaimIssueDraftPublication(
+		state.Repository, draft.ID, draft.Version,
+	)
+	if err != nil || !claimed {
+		t.Fatalf("claim conflict draft: claimed=%v err=%v", claimed, err)
+	}
+	state, draft, err = store.SetIssueDraftPublication(
+		state.Repository, draft.ID, draft.Version, repoaudit.IssueDraftPosted,
+		"19", "https://github.com/owner/repo/issues/19",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, aggregate := range state.RepositoryFindings {
+		if aggregate.ID == originalAggregate.ID {
+			originalAggregate = aggregate
+		}
+		if aggregate.ID == provisionalAggregate.ID {
+			provisionalAggregate = aggregate
+		}
+	}
+	state, merged, err := store.ResolvePossibleDuplicate(
+		state.Repository, repoaudit.RepositoryDuplicateResolution{
+			ProvisionalID: provisionalAggregate.ID, CandidateID: originalAggregate.ID,
+			Decision: "merge", ExpectedProvisionalVersion: provisionalAggregate.Version,
+			ExpectedCandidateVersion: originalAggregate.Version,
+		},
+	)
+	if err != nil || merged.MatchState != repoaudit.RepositoryMatchProvisional {
+		t.Fatalf("merged conflict aggregate=%#v err=%v", merged, err)
+	}
+
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = workspace
+	cfg.Tools.MCP.Enabled = false
 	messageBus := bus.NewMessageBus()
 	loop := agent.NewAgentLoop(cfg, messageBus, &startupBlockedProvider{reason: "not used"})
 	t.Cleanup(func() {
@@ -400,31 +596,6 @@ func TestRepositoryReviewPublicationHandlerRejectsNoncanonicalLegacyConflict(t *
 		messageBus.Close()
 		loop.Close()
 	})
-	store, state, draft := repositoryReviewPublicationTestDraft(t, workspace, "owner/repo")
-	persisted := state
-	draft.State = repoaudit.IssueDraftPosted
-	draft.ExternalID = "41"
-	draft.ExternalURL = "https://github.com/owner/repo/issues/41"
-	for index := range persisted.IssueDrafts {
-		if persisted.IssueDrafts[index].ID == draft.ID {
-			persisted.IssueDrafts[index] = draft
-		}
-	}
-	for index := range persisted.Findings {
-		persisted.Findings[index].Status = repoaudit.FindingPosted
-	}
-	newer := draft
-	newer.ID = "rid_newer_legacy_conflict"
-	newer.Canonical = false
-	newer.ExternalID = "42"
-	newer.ExternalURL = "https://github.com/owner/repo/issues/42"
-	newer.CreatedAt = draft.CreatedAt.Add(1)
-	newer.UpdatedAt = draft.UpdatedAt.Add(1)
-	persisted.IssueDrafts = append(persisted.IssueDrafts, newer)
-	if _, err := store.RewriteStateForMigration(t.Context(), persisted); err != nil {
-		t.Fatal(err)
-	}
-
 	request := httptest.NewRequest(
 		http.MethodPost,
 		repositoryReviewPublicationRoute+state.ID+"/issue-drafts/"+draft.ID+"/publish",
@@ -433,8 +604,8 @@ func TestRepositoryReviewPublicationHandlerRejectsNoncanonicalLegacyConflict(t *
 	response := httptest.NewRecorder()
 	newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
 	if response.Code != http.StatusConflict ||
-		!strings.Contains(response.Body.String(), `"code":"preview_not_canonical"`) {
-		t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		!strings.Contains(response.Body.String(), string(repoaudit.IssuePublicationDuplicateReviewRequired)) {
+		t.Fatalf("conflicted posted draft response=%d %s", response.Code, response.Body.String())
 	}
 }
 
@@ -444,80 +615,25 @@ func repositoryReviewPublicationTestDraft(
 	repository string,
 ) (repoaudit.Store, repoaudit.RepositoryState, repoaudit.IssueDraft) {
 	t.Helper()
-	store := repoaudit.NewStore(workspace)
-	file := repoaudit.FileRef{
-		Path: "service.go", BlobSHA: strings.Repeat("a", 40), SizeBytes: 10,
-		Category: "code", Mode: "100644",
-	}
-	plan, err := store.Plan(t.Context(), repository, "commit-a", "inventory-a", []repoaudit.FileRef{file}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	recorded, err := store.Record(t.Context(), repoaudit.RecordRequest{
-		Plan: plan, RunID: "publication-run",
-		Observations: []repoaudit.Observation{{
-			Model: "review-a", ScopeFiles: []repoaudit.FileRef{file},
-			Findings: []repoaudit.FindingCandidate{{
-				Severity: "high", Title: "Lost update", File: file.Path,
-				Evidence: "unfenced write", Impact: "data loss",
-				Validation: repoaudit.Validation{Status: "confirmed", Summary: "reproduced"},
-			}},
-		}},
+	store, state := seedGatewayRepositoryReviewState(t, workspace, repository)
+	const generationID = "rrig_gateway_publication"
+	state, draft, reserved, err := store.ReserveIssueGeneration(repoaudit.IssueGenerationRequest{
+		Repository: state.Repository, FindingID: state.Findings[0].ID,
+		GenerationID: generationID, ResolvedInstructions: "Present the diagnosis.",
+		InstructionsMode: repoaudit.IssueDraftInstructionsDefault,
+		GeneratorModel:   "issue-writer", GeneratorAccount: "gateway",
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || !reserved {
+		t.Fatalf("reserve issue generation: reserved=%v err=%v", reserved, err)
 	}
-	mappedState := completeRepositoryReviewPublicationTestMapping(
-		t,
-		store,
-		recorded.State,
-		recorded.State.Findings[0].ID,
+	state, draft, err = store.CompleteIssueGeneration(
+		state.Repository, draft.ID, generationID, "Lost update",
+		"Two writers can overwrite the same durable value.", []string{"bug"}, "",
 	)
-	state, draft, err := store.PrepareIssue(repoaudit.IssueDraftRequest{
-		Repository: repository, FindingIDs: []string{mappedState.Findings[0].ID},
-		ExpectedVersion: mappedState.Version,
-	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return store, state, draft
-}
-
-func completeRepositoryReviewPublicationTestMapping(
-	t *testing.T,
-	store repoaudit.Store,
-	state repoaudit.RepositoryState,
-	findingID string,
-) repoaudit.RepositoryState {
-	t.Helper()
-	for index := range state.MappingJobs {
-		job := state.MappingJobs[index]
-		if job.ReviewFindingID != findingID {
-			continue
-		}
-		claimedState, claimedJob, _, claimed, err := store.ClaimMappingJob(
-			state.Repository,
-			job.ID,
-			repoaudit.RepositoryMappingModelSnapshot{},
-		)
-		if err != nil || !claimed {
-			t.Fatalf("claim mapping job for finding %q: claimed=%v err=%v", findingID, claimed, err)
-		}
-		mappedState, _, err := store.CompleteMappingJob(
-			claimedState.Repository,
-			repoaudit.RepositoryMappingCompletion{
-				JobID:                 claimedJob.ID,
-				CreateMatchState:      repoaudit.RepositoryMatchNew,
-				DefaultBranchVerified: true,
-			},
-		)
-		if err != nil {
-			t.Fatalf("complete mapping job for finding %q: %v", findingID, err)
-		}
-		return mappedState
-	}
-	t.Fatalf("mapping job for finding %q is missing", findingID)
-	return repoaudit.RepositoryState{}
 }
 
 func repositoryReviewIssueLinkTestFixture(
@@ -535,7 +651,8 @@ func repositoryReviewIssueLinkTestFixture(
 	automation, err := store.CreateAutomation(t.Context(), repoaudit.RepositoryReviewAutomation{
 		ID:   "rra_issue_link_fixture",
 		Name: "Issue-link test", Repository: state.Repository,
-		Target: "all", ReviewFocus: "Find bugs.", ReviewerModels: []string{"issue-writer"},
+		CampaignID: state.CurrentCampaign.ID,
+		Target:     "all", ReviewFocus: "Find bugs.", ReviewerModels: []string{"issue-writer"},
 		IssueWriterModel: "issue-writer", AccountRef: "writer-account",
 		EffectiveAccountRef: "writer-account", MaxFilesPerRun: 1, MaxContentBytes: 1024,
 		MaxParallelChildren: 1, Status: repoaudit.RepositoryReviewAutomationIdle,
@@ -794,7 +911,8 @@ func TestRepositoryReviewProtectedIssueLinkRefetchesAndPersistsValidatedIssue(t 
 	finding := state.Findings[0]
 	automation, err := store.CreateAutomation(t.Context(), repoaudit.RepositoryReviewAutomation{
 		ID: "rra_link_test", Name: "Link test", Repository: state.Repository,
-		Target: "all", ReviewFocus: "Find bugs.", ReviewerModels: []string{"review"},
+		CampaignID: state.CurrentCampaign.ID,
+		Target:     "all", ReviewFocus: "Find bugs.", ReviewerModels: []string{"review"},
 		IssueWriterModel: "writer", MaxFilesPerRun: 1, MaxContentBytes: 1024,
 		MaxParallelChildren: 1, Status: repoaudit.RepositoryReviewAutomationIdle,
 		RunIDs: []string{"publication-run"},
@@ -1040,8 +1158,12 @@ func TestRepositoryReviewIssueLinkReportsConcurrentFindingMutation(t *testing.T)
 	store, state, finding, automation := repositoryReviewIssueLinkTestFixture(
 		t, loop.GetConfig().WorkspacePath(), "owner/repo",
 	)
-	if _, err := store.SetFindingStatus(
-		state.Repository, finding.ID, repoaudit.FindingDismissed, state.Version,
+	repositoryFinding := state.RepositoryFindings[0]
+	if _, _, err := store.SetRepositoryFindingLifecycle(
+		state.Repository,
+		repositoryFinding.ID,
+		repoaudit.RepositoryFindingDismissed,
+		repositoryFinding.Version,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1084,7 +1206,8 @@ func TestRepositoryReviewProtectedIssueCandidateDiscoverySearchesThenRanks(t *te
 	finding := state.Findings[0]
 	automation, err := store.CreateAutomation(t.Context(), repoaudit.RepositoryReviewAutomation{
 		ID: "rra_candidate_test", Name: "Candidate test", Repository: state.Repository,
-		Target: "all", ReviewFocus: "Find bugs.", ReviewerModels: []string{"issue-writer"},
+		CampaignID: state.CurrentCampaign.ID,
+		Target:     "all", ReviewFocus: "Find bugs.", ReviewerModels: []string{"issue-writer"},
 		IssueWriterModel: "issue-writer", AccountRef: "writer-account",
 		EffectiveAccountRef: "writer-account", MaxFilesPerRun: 1, MaxContentBytes: 1024,
 		MaxParallelChildren: 1, Status: repoaudit.RepositoryReviewAutomationIdle,
@@ -1231,7 +1354,7 @@ func TestRepositoryReviewAutomationOperationRejectsMissingOrUnsafeState(t *testi
 	})
 }
 
-func TestRepositoryReviewAutomationStateFallsBackOnlyToUnambiguousRunMembership(t *testing.T) {
+func TestRepositoryReviewAutomationStateUsesCanonicalRepositoryIdentity(t *testing.T) {
 	t.Run("direct identity", func(t *testing.T) {
 		workspace := t.TempDir()
 		store, expected, _ := repositoryReviewPublicationTestDraft(t, workspace, "owner/repo")
@@ -1244,81 +1367,21 @@ func TestRepositoryReviewAutomationStateFallsBackOnlyToUnambiguousRunMembership(
 		}
 	})
 
-	t.Run("no run membership", func(t *testing.T) {
+	t.Run("missing identity", func(t *testing.T) {
 		store := repoaudit.NewStore(t.TempDir())
-		state, found, err := repositoryReviewAutomationState(
+		_, found, err := repositoryReviewAutomationState(
 			store, repoaudit.RepositoryReviewAutomation{Repository: "missing/repo"},
 		)
-		if err != nil || found || state.ID != "" {
-			t.Fatalf("state=%#v found=%v err=%v", state, found, err)
-		}
-	})
-
-	t.Run("unique run fallback", func(t *testing.T) {
-		workspace := t.TempDir()
-		store, expected, _ := repositoryReviewPublicationTestDraft(t, workspace, "owner/actual")
-		state, found, err := repositoryReviewAutomationState(
-			store,
-			repoaudit.RepositoryReviewAutomation{
-				Repository: "missing/repo", RunIDs: []string{"publication-run", "unrelated"},
-			},
-		)
-		if err != nil || !found || state.ID != expected.ID {
-			t.Fatalf("state=%#v found=%v err=%v", state, found, err)
-		}
-	})
-
-	t.Run("unmatched run", func(t *testing.T) {
-		workspace := t.TempDir()
-		store, _, _ := repositoryReviewPublicationTestDraft(t, workspace, "owner/actual")
-		state, found, err := repositoryReviewAutomationState(
-			store,
-			repoaudit.RepositoryReviewAutomation{
-				Repository: "missing/repo", RunIDs: []string{"other-run"},
-			},
-		)
-		if err != nil || found || state.ID != "" {
-			t.Fatalf("state=%#v found=%v err=%v", state, found, err)
-		}
-	})
-
-	t.Run("ambiguous run", func(t *testing.T) {
-		workspace := t.TempDir()
-		store, _, _ := repositoryReviewPublicationTestDraft(t, workspace, "owner/first")
-		_, _, _ = repositoryReviewPublicationTestDraft(t, workspace, "owner/second")
-		_, found, err := repositoryReviewAutomationState(
-			store,
-			repoaudit.RepositoryReviewAutomation{
-				Repository: "missing/repo", RunIDs: []string{"publication-run"},
-			},
-		)
-		if err == nil || found || !strings.Contains(err.Error(), "ambiguous") {
-			t.Fatalf("found=%v err=%v", found, err)
-		}
-	})
-
-	t.Run("ledger list failure", func(t *testing.T) {
-		workspace := t.TempDir()
-		_, _, _ = repositoryReviewPublicationTestDraft(t, workspace, "owner/corrupt")
-		statePath := filepath.Join(workspace, "repository_reviews", "repository-reviews.db")
-		if writeErr := os.WriteFile(statePath, []byte("not-sqlite"), 0o600); writeErr != nil {
-			t.Fatal(writeErr)
-		}
-		_, found, err := repositoryReviewAutomationState(
-			repoaudit.NewStore(workspace),
-			repoaudit.RepositoryReviewAutomation{
-				Repository: "missing/repo", RunIDs: []string{"publication-run"},
-			},
-		)
-		if err == nil || found {
+		if err != nil || found {
 			t.Fatalf("found=%v err=%v", found, err)
 		}
 	})
 }
 
 func TestRepositoryReviewCandidateEndpointRejectsInvalidStaleAndUnavailableRequests(t *testing.T) {
-	state := repoaudit.RepositoryState{Repository: "owner/repo"}
-	baseFinding := repoaudit.Finding{ID: "rfn_test", Version: 3, Status: repoaudit.FindingOpen}
+	_, state := seedGatewayRepositoryReviewState(t, t.TempDir(), "owner/repo")
+	baseFinding := state.Findings[0]
+	validBody := `{"expected_version":` + strconv.FormatInt(baseFinding.Version, 10) + `}`
 	automation := repoaudit.RepositoryReviewAutomation{
 		IssueWriterModel: "issue-writer", EffectiveAccountRef: "writer-account",
 	}
@@ -1331,19 +1394,19 @@ func TestRepositoryReviewCandidateEndpointRejectsInvalidStaleAndUnavailableReque
 		code    string
 	}{
 		{name: "malformed", body: `{`, finding: baseFinding, status: http.StatusBadRequest, code: "invalid_request"},
-		{name: "unknown field", body: `{"expected_version":3,"extra":true}`, finding: baseFinding, status: http.StatusBadRequest, code: "invalid_request"},
-		{name: "stale", body: `{"expected_version":2}`, finding: baseFinding, status: http.StatusConflict, code: "stale_repository_review"},
+		{name: "unknown field", body: strings.TrimSuffix(validBody, "}") + `,"extra":true}`, finding: baseFinding, status: http.StatusBadRequest, code: "invalid_request"},
+		{name: "stale", body: `{"expected_version":` + strconv.FormatInt(baseFinding.Version+1, 10) + `}`, finding: baseFinding, status: http.StatusConflict, code: "stale_repository_review"},
 		{
-			name: "not open", body: `{"expected_version":3}`,
+			name: "not open", body: validBody,
 			finding: func() repoaudit.Finding {
 				finding := baseFinding
-				finding.Status = repoaudit.FindingDismissed
+				finding.Status = repoaudit.FindingPosted
 				return finding
 			}(),
 			status: http.StatusConflict, code: "stale_repository_review",
 		},
 		{
-			name: "associated", body: `{"expected_version":3}`,
+			name: "associated", body: validBody,
 			finding: func() repoaudit.Finding {
 				finding := baseFinding
 				finding.IssueDraftID = "rid_existing"
@@ -1351,7 +1414,7 @@ func TestRepositoryReviewCandidateEndpointRejectsInvalidStaleAndUnavailableReque
 			}(),
 			status: http.StatusConflict, code: "stale_repository_review",
 		},
-		{name: "writer unavailable", body: `{"expected_version":3}`, finding: baseFinding, status: http.StatusServiceUnavailable, code: "issue_ranking_unavailable"},
+		{name: "writer unavailable", body: validBody, finding: baseFinding, status: http.StatusServiceUnavailable, code: "issue_ranking_unavailable"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(test.body))
@@ -1800,10 +1863,6 @@ func TestRepositoryReviewPublicationHelpersCoverBoundaryResponses(t *testing.T) 
 		{err: os.ErrNotExist, found: true, status: http.StatusNotFound},
 		{err: repoaudit.ErrConflict, found: true, status: http.StatusConflict},
 		{err: repoaudit.ErrRepositoryReviewPurgeInProgress, found: true, status: http.StatusConflict},
-		{
-			err: repoaudit.ErrHistoricalDeduplicationInProgress, found: true,
-			status: http.StatusConflict,
-		},
 		{err: errors.New("disk unavailable"), found: true, status: http.StatusServiceUnavailable},
 	} {
 		response := httptest.NewRecorder()

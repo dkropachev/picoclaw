@@ -31,13 +31,10 @@ func TestRepositoryReviewAssignmentCampaignBindingAndMergeCoverage(t *testing.T)
 		&state, campaignID, commit, "inventory", profileHash, scopeDigest, catalog, 3,
 	)
 	if err != nil || !changed || !state.CurrentCampaign.Paths["complete.go"].Completed ||
-		state.CurrentCampaign.Paths["complete.go"].AssignmentBits == "" ||
-		state.CurrentCampaign.Paths["inspected.go"] != (RepositoryReviewCampaignPathCoverage{}) ||
+		state.CurrentCampaign.Paths["complete.go"].AssignmentBits != "" ||
+		!state.CurrentCampaign.Paths["inspected.go"].Inspected ||
 		!state.CurrentCampaign.Paths["binary.bin"].Unsupported {
 		t.Fatalf("catalog binding = %#v changed=%v err=%v", state.CurrentCampaign, changed, err)
-	}
-	if _, exists := state.CurrentCampaign.Paths["inspected.go"]; exists {
-		t.Fatal("ambiguous inspection-only path survived assignment binding")
 	}
 	changed, err = bindRepositoryReviewCampaignAssignmentCatalog(
 		&state, campaignID, commit, "inventory", profileHash, scopeDigest, catalog, 3,
@@ -112,24 +109,6 @@ func TestRepositoryReviewAssignmentCampaignBindingAndMergeCoverage(t *testing.T)
 	); err == nil {
 		t.Fatal("malformed update assignment bits merged")
 	}
-
-	legacy := &RepositoryReviewCampaignCoverage{
-		ID: campaignID, CommitSHA: commit, InventoryHash: "inventory",
-		ProfileHash: profileHash, ScopeDigest: scopeDigest,
-		RequiredAssignments: 1, SelectedFiles: 1,
-		Paths: map[string]RepositoryReviewCampaignPathCoverage{},
-	}
-	changed, err = mergeRepositoryReviewCampaignPath(
-		legacy, "legacy.go", RepositoryReviewCampaignPathCoverage{Inspected: true},
-	)
-	if err != nil || !changed {
-		t.Fatalf("legacy merge changed=%v err=%v", changed, err)
-	}
-	if _, err := mergeRepositoryReviewCampaignPath(
-		legacy, "legacy.go", RepositoryReviewCampaignPathCoverage{Unsupported: true},
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("legacy terminal conflict error = %v", err)
-	}
 }
 
 //nolint:govet // Boundary assertions intentionally reuse err in short scopes.
@@ -189,7 +168,8 @@ func TestRepositoryReviewAssignmentPlanningAndStateValidationCoverage(t *testing
 	defaultCampaign := NewRepositoryReviewCampaignID()
 	defaultStore := NewStore(t.TempDir())
 	if _, err := defaultStore.BeginCampaign(context.Background(), BeginCampaignRequest{
-		Repository: defaultRepository, CampaignID: defaultCampaign, CommitSHA: fixture.plan.CommitSHA,
+		DeduplicationSnapshot: repositoryReviewDeduplicationSnapshotForTest(),
+		Repository:            defaultRepository, CampaignID: defaultCampaign, CommitSHA: fixture.plan.CommitSHA,
 	}); err != nil {
 		t.Fatal(err)
 	}

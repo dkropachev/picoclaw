@@ -3,7 +3,6 @@ package repoaudit
 import (
 	"context"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -218,28 +217,5 @@ func TestAssignmentCheckpointAtomicallyAdmitsRawFindingAndJob(t *testing.T) {
 	if err != nil || !replayed.Idempotent || len(replayed.State.RawFindings) != 1 ||
 		len(replayed.State.DeduplicationJobs) != 1 {
 		t.Fatalf("idempotent checkpoint = %#v, err=%v", replayed, err)
-	}
-}
-
-func TestRepositoryStateV3MigrationOnlyMarksHistoricalReplay(t *testing.T) {
-	state := RepositoryState{
-		SchemaVersion: 3, ID: RepositoryID("owner/legacy-dedup"),
-		Repository: "owner/legacy-dedup", Findings: []Finding{{ID: "legacy-finding"}},
-		UpdatedAt: repositoryAuditTestNow,
-	}
-	migrated, err := migrateRepositoryState(&state)
-	if err != nil || !migrated {
-		t.Fatalf("migrateRepositoryState() = %v, %v", migrated, err)
-	}
-	if state.SchemaVersion != SchemaVersion || state.RawFindings == nil ||
-		state.DeduplicatedFindings == nil || state.DeduplicationJobs == nil ||
-		len(state.RawFindings) != 0 || !state.HistoricalDeduplication.Required ||
-		state.HistoricalDeduplication.Status != HistoricalDeduplicationPending {
-		t.Fatalf("migrated state = %#v", state)
-	}
-	before := state
-	if migratedAgain, err := migrateRepositoryState(&state); err != nil || migratedAgain ||
-		!reflect.DeepEqual(state, before) {
-		t.Fatalf("second migration = %v, %v, state=%#v", migratedAgain, err, state)
 	}
 }

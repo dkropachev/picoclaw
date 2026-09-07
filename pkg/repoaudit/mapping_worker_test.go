@@ -3,6 +3,7 @@ package repoaudit
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -162,11 +163,6 @@ func TestMappingWorkerBlockingConflictPolicyRetainsEveryConflict(t *testing.T) {
 			confidence: .97,
 			conflicts:  []string{"unclassified factual disagreement"},
 			fields:     []string{RepositoryMappingConflictFieldOther},
-		},
-		{
-			name:       "legacy missing classifications",
-			confidence: .97,
-			conflicts:  []string{"legacy disagreement"},
 		},
 		{
 			name:       "low confidence non-blocking",
@@ -498,9 +494,53 @@ func recordMappingWorkerFinding(
 	runID, commit, pathValue, symbol string,
 ) RepositoryState {
 	t.Helper()
-	file := repositoryAuditTestFile(pathValue, string(rune('a'+len(runID)%5)), 20)
-	plan, err := store.Plan(t.Context(), "owner/repo", commit, "inventory-"+runID, []FileRef{file}, true)
+	const repository = "owner/repo"
+	commitSHA := strings.TrimPrefix(stableID("sha256:", commit), "sha256:")
+	file := FileRef{
+		Path: pathValue, BlobSHA: strings.Repeat("a", 40), SizeBytes: 20,
+		Category: "code", Mode: "100644",
+	}
+	current, _, err := store.Get(repository)
 	if err != nil {
+		t.Fatal(err)
+	}
+	campaignID := NewRepositoryReviewCampaignID()
+	expectedCampaignID := ""
+	if current.CurrentCampaign != nil {
+		expectedCampaignID = current.CurrentCampaign.ID
+	}
+	profileHash := stableID("sha256:", runID)
+	snapshot := RepositoryReviewDeduplicationSnapshot{
+		ReviewerModel: "reviewer", DeduplicationModel: "reviewer",
+		SimilarityThreshold: DeduplicationDefaultThreshold,
+	}
+	if _, err = store.BeginCampaign(t.Context(), BeginCampaignRequest{
+		Repository: repository, CampaignID: campaignID, ExpectedCampaignID: expectedCampaignID,
+		CommitSHA: commitSHA, ExpectedReviewVersion: current.ReviewVersion, Exact: true,
+		DeduplicationSnapshot: &snapshot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assignment, err := NewRepositoryReviewAssignment(
+		RepositoryReviewFocusCorrectnessState, "reviewer", "mapping-worker-v1", profileHash, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := store.PlanAssignmentsForCampaign(
+		t.Context(), repository, commitSHA, "inventory-"+runID, profileHash,
+		campaignID, []RepositoryReviewAssignment{assignment}, []FileRef{file}, false, 1, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err = BindPlanBranch(plan, "main", "main", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.BeginRepositoryReviewRun(t.Context(), BeginRepositoryReviewRunRequest{
+		Plan: plan, RunID: runID, ReviewableFiles: []FileRef{file},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	candidate := FindingCandidate{
@@ -521,24 +561,42 @@ func recordMappingWorkerFinding(
 			DistinguishingFacts: []string{"requires an owner move", "predicate remains false"},
 		},
 		FixEffort: FixEffort{
-			Quick: FixEffortEstimate{LOCMin: 5, LOCMax: 20, Class: "small", Rationale: "Localized containment."},
+			Quick: FixEffortEstimate{
+				LOCMin: 5, LOCMax: 20, Class: "small", Rationale: "Localized containment.",
+			},
 			Quality: FixEffortEstimate{
-				LOCMin:    30,
-				LOCMax:    100,
-				Class:     "medium",
-				Rationale: "Ownership spans related units.",
+				LOCMin: 30, LOCMax: 100, Class: "medium", Rationale: "Ownership spans related units.",
 			},
 		},
 	}
-	result, err := store.Record(t.Context(), RecordRequest{
-		Plan:  plan,
-		RunID: runID,
-		Observations: []Observation{
-			{Model: "reviewer", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{candidate}},
+	checkpoint, err := store.CheckpointRepositoryReviewAssignment(
+		t.Context(), CheckpointRepositoryReviewAssignmentRequest{
+			Plan: plan, RunID: runID, AssignmentID: assignment.ID,
+			AutomationID: "rra_mapping_worker", AgentID: "main", ChildIndex: 1,
+			Digest: "sha256:" + strings.Repeat("b", 64), AcknowledgedFiles: []FileRef{file},
+			Observation: Observation{
+				Model: "provider/reviewer", ModelAlias: "reviewer", Account: "account",
+				Reviewer: assignment.FocusID, ScopeFiles: []FileRef{file},
+				RawDigest: "sha256:" + strings.Repeat("c", 64), Findings: []FindingCandidate{candidate},
+			},
 		},
-	})
-	if err != nil {
+	)
+	if err != nil || len(checkpoint.AcceptedFindingIDs) != 1 {
+		t.Fatalf("checkpoint findings=%#v err=%v", checkpoint.AcceptedFindingIDs, err)
+	}
+	if _, err = store.FinalizeRepositoryReviewRun(
+		t.Context(), FinalizeRepositoryReviewRunRequest{Plan: plan, RunID: runID},
+	); err != nil {
 		t.Fatal(err)
 	}
-	return result.State
+	if _, err = store.ProcessPendingDeduplicationJobs(
+		t.Context(), repository, DeduplicationProcessOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, found, err := store.Get(repository)
+	if err != nil || !found {
+		t.Fatalf("mapping worker state found=%v err=%v", found, err)
+	}
+	return state
 }

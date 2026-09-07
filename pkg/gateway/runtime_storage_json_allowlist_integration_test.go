@@ -457,28 +457,79 @@ func writeRepositoryReviewSentinel(t *testing.T, workspace string) string {
 	t.Helper()
 	ctx := context.Background()
 	store := repoaudit.NewSQLiteStore(workspace)
+	repository := "owner/runtime-storage"
+	commit := strings.Repeat("b", 40)
+	inventoryHash := "sha256:" + strings.Repeat("c", 64)
+	profileHash := "sha256:" + strings.Repeat("d", 64)
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
 	file := repoaudit.FileRef{
 		Path: "pkg/runtime_storage.go", BlobSHA: strings.Repeat("a", 40), SizeBytes: 128,
 		Category: "code", Mode: "100644",
 	}
-	plan, err := store.Plan(
-		ctx,
-		"owner/runtime-storage",
-		strings.Repeat("b", 40),
-		"sha256:runtime-storage-inventory",
-		[]repoaudit.FileRef{file},
-		false,
+	if _, err := store.BeginCampaign(ctx, repoaudit.BeginCampaignRequest{
+		Repository: repository, CampaignID: campaignID, CommitSHA: commit, Exact: true,
+		DeduplicationSnapshot: &repoaudit.RepositoryReviewDeduplicationSnapshot{
+			ReviewerModel: "runtime-model", DeduplicationModel: "runtime-model",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	catalog := make([]repoaudit.RepositoryReviewAssignment, 0, len(repoaudit.RepositoryReviewFocusIDs()))
+	for _, focusID := range repoaudit.RepositoryReviewFocusIDs() {
+		assignment, err := repoaudit.NewRepositoryReviewAssignment(
+			focusID, "runtime-model", "runtime-storage-v1", profileHash, true,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		catalog = append(catalog, assignment)
+	}
+	plan, err := store.PlanAssignmentsForCampaign(
+		ctx, repository, commit, inventoryHash, profileHash, campaignID,
+		catalog, []repoaudit.FileRef{file}, false, 1, true,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	recorded, err := store.Record(ctx, repoaudit.RecordRequest{
-		Plan: plan, RunID: "runtime-storage-review", CompletedAt: time.Now().UTC(),
-		Observations: []repoaudit.Observation{{
-			Model: "runtime-model", ScopeFiles: []repoaudit.FileRef{file}, Summary: "reviewed",
-		}},
-	})
+	const runID = "runtime-storage-review"
+	if _, err := store.BeginRepositoryReviewRun(ctx, repoaudit.BeginRepositoryReviewRunRequest{
+		Plan: plan, RunID: runID, ReviewableFiles: []repoaudit.FileRef{file},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	completedAt := time.Now().UTC()
+	for index, assignment := range plan.AssignmentPlans {
+		digestDigit := fmt.Sprintf("%x", index+1)
+		if _, err := store.CheckpointRepositoryReviewAssignment(
+			ctx,
+			repoaudit.CheckpointRepositoryReviewAssignmentRequest{
+				Plan: plan, RunID: runID, AssignmentID: assignment.AssignmentID,
+				AutomationID: "rra_runtime_storage", AgentID: "main", ChildIndex: index + 1,
+				Digest:            "sha256:" + strings.Repeat(digestDigit, 64),
+				AcknowledgedFiles: []repoaudit.FileRef{file},
+				Observation: repoaudit.Observation{
+					Model: "provider/runtime-model", ModelAlias: "runtime-model", Account: "api",
+					Reviewer: assignment.FocusID, ScopeFiles: []repoaudit.FileRef{file},
+					Summary: "reviewed", RawDigest: "sha256:" + strings.Repeat(digestDigit, 64),
+				},
+				CompletedAt: completedAt,
+			},
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recorded, err := store.FinalizeRepositoryReviewRun(
+		ctx,
+		repoaudit.FinalizeRepositoryReviewRunRequest{
+			Plan: plan, RunID: runID, CompletedAt: completedAt,
+		},
+	)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ProcessPendingDeduplicationJobs(
+		ctx, repository, repoaudit.DeduplicationProcessOptions{},
+	); err != nil {
 		t.Fatal(err)
 	}
 	return recorded.State.ID

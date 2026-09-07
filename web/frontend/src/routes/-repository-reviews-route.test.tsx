@@ -11,30 +11,12 @@ import { describe, expect, it, vi } from "vitest"
 
 import { routeTree } from "@/routeTree.gen"
 
-vi.mock("@/api/repository-reviews", () => ({
-  getRepositoryReviewRawSource: vi.fn(
-    async (_automationID: string, sourceID: string) => ({
-      source: { id: sourceID.startsWith("rfn_") ? "rrw_1" : sourceID },
-    }),
-  ),
-}))
-
 vi.mock("@/api/launcher-auth", () => ({
   getLauncherAuthStatus: vi.fn().mockResolvedValue({
     authenticated: true,
     initialized: true,
   }),
 }))
-
-vi.mock(
-  "@/components/repository-reviews/repository-review-repository-route",
-  () => ({
-    resolveRepositoryFindingRouteID: vi.fn(
-      async (_automationID: string, findingID: string) =>
-        findingID === "rfn_legacy" ? "rrf_1" : findingID,
-    ),
-  }),
-)
 
 vi.mock("@/components/app-layout", () => ({
   AppLayout: ({ children }: { children: ReactNode }) => (
@@ -254,7 +236,7 @@ vi.mock(
           </button>
         )}
         {resourceKind === "repository" && (
-          <button type="button" onClick={() => onLinkIssue("rfn_1")}>
+          <button type="button" onClick={() => onLinkIssue("rrf_1")}>
             Link existing issue
           </button>
         )}
@@ -300,7 +282,7 @@ vi.mock("@/components/repository-reviews/repository-review-issue-page", () => ({
       <button type="button" onClick={onEdit}>
         Edit issue
       </button>
-      <button type="button" onClick={() => onOpenFinding("rfn_1")}>
+      <button type="button" onClick={() => onOpenFinding("finding_1")}>
         Open run finding
       </button>
       <button type="button" onClick={() => onManageLink("rrf_1")}>
@@ -580,15 +562,15 @@ describe("repository review routes", () => {
       { q: "ALL ORDER BY severity DESC, updated DESC" },
     ],
     [
-      "/repository-reviews/repositories/auto_1/findings?offset=50&unknown=value",
+      "/repository-reviews/repositories/auto_1/findings?unknown=value",
       { q: "ALL ORDER BY severity DESC, updated DESC" },
     ],
     [
-      "/repository-reviews/auto_1/issues?generation_id=rig_1&scope=current&unknown=value",
+      "/repository-reviews/auto_1/issues?generation_id=rig_1&unknown=value",
       { q: "ALL ORDER BY updated DESC", generation_id: "rig_1" },
     ],
     [
-      "/repository-reviews/auto_1/findings-processing?view=unsupported&offset=50",
+      "/repository-reviews/auto_1/findings-processing?view=unsupported",
       { q: "ALL ORDER BY updated DESC" },
     ],
   ])(
@@ -607,141 +589,8 @@ describe("repository review routes", () => {
     },
   )
 
-  it("redirects an aggregate report URL to the repositories workspace and preserves safe state", async () => {
-    const router = testRouter(
-      "/repository-reviews/auto_1/report?q=severity%20%3D%20high&view=grid&scope=all&offset=50&generation_id=rig_1",
-    )
-    const user = userEvent.setup()
-    render(<RouterProvider router={router} />)
-
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe(
-        "/repository-reviews/repositories/auto_1/findings",
-      ),
-    )
-    expect(router.state.location.search).toEqual({
-      q: "severity = high",
-      view: "grid",
-    })
-
-    await user.click(
-      await screen.findByRole("button", { name: "Open repository finding" }),
-    )
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe(
-        "/repository-reviews/repositories/auto_1/findings/rrf_1",
-      ),
-    )
-    expect(router.state.location.search).toEqual({
-      q: "severity = high",
-      view: "grid",
-    })
-  })
-
-  it("keeps a current-scope legacy report on the run findings route", async () => {
-    const router = testRouter(
-      "/repository-reviews/auto_1/report?q=severity%20%3D%20high&view=list&scope=current&offset=50",
-    )
-    render(<RouterProvider router={router} />)
-
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe(
-        "/repository-reviews/auto_1/findings",
-      ),
-    )
-    expect(router.state.location.search).toEqual({
-      q: "severity = high",
-      view: "list",
-    })
-  })
-
-  it("canonicalizes an old aggregate findings URL into the repositories subtree", async () => {
-    const router = testRouter(
-      "/repository-reviews/auto_1/findings?q=severity%20%3D%20high&view=grid&scope=all&offset=50",
-    )
-    render(<RouterProvider router={router} />)
-
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe(
-        "/repository-reviews/repositories/auto_1/findings",
-      ),
-    )
-    expect(router.state.location.search).toEqual({
-      q: "severity = high",
-      view: "grid",
-    })
-  })
-
-  it("canonicalizes an old aggregate detail URL into the repositories subtree", async () => {
-    const router = testRouter(
-      "/repository-reviews/auto_1/findings/rrf_1?q=severity%20%3D%20high&scope=all&offset=50",
-    )
-    render(<RouterProvider router={router} />)
-
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe(
-        "/repository-reviews/repositories/auto_1/findings/rrf_1",
-      ),
-    )
-    expect(router.state.location.search).toEqual({ q: "severity = high" })
-    expect(await screen.findByText("Repository finding rrf_1")).toBeVisible()
-  })
-
-  it("canonicalizes an old aggregate issue-link URL into the repositories subtree", async () => {
-    const router = testRouter(
-      "/repository-reviews/auto_1/findings/rrf_1/link-issue?q=severity%20%3D%20high&scope=all&offset=50",
-    )
-    render(<RouterProvider router={router} />)
-
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe(
-        "/repository-reviews/repositories/auto_1/findings/rrf_1/link-issue",
-      ),
-    )
-    expect(router.state.location.search).toEqual({ q: "severity = high" })
-  })
-
-  it.each([
-    [
-      "/repository-reviews/auto_1/findings/rfn_legacy?scope=all",
-      "/repository-reviews/auto_1/raw-findings/rrw_1",
-    ],
-    [
-      "/repository-reviews/auto_1/findings/rfn_legacy/link-issue?scope=all",
-      "/repository-reviews/auto_1/raw-findings/rrw_1",
-    ],
-  ])(
-    "resolves a legacy action occurrence URL into %s",
-    async (path, target) => {
-      const router = testRouter(path)
-      render(<RouterProvider router={router} />)
-
-      await waitFor(() => expect(router.state.location.pathname).toBe(target))
-      expect(router.state.location.search).toEqual({
-        q: "ALL ORDER BY created DESC",
-      })
-    },
-  )
-
-  it("returns an old current-scope issue-link URL to the run finding", async () => {
-    const router = testRouter(
-      "/repository-reviews/auto_1/findings/finding_1/link-issue?q=severity%20%3D%20high&scope=current&offset=50",
-    )
-    render(<RouterProvider router={router} />)
-
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe(
-        "/repository-reviews/auto_1/findings/finding_1",
-      ),
-    )
-    expect(router.state.location.search).toEqual({ q: "severity = high" })
-    expect(await screen.findByText("Finding finding_1")).toBeVisible()
-  })
-
   it("opens the canonical repository finding from a run finding", async () => {
-    const router = testRouter(
-      "/repository-reviews/auto_1/findings/finding_1?scope=current",
-    )
+    const router = testRouter("/repository-reviews/auto_1/findings/finding_1")
     const user = userEvent.setup()
     render(<RouterProvider router={router} />)
 
@@ -768,7 +617,7 @@ describe("repository review routes", () => {
 
   it("opens the repository finding collection from run findings", async () => {
     const router = testRouter(
-      "/repository-reviews/auto_1/findings?q=severity%20%3D%20high&view=grid&scope=current&offset=50",
+      "/repository-reviews/auto_1/findings?q=severity%20%3D%20high&view=grid",
     )
     const user = userEvent.setup()
     render(<RouterProvider router={router} />)
@@ -826,7 +675,7 @@ describe("repository review routes", () => {
 
   it("keeps the canonical repository finding ID while opening issue linking", async () => {
     const router = testRouter(
-      "/repository-reviews/repositories/auto_1/findings/rrf_1?scope=all",
+      "/repository-reviews/repositories/auto_1/findings/rrf_1",
     )
     const user = userEvent.setup()
     render(<RouterProvider router={router} />)
@@ -842,9 +691,7 @@ describe("repository review routes", () => {
   })
 
   it("uses resource-owned routes from an issue preview opened with repository state", async () => {
-    const runRouter = testRouter(
-      "/repository-reviews/auto_1/issues/draft_1?scope=all&offset=50",
-    )
+    const runRouter = testRouter("/repository-reviews/auto_1/issues/draft_1")
     const user = userEvent.setup()
     const runView = render(<RouterProvider router={runRouter} />)
 
@@ -853,16 +700,16 @@ describe("repository review routes", () => {
     )
     await waitFor(() =>
       expect(runRouter.state.location.pathname).toBe(
-        "/repository-reviews/auto_1/raw-findings/rrw_1",
+        "/repository-reviews/auto_1/findings/finding_1",
       ),
     )
     expect(runRouter.state.location.search).toEqual({
-      q: "ALL ORDER BY created DESC",
+      q: "ALL ORDER BY severity DESC, updated DESC",
     })
     runView.unmount()
 
     const repositoryRouter = testRouter(
-      "/repository-reviews/auto_1/issues/draft_1?scope=all&offset=50",
+      "/repository-reviews/auto_1/issues/draft_1",
     )
     render(<RouterProvider router={repositoryRouter} />)
     await user.click(
@@ -1070,26 +917,8 @@ describe("repository review routes", () => {
     })
   })
 
-  it("redirects the legacy Results URL to the collection", async () => {
-    const router = testRouter(
-      "/repository-reviews/results?q=status%20%3D%20paused&view=table",
-    )
-    render(<RouterProvider router={router} />)
-
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/repository-reviews"),
-    )
-    expect(router.state.location.search).toEqual({
-      q: "status = paused",
-      view: "table",
-    })
-  })
-
   it.each([
-    [
-      "/repository-reviews/auto_1/findings/finding_1?scope=current",
-      "Finding finding_1",
-    ],
+    ["/repository-reviews/auto_1/findings/finding_1", "Finding finding_1"],
     ["/repository-reviews/auto_1/issues", "Issues auto_1"],
     [
       "/repository-reviews/auto_1/findings-processing",

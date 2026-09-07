@@ -5,7 +5,7 @@ import type {
 import { collectionListURL, collectionRequest } from "@/api/collection"
 import { launcherFetch } from "@/api/http"
 
-export type RepositoryReviewFindingStatus = "open" | "dismissed" | "posted"
+export type RepositoryReviewFindingStatus = "open" | "posted"
 export type RepositoryReviewIssueDraftState =
   | "generating"
   | "failed"
@@ -17,17 +17,14 @@ export type RepositoryReviewIssueDraftOrigin =
   | "ai_generated"
   | "linked"
   | "discovered"
-  | "legacy"
 export type RepositoryReviewPublishBlockerCode =
   | "repository_not_github"
-  | "preview_not_canonical"
   | "origin_not_publishable"
   | "state_not_publishable"
   | "finding_missing"
   | "finding_status_unresolved"
   | "duplicate_review_required"
   | "issue_association_conflict"
-  | "historical_merge_in_progress"
   | "finding_not_publishable"
 export type RepositoryReviewPurgeBlockerCode =
   | "review_active"
@@ -35,12 +32,8 @@ export type RepositoryReviewPurgeBlockerCode =
   | "resolution_check_active"
   | "issue_generation_active"
   | "publication_active"
-  | "historical_consolidation_active"
   | "retention_unavailable"
 export type RepositoryReviewIssueInstructionsMode = "default" | "custom"
-export type RepositoryReviewFindingsScope = "current" | "all"
-/** @deprecated Use RepositoryReviewFindingsScope. */
-export type RepositoryReviewReportScope = RepositoryReviewFindingsScope
 export type RepositoryReviewMatchState = "new" | "known" | "provisional"
 export type RepositoryReviewRunFindingStatusState =
   | "pending"
@@ -69,7 +62,6 @@ export type RepositoryFindingValidationState =
   | "not_fixed"
   | "inconclusive"
   | "failed"
-export type RepositoryMappingJobState = "pending" | "running" | "completed"
 export type RepositoryReviewDeduplicationState =
   | "pending"
   | "running"
@@ -79,15 +71,6 @@ export type RepositoryReviewRawFindingDisposition =
   | "undecided"
   | "new"
   | "duplicate"
-export type RepositoryReviewHistoricalDeduplicationStatus =
-  | "pending"
-  | "replaying"
-  | "merging"
-  | "failed"
-  | "completed"
-export type RepositoryReviewHistoricalConsolidationStatus =
-  | "not_required"
-  | RepositoryReviewHistoricalDeduplicationStatus
 export type RepositoryReviewFixEffortClass =
   | "tiny"
   | "small"
@@ -128,20 +111,6 @@ export interface RepositoryReviewFileRef {
   size_bytes: number
   category?: string
   mode?: string
-}
-
-export interface RepositoryReviewedFile extends RepositoryReviewFileRef {
-  commit_sha: string
-  profile_hash: string
-  run_id: string
-  reviewed_at: string
-}
-
-export interface RepositoryUnsupportedFile extends RepositoryReviewFileRef {
-  commit_sha: string
-  profile_hash: string
-  reason: string
-  updated_at: string
 }
 
 export interface RepositoryReviewValidation {
@@ -197,8 +166,6 @@ export interface RepositoryReviewFinding {
   version: number
   created_at: string
   updated_at: string
-  raw_source_ids?: string[]
-  raw_source_total?: number
 }
 
 export interface RepositoryReviewRawFindingHistoryEntry {
@@ -224,7 +191,6 @@ export interface RepositoryReviewRawFinding {
   admission_bucket?: string
   insertion_ordinal?: number
   diagnosis_digest?: string
-  legacy_finding_id?: string
   repository?: string
   commit_sha?: string
   file?: RepositoryReviewFileRef
@@ -253,14 +219,6 @@ export interface RepositoryReviewRawFinding {
   failure?: RepositoryReviewDeduplicationFailure
   created_at: string
   updated_at: string
-}
-
-export interface RepositoryReviewHistoricalDeduplication {
-  required: boolean
-  status?: RepositoryReviewHistoricalDeduplicationStatus
-  attempts?: number
-  error?: string
-  updated_at?: string
 }
 
 export interface RepositoryReviewFindingsProcessingCounters {
@@ -300,17 +258,10 @@ export interface RepositoryReviewFindingHealthProcessing {
   completed: number
 }
 
-export interface RepositoryReviewHistoricalConsolidation {
-  required: boolean
-  status: RepositoryReviewHistoricalConsolidationStatus
-  retryable: boolean
-}
-
 export interface RepositoryReviewFindingHealth {
   run_findings: RepositoryReviewFindingHealthRunFindings
   repository_findings: RepositoryReviewFindingHealthRepositoryFindings
   findings_processing: RepositoryReviewFindingHealthProcessing
-  historical_consolidation: RepositoryReviewHistoricalConsolidation
   updated_at: string
 }
 
@@ -321,7 +272,6 @@ export interface RepositoryReviewRawFindingsPage {
   finding_id?: string
   findings_processing?: RepositoryReviewFindingsProcessingCounters
   sources?: RepositoryReviewRawFinding[]
-  raw_findings?: RepositoryReviewRawFinding[]
   offset: number
   total: number
   next_offset?: number
@@ -334,7 +284,6 @@ export interface RepositoryReviewRawFindingDetail {
   context?: RepositoryReviewFindingContext
   finding?: RepositoryReviewFinding
   findings_processing?: RepositoryReviewFindingsProcessingCounters
-  historical_deduplication?: RepositoryReviewHistoricalDeduplication
 }
 
 export interface RepositoryReviewRawFindingsCollectionPage extends CollectionPageMetadata {
@@ -342,7 +291,6 @@ export interface RepositoryReviewRawFindingsCollectionPage extends CollectionPag
   repository?: RepositoryReviewSummary
   raw_findings: RepositoryReviewRawFinding[]
   findings_processing?: RepositoryReviewFindingsProcessingCounters
-  historical_deduplication?: RepositoryReviewHistoricalDeduplication
 }
 
 export interface RepositoryReviewFindingsProcessingCollectionPage extends CollectionPageMetadata {
@@ -350,7 +298,6 @@ export interface RepositoryReviewFindingsProcessingCollectionPage extends Collec
   repository?: RepositoryReviewSummary
   sources: RepositoryReviewRawFinding[]
   findings_processing: RepositoryReviewFindingHealthProcessing
-  historical_consolidation?: RepositoryReviewHistoricalConsolidation
   capabilities?: RepositoryReviewCapabilities
 }
 
@@ -362,7 +309,6 @@ export interface RepositoryReviewFindingsProcessingDetail {
   finding?: RepositoryReviewFinding
   repository_finding?: RepositoryFinding
   findings_processing?: RepositoryReviewFindingHealthProcessing
-  historical_consolidation?: RepositoryReviewHistoricalConsolidation
   health?: RepositoryReviewFindingHealth
 }
 
@@ -397,33 +343,11 @@ export interface RepositoryReviewFindingObservation {
   fix_effort?: RepositoryReviewFixEffort
 }
 
-export interface RepositoryReviewRun {
-  id: string
-  plan_id: string
-  commit_sha: string
-  inventory_hash: string
-  reviewed_files: number
-  unreviewed_files: number
-  unsupported_files: number
-  remaining_files: number
-  unreviewed_paths?: string[]
-  unsupported_paths?: string[]
-  skipped_files: number
-  excluded_files?: number
-  accepted_findings: number
-  rejected_findings: number
-  models: string[]
-  target_branch?: string
-  advertised_default_branch?: string
-  target_is_default?: boolean
-  completed_at: string
-}
-
 export interface RepositoryReviewIssueDraft {
   id: string
   repository: string
   finding_ids: string[]
-  origin?: RepositoryReviewIssueDraftOrigin
+  origin: RepositoryReviewIssueDraftOrigin
   generation_id?: string
   resolved_instructions?: string
   instructions_mode?: RepositoryReviewIssueInstructionsMode
@@ -439,13 +363,10 @@ export interface RepositoryReviewIssueDraft {
   attempt_generator_profile_id?: string
   attempt_generator_profile_version?: number
   generation_error?: string
-  canonical?: boolean
-  read_only?: boolean
   publishable?: boolean
   deletable?: boolean
   regeneratable?: boolean
   unlinkable?: boolean
-  conflict_reason?: string
   title: string
   body: string
   labels?: string[]
@@ -594,30 +515,6 @@ export interface RepositoryMappingModelSnapshot {
   account?: string
 }
 
-export interface RepositoryMappingAdjudication {
-  decision: string
-  candidate_id?: string
-  confidence: number
-  matching_anchors?: string[]
-  conflicting_anchors?: string[]
-  conflict_fields?: string[]
-  explanation?: string
-}
-
-export interface RepositoryMappingJob {
-  id: string
-  review_finding_id: string
-  state: RepositoryMappingJobState
-  repository_finding_id?: string
-  model_snapshot?: RepositoryMappingModelSnapshot
-  adjudication?: RepositoryMappingAdjudication
-  attempts: number
-  error?: string
-  reserved_at?: string
-  created_at: string
-  updated_at: string
-}
-
 export interface RepositoryValidationJob {
   id: string
   repository_finding_id: string
@@ -648,22 +545,6 @@ export interface RepositoryReviewRunFindingStatusMutationResponse {
 export interface RepositoryReviewRunFindingStatusProjection {
   id: string
   run_finding_status: RepositoryReviewRunFindingStatusState
-}
-
-export interface RepositoryReviewFindingsPage {
-  automation: RepositoryReviewAutomation
-  repository?: RepositoryReviewSummary
-  findings: RepositoryReviewFinding[]
-  repository_findings: RepositoryFinding[]
-  contexts?: RepositoryReviewFindingContext[]
-  scope: RepositoryReviewFindingsScope
-  offset: number
-  total: number
-  next_offset?: number
-  repository_finding_total: number
-  repository_finding_offset?: number
-  next_repository_finding_offset?: number
-  capabilities?: RepositoryReviewCapabilities
 }
 
 export interface RepositoryReviewRunFindingSummary {
@@ -714,7 +595,6 @@ export interface RepositoryReviewIssueSummary {
   finding_count: number
   origin: RepositoryReviewIssueDraftOrigin
   generation_id?: string
-  canonical: boolean
   publishable: boolean
   publish_blockers: RepositoryReviewPublishBlocker[]
   title: string
@@ -729,7 +609,6 @@ export interface RepositoryReviewRunFindingsCollectionPage extends CollectionPag
   repository?: RepositoryReviewSummary
   findings: RepositoryReviewRunFindingSummary[]
   findings_processing?: RepositoryReviewFindingsProcessingCounters
-  historical_deduplication?: RepositoryReviewHistoricalDeduplication
   capabilities?: RepositoryReviewCapabilities
 }
 
@@ -750,20 +629,6 @@ export interface RepositoryReviewIssuesCollectionPage extends CollectionPageMeta
 
 export type RepositoryReviewRepositoryFindingDetail =
   RepositoryReviewFindingDetail
-
-/** @deprecated Use RepositoryReviewFindingsPage. */
-export type RepositoryReviewReportPage = RepositoryReviewFindingsPage
-
-export interface RepositoryReviewIssuePage {
-  automation: RepositoryReviewAutomation
-  repository?: RepositoryReviewSummary
-  issues: RepositoryReviewIssueDraft[]
-  offset: number
-  total: number
-  next_offset?: number
-  generation_id?: string
-  capabilities?: RepositoryReviewCapabilities
-}
 
 export interface RepositoryReviewIssueDetail {
   automation: RepositoryReviewAutomation
@@ -788,7 +653,6 @@ export interface RepositoryReviewIssueMutationResponse {
   automation?: RepositoryReviewAutomation
   repository?: RepositoryReviewSummary
   issue?: RepositoryReviewIssueDraft
-  draft?: RepositoryReviewIssueDraft
   finding?: RepositoryReviewFinding
   generation_id?: string
   issues?: RepositoryReviewIssueDraft[]
@@ -834,39 +698,6 @@ export interface RepositoryReviewSummary {
   reviewed_file_count?: number
   excluded_file_count?: number
   updated_at: string
-}
-
-export interface RepositoryReviewState extends RepositoryReviewSummary {
-  files: Record<string, RepositoryReviewedFile>
-  unsupported: Record<string, RepositoryUnsupportedFile>
-  findings: RepositoryReviewFinding[]
-  contexts: RepositoryReviewFindingContext[]
-  runs: RepositoryReviewRun[]
-  issue_drafts: RepositoryReviewIssueDraft[]
-  repository_findings: RepositoryFinding[]
-  mapping_jobs: RepositoryMappingJob[]
-  validation_jobs: RepositoryValidationJob[]
-  finding_offset?: number
-  finding_total?: number
-  next_finding_offset?: number
-  draft_offset?: number
-  draft_total?: number
-  next_draft_offset?: number
-}
-
-export interface RepositoryReviewPage {
-  repositories: RepositoryReviewSummary[]
-}
-
-export interface RepositoryReviewIssueDraftResult {
-  repository: RepositoryReviewSummary
-  draft: RepositoryReviewIssueDraft
-  outcome?: "unknown"
-}
-
-export interface RepositoryReviewFindingResult {
-  repository: RepositoryReviewSummary
-  finding: RepositoryReviewFinding
 }
 
 export type RepositoryReviewAutomationStatus =
@@ -954,7 +785,7 @@ export interface RepositoryReviewFileAttribution {
   reviewer_identity?: string
   account?: string
   model?: string
-  source: "legacy" | "live" | "mixed"
+  source: "live"
   sources: string[]
   attempts: number
   run_ids: string[]
@@ -989,8 +820,6 @@ export interface RepositoryReviewAutomationProgress {
   unsupported_files: number
   raw_findings?: number
   deduplicated_findings?: number
-  /** @deprecated Use deduplicated_findings. */
-  findings: number
   assignment_progress: RepositoryReviewAssignmentProgress
   scope_frozen?: boolean
   finding_aggregates: number
@@ -1190,21 +1019,6 @@ export class RepositoryReviewAPIError extends Error {
 }
 
 const apiRoot = "/api/repository-reviews"
-
-export async function listRepositoryReviews(
-  signal?: AbortSignal,
-): Promise<RepositoryReviewPage> {
-  const page = await requestJSON<RepositoryReviewPage>(
-    apiRoot,
-    undefined,
-    signal,
-  )
-  return {
-    repositories: (page.repositories ?? []).map(
-      normalizeRepositoryReviewSummary,
-    ),
-  }
-}
 
 export async function listRepositoryReviewAutomations(
   signal?: AbortSignal,
@@ -1501,52 +1315,6 @@ export async function listRepositoryReviewAutomationFileAttributionsPage(
   }
 }
 
-export async function getRepositoryReviewAutomationFindings(
-  automationID: string,
-  input: {
-    scope?: RepositoryReviewFindingsScope
-    offset?: number
-    limit?: number
-  } = {},
-  signal?: AbortSignal,
-): Promise<RepositoryReviewFindingsPage> {
-  const params = new URLSearchParams()
-  params.set("scope", input.scope ?? "current")
-  if (input.offset) params.set("offset", String(input.offset))
-  if (input.limit) params.set("limit", String(input.limit))
-  const value = await requestJSON<
-    Partial<RepositoryReviewFindingsPage> & {
-      finding_total?: number
-      next_finding_offset?: number
-    }
-  >(
-    `${automationPath(automationID)}/report?${params.toString()}`,
-    undefined,
-    signal,
-  )
-  return {
-    ...value,
-    automation: normalizeAutomation(value.automation!),
-    repository: value.repository
-      ? normalizeRepositoryReviewSummary(value.repository)
-      : undefined,
-    findings: (value.findings ?? []).map(normalizeFinding),
-    repository_findings: (value.repository_findings ?? []).map(
-      normalizeRepositoryFinding,
-    ),
-    contexts: (value.contexts ?? []).map(normalizeFindingContext),
-    scope: value.scope === "all" ? "all" : "current",
-    offset: value.offset ?? input.offset ?? 0,
-    total: value.total ?? value.finding_total ?? value.findings?.length ?? 0,
-    next_offset: value.next_offset ?? value.next_finding_offset,
-    repository_finding_total:
-      value.repository_finding_total ?? value.repository_findings?.length ?? 0,
-    repository_finding_offset: value.repository_finding_offset ?? 0,
-    next_repository_finding_offset: value.next_repository_finding_offset,
-    capabilities: normalizeCapabilities(value.capabilities),
-  }
-}
-
 export async function listRepositoryReviewAutomationFindingsPage(
   automationID: string,
   input: CollectionListRequest = {},
@@ -1578,9 +1346,6 @@ export async function listRepositoryReviewAutomationFindingsPage(
     query_schema: page.query_schema ?? { fields: [] },
     findings_processing: page.findings_processing
       ? normalizeFindingsProcessingCounters(page.findings_processing)
-      : undefined,
-    historical_deduplication: page.historical_deduplication
-      ? normalizeHistoricalDeduplication(page.historical_deduplication)
       : undefined,
     capabilities: normalizeCapabilities(page.capabilities),
   }
@@ -1618,9 +1383,6 @@ export async function listRepositoryReviewAutomationRawFindingsPage(
     findings_processing: page.findings_processing
       ? normalizeFindingsProcessingCounters(page.findings_processing)
       : undefined,
-    historical_deduplication: page.historical_deduplication
-      ? normalizeHistoricalDeduplication(page.historical_deduplication)
-      : undefined,
   }
 }
 
@@ -1646,7 +1408,9 @@ export async function listRepositoryReviewFindingsProcessingPage(
     query: input.query?.trim() || "ALL ORDER BY updated DESC",
   }
   const page = await collectionRequest<
-    Partial<RepositoryReviewFindingsProcessingCollectionPage> & {
+    Partial<
+      Omit<RepositoryReviewFindingsProcessingCollectionPage, "sources">
+    > & {
       raw_findings?: RepositoryReviewRawFinding[]
     }
   >(
@@ -1662,7 +1426,7 @@ export async function listRepositoryReviewFindingsProcessingPage(
     repository: page.repository
       ? normalizeRepositoryReviewSummary(page.repository)
       : undefined,
-    sources: (page.sources ?? page.raw_findings ?? []).map(normalizeRawFinding),
+    sources: (page.raw_findings ?? []).map(normalizeRawFinding),
     total: page.total ?? 0,
     next_cursor: page.next_cursor ?? "",
     canonical_query: page.canonical_query ?? "",
@@ -1670,9 +1434,6 @@ export async function listRepositoryReviewFindingsProcessingPage(
     findings_processing: normalizeFindingHealthProcessing(
       page.findings_processing,
     ),
-    historical_consolidation: page.historical_consolidation
-      ? normalizeHistoricalConsolidation(page.historical_consolidation)
-      : undefined,
     capabilities: normalizeCapabilities(page.capabilities),
   }
 }
@@ -1717,11 +1478,7 @@ export async function getRepositoryReviewAutomationRepositoryFinding(
   repositoryFindingID: string,
   signal?: AbortSignal,
 ): Promise<RepositoryReviewRepositoryFindingDetail> {
-  const value = await requestJSON<
-    Partial<RepositoryReviewFindingDetail> & {
-      draft?: RepositoryReviewIssueDraft
-    }
-  >(
+  const value = await requestJSON<Partial<RepositoryReviewFindingDetail>>(
     `${automationPath(automationID)}/repository-findings/${encodeURIComponent(repositoryFindingID)}`,
     undefined,
     signal,
@@ -1729,44 +1486,13 @@ export async function getRepositoryReviewAutomationRepositoryFinding(
   return normalizeFindingDetail(value)
 }
 
-/** @deprecated Use getRepositoryReviewAutomationFindings. */
-export async function getRepositoryReviewAutomationReport(
-  automationID: string,
-  input: {
-    scope?: RepositoryReviewReportScope
-    offset?: number
-    limit?: number
-  } = {},
-  signal?: AbortSignal,
-): Promise<RepositoryReviewFindingsPage> {
-  return getRepositoryReviewAutomationFindings(automationID, input, signal)
-}
-
 export async function getRepositoryReviewAutomationFinding(
   automationID: string,
   findingID: string,
   signal?: AbortSignal,
 ): Promise<RepositoryReviewFindingDetail> {
-  const value = await requestJSON<
-    Partial<RepositoryReviewFindingDetail> & {
-      draft?: RepositoryReviewIssueDraft
-    }
-  >(automationFindingPath(automationID, findingID), undefined, signal)
-  return normalizeFindingDetail(value)
-}
-
-/** @deprecated Use only to resolve legacy rfn_* occurrence bookmarks. */
-export async function getRepositoryReviewAutomationRunFinding(
-  automationID: string,
-  findingID: string,
-  signal?: AbortSignal,
-): Promise<RepositoryReviewFindingDetail> {
-  const value = await requestJSON<
-    Partial<RepositoryReviewFindingDetail> & {
-      draft?: RepositoryReviewIssueDraft
-    }
-  >(
-    `${automationPath(automationID)}/run-findings/${encodeURIComponent(findingID)}`,
+  const value = await requestJSON<Partial<RepositoryReviewFindingDetail>>(
+    automationFindingPath(automationID, findingID),
     undefined,
     signal,
   )
@@ -1821,9 +1547,6 @@ export async function getRepositoryReviewRawSource(
     findings_processing: value.findings_processing
       ? normalizeFindingsProcessingCounters(value.findings_processing)
       : undefined,
-    historical_deduplication: value.historical_deduplication
-      ? normalizeHistoricalDeduplication(value.historical_deduplication)
-      : undefined,
   }
 }
 
@@ -1838,39 +1561,6 @@ export async function getRepositoryReviewFindingsProcessingSource(
     signal,
   )
   return normalizeFindingsProcessingDetail(value)
-}
-
-export async function getRepositoryReviewFindingsProcessing(
-  automationID: string,
-  input: {
-    offset?: number
-    limit?: number
-    state?: RepositoryReviewDeduplicationState
-  } = {},
-  signal?: AbortSignal,
-): Promise<RepositoryReviewRawFindingsPage> {
-  const params = new URLSearchParams()
-  if (input.offset) params.set("offset", String(input.offset))
-  if (input.limit) params.set("limit", String(input.limit))
-  if (input.state) params.set("state", input.state)
-  const value = await requestJSON<RepositoryReviewRawFindingsPage>(
-    `${automationPath(automationID)}/findings-processing?${params.toString()}`,
-    undefined,
-    signal,
-  )
-  return {
-    ...value,
-    automation: normalizeAutomation(value.automation),
-    repository: value.repository
-      ? normalizeRepositoryReviewSummary(value.repository)
-      : undefined,
-    raw_findings: (value.raw_findings ?? []).map(normalizeRawFinding),
-    findings_processing: value.findings_processing
-      ? normalizeFindingsProcessingCounters(value.findings_processing)
-      : undefined,
-    offset: value.offset ?? 0,
-    total: value.total ?? value.raw_findings?.length ?? 0,
-  }
 }
 
 export async function retryRepositoryReviewRawSource(
@@ -1933,62 +1623,6 @@ export async function retryRepositoryReviewFindingsProcessingSources(
       value.findings_processing,
     ),
     health: normalizeFindingHealth(value.health),
-  }
-}
-
-export async function retryRepositoryReviewHistoricalDeduplication(
-  automationID: string,
-  signal?: AbortSignal,
-): Promise<{
-  automation: RepositoryReviewAutomation
-  repository?: RepositoryReviewSummary
-  historical_deduplication: RepositoryReviewHistoricalDeduplication
-}> {
-  const value = await requestJSON<{
-    automation: RepositoryReviewAutomation
-    repository?: RepositoryReviewSummary
-    historical_deduplication: RepositoryReviewHistoricalDeduplication
-  }>(
-    `${automationPath(automationID)}/historical-deduplication/retry`,
-    jsonMutation("POST", {}),
-    signal,
-  )
-  return {
-    automation: normalizeAutomation(value.automation),
-    repository: value.repository
-      ? normalizeRepositoryReviewSummary(value.repository)
-      : undefined,
-    historical_deduplication: normalizeHistoricalDeduplication(
-      value.historical_deduplication,
-    ),
-  }
-}
-
-export async function restartRepositoryReviewHistoricalDeduplication(
-  automationID: string,
-  signal?: AbortSignal,
-): Promise<{
-  automation: RepositoryReviewAutomation
-  repository?: RepositoryReviewSummary
-  historical_deduplication: RepositoryReviewHistoricalDeduplication
-}> {
-  const value = await requestJSON<{
-    automation: RepositoryReviewAutomation
-    repository?: RepositoryReviewSummary
-    historical_deduplication: RepositoryReviewHistoricalDeduplication
-  }>(
-    `${automationPath(automationID)}/historical-deduplication/restart`,
-    jsonMutation("POST", { confirmed: true }),
-    signal,
-  )
-  return {
-    automation: normalizeAutomation(value.automation),
-    repository: value.repository
-      ? normalizeRepositoryReviewSummary(value.repository)
-      : undefined,
-    historical_deduplication: normalizeHistoricalDeduplication(
-      value.historical_deduplication,
-    ),
   }
 }
 
@@ -2095,64 +1729,6 @@ export async function syncRepositoryReviewFinding(
   return normalizeRepositoryFindingMutation(value)
 }
 
-export async function updateRepositoryReviewAutomationFinding(
-  automationID: string,
-  findingID: string,
-  input: {
-    status: Exclude<RepositoryReviewFindingStatus, "posted">
-    expected_version: number
-  },
-  signal?: AbortSignal,
-): Promise<RepositoryReviewFindingDetail> {
-  const value = await requestJSON<
-    Partial<RepositoryReviewFindingDetail> & {
-      draft?: RepositoryReviewIssueDraft
-    }
-  >(
-    automationFindingPath(automationID, findingID),
-    jsonMutation("PATCH", input),
-    signal,
-  )
-  return normalizeFindingDetail(value)
-}
-
-export async function listRepositoryReviewAutomationIssues(
-  automationID: string,
-  input: { generation_id?: string; offset?: number; limit?: number } = {},
-  signal?: AbortSignal,
-): Promise<RepositoryReviewIssuePage> {
-  const params = new URLSearchParams()
-  if (input.generation_id) params.set("generation_id", input.generation_id)
-  if (input.offset) params.set("offset", String(input.offset))
-  if (input.limit) params.set("limit", String(input.limit))
-  const query = params.size > 0 ? `?${params.toString()}` : ""
-  const value = await requestJSON<
-    Partial<RepositoryReviewIssuePage> & {
-      drafts?: RepositoryReviewIssueDraft[]
-      issue_total?: number
-      next_issue_offset?: number
-    }
-  >(`${automationPath(automationID)}/issues${query}`, undefined, signal)
-  return {
-    ...value,
-    automation: normalizeAutomation(value.automation!),
-    repository: value.repository
-      ? normalizeRepositoryReviewSummary(value.repository)
-      : undefined,
-    issues: (value.issues ?? value.drafts ?? []).map(normalizeIssueDraft),
-    offset: value.offset ?? input.offset ?? 0,
-    total:
-      value.total ??
-      value.issue_total ??
-      value.issues?.length ??
-      value.drafts?.length ??
-      0,
-    next_offset: value.next_offset ?? value.next_issue_offset,
-    generation_id: value.generation_id ?? input.generation_id,
-    capabilities: normalizeCapabilities(value.capabilities),
-  }
-}
-
 export async function listRepositoryReviewAutomationIssuesPage(
   automationID: string,
   input: CollectionListRequest & { generation_id?: string } = {},
@@ -2228,11 +1804,11 @@ export async function getRepositoryReviewAutomationIssue(
   draftID: string,
   signal?: AbortSignal,
 ): Promise<RepositoryReviewIssueDetail> {
-  const value = await requestJSON<
-    Partial<RepositoryReviewIssueDetail> & {
-      draft?: RepositoryReviewIssueDraft
-    }
-  >(automationIssuePath(automationID, draftID), undefined, signal)
+  const value = await requestJSON<Partial<RepositoryReviewIssueDetail>>(
+    automationIssuePath(automationID, draftID),
+    undefined,
+    signal,
+  )
   return normalizeIssueDetail(value)
 }
 
@@ -2247,11 +1823,7 @@ export async function updateRepositoryReviewAutomationIssue(
   },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewIssueDetail> {
-  const value = await requestJSON<
-    Partial<RepositoryReviewIssueDetail> & {
-      draft?: RepositoryReviewIssueDraft
-    }
-  >(
+  const value = await requestJSON<Partial<RepositoryReviewIssueDetail>>(
     automationIssuePath(automationID, draftID),
     jsonMutation("PATCH", input),
     signal,
@@ -2280,11 +1852,7 @@ export async function regenerateRepositoryReviewAutomationIssue(
   input: { expected_version: number },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewIssueDetail> {
-  const value = await requestJSON<
-    Partial<RepositoryReviewIssueDetail> & {
-      draft?: RepositoryReviewIssueDraft
-    }
-  >(
+  const value = await requestJSON<Partial<RepositoryReviewIssueDetail>>(
     `${automationIssuePath(automationID, draftID)}/regenerate`,
     jsonMutation("POST", input),
     signal,
@@ -2298,11 +1866,7 @@ export async function publishRepositoryReviewAutomationIssue(
   input: { expected_version: number; confirmed: true },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewIssueDetail> {
-  const value = await requestJSON<
-    Partial<RepositoryReviewIssueDetail> & {
-      draft?: RepositoryReviewIssueDraft
-    }
-  >(
+  const value = await requestJSON<Partial<RepositoryReviewIssueDetail>>(
     `${automationIssuePath(automationID, draftID)}/publish`,
     jsonMutation("POST", input),
     signal,
@@ -2350,11 +1914,7 @@ export async function linkRepositoryReviewIssue(
   },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewFindingDetail> {
-  const value = await requestJSON<
-    Partial<RepositoryReviewFindingDetail> & {
-      draft?: RepositoryReviewIssueDraft
-    }
-  >(
+  const value = await requestJSON<Partial<RepositoryReviewFindingDetail>>(
     `${automationFindingPath(automationID, findingID)}/issue-link`,
     jsonMutation("POST", input),
     signal,
@@ -2368,158 +1928,12 @@ export async function unlinkRepositoryReviewIssue(
   input: { expected_version: number; confirmed: true },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewFindingDetail> {
-  const value = await requestJSON<
-    Partial<RepositoryReviewFindingDetail> & {
-      draft?: RepositoryReviewIssueDraft
-    }
-  >(
+  const value = await requestJSON<Partial<RepositoryReviewFindingDetail>>(
     `${automationFindingPath(automationID, findingID)}/issue-link`,
     jsonMutation("DELETE", input),
     signal,
   )
   return normalizeFindingDetail(value)
-}
-
-export async function getRepositoryReview(
-  repositoryID: string,
-  signal?: AbortSignal,
-  options?: {
-    offset?: number
-    limit?: number
-    draftOffset?: number
-    draftLimit?: number
-  },
-): Promise<RepositoryReviewState> {
-  const params = new URLSearchParams()
-  if (options?.offset) params.set("offset", String(options.offset))
-  if (options?.limit) params.set("limit", String(options.limit))
-  if (options?.draftOffset)
-    params.set("draft_offset", String(options.draftOffset))
-  if (options?.draftLimit) params.set("draft_limit", String(options.draftLimit))
-  const query = params.size > 0 ? `?${params.toString()}` : ""
-  return normalizeRepositoryReviewState(
-    await requestJSON<RepositoryReviewState>(
-      repositoryPath(repositoryID) + query,
-      undefined,
-      signal,
-    ),
-  )
-}
-
-export async function updateRepositoryReviewFinding(
-  repositoryID: string,
-  findingID: string,
-  input: {
-    status: RepositoryReviewFindingStatus
-    expected_version: number
-  },
-  signal?: AbortSignal,
-): Promise<RepositoryReviewFindingResult> {
-  const result = await requestJSON<RepositoryReviewFindingResult>(
-    `${repositoryPath(repositoryID)}/findings/${encodeURIComponent(findingID)}`,
-    jsonMutation("PATCH", input),
-    signal,
-  )
-  return {
-    repository: normalizeRepositoryReviewSummary(result.repository),
-    finding: normalizeFinding(result.finding),
-  }
-}
-
-export async function createRepositoryReviewIssueDraft(
-  repositoryID: string,
-  input: {
-    finding_ids: string[]
-    title?: string
-    body?: string
-    labels?: string[]
-    expected_version: number
-  },
-  signal?: AbortSignal,
-): Promise<RepositoryReviewIssueDraftResult> {
-  return normalizeIssueDraftResult(
-    await requestJSON<RepositoryReviewIssueDraftResult>(
-      `${repositoryPath(repositoryID)}/issue-drafts`,
-      jsonMutation("POST", input),
-      signal,
-    ),
-  )
-}
-
-export async function updateRepositoryReviewIssueDraft(
-  repositoryID: string,
-  draftID: string,
-  input: {
-    title: string
-    body: string
-    labels: string[]
-    expected_version: number
-  },
-  signal?: AbortSignal,
-): Promise<RepositoryReviewIssueDraftResult> {
-  return normalizeIssueDraftResult(
-    await requestJSON<RepositoryReviewIssueDraftResult>(
-      `${repositoryPath(repositoryID)}/issue-drafts/${encodeURIComponent(draftID)}`,
-      jsonMutation("PATCH", input),
-      signal,
-    ),
-  )
-}
-
-export async function publishRepositoryReviewIssueDraft(
-  repositoryID: string,
-  draftID: string,
-  input: { expected_version: number },
-  signal?: AbortSignal,
-): Promise<RepositoryReviewIssueDraftResult> {
-  return normalizeIssueDraftResult(
-    await requestJSON<RepositoryReviewIssueDraftResult>(
-      `${repositoryPath(repositoryID)}/issue-drafts/${encodeURIComponent(draftID)}/publish`,
-      jsonMutation("POST", input),
-      signal,
-    ),
-  )
-}
-
-function normalizeIssueDraftResult(
-  value: RepositoryReviewIssueDraftResult,
-): RepositoryReviewIssueDraftResult {
-  return {
-    repository: normalizeRepositoryReviewSummary(value.repository),
-    draft: normalizeIssueDraft(value.draft),
-    ...(value.outcome ? { outcome: value.outcome } : {}),
-  }
-}
-
-function normalizeRepositoryReviewState(
-  value: RepositoryReviewState,
-): RepositoryReviewState {
-  return {
-    ...normalizeRepositoryReviewSummary(value),
-    files: value.files ?? {},
-    unsupported: value.unsupported ?? {},
-    findings: (value.findings ?? []).map(normalizeFinding),
-    contexts: (value.contexts ?? []).map((context) => ({
-      ...context,
-      files: context.files ?? [],
-    })),
-    runs: (value.runs ?? []).map((run) => ({
-      ...run,
-      remaining_files: run.remaining_files ?? run.unreviewed_files ?? 0,
-      unsupported_files: run.unsupported_files ?? 0,
-      unreviewed_paths: run.unreviewed_paths ?? [],
-      unsupported_paths: run.unsupported_paths ?? [],
-      models: run.models ?? [],
-    })),
-    issue_drafts: (value.issue_drafts ?? []).map(normalizeIssueDraft),
-    repository_findings: (value.repository_findings ?? []).map(
-      normalizeRepositoryFinding,
-    ),
-    mapping_jobs: (value.mapping_jobs ?? []).map(normalizeRepositoryMappingJob),
-    validation_jobs: (value.validation_jobs ?? []).map(
-      normalizeRepositoryValidationJob,
-    ),
-  }
 }
 
 function normalizeRepositoryReviewSummary(
@@ -2545,7 +1959,7 @@ function normalizeFileAttribution(
       : {}),
     ...(attribution.account ? { account: attribution.account } : {}),
     ...(attribution.model ? { model: attribution.model } : {}),
-    source: attribution.source ?? "legacy",
+    source: attribution.source,
     sources: attribution.sources ?? [],
     attempts: attribution.attempts ?? 0,
     run_ids: attribution.run_ids ?? [],
@@ -2620,9 +2034,6 @@ function normalizeFindingsProcessingDetail(
     findings_processing: value.findings_processing
       ? normalizeFindingHealthProcessing(value.findings_processing)
       : undefined,
-    historical_consolidation: value.historical_consolidation
-      ? normalizeHistoricalConsolidation(value.historical_consolidation)
-      : undefined,
     health: value.health ? normalizeFindingHealth(value.health) : undefined,
   }
 }
@@ -2652,9 +2063,6 @@ function normalizeFindingHealth(
     findings_processing: normalizeFindingHealthProcessing(
       value.findings_processing,
     ),
-    historical_consolidation: normalizeHistoricalConsolidation(
-      value.historical_consolidation,
-    ),
     updated_at: value.updated_at ?? "",
   }
 }
@@ -2671,32 +2079,6 @@ function normalizeFindingHealthProcessing(
   }
 }
 
-function normalizeHistoricalConsolidation(
-  value?: Partial<RepositoryReviewHistoricalConsolidation>,
-): RepositoryReviewHistoricalConsolidation {
-  const validStatuses = new Set<RepositoryReviewHistoricalConsolidationStatus>([
-    "not_required",
-    "pending",
-    "replaying",
-    "merging",
-    "failed",
-    "completed",
-  ])
-  const required = value?.required ?? false
-  const status = validStatuses.has(
-    value?.status as RepositoryReviewHistoricalConsolidationStatus,
-  )
-    ? (value?.status as RepositoryReviewHistoricalConsolidationStatus)
-    : required
-      ? "pending"
-      : "not_required"
-  return {
-    required,
-    status,
-    retryable: value?.retryable ?? false,
-  }
-}
-
 function normalizeFindingsProcessingCounters(
   counters: RepositoryReviewFindingsProcessingCounters,
 ): RepositoryReviewFindingsProcessingCounters {
@@ -2709,27 +2091,6 @@ function normalizeFindingsProcessingCounters(
     new: counters.new ?? 0,
     duplicates: counters.duplicates ?? 0,
     ...(counters.updated_at ? { updated_at: counters.updated_at } : {}),
-  }
-}
-
-function normalizeHistoricalDeduplication(
-  replay: RepositoryReviewHistoricalDeduplication,
-): RepositoryReviewHistoricalDeduplication {
-  const validStatus = new Set<RepositoryReviewHistoricalDeduplicationStatus>([
-    "pending",
-    "replaying",
-    "merging",
-    "failed",
-    "completed",
-  ]).has(replay.status as RepositoryReviewHistoricalDeduplicationStatus)
-    ? replay.status
-    : undefined
-  return {
-    required: replay.required ?? false,
-    ...(validStatus ? { status: validStatus } : {}),
-    ...(replay.attempts == null ? {} : { attempts: replay.attempts }),
-    ...(replay.error ? { error: replay.error } : {}),
-    ...(replay.updated_at ? { updated_at: replay.updated_at } : {}),
   }
 }
 
@@ -2768,9 +2129,8 @@ function normalizeIssueSummary(
     id: issue.id,
     repository: issue.repository,
     finding_count: issue.finding_count ?? 0,
-    origin: issue.origin || "legacy",
+    origin: issue.origin,
     ...(issue.generation_id ? { generation_id: issue.generation_id } : {}),
-    canonical: issue.canonical ?? false,
     publishable: issue.publishable ?? false,
     publish_blockers: normalizePublishBlockers(issue.publish_blockers),
     title: issue.title,
@@ -2784,11 +2144,19 @@ function normalizeIssueSummary(
 function normalizeFinding(
   finding: RepositoryReviewFinding,
 ): RepositoryReviewFinding {
+  const publicFinding = { ...finding } as RepositoryReviewFinding & {
+    raw_source_ids?: unknown
+    raw_source_total?: unknown
+    history?: unknown
+  }
+  delete publicFinding.raw_source_ids
+  delete publicFinding.raw_source_total
+  delete publicFinding.history
   return {
-    ...finding,
-    context_ids: finding.context_ids ?? [],
-    models: finding.models ?? [],
-    observations: (finding.observations ?? []).map((observation) => ({
+    ...publicFinding,
+    context_ids: publicFinding.context_ids ?? [],
+    models: publicFinding.models ?? [],
+    observations: (publicFinding.observations ?? []).map((observation) => ({
       ...observation,
       match_hints: observation.match_hints
         ? normalizeMatchHints(observation.match_hints)
@@ -2801,17 +2169,19 @@ function normalizeFinding(
         checks: observation.validation?.checks ?? [],
       },
     })),
-    match_hints: finding.match_hints
-      ? normalizeMatchHints(finding.match_hints)
+    match_hints: publicFinding.match_hints
+      ? normalizeMatchHints(publicFinding.match_hints)
       : undefined,
-    fix_effort: finding.fix_effort
-      ? normalizeFixEffort(finding.fix_effort)
+    fix_effort: publicFinding.fix_effort
+      ? normalizeFixEffort(publicFinding.fix_effort)
       : undefined,
     validation: {
-      ...finding.validation,
-      checks: finding.validation?.checks ?? [],
+      ...publicFinding.validation,
+      checks: publicFinding.validation?.checks ?? [],
     },
-    run_finding_status: normalizeRunFindingStatus(finding.run_finding_status),
+    run_finding_status: normalizeRunFindingStatus(
+      publicFinding.run_finding_status,
+    ),
   }
 }
 
@@ -2913,31 +2283,8 @@ function normalizeRepositoryFinding(
   }
 }
 
-function normalizeRepositoryMappingJob(
-  job: RepositoryMappingJob,
-): RepositoryMappingJob {
-  return {
-    ...job,
-    adjudication: job.adjudication
-      ? {
-          ...job.adjudication,
-          matching_anchors: job.adjudication.matching_anchors ?? [],
-          conflicting_anchors: job.adjudication.conflicting_anchors ?? [],
-        }
-      : undefined,
-  }
-}
-
-function normalizeRepositoryValidationJob(
-  job: RepositoryValidationJob,
-): RepositoryValidationJob {
-  return { ...job, candidate_commits: job.candidate_commits ?? [] }
-}
-
 function normalizeFindingDetail(
-  value: Partial<RepositoryReviewFindingDetail> & {
-    draft?: RepositoryReviewIssueDraft
-  },
+  value: Partial<RepositoryReviewFindingDetail>,
 ): RepositoryReviewFindingDetail {
   return {
     ...value,
@@ -2957,21 +2304,14 @@ function normalizeFindingDetail(
     possible_duplicate_findings: value.possible_duplicate_findings?.map(
       normalizeRepositoryFinding,
     ),
-    raw_source_total:
-      value.raw_source_total ?? value.finding?.raw_source_total ?? 0,
-    issue: value.issue
-      ? normalizeIssueDraft(value.issue)
-      : value.draft
-        ? normalizeIssueDraft(value.draft)
-        : undefined,
+    raw_source_total: value.raw_source_total ?? 0,
+    issue: value.issue ? normalizeIssueDraft(value.issue) : undefined,
     capabilities: normalizeCapabilities(value.capabilities),
   }
 }
 
 function normalizeIssueDetail(
-  value: Partial<RepositoryReviewIssueDetail> & {
-    draft?: RepositoryReviewIssueDraft
-  },
+  value: Partial<RepositoryReviewIssueDetail>,
 ): RepositoryReviewIssueDetail {
   return {
     ...value,
@@ -2979,7 +2319,7 @@ function normalizeIssueDetail(
     repository: value.repository
       ? normalizeRepositoryReviewSummary(value.repository)
       : undefined,
-    issue: normalizeIssueDraft(value.issue ?? value.draft!),
+    issue: normalizeIssueDraft(value.issue!),
     finding: value.finding ? normalizeFinding(value.finding) : undefined,
     capabilities: normalizeCapabilities(value.capabilities),
   }
@@ -3043,7 +2383,6 @@ function normalizeIssueMutationResponse(
       ? normalizeRepositoryReviewSummary(value.repository)
       : undefined,
     issue: value.issue ? normalizeIssueDraft(value.issue) : undefined,
-    draft: value.draft ? normalizeIssueDraft(value.draft) : undefined,
     finding: value.finding ? normalizeFinding(value.finding) : undefined,
     issues: value.issues?.map(normalizeIssueDraft),
     results: value.results ?? [],
@@ -3190,14 +2529,7 @@ function normalizeAutomation(
       remaining_files: automation.progress?.remaining_files ?? 0,
       unsupported_files: automation.progress?.unsupported_files ?? 0,
       raw_findings: automation.progress?.raw_findings ?? 0,
-      deduplicated_findings:
-        automation.progress?.deduplicated_findings ??
-        automation.progress?.findings ??
-        0,
-      findings:
-        automation.progress?.findings ??
-        automation.progress?.deduplicated_findings ??
-        0,
+      deduplicated_findings: automation.progress?.deduplicated_findings ?? 0,
       assignment_progress: normalizeAssignmentProgress(
         automation.progress?.assignment_progress,
       ),
@@ -3409,10 +2741,6 @@ function normalizeOptionalTimestamp(
   return Number.isNaN(parsed.getTime()) || parsed.getUTCFullYear() <= 1
     ? undefined
     : value
-}
-
-function repositoryPath(repositoryID: string): string {
-  return `${apiRoot}/${encodeURIComponent(repositoryID)}`
 }
 
 function automationPath(automationID: string): string {

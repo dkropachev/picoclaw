@@ -14,87 +14,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
 )
 
-func TestNativeRepositoryReviewDoesNotCheckpointFileWithFailedChallenge(t *testing.T) {
-	workspace := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(workspace, "pkg"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeTestFile(t, filepath.Join(workspace, "pkg", "service.go"), strings.Repeat("a", 120))
-	gitCmd(t, workspace, "init")
-	gitCmd(t, workspace, "config", "user.email", "test@example.com")
-	gitCmd(t, workspace, "config", "user.name", "Test User")
-	gitCmd(t, workspace, "add", "pkg/service.go")
-	gitCmd(t, workspace, "commit", "-m", "initial")
-	exec := ExecutionContext{WorkspaceDir: workspace, WorkflowRef: RepositoryBugFinderWorkflowRef, RunID: "native-run"}
-	inventory, handled, err := RunNativeFunction(context.Background(), "git.inventory", map[string]any{
-		"working_directory": ".", "target": "all",
-	}, exec)
-	if err != nil || !handled {
-		t.Fatalf("inventory handled=%v err=%v", handled, err)
-	}
-	file := inventory["selectedFiles"].([]map[string]any)[0]
-	planned, handled, err := RunNativeFunction(context.Background(), "review.repository", map[string]any{
-		"action": "plan", "working_directory": ".", "commit": inventory["commit"],
-		"inventory_hash": inventory["inventoryHash"], "files": []map[string]any{file},
-		"profile": map[string]any{"schema": "test-v1"},
-	}, exec)
-	if err != nil || !handled {
-		t.Fatalf("plan handled=%v err=%v", handled, err)
-	}
-	validated := map[string]any{
-		"summary":       "found",
-		"reviewedFiles": []any{"pkg/service.go"},
-		"findings": []any{repositoryReviewTestFinding(map[string]any{
-			"severity": "high", "title": "Lost update", "symbol": "Save", "file": "pkg/service.go",
-			"message": "A writer overwrites state.", "evidence": "No version fence.",
-			"impact":     "Data is lost.",
-			"validation": map[string]any{"status": "confirmed", "summary": "Reproduced", "checks": []any{"race test"}},
-		})},
-		"residualRisks": []any{},
-	}
-	children := []map[string]any{
-		{
-			"label": "correctness", "valid": true, "scope": []map[string]any{file},
-			"model": map[string]any{"selected": "review-a"}, "structured": validated, "text": "validated",
-		},
-		{
-			"label": "security challenge", "valid": false, "scope": []map[string]any{file},
-			"model": map[string]any{"selected": "review-b"}, "run_error": "security violation",
-		},
-	}
-	recorded, handled, err := RunNativeFunction(context.Background(), "review.repository", map[string]any{
-		"action": "record", "plan": planned["plan"], "managed_children": children,
-	}, exec)
-	if err != nil || !handled {
-		t.Fatalf("record handled=%v err=%v output=%#v", handled, err, recorded)
-	}
-	run := recorded["run"].(map[string]any)
-	if run["reviewed_files"] != float64(0) || run["unreviewed_files"] != float64(1) {
-		t.Fatalf("run coverage=%#v, want failed challenge to keep file pending", run)
-	}
-	state, found, err := repoaudit.NewStore(workspace).Get(workspace)
-	if err != nil || !found {
-		t.Fatalf("state found=%v err=%v", found, err)
-	}
-	if len(state.Files) != 0 || len(state.Findings) != 1 {
-		t.Fatalf(
-			"state files=%#v findings=%#v; partial finding should persist without checkpoint",
-			state.Files,
-			state.Findings,
-		)
-	}
-	next, err := repoaudit.NewStore(workspace).Plan(
-		context.Background(), workspace, "commit-b", "inventory-b", []repoaudit.FileRef{{
-			Path: "pkg/service.go", BlobSHA: file["fileHash"].(string), SizeBytes: 120,
-			Category: "code", Mode: "100644",
-		}},
-		false,
-	)
-	if err != nil || len(next.PendingFiles) != 1 {
-		t.Fatalf("next plan=%#v err=%v, want file retried", next, err)
-	}
-}
-
 func repositoryReviewTestFinding(finding map[string]any) map[string]any {
 	finding["match_hints"] = map[string]any{
 		"component": "persistence", "operation": "save versioned state",
@@ -119,7 +38,7 @@ func repositoryReviewTestFinding(finding map[string]any) map[string]any {
 }
 
 func TestNativeRepositoryReviewRejectsFieldsOutsideDiagnosisOnlyContract(t *testing.T) {
-	_, err := nativeRepositoryReviewObservation(
+	_, err := nativeRepositoryReviewObservationWithProvenance(
 		map[string]any{
 			"summary": "found", "reviewedFiles": []any{"service.go"},
 			"findings": []any{map[string]any{
@@ -133,8 +52,11 @@ func TestNativeRepositoryReviewRejectsFieldsOutsideDiagnosisOnlyContract(t *test
 			}},
 			"residualRisks": []any{},
 		},
-		nil,
-		"review-a",
+		[]map[string]any{{
+			"path": "service.go", "fileHash": strings.Repeat("a", 40),
+			"sizeBytes": int64(10), "contentComplete": true,
+		}},
+		nativeRepositoryReviewProvenance{Model: "review-a"},
 		"challenge",
 		"response",
 	)
@@ -178,13 +100,13 @@ func TestNativeRepositoryReviewRequiresClosedMatchingAndEffortContract(t *testin
 		})
 	}
 	observe := func(finding map[string]any) error {
-		_, err := nativeRepositoryReviewObservation(
+		_, err := nativeRepositoryReviewObservationWithProvenance(
 			map[string]any{
 				"summary": "found", "reviewedFiles": []any{"service.go"},
 				"findings": []any{finding}, "residualRisks": []any{},
 			},
 			scope,
-			"review-a",
+			nativeRepositoryReviewProvenance{Model: "review-a"},
 			"challenge",
 			"response",
 		)
@@ -203,7 +125,7 @@ func TestNativeRepositoryReviewRequiresClosedMatchingAndEffortContract(t *testin
 			mutate: func(finding map[string]any) {
 				delete(finding, "match_hints")
 			},
-			want: "missing required field \"match_hints\"",
+			want: `missing required field "match_hints"`,
 		},
 		{
 			name: "extra match hint",
@@ -218,7 +140,7 @@ func TestNativeRepositoryReviewRequiresClosedMatchingAndEffortContract(t *testin
 				quick := finding["fix_effort"].(map[string]any)["quick"].(map[string]any)
 				delete(quick, "rationale")
 			},
-			want: "missing required field \"rationale\"",
+			want: `missing required field "rationale"`,
 		},
 		{
 			name: "inconsistent effort class",
@@ -238,7 +160,7 @@ func TestNativeRepositoryReviewRequiresClosedMatchingAndEffortContract(t *testin
 		{
 			name: "too many anchors",
 			mutate: func(finding map[string]any) {
-				anchors := make([]any, maxMatchHintItemsForTest+1)
+				anchors := make([]any, 33)
 				for index := range anchors {
 					anchors[index] = fmt.Sprintf("anchor-%d", index)
 				}
@@ -258,68 +180,83 @@ func TestNativeRepositoryReviewRequiresClosedMatchingAndEffortContract(t *testin
 	}
 }
 
-const maxMatchHintItemsForTest = 32
-
-func TestNativeRepositoryReviewOptionalDefaultFallbackReviewerDoesNotBlockCoverage(t *testing.T) {
-	file := repoaudit.FileRef{
-		Path: "service.go", BlobSHA: strings.Repeat("a", 40), SizeBytes: 10,
-		Category: "code", Mode: "100644",
-	}
-	plan := repoaudit.Plan{PendingFiles: []repoaudit.FileRef{file}}
-	scope := nativeRepositoryReviewFileMaps([]repoaudit.FileRef{file})
-	observations, completed, err := nativeRepositoryReviewObservations(map[string]any{
-		"managed_children": []map[string]any{
-			{
-				"required": true, "valid": true, "scope": scope,
-				"model": map[string]any{
-					"selected": "primary", "actual": "openai/gpt-5.4", "account": "openai-work",
-				},
-				"structured": map[string]any{
-					"summary": "reviewed", "reviewedFiles": []any{"service.go"},
-					"findings": []any{}, "residualRisks": []any{},
-				},
+func TestNativeRepositoryReviewValidationRejectsMalformedCanonicalFieldTypes(t *testing.T) {
+	validFinding := func() map[string]any {
+		return repositoryReviewTestFinding(map[string]any{
+			"severity": "high", "title": "Lost update", "symbol": "Save",
+			"file": "service.go", "message": "Concurrent saves overwrite state.",
+			"evidence": "Both writes use one version.", "impact": "Data is lost.",
+			"validation": map[string]any{
+				"status": "confirmed", "summary": "Traced two writers", "checks": []any{},
 			},
-			{
-				"required": false, "valid": false, "scope": scope,
-				"model":     map[string]any{"selected": "fallback"},
-				"run_error": "security violation",
-			},
-		},
-	}, plan)
-	if err != nil || len(observations) != 1 ||
-		observations[0].Model != "openai/gpt-5.4" || observations[0].ModelAlias != "primary" ||
-		observations[0].Account != "openai-work" ||
-		!reflect.DeepEqual(completed, []repoaudit.FileRef{file}) {
-		t.Fatalf("optional reviewer coverage observations=%#v completed=%#v err=%v", observations, completed, err)
+		})
 	}
-}
-
-func TestNativeRepositoryReviewDerivesPublishIdentityFromActualGitOrigin(t *testing.T) {
-	workspace := t.TempDir()
-	writeTestFile(t, filepath.Join(workspace, "service.go"), "package service\n")
-	gitCmd(t, workspace, "init")
-	gitCmd(t, workspace, "config", "user.email", "test@example.com")
-	gitCmd(t, workspace, "config", "user.name", "Test User")
-	gitCmd(t, workspace, "remote", "add", "origin", "git@GitHub.com:Owner/Repo.git")
-	gitCmd(t, workspace, "add", "service.go")
-	gitCmd(t, workspace, "commit", "-m", "initial")
-	exec := ExecutionContext{WorkspaceDir: workspace, RunID: "identity-run"}
-	inventory, _, err := RunNativeFunction(context.Background(), "git.inventory", map[string]any{
-		"working_directory": ".", "target": "all",
-	}, exec)
-	if err != nil {
-		t.Fatal(err)
+	validOutput := func() map[string]any {
+		return map[string]any{
+			"summary": "found", "reviewedFiles": []any{"service.go"},
+			"findings": []any{validFinding()}, "residualRisks": []any{},
+		}
 	}
-	planned, _, err := RunNativeFunction(context.Background(), "review.repository", map[string]any{
-		"action": "plan", "working_directory": ".", "commit": inventory["commit"],
-		"inventory_hash": inventory["inventoryHash"], "files": inventory["selectedFiles"],
-	}, exec)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "extra output field", mutate: func(output map[string]any) { output["patch"] = "forbidden" }},
+		{name: "invalid summary", mutate: func(output map[string]any) { output["summary"] = 7 }},
+		{name: "unserializable reviewed files", mutate: func(output map[string]any) {
+			output["reviewedFiles"] = make(chan int)
+		}},
+		{name: "null residual risks", mutate: func(output map[string]any) { output["residualRisks"] = nil }},
+		{name: "scalar residual risks", mutate: func(output map[string]any) { output["residualRisks"] = "none" }},
+		{name: "invalid validation", mutate: func(output map[string]any) {
+			output["findings"].([]any)[0].(map[string]any)["validation"] = "invalid"
+		}},
+		{name: "extra validation field", mutate: func(output map[string]any) {
+			output["findings"].([]any)[0].(map[string]any)["validation"].(map[string]any)["next"] = "forbidden"
+		}},
+		{name: "missing validation field", mutate: func(output map[string]any) {
+			delete(output["findings"].([]any)[0].(map[string]any)["validation"].(map[string]any), "checks")
+		}},
+		{name: "invalid match hints", mutate: func(output map[string]any) {
+			output["findings"].([]any)[0].(map[string]any)["match_hints"] = "invalid"
+		}},
+		{name: "missing match hint field", mutate: func(output map[string]any) {
+			delete(output["findings"].([]any)[0].(map[string]any)["match_hints"].(map[string]any), "trigger")
+		}},
+		{name: "invalid fix effort", mutate: func(output map[string]any) {
+			output["findings"].([]any)[0].(map[string]any)["fix_effort"] = "invalid"
+		}},
+		{name: "extra fix effort field", mutate: func(output map[string]any) {
+			output["findings"].([]any)[0].(map[string]any)["fix_effort"].(map[string]any)["later"] = map[string]any{}
+		}},
+		{name: "missing effort estimate", mutate: func(output map[string]any) {
+			delete(output["findings"].([]any)[0].(map[string]any)["fix_effort"].(map[string]any), "quick")
+		}},
+		{name: "invalid effort estimate", mutate: func(output map[string]any) {
+			output["findings"].([]any)[0].(map[string]any)["fix_effort"].(map[string]any)["quick"] = "invalid"
+		}},
+		{name: "extra estimate field", mutate: func(output map[string]any) {
+			finding := output["findings"].([]any)[0].(map[string]any)
+			quick := finding["fix_effort"].(map[string]any)["quick"].(map[string]any)
+			quick["patch"] = "forbidden"
+		}},
+		{name: "missing estimate field", mutate: func(output map[string]any) {
+			finding := output["findings"].([]any)[0].(map[string]any)
+			quick := finding["fix_effort"].(map[string]any)["quick"].(map[string]any)
+			delete(quick, "loc_min")
+		}},
+		{name: "unserializable finding", mutate: func(output map[string]any) {
+			output["findings"].([]any)[0].(map[string]any)["line"] = make(chan int)
+		}},
 	}
-	plan := planned["plan"].(map[string]any)
-	if plan["repository"] != "owner/repo" {
-		t.Fatalf("repository identity=%#v, want owner/repo", plan["repository"])
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := validOutput()
+			test.mutate(output)
+			if err := nativeValidateRepositoryReviewOutputFields(output); err == nil {
+				t.Fatalf("malformed canonical output was accepted: %#v", output)
+			}
+		})
 	}
 }
 
@@ -348,59 +285,6 @@ func TestNativeRepositoryReviewUsesPreservedGitHubOriginForLocalSourceClone(t *t
 	}, ExecutionContext{WorkspaceDir: workspace})
 	if err != nil || identity != "owner/repo" {
 		t.Fatalf("local clone publish identity=%q err=%v", identity, err)
-	}
-}
-
-func TestNativeRepositoryReviewRejectsMalformedActionsAndEvidence(t *testing.T) {
-	exec := ExecutionContext{
-		WorkspaceDir: t.TempDir(), WorkflowRef: RepositoryBugFinderWorkflowRef, RunID: "native-errors",
-	}
-	for _, test := range []struct {
-		name string
-		args map[string]any
-		want string
-	}{
-		{name: "unknown action", args: map[string]any{"action": "unknown"}, want: "unsupported"},
-		{name: "malformed plan files", args: map[string]any{"action": "plan", "files": []any{"bad"}}, want: "review repository files"},
-		{name: "malformed freeze scope", args: map[string]any{"action": "freeze", "files": "bad"}, want: "immutable Git scope"},
-		{name: "unserializable record plan", args: map[string]any{"action": "record", "plan": make(chan int)}, want: "unsupported type"},
-		{name: "record without evidence", args: map[string]any{"action": "record", "plan": repoaudit.Plan{}}, want: "structured review evidence"},
-		{name: "unserializable result plan", args: map[string]any{"action": "result", "plan": make(chan int)}, want: "unsupported type"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := nativeRepositoryReview(context.Background(), test.args, exec)
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("nativeRepositoryReview(%#v) error = %v, want %q", test.args, err, test.want)
-			}
-		})
-	}
-
-	pending, err := nativeRepositoryReview(context.Background(), map[string]any{
-		"action": "result",
-		"plan":   repoaudit.Plan{PendingFiles: []repoaudit.FileRef{{Path: "service.go"}}},
-	}, exec)
-	if err != nil || pending["summary"] != "Repository review batch completed." {
-		t.Fatalf("pending result = (%#v, %v)", pending, err)
-	}
-	noop, err := nativeRepositoryReview(context.Background(), map[string]any{
-		"action": "result", "plan": repoaudit.Plan{}, "excluded_count": "2",
-	}, exec)
-	if err != nil || noop["summary"] != "No changed reviewable files required model review." ||
-		noop["findingIds"] == nil {
-		t.Fatalf("noop result = (%#v, %v)", noop, err)
-	}
-	preserved, err := nativeRepositoryReview(context.Background(), map[string]any{
-		"action": "result",
-		"plan":   repoaudit.Plan{},
-		"review": map[string]any{"summary": "review complete"},
-		"recorded": map[string]any{
-			"run":                map[string]any{"reviewed_files": 1},
-			"acceptedFindingIds": []string{"finding-1"},
-		},
-	}, exec)
-	if err != nil || preserved["summary"] != "review complete" ||
-		!reflect.DeepEqual(preserved["findingIds"], []string{"finding-1"}) {
-		t.Fatalf("preserved result = (%#v, %v)", preserved, err)
 	}
 }
 
@@ -559,9 +443,9 @@ func TestNativeRepositoryReviewEvidenceContracts(t *testing.T) {
 	file := repoaudit.FileRef{Path: "service.go", BlobSHA: strings.Repeat("a", 40), SizeBytes: 12}
 	fileMap := nativeRepositoryReviewFileMaps([]repoaudit.FileRef{file})[0]
 	if parsed, err := nativeRepositoryReviewFiles([]map[string]any{{
-		"path": "service.go", "blob_sha": file.BlobSHA, "size_bytes": json.Number("12"),
+		"path": "service.go", "fileHash": file.BlobSHA, "sizeBytes": json.Number("12"),
 	}}); err != nil || !reflect.DeepEqual(parsed, []repoaudit.FileRef{file}) {
-		t.Fatalf("legacy exact file reference = (%#v, %v)", parsed, err)
+		t.Fatalf("exact file reference = (%#v, %v)", parsed, err)
 	}
 	for _, value := range []any{
 		[]map[string]any{{"path": "", "fileHash": file.BlobSHA, "sizeBytes": 1}},
@@ -586,39 +470,6 @@ func TestNativeRepositoryReviewEvidenceContracts(t *testing.T) {
 		t.Fatalf("fallback bound file = %#v", bound)
 	}
 
-	if _, _, err := nativeRepositoryReviewObservations(map[string]any{
-		"managed_children": "bad",
-	}, repoaudit.Plan{}); err == nil || !strings.Contains(err.Error(), "managed children") {
-		t.Fatalf("invalid managed children error = %v", err)
-	}
-	if observations, completed, err := nativeRepositoryReviewObservations(map[string]any{
-		"reviewable_count": 0,
-	}, repoaudit.Plan{}); err != nil || observations != nil || len(completed) != 0 {
-		t.Fatalf("bounded empty review = (%#v, %#v, %v)", observations, completed, err)
-	}
-	if _, _, err := nativeRepositoryReviewObservations(map[string]any{
-		"managed_children": []map[string]any{{"scope": "bad"}},
-	}, repoaudit.Plan{}); err == nil || !strings.Contains(err.Error(), "managed child 0 scope") {
-		t.Fatalf("invalid child scope error = %v", err)
-	}
-	if _, _, err := nativeRepositoryReviewObservations(
-		nil,
-		repoaudit.Plan{PendingFiles: []repoaudit.FileRef{file}},
-	); err == nil {
-		t.Fatal("missing single-review evidence was accepted")
-	}
-	structured := map[string]any{
-		"summary": "checked", "reviewedFiles": []any{"service.go"},
-		"findings": []any{}, "residualRisks": []any{},
-	}
-	observations, completed, err := nativeRepositoryReviewObservations(map[string]any{
-		"review": structured,
-	}, repoaudit.Plan{PendingFiles: []repoaudit.FileRef{file}})
-	if err != nil || len(observations) != 1 || observations[0].Model != "default" ||
-		!reflect.DeepEqual(completed, []repoaudit.FileRef{file}) {
-		t.Fatalf("default single review = (%#v, %#v, %v)", observations, completed, err)
-	}
-
 	complete := map[string]bool{"service.go": true}
 	for _, test := range []struct {
 		name       string
@@ -641,39 +492,37 @@ func TestNativeRepositoryReviewEvidenceContracts(t *testing.T) {
 	if got := nativeRepositoryReviewCompletedScopePaths("bad"); got != nil {
 		t.Fatalf("invalid completed scope = %#v", got)
 	}
-	if _, provenanceErr := nativeRepositoryReviewManagedChildProvenance(map[string]any{
-		"model": map[string]any{"selected": "review", "actual": "provider/model"},
-	}, false); provenanceErr == nil || !strings.Contains(provenanceErr.Error(), "incomplete model provenance") {
-		t.Fatalf("partial managed provenance error = %v", provenanceErr)
+	structured := map[string]any{
+		"summary": "checked", "reviewedFiles": []any{"service.go"},
+		"findings": []any{}, "residualRisks": []any{},
 	}
-	legacyProvenance, err := nativeRepositoryReviewManagedChildProvenance(map[string]any{
-		"model": map[string]any{"selected": "legacy-review"},
-	}, true)
-	if err != nil || legacyProvenance.Model != "legacy-review" ||
-		legacyProvenance.ModelAlias != "" || legacyProvenance.Account != "" {
-		t.Fatalf("legacy managed provenance = %#v, err=%v", legacyProvenance, err)
-	}
-	if _, err := nativeRepositoryReviewObservation(structured, "bad", "model", "reviewer", "raw"); err == nil ||
-		!strings.Contains(err.Error(), "scope") {
+	if _, err := nativeRepositoryReviewObservationWithProvenance(
+		structured, "bad", nativeRepositoryReviewProvenance{Model: "model"}, "reviewer", "raw",
+	); err == nil || !strings.Contains(err.Error(), "scope") {
 		t.Fatalf("invalid observation scope error = %v", err)
 	}
-	if _, err := nativeRepositoryReviewObservation(
+	if _, err := nativeRepositoryReviewObservationWithProvenance(
 		map[string]any{
 			"summary": "bad", "reviewedFiles": []any{},
 			"findings": "bad", "residualRisks": []any{},
 		},
 		[]map[string]any{fileMap},
-		"model",
+		nativeRepositoryReviewProvenance{Model: "model"},
 		"reviewer",
 		"raw",
-	); err == nil ||
-		!strings.Contains(err.Error(), "findings") {
+	); err == nil || !strings.Contains(err.Error(), "findings") {
 		t.Fatalf("invalid findings error = %v", err)
 	}
-	if _, err := nativeRepositoryReviewObservation(map[string]any{
-		"summary": "bad", "reviewedFiles": []any{"service.go"},
-		"findings": []map[string]any{{"bad": make(chan int)}}, "residualRisks": []any{},
-	}, []map[string]any{fileMap}, "model", "reviewer", "raw"); err == nil {
+	if _, err := nativeRepositoryReviewObservationWithProvenance(
+		map[string]any{
+			"summary": "bad", "reviewedFiles": []any{"service.go"},
+			"findings": []map[string]any{{"bad": make(chan int)}}, "residualRisks": []any{},
+		},
+		[]map[string]any{fileMap},
+		nativeRepositoryReviewProvenance{Model: "model"},
+		"reviewer",
+		"raw",
+	); err == nil {
 		t.Fatal("unserializable finding was accepted")
 	}
 	if merged := mergeNativeRepositoryUnsupportedFiles(
@@ -684,6 +533,84 @@ func TestNativeRepositoryReviewEvidenceContracts(t *testing.T) {
 		},
 	); len(merged) != 2 || merged[0].Path != "a" || merged[1].Reason != "file_too_large" {
 		t.Fatalf("merged unsupported files = %#v", merged)
+	}
+}
+
+func TestNativeRepositoryReviewUnavailableScopeFilesKeepsOnlyExactAggregateLimits(t *testing.T) {
+	if files := nativeRepositoryReviewUnavailableScopeFiles("invalid"); files != nil {
+		t.Fatalf("invalid scope files=%#v", files)
+	}
+	first := repoaudit.FileRef{Path: "a.go", BlobSHA: strings.Repeat("a", 40), SizeBytes: 1}
+	second := repoaudit.FileRef{Path: "b.go", BlobSHA: strings.Repeat("b", 40), SizeBytes: 2}
+	firstMap := nativeRepositoryReviewFileMaps([]repoaudit.FileRef{first})[0]
+	firstMap["contentUnavailable"] = " aggregate_limit "
+	secondMap := nativeRepositoryReviewFileMaps([]repoaudit.FileRef{second})[0]
+	secondMap["contentUnavailable"] = "aggregate_limit"
+	files := nativeRepositoryReviewUnavailableScopeFiles([]any{
+		"not-a-file",
+		map[string]any{"path": "binary.bin", "contentUnavailable": "binary"},
+		map[string]any{"path": "bad.go", "contentUnavailable": "aggregate_limit"},
+		secondMap,
+		firstMap,
+	})
+	if len(files) != 2 || files[0]["path"] != "a.go" || files[1]["path"] != "b.go" ||
+		files[0]["contentUnavailable"] != nil || files[1]["contentUnavailable"] != nil {
+		t.Fatalf("aggregate-limit files=%#v", files)
+	}
+}
+
+func TestNativeRepositoryReviewRejectsMalformedActionsAndEvidence(t *testing.T) {
+	exec := ExecutionContext{
+		WorkspaceDir: t.TempDir(), WorkflowRef: RepositoryBugFinderWorkflowRef, RunID: "native-errors",
+	}
+	for _, test := range []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{name: "unknown action", args: map[string]any{"action": "unknown"}, want: "unsupported"},
+		{name: "malformed plan files", args: map[string]any{"action": "plan", "files": []any{"bad"}}, want: "review repository files"},
+		{name: "malformed freeze scope", args: map[string]any{"action": "freeze", "files": "bad"}, want: "immutable Git scope"},
+		{name: "unserializable begin plan", args: map[string]any{"action": "begin", "plan": make(chan int)}, want: "unsupported type"},
+		{name: "begin without catalog", args: map[string]any{"action": "begin", "plan": repoaudit.Plan{}}, want: "no assignment catalog"},
+		{name: "unserializable record plan", args: map[string]any{"action": "record", "plan": make(chan int)}, want: "unsupported type"},
+		{name: "record without durable plan", args: map[string]any{"action": "record", "plan": repoaudit.Plan{}}, want: "no assignment catalog"},
+		{name: "unserializable result plan", args: map[string]any{"action": "result", "plan": make(chan int)}, want: "unsupported type"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := nativeRepositoryReview(context.Background(), test.args, exec)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("nativeRepositoryReview(%#v) error = %v, want %q", test.args, err, test.want)
+			}
+		})
+	}
+
+	pending, err := nativeRepositoryReview(context.Background(), map[string]any{
+		"action": "result",
+		"plan":   repoaudit.Plan{PendingFiles: []repoaudit.FileRef{{Path: "service.go"}}},
+	}, exec)
+	if err != nil || pending["summary"] != "Repository review batch completed." {
+		t.Fatalf("pending result = (%#v, %v)", pending, err)
+	}
+	noop, err := nativeRepositoryReview(context.Background(), map[string]any{
+		"action": "result", "plan": repoaudit.Plan{}, "excluded_count": "2",
+	}, exec)
+	if err != nil || noop["summary"] != "No changed reviewable files required model review." ||
+		noop["findingIds"] == nil {
+		t.Fatalf("noop result = (%#v, %v)", noop, err)
+	}
+	preserved, err := nativeRepositoryReview(context.Background(), map[string]any{
+		"action": "result",
+		"plan":   repoaudit.Plan{},
+		"review": map[string]any{"summary": "review complete"},
+		"recorded": map[string]any{
+			"run":                map[string]any{"reviewed_files": 1},
+			"acceptedFindingIds": []string{"rrw_finding_one"},
+		},
+	}, exec)
+	if err != nil || preserved["summary"] != "review complete" ||
+		!reflect.DeepEqual(preserved["findingIds"], []string{"rrw_finding_one"}) {
+		t.Fatalf("preserved result = (%#v, %v)", preserved, err)
 	}
 }
 

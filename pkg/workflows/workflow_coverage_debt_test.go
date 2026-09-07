@@ -7,24 +7,6 @@ import (
 )
 
 func TestWorkflowCoverageDebtHelpers(t *testing.T) {
-	currentFocus := repositoryBugFinderFocuses[0]
-	if got := repositoryReviewManagedEvidenceFocusID(map[string]any{
-		"tasks": []any{currentFocus.Task},
-	}); got != currentFocus.ID {
-		t.Fatalf("current focus = %q, want %q", got, currentFocus.ID)
-	}
-	legacyTask := "Trace correctness, state transitions, invariants, and data-flow edge cases."
-	if got := repositoryReviewManagedEvidenceFocusID(map[string]any{
-		"tasks": []string{legacyTask},
-	}); got != repositoryBugFinderLegacyFocusTasks[legacyTask] {
-		t.Fatalf("legacy focus = %q", got)
-	}
-	if got := repositoryReviewManagedEvidenceFocusID(map[string]any{
-		"tasks": []any{"unknown review task"},
-	}); got != "" {
-		t.Fatalf("unknown focus = %q", got)
-	}
-
 	if draft := fallbackWorkflowDraftYAML("Fallback", "inspect state"); !strings.Contains(draft, `name: "Fallback"`) ||
 		!strings.Contains(draft, `prompt: "inspect state"`) {
 		t.Fatalf("fallback workflow draft = %q", draft)
@@ -35,7 +17,6 @@ func TestWorkflowCoverageDebtHelpers(t *testing.T) {
 		!strings.Contains(draft, "commit:") || !strings.Contains(draft, "prompt:") {
 		t.Fatalf("fallback repository review draft = %q", draft)
 	}
-
 	if !nativeTargetSelects("tests", "tests") || nativeTargetSelects("unknown", "tests") {
 		t.Fatal("target selection fallback branches are incorrect")
 	}

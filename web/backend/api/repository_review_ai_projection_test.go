@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +23,14 @@ func TestRepositoryMappingAdjudicationProjectionBoundsPrivateData(t *testing.T) 
 	}
 	request := repoaudit.RepositoryMappingAIRequest{
 		Finding: repoaudit.Finding{
-			CampaignID:   canary,
+			CampaignID:      canary,
+			AdmissionBucket: "bucket-secret",
+			CreationOrdinal: 17,
+			DiagnosisDigest: "digest-secret",
+			RawSourceIDs:    []string{"rrw_secret"},
+			History: []repoaudit.DeduplicatedFindingHistoryEntry{{
+				Action: "history-secret",
+			}},
 			ID:           "rvf_occurrence",
 			ContextIDs:   []string{"context-secret"},
 			Models:       []string{"reviewer-secret"},
@@ -84,6 +93,25 @@ func TestRepositoryMappingAdjudicationProjectionBoundsPrivateData(t *testing.T) 
 	}
 	if request.Candidates[0].Finding.PathSymbolHistory[4].ReviewFindingID != "rvf_04" {
 		t.Fatal("projection mutated source candidate history")
+	}
+	payload, err := repositoryMappingAdjudicationPayload(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payloadObject map[string]any
+	if err := json.Unmarshal(payload, &payloadObject); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		canary, "bucket-secret", "digest-secret", "rrw_secret", "history-secret",
+		`"campaign_id"`, `"admission_bucket"`, `"creation_ordinal"`,
+		`"diagnosis_digest"`, `"raw_source_ids"`, `"history"`,
+		`"context_ids"`, `"models"`, `"observation_count"`,
+		`"observations"`, `"issue_draft_id"`,
+	} {
+		if strings.Contains(string(payload), forbidden) {
+			t.Fatalf("mapping payload exposed %q: %s", forbidden, payload)
+		}
 	}
 }
 

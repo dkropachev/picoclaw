@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -43,22 +42,6 @@ func (h *Handler) handleListRepositoryReviewFindingsProcessing(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	legacy, modeErr := repositoryReviewUsesLegacyFindingsProcessingPage(r)
-	if modeErr != nil {
-		writeCollectionError(
-			w,
-			http.StatusBadRequest,
-			"invalid_collection_request",
-			"Collection query parameters are malformed",
-			-1,
-			nil,
-		)
-		return
-	}
-	if legacy {
-		h.handleGetRepositoryReviewFindingsProcessing(w, r)
-		return
-	}
 	listRequest, ok := parseCollectionListRequest(
 		w, r, repositoryReviewFindingsProcessingCollectionSchema,
 	)
@@ -113,25 +96,13 @@ func (h *Handler) handleListRepositoryReviewFindingsProcessing(
 				"symbol": symbols, "model": models, "reviewer": reviewers,
 			},
 		),
-		"capabilities":             repositoryReviewGlobalCapabilities(ledger),
-		"findings_processing":      health.FindingsProcessing,
-		"historical_consolidation": health.HistoricalConsolidation,
+		"capabilities":        repositoryReviewGlobalCapabilities(ledger),
+		"findings_processing": health.FindingsProcessing,
 	}
 	if ledger.Found {
 		response["repository"] = repoaudit.Summarize(ledger.State)
 	}
 	writeRepositoryReviewJSON(w, http.StatusOK, response)
-}
-
-func repositoryReviewUsesLegacyFindingsProcessingPage(r *http.Request) (bool, error) {
-	if r == nil || r.URL == nil {
-		return false, errors.New("invalid findings processing request")
-	}
-	query, err := url.ParseQuery(r.URL.RawQuery)
-	if err != nil {
-		return false, err
-	}
-	return query.Has("offset") || query.Has("state"), nil
 }
 
 func repositoryReviewFindingsProcessingPageOptions(
@@ -198,31 +169,17 @@ func repositoryReviewProcessingSourceDetail(
 ) map[string]any {
 	health := repositoryReviewFindingHealthFor(ledger.Automation, ledger.State)
 	response := map[string]any{
-		"automation":               projectRepositoryReviewAutomation(ledger.Automation),
-		"repository":               repoaudit.Summarize(ledger.State),
-		"source":                   projectRepositoryReviewRawFindingDetail(raw),
-		"capabilities":             repositoryReviewGlobalCapabilities(ledger),
-		"findings_processing":      health.FindingsProcessing,
-		"historical_consolidation": health.HistoricalConsolidation,
+		"automation":          projectRepositoryReviewAutomation(ledger.Automation),
+		"repository":          repoaudit.Summarize(ledger.State),
+		"source":              projectRepositoryReviewRawFindingDetail(raw),
+		"capabilities":        repositoryReviewGlobalCapabilities(ledger),
+		"findings_processing": health.FindingsProcessing,
 	}
 	if contextRecord, found := repositoryReviewContextByID(ledger.State, raw.ContextID); found {
 		response["context"] = contextRecord
 	}
 	repositoryFindingID := ""
-	if finding, found := repositoryReviewDeduplicatedFindingByID(
-		ledger.State, raw.DeduplicatedFindingID,
-	); found {
-		repositoryFindingID = finding.RepositoryFindingID
-		if projection, projectionFound := repositoryReviewFindingByID(
-			ledger.State, finding.ID,
-		); projectionFound {
-			response["finding"] = projectRepositoryReviewRunFinding(ledger.State, projection)
-		} else {
-			response["finding"] = finding
-		}
-	} else if finding, found := repositoryReviewFindingByID(
-		ledger.State, raw.DeduplicatedFindingID,
-	); found {
+	if finding, found := repositoryReviewFindingByID(ledger.State, raw.DeduplicatedFindingID); found {
 		repositoryFindingID = finding.RepositoryFindingID
 		response["finding"] = projectRepositoryReviewRunFinding(ledger.State, finding)
 	}
@@ -250,13 +207,6 @@ func (h *Handler) handleRetryRepositoryReviewProcessingSource(
 	}
 	ledger, raw, ok := h.repositoryReviewCanonicalProcessingSource(w, r)
 	if !ok {
-		return
-	}
-	if repoaudit.HistoricalDeduplicationRawFinding(raw) {
-		writeRepositoryReviewError(w, errors.Join(
-			repoaudit.ErrConflict,
-			errors.New("historical sources require retrying historical consolidation"),
-		))
 		return
 	}
 	state, retried, err := ledger.Store.RetryDeduplication(ledger.State.Repository, raw.ID)
@@ -333,8 +283,8 @@ func (h *Handler) repositoryReviewCanonicalProcessingSource(
 		writeRepositoryReviewAutomationError(w, err)
 		return repositoryReviewAutomationLedger{}, repoaudit.RawReviewFinding{}, false
 	}
-	raw, found := repositoryReviewRawFindingByAlias(
-		ledger.State.RawFindings, strings.TrimSpace(r.PathValue("source_id")),
+	raw, found := repositoryReviewRawFindingByID(
+		ledger.State, strings.TrimSpace(r.PathValue("source_id")),
 	)
 	if !found {
 		writeRepositoryReviewAutomationError(w, os.ErrNotExist)

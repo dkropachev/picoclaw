@@ -28,10 +28,8 @@ import {
   repositoryReviewAutomationIsActive,
   repositoryReviewFindingHealthNeedsPolling,
   repositoryReviewFindingHealthQueryKey,
-  repositoryReviewHistoricalConsolidationIsActive,
   useRepositoryReviewFindingHealth,
 } from "./repository-review-finding-health"
-import { RepositoryReviewHistoricalConsolidationNotice } from "./repository-review-findings-processing"
 import {
   repositoryReviewProcessingDispositionLabel,
   repositoryReviewProcessingStateLabel,
@@ -84,14 +82,10 @@ export function RepositoryReviewFindingsProcessingPage({
       return Boolean(
         first && repositoryReviewAutomationIsActive(first.automation),
       ) ||
-        current.state.data?.pages.some(
-          (page) =>
-            page.sources.some((source) =>
-              new Set(["pending", "running"]).has(source.deduplication_state),
-            ) ||
-            repositoryReviewHistoricalConsolidationIsActive(
-              page.historical_consolidation,
-            ),
+        current.state.data?.pages.some((page) =>
+          page.sources.some((source) =>
+            new Set(["pending", "running"]).has(source.deduplication_state),
+          ),
         )
         ? 2_000
         : false
@@ -295,7 +289,6 @@ export function RepositoryReviewFindingsProcessingPage({
     </Button>
   )
 
-  const consolidation = healthQuery.data?.historical_consolidation
   return (
     <StandardCollectionPage
       definition={definition}
@@ -337,15 +330,6 @@ export function RepositoryReviewFindingsProcessingPage({
         isItemSelectable: (source) => source.deduplication_state === "failed",
         renderActions: selectionActions,
       }}
-      beforeResults={
-        <RepositoryReviewHistoricalConsolidationNotice
-          automationID={automationID}
-          consolidation={consolidation}
-          onRefresh={() =>
-            Promise.all([query.refetch(), healthQuery.refetch()])
-          }
-        />
-      }
       emptyTitle={
         repositoryReviewFindingHealthNeedsPolling(
           firstPage?.automation,

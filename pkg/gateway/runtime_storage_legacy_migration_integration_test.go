@@ -49,6 +49,7 @@ type runtimeLegacySource struct {
 type runtimeLegacyMigrationFixture struct {
 	*runtimeStorageIntegrationFixture
 	sources                  []runtimeLegacySource
+	retiredReviewSources     []runtimeLegacySource
 	launcherOriginal         []byte
 	launcherPassword         string
 	legacySessionCreated     time.Time
@@ -512,6 +513,15 @@ func seedLegacyRepositoryReview(t *testing.T, fixture *runtimeLegacyMigrationFix
 	if err != nil {
 		t.Fatal(err)
 	}
+	automation.Status = repoaudit.RepositoryReviewAutomationCompleted
+	automation.CampaignID = repoaudit.NewRepositoryReviewCampaignID()
+	automation.RunIDs = []string{"wr_legacy_repository_review"}
+	automation.ResolvedCommitSHA = strings.Repeat("f", 40)
+	automation.Progress = repoaudit.RepositoryReviewProgress{
+		CompletedBatches: 1, TotalBatches: 1, ReviewedFiles: 1,
+	}
+	automation.StartedAt = time.Now().UTC().Add(-time.Minute)
+	automation.CompletedAt = time.Now().UTC()
 	reviewID := writeRepositoryReviewSentinel(t, seedWorkspace)
 	review, found, err := store.GetByID(reviewID)
 	if err != nil || !found {
@@ -522,12 +532,27 @@ func seedLegacyRepositoryReview(t *testing.T, fixture *runtimeLegacyMigrationFix
 	fixture.legacyReviewAutomation = automation
 	root := filepath.Join(fixture.workspace, "repository_reviews")
 	stateName := "repo_" + strings.TrimPrefix(review.ID, "rrp_") + ".json"
-	sources := map[string][]byte{
+	retiredLedgers := map[string][]byte{
 		stateName: runtimeLegacyJSON(t, review),
 		strings.TrimSuffix(stateName, ".json") + ".summary.json": runtimeLegacyJSON(t, repoaudit.Summarize(review)),
-		"profile_" + profile.ID + ".json":                        runtimeLegacyJSON(t, profile),
-		"automation_" + automation.ID + ".json":                  runtimeLegacyJSON(t, automation),
-		"profile_rrpf_malformed.json":                            []byte(`{"secret":"` + legacyMigrationSecretCanary),
+	}
+	for name, data := range retiredLedgers {
+		source := filepath.Join(root, name)
+		archive := filepath.Join(root, "legacy-json", "repository-reviews-v1", name)
+		if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(source, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fixture.retiredReviewSources = append(fixture.retiredReviewSources, runtimeLegacySource{
+			source: source, archive: archive, data: append([]byte(nil), data...), mode: 0o600,
+		})
+	}
+	sources := map[string][]byte{
+		"profile_" + profile.ID + ".json":       runtimeLegacyJSON(t, profile),
+		"automation_" + automation.ID + ".json": runtimeLegacyJSON(t, automation),
+		"profile_rrpf_malformed.json":           []byte(`{"secret":"` + legacyMigrationSecretCanary),
 	}
 	for name, data := range sources {
 		if name == "profile_rrpf_malformed.json" {
@@ -892,17 +917,25 @@ func exerciseRuntimeLegacyMigrationFirstStartup(
 	}
 
 	reviewStore := repoaudit.NewSQLiteStore(fixture.workspace)
-	if review, found, err := reviewStore.GetByID(fixture.legacyReviewState.ID); err != nil || !found ||
-		!reflect.DeepEqual(review, fixture.legacyReviewState) {
-		t.Fatalf("legacy repository review = %#v found=%v err=%v", review, found, err)
+	if review, found, err := reviewStore.GetByID(fixture.legacyReviewState.ID); err != nil || found {
+		t.Fatalf("retired repository review = %#v found=%v err=%v", review, found, err)
 	}
 	if profile, found, err := reviewStore.GetProfile(ctx, fixture.legacyReviewProfile.ID); err != nil || !found ||
 		!reflect.DeepEqual(profile, fixture.legacyReviewProfile) {
 		t.Fatalf("legacy repository review profile = %#v found=%v err=%v", profile, found, err)
 	}
 	if automation, found, err := reviewStore.GetAutomation(ctx, fixture.legacyReviewAutomation.ID); err != nil ||
-		!found || !reflect.DeepEqual(automation, fixture.legacyReviewAutomation) {
-		t.Fatalf("legacy repository review automation = %#v found=%v err=%v", automation, found, err)
+		!found || automation.ID != fixture.legacyReviewAutomation.ID ||
+		automation.ProfileID != fixture.legacyReviewAutomation.ProfileID ||
+		automation.ProfileVersion != fixture.legacyReviewAutomation.ProfileVersion ||
+		automation.Name != fixture.legacyReviewAutomation.Name ||
+		automation.Repository != fixture.legacyReviewAutomation.Repository ||
+		!reflect.DeepEqual(automation.ReviewerModels, fixture.legacyReviewAutomation.ReviewerModels) ||
+		automation.Status != repoaudit.RepositoryReviewAutomationIdle || automation.CampaignID != "" ||
+		automation.ResolvedCommitSHA != "" || len(automation.RunIDs) != 0 ||
+		automation.Progress != (repoaudit.RepositoryReviewProgress{}) ||
+		!automation.StartedAt.IsZero() || !automation.CompletedAt.IsZero() {
+		t.Fatalf("legacy repository review configuration = %#v found=%v err=%v", automation, found, err)
 	}
 
 	evaluationStore := repoeval.NewSQLiteStore(fixture.workspace)
@@ -1044,6 +1077,8 @@ func assertRuntimeLegacyMigrationRows(t *testing.T, fixture *runtimeLegacyMigrat
 		`SELECT COUNT(*) FROM repository_review_profiles WHERE profile_id='rrpf_legacy_fixture'`, 1)
 	assertLegacySQLInt(t, filepath.Join(fixture.workspace, "repository_reviews", "repository-reviews.db"),
 		`SELECT COUNT(*) FROM repository_review_automations WHERE automation_id='rra_legacy_fixture'`, 1)
+	assertLegacySQLInt(t, filepath.Join(fixture.workspace, "repository_reviews", "repository-reviews.db"),
+		`SELECT COUNT(*) FROM repository_review_states`, 0)
 	assertLegacySQLRow(t, filepath.Join(fixture.workspace, "repository_evaluations", "evaluations.db"),
 		`SELECT group_concat(model_alias, ',') FROM (
 		 SELECT model_alias FROM repository_evaluation_models WHERE evaluation_id=? ORDER BY position
@@ -1098,6 +1133,15 @@ func assertRuntimeLegacyMigrationArchives(t *testing.T, fixture *runtimeLegacyMi
 		if info, statErr := os.Stat(source.archive); statErr != nil ||
 			(runtimeStoragePOSIXModes() && info.Mode().Perm() != source.mode.Perm()) {
 			t.Fatalf("legacy archive mode %s = %#v err=%v", source.archive, info, statErr)
+		}
+	}
+	for _, source := range fixture.retiredReviewSources {
+		retained, err := os.ReadFile(source.source)
+		if err != nil || !bytes.Equal(retained, source.data) {
+			t.Fatalf("retired review source %s = %d bytes err=%v", source.source, len(retained), err)
+		}
+		if _, err := os.Lstat(source.archive); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("retired review source was archived at %s: %v", source.archive, err)
 		}
 	}
 	launcherArchive := filepath.Join(fixture.home, "legacy-json", "launcher-auth-v1", launcherconfig.FileName)
@@ -1261,7 +1305,6 @@ func runtimeLegacyAuditExpectations(
 		runtimeLegacySafeStorageSegment("legacy-space"),
 		runtimeLegacySafeStorageSegment("legacy-key")+".json",
 	))
-	reviewStateName := "repo_" + strings.TrimPrefix(fixture.legacyReviewState.ID, "rrp_") + ".json"
 	evaluationName := "evaluation_" + fixture.legacyEvaluation.ID + ".json"
 	checkpointName := legacyPRWorkspaceCheckpointFilename(fixture.legacyCheckpoint.WorkspaceID)
 	malformedCheckpointName := legacyPRWorkspaceCheckpointFilename(
@@ -1373,10 +1416,6 @@ func runtimeLegacyAuditExpectations(
 				"automation_rra_legacy_fixture.json": {imported: 1, skipped: 0},
 				"profile_rrpf_legacy_fixture.json":   {imported: 1, skipped: 0},
 				"profile_rrpf_malformed.json":        {imported: 0, skipped: 1},
-				reviewStateName:                      {imported: 1, skipped: 0},
-				strings.TrimSuffix(reviewStateName, ".json") + ".summary.json": {
-					imported: 0, skipped: 0,
-				},
 			},
 			issues: []runtimeLegacyImportIssue{
 				{relative: "profile_rrpf_malformed.json", code: "invalid_profile"},

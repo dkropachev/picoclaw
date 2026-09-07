@@ -23,7 +23,6 @@ import type {
   RepositoryReviewAutomation,
   RepositoryReviewFinding,
   RepositoryReviewFindingContext,
-  RepositoryReviewHistoricalConsolidation,
   RepositoryReviewIssueDraft,
   RepositoryReviewRawFinding,
   RepositoryReviewSummary,
@@ -109,7 +108,6 @@ const smokeRoutes = [
   "/repository-reviews/rra_smoke",
   "/repository-reviews/rra_smoke/findings",
   "/repository-reviews/rra_smoke/findings/rdf_smoke_1",
-  "/repository-reviews/rra_smoke/findings/rdf_smoke_3/link-issue",
   "/repository-reviews/rra_smoke/raw-findings",
   "/repository-reviews/rra_smoke/raw-findings/rrw_smoke_1",
   "/repository-reviews/rra_smoke/findings-processing",
@@ -506,7 +504,7 @@ const mockCollectionSchemas = {
       ["path", "string"],
       ["symbol", "string"],
       ["severity", "enum", ["critical", "high", "medium", "low"]],
-      ["status", "enum", ["open", "dismissed", "posted"]],
+      ["status", "enum", ["open", "posted"]],
       [
         "run_status",
         "enum",
@@ -621,8 +619,7 @@ const mockCollectionSchemas = {
         "enum",
         ["generating", "failed", "editing", "publishing", "posted", "unknown"],
       ],
-      ["origin", "enum", ["ai_generated", "linked", "discovered", "legacy"]],
-      ["canonical", "boolean"],
+      ["origin", "enum", ["ai_generated", "linked", "discovered"]],
       ["publishable", "boolean"],
       ["findings", "number"],
       ["created", "timestamp"],
@@ -1981,8 +1978,7 @@ const repositoryReviewProcessingPendingID = "rrw_smoke_processing_pending"
 const repositoryReviewProcessingRunningID = "rrw_smoke_processing_running"
 const repositoryReviewProcessingFailedID = "rrw_smoke_processing_failed"
 const repositoryReviewProcessingCompletedID = "rrw_smoke_processing_completed"
-const repositoryReviewProcessingOldCampaignID =
-  "rrw_smoke_processing_old_campaign"
+const repositoryReviewProcessingBlockedID = "rrw_smoke_processing_blocked"
 const repositoryReviewCommitSHA = "a".repeat(40)
 
 const repositoryReviewAutomationFixture: RepositoryReviewAutomation = {
@@ -2129,7 +2125,6 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     version: 2,
     created_at: "2026-08-26T12:02:00Z",
     updated_at: "2026-08-26T12:02:00Z",
-    raw_source_total: 2,
   },
   {
     id: repositoryReviewFindingTwoID,
@@ -2165,7 +2160,6 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     version: 3,
     created_at: "2026-08-26T12:02:30Z",
     updated_at: "2026-08-26T12:03:00Z",
-    raw_source_total: 1,
   },
   {
     id: repositoryReviewFindingThreeID,
@@ -2200,7 +2194,6 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     version: 1,
     created_at: "2026-08-26T12:03:30Z",
     updated_at: "2026-08-26T12:03:30Z",
-    raw_source_total: 1,
   },
   {
     id: repositoryReviewFindingFourID,
@@ -2236,7 +2229,6 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     version: 2,
     created_at: "2026-08-26T12:04:00Z",
     updated_at: "2026-08-26T12:04:00Z",
-    raw_source_total: 1,
   },
   {
     id: repositoryReviewAttentionFindingID,
@@ -2274,7 +2266,6 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     version: 2,
     created_at: "2026-08-26T12:04:15Z",
     updated_at: "2026-08-26T12:04:45Z",
-    raw_source_total: 1,
   },
   {
     id: repositoryReviewCandidateFindingID,
@@ -2309,7 +2300,6 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     version: 4,
     created_at: "2026-08-25T16:20:00Z",
     updated_at: "2026-08-25T16:20:00Z",
-    raw_source_total: 1,
   },
 ]
 
@@ -2635,17 +2625,16 @@ const repositoryReviewProcessingSourcesFixture: RepositoryReviewRawFinding[] = [
     24,
   ),
   repositoryReviewProcessingSourceFixture(
-    repositoryReviewProcessingOldCampaignID,
+    repositoryReviewProcessingBlockedID,
     repositoryReviewRawFindingsFixture[4]!,
     "failed",
     25,
     {
-      code: "processing_interrupted",
-      message: "Historical finding grouping was interrupted.",
-      retryable: true,
+      code: "not_retryable",
+      message: "Finding processing source is not retryable.",
+      retryable: false,
       at: "2026-08-25T17:00:00Z",
     },
-    "rrc_smoke_previous",
   ),
   ...Array.from({ length: 52 }, (_, index) => ({
     ...repositoryReviewProcessingSourceFixture(
@@ -2674,7 +2663,6 @@ function repositoryReviewRawFindingFixture(
     admission_bucket: `rdb_smoke_${ordinal}`,
     insertion_ordinal: ordinal,
     diagnosis_digest: `sha256:${id}`,
-    ...(id === "rrw_smoke_1" ? { legacy_finding_id: "rfn_smoke_legacy" } : {}),
     repository: finding.repository,
     commit_sha: finding.commit_sha,
     file: finding.file,
@@ -2725,7 +2713,6 @@ function repositoryReviewProcessingSourceFixture(
     campaign_id: campaignID,
     insertion_ordinal: ordinal,
     diagnosis_digest: `sha256:${id}`,
-    legacy_finding_id: undefined,
     assignment_id: `assignment-processing-${ordinal}`,
     model_alias: source.model,
     account: "openai-primary",
@@ -2765,7 +2752,6 @@ const repositoryReviewIssuesFixture: RepositoryReviewIssueDraft[] = [
     generator_account: "openai-primary",
     generator_profile_id: "rrpf_smoke",
     generator_profile_version: 3,
-    canonical: true,
     publishable: true,
     deletable: true,
     regeneratable: true,
@@ -2807,7 +2793,6 @@ const repositoryReviewIssuesFixture: RepositoryReviewIssueDraft[] = [
     generator_account: "openai-primary",
     generator_profile_id: "rrpf_smoke",
     generator_profile_version: 3,
-    canonical: true,
     publishable: true,
     deletable: true,
     regeneratable: true,
@@ -2821,7 +2806,10 @@ const repositoryReviewIssuesFixture: RepositoryReviewIssueDraft[] = [
   },
 ]
 
-function repositoryReviewRunFindingSummary(finding: RepositoryReviewFinding) {
+function repositoryReviewRunFindingSummary(
+  finding: RepositoryReviewFinding,
+  rawFindings: RepositoryReviewRawFinding[],
+) {
   const runStatus = finding.run_finding_status ?? "pending"
   const association =
     runStatus === "associated_new"
@@ -2851,7 +2839,9 @@ function repositoryReviewRunFindingSummary(finding: RepositoryReviewFinding) {
         ...finding.models,
       ]),
     ],
-    raw_source_count: finding.raw_source_total ?? 0,
+    raw_source_count: rawFindings.filter(
+      (source) => source.deduplicated_finding_id === finding.id,
+    ).length,
     created_at: finding.created_at,
     updated_at: finding.updated_at,
   }
@@ -2891,9 +2881,8 @@ function repositoryReviewIssueCollectionSummary(
     id: issue.id,
     repository: issue.repository,
     finding_count: issue.finding_ids.length,
-    origin: issue.origin ?? "legacy",
+    origin: issue.origin,
     generation_id: issue.generation_id,
-    canonical: issue.canonical ?? false,
     publishable: issue.publishable ?? false,
     title: issue.title,
     state: issue.state,
@@ -2912,7 +2901,6 @@ interface RepositoryReviewMockState {
   repositoryFindings: RepositoryFinding[]
   contexts: RepositoryReviewFindingContext[]
   issues: RepositoryReviewIssueDraft[]
-  historicalConsolidation: RepositoryReviewHistoricalConsolidation
   healthReads: number
   stagedHealth: boolean
 }
@@ -2929,11 +2917,6 @@ function createRepositoryReviewMockState(): RepositoryReviewMockState {
     repositoryFindings: structuredClone(repositoryFindingsFixture),
     contexts: structuredClone(repositoryReviewContextsFixture),
     issues: structuredClone(repositoryReviewIssuesFixture),
-    historicalConsolidation: {
-      required: true,
-      status: "failed",
-      retryable: true,
-    },
     healthReads: 0,
     stagedHealth: false,
   }
@@ -3548,11 +3531,6 @@ async function mockLauncherApis(
           source.deduplicated_finding_id ?? repositoryReviewFindingOneID,
         failure: undefined,
       }))
-    repositoryReviewState.historicalConsolidation = {
-      required: false,
-      status: "completed",
-      retryable: false,
-    }
   }
   let currentModelEvaluation: Record<string, unknown> | null = null
   let modelEvaluationDetailReads = 0
@@ -6088,8 +6066,6 @@ async function mockLauncherApis(
             default_branch: "main",
             can_implement: true,
           })
-        case "/api/repository-reviews":
-          return json(route, { repositories: [] })
         case "/api/repository-reviews/automations":
           return json(route, { automations: [] })
         case "/api/repository-reviews/profiles":
@@ -6879,16 +6855,12 @@ async function mockRepositoryReviewAutomationRequest(
     ),
     capabilities: {
       ...capabilities,
-      can_edit: issue.state === "editing" && issue.canonical !== false,
-      can_delete:
-        (issue.state === "editing" || issue.state === "failed") &&
-        issue.canonical !== false,
-      can_regenerate:
-        (issue.state === "editing" || issue.state === "failed") &&
-        issue.canonical !== false,
-      can_publish:
-        new Set(["editing", "publishing", "unknown"]).has(issue.state) &&
-        issue.canonical !== false,
+      can_edit: issue.state === "editing",
+      can_delete: issue.state === "editing" || issue.state === "failed",
+      can_regenerate: issue.state === "editing" || issue.state === "failed",
+      can_publish: new Set(["editing", "publishing", "unknown"]).has(
+        issue.state,
+      ),
     },
   })
   const processingHealth = () => ({
@@ -6936,7 +6908,6 @@ async function mockRepositoryReviewAutomationRequest(
       ).length,
     },
     findings_processing: processingHealth(),
-    historical_consolidation: state.historicalConsolidation,
     updated_at: "2026-08-26T12:05:10Z",
   })
   const processingDetail = (source: RepositoryReviewRawFinding) => {
@@ -6956,7 +6927,6 @@ async function mockRepositoryReviewAutomationRequest(
       ...(finding ? { finding } : {}),
       ...(repositoryFinding ? { repository_finding: repositoryFinding } : {}),
       findings_processing: processingHealth(),
-      historical_consolidation: state.historicalConsolidation,
     }
   }
 
@@ -7039,11 +7009,6 @@ async function mockRepositoryReviewAutomationRequest(
           failed: 0,
           completed: 0,
         },
-        historical_consolidation: {
-          required: false,
-          status: "not_required",
-          retryable: false,
-        },
         updated_at: "2026-08-26T12:00:00Z",
       })
     }
@@ -7077,7 +7042,6 @@ async function mockRepositoryReviewAutomationRequest(
       canonical_query: query,
       query_schema: mockCollectionSchemas.reviewFindingsProcessing,
       findings_processing: processingHealth(),
-      historical_consolidation: state.historicalConsolidation,
       capabilities,
     })
   }
@@ -7113,18 +7077,10 @@ async function mockRepositoryReviewAutomationRequest(
       }
       failures.push({
         source_id: sourceID,
-        code:
-          source?.id === repositoryReviewProcessingOldCampaignID
-            ? "historical_replay_required"
-            : source
-              ? "not_retryable"
-              : "not_found",
-        message:
-          source?.id === repositoryReviewProcessingOldCampaignID
-            ? "Historical sources must be retried through historical consolidation."
-            : source
-              ? "Finding processing source is not retryable."
-              : "Finding processing source was not found.",
+        code: source ? "not_retryable" : "not_found",
+        message: source
+          ? "Finding processing source is not retryable."
+          : "Finding processing source was not found.",
       })
     }
     return json(
@@ -7169,58 +7125,7 @@ async function mockRepositoryReviewAutomationRequest(
       : json(route, { code: "not_found" }, 404)
   }
 
-  if (
-    path === `${automationRoot}/historical-deduplication/retry` &&
-    method === "POST"
-  ) {
-    return json(
-      route,
-      {
-        code: "historical_consolidation_restart_required",
-        message: "The saved profile no longer matches this historical replay.",
-      },
-      409,
-    )
-  }
-
-  if (
-    path === `${automationRoot}/historical-deduplication/restart` &&
-    method === "POST"
-  ) {
-    if (body?.confirmed !== true) {
-      return json(
-        route,
-        {
-          code: "confirmation_required",
-          message: "Historical restart requires explicit confirmation.",
-        },
-        400,
-      )
-    }
-    state.historicalConsolidation = {
-      required: true,
-      status: "pending",
-      retryable: false,
-    }
-    return json(
-      route,
-      {
-        automation: state.automation,
-        repository: state.summary,
-        historical_deduplication: {
-          required: true,
-          status: "pending",
-        },
-      },
-      202,
-    )
-  }
-
-  if (
-    (path === `${automationRoot}/findings` ||
-      path === `${automationRoot}/run-findings`) &&
-    method === "GET"
-  ) {
+  if (path === `${automationRoot}/findings` && method === "GET") {
     const cursor = Number(url.searchParams.get("cursor") ?? 0)
     const offset = Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0
     const limit = Number(url.searchParams.get("limit") ?? 50)
@@ -7228,7 +7133,9 @@ async function mockRepositoryReviewAutomationRequest(
     return json(route, {
       automation: state.automation,
       repository: state.summary,
-      findings: findings.map(repositoryReviewRunFindingSummary),
+      findings: findings.map((finding) =>
+        repositoryReviewRunFindingSummary(finding, state.rawFindings),
+      ),
       total: state.findings.length,
       next_cursor:
         offset + findings.length < state.findings.length
@@ -7259,7 +7166,6 @@ async function mockRepositoryReviewAutomationRequest(
           (finding) => finding.disposition === "duplicate",
         ).length,
       },
-      historical_deduplication: { required: false, status: "completed" },
       capabilities,
     })
   }
@@ -7294,7 +7200,6 @@ async function mockRepositoryReviewAutomationRequest(
           (finding) => finding.disposition === "duplicate",
         ).length,
       },
-      historical_deduplication: { required: false, status: "completed" },
       capabilities,
     })
   }
@@ -7417,8 +7322,6 @@ async function mockRepositoryReviewAutomationRequest(
         repository: finding.repository,
         finding_ids: [finding.id],
         origin: "linked",
-        canonical: true,
-        read_only: true,
         publishable: false,
         deletable: false,
         regeneratable: false,
@@ -7447,15 +7350,11 @@ async function mockRepositoryReviewAutomationRequest(
   const findingMatch = path.match(
     new RegExp(`^${automationRoot}/findings/([^/]+)$`),
   )
-  if (findingMatch) {
+  if (findingMatch && method === "GET") {
     const findingID = decodeURIComponent(findingMatch[1]!)
     const finding = findFinding(findingID)
     if (!finding) {
       return json(route, { code: "not_found" }, 404)
-    }
-    if (method === "PATCH") {
-      finding.status = body?.status === "dismissed" ? "dismissed" : "open"
-      finding.version += 1
     }
     return json(route, findingDetail(finding))
   }
@@ -7484,9 +7383,7 @@ async function mockRepositoryReviewAutomationRequest(
   if (rawFindingMatch && method === "GET") {
     const requestedID = decodeURIComponent(rawFindingMatch[1]!)
     const source = state.rawFindings.find(
-      (candidate) =>
-        candidate.id === requestedID ||
-        candidate.legacy_finding_id === requestedID,
+      (candidate) => candidate.id === requestedID,
     )
     if (!source) return json(route, { code: "not_found" }, 404)
     return json(route, {
@@ -7500,16 +7397,6 @@ async function mockRepositoryReviewAutomationRequest(
         (finding) => finding.id === source.deduplicated_finding_id,
       ),
     })
-  }
-
-  const runFindingMatch = path.match(
-    new RegExp(`^${automationRoot}/run-findings/([^/]+)$`),
-  )
-  if (runFindingMatch && method === "GET") {
-    const finding = findFinding(decodeURIComponent(runFindingMatch[1]!))
-    return finding
-      ? json(route, findingDetail(finding))
-      : json(route, { code: "not_found" }, 404)
   }
 
   const duplicateDecisionMatch = path.match(
@@ -7598,7 +7485,6 @@ async function mockRepositoryReviewAutomationRequest(
               generator_account: state.automation.effective_account_ref,
               generator_profile_id: state.automation.profile_id,
               generator_profile_version: state.automation.profile_version,
-              canonical: true,
               publishable: true,
               deletable: true,
               regeneratable: true,
@@ -7942,57 +7828,6 @@ test("findings processing selects only failures and preserves partial bulk retry
     { repositoryReviewRequests: requests },
   )
 
-  await expect(
-    page.getByRole("heading", { name: "Historical consolidation" }),
-  ).toBeVisible()
-  await expect(
-    page.getByRole("button", { name: "Restart incompatible work" }),
-  ).toHaveCount(0)
-  await page
-    .getByRole("button", { name: "Resume historical consolidation" })
-    .click()
-  await expect
-    .poll(() =>
-      requests.find((request) =>
-        request.path.endsWith("/historical-deduplication/retry"),
-      ),
-    )
-    .toMatchObject({ method: "POST", body: {} })
-  const restart = page.getByRole("button", {
-    name: "Restart incompatible work",
-  })
-  await expect(restart).toBeVisible()
-  await restart.click()
-  const restartDialog = page.getByRole("alertdialog")
-  await expect(
-    restartDialog.getByText(
-      /Completed results in affected historical buckets will be reprocessed/u,
-    ),
-  ).toBeVisible()
-  await expect(
-    restartDialog.getByText(
-      /Completed work in unrelated buckets will remain preserved/u,
-    ),
-  ).toBeVisible()
-  expect(
-    requests.find((request) =>
-      request.path.endsWith("/historical-deduplication/restart"),
-    ),
-  ).toBeUndefined()
-  await restartDialog
-    .getByRole("button", { name: "Restart incompatible work" })
-    .click()
-  const historicalToast = page.getByText(
-    "Incompatible historical work restarted.",
-  )
-  await expect(historicalToast).toBeVisible()
-  await expect
-    .poll(() =>
-      requests.find((request) =>
-        request.path.endsWith("/historical-deduplication/restart"),
-      ),
-    )
-    .toMatchObject({ method: "POST", body: { confirmed: true } })
   const pending = page.locator(
     `[data-item-id="${repositoryReviewProcessingPendingID}"]`,
   )
@@ -8010,7 +7845,7 @@ test("findings processing selects only failures and preserves partial bulk retry
 
   for (const [index, sourceID] of [
     repositoryReviewProcessingFailedID,
-    repositoryReviewProcessingOldCampaignID,
+    repositoryReviewProcessingBlockedID,
   ].entries()) {
     const item = page.locator(`[data-item-id="${sourceID}"]`)
     await expect(item).toBeVisible()
@@ -8026,15 +7861,14 @@ test("findings processing selects only failures and preserves partial bulk retry
   await expect(partialToast).toBeVisible()
   await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
   await expect(
-    page.locator(`[data-item-id="${repositoryReviewProcessingOldCampaignID}"]`),
+    page.locator(`[data-item-id="${repositoryReviewProcessingBlockedID}"]`),
   ).toBeVisible()
   await expect(
     page
-      .locator(`[data-item-id="${repositoryReviewProcessingOldCampaignID}"]`)
-      .getByText(
-        "Historical sources must be retried through historical consolidation.",
-        { exact: true },
-      ),
+      .locator(`[data-item-id="${repositoryReviewProcessingBlockedID}"]`)
+      .getByText("Finding processing source is not retryable.", {
+        exact: true,
+      }),
   ).toBeVisible()
   await expect(
     page.locator(`[data-item-id="${repositoryReviewProcessingFailedID}"]`),
@@ -8050,22 +7884,14 @@ test("findings processing selects only failures and preserves partial bulk retry
       body: {
         source_ids: [
           repositoryReviewProcessingFailedID,
-          repositoryReviewProcessingOldCampaignID,
+          repositoryReviewProcessingBlockedID,
         ],
       },
     })
-  await expect(historicalToast).toBeHidden({ timeout: 10_000 })
   await expect(partialToast).toBeHidden({ timeout: 10_000 })
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
-  expect(
-    errors.filter(
-      (message) =>
-        !message.includes(
-          "Failed to load resource: the server responded with a status of 409",
-        ),
-    ),
-  ).toEqual([])
+  expect(errors).toEqual([])
 })
 
 test("findings processing detail exposes safe failure, immutable provenance, links, and retry", async ({
@@ -8143,7 +7969,7 @@ test("findings processing Back restores query, view, selection, and scroll", asy
   )
   await page.getByRole("button", { name: "Load more" }).click()
   const item = page.locator(
-    `[data-item-id="${repositoryReviewProcessingOldCampaignID}"]`,
+    `[data-item-id="${repositoryReviewProcessingBlockedID}"]`,
   )
   await item.scrollIntoViewIfNeeded()
   await item.focus()
@@ -8158,13 +7984,9 @@ test("findings processing Back restores query, view, selection, and scroll", asy
   expect(rememberedScroll).toBeGreaterThan(0)
   await page.keyboard.press("Enter")
   await expect(page).toHaveURL(
-    new RegExp(
-      `/findings-processing/${repositoryReviewProcessingOldCampaignID}`,
-    ),
+    new RegExp(`/findings-processing/${repositoryReviewProcessingBlockedID}`),
   )
-  await expect(
-    page.getByText("rrc_smoke_previous", { exact: true }),
-  ).toBeVisible()
+  await expect(page.getByText("rrc_smoke", { exact: true })).toBeVisible()
   await page.goBack()
 
   await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
@@ -8901,23 +8723,6 @@ test("repository review raw findings navigate through canonical source detail", 
   expect(errors).toEqual([])
 })
 
-test("legacy repository review finding bookmarks redirect to canonical raw detail", async ({
-  page,
-}) => {
-  await gotoMockedRoute(
-    page,
-    `/repository-reviews/${repositoryReviewAutomationID}/findings/rfn_smoke_legacy`,
-  )
-  await expect(page).toHaveURL(
-    new RegExp(
-      `/repository-reviews/${repositoryReviewAutomationID}/raw-findings/rrw_smoke_1`,
-    ),
-  )
-  await expect(
-    page.getByRole("heading", { name: "Raw diagnosis" }),
-  ).toBeVisible()
-})
-
 test("repository review routing preserves run context through repository finding generation and subset publication", async ({
   page,
 }) => {
@@ -9139,113 +8944,6 @@ test("repository review candidate linking requires explicit confirmation", async
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
-})
-
-test("legacy repository review results redirect to the standard collection", async ({
-  page,
-}) => {
-  await gotoMockedRoute(
-    page,
-    "/repository-reviews/results?q=status+%3D+running&view=grid",
-  )
-  await expect(page).toHaveURL(
-    /\/repository-reviews\?q=status(?:\+|%20)%3D(?:\+|%20)running&view=grid$/,
-  )
-  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
-})
-
-test("legacy repository finding scope and offset normalize to cursor collections", async ({
-  page,
-}) => {
-  const collectionRequests: URL[] = []
-  const findingsPath = `/api/repository-reviews/automations/${repositoryReviewAutomationID}/findings`
-  page.on("request", (request) => {
-    const url = new URL(request.url())
-    if (
-      url.pathname === findingsPath ||
-      url.pathname ===
-        `/api/repository-reviews/automations/${repositoryReviewAutomationID}/repository-findings`
-    ) {
-      collectionRequests.push(url)
-    }
-  })
-
-  const legacyQuery = "ALL ORDER BY repository ASC"
-  await gotoMockedRoute(
-    page,
-    `/repository-reviews/${repositoryReviewAutomationID}/findings?${new URLSearchParams(
-      {
-        q: legacyQuery,
-        scope: "current",
-        offset: "75",
-        view: "grid",
-      },
-    ).toString()}`,
-  )
-  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
-  await expect
-    .poll(() => {
-      const current = new URL(page.url())
-      return {
-        path: current.pathname,
-        q: current.searchParams.get("q"),
-        view: current.searchParams.get("view"),
-        scope: current.searchParams.get("scope"),
-        offset: current.searchParams.get("offset"),
-      }
-    })
-    .toEqual({
-      path: `/repository-reviews/${repositoryReviewAutomationID}/findings`,
-      q: legacyQuery,
-      view: "grid",
-      scope: null,
-      offset: null,
-    })
-  const currentRequest = collectionRequests.findLast(
-    (request) => request.pathname === findingsPath,
-  )
-  expect(currentRequest?.pathname).toBe(findingsPath)
-  expect(currentRequest?.searchParams.get("query")).toBe(legacyQuery)
-  expect(currentRequest?.searchParams.has("cursor")).toBe(false)
-  expect(currentRequest?.searchParams.has("offset")).toBe(false)
-  expect(currentRequest?.searchParams.has("scope")).toBe(false)
-
-  await page.goto(
-    `/repository-reviews/${repositoryReviewAutomationID}/findings?${new URLSearchParams(
-      {
-        q: legacyQuery,
-        scope: "all",
-        offset: "75",
-        view: "table",
-      },
-    ).toString()}`,
-  )
-  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
-  await expect
-    .poll(() => {
-      const current = new URL(page.url())
-      return {
-        path: current.pathname,
-        q: current.searchParams.get("q"),
-        view: current.searchParams.get("view"),
-        scope: current.searchParams.get("scope"),
-        offset: current.searchParams.get("offset"),
-      }
-    })
-    .toEqual({
-      path: `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings`,
-      q: legacyQuery,
-      view: "table",
-      scope: null,
-      offset: null,
-    })
-  const allRequest = collectionRequests.findLast((request) =>
-    request.pathname.endsWith("/repository-findings"),
-  )
-  expect(allRequest?.searchParams.get("query")).toBe(legacyQuery)
-  expect(allRequest?.searchParams.has("cursor")).toBe(false)
-  expect(allRequest?.searchParams.has("offset")).toBe(false)
-  expect(allRequest?.searchParams.has("scope")).toBe(false)
 })
 
 test("issue preview detail opens its dedicated editor and preserves collection state", async ({

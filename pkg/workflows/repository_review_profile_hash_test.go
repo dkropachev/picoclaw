@@ -51,7 +51,7 @@ func TestRepositoryBugFinderProfileHashBindsResolvedModelGraph(t *testing.T) {
 	}
 }
 
-func TestRepositoryBugFinderProfileHashMatchesResolvedMapAndLegacyVector(t *testing.T) {
+func TestRepositoryBugFinderProfileHashMatchesResolvedMap(t *testing.T) {
 	input := NewRepositoryBugFinderProfileHashInput(
 		"account", "all", "focus", `{}`, "scope", " requested-a,requested-b ",
 		"graph", []string{" effective-a ", "effective-b"}, false, 2048,
@@ -70,21 +70,6 @@ func TestRepositoryBugFinderProfileHashMatchesResolvedMapAndLegacyVector(t *test
 	native, err := nativeStableHash(canonical)
 	if err != nil || got != "sha256:"+native {
 		t.Fatalf("canonical hash=%q native=%q err=%v", got, native, err)
-	}
-	legacy, err := RepositoryBugFinderLegacyResolvedProfileHash(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyMap := map[string]any{
-		"schema": RepositoryBugFinderProfileSchema, "prompt_revision": RepositoryBugFinderPromptRevision,
-		"account_ref": "account", "target": "all", "focus": "focus", "scope_policy": `{}`,
-		"scope_plan_hash": "scope", "models": []string{"requested-a", "requested-b"},
-		"model_graph_revision": "graph", "effective_models": []string{"effective-a", "effective-b"},
-		"include_default_reviewer": false, "max_content_bytes": int64(2048),
-	}
-	legacyNative, err := nativeStableHash(legacyMap)
-	if err != nil || legacy != "sha256:"+legacyNative {
-		t.Fatalf("legacy hash=%q native=%q err=%v", legacy, legacyNative, err)
 	}
 }
 

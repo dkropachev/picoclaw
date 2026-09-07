@@ -1,7 +1,7 @@
 import type {
   RepositoryReviewFinding,
   RepositoryReviewFindingContext,
-  RepositoryReviewState,
+  RepositoryReviewSummary,
 } from "@/api/repository-reviews"
 
 const discussionTextFieldBytes = 8 << 10
@@ -25,10 +25,13 @@ function boundedDiscussionCheck(value: string): string {
 
 export function discussionPrompt<
   T extends Pick<
-    RepositoryReviewState,
+    RepositoryReviewSummary,
     "id" | "repository" | "last_commit_sha"
   > & { contexts: RepositoryReviewFindingContext[] },
->(repository: T, findings: RepositoryReviewFinding[]): string {
+>(
+  repository: T,
+  findings: Array<RepositoryReviewFinding & { raw_source_total?: number }>,
+): string {
   const contextByID = new Map(
     repository.contexts.map((context) => [context.id, context]),
   )
@@ -51,7 +54,7 @@ export function discussionPrompt<
       `  Finding commit SHA: ${finding.commit_sha}`,
       `  Blob SHA: ${finding.file.blob_sha}`,
       `  Models: ${finding.models.join(", ")}`,
-      `  Raw source count: ${finding.raw_source_total ?? finding.raw_source_ids?.length ?? 0}`,
+      `  Raw source count: ${finding.raw_source_total ?? 0}`,
       `  Context IDs: ${finding.context_ids.join(", ")}`,
       `  Message: ${boundedDiscussionText(finding.message)}`,
       `  Evidence: ${boundedDiscussionText(finding.evidence)}`,

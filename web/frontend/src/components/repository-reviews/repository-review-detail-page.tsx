@@ -50,9 +50,6 @@ import {
 import { useRepositoryReviewFindingHealth } from "./repository-review-finding-health"
 
 const fullCommitSHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu
-const legacyUnknownCandidateFailure = "AI selected an unknown candidate ID"
-const legacyUnknownCandidateExplanation =
-  "The scope planner returned a malformed or stale file candidate ID. Native validation stopped the run before applying that selection. Continue retries from the saved review state."
 const assignmentFocuses: Array<{
   id: RepositoryReviewFocusID
   label: string
@@ -77,9 +74,6 @@ function repositoryReviewStatusDetail(
   review: RepositoryReviewAutomation,
 ): string {
   const detail = review.pause_detail?.trim()
-  if (review.status === "failed" && detail === legacyUnknownCandidateFailure) {
-    return legacyUnknownCandidateExplanation
-  }
   if (detail) {
     return detail
   }
@@ -401,8 +395,7 @@ export function RepositoryReviewDetailPage({
 
             {repositoryReviewInspectedFilesLabel(review) === "Unknown" && (
               <p className="text-muted-foreground text-sm">
-                Inspected-file coverage is unknown for legacy campaigns until
-                their durable evidence is recovered.
+                Inspection coverage is unavailable for this campaign.
               </p>
             )}
 
@@ -991,10 +984,7 @@ function FileProcessingAttribution({
                       )}
                     </td>
                     <td className="px-3 py-2 font-mono text-xs">
-                      {attribution.account ||
-                        (attribution.source === "legacy"
-                          ? "Legacy account unavailable"
-                          : "Unrecorded")}
+                      {attribution.account || "Unrecorded"}
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">
                       {attribution.attempts}
@@ -1066,9 +1056,7 @@ function assignmentFocusLabel(focusID: RepositoryReviewFocusID): string {
 }
 
 function fileAttributionSourceLabel(source: string): string {
-  if (source === "legacy") return "Historical replay"
   if (source === "live") return "Live checkpoint"
-  if (source === "mixed") return "Historical and live"
   return source.replaceAll("_", " ")
 }
 

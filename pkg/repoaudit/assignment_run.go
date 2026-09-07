@@ -199,8 +199,12 @@ func repositoryReviewActiveRunFromPlan(
 	return RepositoryReviewActiveRun{
 		ID: runID, CampaignID: plan.CampaignID, PlanID: plan.ID,
 		CommitSHA: plan.CommitSHA, InventoryHash: plan.InventoryHash,
-		ProfileHash: plan.ProfileHash, Reservations: reservations,
-		StartedAt: startedAt.UTC(),
+		ProfileHash:             plan.ProfileHash,
+		TargetBranch:            plan.TargetBranch,
+		AdvertisedDefaultBranch: plan.AdvertisedDefaultBranch,
+		TargetIsDefault:         plan.TargetIsDefault,
+		Reservations:            reservations,
+		StartedAt:               startedAt.UTC(),
 	}, nil
 }
 
@@ -399,7 +403,7 @@ func (s Store) CheckpointRepositoryReviewAssignment(
 				"%w: checkpoint finding %d is not confirmed", ErrInvalidPlan, index,
 			)
 		}
-		if candidateErr := validateCandidate(finding); candidateErr != nil {
+		if candidateErr := ValidateGeneratedFindingCandidate(finding); candidateErr != nil {
 			return CheckpointRepositoryReviewAssignmentResult{}, fmt.Errorf(
 				"%w: checkpoint finding %d is invalid: %v", ErrInvalidPlan, index, candidateErr,
 			)
@@ -413,8 +417,7 @@ func (s Store) CheckpointRepositoryReviewAssignment(
 	}
 	checkpointDigest := repositoryReviewCheckpointRequestDigest(request)
 	if existingDigest != "" {
-		legacyCheckpointDigest := repositoryReviewLegacyCheckpointRequestDigest(request)
-		if existingDigest != checkpointDigest && existingDigest != legacyCheckpointDigest {
+		if existingDigest != checkpointDigest {
 			return CheckpointRepositoryReviewAssignmentResult{}, ErrConflict
 		}
 		if len(acknowledged) > 0 {
@@ -533,10 +536,9 @@ func repositoryReviewCheckpointAttribution(
 	}
 }
 
-// reconcileRepositoryReviewCheckpointAttribution verifies a replay against
-// the immutable retained child evidence. A schema-4 checkpoint can be repaired
-// only when its original completion time is supplied explicitly; guessing a
-// historical timestamp would turn recovery into fabricated provenance.
+// reconcileRepositoryReviewCheckpointAttribution verifies an idempotent
+// callback against immutable retained child evidence. A missing completion
+// time cannot be guessed without fabricating provenance.
 func reconcileRepositoryReviewCheckpointAttribution(
 	state *RepositoryState,
 	request CheckpointRepositoryReviewAssignmentRequest,
@@ -631,7 +633,6 @@ func persistRepositoryReviewCheckpointObservation(
 		RawDigest: observation.RawDigest, CreatedAt: completedAt,
 	}
 	contextRecord.ID = stableID("rctx_", contextBindingDigest(contextRecord))
-	initialFindingCount := len(state.Findings)
 	acceptedIDs := make([]string, 0, len(observation.Findings))
 	contextUsed := false
 	for candidateIndex, rawCandidate := range observation.Findings {
@@ -643,7 +644,7 @@ func persistRepositoryReviewCheckpointObservation(
 		if !inScope {
 			return nil, fmt.Errorf("checkpoint finding references an unacknowledged file")
 		}
-		if err := validateCandidate(candidate); err != nil {
+		if err := ValidateGeneratedFindingCandidate(candidate); err != nil {
 			return nil, fmt.Errorf("checkpoint finding is invalid: %w", err)
 		}
 		admissionBucket, bucketErr := DeduplicationAdmissionBucket(
@@ -664,62 +665,6 @@ func persistRepositoryReviewCheckpointObservation(
 			return nil, err
 		}
 		acceptedIDs = append(acceptedIDs, rawID)
-		candidateObservation := findingObservationFrom(
-			candidate, contextRecord.ID, observation.Model,
-			observation.ModelAlias, observation.Account, observation.Reviewer,
-		)
-		contributorModel := observation.ModelAlias
-		if contributorModel == "" {
-			contributorModel = observation.Model
-		}
-		index := findingIndexByFingerprint(state.Findings[initialFindingCount:], fingerprint)
-		if index >= 0 {
-			index += initialFindingCount
-		}
-		if index < 0 {
-			index = semanticFindingIndex(state.Findings[initialFindingCount:], primary, candidate)
-			if index >= 0 {
-				index += initialFindingCount
-			}
-		}
-		if index < 0 {
-			finding := Finding{
-				ID: stableID(
-					"rfn_", plan.Repository, plan.CommitSHA, runID, assignmentID, fingerprint,
-				),
-				CampaignID: plan.CampaignID, Fingerprint: fingerprint,
-				Repository: plan.Repository, CommitSHA: plan.CommitSHA,
-				File: primary, Line: candidate.Line, Severity: candidate.Severity,
-				Title: candidate.Title, Symbol: candidate.Symbol,
-				Message: candidate.Message, Evidence: candidate.Evidence,
-				Impact: candidate.Impact, Validation: candidate.Validation,
-				MatchHints: candidate.MatchHints, FixEffort: candidate.FixEffort,
-				ContextIDs: []string{contextRecord.ID}, Models: []string{contributorModel},
-				ObservationCount: 1, Status: FindingOpen,
-				DeduplicationPending: true, RawFindingIDs: []string{rawID},
-				Observations:            []FindingObservation{candidateObservation},
-				TargetBranch:            plan.TargetBranch,
-				AdvertisedDefaultBranch: plan.AdvertisedDefaultBranch,
-				TargetIsDefault:         plan.TargetIsDefault,
-				Version:                 1, CreatedAt: completedAt, UpdatedAt: completedAt,
-			}
-			state.Findings = append(state.Findings, finding)
-			setRawReviewFindingLegacyProjection(state, rawID, finding.ID)
-			contextUsed = true
-			continue
-		}
-		finding := &state.Findings[index]
-		finding.Severity = moreSevere(finding.Severity, candidate.Severity)
-		finding.Observations, _ = upsertFindingObservation(
-			finding.Observations, candidateObservation,
-		)
-		finding.ContextIDs = findingObservationContextIDs(finding.Observations)
-		finding.Models = appendUnique(finding.Models, contributorModel)
-		finding.ObservationCount = len(finding.Observations)
-		finding.RawFindingIDs = appendUnique(finding.RawFindingIDs, rawID)
-		finding.Version++
-		finding.UpdatedAt = completedAt
-		setRawReviewFindingLegacyProjection(state, rawID, finding.ID)
 		contextUsed = true
 	}
 	if contextUsed {
@@ -742,31 +687,11 @@ func persistRepositoryReviewCheckpointObservation(
 	return acceptedIDs, nil
 }
 
-func setRawReviewFindingLegacyProjection(state *RepositoryState, rawID, findingID string) {
-	if state == nil {
-		return
-	}
-	if index := rawFindingIndexByID(state.RawFindings, rawID); index >= 0 {
-		state.RawFindings[index].LegacyFindingID = findingID
-		state.RawFindings[index].DiagnosisDigest = RawReviewFindingDiagnosisDigest(
-			state.RawFindings[index],
-		)
-	}
-}
-
 func repositoryReviewCheckpointDeduplicationSnapshot(
 	coverage *RepositoryReviewCampaignCoverage,
-	reviewerModel string,
+	_ string,
 ) RepositoryReviewDeduplicationSnapshot {
-	if coverage != nil && coverage.DeduplicationSnapshot != nil {
-		return *cloneRepositoryReviewDeduplicationSnapshot(coverage.DeduplicationSnapshot)
-	}
-	reviewerModel = strings.TrimSpace(reviewerModel)
-	return RepositoryReviewDeduplicationSnapshot{
-		ReviewerModel: reviewerModel, DeduplicationModel: reviewerModel,
-		SimilarityThreshold: DeduplicationDefaultThreshold,
-		CandidateLimit:      DeduplicationDefaultCandidateLimit,
-	}
+	return *cloneRepositoryReviewDeduplicationSnapshot(coverage.DeduplicationSnapshot)
 }
 
 func persistRawRepositoryReviewCheckpointFinding(
@@ -784,7 +709,7 @@ func persistRawRepositoryReviewCheckpointFinding(
 ) error {
 	if !validFindingSourceProvenance(
 		observation.Model, observation.ModelAlias, observation.Account,
-	) || observation.ModelAlias == "" || observation.Account == "" {
+	) || state.CurrentCampaign == nil || state.CurrentCampaign.DeduplicationSnapshot == nil {
 		return ErrInvalidPlan
 	}
 	for _, existing := range state.RawFindings {
@@ -830,10 +755,13 @@ func persistRawRepositoryReviewCheckpointFinding(
 		MatchHints: candidate.MatchHints, FixEffort: candidate.FixEffort,
 		ContextID: contextID, RunID: runID, AssignmentID: assignmentID,
 		Model: observation.Model, ModelAlias: observation.ModelAlias, Account: observation.Account,
-		Reviewer: observation.Reviewer,
-		State:    RawFindingDeduplicationPending, Disposition: RawFindingDispositionUndecided,
+		Reviewer:     observation.Reviewer,
+		TargetBranch: plan.TargetBranch, AdvertisedDefaultBranch: plan.AdvertisedDefaultBranch,
+		TargetIsDefault: plan.TargetIsDefault,
+		State:           RawFindingDeduplicationPending, Disposition: RawFindingDispositionUndecided,
 		CreatedAt: completedAt, UpdatedAt: completedAt,
 	}
+	raw.DeduplicationSnapshotDigest = repositoryReviewDeduplicationSnapshotDigest(snapshot)
 	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(raw)
 	raw.History = []RawFindingHistoryEntry{{
 		State: raw.State, Disposition: raw.Disposition, At: completedAt,
@@ -852,37 +780,37 @@ func persistRawRepositoryReviewCheckpointFinding(
 func (s Store) FinalizeRepositoryReviewRun(
 	ctx context.Context,
 	request FinalizeRepositoryReviewRunRequest,
-) (RecordResult, error) {
+) (FinalizeRepositoryReviewRunResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if contextErr := ctx.Err(); contextErr != nil {
-		return RecordResult{}, contextErr
+		return FinalizeRepositoryReviewRunResult{}, contextErr
 	}
 	request.RunID = strings.TrimSpace(request.RunID)
 	if !validBoundedText(request.RunID, 1024) || request.Plan.ID == "" ||
 		request.Plan.ID != planDigest(request.Plan) || request.ExcludedFiles < 0 ||
 		request.ExcludedFiles > maxReviewFiles {
-		return RecordResult{}, ErrInvalidPlan
+		return FinalizeRepositoryReviewRunResult{}, ErrInvalidPlan
 	}
 	unlock, err := s.lock(request.Plan.Repository)
 	if err != nil {
-		return RecordResult{}, err
+		return FinalizeRepositoryReviewRunResult{}, err
 	}
 	defer unlock()
 	state, err := s.load(request.Plan.Repository)
 	if err != nil {
-		return RecordResult{}, err
+		return FinalizeRepositoryReviewRunResult{}, err
 	}
 	for _, run := range state.Runs {
 		if run.ID == request.RunID {
 			if run.PlanID != request.Plan.ID || run.CampaignID != request.Plan.CampaignID {
-				return RecordResult{}, ErrConflict
+				return FinalizeRepositoryReviewRunResult{}, ErrConflict
 			}
 			if run.Interrupted {
-				return RecordResult{}, ErrConflict
+				return FinalizeRepositoryReviewRunResult{}, ErrConflict
 			}
-			return RecordResult{
+			return FinalizeRepositoryReviewRunResult{
 				State: state, Run: run,
 				AcceptedFindingIDs: append([]string(nil), run.FindingIDs...),
 			}, nil
@@ -891,7 +819,7 @@ func (s Store) FinalizeRepositoryReviewRun(
 	active := state.ActiveReviewRun
 	if active == nil || active.ID != request.RunID || active.PlanID != request.Plan.ID ||
 		state.CurrentCampaign == nil || state.CurrentCampaign.ID != request.Plan.CampaignID {
-		return RecordResult{}, ErrConflict
+		return FinalizeRepositoryReviewRunResult{}, ErrConflict
 	}
 	completedAt := request.CompletedAt.UTC()
 	if completedAt.IsZero() {
@@ -906,11 +834,11 @@ func (s Store) FinalizeRepositoryReviewRun(
 		bound, found := pending[item.Path]
 		item.Reason = strings.TrimSpace(item.Reason)
 		if !found || bound != item.FileRef || !validBoundedText(item.Reason, 256) {
-			return RecordResult{}, ErrInvalidPlan
+			return FinalizeRepositoryReviewRunResult{}, ErrInvalidPlan
 		}
 		pathCoverage := state.CurrentCampaign.Paths[item.Path]
 		if pathCoverage.AssignmentBits != "" || pathCoverage.Inspected || pathCoverage.Completed {
-			return RecordResult{}, ErrConflict
+			return FinalizeRepositoryReviewRunResult{}, ErrConflict
 		}
 		item.FileRef = bound
 		item.CommitSHA = request.Plan.CommitSHA
@@ -928,7 +856,7 @@ func (s Store) FinalizeRepositoryReviewRun(
 			state.CurrentCampaign, pathValue,
 			RepositoryReviewCampaignPathCoverage{Unsupported: true},
 		); mergeErr != nil {
-			return RecordResult{}, mergeErr
+			return FinalizeRepositoryReviewRunResult{}, mergeErr
 		}
 	}
 	for _, item := range request.Plan.UnsupportedFiles {
@@ -936,7 +864,7 @@ func (s Store) FinalizeRepositoryReviewRun(
 			state.CurrentCampaign, item.Path,
 			RepositoryReviewCampaignPathCoverage{Unsupported: true},
 		); mergeErr != nil {
-			return RecordResult{}, mergeErr
+			return FinalizeRepositoryReviewRunResult{}, mergeErr
 		}
 	}
 	for _, file := range request.Plan.UnchangedFiles {
@@ -944,7 +872,7 @@ func (s Store) FinalizeRepositoryReviewRun(
 			state.CurrentCampaign, file.Path,
 			RepositoryReviewCampaignPathCoverage{Completed: true},
 		); mergeErr != nil {
-			return RecordResult{}, mergeErr
+			return FinalizeRepositoryReviewRunResult{}, mergeErr
 		}
 	}
 	inspectedPaths := make(map[string]struct{})
@@ -1028,9 +956,9 @@ func (s Store) FinalizeRepositoryReviewRun(
 	state.ReviewVersion++
 	state.UpdatedAt = completedAt
 	if err := s.save(&state); err != nil {
-		return RecordResult{}, err
+		return FinalizeRepositoryReviewRunResult{}, err
 	}
-	return RecordResult{
+	return FinalizeRepositoryReviewRunResult{
 		State: state, Run: run,
 		AcceptedFindingIDs: append([]string(nil), active.FindingIDs...),
 	}, nil
@@ -1183,7 +1111,11 @@ func archiveInterruptedRepositoryReviewRun(state *RepositoryState, completedAt t
 		FindingIDs:        append([]string(nil), active.FindingIDs...),
 		Models:            models,
 		CheckpointDigests: checkpointDigests, CheckpointScopes: checkpointScopes,
-		Interrupted: true, CompletedAt: completedAt.UTC(),
+		Interrupted:             true,
+		TargetBranch:            active.TargetBranch,
+		AdvertisedDefaultBranch: active.AdvertisedDefaultBranch,
+		TargetIsDefault:         active.TargetIsDefault,
+		CompletedAt:             completedAt.UTC(),
 	})
 	if len(state.Runs) > 1000 {
 		state.Runs = append([]ReviewRun(nil), state.Runs[len(state.Runs)-1000:]...)
@@ -1216,30 +1148,6 @@ func repositoryReviewCheckpointRequestDigest(
 	return stableID("sha256:", string(data))
 }
 
-// repositoryReviewLegacyCheckpointRequestDigest preserves the schema-4
-// checkpoint fence solely so a replay carrying enough exact attribution
-// evidence can repair the newly introduced provenance record.
-func repositoryReviewLegacyCheckpointRequestDigest(
-	request CheckpointRepositoryReviewAssignmentRequest,
-) string {
-	data, _ := json.Marshal(struct {
-		PlanID            string      `json:"plan_id"`
-		CampaignID        string      `json:"campaign_id"`
-		RunID             string      `json:"run_id"`
-		AssignmentID      string      `json:"assignment_id"`
-		ProviderDigest    string      `json:"provider_digest"`
-		AcknowledgedFiles []FileRef   `json:"acknowledged_files"`
-		Observation       Observation `json:"observation"`
-	}{
-		PlanID: request.Plan.ID, CampaignID: request.Plan.CampaignID,
-		RunID: request.RunID, AssignmentID: request.AssignmentID,
-		ProviderDigest:    request.Digest,
-		AcknowledgedFiles: request.AcknowledgedFiles,
-		Observation:       request.Observation,
-	})
-	return stableID("sha256:", string(data))
-}
-
 func validRepositoryReviewCheckpointDigest(value string) bool {
 	digest, ok := strings.CutPrefix(value, "sha256:")
 	return ok && len(digest) == 64 && validHexDigest(digest)
@@ -1260,6 +1168,9 @@ func validateRepositoryReviewActiveRun(
 	if !validBoundedText(active.ID, 1024) || !ValidRepositoryReviewCampaignID(active.CampaignID) ||
 		!validBoundedText(active.PlanID, 128) || !validRepositoryReviewCommitSHA(active.CommitSHA) ||
 		!validBoundedText(active.InventoryHash, 256) || !validBoundedText(active.ProfileHash, 256) ||
+		!validRepositoryReviewBranchProvenance(
+			active.TargetBranch, active.AdvertisedDefaultBranch, active.TargetIsDefault,
+		) ||
 		active.StartedAt.IsZero() || active.Reservations == nil ||
 		len(active.Reservations) > maxRepositoryReviewRequiredAssignments ||
 		state.CurrentCampaign == nil || state.CurrentCampaign.ID != active.CampaignID ||

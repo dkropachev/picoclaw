@@ -94,7 +94,6 @@ jobs:
 
 const RepositoryBugFinderWorkflowYAML = `name: Repository Bug Finder
 on:
-  manual: {}
   workflow_call:
     inputs:
       repository:
@@ -105,7 +104,7 @@ on:
         required: true
       campaign_id:
         type: string
-        default: ""
+        required: true
       ref:
         type: string
         default: ""

@@ -104,7 +104,7 @@ func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T)
 		call.Inputs["automation_id"].Type != "string" ||
 		!call.Inputs["automation_id"].Required ||
 		call.Inputs["campaign_id"].Type != "string" ||
-		call.Inputs["campaign_id"].Default != "" {
+		!call.Inputs["campaign_id"].Required || call.Inputs["campaign_id"].Default != nil {
 		t.Fatalf("frozen scope inputs=%#v", call)
 	}
 	if selection := call.Inputs["scope_selection"].Default; !reflect.DeepEqual(selection, map[string]any{}) {

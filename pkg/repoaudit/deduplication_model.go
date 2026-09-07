@@ -65,40 +65,43 @@ type RawFindingHistoryEntry struct {
 // finding agent returned it. Processing fields may advance, but diagnosis and
 // provenance fields are immutable after insertion.
 type RawReviewFinding struct {
-	ID                    string                       `json:"id"`
-	Version               int64                        `json:"version"`
-	CampaignID            string                       `json:"campaign_id"`
-	AdmissionBucket       string                       `json:"admission_bucket"`
-	InsertionOrdinal      uint64                       `json:"insertion_ordinal"`
-	DiagnosisDigest       string                       `json:"diagnosis_digest"`
-	LegacyFindingID       string                       `json:"legacy_finding_id,omitempty"`
-	Repository            string                       `json:"repository"`
-	CommitSHA             string                       `json:"commit_sha"`
-	File                  FileRef                      `json:"file"`
-	Line                  *int                         `json:"line,omitempty"`
-	Severity              string                       `json:"severity"`
-	Title                 string                       `json:"title"`
-	Symbol                string                       `json:"symbol,omitempty"`
-	Message               string                       `json:"message,omitempty"`
-	Evidence              string                       `json:"evidence"`
-	Impact                string                       `json:"impact"`
-	Validation            Validation                   `json:"validation"`
-	MatchHints            MatchHints                   `json:"match_hints,omitempty"`
-	FixEffort             FixEffort                    `json:"fix_effort,omitempty"`
-	ContextID             string                       `json:"context_id"`
-	RunID                 string                       `json:"run_id"`
-	AssignmentID          string                       `json:"assignment_id"`
-	Model                 string                       `json:"model"`
-	ModelAlias            string                       `json:"model_alias,omitempty"`
-	Account               string                       `json:"account,omitempty"`
-	Reviewer              string                       `json:"reviewer,omitempty"`
-	State                 RawFindingDeduplicationState `json:"deduplication_state"`
-	Disposition           RawFindingDisposition        `json:"disposition"`
-	DeduplicatedFindingID string                       `json:"deduplicated_finding_id,omitempty"`
-	History               []RawFindingHistoryEntry     `json:"history,omitempty"`
-	Failure               *DeduplicationFailure        `json:"failure,omitempty"`
-	CreatedAt             time.Time                    `json:"created_at"`
-	UpdatedAt             time.Time                    `json:"updated_at"`
+	ID                          string                       `json:"id"`
+	Version                     int64                        `json:"version"`
+	CampaignID                  string                       `json:"campaign_id"`
+	AdmissionBucket             string                       `json:"admission_bucket"`
+	InsertionOrdinal            uint64                       `json:"insertion_ordinal"`
+	DiagnosisDigest             string                       `json:"diagnosis_digest"`
+	DeduplicationSnapshotDigest string                       `json:"deduplication_snapshot_digest,omitempty"`
+	Repository                  string                       `json:"repository"`
+	CommitSHA                   string                       `json:"commit_sha"`
+	File                        FileRef                      `json:"file"`
+	Line                        *int                         `json:"line,omitempty"`
+	Severity                    string                       `json:"severity"`
+	Title                       string                       `json:"title"`
+	Symbol                      string                       `json:"symbol,omitempty"`
+	Message                     string                       `json:"message,omitempty"`
+	Evidence                    string                       `json:"evidence"`
+	Impact                      string                       `json:"impact"`
+	Validation                  Validation                   `json:"validation"`
+	MatchHints                  MatchHints                   `json:"match_hints,omitempty"`
+	FixEffort                   FixEffort                    `json:"fix_effort,omitempty"`
+	ContextID                   string                       `json:"context_id"`
+	RunID                       string                       `json:"run_id"`
+	AssignmentID                string                       `json:"assignment_id"`
+	Model                       string                       `json:"model"`
+	ModelAlias                  string                       `json:"model_alias,omitempty"`
+	Account                     string                       `json:"account,omitempty"`
+	Reviewer                    string                       `json:"reviewer,omitempty"`
+	TargetBranch                string                       `json:"target_branch,omitempty"`
+	AdvertisedDefaultBranch     string                       `json:"advertised_default_branch,omitempty"`
+	TargetIsDefault             bool                         `json:"target_is_default"`
+	State                       RawFindingDeduplicationState `json:"deduplication_state"`
+	Disposition                 RawFindingDisposition        `json:"disposition"`
+	DeduplicatedFindingID       string                       `json:"deduplicated_finding_id,omitempty"`
+	History                     []RawFindingHistoryEntry     `json:"history,omitempty"`
+	Failure                     *DeduplicationFailure        `json:"failure,omitempty"`
+	CreatedAt                   time.Time                    `json:"created_at"`
+	UpdatedAt                   time.Time                    `json:"updated_at"`
 }
 
 type DeduplicatedFindingHistoryEntry struct {
@@ -106,42 +109,6 @@ type DeduplicatedFindingHistoryEntry struct {
 	RawFindingID        string    `json:"raw_finding_id,omitempty"`
 	RepositoryFindingID string    `json:"repository_finding_id,omitempty"`
 	At                  time.Time `json:"at"`
-}
-
-// DeduplicatedReviewFinding is the campaign-level occurrence admitted to
-// repository mapping. Its diagnosis is copied from the first raw source and
-// is never consolidated or rewritten when later source IDs are attached.
-type DeduplicatedReviewFinding struct {
-	ID                      string                            `json:"id"`
-	Version                 int64                             `json:"version"`
-	CampaignID              string                            `json:"campaign_id"`
-	AdmissionBucket         string                            `json:"admission_bucket"`
-	CreationOrdinal         uint64                            `json:"creation_ordinal"`
-	DiagnosisDigest         string                            `json:"diagnosis_digest"`
-	Repository              string                            `json:"repository"`
-	CommitSHA               string                            `json:"commit_sha"`
-	File                    FileRef                           `json:"file"`
-	Line                    *int                              `json:"line,omitempty"`
-	Severity                string                            `json:"severity"`
-	Title                   string                            `json:"title"`
-	Symbol                  string                            `json:"symbol,omitempty"`
-	Message                 string                            `json:"message,omitempty"`
-	Evidence                string                            `json:"evidence"`
-	Impact                  string                            `json:"impact"`
-	Validation              Validation                        `json:"validation"`
-	MatchHints              MatchHints                        `json:"match_hints,omitempty"`
-	FixEffort               FixEffort                         `json:"fix_effort,omitempty"`
-	RawSourceIDs            []string                          `json:"raw_source_ids"`
-	History                 []DeduplicatedFindingHistoryEntry `json:"history,omitempty"`
-	Status                  FindingStatus                     `json:"status"`
-	IssueDraftID            string                            `json:"issue_draft_id,omitempty"`
-	RepositoryFindingID     string                            `json:"repository_finding_id,omitempty"`
-	RepositoryMatchState    RepositoryMatchState              `json:"repository_match_state,omitempty"`
-	TargetBranch            string                            `json:"target_branch,omitempty"`
-	AdvertisedDefaultBranch string                            `json:"advertised_default_branch,omitempty"`
-	TargetIsDefault         bool                              `json:"target_is_default"`
-	CreatedAt               time.Time                         `json:"created_at"`
-	UpdatedAt               time.Time                         `json:"updated_at"`
 }
 
 type DeduplicationJobState string
@@ -239,6 +206,18 @@ func cloneRepositoryReviewDeduplicationSnapshot(
 	return &cloned
 }
 
+func repositoryReviewDeduplicationSnapshotDigest(
+	snapshot RepositoryReviewDeduplicationSnapshot,
+) string {
+	encoded, _ := json.Marshal(snapshot)
+	return stableID("sha256:", string(encoded))
+}
+
+func validRepositoryReviewDeduplicationSnapshotDigest(value string) bool {
+	digest, ok := strings.CutPrefix(value, "sha256:")
+	return ok && len(digest) == 64 && validHexDigest(digest)
+}
+
 func validateRepositoryReviewDeduplicationSnapshot(
 	snapshot RepositoryReviewDeduplicationSnapshot,
 ) error {
@@ -287,7 +266,7 @@ func reconcileFindingsProcessingCounters(state *RepositoryState) bool {
 			next.Duplicates++
 		}
 	}
-	for _, finding := range state.DeduplicatedFindings {
+	for _, finding := range state.Findings {
 		if finding.CreationOrdinal > maximumOrdinal {
 			maximumOrdinal = finding.CreationOrdinal
 		}
@@ -315,71 +294,48 @@ func reconcileFindingsProcessingCounters(state *RepositoryState) bool {
 	return changed
 }
 
-// synchronizeDeduplicatedFindingProjections mirrors only downstream mutable
-// association fields from the compatibility Finding consumed by the mature
-// repository-mapping and issue pipelines. The immutable diagnosis and ordered
-// raw provenance remain owned by DeduplicatedReviewFinding.
-func synchronizeDeduplicatedFindingProjections(state *RepositoryState) bool {
-	if state == nil || len(state.DeduplicatedFindings) == 0 || len(state.Findings) == 0 {
-		return false
-	}
-	byID := make(map[string]Finding, len(state.Findings))
-	for _, finding := range state.Findings {
-		byID[finding.ID] = finding
-	}
-	changed := false
-	for index := range state.DeduplicatedFindings {
-		deduplicated := &state.DeduplicatedFindings[index]
-		projection, found := byID[deduplicated.ID]
-		if !found {
-			continue
-		}
-		if deduplicated.Status == projection.Status &&
-			deduplicated.IssueDraftID == projection.IssueDraftID &&
-			deduplicated.RepositoryFindingID == projection.RepositoryFindingID &&
-			deduplicated.RepositoryMatchState == projection.RepositoryMatchState {
-			continue
-		}
-		associationChanged := deduplicated.RepositoryFindingID != projection.RepositoryFindingID ||
-			deduplicated.RepositoryMatchState != projection.RepositoryMatchState
-		deduplicated.Status = projection.Status
-		deduplicated.IssueDraftID = projection.IssueDraftID
-		deduplicated.RepositoryFindingID = projection.RepositoryFindingID
-		deduplicated.RepositoryMatchState = projection.RepositoryMatchState
-		deduplicated.Version++
-		if projection.UpdatedAt.After(deduplicated.UpdatedAt) {
-			deduplicated.UpdatedAt = projection.UpdatedAt
-		}
-		if associationChanged {
-			at := projection.UpdatedAt
-			if at.IsZero() {
-				at = state.UpdatedAt
-			}
-			deduplicated.History = appendDeduplicatedFindingHistory(
-				deduplicated.History,
-				DeduplicatedFindingHistoryEntry{
-					Action: "repository_associated", RepositoryFindingID: projection.RepositoryFindingID,
-					At: at,
-				},
-			)
-		}
-		changed = true
-	}
-	return changed
-}
-
 func validateDeduplicationState(state RepositoryState) error {
 	rawByID := make(map[string]RawReviewFinding, len(state.RawFindings))
+	contexts := make(map[string]FindingContext, len(state.Contexts))
+	for _, contextRecord := range state.Contexts {
+		contexts[contextRecord.ID] = contextRecord
+	}
+	type assignmentKey struct{ runID, assignmentID string }
+	assignments := make(map[assignmentKey]struct{})
+	retainedRuns := make(map[string]struct{}, len(state.Runs)+1)
+	if state.ActiveReviewRun != nil {
+		retainedRuns[state.ActiveReviewRun.ID] = struct{}{}
+		for assignmentID := range state.ActiveReviewRun.Reservations {
+			assignments[assignmentKey{state.ActiveReviewRun.ID, assignmentID}] = struct{}{}
+		}
+	}
+	for _, run := range state.Runs {
+		retainedRuns[run.ID] = struct{}{}
+		for assignmentID := range run.CheckpointDigests {
+			assignments[assignmentKey{run.ID, assignmentID}] = struct{}{}
+		}
+	}
 	maximumOrdinal := uint64(0)
 	for _, raw := range state.RawFindings {
+		rawIDSuffix, validRawID := strings.CutPrefix(raw.ID, "rrw_")
 		validCommit := validRepositoryReviewCommitSHA(raw.CommitSHA)
-		if strings.HasPrefix(raw.AssignmentID, "record-") {
-			validCommit = validBoundedText(raw.CommitSHA, 256)
+		contextRecord, contextFound := contexts[raw.ContextID]
+		contextContainsFile := false
+		if contextFound {
+			for _, contextFile := range contextRecord.Files {
+				if contextFile == raw.File {
+					contextContainsFile = true
+					break
+				}
+			}
 		}
+		_, assignmentFound := assignments[assignmentKey{raw.RunID, raw.AssignmentID}]
+		_, runRetained := retainedRuns[raw.RunID]
 		if _, duplicate := rawByID[raw.ID]; duplicate ||
-			!validBoundedText(raw.ID, 256) || raw.Version < 1 ||
+			!validRawID || len(rawIDSuffix) != 64 || !validHexDigest(rawIDSuffix) || raw.Version < 1 ||
 			!validBoundedText(raw.CampaignID, 256) ||
 			!validBoundedText(raw.AdmissionBucket, 256) || raw.InsertionOrdinal == 0 ||
+			!validRepositoryReviewDeduplicationSnapshotDigest(raw.DeduplicationSnapshotDigest) ||
 			raw.DiagnosisDigest != RawReviewFindingDiagnosisDigest(raw) ||
 			!validBoundedText(raw.Repository, maxRepositoryIdentityBytes) || raw.Repository != state.Repository ||
 			!validCommit ||
@@ -389,14 +345,28 @@ func validateDeduplicationState(state RepositoryState) error {
 			!validBoundedText(raw.AssignmentID, 128) ||
 			!validFindingSourceProvenance(raw.Model, raw.ModelAlias, raw.Account) ||
 			!validOptionalAutomationText(raw.Reviewer, 256) ||
+			!validRepositoryReviewBranchProvenance(
+				raw.TargetBranch, raw.AdvertisedDefaultBranch, raw.TargetIsDefault,
+			) ||
+			!contextFound || runRetained && !assignmentFound || contextRecord.CampaignID != raw.CampaignID ||
+			contextRecord.Repository != raw.Repository || contextRecord.CommitSHA != raw.CommitSHA ||
+			contextRecord.RunID != raw.RunID || contextRecord.Model != raw.Model ||
+			contextRecord.ModelAlias != raw.ModelAlias || contextRecord.Account != raw.Account ||
+			contextRecord.Reviewer != raw.Reviewer || !contextContainsFile ||
 			len(raw.History) > DeduplicationHistoryLimit || raw.CreatedAt.IsZero() ||
 			raw.UpdatedAt.Before(raw.CreatedAt) || !validRawFindingState(raw) ||
 			!validDeduplicationFailure(raw.Failure) {
 			return errors.New("invalid raw repository review finding")
 		}
-		if candidate := rawFindingCandidate(raw); validateCandidate(candidate) != nil ||
+		if candidate := rawFindingCandidate(raw); ValidateGeneratedFindingCandidate(candidate) != nil ||
 			candidate.Validation.Status != "confirmed" || raw.File.Path != candidate.File {
 			return errors.New("invalid raw repository review finding diagnosis")
+		}
+		if state.CurrentCampaign != nil && state.CurrentCampaign.ID == raw.CampaignID &&
+			raw.DeduplicationSnapshotDigest != repositoryReviewDeduplicationSnapshotDigest(
+				*state.CurrentCampaign.DeduplicationSnapshot,
+			) {
+			return errors.New("raw repository review finding has the wrong deduplication snapshot")
 		}
 		for _, history := range raw.History {
 			if history.At.IsZero() || history.Attempt < 0 ||
@@ -411,64 +381,71 @@ func validateDeduplicationState(state RepositoryState) error {
 			maximumOrdinal = raw.InsertionOrdinal
 		}
 	}
-	for _, projection := range state.Findings {
-		if !projection.DeduplicationPending {
-			continue
-		}
-		if len(projection.RawFindingIDs) == 0 || projection.RepositoryFindingID != "" ||
-			projection.IssueDraftID != "" {
-			return errors.New("invalid pending deduplication finding projection")
-		}
-		seen := make(map[string]struct{}, len(projection.RawFindingIDs))
-		for _, rawID := range projection.RawFindingIDs {
-			raw, found := rawByID[rawID]
-			if !found || raw.CampaignID != projection.CampaignID || raw.Repository != projection.Repository {
-				return errors.New("pending deduplication finding projection has an invalid raw source")
-			}
-			if _, duplicate := seen[rawID]; duplicate {
-				return errors.New("pending deduplication finding projection repeats a raw source")
-			}
-			seen[rawID] = struct{}{}
-		}
-	}
-	deduplicatedByID := make(map[string]DeduplicatedReviewFinding, len(state.DeduplicatedFindings))
-	for _, finding := range state.DeduplicatedFindings {
+	deduplicatedByID := make(map[string]Finding, len(state.Findings))
+	rawOwners := make(map[string]string, len(state.RawFindings))
+	for _, finding := range state.Findings {
+		findingIDSuffix, validFindingID := strings.CutPrefix(finding.ID, "rdf_")
 		validCommit := validRepositoryReviewCommitSHA(finding.CommitSHA)
-		if len(finding.RawSourceIDs) > 0 {
-			if first, found := rawByID[finding.RawSourceIDs[0]]; found &&
-				strings.HasPrefix(first.AssignmentID, "record-") {
-				validCommit = validBoundedText(finding.CommitSHA, 256)
-			}
-		}
 		if _, duplicate := deduplicatedByID[finding.ID]; duplicate ||
-			!validBoundedText(finding.ID, 256) || finding.Version < 1 ||
+			!validFindingID || len(findingIDSuffix) != 64 || !validHexDigest(findingIDSuffix) ||
+			finding.Version < 1 ||
 			!validBoundedText(finding.CampaignID, 256) ||
 			!validBoundedText(finding.AdmissionBucket, 256) || finding.CreationOrdinal == 0 ||
 			!validBoundedText(finding.Repository, maxRepositoryIdentityBytes) ||
-			!validCommit || len(finding.RawSourceIDs) == 0 ||
+			!validCommit || !validRepositoryReviewBranchProvenance(
+			finding.TargetBranch, finding.AdvertisedDefaultBranch, finding.TargetIsDefault,
+		) || len(finding.RawSourceIDs) == 0 ||
 			len(finding.History) > DeduplicationHistoryLimit || finding.CreatedAt.IsZero() ||
 			finding.UpdatedAt.Before(finding.CreatedAt) ||
-			(finding.Status != FindingOpen && finding.Status != FindingDismissed &&
-				finding.Status != FindingPosted) ||
+			(finding.Status != FindingOpen && finding.Status != FindingPosted) ||
 			(finding.RepositoryFindingID == "") != (finding.RepositoryMatchState == "") ||
 			(finding.RepositoryFindingID != "" &&
 				repositoryFindingIndexByID(state.RepositoryFindings, finding.RepositoryFindingID) < 0) {
 			return errors.New("invalid deduplicated repository review finding")
 		}
 		seenSources := make(map[string]struct{}, len(finding.RawSourceIDs))
-		for _, rawID := range finding.RawSourceIDs {
+		expectedObservations := make([]FindingObservation, 0, min(
+			len(finding.RawSourceIDs), maxFindingContributorObservations,
+		))
+		expectedModels := make([]string, 0)
+		for sourceIndex, rawID := range finding.RawSourceIDs {
 			raw, found := rawByID[rawID]
 			if !found || raw.CampaignID != finding.CampaignID ||
-				raw.AdmissionBucket != finding.AdmissionBucket {
+				raw.AdmissionBucket != finding.AdmissionBucket ||
+				raw.State != RawFindingDeduplicationCompleted ||
+				raw.DeduplicatedFindingID != finding.ID ||
+				(sourceIndex == 0 && raw.Disposition != RawFindingDispositionNew) ||
+				(sourceIndex > 0 && raw.Disposition != RawFindingDispositionDuplicate) {
 				return errors.New("invalid deduplicated repository review finding source")
 			}
 			if _, duplicate := seenSources[rawID]; duplicate {
 				return errors.New("duplicate raw repository review finding source")
 			}
 			seenSources[rawID] = struct{}{}
+			if _, owned := rawOwners[rawID]; owned {
+				return errors.New("raw repository review finding has multiple deduplicated owners")
+			}
+			rawOwners[rawID] = finding.ID
+			expectedObservations = appendBoundedFindingObservation(
+				expectedObservations,
+				findingObservationFrom(
+					rawFindingCandidate(raw), raw.ContextID, raw.Model, raw.ModelAlias,
+					raw.Account, raw.Reviewer,
+				),
+			)
+			expectedModels = appendUnique(expectedModels, raw.ModelAlias)
+		}
+		expectedContextIDs := make([]string, 0, len(expectedObservations))
+		for _, observation := range expectedObservations {
+			expectedContextIDs = appendUnique(expectedContextIDs, observation.ContextID)
 		}
 		first := rawByID[finding.RawSourceIDs[0]]
-		if finding.DiagnosisDigest != first.DiagnosisDigest ||
+		if finding.ID != stableID("rdf_", first.ID) ||
+			finding.ObservationCount != len(finding.RawSourceIDs) ||
+			!reflect.DeepEqual(finding.Observations, expectedObservations) ||
+			!reflect.DeepEqual(finding.ContextIDs, expectedContextIDs) ||
+			!reflect.DeepEqual(finding.Models, expectedModels) ||
+			finding.DiagnosisDigest != first.DiagnosisDigest ||
 			!deduplicatedFindingMatchesRaw(finding, first) {
 			return errors.New("deduplicated repository review finding rewrites its first diagnosis")
 		}
@@ -484,13 +461,16 @@ func validateDeduplicationState(state RepositoryState) error {
 			maximumOrdinal = finding.CreationOrdinal
 		}
 	}
-	jobsByRaw := make(map[string]struct{}, len(state.DeduplicationJobs))
+	jobsByRaw := make(map[string]DeduplicationJob, len(state.DeduplicationJobs))
 	jobIDs := make(map[string]struct{}, len(state.DeduplicationJobs))
 	for _, job := range state.DeduplicationJobs {
 		raw, found := rawByID[job.RawFindingID]
 		_, duplicateJob := jobIDs[job.ID]
 		_, duplicateRaw := jobsByRaw[job.RawFindingID]
-		if duplicateJob || duplicateRaw || !found || !validBoundedText(job.ID, 256) ||
+		if duplicateJob || duplicateRaw || !found ||
+			job.ID != stableID("rdj_", job.RawFindingID) ||
+			repositoryReviewDeduplicationSnapshotDigest(job.ModelSnapshot) !=
+				raw.DeduplicationSnapshotDigest ||
 			job.AdmissionBucket != raw.AdmissionBucket || job.InsertionOrdinal < raw.InsertionOrdinal ||
 			job.Attempts < 0 || job.Attempts > DeduplicationAttemptLimit ||
 			len(job.History) > DeduplicationHistoryLimit || job.CreatedAt.IsZero() ||
@@ -532,7 +512,7 @@ func validateDeduplicationState(state RepositoryState) error {
 			}
 		}
 		jobIDs[job.ID] = struct{}{}
-		jobsByRaw[job.RawFindingID] = struct{}{}
+		jobsByRaw[job.RawFindingID] = job
 		if job.InsertionOrdinal > maximumOrdinal {
 			maximumOrdinal = job.InsertionOrdinal
 		}
@@ -541,10 +521,23 @@ func validateDeduplicationState(state RepositoryState) error {
 		return errors.New("raw repository review findings and deduplication jobs differ")
 	}
 	for _, raw := range state.RawFindings {
-		if raw.DeduplicatedFindingID != "" {
-			if _, found := deduplicatedByID[raw.DeduplicatedFindingID]; !found {
-				return errors.New("raw repository review finding has an invalid target")
+		job, found := jobsByRaw[raw.ID]
+		if !found || job.State != DeduplicationJobState(raw.State) {
+			return errors.New("raw repository review finding has inconsistent processing state")
+		}
+		owner, owned := rawOwners[raw.ID]
+		if raw.State == RawFindingDeduplicationCompleted {
+			if !owned || owner != raw.DeduplicatedFindingID ||
+				deduplicatedByID[owner].ID == "" ||
+				raw.Disposition == RawFindingDispositionNew &&
+					(job.Decision.Decision != "new" || job.Decision.CandidateID != "" ||
+						deduplicatedByID[owner].CreationOrdinal != job.InsertionOrdinal) ||
+				raw.Disposition == RawFindingDispositionDuplicate &&
+					(job.Decision.Decision != "duplicate" || job.Decision.CandidateID != owner) {
+				return errors.New("raw repository review finding has an invalid deduplicated target")
 			}
+		} else if owned || raw.DeduplicatedFindingID != "" || job.Decision != (DeduplicationJudgment{}) {
+			return errors.New("unfinished raw repository review finding has a deduplicated owner")
 		}
 	}
 	expected := state
@@ -562,6 +555,19 @@ func validateDeduplicationState(state RepositoryState) error {
 	return nil
 }
 
+func validRepositoryReviewBranchProvenance(target, advertised string, isDefault bool) bool {
+	normalizedTarget, targetErr := NormalizeRepositoryReviewBranch(target)
+	normalizedAdvertised, advertisedErr := NormalizeRepositoryReviewBranch(advertised)
+	if targetErr != nil || advertisedErr != nil || normalizedTarget != target ||
+		normalizedAdvertised != advertised || (target == "") != (advertised == "") {
+		return false
+	}
+	if target == "" {
+		return isDefault
+	}
+	return isDefault == (target == advertised)
+}
+
 func rawFindingCandidate(raw RawReviewFinding) FindingCandidate {
 	return FindingCandidate{
 		Severity: raw.Severity, Title: raw.Title, Symbol: raw.Symbol, File: raw.File.Path,
@@ -574,29 +580,35 @@ func rawFindingCandidate(raw RawReviewFinding) FindingCandidate {
 // provenance field while leaving only processing metadata free to advance.
 func RawReviewFindingDiagnosisDigest(raw RawReviewFinding) string {
 	encoded, _ := json.Marshal(struct {
-		CampaignID       string                 `json:"campaign_id"`
-		AdmissionBucket  string                 `json:"admission_bucket"`
-		InsertionOrdinal uint64                 `json:"insertion_ordinal"`
-		LegacyFindingID  string                 `json:"legacy_finding_id,omitempty"`
-		Repository       string                 `json:"repository"`
-		CommitSHA        string                 `json:"commit_sha"`
-		File             FileRef                `json:"file"`
-		Line             *int                   `json:"line,omitempty"`
-		ContextID        string                 `json:"context_id"`
-		RunID            string                 `json:"run_id"`
-		AssignmentID     string                 `json:"assignment_id"`
-		Model            string                 `json:"model"`
-		ModelAlias       string                 `json:"model_alias,omitempty"`
-		Account          string                 `json:"account,omitempty"`
-		Reviewer         string                 `json:"reviewer,omitempty"`
-		Diagnosis        DeduplicationDiagnosis `json:"diagnosis"`
+		CampaignID                  string                 `json:"campaign_id"`
+		AdmissionBucket             string                 `json:"admission_bucket"`
+		InsertionOrdinal            uint64                 `json:"insertion_ordinal"`
+		Repository                  string                 `json:"repository"`
+		CommitSHA                   string                 `json:"commit_sha"`
+		File                        FileRef                `json:"file"`
+		Line                        *int                   `json:"line,omitempty"`
+		ContextID                   string                 `json:"context_id"`
+		RunID                       string                 `json:"run_id"`
+		AssignmentID                string                 `json:"assignment_id"`
+		DeduplicationSnapshotDigest string                 `json:"deduplication_snapshot_digest"`
+		Model                       string                 `json:"model"`
+		ModelAlias                  string                 `json:"model_alias,omitempty"`
+		Account                     string                 `json:"account,omitempty"`
+		Reviewer                    string                 `json:"reviewer,omitempty"`
+		TargetBranch                string                 `json:"target_branch,omitempty"`
+		AdvertisedDefaultBranch     string                 `json:"advertised_default_branch,omitempty"`
+		TargetIsDefault             bool                   `json:"target_is_default"`
+		Diagnosis                   DeduplicationDiagnosis `json:"diagnosis"`
 	}{
 		CampaignID: raw.CampaignID, AdmissionBucket: raw.AdmissionBucket,
-		InsertionOrdinal: raw.InsertionOrdinal, LegacyFindingID: raw.LegacyFindingID,
-		Repository: raw.Repository, CommitSHA: raw.CommitSHA,
+		InsertionOrdinal: raw.InsertionOrdinal,
+		Repository:       raw.Repository, CommitSHA: raw.CommitSHA,
 		File: raw.File, Line: raw.Line, ContextID: raw.ContextID, RunID: raw.RunID,
 		AssignmentID: raw.AssignmentID, Model: raw.Model, ModelAlias: raw.ModelAlias,
-		Account: raw.Account, Reviewer: raw.Reviewer,
+		DeduplicationSnapshotDigest: raw.DeduplicationSnapshotDigest,
+		Account:                     raw.Account, Reviewer: raw.Reviewer,
+		TargetBranch: raw.TargetBranch, AdvertisedDefaultBranch: raw.AdvertisedDefaultBranch,
+		TargetIsDefault: raw.TargetIsDefault,
 		Diagnosis: DeduplicationDiagnosis{
 			Severity: raw.Severity, Title: raw.Title, Symbol: raw.Symbol,
 			Message: raw.Message, Evidence: raw.Evidence, Impact: raw.Impact,
@@ -607,9 +619,12 @@ func RawReviewFindingDiagnosisDigest(raw RawReviewFinding) string {
 }
 
 func deduplicatedFindingMatchesRaw(
-	finding DeduplicatedReviewFinding,
+	finding Finding,
 	raw RawReviewFinding,
 ) bool {
+	expectedObservation := findingObservationFrom(
+		rawFindingCandidate(raw), raw.ContextID, raw.Model, raw.ModelAlias, raw.Account, raw.Reviewer,
+	)
 	return finding.CampaignID == raw.CampaignID &&
 		finding.AdmissionBucket == raw.AdmissionBucket &&
 		finding.Repository == raw.Repository && finding.CommitSHA == raw.CommitSHA &&
@@ -617,6 +632,13 @@ func deduplicatedFindingMatchesRaw(
 		finding.Severity == raw.Severity && finding.Title == raw.Title &&
 		finding.Symbol == raw.Symbol && finding.Message == raw.Message &&
 		finding.Evidence == raw.Evidence && finding.Impact == raw.Impact &&
+		finding.TargetBranch == raw.TargetBranch &&
+		finding.AdvertisedDefaultBranch == raw.AdvertisedDefaultBranch &&
+		finding.TargetIsDefault == raw.TargetIsDefault &&
+		finding.Fingerprint == findingFingerprint(raw.File, rawFindingCandidate(raw)) &&
+		len(finding.ContextIDs) > 0 && finding.ContextIDs[0] == raw.ContextID &&
+		len(finding.Models) > 0 && finding.Models[0] == raw.ModelAlias &&
+		reflect.DeepEqual(finding.Observations[0], expectedObservation) &&
 		reflect.DeepEqual(finding.Validation, raw.Validation) &&
 		reflect.DeepEqual(finding.MatchHints, raw.MatchHints) &&
 		reflect.DeepEqual(finding.FixEffort, raw.FixEffort)

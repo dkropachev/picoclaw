@@ -375,6 +375,11 @@ func TestBindRepositoryReviewModelProfileValidatesAndFreezesResolution(t *testin
 		Revision: "sha256:models", AccountRef: "review-account",
 		ReviewerModels: []string{"review-a", "review-b"}, MaxContentBytes: 64 << 10,
 	}}
+	if bound, err := (&Executor{Agents: stub}).bindRepositoryReviewModelProfile(
+		context.Background(), map[string]any{},
+	); err != nil || nativeMapValue(bound["profile"]) == nil {
+		t.Fatalf("nil profile binding = (%#v, %v)", bound, err)
+	}
 	bound, err := (&Executor{Agents: stub}).bindRepositoryReviewModelProfile(context.Background(), base)
 	if err != nil {
 		t.Fatal(err)
@@ -412,6 +417,14 @@ func TestBindRepositoryReviewModelProfileValidatesAndFreezesResolution(t *testin
 			!strings.Contains(err.Error(), "empty result") {
 			t.Fatalf("empty profile %#v error = %v", empty, err)
 		}
+	}
+}
+
+func TestNilExecutorRunFailsClosed(t *testing.T) {
+	var executor *Executor
+	if _, err := executor.Run(t.Context(), RunRequest{}); err == nil ||
+		!strings.Contains(err.Error(), "executor is nil") {
+		t.Fatalf("nil executor error = %v", err)
 	}
 }
 

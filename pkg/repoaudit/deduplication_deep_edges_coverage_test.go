@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -75,7 +76,7 @@ func dedupDeepSaveFailureStore(
 
 type dedupDeepCompletionResult struct {
 	state   RepositoryState
-	finding DeduplicatedReviewFinding
+	finding Finding
 	created bool
 	err     error
 }
@@ -626,7 +627,7 @@ func TestDeduplicationDeepRemainingWorkerCoverage(t *testing.T) {
 		t.Fatalf("terminal claim=%#v claimed=%v err=%v", terminalClaim, terminalClaimed, terminalErr)
 	}
 	missingCompletedTarget := dedupDeepCloneState(t, completedState)
-	missingCompletedTarget.DeduplicatedFindings = nil
+	missingCompletedTarget.Findings = nil
 	missingTargetStore := NewStore(t.TempDir())
 	missingTargetStore.loadForTest = func(string) (RepositoryState, error) { return missingCompletedTarget, nil }
 	missingTargetResult := dedupDeepComplete(missingTargetStore, fixture.repository, completion)
@@ -844,8 +845,8 @@ func TestDeduplicationDeepClaimAndCompletionCoverage(t *testing.T) {
 		changedResult.finding.ID != "" || changedResult.created {
 		t.Fatalf("changed replay error=%v", changedResult.err)
 	}
-	if len(completedState.DeduplicatedFindings) != 1 {
-		t.Fatalf("completed state=%#v", completedState.DeduplicatedFindings)
+	if len(completedState.Findings) != 1 {
+		t.Fatalf("completed state=%#v", completedState.Findings)
 	}
 
 	// The second same-bucket raw now snapshots the created candidate.
@@ -881,8 +882,8 @@ func TestDeduplicationDeepClaimAndCompletionCoverage(t *testing.T) {
 		CandidateID: target.ID, Score: 100, Explanation: "same defect",
 	}}
 	duplicateRunning := dedupDeepState(t, fixture)
-	duplicateRunning.DeduplicatedFindings[0].RawSourceIDs = append(
-		duplicateRunning.DeduplicatedFindings[0].RawSourceIDs,
+	duplicateRunning.Findings[0].RawSourceIDs = append(
+		duplicateRunning.Findings[0].RawSourceIDs,
 		duplicateClaim.RawFinding.ID,
 	)
 	duplicateConflictStore := NewStore(t.TempDir())
@@ -1148,7 +1149,7 @@ func TestDeduplicationDeepProcessorFailureCoverage(t *testing.T) {
 		DeduplicationProcessOptions{
 			Score: func(_ context.Context, _ RepositoryReviewDeduplicationSnapshot, _ string, request DeduplicationScoringRequest) (DeduplicationScoringResponse, error) {
 				current := dedupDeepState(t, fixture)
-				current.DeduplicatedFindings[0].Version++
+				current.Findings[0].Version++
 				current.Version++
 				if saveErr := fixture.store.save(&current); saveErr != nil {
 					t.Fatal(saveErr)
@@ -1205,7 +1206,7 @@ func TestDeduplicationDeepProcessorFailureCoverage(t *testing.T) {
 	}
 }
 
-func TestDeduplicationDeepStateValidationCoverage(t *testing.T) {
+func TestDeduplicationCanonicalStateValidationCoverage(t *testing.T) {
 	fixture := dedupDeepPendingFixture(t, 1)
 	if _, err := fixture.store.ProcessPendingDeduplicationJobs(
 		t.Context(), fixture.repository, DeduplicationProcessOptions{},
@@ -1216,24 +1217,13 @@ func TestDeduplicationDeepStateValidationCoverage(t *testing.T) {
 	if err := validateDeduplicationState(base); err != nil {
 		t.Fatalf("valid baseline: %v", err)
 	}
-	pendingProjectionIndex := -1
-	for index := range base.Findings {
-		if base.Findings[index].DeduplicationPending {
-			pendingProjectionIndex = index
-			break
-		}
-	}
-	if pendingProjectionIndex < 0 {
-		base.Findings = append(base.Findings, Finding{
-			ID: "pending-projection", CampaignID: base.RawFindings[0].CampaignID,
-			Repository: base.Repository, DeduplicationPending: true,
-			RawFindingIDs: []string{base.RawFindings[0].ID},
-		})
-		pendingProjectionIndex = len(base.Findings) - 1
-	}
 	mutations := map[string]func(*RepositoryState){
 		"raw diagnosis": func(state *RepositoryState) {
 			state.RawFindings[0].Severity = ""
+			state.RawFindings[0].DiagnosisDigest = RawReviewFindingDiagnosisDigest(state.RawFindings[0])
+		},
+		"raw snapshot digest": func(state *RepositoryState) {
+			state.RawFindings[0].DeduplicationSnapshotDigest = "sha256:" + strings.Repeat("0", 64)
 			state.RawFindings[0].DiagnosisDigest = RawReviewFindingDiagnosisDigest(state.RawFindings[0])
 		},
 		"raw history": func(state *RepositoryState) {
@@ -1241,34 +1231,30 @@ func TestDeduplicationDeepStateValidationCoverage(t *testing.T) {
 				State: "bad", Disposition: RawFindingDispositionUndecided, At: repositoryAuditTestNow,
 			})
 		},
-		"pending empty": func(state *RepositoryState) {
-			state.Findings[pendingProjectionIndex].RawFindingIDs = nil
-		},
-		"pending missing": func(state *RepositoryState) {
-			state.Findings[pendingProjectionIndex].RawFindingIDs = []string{"missing"}
-		},
-		"pending duplicate": func(state *RepositoryState) {
-			id := state.RawFindings[0].ID
-			state.Findings[pendingProjectionIndex].RawFindingIDs = []string{id, id}
-		},
 		"dedup missing source": func(state *RepositoryState) {
-			state.DeduplicatedFindings[0].RawSourceIDs = append(state.DeduplicatedFindings[0].RawSourceIDs, "missing")
+			state.Findings[0].RawSourceIDs = append(state.Findings[0].RawSourceIDs, "missing")
 		},
 		"dedup duplicate source": func(state *RepositoryState) {
 			id := state.RawFindings[0].ID
-			state.DeduplicatedFindings[0].RawSourceIDs = []string{id, id}
+			state.Findings[0].RawSourceIDs = []string{id, id}
 		},
 		"dedup rewrite": func(state *RepositoryState) {
-			state.DeduplicatedFindings[0].Title = "rewritten"
+			state.Findings[0].Title = "rewritten"
+		},
+		"dedup contributor": func(state *RepositoryState) {
+			state.Findings[0].Models = append(state.Findings[0].Models, "invented")
 		},
 		"dedup history": func(state *RepositoryState) {
-			state.DeduplicatedFindings[0].History = append(
-				state.DeduplicatedFindings[0].History,
+			state.Findings[0].History = append(
+				state.Findings[0].History,
 				DeduplicatedFindingHistoryEntry{At: repositoryAuditTestNow},
 			)
 		},
 		"job state": func(state *RepositoryState) {
 			state.DeduplicationJobs[0].State = "bad"
+		},
+		"job snapshot": func(state *RepositoryState) {
+			state.DeduplicationJobs[0].ModelSnapshot.SimilarityThreshold--
 		},
 		"candidate version": func(state *RepositoryState) {
 			state.DeduplicationJobs[0].CandidateVersions = []DeduplicationCandidateVersion{
@@ -1283,14 +1269,11 @@ func TestDeduplicationDeepStateValidationCoverage(t *testing.T) {
 		},
 		"shortlist oversized": func(state *RepositoryState) {
 			state.DeduplicationJobs[0].ShortlistedScores = make(
-				[]DeduplicationCandidateScore,
-				DeduplicationMaximumShortlist+1,
+				[]DeduplicationCandidateScore, DeduplicationMaximumShortlist+1,
 			)
 			for index := range state.DeduplicationJobs[0].ShortlistedScores {
 				state.DeduplicationJobs[0].ShortlistedScores[index] = DeduplicationCandidateScore{
-					CandidateID: "candidate-" + string(rune('a'+index)),
-					Score:       90,
-					Explanation: "same",
+					CandidateID: fmt.Sprintf("candidate-%d", index), Score: 90, Explanation: "same",
 				}
 			}
 		},
@@ -1331,110 +1314,11 @@ func TestDeduplicationDeepStateValidationCoverage(t *testing.T) {
 		})
 	}
 	ordinal := dedupDeepCloneState(t, base)
-	ordinal.DeduplicatedFindings[0].CreationOrdinal = ordinal.RawFindings[0].InsertionOrdinal + 1
-	ordinal.NextDeduplicationOrdinal = ordinal.DeduplicatedFindings[0].CreationOrdinal + 1
+	ordinal.DeduplicationJobs[0].InsertionOrdinal++
+	ordinal.Findings[0].CreationOrdinal = ordinal.DeduplicationJobs[0].InsertionOrdinal
+	ordinal.NextDeduplicationOrdinal = ordinal.Findings[0].CreationOrdinal + 1
 	if err := validateDeduplicationState(ordinal); err != nil {
-		t.Fatalf("higher deduplicated ordinal rejected: %v", err)
-	}
-}
-
-func TestDeduplicationDeepProjectionAndCounterCoverage(t *testing.T) {
-	if synchronizeDeduplicatedFindingProjections(nil) {
-		t.Fatal("nil projection state changed")
-	}
-	state := RepositoryState{
-		UpdatedAt: repositoryAuditTestNow,
-		DeduplicatedFindings: []DeduplicatedReviewFinding{{
-			ID: "dedup", Version: 1, Status: FindingOpen, UpdatedAt: repositoryAuditTestNow,
-		}},
-		Findings: []Finding{{ID: "other"}},
-	}
-	if synchronizeDeduplicatedFindingProjections(&state) {
-		t.Fatal("missing projection changed deduplicated finding")
-	}
-	state.Findings = append(state.Findings, Finding{
-		ID: "dedup", Status: FindingDismissed, RepositoryFindingID: "repository-target",
-		RepositoryMatchState: RepositoryMatchKnown,
-	})
-	if !synchronizeDeduplicatedFindingProjections(&state) || len(state.DeduplicatedFindings[0].History) != 1 ||
-		state.DeduplicatedFindings[0].History[0].At != state.UpdatedAt {
-		t.Fatalf("projection synchronization=%#v", state.DeduplicatedFindings[0])
-	}
-	counters := RepositoryState{
-		UpdatedAt:            repositoryAuditTestNow,
-		DeduplicatedFindings: []DeduplicatedReviewFinding{{CreationOrdinal: 9}},
-	}
-	if !reconcileFindingsProcessingCounters(&counters) || counters.NextDeduplicationOrdinal != 10 {
-		t.Fatalf("ordinal counters=%#v", counters)
-	}
-}
-
-func TestDeduplicationDeepLegacyRecordCoverage(t *testing.T) {
-	repository := "owner/legacy-deep"
-	plan := Plan{
-		Repository: repository, CampaignID: "campaign", CommitSHA: strings.Repeat("a", 40),
-		TargetBranch: "main", AdvertisedDefaultBranch: "main", TargetIsDefault: true,
-	}
-	file := repositoryAuditTestFile("pkg/legacy.go", "a", 10)
-	candidate := repositoryReviewCampaignFinding(file, "legacy deep")
-	contextRecord := FindingContext{ID: "context", Repository: repository}
-	observation := Observation{
-		Model: "provider/review", ModelAlias: "review", Account: "review-account",
-		Reviewer: "reviewer",
-	}
-	if _, err := persistLegacyRecordFinding(
-		&RepositoryState{},
-		plan,
-		"run",
-		0,
-		0,
-		contextRecord,
-		observation,
-		FileRef{},
-		candidate,
-		repositoryAuditTestNow,
-	); err == nil {
-		t.Fatal("legacy record with invalid primary accepted")
-	}
-	state := RepositoryState{Repository: repository, CurrentCampaign: &RepositoryReviewCampaignCoverage{
-		ID: plan.CampaignID,
-		DeduplicationSnapshot: &RepositoryReviewDeduplicationSnapshot{
-			ReviewerModel: "review", DeduplicationModel: "dedup", AccountRef: "account",
-			SimilarityThreshold: 88, CandidateLimit: 7,
-		},
-	}}
-	id, err := persistLegacyRecordFinding(
-		&state,
-		plan,
-		"run",
-		0,
-		0,
-		contextRecord,
-		observation,
-		file,
-		candidate,
-		repositoryAuditTestNow,
-	)
-	if err != nil || id == "" || state.DeduplicationJobs[0].ModelSnapshot.CandidateLimit != 0 ||
-		state.DeduplicationJobs[0].ModelSnapshot.SimilarityThreshold != 88 {
-		t.Fatalf("legacy record id=%q state=%#v err=%v", id, state, err)
-	}
-	if _, err := persistLegacyRecordFinding(
-		&state,
-		plan,
-		"run",
-		0,
-		0,
-		contextRecord,
-		observation,
-		file,
-		candidate,
-		repositoryAuditTestNow,
-	); !errors.Is(
-		err,
-		ErrConflict,
-	) {
-		t.Fatalf("duplicate legacy record error=%v", err)
+		t.Fatalf("retried creation ordinal rejected: %v", err)
 	}
 }
 
@@ -1549,465 +1433,5 @@ func TestDeduplicationDeepHistoryAndPredicateCoverage(t *testing.T) {
 		(*RepositoryReviewDeduplicationSnapshot)(nil),
 	) {
 		t.Fatal("nil snapshot clone changed")
-	}
-}
-
-func TestDeduplicationDeepHistoricalMutationFences(t *testing.T) {
-	repository := "owner/fenced-mutations"
-	state := RepositoryState{Repository: repository, Version: 1, HistoricalDeduplication: HistoricalDeduplicationReplay{
-		Required: true, Status: HistoricalDeduplicationMerging,
-		MergeLease: HistoricalDeduplicationMergeLease{ID: "lease"},
-	}}
-	store := NewStore(t.TempDir())
-	store.loadForTest = func(string) (RepositoryState, error) {
-		return dedupDeepCloneState(t, state), nil
-	}
-	assertFence := func(name string, err error) {
-		t.Helper()
-		if !errors.Is(err, ErrHistoricalDeduplicationInProgress) {
-			t.Errorf("%s fence error=%v", name, err)
-		}
-	}
-	_, _, err := store.SetFindingStatusByVersion(repository, "finding", FindingDismissed, 1)
-	assertFence("status by version", err)
-	reservedState, reservedDraft, reserved, reserveErr := store.ReserveIssueGeneration(
-		testIssueGenerationRequest(repository, "finding", "generation"),
-	)
-	if reservedState.Repository != "" || reservedDraft.ID != "" || reserved {
-		t.Fatal("fenced issue reservation returned durable values")
-	}
-	assertFence("reserve issue", reserveErr)
-	regenerationState, regenerationDraft, regenerated, regenerationErr := store.BeginIssueRegeneration(
-		repository, "draft", testIssueGenerationRequest(repository, "finding", "generation"),
-	)
-	if regenerationState.Repository != "" || regenerationDraft.ID != "" || regenerated {
-		t.Fatal("fenced issue regeneration returned durable values")
-	}
-	assertFence("regenerate issue", regenerationErr)
-	_, _, err = store.CompleteIssueGeneration(repository, "draft", "generation", "title", "body", nil, "")
-	assertFence("complete issue", err)
-	_, err = store.DeleteIssueDraft(repository, "draft", 1)
-	assertFence("delete issue", err)
-	_, _, err = store.LinkExistingIssue(ExistingIssueLink{
-		Repository: repository, FindingID: "finding", ExternalID: "1",
-		ExternalURL: "https://example.test/issues/1", Title: "issue", Confirmed: true,
-	})
-	assertFence("link issue", err)
-	_, err = store.UnlinkExistingIssue(repository, "finding", 1, true)
-	assertFence("unlink issue", err)
-
-	mappingState, mappingJob, mappingFinding, mappingClaimed, mappingErr := store.ClaimMappingJob(
-		repository,
-		"job",
-		RepositoryMappingModelSnapshot{},
-	)
-	if mappingState.Repository != "" || mappingJob.ID != "" || mappingFinding.ID != "" ||
-		mappingClaimed {
-		t.Fatal("fenced mapping claim returned durable values")
-	}
-	assertFence("claim mapping", mappingErr)
-	_, _, err = store.SaveMappingAdjudication(repository, "job", RepositoryMappingAdjudication{
-		Decision: "distinct", Confidence: 1, Explanation: "distinct",
-	})
-	assertFence("save mapping", err)
-	_, _, err = store.CompleteMappingJob(repository, RepositoryMappingCompletion{
-		JobID: "job", CreateMatchState: RepositoryMatchNew,
-	})
-	assertFence("complete mapping", err)
-	_, _, err = store.ResolvePossibleDuplicate(repository, RepositoryDuplicateResolution{
-		ProvisionalID: "one", CandidateID: "two", Decision: "distinct",
-		ExpectedProvisionalVersion: 1,
-	})
-	assertFence("resolve duplicate", err)
-	_, _, err = store.ReserveValidationJobs(repository, []string{"finding"}, RepositoryMappingModelSnapshot{})
-	assertFence("reserve validation", err)
-	var (
-		validationState   RepositoryState
-		validationJob     RepositoryValidationJob
-		validationFinding RepositoryFinding
-		validationClaimed bool
-		validationErr     error
-	)
-	validationState, validationJob, validationFinding, validationClaimed,
-		validationErr = store.ClaimValidationJob(repository, "job")
-	if validationState.Repository != "" || validationJob.ID != "" ||
-		validationFinding.ID != "" || validationClaimed {
-		t.Fatal("fenced validation claim returned durable values")
-	}
-	assertFence("claim validation", validationErr)
-	_, _, err = store.SetValidationJobCandidates(repository, "job", nil)
-	assertFence("validation candidates", err)
-	var (
-		completedValidationState   RepositoryState
-		completedValidationFinding RepositoryFinding
-		completedValidationJob     RepositoryValidationJob
-		completedValidationErr     error
-	)
-	completedValidationState, completedValidationFinding, completedValidationJob,
-		completedValidationErr = store.CompleteValidationJob(repository, RepositoryValidationCompletion{
-		JobID: "job", Outcome: RepositoryValidationFailed, Error: "failed",
-	})
-	if completedValidationState.Repository != "" || completedValidationFinding.ID != "" ||
-		completedValidationJob.ID != "" {
-		t.Fatal("fenced validation completion returned durable values")
-	}
-	assertFence("complete validation", completedValidationErr)
-	_, _, err = store.UpdateRepositoryFindingIssueSnapshot(repository, RepositoryIssueSnapshotUpdate{
-		RepositoryFindingID: "finding", State: RepositoryFindingIssueNone,
-	})
-	assertFence("issue snapshot", err)
-
-	_, err = store.SnapshotMappingJobs(
-		repository, []string{"finding"}, RepositoryMappingModelSnapshot{Model: "mapper"},
-	)
-	assertFence("mapping snapshot", err)
-	_, err = store.SetFindingStatus(repository, "finding", FindingDismissed, 1)
-	assertFence("legacy status", err)
-	_, _, err = store.PrepareIssue(IssueDraftRequest{
-		Repository: repository, FindingIDs: []string{"finding"}, ExpectedVersion: 1,
-	})
-	assertFence("prepare issue", err)
-	_, _, err = store.UpdateIssueDraft(repository, "draft", "title", "body", nil, 1)
-	assertFence("update issue", err)
-	_, _, err = store.SetIssueDraftPublication(
-		repository, "draft", 1, IssueDraftEditing, "", "",
-	)
-	assertFence("publication", err)
-	var (
-		publicationState   RepositoryState
-		publicationDraft   IssueDraft
-		publicationClaimed bool
-		publicationErr     error
-	)
-	publicationState, publicationDraft, publicationClaimed,
-		publicationErr = store.ClaimIssueDraftPublication(repository, "draft", 1)
-	if publicationState.Repository != "" || publicationDraft.ID != "" || publicationClaimed {
-		t.Fatal("fenced publication claim returned durable values")
-	}
-	assertFence("claim publication", publicationErr)
-}
-
-func TestDeduplicationDeepLegacyPureBoundaries(t *testing.T) {
-	if historicalReplayDeduplicatedFinding(RepositoryState{}, "missing") {
-		t.Fatal("missing historical deduplicated finding selected")
-	}
-	replayState := RepositoryState{
-		DeduplicatedFindings: []DeduplicatedReviewFinding{{ID: "dedup", RawSourceIDs: []string{"rrw_source"}}},
-		RawFindings:          []RawReviewFinding{{ID: "rrw_source", LegacyFindingID: "legacy"}},
-	}
-	if !historicalReplayDeduplicatedFinding(replayState, "dedup") {
-		t.Fatal("historical replay source not recognized")
-	}
-	replayState.RawFindings[0].LegacyFindingID = ""
-	if historicalReplayDeduplicatedFinding(replayState, "dedup") {
-		t.Fatal("nonlegacy source recognized as replay")
-	}
-
-	raws := []RawReviewFinding{
-		{ID: "z", CampaignID: "campaign", RunID: "run", AssignmentID: "assignment", InsertionOrdinal: 1},
-		{ID: "a", CampaignID: "campaign", RunID: "run", AssignmentID: "assignment", InsertionOrdinal: 1},
-		{ID: "other", CampaignID: "other", RunID: "run", AssignmentID: "assignment", InsertionOrdinal: 2},
-	}
-	if ids := repositoryReviewCheckpointRawFindingIDs(
-		raws, "campaign", "run", "assignment",
-	); !reflect.DeepEqual(ids, []string{"a", "z"}) {
-		t.Fatalf("raw checkpoint ordering=%#v", ids)
-	}
-	setRawReviewFindingLegacyProjection(nil, "raw", "legacy")
-
-	file := repositoryAuditTestFile("pkg/raw.go", "a", 1)
-	candidate := repositoryReviewCampaignFinding(file, "raw boundary")
-	plan := Plan{Repository: "owner/raw-boundary", CampaignID: "campaign", CommitSHA: strings.Repeat("a", 40)}
-	observation := Observation{
-		Model: "provider/review", ModelAlias: "review", Account: "review-account",
-		Reviewer: "reviewer",
-	}
-	state := RepositoryState{}
-	if err := persistRawRepositoryReviewCheckpointFinding(
-		&state, "raw", "bucket", plan, "run", "assignment", "context",
-		observation, file, candidate, repositoryAuditTestNow,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if state.RawFindings[0].InsertionOrdinal != 1 {
-		t.Fatalf("zero ordinal admission=%#v", state.RawFindings[0])
-	}
-	missingJob := dedupDeepCloneState(t, state)
-	missingJob.DeduplicationJobs = nil
-	if err := persistRawRepositoryReviewCheckpointFinding(
-		&missingJob, "raw", "bucket", plan, "run", "assignment", "context",
-		observation, file, candidate, repositoryAuditTestNow,
-	); err == nil {
-		t.Fatal("existing raw without job accepted")
-	}
-	conflicting := candidate
-	conflicting.Title = "changed"
-	if err := persistRawRepositoryReviewCheckpointFinding(
-		&state, "raw", "bucket", plan, "run", "assignment", "context",
-		observation, file, conflicting, repositoryAuditTestNow,
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("conflicting raw error=%v", err)
-	}
-
-	finding := DeduplicatedReviewFinding{ID: "dedup", CampaignID: "direct"}
-	if !DeduplicatedFindingBelongsToCampaign(RepositoryState{}, finding, "direct") {
-		t.Fatal("direct campaign membership rejected")
-	}
-	finding.CampaignID = "other"
-	membership := RepositoryState{Findings: []Finding{{ID: "dedup", CampaignID: "projection"}}}
-	if !DeduplicatedFindingBelongsToCampaign(membership, finding, "projection") ||
-		DeduplicatedFindingBelongsToCampaign(RepositoryState{}, finding, "projection") {
-		t.Fatal("projection campaign membership mismatch")
-	}
-
-	observations := make([]FindingObservation, 64)
-	for index := range observations {
-		observations[index].ContextID = string(rune('a' + index))
-	}
-	updated, added := upsertFindingObservation(observations, FindingObservation{ContextID: "new"})
-	if !added || len(updated) != 64 || updated[len(updated)-1].ContextID != "new" {
-		t.Fatalf("bounded observations len=%d added=%v", len(updated), added)
-	}
-
-	emptyState, _, err := NewStore(t.TempDir()).Get("owner/invalid-history")
-	if err != nil {
-		t.Fatal(err)
-	}
-	emptyState.HistoricalDeduplication = HistoricalDeduplicationReplay{
-		Required: true, Status: HistoricalDeduplicationMerging,
-		MergeLease: HistoricalDeduplicationMergeLease{ID: "invalid"},
-	}
-	if err := validateState(emptyState); err == nil {
-		t.Fatal("invalid historical replay state accepted")
-	}
-}
-
-func TestDeduplicationDeepLegacyStateMachineEdges(t *testing.T) {
-	mergeState := RepositoryState{
-		Repository: "owner/interrupted-merge", Version: 1,
-		HistoricalDeduplication: HistoricalDeduplicationReplay{
-			Required: true, Status: HistoricalDeduplicationMerging,
-			MergeLease: HistoricalDeduplicationMergeLease{ID: "lease"},
-		},
-	}
-	mergeStore := NewStore(t.TempDir())
-	mergeStore.loadForTest = func(string) (RepositoryState, error) {
-		return dedupDeepCloneState(t, mergeState), nil
-	}
-	if _, _, _, err := mergeStore.reconcileRepositoryJobs(mergeState.Repository); err == nil {
-		t.Fatal("invalid interrupted merge unexpectedly persisted")
-	}
-
-	mappingState := RepositoryState{
-		Repository: "owner/mapping-admission", Version: 1,
-		HistoricalDeduplication: HistoricalDeduplicationReplay{Required: true, Status: HistoricalDeduplicationPending},
-		MappingJobs: []RepositoryMappingJob{{
-			ID: "job", ReviewFindingID: "projection", State: RepositoryMappingPending,
-		}},
-		Findings: []Finding{{ID: "projection"}},
-	}
-	mappingStore := NewStore(t.TempDir())
-	mappingStore.loadForTest = func(string) (RepositoryState, error) {
-		return dedupDeepCloneState(t, mappingState), nil
-	}
-	if _, _, _, _, err := mappingStore.ClaimMappingJob(
-		mappingState.Repository, "job", RepositoryMappingModelSnapshot{},
-	); err == nil || !strings.Contains(err.Error(), "requires a deduplicated finding") {
-		t.Fatalf("unadmitted mapping error=%v", err)
-	}
-	mappingState.DeduplicatedFindings = []DeduplicatedReviewFinding{{
-		ID: "projection", RawSourceIDs: []string{"rrw_source"},
-	}}
-	mappingState.RawFindings = []RawReviewFinding{{
-		ID: "rrw_source", LegacyFindingID: "legacy",
-	}}
-	if _, _, _, claimed, err := mappingStore.ClaimMappingJob(
-		mappingState.Repository, "job", RepositoryMappingModelSnapshot{},
-	); err != nil || claimed {
-		t.Fatalf("historical mapping claim=%v err=%v", claimed, err)
-	}
-
-	fixture := newAssignmentCoverageFixture(t, 1, 1)
-	state := dedupDeepState(t, fixture)
-	if state.CurrentCampaign == nil {
-		t.Fatal("campaign fixture missing")
-	}
-	state.CurrentCampaign.DeduplicationSnapshot = nil
-	snapshot := &RepositoryReviewDeduplicationSnapshot{
-		ReviewerModel: "review", DeduplicationModel: "dedup",
-		SimilarityThreshold: 90, CandidateLimit: 4,
-	}
-	beginFailure := dedupDeepSaveFailureStore(t, state, repositoryAuditTestNow)
-	if _, err := beginFailure.BeginCampaign(t.Context(), BeginCampaignRequest{
-		Repository: fixture.repository, CampaignID: fixture.campaignID,
-		CommitSHA: fixture.plan.CommitSHA, DeduplicationSnapshot: snapshot,
-	}); err == nil {
-		t.Fatal("campaign snapshot save failure ignored")
-	}
-
-	coverage := cloneRepositoryReviewCampaignCoverage(*state.CurrentCampaign)
-	coverage.DeduplicationSnapshot = snapshot
-	if _, err := fixture.store.ReconcileCampaign(t.Context(), ReconcileCampaignRequest{
-		Repository: fixture.repository, ExpectedReviewVersion: state.ReviewVersion,
-		Coverage: coverage, SelectedScope: fixture.files,
-	}); !errors.Is(err, ErrConflict) {
-		t.Fatalf("reconcile snapshot mismatch error=%v", err)
-	}
-
-	badPlan := fixture.store
-	corrupt := state
-	corrupt.CurrentCampaign.Paths[fixture.files[0].Path] = RepositoryReviewCampaignPathCoverage{
-		AssignmentBits: "!",
-	}
-	badPlan.loadForTest = func(string) (RepositoryState, error) {
-		return dedupDeepCloneState(t, corrupt), nil
-	}
-	if _, err := badPlan.PlanAssignmentsForCampaign(
-		t.Context(), fixture.repository, fixture.plan.CommitSHA, fixture.plan.InventoryHash,
-		fixture.plan.ProfileHash, fixture.campaignID, fixture.catalog, fixture.files,
-		false, 1, true,
-	); err == nil {
-		t.Fatal("corrupt assignment bits were planned")
-	}
-
-	invalidPlan := Plan{Repository: "owner/checkpoint-bucket", CampaignID: "", CommitSHA: strings.Repeat("a", 40)}
-	file := repositoryAuditTestFile("pkg/checkpoint.go", "a", 1)
-	observation := Observation{
-		Model: "review", ScopeFiles: []FileRef{file},
-		Findings: []FindingCandidate{repositoryReviewCampaignFinding(file, "bucket failure")},
-	}
-	if _, err := persistRepositoryReviewCheckpointObservation(
-		&RepositoryState{}, invalidPlan, "run", "assignment", observation,
-		[]FileRef{file}, repositoryAuditTestNow,
-	); err == nil {
-		t.Fatal("checkpoint with empty campaign bucket accepted")
-	}
-}
-
-func TestDeduplicationDeepLegacyProfileDefaults(t *testing.T) {
-	store := NewStore(t.TempDir())
-	profile := validProfileForTest("rrpf_deep_legacy_defaults", "Legacy defaults")
-	profile.SchemaVersion = 3
-	profile.Version = 1
-	profile.CreatedAt = repositoryAuditTestNow
-	profile.UpdatedAt = repositoryAuditTestNow
-	encoded, err := json.Marshal(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var legacy map[string]json.RawMessage
-	unmarshalErr := json.Unmarshal(encoded, &legacy)
-	if unmarshalErr != nil {
-		t.Fatal(unmarshalErr)
-	}
-	delete(legacy, "deduplication_similarity_threshold")
-	delete(legacy, "deduplication_candidate_limit")
-	encoded, err = json.Marshal(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mkdirErr := os.MkdirAll(store.root, 0o700)
-	if mkdirErr != nil {
-		t.Fatal(mkdirErr)
-	}
-	writeErr := os.WriteFile(store.profilePath(profile.ID), encoded, 0o600)
-	if writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	loaded, found, err := store.loadProfile(profile.ID)
-	if err != nil || !found || loaded.DeduplicationSimilarityThreshold != DeduplicationDefaultThreshold ||
-		loaded.DeduplicationCandidateLimit != DeduplicationDefaultCandidateLimit {
-		t.Fatalf("legacy profile=%#v found=%v err=%v", loaded, found, err)
-	}
-}
-
-func TestDeduplicationDeepPersistenceErrorPropagation(t *testing.T) {
-	checkpointFixture := newAssignmentCoverageFixture(t, 1, 1)
-	if _, err := checkpointFixture.store.BeginRepositoryReviewRun(
-		t.Context(), BeginRepositoryReviewRunRequest{
-			Plan: checkpointFixture.plan, RunID: "propagation-run",
-			ReviewableFiles: checkpointFixture.files,
-		},
-	); err != nil {
-		t.Fatal(err)
-	}
-	checkpoint := assignmentCoverageCheckpoint(
-		checkpointFixture, "propagation-run", 0, checkpointFixture.files,
-	)
-	candidate := normalizeCandidate(repositoryReviewCampaignFinding(
-		checkpointFixture.files[0], "checkpoint collision",
-	))
-	checkpoint.Observation.Findings = []FindingCandidate{candidate}
-	checkpointState := dedupDeepState(t, checkpointFixture)
-	rawID := stableID(
-		"rrw_", checkpoint.Plan.Repository, checkpoint.Plan.CampaignID,
-		checkpoint.Plan.CommitSHA, checkpoint.RunID, checkpoint.AssignmentID,
-		"0", findingFingerprint(checkpointFixture.files[0], candidate),
-	)
-	checkpointState.RawFindings = append(
-		checkpointState.RawFindings,
-		RawReviewFinding{ID: rawID},
-	)
-	checkpointStore := checkpointFixture.store
-	checkpointStore.loadForTest = func(string) (RepositoryState, error) {
-		return dedupDeepCloneState(t, checkpointState), nil
-	}
-	if _, err := checkpointStore.CheckpointRepositoryReviewAssignment(
-		t.Context(), checkpoint,
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("checkpoint persistence error=%v", err)
-	}
-
-	recordStore := newRepositoryAuditTestStore(t)
-	recordFile := repositoryAuditTestFile("pkg/record-collision.go", "b", 2)
-	plan, err := recordStore.Plan(
-		t.Context(), "owner/record-collision", "commit-a", "inventory-a",
-		[]FileRef{recordFile}, false,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	recordCandidate := normalizeCandidate(repositoryReviewCampaignFinding(
-		recordFile, "record collision",
-	))
-	recordRequest := RecordRequest{
-		Plan: plan, RunID: "record-run", CompletedAt: repositoryAuditTestNow,
-		Observations: []Observation{{
-			Model: "review", ScopeFiles: []FileRef{recordFile},
-			Findings: []FindingCandidate{recordCandidate},
-		}},
-	}
-	recordState, _, err := recordStore.Get(plan.Repository)
-	if err != nil {
-		t.Fatal(err)
-	}
-	boundaryID := stableID("rrc_", plan.Repository, recordRequest.RunID)
-	recordRawID := stableID(
-		"rrw_", plan.Repository, boundaryID, plan.CommitSHA, recordRequest.RunID,
-		"0", "0", findingFingerprint(recordFile, recordCandidate),
-	)
-	recordState.RawFindings = append(recordState.RawFindings, RawReviewFinding{ID: recordRawID})
-	brokenRecordStore := recordStore
-	brokenRecordStore.loadForTest = func(string) (RepositoryState, error) {
-		return dedupDeepCloneState(t, recordState), nil
-	}
-	if _, err := brokenRecordStore.Record(t.Context(), recordRequest); !errors.Is(err, ErrConflict) {
-		t.Fatalf("record persistence error=%v", err)
-	}
-
-	pendingStore := NewStore(t.TempDir())
-	pendingState := RepositoryState{
-		Repository: "owner/pending-status", Version: 1,
-		Findings: []Finding{{
-			ID: "pending", Status: FindingOpen, DeduplicationPending: true,
-		}},
-	}
-	pendingStore.loadForTest = func(string) (RepositoryState, error) {
-		return pendingState, nil
-	}
-	if _, err := pendingStore.SetFindingStatus(
-		pendingState.Repository, "pending", FindingDismissed, pendingState.Version,
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("pending finding status error=%v", err)
 	}
 }

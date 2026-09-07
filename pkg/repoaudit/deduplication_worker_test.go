@@ -3,11 +3,30 @@ package repoaudit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestAppendBoundedFindingObservationPreservesFirstAndNewestContributors(t *testing.T) {
+	observations := make([]FindingObservation, 0, maxFindingContributorObservations)
+	for index := 0; index < maxFindingContributorObservations+20; index++ {
+		observations = appendBoundedFindingObservation(observations, FindingObservation{
+			ContextID: "context-" + fmt.Sprint(index),
+		})
+	}
+	if len(observations) != maxFindingContributorObservations ||
+		observations[0].ContextID != "context-0" ||
+		observations[len(observations)-1].ContextID !=
+			"context-"+fmt.Sprint(maxFindingContributorObservations+19) {
+		t.Fatalf("bounded contributor observations=%#v", observations)
+	}
+	if observations[1].ContextID == "context-1" {
+		t.Fatal("bounded contributor observations did not evict old middle entries")
+	}
+}
 
 func TestDeduplicationWorkerSerializesBucketAndPromotesOnlyDeduplicatedFinding(t *testing.T) {
 	fixture := newAssignmentCoverageFixture(t, 1, 1)
@@ -74,17 +93,36 @@ func TestDeduplicationWorkerSerializesBucketAndPromotesOnlyDeduplicatedFinding(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(state.DeduplicatedFindings) != 1 || len(state.MappingJobs) != 1 ||
-		state.MappingJobs[0].ReviewFindingID != state.DeduplicatedFindings[0].ID ||
-		len(state.DeduplicatedFindings[0].RawSourceIDs) != 2 ||
-		state.DeduplicatedFindings[0].Title != first.Title {
+	if len(state.Findings) != 1 || len(state.MappingJobs) != 1 ||
+		state.MappingJobs[0].ReviewFindingID != state.Findings[0].ID ||
+		len(state.Findings[0].RawSourceIDs) != 2 ||
+		state.Findings[0].Title != first.Title {
 		t.Fatalf("deduplicated state = %#v", state)
 	}
 	for _, raw := range state.RawFindings {
 		if raw.State != RawFindingDeduplicationCompleted ||
-			raw.DeduplicatedFindingID != state.DeduplicatedFindings[0].ID {
+			raw.DeduplicatedFindingID != state.Findings[0].ID {
 			t.Fatalf("raw finding was not retained: %#v", raw)
 		}
+	}
+	for name, mutate := range map[string]func(*RepositoryState){
+		"contributor observation": func(candidate *RepositoryState) {
+			candidate.Findings[0].Observations[1].Title = "forged contributor diagnosis"
+		},
+		"contributor models": func(candidate *RepositoryState) {
+			candidate.Findings[0].Models = append(candidate.Findings[0].Models, "invented-model")
+		},
+		"deduplication snapshot": func(candidate *RepositoryState) {
+			candidate.DeduplicationJobs[0].ModelSnapshot.SimilarityThreshold--
+		},
+	} {
+		t.Run("rejects tampered "+name, func(t *testing.T) {
+			candidate := dedupDeepCloneState(t, state)
+			mutate(&candidate)
+			if err := validateState(candidate); err == nil {
+				t.Fatalf("tampered %s was accepted", name)
+			}
+		})
 	}
 }
 
@@ -176,62 +214,6 @@ func TestDeduplicationWorkerRunsFourBucketsConcurrently(t *testing.T) {
 	}
 }
 
-func TestDeduplicationWorkerCandidateLimitZeroSkipsModels(t *testing.T) {
-	fixture := newAssignmentCoverageFixture(t, 1, 1)
-	state, _, err := fixture.store.Get(fixture.repository)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot := RepositoryReviewDeduplicationSnapshot{
-		ReviewerModel: "review-a", DeduplicationModel: "review-a",
-		SimilarityThreshold: 90, CandidateLimit: 0,
-	}
-	if _, beginErr := fixture.store.BeginCampaign(t.Context(), BeginCampaignRequest{
-		Repository: fixture.repository, CampaignID: fixture.campaignID,
-		CommitSHA: fixture.plan.CommitSHA, ExpectedReviewVersion: state.ReviewVersion,
-		DeduplicationSnapshot: &snapshot,
-	}); beginErr != nil {
-		t.Fatal(beginErr)
-	}
-	// Binding the legacy campaign snapshot advances its review CAS, so produce
-	// a fresh plan before beginning the run.
-	fixture.plan, err = fixture.store.PlanAssignmentsForCampaign(
-		t.Context(), fixture.repository, fixture.plan.CommitSHA, fixture.plan.InventoryHash,
-		fixture.plan.ProfileHash, fixture.campaignID, fixture.catalog, fixture.files,
-		false, 1, true,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, beginErr := fixture.store.BeginRepositoryReviewRun(t.Context(), BeginRepositoryReviewRunRequest{
-		Plan: fixture.plan, RunID: "no-model-run", ReviewableFiles: fixture.files,
-	}); beginErr != nil {
-		t.Fatal(beginErr)
-	}
-	finding := repositoryReviewCampaignFinding(fixture.files[0], "same diagnosis")
-	checkpoint := assignmentCoverageCheckpoint(fixture, "no-model-run", 0, fixture.files)
-	checkpoint.Observation.Findings = []FindingCandidate{finding, finding}
-	if _, checkpointErr := fixture.store.CheckpointRepositoryReviewAssignment(
-		t.Context(),
-		checkpoint,
-	); checkpointErr != nil {
-		t.Fatal(checkpointErr)
-	}
-	processed, err := fixture.store.ProcessPendingDeduplicationJobs(
-		t.Context(), fixture.repository, DeduplicationProcessOptions{
-			Score: func(context.Context, RepositoryReviewDeduplicationSnapshot, string, DeduplicationScoringRequest) (DeduplicationScoringResponse, error) {
-				return DeduplicationScoringResponse{}, errors.New("scorer must not be called")
-			},
-			Judge: func(context.Context, RepositoryReviewDeduplicationSnapshot, string, DeduplicationJudgeRequest) (DeduplicationJudgment, error) {
-				return DeduplicationJudgment{}, errors.New("judge must not be called")
-			},
-		},
-	)
-	if err != nil || processed.Created != 2 || processed.Duplicates != 0 {
-		t.Fatalf("candidate-limit-zero processed=%#v err=%v", processed, err)
-	}
-}
-
 func TestDeduplicationFailureRetainsReadableRawAndRetryMovesOnlyJobToTail(t *testing.T) {
 	fixture := newAssignmentCoverageFixture(t, 1, 1)
 	if _, err := fixture.store.BeginRepositoryReviewRun(t.Context(), BeginRepositoryReviewRunRequest{
@@ -317,7 +299,7 @@ func TestDeduplicationCompletionRejectsStaleUniverse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state.DeduplicatedFindings[0].Version++
+	state.Findings[0].Version++
 	state.Version++
 	if saveErr := fixture.store.save(&state); saveErr != nil {
 		t.Fatal(saveErr)

@@ -4,7 +4,6 @@ import {
   IconRefresh,
 } from "@tabler/icons-react"
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { useEffect } from "react"
 import { toast } from "sonner"
 
 import {
@@ -20,7 +19,6 @@ import {
   repositoryReviewFindingHealthNeedsPolling,
   useRepositoryReviewFindingHealth,
 } from "./repository-review-finding-health"
-import { RepositoryReviewHistoricalConsolidationNotice } from "./repository-review-findings-processing"
 import {
   repositoryReviewProcessingDispositionLabel,
   repositoryReviewProcessingStateLabel,
@@ -30,14 +28,12 @@ export function RepositoryReviewFindingProcessingPage({
   automationID,
   sourceID,
   onBack,
-  onCanonicalSource,
   onOpenFinding,
   onOpenRepositoryFinding,
 }: {
   automationID: string
   sourceID: string
   onBack: () => void
-  onCanonicalSource: (sourceID: string) => void
   onOpenFinding: (findingID: string) => void
   onOpenRepositoryFinding: (findingID: string) => void
 }) {
@@ -65,9 +61,6 @@ export function RepositoryReviewFindingProcessingPage({
   })
   const detail = query.data
   const source = detail?.source
-  useEffect(() => {
-    if (source?.id && source.id !== sourceID) onCanonicalSource(source.id)
-  }, [onCanonicalSource, source?.id, sourceID])
   const retryMutation = useMutation({
     mutationFn: () =>
       retryRepositoryReviewFindingsProcessingSource(
@@ -90,14 +83,8 @@ export function RepositoryReviewFindingProcessingPage({
   const notFound =
     query.error instanceof RepositoryReviewAPIError &&
     query.error.status === 404
-  const historicalSource = Boolean(
-    source?.assignment_id === "historical-replay" ||
-    (source?.legacy_finding_id && !source.assignment_id),
-  )
   const canRetry = Boolean(
-    source?.deduplication_state === "failed" &&
-    source.failure?.retryable &&
-    !historicalSource,
+    source?.deduplication_state === "failed" && source.failure?.retryable,
   )
   const findingID = source?.deduplicated_finding_id || detail?.finding?.id
   const repositoryFindingID = detail?.repository_finding?.id
@@ -166,18 +153,6 @@ export function RepositoryReviewFindingProcessingPage({
               )}
             </section>
           )}
-
-          <RepositoryReviewHistoricalConsolidationNotice
-            automationID={automationID}
-            consolidation={
-              detail.health?.historical_consolidation ??
-              detail.historical_consolidation ??
-              healthQuery.data?.historical_consolidation
-            }
-            onRefresh={() =>
-              Promise.all([query.refetch(), healthQuery.refetch()])
-            }
-          />
 
           {(findingID || repositoryFindingID) && (
             <section className="border-border flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4">

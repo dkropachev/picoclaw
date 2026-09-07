@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -54,6 +55,19 @@ func (h *Handler) handleRetryRepositoryReviewRunFindingStatus(
 		}
 		writeRepositoryReviewAutomationError(w, err)
 		return
+	}
+	if ledger.Automation.CampaignID == "" {
+		writeRepositoryReviewAutomationError(w, os.ErrNotExist)
+		return
+	}
+	if len(request.FindingIDs) <= 200 {
+		for _, findingID := range request.FindingIDs {
+			finding, found := repositoryReviewFindingByID(ledger.State, strings.TrimSpace(findingID))
+			if !found || finding.CampaignID != ledger.Automation.CampaignID {
+				writeRepositoryReviewAutomationError(w, os.ErrNotExist)
+				return
+			}
+		}
 	}
 	state, selected, err := ledger.Store.RetryRunFindingStatus(
 		ledger.State.Repository,

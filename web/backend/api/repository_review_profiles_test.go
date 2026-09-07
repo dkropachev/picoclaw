@@ -499,7 +499,7 @@ func TestRepositoryReviewProfileAssignmentRejectsRevisionAndStrictPayload(t *tes
 		"/api/repository-reviews/automations",
 		map[string]any{
 			"repository":      "https://github.com/acme/legacy-create.git",
-			"ref":             "main",
+			"branch":          "main",
 			"reviewer_models": []string{"cheap", "quality"},
 			"compare_models":  true,
 		},
@@ -589,11 +589,8 @@ func TestRepositoryReviewProfileAssignmentRejectsRevisionAndStrictPayload(t *tes
 		want    string
 		valid   bool
 	}{
-		{request: repositoryReviewAutomationConfigRequest{Branch: "main", Ref: "main"}, want: "main", valid: true},
-		{request: repositoryReviewAutomationConfigRequest{Branch: "bad ref", Ref: "main"}},
-		{request: repositoryReviewAutomationConfigRequest{Branch: "main", Ref: "bad ref"}},
-		{request: repositoryReviewAutomationConfigRequest{Branch: "main", Ref: "release"}},
-		{request: repositoryReviewAutomationConfigRequest{Ref: "HEAD"}},
+		{request: repositoryReviewAutomationConfigRequest{Branch: "main"}, want: "main", valid: true},
+		{request: repositoryReviewAutomationConfigRequest{Branch: "bad ref"}},
 		{request: repositoryReviewAutomationConfigRequest{Branch: "HEAD"}},
 	}
 	for _, branchCase := range branchCases {

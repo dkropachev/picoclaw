@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
-	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 type repositoryReviewThirdErrorContext struct {
@@ -30,204 +28,6 @@ func (ctx *repositoryReviewThirdErrorContext) Err() error {
 		return context.Canceled
 	}
 	return nil
-}
-
-//nolint:govet // Boundary assertions intentionally reuse err in short scopes.
-func TestRepositoryReviewAssignmentControllerCampaignBoundaries(t *testing.T) {
-	store := repoaudit.NewStore(t.TempDir())
-	automation := testRepositoryReviewAutomation()
-	automation.ID = "rra_assignment_campaign_coverage"
-	automation.Repository = "owner/assignment-coverage"
-	automation.ModelStats = map[string]repoaudit.RepositoryReviewModelStats{
-		"cheap": {Findings: 3, ReviewedFiles: 5},
-	}
-	created, err := store.CreateAutomation(t.Context(), automation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	controller := &repositoryReviewController{}
-	if _, err := controller.ensureRepositoryReviewCampaign(
-		t.Context(), store, &config.Config{}, created, "bad", "start",
-	); !errors.Is(err, repoaudit.ErrInvalidAutomation) {
-		t.Fatalf("invalid commit error = %v", err)
-	}
-	commit := strings.Repeat("a", 40)
-	first, err := controller.ensureRepositoryReviewCampaign(
-		t.Context(), store, &config.Config{}, created, commit, "start",
-	)
-	if err != nil || first.CampaignID == "" {
-		t.Fatalf("first campaign = %#v, %v", first, err)
-	}
-	replayed, err := controller.ensureRepositoryReviewCampaign(
-		t.Context(), store, &config.Config{}, first, commit, "resume",
-	)
-	if err != nil || replayed.CampaignID != first.CampaignID {
-		t.Fatalf("campaign replay = %#v, %v", replayed, err)
-	}
-	conflicting := replayed
-	conflicting.CampaignID = repoaudit.NewRepositoryReviewCampaignID()
-	if _, err := controller.ensureRepositoryReviewCampaign(
-		t.Context(), store, &config.Config{}, conflicting, commit, "resume",
-	); !errors.Is(err, repoaudit.ErrConflict) {
-		t.Fatalf("campaign conflict error = %v", err)
-	}
-	secondCommit := strings.Repeat("b", 40)
-	second, err := controller.ensureRepositoryReviewCampaign(
-		t.Context(), store, &config.Config{}, replayed, secondCommit, "resume",
-	)
-	if err != nil || second.CampaignID == first.CampaignID ||
-		second.ResolvedCommitSHA != secondCommit || second.Progress != (repoaudit.RepositoryReviewProgress{}) ||
-		second.ModelStats["cheap"].Findings != 0 || second.ModelStats["cheap"].ReviewedFiles != 0 {
-		t.Fatalf("second campaign = %#v, %v", second, err)
-	}
-	pendingWithoutState := created
-	pendingWithoutState.ID = "rra_missing_pending"
-	pendingWithoutState.Repository = "owner/missing-pending"
-	pendingWithoutState.CampaignRecoveryPending = true
-	if _, err := controller.ensureRepositoryReviewCampaign(
-		t.Context(), store, &config.Config{}, pendingWithoutState, commit, "resume",
-	); !errors.Is(err, repoaudit.ErrConflict) {
-		t.Fatalf("missing pending recovery error = %v", err)
-	}
-	if _, err := (*repositoryReviewController)(nil).resolveRepositoryReviewCampaignProfile(
-		context.Background(), &config.Config{}, created,
-	); err == nil {
-		t.Fatal("nil controller resolved a review profile")
-	}
-	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	runtimeConfig, err := config.LoadConfig(handler.configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimeConfig.ModelList[0].APIBase = "http://127.0.0.1:1/v1"
-	if err := config.SaveConfig(handler.configPath, runtimeConfig); err != nil {
-		t.Fatal(err)
-	}
-	resolved, err := handler.repositoryReviewControllerInstance().resolveRepositoryReviewCampaignProfile(
-		t.Context(), runtimeConfig, created,
-	)
-	if err != nil || resolved.Revision == "" || len(resolved.ReviewerModels) == 0 {
-		t.Fatalf("resolved campaign profile = %#v, %v", resolved, err)
-	}
-}
-
-//nolint:govet // Boundary assertions intentionally reuse err in short scopes.
-func TestRepositoryReviewAssignmentCampaignRecoveryExecutionBranches(t *testing.T) {
-	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	store, err := handler.repositoryReviewStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	commit := strings.Repeat("d", 40)
-	input := testRepositoryReviewAutomation()
-	input.Repository = "owner/assignment-recovery-execution"
-	input.CampaignID = repoaudit.NewRepositoryReviewCampaignID()
-	input.CampaignRecoveryPending = true
-	input.ResolvedCommitSHA = commit
-	input.ScopeSelection = &repoaudit.RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
-	input.ScopePlan = repoaudit.RepositoryReviewScopePlan{
-		CommitSHA: commit, PolicyHash: strings.Repeat("a", 64), Hash: strings.Repeat("b", 64),
-		Summary: "Recovered scope",
-	}
-	input.RunIDs = []string{"legacy-run"}
-	input.StartedAt = time.Now().Add(-time.Hour)
-	input.Status = repoaudit.RepositoryReviewAutomationPaused
-	input.PauseReason = repoaudit.RepositoryReviewPauseServiceRestart
-	input.PauseDetail = "resume legacy assignment recovery"
-	automation, err := store.CreateAutomation(t.Context(), input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.BeginCampaign(t.Context(), repoaudit.BeginCampaignRequest{
-		Repository: repoaudit.CanonicalRepositoryIdentity(input.Repository),
-		CampaignID: input.CampaignID, CommitSHA: commit,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.LoadConfig(handler.configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	previousRunners := newWorkflowRuntimeRunners
-	t.Cleanup(func() { newWorkflowRuntimeRunners = previousRunners })
-	newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
-		return workflowRuntimeRunners{Agents: &repositoryReviewRecoveryProfileRunner{
-			profile: workflows.RepositoryReviewModelProfile{
-				Revision: "sha256:assignment-recovery", ReviewerModels: []string{"cheap"},
-				MaxContentBytes: 65536,
-			},
-		}}
-	}
-	controller := &repositoryReviewController{handler: handler}
-	controller.recoverCampaign = func(
-		context.Context,
-		repoaudit.Store,
-		string,
-		repoaudit.RepositoryReviewAutomation,
-		string,
-		workflows.RepositoryReviewModelProfile,
-	) (repoaudit.RepositoryReviewAutomation, error) {
-		recovered := automation
-		recovered.CampaignRecoveryPending = false
-		return recovered, nil
-	}
-	recovered, err := controller.ensureRepositoryReviewCampaign(
-		t.Context(), store, cfg, automation, commit, "resume",
-	)
-	if err != nil || recovered.CampaignRecoveryPending {
-		t.Fatalf("recovered campaign = %#v err=%v", recovered, err)
-	}
-
-	sentinel := errors.New("injected assignment recovery failure")
-	controller.recoverCampaign = func(
-		context.Context,
-		repoaudit.Store,
-		string,
-		repoaudit.RepositoryReviewAutomation,
-		string,
-		workflows.RepositoryReviewModelProfile,
-	) (repoaudit.RepositoryReviewAutomation, error) {
-		return repoaudit.RepositoryReviewAutomation{}, sentinel
-	}
-	if _, err := controller.ensureRepositoryReviewCampaign(
-		t.Context(), store, cfg, automation, commit, "resume",
-	); !errors.Is(err, sentinel) {
-		t.Fatalf("recovery failure = %v", err)
-	}
-	controller.recoverCampaign = nil
-	if _, err := controller.ensureRepositoryReviewCampaign(
-		t.Context(), store, cfg, automation, commit, "resume",
-	); err == nil || !strings.Contains(err.Error(), "recovery is unavailable") {
-		t.Fatalf("missing recovery adapter error = %v", err)
-	}
-
-	newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
-		return workflowRuntimeRunners{Agents: fakeWorkflowRuntimeRunner{}}
-	}
-	if _, err := controller.resolveRepositoryReviewCampaignProfile(t.Context(), cfg, automation); err == nil {
-		t.Fatal("non-profile runtime resolved an assignment campaign profile")
-	}
-}
-
-func TestRepositoryReviewAssignmentCampaignResumeWithoutLegacyState(t *testing.T) {
-	store := repoaudit.NewStore(t.TempDir())
-	automation := testRepositoryReviewAutomation()
-	automation.ID = "rra_assignment_resume_without_state"
-	automation.Repository = "owner/assignment-resume-without-state"
-	automation.RunIDs = []string{"unknown-run"}
-	created, err := store.CreateAutomation(t.Context(), automation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	commit := strings.Repeat("e", 40)
-	updated, err := (&repositoryReviewController{}).ensureRepositoryReviewCampaign(
-		t.Context(), store, &config.Config{}, created, commit, "resume",
-	)
-	if err != nil || updated.CampaignID == "" || updated.ResolvedCommitSHA != commit {
-		t.Fatalf("resume without state = %#v err=%v", updated, err)
-	}
 }
 
 func TestRepositoryReviewAssignmentAdmissionFailureBranches(t *testing.T) {
@@ -380,6 +180,9 @@ func TestRepositoryReviewAssignmentAdmissionFailureBranches(t *testing.T) {
 				_, err = store.BeginCampaign(ctx, repoaudit.BeginCampaignRequest{
 					Repository: identity, CampaignID: updated.CampaignID,
 					CommitSHA: strings.Repeat("b", 40), Exact: true,
+					DeduplicationSnapshot: &repoaudit.RepositoryReviewDeduplicationSnapshot{
+						ReviewerModel: "cheap", DeduplicationModel: "cheap",
+					},
 				})
 			}
 			return updated, err
@@ -414,205 +217,6 @@ func TestRepositoryReviewAssignmentAdmissionFailureBranches(t *testing.T) {
 			t.Fatalf("late controller shutdown error = %v", err)
 		}
 	})
-}
-
-func TestLoadRepositoryReviewOutcomeUsesAssignmentCampaign(t *testing.T) {
-	ctx := t.Context()
-	store := repoaudit.NewStore(t.TempDir())
-	repository := "owner/assignment-outcome"
-	commit := strings.Repeat("c", 40)
-	profileHash := "sha256:" + strings.Repeat("d", 64)
-	campaignID := repoaudit.NewRepositoryReviewCampaignID()
-	code := repoaudit.FileRef{
-		Path: "code.go", BlobSHA: strings.Repeat("e", 40), SizeBytes: 10,
-		Category: "code", Mode: "100644",
-	}
-	binary := repoaudit.FileRef{
-		Path: "asset.bin", BlobSHA: strings.Repeat("f", 40), SizeBytes: 20,
-		Category: "binary", Mode: "100644",
-	}
-	if _, err := store.BeginCampaign(ctx, repoaudit.BeginCampaignRequest{
-		Repository: repository, CampaignID: campaignID, CommitSHA: commit,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	catalog := make([]repoaudit.RepositoryReviewAssignment, 0, 4)
-	for _, focusID := range repoaudit.RepositoryReviewFocusIDs() {
-		assignment, err := repoaudit.NewRepositoryReviewAssignment(
-			focusID, "review-a", "prompt-v1", profileHash, true,
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		catalog = append(catalog, assignment)
-	}
-	plan, err := store.PlanAssignmentsForCampaign(
-		ctx, repository, commit, "inventory", profileHash, campaignID,
-		catalog, []repoaudit.FileRef{code, binary}, false, 2, true,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.BeginRepositoryReviewRun(ctx, repoaudit.BeginRepositoryReviewRunRequest{
-		Plan: plan, RunID: "assignment-outcome-run", ReviewableFiles: []repoaudit.FileRef{code},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	for index, assignmentPlan := range plan.AssignmentPlans {
-		findings := []repoaudit.FindingCandidate(nil)
-		if index == 0 {
-			findings = []repoaudit.FindingCandidate{{
-				Severity: "high", Title: "campaign finding", Symbol: "Run", File: code.Path,
-				Evidence: "validated branch", Impact: "observable failure",
-				Validation: repoaudit.Validation{Status: "confirmed", Summary: "confirmed"},
-			}}
-		}
-		if _, err := store.CheckpointRepositoryReviewAssignment(
-			ctx, repoaudit.CheckpointRepositoryReviewAssignmentRequest{
-				Plan: plan, RunID: "assignment-outcome-run", AssignmentID: assignmentPlan.AssignmentID,
-				AutomationID: "rra_assignment_outcome", AgentID: "main", ChildIndex: index + 1,
-				Digest:            "sha256:" + strings.Repeat(string(rune('1'+index)), 64),
-				AcknowledgedFiles: []repoaudit.FileRef{code},
-				Observation: repoaudit.Observation{
-					Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
-					Reviewer:   assignmentPlan.FocusID,
-					ScopeFiles: []repoaudit.FileRef{code}, Findings: findings,
-					RawDigest: "sha256:" + strings.Repeat("9", 64),
-				},
-			},
-		); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := store.FinalizeRepositoryReviewRun(
-		ctx, repoaudit.FinalizeRepositoryReviewRunRequest{
-			Plan: plan, RunID: "assignment-outcome-run",
-			UnsupportedFiles: []repoaudit.UnsupportedFile{{
-				FileRef: binary, Reason: "binary",
-			}},
-		},
-	); err != nil {
-		t.Fatal(err)
-	}
-	outcome := loadRepositoryReviewOutcome(store, repoaudit.RepositoryReviewAutomation{
-		Repository: repository, CampaignID: campaignID,
-		RunIDs:         []string{"old-run", "assignment-outcome-run"},
-		ReviewerModels: []string{"review-a"},
-	})
-	if !outcome.found || outcome.reviewedFiles != 1 || outcome.unsupportedFiles != 1 ||
-		outcome.findings != 0 || outcome.modelFindings["review-a"] != 1 ||
-		len(outcome.modelPaths["review-a"]) != 1 {
-		t.Fatalf("assignment campaign outcome = %#v", outcome)
-	}
-}
-
-func TestLoadRepositoryReviewOutcomeSkipsForeignLegacyRunForPendingCampaign(t *testing.T) {
-	store := repoaudit.NewStore(t.TempDir())
-	repository := "owner/assignment-foreign-legacy-run"
-	commit := strings.Repeat("a", 40)
-	file := repoaudit.FileRef{
-		Path: "legacy.go", BlobSHA: strings.Repeat("b", 40), SizeBytes: 10,
-		Category: "code", Mode: "100644",
-	}
-	plan, err := store.PlanWithProfileLimitAuthoritative(
-		t.Context(), repository, commit, "inventory", "legacy-profile",
-		[]repoaudit.FileRef{file}, false, 1, true,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Record(t.Context(), repoaudit.RecordRequest{
-		Plan: plan, RunID: "legacy-run", CompletedFiles: []repoaudit.FileRef{file},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	outcome := loadRepositoryReviewOutcome(store, repoaudit.RepositoryReviewAutomation{
-		Repository: repository, CampaignID: repoaudit.NewRepositoryReviewCampaignID(),
-		CampaignRecoveryPending: true, RunIDs: []string{"legacy-run"},
-	})
-	if !outcome.found || outcome.reviewedFiles != 0 {
-		t.Fatalf("foreign legacy outcome = %#v", outcome)
-	}
-}
-
-func TestRepositoryReviewAssignmentSmallBoundaryHelpers(t *testing.T) {
-	if !repositoryReviewLegacyReviewerIdentityMatches("default", "default") ||
-		repositoryReviewLegacyReviewerIdentityMatches("default", "review-a") ||
-		repositoryReviewLegacyReviewerIdentityMatches("", "") ||
-		!repositoryReviewLegacyReviewerIdentityMatches("review-a", "review-a") {
-		t.Fatal("legacy reviewer identity boundary mismatch")
-	}
-	if got := repositoryReviewEffectiveWorkflowTimeoutForAssignment(0, 0); got != 65*time.Minute {
-		t.Fatalf("default assignment envelope = %s", got)
-	}
-}
-
-func TestRepositoryReviewAssignmentInstalledRecoveryRejectsActiveRun(t *testing.T) {
-	fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
-		inspected: []int{0}, occurrences: 0,
-	})
-	resolved := workflows.RepositoryReviewModelProfile{
-		Revision: "assignment-active-recovery", AccountRef: fixture.automation.EffectiveAccountRef,
-		ReviewerModels: fixture.automation.ReviewerModels, MaxContentBytes: int(fixture.automation.MaxContentBytes),
-	}
-	prepared, err := prepareRepositoryReviewLegacyCampaignBackfill(
-		t.Context(), fixture.automation, fixture.state,
-		repoaudit.NewRepositoryReviewCampaignID(), fixture.runStore, resolved,
-	)
-	if err != nil || !prepared.Available {
-		t.Fatalf("prepared recovery = %#v err=%v", prepared, err)
-	}
-	installed, prepared, err := installRepositoryReviewLegacyCampaignAuthority(
-		t.Context(), fixture.store, prepared,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	active, err := fixture.store.UpdateAutomation(
-		t.Context(), installed.ID, installed.Version,
-		func(candidate *repoaudit.RepositoryReviewAutomation) error {
-			candidate.CampaignRecoveryPending = false
-			candidate.Status = repoaudit.RepositoryReviewAutomationRunning
-			candidate.ActiveRunID = "active-assignment-run"
-			candidate.RunIDs = append(candidate.RunIDs, candidate.ActiveRunID)
-			if candidate.StartedAt.IsZero() {
-				candidate.StartedAt = time.Now().Add(-time.Minute)
-			}
-			candidate.PauseReason = ""
-			candidate.PauseDetail = ""
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	prepared.AutomationVersion = active.Version
-	if _, _, err := installRepositoryReviewLegacyCampaignAuthority(
-		t.Context(), fixture.store, prepared,
-	); !errors.Is(err, repoaudit.ErrConflict) {
-		t.Fatalf("active installed recovery error = %v", err)
-	}
-}
-
-func TestRepositoryReviewAssignmentRecoveryRejectsOversizedCatalog(t *testing.T) {
-	fixture := newRepositoryReviewBackfillFixture(t, 1, repositoryReviewBackfillRunSpec{
-		inspected: []int{0}, occurrences: 0,
-	})
-	models := make([]string, 33)
-	for index := range models {
-		models[index] = fmt.Sprintf("review-%02d", index)
-	}
-	resolved := workflows.RepositoryReviewModelProfile{
-		Revision: "assignment-oversized-catalog", AccountRef: fixture.automation.EffectiveAccountRef,
-		ReviewerModels: models, MaxContentBytes: int(fixture.automation.MaxContentBytes),
-	}
-	prepared, err := prepareRepositoryReviewLegacyCampaignBackfill(
-		t.Context(), fixture.automation, fixture.state,
-		repoaudit.NewRepositoryReviewCampaignID(), fixture.runStore, resolved,
-	)
-	if err == nil || prepared.Exact {
-		t.Fatalf("oversized recovery catalog = %#v err=%v", prepared, err)
-	}
 }
 
 func TestRepositoryReviewAssignmentTimeoutMutationBoundaries(t *testing.T) {
@@ -715,6 +319,9 @@ func TestRepositoryReviewAssignmentReconcileRestoresCampaignAfterRestart(t *test
 	if _, err := store.BeginCampaign(t.Context(), repoaudit.BeginCampaignRequest{
 		Repository: repoaudit.CanonicalRepositoryIdentity(input.Repository),
 		CampaignID: input.CampaignID, CommitSHA: commit,
+		DeduplicationSnapshot: &repoaudit.RepositoryReviewDeduplicationSnapshot{
+			ReviewerModel: "cheap", DeduplicationModel: "cheap",
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}

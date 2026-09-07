@@ -5,7 +5,6 @@ import type { RepositoryReviewFindingHealth } from "@/api/repository-reviews"
 import {
   repositoryReviewAutomationIsActive,
   repositoryReviewFindingHealthNeedsPolling,
-  repositoryReviewHistoricalConsolidationIsActive,
 } from "./repository-review-finding-health"
 
 const terminalHealth: RepositoryReviewFindingHealth = {
@@ -32,11 +31,6 @@ const terminalHealth: RepositoryReviewFindingHealth = {
     failed: 2,
     completed: 7,
   },
-  historical_consolidation: {
-    required: true,
-    status: "failed",
-    retryable: true,
-  },
   updated_at: "2026-08-31T12:00:00Z",
 }
 
@@ -57,18 +51,6 @@ describe("repository review finding health polling", () => {
           progress: { stage },
         }),
       ).toBe(expected)
-    },
-  )
-
-  it.each(["pending", "replaying", "merging"] as const)(
-    "polls active historical consolidation state %s",
-    (status) => {
-      expect(
-        repositoryReviewHistoricalConsolidationIsActive({
-          required: true,
-          status,
-        }),
-      ).toBe(true)
     },
   )
 

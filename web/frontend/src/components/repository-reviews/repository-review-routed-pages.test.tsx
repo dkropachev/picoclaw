@@ -48,11 +48,9 @@ import {
   reserveRepositoryReviewValidations,
   resolveRepositoryReviewPossibleDuplicate,
   restartRepositoryReviewAutomation,
-  restartRepositoryReviewHistoricalDeduplication,
   resumeRepositoryReviewAutomation,
   retryRepositoryReviewFindingsProcessingSource,
   retryRepositoryReviewFindingsProcessingSources,
-  retryRepositoryReviewHistoricalDeduplication,
   retryRepositoryReviewRawSource,
   retryRepositoryReviewRunFindingStatuses,
   startRepositoryReviewAutomation,
@@ -108,8 +106,6 @@ vi.mock("@/api/repository-reviews", () => ({
   pauseRepositoryReviewAutomation: vi.fn(),
   resumeRepositoryReviewAutomation: vi.fn(),
   restartRepositoryReviewAutomation: vi.fn(),
-  restartRepositoryReviewHistoricalDeduplication: vi.fn(),
-  updateRepositoryReviewAutomationFinding: vi.fn(),
   updateRepositoryReviewAutomationIssue: vi.fn(),
   deleteRepositoryReviewAutomationIssue: vi.fn(),
   regenerateRepositoryReviewAutomationIssue: vi.fn(),
@@ -119,7 +115,6 @@ vi.mock("@/api/repository-reviews", () => ({
   reserveRepositoryReviewValidations: vi.fn(),
   resolveRepositoryReviewPossibleDuplicate: vi.fn(),
   retryRepositoryReviewRunFindingStatuses: vi.fn(),
-  retryRepositoryReviewHistoricalDeduplication: vi.fn(),
   retryRepositoryReviewFindingsProcessingSource: vi.fn(),
   retryRepositoryReviewFindingsProcessingSources: vi.fn(),
   retryRepositoryReviewRawSource: vi.fn(),
@@ -196,16 +191,17 @@ const automation: RepositoryReviewAutomation = {
     stage: "reviewing",
     completed_batches: 1,
     total_batches: 2,
-    coverage_available: false,
-    coverage_exact: false,
+    coverage_available: true,
+    coverage_exact: true,
     selected_files: 8,
-    inspected_files: 0,
+    inspected_files: 4,
     reviewed_files: 4,
     remaining_files: 4,
     unsupported_files: 0,
-    findings: 1,
+    deduplicated_findings: 1,
     finding_aggregates: 1,
     unaggregated_findings: 0,
+    scope_frozen: true,
     assignment_progress: {
       total: 32,
       completed: 18,
@@ -231,6 +227,20 @@ const automation: RepositoryReviewAutomation = {
   },
   model_stats: [],
   account_limits: [],
+  scope_plan: {
+    commit_sha: "a".repeat(40),
+    policy_hash: "b".repeat(64),
+    hash: "c".repeat(64),
+    summary: "Frozen scope",
+    warnings: [],
+    counts: {
+      total_files: 8,
+      code_type_files: 8,
+      include_files: 8,
+      excluded_files: 0,
+      selected_files: 8,
+    },
+  },
   created_at: "2026-08-26T00:00:00Z",
   updated_at: "2026-08-26T00:00:00Z",
 }
@@ -360,11 +370,6 @@ const findingHealth = {
     failed: 1,
     completed: 3,
   },
-  historical_consolidation: {
-    required: false,
-    status: "not_required" as const,
-    retryable: false,
-  },
   updated_at: "2026-08-31T12:00:00Z",
 }
 
@@ -402,7 +407,6 @@ const issue: RepositoryReviewIssueDraft = {
   instructions_mode: "default",
   generator_model: "writer",
   generator_account: "acct",
-  canonical: true,
   title: "Lost update can discard findings",
   body: "## Evidence\n\n- Version fence is absent.\n\n## Impact\n\nStored findings can disappear.",
   labels: ["bug"],
@@ -451,9 +455,8 @@ const issueSummary: RepositoryReviewIssueSummary = {
   id: issue.id,
   repository: issue.repository,
   finding_count: issue.finding_ids.length,
-  origin: issue.origin!,
+  origin: issue.origin,
   generation_id: issue.generation_id,
-  canonical: true,
   publishable: true,
   publish_blockers: [],
   title: issue.title,
@@ -505,8 +508,8 @@ describe("routed repository review pages", () => {
           reviewer_identity: "review",
           account: "review-account",
           model: "gpt-5.6-sol",
-          source: "legacy",
-          sources: ["legacy_managed_child"],
+          source: "live",
+          sources: ["managed_child"],
           attempts: 2,
           run_ids: ["run_1", "run_2"],
           run_count: 2,
@@ -577,7 +580,6 @@ describe("routed repository review pages", () => {
       repository: repositorySummary,
       finding_id: finding.id,
       sources: [rawFinding],
-      raw_findings: [],
       offset: 0,
       total: 1,
     })
@@ -659,18 +661,6 @@ describe("routed repository review pages", () => {
       repository: repositorySummary,
       source: { ...rawFinding, deduplication_state: "pending" },
     })
-    vi.mocked(retryRepositoryReviewHistoricalDeduplication).mockResolvedValue({
-      automation,
-      repository: repositorySummary,
-      historical_deduplication: { required: true, status: "pending" },
-    })
-    vi.mocked(restartRepositoryReviewHistoricalDeduplication).mockResolvedValue(
-      {
-        automation,
-        repository: repositorySummary,
-        historical_deduplication: { required: true, status: "pending" },
-      },
-    )
     vi.mocked(listRepositoryReviewAutomationIssuesPage).mockResolvedValue({
       automation,
       repository: repositorySummary,
@@ -845,7 +835,6 @@ describe("routed repository review pages", () => {
     expect(screen.getAllByText("Findings processing").length).toBeGreaterThan(0)
     expect(screen.getAllByText("Raw findings").length).toBeGreaterThan(0)
     expect(screen.getByText("Unrepresented run findings")).toBeVisible()
-    expect(screen.getByText("Unknown")).toBeVisible()
     expect(screen.getByText("Review assignment coverage")).toBeVisible()
     expect(screen.getByText("Total assignments")).toBeVisible()
     expect(screen.getByText("Completed assignments")).toBeVisible()
@@ -861,9 +850,6 @@ describe("routed repository review pages", () => {
       screen.getByText(/every required reviewer acknowledges the file/i),
     ).toBeVisible()
     expect(
-      screen.getByText(/inspected-file coverage is unknown/i),
-    ).toBeVisible()
-    expect(
       await screen.findByRole("heading", {
         name: "File processing attribution",
       }),
@@ -876,9 +862,7 @@ describe("routed repository review pages", () => {
     expect(within(attributionTable).getByText("main")).toBeVisible()
     expect(within(attributionTable).getByText("gpt-5.6-sol")).toBeVisible()
     expect(within(attributionTable).getByText("review-account")).toBeVisible()
-    expect(
-      within(attributionTable).getByText("Historical replay"),
-    ).toBeVisible()
+    expect(within(attributionTable).getByText("Live checkpoint")).toBeVisible()
     expect(
       listRepositoryReviewAutomationFileAttributionsPage,
     ).toHaveBeenCalledWith(
@@ -886,70 +870,6 @@ describe("routed repository review pages", () => {
       { cursor: undefined, limit: 200 },
       expect.anything(),
     )
-  })
-
-  it("distinguishes unavailable legacy attribution accounts from unrecorded live accounts", async () => {
-    vi.mocked(
-      listRepositoryReviewAutomationFileAttributionsPage,
-    ).mockResolvedValue({
-      automation,
-      repository: repositorySummary,
-      file_attributions: [
-        {
-          id: "legacy_without_account",
-          path: "pkg/legacy.go",
-          commit_sha: "a".repeat(40),
-          blob_sha: "b".repeat(40),
-          focus_id: "security_trust",
-          root_agent_id: "main",
-          reviewer_identity: "review",
-          account: "",
-          model: "gpt-5.6-sol",
-          source: "legacy",
-          sources: ["legacy_managed_child"],
-          attempts: 1,
-          run_ids: ["legacy_run"],
-          run_count: 1,
-          latest_completed_at: "2026-08-26T01:00:00Z",
-        },
-        {
-          id: "live_without_account",
-          path: "pkg/live.go",
-          commit_sha: "a".repeat(40),
-          blob_sha: "c".repeat(40),
-          focus_id: "concurrency_recovery",
-          root_agent_id: "main",
-          reviewer_identity: "review",
-          account: "",
-          model: "gpt-5.6-sol",
-          source: "live",
-          sources: ["live_checkpoint"],
-          attempts: 1,
-          run_ids: ["live_run"],
-          run_count: 1,
-          latest_completed_at: "2026-08-26T02:00:00Z",
-        },
-      ],
-      total: 2,
-      next_cursor: "",
-      canonical_query: "ALL ORDER BY path ASC, focus ASC, reviewer ASC",
-      query_schema: { fields: [] },
-    })
-
-    renderPage(
-      <RepositoryReviewDetailPage
-        id={automation.id}
-        onBack={vi.fn()}
-        onFindings={vi.fn()}
-        onIssues={vi.fn()}
-      />,
-    )
-
-    const attributionTable = await screen.findByRole("table")
-    expect(
-      within(attributionTable).getByText("Legacy account unavailable"),
-    ).toBeVisible()
-    expect(within(attributionTable).getByText("Unrecorded")).toBeVisible()
   })
 
   it("loads file attribution rows beyond the first 200", async () => {
@@ -1025,7 +945,7 @@ describe("routed repository review pages", () => {
         reviewed_files: 0,
         remaining_files: 0,
         unsupported_files: 0,
-        findings: 74,
+        deduplicated_findings: 74,
         scope_frozen: true,
       },
       scope_plan: {
@@ -1078,6 +998,17 @@ describe("routed repository review pages", () => {
       status: "idle",
       auto_continue: false,
       run_ids: [],
+      scope_plan: undefined,
+      progress: {
+        ...automation.progress,
+        coverage_available: false,
+        coverage_exact: false,
+        inspected_files: 0,
+        reviewed_files: 0,
+        remaining_files: 0,
+        unsupported_files: 0,
+        scope_frozen: false,
+      },
     }
     vi.mocked(getRepositoryReviewAutomation).mockResolvedValue(idleReview)
     vi.mocked(startRepositoryReviewAutomation).mockResolvedValue({
@@ -1221,36 +1152,6 @@ describe("routed repository review pages", () => {
       ),
     )
     expect(restartRepositoryReviewAutomation).not.toHaveBeenCalled()
-  })
-
-  it("explains legacy unknown-candidate failures", async () => {
-    const failedReview: RepositoryReviewAutomation = {
-      ...automation,
-      status: "failed",
-      pause_reason: "run_failed",
-      pause_detail: "AI selected an unknown candidate ID",
-    }
-    vi.mocked(getRepositoryReviewAutomation).mockResolvedValue(failedReview)
-
-    renderPage(
-      <RepositoryReviewDetailPage
-        id={failedReview.id}
-        onBack={vi.fn()}
-        onFindings={vi.fn()}
-        onIssues={vi.fn()}
-      />,
-    )
-
-    const alert = await screen.findByRole("alert")
-    expect(alert).toHaveTextContent(
-      /scope planner returned a malformed or stale/i,
-    )
-    expect(alert).toHaveTextContent(/native validation stopped the run/i)
-    expect(alert).toHaveTextContent(
-      /continue retries from the saved review state/i,
-    )
-    expect(alert).not.toHaveTextContent("AI selected an unknown candidate ID")
-    expect(screen.getByRole("button", { name: "Continue" })).toBeVisible()
   })
 
   it("runs a completed review again from its detail page", async () => {
@@ -1548,215 +1449,6 @@ describe("routed repository review pages", () => {
     )
   })
 
-  it("shows raw counters and explicitly resumes failed historical consolidation", async () => {
-    vi.mocked(getRepositoryReviewFindingHealth).mockResolvedValue({
-      ...findingHealth,
-      historical_consolidation: {
-        required: true,
-        status: "failed",
-        retryable: true,
-      },
-    })
-    vi.mocked(listRepositoryReviewAutomationFindingsPage).mockResolvedValue({
-      automation: { ...automation, status: "failed" },
-      repository: repositorySummary,
-      findings: [findingSummary],
-      total: 1,
-      next_cursor: "",
-      canonical_query: "ALL ORDER BY severity DESC, updated DESC",
-      query_schema: { fields: [] },
-      findings_processing: {
-        raw_total: 87,
-        pending: 4,
-        processing: 0,
-        failed: 1,
-        completed: 82,
-        new: 40,
-        duplicates: 42,
-      },
-    })
-    const user = userEvent.setup()
-    renderPage(
-      <RepositoryReviewFindingsPage
-        automationID={automation.id}
-        search={{ q: "ALL ORDER BY severity DESC, updated DESC" }}
-        onSearchChange={vi.fn()}
-        onBack={vi.fn()}
-        onOpenFinding={vi.fn()}
-        onOpenRawFindings={vi.fn()}
-        onOpenRepositoryFindings={vi.fn()}
-        onOpenRepositoryFinding={vi.fn()}
-        onOpenThread={vi.fn()}
-      />,
-    )
-
-    expect(await screen.findByText("87")).toBeVisible()
-    expect(screen.getByText("Historical consolidation")).toBeVisible()
-    await user.click(
-      screen.getByRole("button", {
-        name: "Resume historical consolidation",
-      }),
-    )
-    await waitFor(() =>
-      expect(retryRepositoryReviewHistoricalDeduplication).toHaveBeenCalledWith(
-        automation.id,
-      ),
-    )
-  })
-
-  it("reveals and confirms incompatible-work restart only after its specific resume conflict", async () => {
-    vi.mocked(getRepositoryReviewFindingHealth).mockResolvedValue({
-      ...findingHealth,
-      historical_consolidation: {
-        required: true,
-        status: "failed",
-        retryable: true,
-      },
-    })
-    vi.mocked(listRepositoryReviewAutomationFindingsPage).mockResolvedValue({
-      automation: { ...automation, status: "failed" },
-      repository: repositorySummary,
-      findings: [findingSummary],
-      total: 1,
-      next_cursor: "",
-      canonical_query: "ALL ORDER BY severity DESC, updated DESC",
-      query_schema: { fields: [] },
-    })
-    vi.mocked(
-      retryRepositoryReviewHistoricalDeduplication,
-    ).mockRejectedValueOnce(
-      new RepositoryReviewAPIError(
-        409,
-        "The saved profile no longer matches this historical replay.",
-        "historical_consolidation_restart_required",
-      ),
-    )
-    const user = userEvent.setup()
-    renderPage(
-      <RepositoryReviewFindingsPage
-        automationID={automation.id}
-        search={{ q: "ALL ORDER BY severity DESC, updated DESC" }}
-        onSearchChange={vi.fn()}
-        onBack={vi.fn()}
-        onOpenFinding={vi.fn()}
-        onOpenRawFindings={vi.fn()}
-        onOpenRepositoryFindings={vi.fn()}
-        onOpenRepositoryFinding={vi.fn()}
-        onOpenThread={vi.fn()}
-      />,
-    )
-
-    expect(
-      await screen.findByRole("button", {
-        name: "Resume historical consolidation",
-      }),
-    ).toBeVisible()
-    expect(
-      screen.queryByRole("button", { name: "Restart incompatible work" }),
-    ).not.toBeInTheDocument()
-
-    await user.click(
-      screen.getByRole("button", {
-        name: "Resume historical consolidation",
-      }),
-    )
-    const restartButton = await screen.findByRole("button", {
-      name: "Restart incompatible work",
-    })
-    expect(
-      restartRepositoryReviewHistoricalDeduplication,
-    ).not.toHaveBeenCalled()
-
-    await user.click(restartButton)
-    const dialog = screen.getByRole("alertdialog")
-    expect(
-      within(dialog).getByText(
-        /Completed results in affected historical buckets will be reprocessed/u,
-      ),
-    ).toBeVisible()
-    expect(
-      within(dialog).getByText(
-        /Completed work in unrelated buckets will remain preserved/u,
-      ),
-    ).toBeVisible()
-    expect(
-      restartRepositoryReviewHistoricalDeduplication,
-    ).not.toHaveBeenCalled()
-
-    const healthCallsBeforeRestart = vi.mocked(getRepositoryReviewFindingHealth)
-      .mock.calls.length
-    await user.click(
-      within(dialog).getByRole("button", {
-        name: "Restart incompatible work",
-      }),
-    )
-    await waitFor(() =>
-      expect(
-        restartRepositoryReviewHistoricalDeduplication,
-      ).toHaveBeenCalledWith(automation.id),
-    )
-    await waitFor(() =>
-      expect(
-        vi.mocked(getRepositoryReviewFindingHealth).mock.calls.length,
-      ).toBeGreaterThan(healthCallsBeforeRestart),
-    )
-  })
-
-  it("keeps unrelated resume failures on the normal error path", async () => {
-    vi.mocked(getRepositoryReviewFindingHealth).mockResolvedValue({
-      ...findingHealth,
-      historical_consolidation: {
-        required: true,
-        status: "failed",
-        retryable: true,
-      },
-    })
-    vi.mocked(
-      retryRepositoryReviewHistoricalDeduplication,
-    ).mockRejectedValueOnce(
-      new RepositoryReviewAPIError(
-        409,
-        "Exact historical campaign evidence is unavailable.",
-        "historical_deduplication_campaign_recovery_required",
-      ),
-    )
-    const user = userEvent.setup()
-    renderPage(
-      <RepositoryReviewFindingsPage
-        automationID={automation.id}
-        search={{ q: "ALL ORDER BY severity DESC, updated DESC" }}
-        onSearchChange={vi.fn()}
-        onBack={vi.fn()}
-        onOpenFinding={vi.fn()}
-        onOpenRawFindings={vi.fn()}
-        onOpenRepositoryFindings={vi.fn()}
-        onOpenRepositoryFinding={vi.fn()}
-        onOpenThread={vi.fn()}
-      />,
-    )
-
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Resume historical consolidation",
-      }),
-    )
-    await waitFor(() =>
-      expect(retryRepositoryReviewHistoricalDeduplication).toHaveBeenCalledWith(
-        automation.id,
-      ),
-    )
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", {
-          name: "Resume historical consolidation",
-        }),
-      ).toBeEnabled(),
-    )
-    expect(
-      screen.queryByRole("button", { name: "Restart incompatible work" }),
-    ).not.toBeInTheDocument()
-  })
-
   it("selects only failed processing records and retains safe bulk failures", async () => {
     const failedSource: RepositoryReviewRawFinding = {
       ...rawFinding,
@@ -1851,11 +1543,6 @@ describe("routed repository review pages", () => {
       source: failedSource,
       finding,
       repository_finding: repositoryFinding,
-      historical_consolidation: {
-        required: true,
-        status: "failed",
-        retryable: true,
-      },
     })
     const user = userEvent.setup()
     renderPage(
@@ -1863,7 +1550,6 @@ describe("routed repository review pages", () => {
         automationID={automation.id}
         sourceID={failedSource.id}
         onBack={vi.fn()}
-        onCanonicalSource={vi.fn()}
         onOpenFinding={vi.fn()}
         onOpenRepositoryFinding={vi.fn()}
       />,
@@ -1879,11 +1565,6 @@ describe("routed repository review pages", () => {
     expect(
       screen.getByRole("button", { name: "Repository finding" }),
     ).toBeVisible()
-    expect(
-      screen.getByRole("button", {
-        name: "Resume historical consolidation",
-      }),
-    ).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Retry" }))
     await waitFor(() =>
       expect(
@@ -1892,7 +1573,7 @@ describe("routed repository review pages", () => {
     )
   })
 
-  it("loads the typed raw collection and normalizes a legacy source detail", async () => {
+  it("loads the typed raw collection and retries a source detail", async () => {
     const onOpenRawFinding = vi.fn()
     const user = userEvent.setup()
     const collectionView = renderPage(
@@ -1939,13 +1620,11 @@ describe("routed repository review pages", () => {
       repository: repositorySummary,
       source: failedSource,
     })
-    const onCanonicalSource = vi.fn()
     renderPage(
       <RepositoryReviewRawFindingPage
         automationID={automation.id}
-        sourceID="rfn_legacy"
+        sourceID={failedSource.id}
         onBack={vi.fn()}
-        onCanonicalSource={onCanonicalSource}
         onOpenFinding={vi.fn()}
       />,
     )
@@ -1953,9 +1632,6 @@ describe("routed repository review pages", () => {
     expect(
       await screen.findByText("The deduplication provider failed."),
     ).toBeVisible()
-    await waitFor(() =>
-      expect(onCanonicalSource).toHaveBeenCalledWith(failedSource.id),
-    )
     await user.click(screen.getByRole("button", { name: "Retry raw finding" }))
     await waitFor(() =>
       expect(retryRepositoryReviewRawSource).toHaveBeenCalledWith(
@@ -1997,7 +1673,6 @@ describe("routed repository review pages", () => {
         automationID={automation.id}
         sourceID={source.id}
         onBack={vi.fn()}
-        onCanonicalSource={vi.fn()}
         onOpenFinding={vi.fn()}
       />,
     )
@@ -2021,78 +1696,6 @@ describe("routed repository review pages", () => {
     expect(
       within(immutableContext).getByText("context-review-account"),
     ).toBeVisible()
-  })
-
-  it("stops polling a pending raw source after historical replay fails", async () => {
-    vi.mocked(getRepositoryReviewRawSource).mockResolvedValue({
-      automation,
-      repository: repositorySummary,
-      source: {
-        ...rawFinding,
-        deduplication_state: "pending",
-        disposition: "undecided",
-        deduplicated_finding_id: undefined,
-        assignment_id: "historical-replay",
-      },
-      historical_deduplication: {
-        required: true,
-        status: "failed",
-        error: "Campaign recovery failed.",
-      },
-    })
-    const view = renderPage(
-      <RepositoryReviewRawFindingPage
-        automationID={automation.id}
-        sourceID={rawFinding.id}
-        onBack={vi.fn()}
-        onCanonicalSource={vi.fn()}
-        onOpenFinding={vi.fn()}
-      />,
-    )
-
-    await waitFor(() =>
-      expect(getRepositoryReviewRawSource).toHaveBeenCalledTimes(1),
-    )
-    await new Promise((resolve) => setTimeout(resolve, 2_200))
-    expect(getRepositoryReviewRawSource).toHaveBeenCalledTimes(1)
-    view.unmount()
-  })
-
-  it("keeps polling a native pending source after historical replay fails", async () => {
-    vi.mocked(getRepositoryReviewRawSource).mockResolvedValue({
-      automation,
-      repository: repositorySummary,
-      source: {
-        ...rawFinding,
-        deduplication_state: "pending",
-        disposition: "undecided",
-        deduplicated_finding_id: undefined,
-        assignment_id: "native-assignment",
-      },
-      historical_deduplication: {
-        required: true,
-        status: "failed",
-        error: "Campaign recovery failed.",
-      },
-    })
-    const view = renderPage(
-      <RepositoryReviewRawFindingPage
-        automationID={automation.id}
-        sourceID={rawFinding.id}
-        onBack={vi.fn()}
-        onCanonicalSource={vi.fn()}
-        onOpenFinding={vi.fn()}
-      />,
-    )
-
-    await waitFor(
-      () =>
-        expect(
-          vi.mocked(getRepositoryReviewRawSource).mock.calls.length,
-        ).toBeGreaterThan(1),
-      { timeout: 3_000 },
-    )
-    view.unmount()
   })
 
   it("opens an associated repository finding from a single run selection", async () => {
@@ -2225,6 +1828,92 @@ describe("routed repository review pages", () => {
         expect.objectContaining({ finding_ids: [finding.id] }),
       ),
     )
+  })
+
+  it("does not draft a selected repository finding without a current-campaign action", async () => {
+    vi.mocked(getRepositoryReviewAutomationRepositoryFinding).mockResolvedValue(
+      {
+        automation,
+        repository: repositorySummary,
+        finding: { ...finding, id: "rdf_previous_campaign" },
+        repository_finding: repositoryFinding,
+        occurrences: [{ ...finding, id: "rdf_previous_campaign" }],
+        contexts: [],
+        capabilities: { github: true, can_generate: true },
+      },
+    )
+    const onGenerated = vi.fn()
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewRepositoryFindingsPage
+        automationID={automation.id}
+        search={{ q: "ORDER BY repository ASC" }}
+        onSearchChange={vi.fn()}
+        onBack={vi.fn()}
+        onOpenFinding={vi.fn()}
+        onGenerated={onGenerated}
+      />,
+    )
+
+    const item = (
+      await screen.findByText(repositoryFinding.canonical_title)
+    ).closest("[data-item-id]")!
+    await user.click(item)
+    await user.click(
+      screen.getByRole("button", { name: "Draft issue previews" }),
+    )
+    await user.click(screen.getByRole("button", { name: "Draft previews" }))
+
+    await waitFor(() =>
+      expect(
+        getRepositoryReviewAutomationRepositoryFinding,
+      ).toHaveBeenCalledWith(automation.id, repositoryFinding.id),
+    )
+    await Promise.resolve()
+    expect(generateRepositoryReviewIssues).not.toHaveBeenCalled()
+    expect(onGenerated).not.toHaveBeenCalled()
+  })
+
+  it("does not offer repository issue actions without a current-campaign action", async () => {
+    vi.mocked(getRepositoryReviewAutomationRepositoryFinding).mockResolvedValue(
+      {
+        automation,
+        repository: repositorySummary,
+        finding: { ...finding, id: "rdf_previous_campaign" },
+        repository_finding: repositoryFinding,
+        occurrences: [{ ...finding, id: "rdf_previous_campaign" }],
+        contexts: [],
+        capabilities: {
+          github: true,
+          can_generate: true,
+          can_link_issue: true,
+        },
+      },
+    )
+    renderPage(
+      <RepositoryReviewFindingPage
+        automationID={automation.id}
+        findingID={repositoryFinding.id}
+        resourceKind="repository"
+        onBack={vi.fn()}
+        onOpenRepositoryFinding={vi.fn()}
+        onOpenIssue={vi.fn()}
+        onLinkIssue={vi.fn()}
+        onGenerated={vi.fn()}
+        onOpenThread={vi.fn()}
+      />,
+    )
+
+    expect(
+      await screen.findByRole("heading", {
+        name: repositoryFinding.canonical_title,
+      }),
+    ).toBeVisible()
+    expect(screen.queryByRole("button", { name: "Draft issue" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Post issue" })).toBeNull()
+    expect(
+      screen.queryByRole("button", { name: "Link existing issue" }),
+    ).toBeNull()
   })
 
   it("clears a repository-finding selection after queueing validation", async () => {
@@ -3319,63 +3008,7 @@ describe("routed repository review pages", () => {
     ).toBeEnabled()
   })
 
-  it("explains failed legacy fix checks without recorded diagnostics", async () => {
-    const validatedAt = "2026-08-26T03:04:05Z"
-    const aggregate: RepositoryFinding = {
-      ...repositoryFinding,
-      validation_state: "failed",
-      resolution_history: [
-        {
-          outcome: "failed",
-          validated_at: validatedAt,
-        },
-      ],
-    }
-    vi.mocked(getRepositoryReviewAutomationRepositoryFinding).mockResolvedValue(
-      {
-        automation,
-        repository: repositorySummary,
-        finding,
-        repository_finding: aggregate,
-        occurrences: [finding],
-        contexts: [],
-        capabilities: { github: true },
-      },
-    )
-
-    renderPage(
-      <RepositoryReviewFindingPage
-        automationID={automation.id}
-        findingID={aggregate.id}
-        resourceKind="repository"
-        onBack={vi.fn()}
-        onOpenRepositoryFinding={vi.fn()}
-        onOpenIssue={vi.fn()}
-        onLinkIssue={vi.fn()}
-        onGenerated={vi.fn()}
-        onOpenThread={vi.fn()}
-      />,
-    )
-
-    const alert = await screen.findByRole("alert", {
-      name: "Fix check failed",
-    })
-    expect(
-      within(alert).getByText(
-        "No failure details were recorded for this attempt. It may predate fix-check failure diagnostics.",
-      ),
-    ).toBeVisible()
-    expect(
-      within(alert).getByText(
-        `details_unavailable · ${new Date(validatedAt).toLocaleString()}`,
-      ),
-    ).toBeVisible()
-    expect(
-      screen.getByRole("button", { name: "Retry fix check" }),
-    ).toBeEnabled()
-  })
-
-  it("does not show historical fix-check failures for a current non-failed state", async () => {
+  it("does not show past fix-check failures for a current non-failed state", async () => {
     const aggregate: RepositoryFinding = {
       ...repositoryFinding,
       validation_state: "confirmed",
@@ -3384,7 +3017,7 @@ describe("routed repository review pages", () => {
           outcome: "failed",
           validated_at: "2026-08-26T01:00:00Z",
           failure: {
-            code: "historical_failure",
+            code: "provider_failure",
             message: "This failure is no longer current.",
             retryable: true,
             at: "2026-08-26T01:00:00Z",
@@ -3547,19 +3180,60 @@ describe("routed repository review pages", () => {
     expect(linkRepositoryReviewIssue).not.toHaveBeenCalled()
   })
 
-  it("hides all link and search actions for a dismissed finding", async () => {
-    const dismissedFinding: RepositoryReviewFinding = {
+  it("does not link through a historical occurrence without a current-campaign action", async () => {
+    const previousCampaignFinding: RepositoryReviewFinding = {
       ...finding,
-      status: "dismissed",
+      id: "rdf_previous_campaign",
       issue_draft_id: undefined,
+    }
+    vi.mocked(getRepositoryReviewAutomationRepositoryFinding).mockResolvedValue(
+      {
+        automation,
+        repository: repositorySummary,
+        finding: previousCampaignFinding,
+        repository_finding: repositoryFinding,
+        occurrences: [previousCampaignFinding],
+        contexts: [],
+        capabilities: {
+          github: true,
+          can_link_issue: true,
+          can_search_issues: true,
+        },
+      },
+    )
+    renderPage(
+      <RepositoryReviewLinkIssuePage
+        automationID={automation.id}
+        findingID={repositoryFinding.id}
+        onBack={vi.fn()}
+        onLinked={vi.fn()}
+      />,
+    )
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Existing-issue linking is unavailable",
+      }),
+    ).toBeVisible()
+    expect(
+      screen.queryByRole("textbox", { name: "GitHub issue URL" }),
+    ).toBeNull()
+    expect(findRepositoryReviewIssueCandidates).not.toHaveBeenCalled()
+    expect(linkRepositoryReviewIssue).not.toHaveBeenCalled()
+  })
+
+  it("hides all link and search actions for a dismissed repository finding", async () => {
+    const dismissedRepositoryFinding = {
+      ...repositoryFinding,
+      lifecycle: "dismissed" as const,
     }
     vi.mocked(getRepositoryReviewAutomationFinding).mockResolvedValue({
       automation,
       repository: repositorySummary,
-      finding: dismissedFinding,
-      action_finding: dismissedFinding,
-      repository_finding: repositoryFinding,
-      occurrences: [dismissedFinding],
+      finding,
+      action_finding: finding,
+      repository_finding: dismissedRepositoryFinding,
+      occurrences: [finding],
       contexts: [],
       capabilities: {
         github: true,
@@ -3604,6 +3278,7 @@ describe("routed repository review pages", () => {
       automation,
       repository: repositorySummary,
       finding: linkedFinding,
+      action_finding: linkedFinding,
       repository_finding: repositoryFinding,
       occurrences: [linkedFinding],
       contexts: [],
@@ -3696,6 +3371,7 @@ describe("routed repository review pages", () => {
       automation,
       repository: repositorySummary,
       finding: linkedFinding,
+      action_finding: linkedFinding,
       repository_finding: repositoryFinding,
       occurrences: [linkedFinding],
       contexts: [],
@@ -3905,37 +3581,6 @@ describe("routed repository review pages", () => {
     },
   )
 
-  it("hides publication actions from a canonical read-only eligible-looking preview", async () => {
-    vi.mocked(getRepositoryReviewAutomationIssue).mockResolvedValue({
-      automation,
-      repository: repositorySummary,
-      issue: { ...issue, read_only: true },
-      finding,
-      capabilities: {
-        github: true,
-        can_publish: true,
-        publish_blockers: [],
-      },
-    })
-    renderPage(
-      <RepositoryReviewIssuePage
-        automationID={automation.id}
-        draftID={issue.id}
-        onBack={vi.fn()}
-        onDeleted={vi.fn()}
-        onEdit={vi.fn()}
-        onOpenFinding={vi.fn()}
-        onManageLink={vi.fn()}
-      />,
-    )
-
-    expect(
-      await screen.findByText("This preview cannot be posted to GitHub yet."),
-    ).toBeVisible()
-    expect(screen.queryByRole("button", { name: "Post to GitHub" })).toBeNull()
-    expect(screen.queryByRole("link", { name: "Open GitHub issue" })).toBeNull()
-  })
-
   it("keeps a blocked canonical GitHub Post action disabled and explains every blocker", async () => {
     vi.mocked(getRepositoryReviewAutomationIssue).mockResolvedValue({
       automation,
@@ -4022,47 +3667,6 @@ describe("routed repository review pages", () => {
       await screen.findByText(
         "This preview is saved locally. Posting is unavailable because this review is not bound to a canonical GitHub repository.",
       ),
-    ).toBeVisible()
-    expect(screen.queryByRole("button", { name: "Post to GitHub" })).toBeNull()
-  })
-
-  it("explains a noncanonical preview without offering a GitHub Post action", async () => {
-    vi.mocked(getRepositoryReviewAutomationIssue).mockResolvedValue({
-      automation,
-      repository: repositorySummary,
-      issue: {
-        ...issue,
-        canonical: false,
-        read_only: true,
-        conflict_reason: "A newer preview owns the canonical association.",
-      },
-      finding,
-      capabilities: {
-        github: true,
-        can_publish: false,
-        publish_blockers: [
-          {
-            code: "preview_not_canonical",
-            count: 1,
-            message: "This preview is not canonical.",
-          },
-        ],
-      },
-    })
-    renderPage(
-      <RepositoryReviewIssuePage
-        automationID={automation.id}
-        draftID={issue.id}
-        onBack={vi.fn()}
-        onDeleted={vi.fn()}
-        onEdit={vi.fn()}
-        onOpenFinding={vi.fn()}
-        onManageLink={vi.fn()}
-      />,
-    )
-
-    expect(
-      await screen.findByText(/not the finding’s canonical association/u),
     ).toBeVisible()
     expect(screen.queryByRole("button", { name: "Post to GitHub" })).toBeNull()
   })
@@ -4241,55 +3845,6 @@ describe("routed repository review pages", () => {
     )
     expect(screen.getByRole("heading", { name: "Evidence" })).toBeVisible()
     expect(screen.getByText("Version fence is absent.")).toBeVisible()
-  })
-
-  it("never offers AI regeneration for a canonical legacy editing draft", async () => {
-    const legacyIssue: RepositoryReviewIssueDraft = {
-      ...issue,
-      id: "draft_legacy",
-      origin: "legacy",
-      generation_id: undefined,
-      resolved_instructions: undefined,
-      instructions_mode: undefined,
-      generator_model: undefined,
-      generator_account: undefined,
-      canonical: true,
-      read_only: false,
-      state: "editing",
-      regeneratable: undefined,
-    }
-    vi.mocked(getRepositoryReviewAutomationIssue).mockResolvedValue({
-      automation,
-      repository: repositorySummary,
-      issue: legacyIssue,
-      finding,
-      capabilities: {
-        github: true,
-        can_edit: true,
-        can_delete: true,
-        can_regenerate: false,
-        can_publish: true,
-      },
-    })
-    renderPage(
-      <RepositoryReviewIssuePage
-        automationID={automation.id}
-        draftID={legacyIssue.id}
-        onBack={vi.fn()}
-        onDeleted={vi.fn()}
-        onEdit={vi.fn()}
-        onOpenFinding={vi.fn()}
-        onManageLink={vi.fn()}
-      />,
-    )
-
-    expect(
-      (await screen.findAllByText("legacy", { exact: true })).length,
-    ).toBeGreaterThan(0)
-    expect(
-      screen.queryByRole("button", { name: /Regenerate|Retry generation/u }),
-    ).not.toBeInTheDocument()
-    expect(regenerateRepositoryReviewAutomationIssue).not.toHaveBeenCalled()
   })
 
   it("lets an interrupted generating preview retry its original reservation", async () => {

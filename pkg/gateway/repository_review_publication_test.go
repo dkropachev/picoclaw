@@ -32,25 +32,25 @@ func TestRepositoryReviewAutomationIssueLinkRouteParsingIsExact(t *testing.T) {
 		{
 			method: http.MethodPost,
 			path: repositoryReviewPublicationRoute +
-				"automations/rra_test/findings/rfn_test/issue-link/candidates",
+				"automations/rra_test/findings/rdf_test/issue-link/candidates",
 			action: "candidates",
 		},
 		{
 			method: http.MethodPost,
 			path: repositoryReviewPublicationRoute +
-				"automations/rra_test/findings/rfn_test/issue-link",
+				"automations/rra_test/findings/rdf_test/issue-link",
 			action: "link",
 		},
 		{
 			method: http.MethodDelete,
 			path: repositoryReviewPublicationRoute +
-				"automations/rra_test/findings/rfn_test/issue-link",
+				"automations/rra_test/findings/rdf_test/issue-link",
 			action: "link",
 		},
 	} {
 		request := httptest.NewRequest(test.method, test.path, nil)
 		operation, ok := repositoryReviewAutomationOperationFromRequest(request)
-		if !ok || operation.AutomationID != "rra_test" || operation.FindingID != "rfn_test" ||
+		if !ok || operation.AutomationID != "rra_test" || operation.FindingID != "rdf_test" ||
 			operation.Action != test.action {
 			t.Fatalf("operation=%#v ok=%v", operation, ok)
 		}
@@ -499,25 +499,22 @@ func TestRepositoryReviewGatewayLedgerIdentityNormalizationIsExact(t *testing.T)
 			t.Fatalf("identity(%q)=%q, want %q", test.input, got, test.want)
 		}
 	}
-	if identities := repositoryReviewGatewayLedgerIdentities(" "); identities != nil {
+	if identities := repoaudit.RepositoryLedgerIdentities(" "); identities != nil {
 		t.Fatalf("empty identities=%#v", identities)
 	}
 	absolute := filepath.Join(string(filepath.Separator), "tmp", "repo")
 	dirtyAbsolute := filepath.Join(string(filepath.Separator), "tmp", "..", "tmp", "repo")
-	if identities := repositoryReviewGatewayLedgerIdentities(
+	if identities := repoaudit.RepositoryLedgerIdentities(
 		" " + dirtyAbsolute + " ",
 	); !reflect.DeepEqual(identities, []string{absolute}) {
 		t.Fatalf("absolute identities=%#v", identities)
 	}
-	if identities := repositoryReviewGatewayLedgerIdentities(
+	if identities := repoaudit.RepositoryLedgerIdentities(
 		"https://github.com/Owner/Repo.git",
-	); !reflect.DeepEqual(
-		identities,
-		[]string{"owner/repo", "https://github.com/Owner/Repo.git"},
-	) {
+	); !reflect.DeepEqual(identities, []string{"owner/repo"}) {
 		t.Fatalf("GitHub identities=%#v", identities)
 	}
-	if identities := repositoryReviewGatewayLedgerIdentities(
+	if identities := repoaudit.RepositoryLedgerIdentities(
 		"opaque-repository",
 	); !reflect.DeepEqual(identities, []string{"opaque-repository"}) {
 		t.Fatalf("opaque identities=%#v", identities)

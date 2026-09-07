@@ -4,21 +4,17 @@ import { launcherFetch } from "@/api/http"
 import {
   type RepositoryReviewProfileConfig,
   createRepositoryReviewAutomation,
-  createRepositoryReviewIssueDraft,
   createRepositoryReviewProfile,
   deleteRepositoryReviewAutomation,
   deleteRepositoryReviewAutomationIssue,
   deleteRepositoryReviewProfile,
   generateRepositoryReviewIssues,
-  getRepositoryReview,
   getRepositoryReviewAutomation,
   getRepositoryReviewAutomationDetail,
   getRepositoryReviewAutomationFinding,
-  getRepositoryReviewAutomationFindings,
   getRepositoryReviewAutomationIssue,
   getRepositoryReviewAutomationOptions,
   getRepositoryReviewAutomationRepositoryFinding,
-  getRepositoryReviewAutomationRunFinding,
   getRepositoryReviewCommitOptions,
   getRepositoryReviewFindingHealth,
   getRepositoryReviewFindingsProcessingSource,
@@ -26,7 +22,6 @@ import {
   getRepositoryReviewRawSource,
   listRepositoryReviewAutomationFileAttributionsPage,
   listRepositoryReviewAutomationFindingsPage,
-  listRepositoryReviewAutomationIssues,
   listRepositoryReviewAutomationIssuesPage,
   listRepositoryReviewAutomationRawFindingsPage,
   listRepositoryReviewAutomationRepositoryFindingsPage,
@@ -36,24 +31,18 @@ import {
   listRepositoryReviewFindingsProcessingPage,
   listRepositoryReviewProfiles,
   listRepositoryReviewProfilesPage,
-  listRepositoryReviews,
   pauseRepositoryReviewAutomation,
-  publishRepositoryReviewIssueDraft,
   purgeRepositoryReviewAutomationHistory,
   repositoryReviewDefaultIssuePrompt,
   restartRepositoryReviewAutomation,
-  restartRepositoryReviewHistoricalDeduplication,
   resumeRepositoryReviewAutomation,
   retryRepositoryReviewFindingsProcessingSource,
   retryRepositoryReviewFindingsProcessingSources,
-  retryRepositoryReviewHistoricalDeduplication,
   retryRepositoryReviewRawSource,
   retryRepositoryReviewRunFindingStatuses,
   startRepositoryReviewAutomation,
   updateRepositoryReviewAutomation,
   updateRepositoryReviewAutomationIssue,
-  updateRepositoryReviewFinding,
-  updateRepositoryReviewIssueDraft,
   updateRepositoryReviewProfile,
 } from "@/api/repository-reviews"
 
@@ -63,207 +52,6 @@ const mockedLauncherFetch = vi.mocked(launcherFetch)
 
 describe("repository review API", () => {
   beforeEach(() => mockedLauncherFetch.mockReset())
-
-  it("loads legacy occurrence bookmarks from the deprecated run-findings resource", async () => {
-    mockedLauncherFetch.mockResolvedValueOnce(
-      jsonResponse({
-        automation: { id: "auto/slash", repository: "owner/repo" },
-        finding: { id: "rfn/legacy", context_ids: [] },
-        contexts: [],
-      }),
-    )
-
-    await expect(
-      getRepositoryReviewAutomationRunFinding("auto/slash", "rfn/legacy"),
-    ).resolves.toMatchObject({ finding: { id: "rfn/legacy" } })
-    expect(mockedLauncherFetch).toHaveBeenCalledWith(
-      "/api/repository-reviews/automations/auto%2Fslash/run-findings/rfn%2Flegacy",
-      { signal: undefined },
-    )
-  })
-
-  it("lists and loads repository review state", async () => {
-    mockedLauncherFetch
-      .mockResolvedValueOnce(jsonResponse({ repositories: [] }))
-      .mockResolvedValueOnce(
-        jsonResponse({ id: "rrp_repo", repository: "owner/repo" }),
-      )
-
-    await expect(listRepositoryReviews()).resolves.toEqual({ repositories: [] })
-    await expect(getRepositoryReview("rrp_repo/slash")).resolves.toMatchObject({
-      repository: "owner/repo",
-    })
-
-    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      1,
-      "/api/repository-reviews",
-      { signal: undefined },
-    )
-    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      2,
-      "/api/repository-reviews/rrp_repo%2Fslash",
-      { signal: undefined },
-    )
-  })
-
-  it("requests a bounded finding page", async () => {
-    mockedLauncherFetch.mockResolvedValueOnce(
-      jsonResponse({
-        id: "rrp_repo",
-        repository: "owner/repo",
-        finding_offset: 50,
-        finding_total: 75,
-      }),
-    )
-
-    await getRepositoryReview("rrp_repo", undefined, {
-      offset: 50,
-      limit: 25,
-    })
-
-    expect(mockedLauncherFetch).toHaveBeenCalledWith(
-      "/api/repository-reviews/rrp_repo?offset=50&limit=25",
-      { signal: undefined },
-    )
-  })
-
-  it("sends version-fenced finding and issue-draft mutations", async () => {
-    mockedLauncherFetch
-      .mockResolvedValueOnce(
-        jsonResponse({
-          repository: { id: "rrp_repo", review_version: 1 },
-          finding: {
-            id: "rfn_1",
-            context_ids: [],
-            models: [],
-            validation: { status: "confirmed", summary: "confirmed" },
-          },
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          repository: { id: "rrp_repo" },
-          draft: { id: "rid_1" },
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          repository: { id: "rrp_repo" },
-          draft: { id: "rid_1" },
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          repository: { id: "rrp_repo" },
-          draft: { id: "rid_1" },
-        }),
-      )
-
-    await updateRepositoryReviewFinding("rrp_repo", "rfn/1", {
-      status: "dismissed",
-      expected_version: 4,
-    })
-    await createRepositoryReviewIssueDraft("rrp_repo", {
-      finding_ids: ["rfn_1", "rfn_2"],
-      expected_version: 5,
-    })
-    await updateRepositoryReviewIssueDraft("rrp_repo", "rid/1", {
-      title: "Lost update",
-      body: "The write needs a version fence.",
-      labels: ["bug", "concurrency"],
-      expected_version: 2,
-    })
-    await publishRepositoryReviewIssueDraft("rrp_repo", "rid/1", {
-      expected_version: 3,
-    })
-
-    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      1,
-      "/api/repository-reviews/rrp_repo/findings/rfn%2F1",
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({
-          status: "dismissed",
-          expected_version: 4,
-        }),
-      }),
-    )
-    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      2,
-      "/api/repository-reviews/rrp_repo/issue-drafts",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({
-          finding_ids: ["rfn_1", "rfn_2"],
-          expected_version: 5,
-        }),
-      }),
-    )
-    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      3,
-      "/api/repository-reviews/rrp_repo/issue-drafts/rid%2F1",
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({
-          title: "Lost update",
-          body: "The write needs a version fence.",
-          labels: ["bug", "concurrency"],
-          expected_version: 2,
-        }),
-      }),
-    )
-    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      4,
-      "/api/repository-reviews/rrp_repo/issue-drafts/rid%2F1/publish",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ expected_version: 3 }),
-      }),
-    )
-  })
-
-  it("surfaces structured API errors", async () => {
-    mockedLauncherFetch.mockResolvedValueOnce(
-      jsonResponse(
-        { code: "repository_review_conflict", message: "Review changed." },
-        409,
-      ),
-    )
-
-    await expect(getRepositoryReview("rrp_repo")).rejects.toMatchObject({
-      status: 409,
-      code: "repository_review_conflict",
-      message: "Review changed.",
-    })
-  })
-
-  it("normalizes nullable stored collections", async () => {
-    mockedLauncherFetch.mockResolvedValueOnce(
-      jsonResponse({
-        id: "rrp_repo",
-        repository: "owner/repo",
-        files: null,
-        findings: null,
-        contexts: null,
-        runs: null,
-        issue_drafts: null,
-        repository_findings: null,
-        mapping_jobs: null,
-        validation_jobs: null,
-      }),
-    )
-
-    await expect(getRepositoryReview("rrp_repo")).resolves.toMatchObject({
-      files: {},
-      findings: [],
-      contexts: [],
-      runs: [],
-      issue_drafts: [],
-      repository_findings: [],
-      mapping_jobs: [],
-      validation_jobs: [],
-    })
-  })
 
   it("loads and normalizes automation options and model-stat maps", async () => {
     mockedLauncherFetch
@@ -971,7 +759,7 @@ describe("repository review API", () => {
             root_agent_id: "main",
             reviewer_identity: "review",
             model: "gpt-5.6-sol",
-            source: "legacy",
+            source: "live",
             attempts: 2,
             run_ids: null,
             sources: null,
@@ -1018,39 +806,20 @@ describe("repository review API", () => {
       repository: "owner/repo",
       reviewer_models: ["reviewer"],
       issue_writer_model: "writer",
-      progress: { findings: 1 },
+      progress: { deduplicated_findings: 1 },
     }
     const finding = {
       id: "finding/slash",
       context_ids: null,
       models: null,
       observations: null,
+      raw_source_ids: ["rrw_internal"],
+      raw_source_total: 99,
+      history: [{ action: "internal" }],
       validation: { status: "confirmed", summary: "Confirmed", checks: null },
     }
     mockedLauncherFetch
       .mockResolvedValueOnce(jsonResponse({ automation }))
-      .mockResolvedValueOnce(
-        jsonResponse({
-          automation,
-          findings: [finding],
-          repository_findings: [
-            {
-              id: "rrf/one",
-              canonical_title: "Cross-commit finding",
-              review_finding_ids: null,
-              found_commits: null,
-              path_symbol_history: null,
-              issue: { state: "none", conflict_urls: null },
-              possible_duplicates: null,
-              resolution_history: null,
-            },
-          ],
-          contexts: [],
-          scope: "all",
-          offset: 50,
-          total: 51,
-        }),
-      )
       .mockResolvedValueOnce(
         jsonResponse({ automation, finding, contexts: [], capabilities: {} }),
       )
@@ -1076,30 +845,17 @@ describe("repository review API", () => {
       id: "auto/slash",
       issue_writer_model: "writer",
     })
-    await expect(
-      getRepositoryReviewAutomationFindings("auto/slash", {
-        scope: "all",
-        offset: 50,
-        limit: 50,
-      }),
-    ).resolves.toMatchObject({
-      scope: "all",
-      offset: 50,
-      total: 51,
-      repository_finding_total: 1,
-      repository_findings: [
-        {
-          id: "rrf/one",
-          review_finding_ids: [],
-          issue: { state: "none", conflict_urls: [] },
-        },
-      ],
-    })
-    await expect(
-      getRepositoryReviewAutomationFinding("auto/slash", "finding/slash"),
-    ).resolves.toMatchObject({
+    const findingDetail = await getRepositoryReviewAutomationFinding(
+      "auto/slash",
+      "finding/slash",
+    )
+    expect(findingDetail).toMatchObject({
       finding: { id: "finding/slash", context_ids: [] },
+      raw_source_total: 0,
     })
+    expect(findingDetail.finding).not.toHaveProperty("raw_source_ids")
+    expect(findingDetail.finding).not.toHaveProperty("raw_source_total")
+    expect(findingDetail.finding).not.toHaveProperty("history")
     await expect(
       listRepositoryReviewFindingRawSources(
         "auto/slash",
@@ -1126,16 +882,11 @@ describe("repository review API", () => {
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       2,
-      "/api/repository-reviews/automations/auto%2Fslash/report?scope=all&offset=50&limit=50",
-      { signal: undefined },
-    )
-    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      3,
       "/api/repository-reviews/automations/auto%2Fslash/findings/finding%2Fslash",
       { signal: undefined },
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      4,
+      3,
       "/api/repository-reviews/automations/auto%2Fslash/findings/deduplicated%2Fslash/sources?offset=25&limit=25",
       { signal: undefined },
     )
@@ -1179,7 +930,6 @@ describe("repository review API", () => {
       title: "Lost update",
       state: "editing",
       origin: "ai_generated",
-      canonical: true,
       publishable: false,
       publish_blockers: [
         {
@@ -1398,11 +1148,6 @@ describe("repository review API", () => {
           canonical_query: "ALL ORDER BY created DESC",
           query_schema: { fields: [] },
           findings_processing: findingsProcessing,
-          historical_deduplication: {
-            required: true,
-            status: "failed",
-            error: "Replay failed",
-          },
         }),
       )
       .mockResolvedValueOnce(
@@ -1419,18 +1164,6 @@ describe("repository review API", () => {
           findings_processing: { ...findingsProcessing, failed: 0, pending: 1 },
         }),
       )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          automation,
-          historical_deduplication: { required: true, status: "pending" },
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          automation,
-          historical_deduplication: { required: true, status: "pending" },
-        }),
-      )
 
     await expect(
       listRepositoryReviewAutomationRawFindingsPage("auto/slash", {
@@ -1441,27 +1174,15 @@ describe("repository review API", () => {
       raw_findings: [{ id: "rrw/slash", path: "pkg/store.go" }],
       next_cursor: "raw-next",
       findings_processing: { raw_total: 1, failed: 1 },
-      historical_deduplication: { status: "failed" },
     })
     await expect(
-      getRepositoryReviewRawSource("auto/slash", "rfn/legacy"),
+      getRepositoryReviewRawSource("auto/slash", "rrw_1"),
     ).resolves.toMatchObject({ source: { id: "rrw_1" } })
     await expect(
       retryRepositoryReviewRawSource("auto/slash", "rrw_1"),
     ).resolves.toMatchObject({
       source: { id: "rrw_1", deduplication_state: "pending" },
     })
-    await expect(
-      retryRepositoryReviewHistoricalDeduplication("auto/slash"),
-    ).resolves.toMatchObject({
-      historical_deduplication: { required: true, status: "pending" },
-    })
-    await expect(
-      restartRepositoryReviewHistoricalDeduplication("auto/slash"),
-    ).resolves.toMatchObject({
-      historical_deduplication: { required: true, status: "pending" },
-    })
-
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       1,
       "/api/repository-reviews/automations/auto%2Fslash/raw-findings?query=ALL+ORDER+BY+created+DESC&cursor=raw%2Fcursor&limit=25",
@@ -1469,7 +1190,7 @@ describe("repository review API", () => {
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       2,
-      "/api/repository-reviews/automations/auto%2Fslash/raw-findings/rfn%2Flegacy",
+      "/api/repository-reviews/automations/auto%2Fslash/raw-findings/rrw_1",
       { signal: undefined },
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
@@ -1477,22 +1198,9 @@ describe("repository review API", () => {
       "/api/repository-reviews/automations/auto%2Fslash/raw-findings/rrw_1/retry",
       expect.objectContaining({ method: "POST", body: "{}" }),
     )
-    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      4,
-      "/api/repository-reviews/automations/auto%2Fslash/historical-deduplication/retry",
-      expect.objectContaining({ method: "POST", body: "{}" }),
-    )
-    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      5,
-      "/api/repository-reviews/automations/auto%2Fslash/historical-deduplication/restart",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ confirmed: true }),
-      }),
-    )
   })
 
-  it("uses health-backed findings-processing collection and recovery endpoints", async () => {
+  it("uses health-backed findings-processing collection and retry endpoints", async () => {
     const automation = { id: "auto/slash", repository: "owner/repo" }
     const source = {
       id: "source/slash",
@@ -1537,11 +1245,6 @@ describe("repository review API", () => {
         issue_conflicts: 0,
       },
       findings_processing: counters,
-      historical_consolidation: {
-        required: true,
-        status: "failed",
-        retryable: true,
-      },
       updated_at: "2026-08-31T12:00:00Z",
     }
     mockedLauncherFetch
@@ -1562,7 +1265,6 @@ describe("repository review API", () => {
           automation,
           source,
           repository_finding: { id: "rrf_1", issue: { state: "none" } },
-          historical_consolidation: health.historical_consolidation,
         }),
       )
       .mockResolvedValueOnce(
@@ -1596,7 +1298,6 @@ describe("repository review API", () => {
     ).resolves.toMatchObject({
       run_findings: { unrepresented: 2 },
       findings_processing: { total: 4 },
-      historical_consolidation: { status: "failed", retryable: true },
     })
     await expect(
       listRepositoryReviewFindingsProcessingPage("auto/slash", {
@@ -1677,44 +1378,17 @@ describe("repository review API", () => {
       repository: "owner/repo",
       progress: {},
     }
-    const finding = {
-      id: "finding/slash",
-      context_ids: null,
-      models: null,
-      observations: null,
-      validation: { status: "confirmed", summary: "Confirmed", checks: null },
-      run_finding_status: "failed",
-    }
-    mockedLauncherFetch
-      .mockResolvedValueOnce(
-        jsonResponse({
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
           automation,
-          findings: [finding],
-          repository_findings: [],
-          repository_finding_total: 0,
-          scope: "current",
-          offset: 0,
-          total: 1,
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse(
-          {
-            automation,
-            repository: { id: "rrp_repo", repository: "owner/repo" },
-            findings: [{ id: "finding/slash", run_finding_status: "pending" }],
-          },
-          202,
-        ),
-      )
+          repository: { id: "rrp_repo", repository: "owner/repo" },
+          findings: [{ id: "finding/slash", run_finding_status: "pending" }],
+        },
+        202,
+      ),
+    )
 
-    await expect(
-      getRepositoryReviewAutomationFindings("auto/slash"),
-    ).resolves.toMatchObject({
-      findings: [
-        { id: "finding/slash", run_finding_status: "failed", context_ids: [] },
-      ],
-    })
     await expect(
       retryRepositoryReviewRunFindingStatuses("auto/slash", ["finding/slash"]),
     ).resolves.toMatchObject({
@@ -1722,7 +1396,7 @@ describe("repository review API", () => {
     })
 
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      2,
+      1,
       "/api/repository-reviews/automations/auto%2Fslash/findings/status",
       expect.objectContaining({
         method: "POST",
@@ -1736,13 +1410,11 @@ describe("repository review API", () => {
     const issue = {
       id: "draft/slash",
       finding_ids: ["finding"],
+      origin: "ai_generated",
       state: "editing",
       labels: null,
     }
     mockedLauncherFetch
-      .mockResolvedValueOnce(
-        jsonResponse({ automation, issues: [issue], offset: 0, total: 1 }),
-      )
       .mockResolvedValueOnce(
         jsonResponse({
           automation,
@@ -1760,10 +1432,6 @@ describe("repository review API", () => {
         }),
       )
 
-    await listRepositoryReviewAutomationIssues("auto", {
-      generation_id: "rrig_1",
-      limit: 200,
-    })
     await expect(
       getRepositoryReviewAutomationIssue("auto", "draft/slash"),
     ).resolves.toMatchObject({
@@ -1786,12 +1454,7 @@ describe("repository review API", () => {
     })
 
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      1,
-      "/api/repository-reviews/automations/auto/issues?generation_id=rrig_1&limit=200",
-      { signal: undefined },
-    )
-    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      3,
+      2,
       "/api/repository-reviews/automations/auto/issues/draft%2Fslash",
       expect.objectContaining({
         method: "PATCH",
@@ -1804,7 +1467,7 @@ describe("repository review API", () => {
       }),
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
-      4,
+      3,
       "/api/repository-reviews/automations/auto/issues/generations",
       expect.objectContaining({
         method: "POST",

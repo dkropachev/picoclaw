@@ -237,36 +237,6 @@ func TestReviewTextBudgetAccountsForPromptEscapingAndControls(t *testing.T) {
 	}
 }
 
-func TestUnavailableImmutableScopeCannotProducePersistedFinding(t *testing.T) {
-	file := map[string]any{
-		"path": "tests/fixture.bin", "fileHash": strings.Repeat("a", 40),
-		"sizeBytes": int64(4), "contentComplete": false, "contentUnavailable": "binary",
-	}
-	observation, err := nativeRepositoryReviewObservation(
-		map[string]any{
-			"summary": "unavailable", "reviewedFiles": []any{},
-			"findings": []map[string]any{repositoryReviewTestFinding(map[string]any{
-				"severity": "high", "title": "Invented binary bug", "symbol": "fixture", "file": "tests/fixture.bin",
-				"message": "Invented behavior.", "evidence": "not actually visible", "impact": "unknown",
-				"validation": map[string]any{"status": "confirmed", "summary": "claimed", "checks": []any{}},
-			})}, "residualRisks": []any{"tests/fixture.bin: binary"},
-		},
-		[]map[string]any{file},
-		"review-a",
-		"binary challenge",
-		"response",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(observation.Findings) != 0 {
-		t.Fatalf("unavailable content produced findings: %#v", observation.Findings)
-	}
-	if got := nativeCategorizePath("tests/fixtures/logo.png"); got != "binary" {
-		t.Fatalf("binary test fixture category=%q, want binary", got)
-	}
-}
-
 func TestOnlyIntrinsicUnavailableFilesBecomeTerminalUnsupported(t *testing.T) {
 	file := func(pathValue, reason string) map[string]any {
 		return map[string]any{

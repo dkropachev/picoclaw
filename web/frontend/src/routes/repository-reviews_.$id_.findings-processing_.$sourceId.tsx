@@ -30,15 +30,6 @@ function RepositoryReviewFindingProcessingRoute() {
           state: true,
         })
       }
-      onCanonicalSource={(canonicalSourceID) =>
-        void navigate({
-          to: "/repository-reviews/$id/findings-processing/$sourceId",
-          params: { id, sourceId: canonicalSourceID },
-          search,
-          state: true,
-          replace: true,
-        })
-      }
       onOpenFinding={(findingID) =>
         void navigate({
           to: "/repository-reviews/$id/findings/$findingId",

@@ -178,7 +178,7 @@ const querySchemas = {
       field("path", "string"),
       field("symbol", "string"),
       field("severity", "enum", ["critical", "high", "medium", "low"]),
-      field("status", "enum", ["open", "dismissed", "posted"]),
+      field("status", "enum", ["open", "posted"]),
       field("run_status", "enum", [
         "pending",
         "processing",
@@ -292,13 +292,7 @@ const querySchemas = {
         "posted",
         "unknown",
       ]),
-      field("origin", "enum", [
-        "ai_generated",
-        "linked",
-        "discovered",
-        "legacy",
-      ]),
-      field("canonical", "boolean", ["true", "false"]),
+      field("origin", "enum", ["ai_generated", "linked", "discovered"]),
       field("publishable", "boolean", ["true", "false"]),
       field("findings", "number"),
       field("created", "timestamp"),
@@ -1196,7 +1190,6 @@ export const repositoryReviewVisualIDs = {
   processingRunning: "rrw_visual_processing_running",
   processingFailed: "rrw_visual_processing_failed",
   processingCompleted: "rrw_visual_processing_completed",
-  processingOldCampaign: "rrw_visual_processing_old_campaign",
   repositoryFinding: "rrf_visual_1",
   normalRepositoryFinding: "rrf_visual_normal",
   provisionalRepositoryFinding: "rrf_visual_provisional",
@@ -1381,7 +1374,6 @@ const repositoryReviewFindings = [
     version: 3,
     created_at: "2026-08-25T14:05:00Z",
     updated_at: "2026-08-25T14:10:00Z",
-    raw_source_total: 2,
   },
   {
     id: repositoryReviewVisualIDs.secondFinding,
@@ -1417,7 +1409,6 @@ const repositoryReviewFindings = [
     version: 2,
     created_at: "2026-08-25T14:12:00Z",
     updated_at: "2026-08-25T14:15:00Z",
-    raw_source_total: 1,
   },
 ]
 
@@ -1455,7 +1446,6 @@ const repositoryReviewAttentionFinding = {
   version: 1,
   created_at: "2026-08-25T14:16:00Z",
   updated_at: "2026-08-25T14:18:00Z",
-  raw_source_total: 1,
 }
 
 const repositoryReviewDetailFindings = [
@@ -1875,24 +1865,6 @@ const repositoryReviewProcessingSources: RepositoryReviewRawFinding[] = [
     "duplicate",
     { state: "completed", ordinal: 14 },
   ),
-  repositoryReviewRawFinding(
-    repositoryReviewVisualIDs.processingOldCampaign,
-    repositoryReviewFindings[1],
-    "legacy-review-model",
-    "historical-review",
-    "new",
-    {
-      state: "failed",
-      campaignID: "rrc_visual_previous",
-      ordinal: 15,
-      failure: {
-        code: "processing_interrupted",
-        message: "Historical finding grouping was interrupted.",
-        retryable: true,
-        at: "2026-08-24T17:00:00Z",
-      },
-    },
-  ),
 ]
 
 const repositoryReviewFindingHealth = {
@@ -1915,17 +1887,6 @@ const repositoryReviewFindingHealth = {
   findings_processing: repositoryReviewProcessingHealth(
     repositoryReviewProcessingSources,
   ),
-  historical_consolidation: {
-    required: true,
-    status: "failed" as
-      | "not_required"
-      | "pending"
-      | "replaying"
-      | "merging"
-      | "failed"
-      | "completed",
-    retryable: true,
-  },
   updated_at: "2026-08-25T14:22:00Z",
 }
 
@@ -1951,7 +1912,6 @@ function repositoryReviewProcessingHealth(
 function repositoryReviewProcessingDetail(
   source: RepositoryReviewRawFinding,
   sources: RepositoryReviewRawFinding[],
-  historicalConsolidation: (typeof repositoryReviewFindingHealth)["historical_consolidation"],
 ) {
   const finding = repositoryReviewDetailFindings.find(
     (candidate) => candidate.id === source.deduplicated_finding_id,
@@ -1971,7 +1931,6 @@ function repositoryReviewProcessingDetail(
     ...(finding ? { finding } : {}),
     ...(repositoryFinding ? { repository_finding: repositoryFinding } : {}),
     findings_processing: repositoryReviewProcessingHealth(sources),
-    historical_consolidation: historicalConsolidation,
   }
 }
 
@@ -1989,7 +1948,6 @@ const repositoryReviewIssues = [
     generator_account: "openai-primary",
     generator_profile_id: "rrpf_visual",
     generator_profile_version: 4,
-    canonical: true,
     publishable: true,
     deletable: true,
     regeneratable: true,
@@ -2032,7 +1990,6 @@ const repositoryReviewIssues = [
     generator_profile_id: "rrpf_visual",
     generator_profile_version: 4,
     generation_error: "The issue writer returned an invalid structured body.",
-    canonical: true,
     publishable: false,
     deletable: true,
     regeneratable: true,
@@ -2060,7 +2017,9 @@ const repositoryReviewRunFindingSummaries = repositoryReviewFindings.map(
     association: "existing",
     repository_finding_id: finding.repository_finding_id,
     contributors: finding.models,
-    raw_source_count: finding.raw_source_total,
+    raw_source_count: repositoryReviewRawFindings.filter(
+      (source) => source.deduplicated_finding_id === finding.id,
+    ).length,
     created_at: finding.created_at,
     updated_at: finding.updated_at,
   }),
@@ -2113,7 +2072,6 @@ const repositoryReviewIssueSummaries = repositoryReviewIssues.map((issue) => ({
   finding_count: issue.finding_ids.length,
   origin: issue.origin,
   generation_id: issue.generation_id,
-  canonical: issue.canonical,
   publishable: issue.publishable,
   title: issue.title,
   state: issue.state,
@@ -2219,18 +2177,10 @@ export async function installCollectionVisualMocks(
             }
             failures.push({
               source_id: sourceID,
-              code:
-                source?.id === repositoryReviewVisualIDs.processingOldCampaign
-                  ? "historical_replay_required"
-                  : source
-                    ? "not_retryable"
-                    : "not_found",
-              message:
-                source?.id === repositoryReviewVisualIDs.processingOldCampaign
-                  ? "Historical sources must be retried through historical consolidation."
-                  : source
-                    ? "Finding processing source is not retryable."
-                    : "Finding processing source was not found.",
+              code: source ? "not_retryable" : "not_found",
+              message: source
+                ? "Finding processing source is not retryable."
+                : "Finding processing source was not found.",
             })
           }
           findingHealth.findings_processing =
@@ -2267,61 +2217,7 @@ export async function installCollectionVisualMocks(
             repositoryReviewProcessingHealth(processingSources)
           return json(
             route,
-            repositoryReviewProcessingDetail(
-              source,
-              processingSources,
-              findingHealth.historical_consolidation,
-            ),
-            202,
-          )
-        }
-        if (path === `${reviewRoot}/historical-deduplication/retry`) {
-          findingHealth.historical_consolidation = {
-            required: true,
-            status: "pending",
-            retryable: false,
-          }
-          findingHealth.updated_at = "2026-08-25T14:23:00Z"
-          return json(
-            route,
-            {
-              automation: repositoryReviewAutomation,
-              repository: repositoryReviewSummary,
-              historical_deduplication: {
-                required: true,
-                status: "pending",
-              },
-            },
-            202,
-          )
-        }
-        if (path === `${reviewRoot}/historical-deduplication/restart`) {
-          if (body?.confirmed !== true) {
-            return json(
-              route,
-              {
-                code: "confirmation_required",
-                message: "Historical restart requires explicit confirmation.",
-              },
-              400,
-            )
-          }
-          findingHealth.historical_consolidation = {
-            required: true,
-            status: "pending",
-            retryable: false,
-          }
-          findingHealth.updated_at = "2026-08-25T14:23:00Z"
-          return json(
-            route,
-            {
-              automation: repositoryReviewAutomation,
-              repository: repositoryReviewSummary,
-              historical_deduplication: {
-                required: true,
-                status: "pending",
-              },
-            },
+            repositoryReviewProcessingDetail(source, processingSources),
             202,
           )
         }
@@ -2640,11 +2536,6 @@ export async function installCollectionVisualMocks(
               failed: 0,
               completed: 0,
             },
-            historical_consolidation: {
-              required: false,
-              status: "not_required",
-              retryable: false,
-            },
             updated_at: fixedNow,
           })
         }
@@ -2691,7 +2582,6 @@ export async function installCollectionVisualMocks(
                   completed: 0,
                 }
               : repositoryReviewProcessingHealth(processingSources),
-          historical_consolidation: findingHealth.historical_consolidation,
           capabilities: repositoryReviewCapabilities,
         })
       }
@@ -2706,11 +2596,7 @@ export async function installCollectionVisualMocks(
         return source
           ? json(
               route,
-              repositoryReviewProcessingDetail(
-                source,
-                processingSources,
-                findingHealth.historical_consolidation,
-              ),
+              repositoryReviewProcessingDetail(source, processingSources),
             )
           : json(
               route,
@@ -2718,10 +2604,7 @@ export async function installCollectionVisualMocks(
               404,
             )
       }
-      if (
-        path === `${reviewRoot}/findings` ||
-        path === `${reviewRoot}/run-findings`
-      ) {
+      if (path === `${reviewRoot}/findings`) {
         return json(route, {
           automation: repositoryReviewAutomation,
           repository: repositoryReviewSummary,
@@ -2744,10 +2627,6 @@ export async function installCollectionVisualMocks(
               state === "empty" ? 0 : repositoryReviewRawFindings.length,
             new: state === "empty" ? 0 : 2,
             duplicates: state === "empty" ? 0 : 1,
-          },
-          historical_deduplication: {
-            required: false,
-            status: "completed",
           },
           capabilities: repositoryReviewCapabilities,
         })
@@ -2772,10 +2651,6 @@ export async function installCollectionVisualMocks(
               state === "empty" ? 0 : repositoryReviewRawFindings.length,
             new: state === "empty" ? 0 : 2,
             duplicates: state === "empty" ? 0 : 1,
-          },
-          historical_deduplication: {
-            required: false,
-            status: "completed",
           },
           capabilities: repositoryReviewCapabilities,
         })
@@ -2928,7 +2803,9 @@ export async function installCollectionVisualMocks(
           issue: repositoryReviewIssues.find((issue) =>
             issue.finding_ids.includes(finding.id),
           ),
-          raw_source_total: finding.raw_source_total,
+          raw_source_total: repositoryReviewRawFindings.filter(
+            (source) => source.deduplicated_finding_id === finding.id,
+          ).length,
           capabilities: repositoryReviewCapabilities,
         })
       }

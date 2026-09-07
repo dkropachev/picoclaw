@@ -550,7 +550,7 @@ func ValidateRepositoryMappingAdjudication(
 
 func normalizeRepositoryMappingConflictFields(values []string) []string {
 	if values == nil {
-		return nil
+		return []string{}
 	}
 	normalized := make([]string, len(values))
 	for index, value := range values {
@@ -579,12 +579,7 @@ func validRepositoryMappingConflictField(value string) bool {
 }
 
 func validateRepositoryMappingConflictFields(conflicts, fields []string) error {
-	// A missing field array is the legacy representation. It remains readable,
-	// but the policy below treats every retained legacy conflict as blocking.
-	if fields == nil {
-		return nil
-	}
-	if len(fields) != len(conflicts) {
+	if fields == nil || len(fields) != len(conflicts) {
 		return errors.New("repository mapping conflict fields are not aligned")
 	}
 	for _, field := range fields {
@@ -598,12 +593,6 @@ func validateRepositoryMappingConflictFields(conflicts, fields []string) error {
 func repositoryMappingAdjudicationHasBlockingConflicts(
 	adjudication RepositoryMappingAdjudication,
 ) bool {
-	if adjudication.ConflictFields == nil {
-		return len(adjudication.ConflictingAnchors) > 0
-	}
-	if len(adjudication.ConflictFields) != len(adjudication.ConflictingAnchors) {
-		return true
-	}
 	for _, field := range adjudication.ConflictFields {
 		switch strings.ToLower(strings.TrimSpace(field)) {
 		case RepositoryMappingConflictFieldSeverity,

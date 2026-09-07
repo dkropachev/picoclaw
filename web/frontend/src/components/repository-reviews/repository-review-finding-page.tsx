@@ -100,7 +100,7 @@ export function RepositoryReviewFindingPage({
   onOpenRepositoryFinding: (findingID: string) => void
   onOpenRawFinding?: (sourceID: string) => void
   onOpenIssue: (draftID: string) => void
-  onLinkIssue: (findingID?: string) => void
+  onLinkIssue?: (findingID?: string) => void
   onGenerated: (generationID: string) => void
   onOpenThread: (threadID: string) => void
   onRepositoryFindingReplaced?: (repositoryFindingID: string) => void
@@ -166,8 +166,8 @@ export function RepositoryReviewFindingPage({
       : undefined
   const latestFixCheckFailure = latestFixCheckResolution?.failure
   const isRepositoryResource = resourceKind === "repository"
-  const actionFinding = detail?.action_finding ?? finding
-  const actionFindingID = repositoryFinding ? actionFinding?.id : findingID
+  const actionFinding = isRepositoryResource ? detail?.action_finding : finding
+  const actionFindingID = actionFinding?.id
   const rawSourcesQuery = useInfiniteQuery({
     queryKey: ["repository-review-finding-sources", automationID, findingID],
     initialPageParam: 0,
@@ -226,7 +226,7 @@ export function RepositoryReviewFindingPage({
       ]
       const savedDraft =
         (response.issues?.length ?? 0) > 0 ||
-        Boolean(response.issue || response.draft) ||
+        Boolean(response.issue) ||
         outcomes.some((outcome) => Boolean(outcome.draft_id))
       const succeeded =
         outcomes.some((outcome) => outcome.success === true) ||
@@ -421,16 +421,18 @@ export function RepositoryReviewFindingPage({
     capabilities?.github ??
     Boolean(detail && githubRepositoryPath(detail.automation.repository))
   const canGenerate =
-    capabilities?.can_generate ??
-    Boolean(finding?.status === "open" && !issueID)
+    Boolean(actionFindingID) &&
+    (capabilities?.can_generate ??
+      Boolean(finding?.status === "open" && !issueID))
   const canLink =
-    capabilities?.can_link_issue ??
-    Boolean(
-      github &&
-      finding?.status === "open" &&
-      !issueID &&
-      repositoryFinding?.match_state !== "provisional",
-    )
+    Boolean(actionFindingID) &&
+    (capabilities?.can_link_issue ??
+      Boolean(
+        github &&
+        finding?.status === "open" &&
+        !issueID &&
+        repositoryFinding?.match_state !== "provisional",
+      ))
   const contexts = useMemo(
     () =>
       new Map((detail?.contexts ?? []).map((context) => [context.id, context])),
@@ -704,7 +706,7 @@ export function RepositoryReviewFindingPage({
                   type="button"
                   size="sm"
                   variant="outline"
-                  onClick={() => onLinkIssue(actionFindingID)}
+                  onClick={() => onLinkIssue?.(actionFindingID)}
                 >
                   <IconExternalLink /> Link existing issue
                 </Button>
@@ -939,8 +941,7 @@ export function RepositoryReviewFindingPage({
                     ) : (
                       <>
                         <p className="text-muted-foreground mt-1">
-                          No failure details were recorded for this attempt. It
-                          may predate fix-check failure diagnostics.
+                          No failure details were recorded for this attempt.
                         </p>
                         {latestFixCheckResolution && (
                           <p className="text-muted-foreground mt-1 text-xs">
@@ -1795,7 +1796,7 @@ function EffortCard({
           : "Estimate unavailable"}
       </p>
       <p className="text-muted-foreground mt-2">
-        {effort.rationale || "This legacy finding predates effort estimation."}
+        {effort.rationale || "Estimate rationale unavailable."}
       </p>
     </article>
   )

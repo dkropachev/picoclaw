@@ -23,9 +23,7 @@ func TestRetryDeduplicationsReturnsOrderedPartialResultsAtomically(t *testing.T)
 			now,
 		)
 	}
-	historicalID := state.RawFindings[3].ID
-	state.RawFindings[3].AssignmentID = historicalReplayAssignmentID
-	state.RawFindings[3].DiagnosisDigest = RawReviewFindingDiagnosisDigest(state.RawFindings[3])
+	thirdID := state.RawFindings[3].ID
 	state.Version++
 	state.UpdatedAt = now
 	reconcileFindingsProcessingCounters(&state)
@@ -44,12 +42,12 @@ func TestRetryDeduplicationsReturnsOrderedPartialResultsAtomically(t *testing.T)
 
 	updated, result, err := fixture.store.RetryDeduplications(
 		fixture.repository,
-		[]string{"missing-source", "  " + firstID + " ", nonfailedID, historicalID, secondID},
+		[]string{"missing-source", "  " + firstID + " ", nonfailedID, thirdID, secondID},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(result.RetriedIDs, []string{firstID, secondID}) {
+	if !reflect.DeepEqual(result.RetriedIDs, []string{firstID, thirdID, secondID}) {
 		t.Fatalf("retried IDs=%v", result.RetriedIDs)
 	}
 	wantFailures := []DeduplicationRetryFailure{
@@ -61,16 +59,12 @@ func TestRetryDeduplicationsReturnsOrderedPartialResultsAtomically(t *testing.T)
 			SourceID: nonfailedID, Code: "not_retryable",
 			Message: "Finding processing source is not retryable.",
 		},
-		{
-			SourceID: historicalID, Code: "historical_replay_required",
-			Message: "Historical sources must be retried through historical consolidation.",
-		},
 	}
 	if !reflect.DeepEqual(result.Failures, wantFailures) {
 		t.Fatalf("failures=%#v", result.Failures)
 	}
-	if updated.Version != versionBefore+1 || updated.NextDeduplicationOrdinal != nextOrdinal+2 ||
-		updated.FindingsProcessing.Pending != 3 || updated.FindingsProcessing.Failed != 1 {
+	if updated.Version != versionBefore+1 || updated.NextDeduplicationOrdinal != nextOrdinal+3 ||
+		updated.FindingsProcessing.Pending != 4 || updated.FindingsProcessing.Failed != 0 {
 		t.Fatalf(
 			"version=%d next=%d counters=%#v",
 			updated.Version,
@@ -80,7 +74,7 @@ func TestRetryDeduplicationsReturnsOrderedPartialResultsAtomically(t *testing.T)
 	}
 	firstRaw, firstJob := bulkRetrySource(t, updated, firstID)
 	secondRaw, secondJob := bulkRetrySource(t, updated, secondID)
-	if firstJob.InsertionOrdinal != nextOrdinal || secondJob.InsertionOrdinal != nextOrdinal+1 ||
+	if firstJob.InsertionOrdinal != nextOrdinal || secondJob.InsertionOrdinal != nextOrdinal+2 ||
 		firstRaw.InsertionOrdinal != firstBefore.InsertionOrdinal ||
 		secondRaw.InsertionOrdinal != secondBefore.InsertionOrdinal {
 		t.Fatalf(
@@ -110,31 +104,12 @@ func TestRetryDeduplicationsReturnsOrderedPartialResultsAtomically(t *testing.T)
 func TestRetryDeduplicationsAllIneligibleDoesNotMutateState(t *testing.T) {
 	fixture := dedupDeepPendingFixture(t, 2)
 	state := dedupDeepState(t, fixture)
-	now := state.UpdatedAt.Add(time.Minute)
-	historicalID := state.RawFindings[1].ID
-	markDeduplicationFailed(
-		&state.RawFindings[1],
-		&state.DeduplicationJobs[deduplicationJobIndexByRawID(
-			state.DeduplicationJobs,
-			historicalID,
-		)],
-		"attempt_limit",
-		now,
-	)
-	state.RawFindings[1].AssignmentID = historicalReplayAssignmentID
-	state.RawFindings[1].DiagnosisDigest = RawReviewFindingDiagnosisDigest(state.RawFindings[1])
-	state.Version++
-	state.UpdatedAt = now
-	reconcileFindingsProcessingCounters(&state)
-	state.FindingsProcessing.UpdatedAt = now
-	if err := fixture.store.save(&state); err != nil {
-		t.Fatal(err)
-	}
+	secondID := state.RawFindings[1].ID
 	before := dedupDeepState(t, fixture)
 
 	returned, result, err := fixture.store.RetryDeduplications(
 		fixture.repository,
-		[]string{state.RawFindings[0].ID, "missing", historicalID},
+		[]string{state.RawFindings[0].ID, "missing", secondID},
 	)
 	if err != nil {
 		t.Fatal(err)

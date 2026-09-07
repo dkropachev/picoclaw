@@ -16,7 +16,7 @@ import (
 func TestRepositoryReviewCollectionRoutesAndCompactProjections(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
-	state := seedRepositoryReviewGenerationFindings(t, workspace, 4)
+	state := seedCanonicalRepositoryReviewGenerationFindings(t, workspace, 4)
 	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 
@@ -138,203 +138,6 @@ func TestRepositoryReviewCollectionRoutesAndCompactProjections(t *testing.T) {
 	}
 }
 
-func TestRepositoryReviewRunFindingsSurviveFailedHistoricalDeduplication(t *testing.T) {
-	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	state := seedRepositoryReviewAPIState(t, workspace)
-	state.Findings[0].ID = "rfn_failed_historical"
-	for runIndex := range state.Runs {
-		for findingIndex := range state.Runs[runIndex].FindingIDs {
-			state.Runs[runIndex].FindingIDs[findingIndex] = state.Findings[0].ID
-		}
-	}
-	state.MappingJobs = nil
-	want := state.Findings[0]
-	state.RawFindings = nil
-	state.DeduplicatedFindings = nil
-	state.DeduplicationJobs = nil
-	state.FindingsProcessing = repoaudit.FindingsProcessingCounters{}
-	state.HistoricalDeduplication = repoaudit.HistoricalDeduplicationReplay{
-		Required:  true,
-		Status:    repoaudit.HistoricalDeduplicationFailed,
-		Attempts:  3,
-		Error:     "Historical deduplication failed.",
-		UpdatedAt: time.Now().UTC(),
-	}
-	persistRepositoryReviewAdditionalCoverageState(t, workspace, state)
-	automation := seedRepositoryReviewDetailAutomation(
-		t, handler, state.Repository, state.Runs[0].ID,
-	)
-
-	query := url.QueryEscape("ALL ORDER BY severity DESC, updated DESC")
-	strictResponse := httptest.NewRecorder()
-	mux.ServeHTTP(strictResponse, httptest.NewRequest(
-		http.MethodGet,
-		"/api/repository-reviews/automations/"+automation.ID+"/findings?query="+query,
-		nil,
-	))
-	var strictPage struct {
-		Findings                []repositoryReviewDeduplicatedFindingSummary `json:"findings"`
-		Total                   int                                          `json:"total"`
-		FindingsProcessing      repoaudit.FindingsProcessingCounters         `json:"findings_processing"`
-		HistoricalDeduplication repoaudit.HistoricalDeduplicationReplay      `json:"historical_deduplication"`
-	}
-	if err := json.Unmarshal(strictResponse.Body.Bytes(), &strictPage); err != nil {
-		t.Fatal(err)
-	}
-	if strictResponse.Code != http.StatusOK || strictPage.Total != 0 ||
-		len(strictPage.Findings) != 0 || strictPage.FindingsProcessing.RawTotal != 1 ||
-		strictPage.HistoricalDeduplication.Status != repoaudit.HistoricalDeduplicationFailed {
-		t.Fatalf("strict findings page=%#v body=%s", strictPage, strictResponse.Body.String())
-	}
-
-	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, httptest.NewRequest(
-		http.MethodGet,
-		"/api/repository-reviews/automations/"+automation.ID+"/run-findings?query="+query,
-		nil,
-	))
-	if response.Code != http.StatusOK {
-		t.Fatalf("run findings status=%d body=%s", response.Code, response.Body.String())
-	}
-	var page struct {
-		Findings       []repositoryReviewRunFindingSummary `json:"findings"`
-		Total          int                                 `json:"total"`
-		CanonicalQuery string                              `json:"canonical_query"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
-		t.Fatal(err)
-	}
-	if page.Total != 1 || len(page.Findings) != 1 || page.Findings[0].ID != want.ID ||
-		page.Findings[0].Title != want.Title || page.Findings[0].Severity != want.Severity ||
-		page.CanonicalQuery != "ALL ORDER BY severity DESC, updated DESC" {
-		t.Fatalf("run findings page=%#v body=%s", page, response.Body.String())
-	}
-
-	detailResponse := httptest.NewRecorder()
-	mux.ServeHTTP(detailResponse, httptest.NewRequest(
-		http.MethodGet,
-		"/api/repository-reviews/automations/"+automation.ID+"/run-findings/"+want.ID,
-		nil,
-	))
-	if detailResponse.Code != http.StatusOK {
-		t.Fatalf(
-			"run finding detail status=%d body=%s",
-			detailResponse.Code,
-			detailResponse.Body.String(),
-		)
-	}
-	var detail struct {
-		Finding repositoryReviewRunFindingProjection `json:"finding"`
-	}
-	if err := json.Unmarshal(detailResponse.Body.Bytes(), &detail); err != nil {
-		t.Fatal(err)
-	}
-	if detail.Finding.ID != want.ID {
-		t.Fatalf("run finding detail=%#v body=%s", detail, detailResponse.Body.String())
-	}
-}
-
-func TestRepositoryReviewIssueCollectionGenerationCursorAndLegacyFirstPage(t *testing.T) {
-	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	state := seedRepositoryReviewGenerationFindings(t, workspace, 4)
-	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
-	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
-	store := repoaudit.NewStore(workspace)
-	generations := []string{"rrig_first", "rrig_first", "rrig_second", "rrig_second"}
-	for index, findingID := range state.Runs[0].FindingIDs {
-		_, draft, reserved, err := store.ReserveIssueGeneration(repoaudit.IssueGenerationRequest{
-			Repository: state.Repository, FindingID: findingID, GenerationID: generations[index],
-			ResolvedInstructions: repositoryReviewDefaultIssueInstructions,
-			InstructionsMode:     repoaudit.IssueDraftInstructionsDefault,
-			GeneratorModel:       "cheap", GeneratorAccount: "api",
-		})
-		if err != nil || !reserved {
-			t.Fatalf("reserve issue %d: reserved=%v err=%v", index, reserved, err)
-		}
-		if _, _, err = store.CompleteIssueGeneration(
-			state.Repository, draft.ID, draft.GenerationID,
-			"Issue preview", "private issue body", []string{"bug"}, "",
-		); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	base := "/api/repository-reviews/automations/" + automation.ID + "/issues"
-	legacy := httptest.NewRecorder()
-	mux.ServeHTTP(legacy, httptest.NewRequest(
-		http.MethodGet, base+"?generation_id=rrig_first&limit=1", nil,
-	))
-	if legacy.Code != http.StatusOK || !strings.Contains(legacy.Body.String(), `"offset":0`) ||
-		!strings.Contains(legacy.Body.String(), `"next_offset":1`) ||
-		!strings.Contains(legacy.Body.String(), `"body":"private issue body"`) ||
-		strings.Contains(legacy.Body.String(), `"canonical_query"`) {
-		t.Fatalf("legacy first page status=%d body=%s", legacy.Code, legacy.Body.String())
-	}
-
-	query := url.QueryEscape("ALL ORDER BY updated DESC")
-	first := httptest.NewRecorder()
-	mux.ServeHTTP(first, httptest.NewRequest(
-		http.MethodGet, base+"?query="+query+"&generation_id=rrig_first&limit=1", nil,
-	))
-	if first.Code != http.StatusOK {
-		t.Fatalf("issue collection status=%d body=%s", first.Code, first.Body.String())
-	}
-	var firstPage struct {
-		Issues         []repositoryReviewIssueCollectionSummary `json:"issues"`
-		Total          int                                      `json:"total"`
-		NextCursor     string                                   `json:"next_cursor"`
-		CanonicalQuery string                                   `json:"canonical_query"`
-		GenerationID   string                                   `json:"generation_id"`
-	}
-	if err := json.Unmarshal(first.Body.Bytes(), &firstPage); err != nil {
-		t.Fatal(err)
-	}
-	for _, detailOnly := range []string{
-		"finding_ids", "generation_error", "labels", "external_id", "external_url",
-		"external_state", "body", "resolved_instructions",
-	} {
-		if strings.Contains(first.Body.String(), `"`+detailOnly+`"`) {
-			t.Fatalf("issue summary leaked detail field %q: %s", detailOnly, first.Body.String())
-		}
-	}
-	if firstPage.Total != 2 || len(firstPage.Issues) != 1 || firstPage.NextCursor == "" ||
-		firstPage.GenerationID != "rrig_first" || firstPage.CanonicalQuery != "ALL ORDER BY updated DESC" ||
-		firstPage.Issues[0].FindingCount != 1 || strings.Contains(first.Body.String(), `"offset"`) {
-		t.Fatalf("issue collection page=%#v body=%s", firstPage, first.Body.String())
-	}
-
-	wrongGeneration := httptest.NewRecorder()
-	mux.ServeHTTP(wrongGeneration, httptest.NewRequest(
-		http.MethodGet,
-		base+"?query="+query+"&generation_id=rrig_second&cursor="+url.QueryEscape(firstPage.NextCursor),
-		nil,
-	))
-	if wrongGeneration.Code != http.StatusBadRequest ||
-		!strings.Contains(wrongGeneration.Body.String(), `"code":"invalid_cursor"`) {
-		t.Fatalf("wrong-generation cursor status=%d body=%s", wrongGeneration.Code, wrongGeneration.Body.String())
-	}
-
-	for _, malformedGeneration := range []string{"%FF", "%00"} {
-		malformed := httptest.NewRecorder()
-		mux.ServeHTTP(malformed, httptest.NewRequest(
-			http.MethodGet,
-			base+"?query="+query+"&generation_id="+malformedGeneration,
-			nil,
-		))
-		if malformed.Code != http.StatusBadRequest ||
-			!strings.Contains(malformed.Body.String(), `"code":"invalid_generation_id"`) {
-			t.Fatalf(
-				"malformed generation %q status=%d body=%s",
-				malformedGeneration,
-				malformed.Code,
-				malformed.Body.String(),
-			)
-		}
-	}
-}
-
 func TestRepositoryReviewCollectionSeverityOrderAndStructuredQueryError(t *testing.T) {
 	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
 	query, err := collectionquery.Parse("", repositoryReviewRunFindingCollectionSchema)
@@ -346,7 +149,7 @@ func TestRepositoryReviewCollectionSeverityOrderAndStructuredQueryError(t *testi
 		repositoryReviewCollectionFindingForTest("critical", "critical", now),
 		repositoryReviewCollectionFindingForTest("high", "high", now),
 	}
-	contextID := repositoryReviewCollectionCursorContext("run-findings", "rra_test", "current")
+	contextID := repositoryReviewCollectionCursorContext("findings", "rra_test", "current")
 	page, err := collectionquery.Paginate(
 		summaries, query, "", 50, now, repositoryReviewRunFindingPageOptions(contextID),
 	)
@@ -386,10 +189,23 @@ func TestRepositoryReviewCollectionSeverityOrderAndStructuredQueryError(t *testi
 	}
 }
 
-func TestRepositoryReviewCollectionSchemasResolveEveryFieldAndTypedPredicates(t *testing.T) {
+func TestRepositoryReviewCanonicalCollectionSchemasResolveEveryField(t *testing.T) {
 	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	automation := testRepositoryReviewAutomation()
+	automation.ID = "rra_collection_fields"
+	automation.Status = repoaudit.RepositoryReviewAutomationRunning
+	automation.UpdatedAt = now
+	for _, field := range repositoryReviewAutomationCollectionSchema.Fields {
+		if _, ok := repositoryReviewAutomationCollectionField(automation, field.Name); !ok {
+			t.Fatalf("automation schema field %q is unresolved", field.Name)
+		}
+	}
+	if _, ok := repositoryReviewAutomationCollectionField(automation, "unknown"); ok {
+		t.Fatal("unknown automation field resolved")
+	}
+
 	runFinding := repositoryReviewRunFindingSummary{
-		ID: "rfn_fields", Repository: "owner/repo", Path: "pkg/service.go", Symbol: "Save",
+		ID: "rdf_fields", Repository: "owner/repo", Path: "pkg/service.go", Symbol: "Save",
 		Severity: "high", Title: "Lost update", Status: repoaudit.FindingOpen,
 		RunFindingStatus: repositoryReviewRunFindingAssociatedExisting, Association: "existing",
 		Contributors: []string{"reviewer-one"},
@@ -400,14 +216,17 @@ func TestRepositoryReviewCollectionSchemasResolveEveryFieldAndTypedPredicates(t 
 			t.Fatalf("run finding schema field %q is unresolved", field.Name)
 		}
 	}
+	if _, ok := repositoryReviewRunFindingCollectionField(runFinding, "unknown"); ok {
+		t.Fatal("unknown run finding field resolved")
+	}
 	runQuery, err := collectionquery.Parse(
-		`severity IN (high, critical) AND contributors ~ reviewer AND updated >= 2026-08-28T00:00:00Z ORDER BY severity DESC`,
+		`severity IN (high, critical) AND contributors ~ reviewer ORDER BY severity DESC`,
 		repositoryReviewRunFindingCollectionSchema,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runContext := repositoryReviewCollectionCursorContext("run-findings", "rra_fields", "current")
+	runContext := repositoryReviewCollectionCursorContext("findings", "rra_fields", "current")
 	runPage, err := collectionquery.Paginate(
 		[]repositoryReviewRunFindingSummary{runFinding}, runQuery, "", 50, now,
 		repositoryReviewRunFindingPageOptions(runContext),
@@ -430,27 +249,30 @@ func TestRepositoryReviewCollectionSchemasResolveEveryFieldAndTypedPredicates(t 
 			t.Fatalf("repository finding schema field %q is unresolved", field.Name)
 		}
 	}
+	if _, ok := repositoryReviewRepositoryFindingCollectionField(repositoryFinding, "unknown"); ok {
+		t.Fatal("unknown repository finding field resolved")
+	}
 	repositoryQuery, err := collectionquery.Parse(
-		`match = known AND lifecycle IN (open, regressed) AND issue = open AND validation = confirmed AND occurrences >= 2 ORDER BY commits DESC`,
+		`match = known AND lifecycle = open AND issue = open AND validation = confirmed AND occurrences >= 2`,
 		repositoryReviewRepositoryFindingCollectionSchema,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repositoryContext := repositoryReviewCollectionCursorContext("repository-findings", "rra_fields")
 	repositoryPage, err := collectionquery.Paginate(
-		[]repositoryReviewRepositoryFindingCollectionSummary{repositoryFinding},
-		repositoryQuery, "", 50, now,
-		repositoryReviewRepositoryFindingPageOptions(repositoryContext),
+		[]repositoryReviewRepositoryFindingCollectionSummary{repositoryFinding}, repositoryQuery, "", 50, now,
+		repositoryReviewRepositoryFindingPageOptions(
+			repositoryReviewCollectionCursorContext("repository-findings", "rra_fields"),
+		),
 	)
 	if err != nil || repositoryPage.Total != 1 {
 		t.Fatalf("repository typed query page=%#v err=%v", repositoryPage, err)
 	}
 
 	issue := repositoryReviewIssueCollectionSummary{
-		ID: "rid_fields", Repository: "owner/repo",
-		FindingCount: 2, Origin: repoaudit.IssueDraftOriginAIGenerated, GenerationID: "rrig_fields",
-		Canonical: true, Publishable: true, Title: "Lost update", State: repoaudit.IssueDraftEditing,
+		ID: "rid_fields", Repository: "owner/repo", FindingCount: 2,
+		Origin: repoaudit.IssueDraftOriginAIGenerated, GenerationID: "rrig_fields",
+		Publishable: true, Title: "Lost update", State: repoaudit.IssueDraftEditing,
 		CreatedAt: now.Add(-3 * time.Hour), UpdatedAt: now,
 	}
 	for _, field := range repositoryReviewIssueCollectionSchema.Fields {
@@ -458,164 +280,22 @@ func TestRepositoryReviewCollectionSchemasResolveEveryFieldAndTypedPredicates(t 
 			t.Fatalf("issue schema field %q is unresolved", field.Name)
 		}
 	}
+	if _, ok := repositoryReviewIssueCollectionField(issue, "unknown"); ok {
+		t.Fatal("unknown issue field resolved")
+	}
 	issueQuery, err := collectionquery.Parse(
-		`state = editing AND origin = ai_generated AND canonical = true AND publishable = true AND findings >= 2 ORDER BY updated DESC`,
+		`state = editing AND origin = ai_generated AND publishable = true AND findings >= 2`,
 		repositoryReviewIssueCollectionSchema,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	issueContext := repositoryReviewCollectionCursorContext("issues", "rra_fields", "rrig_fields")
 	issuePage, err := collectionquery.Paginate(
 		[]repositoryReviewIssueCollectionSummary{issue}, issueQuery, "", 50, now,
-		repositoryReviewIssuePageOptions(issueContext),
+		repositoryReviewIssuePageOptions(repositoryReviewCollectionCursorContext("issues", "rra_fields")),
 	)
 	if err != nil || issuePage.Total != 1 {
 		t.Fatalf("issue typed query page=%#v err=%v", issuePage, err)
-	}
-}
-
-func TestRepositoryReviewCollectionBoundaryCoverage(t *testing.T) {
-	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	state := seedRepositoryReviewAPIState(t, workspace)
-	automation := seedRepositoryReviewDetailAutomation(
-		t,
-		handler,
-		state.Repository,
-		state.Runs[0].ID,
-	)
-	base := "/api/repository-reviews/automations/"
-
-	for _, path := range []string{
-		base + "rra_missing/findings?query=ALL",
-		base + "rra_missing/repository-findings?query=ALL",
-		base + "rra_missing/issues?query=ALL",
-		base + "rra_missing/repository-findings/rrf_missing",
-	} {
-		response := httptest.NewRecorder()
-		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
-		if response.Code != http.StatusNotFound {
-			t.Fatalf("missing collection path %s status=%d body=%s", path, response.Code, response.Body.String())
-		}
-	}
-
-	for _, test := range []struct {
-		path string
-		code string
-	}{
-		{
-			path: base + automation.ID + "/findings?query=ALL&cursor=bad",
-			code: "invalid_cursor",
-		},
-		{
-			path: base + automation.ID + "/repository-findings?query=unknown%20%3D%20x",
-			code: "invalid_query",
-		},
-		{
-			path: base + automation.ID + "/issues?query=ALL&query=ALL",
-			code: "invalid_collection_request",
-		},
-	} {
-		response := httptest.NewRecorder()
-		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
-		if response.Code != http.StatusBadRequest ||
-			!strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
-			t.Fatalf("boundary path %s status=%d body=%s", test.path, response.Code, response.Body.String())
-		}
-	}
-
-	repositorySummary := projectRepositoryReviewRepositoryFindingCollectionSummary(
-		repoaudit.RepositoryFinding{
-			ID: "rrf_empty", Repository: "owner/repo", CanonicalTitle: "Empty history",
-			CanonicalSeverity: "low", MatchState: repoaudit.RepositoryMatchKnown,
-			Lifecycle: repoaudit.RepositoryFindingOpen,
-		},
-	)
-	if repositorySummary.Path != "" ||
-		repositorySummary.Issue.State != repoaudit.RepositoryFindingIssueNone {
-		t.Fatalf("empty repository summary=%#v", repositorySummary)
-	}
-	issueSummary := projectRepositoryReviewIssueCollectionSummary(
-		repoaudit.RepositoryState{},
-		repoaudit.IssueDraft{ID: "rid_legacy", Repository: "owner/repo"},
-	)
-	if issueSummary.Origin != repoaudit.IssueDraftOriginLegacy {
-		t.Fatalf("legacy issue summary=%#v", issueSummary)
-	}
-
-	if _, ok := repositoryReviewRunFindingCollectionField(
-		repositoryReviewRunFindingSummary{},
-		"unknown",
-	); ok {
-		t.Fatal("unknown run-finding field resolved")
-	}
-	if _, ok := repositoryReviewRepositoryFindingCollectionField(
-		repositoryReviewRepositoryFindingCollectionSummary{},
-		"unknown",
-	); ok {
-		t.Fatal("unknown repository-finding field resolved")
-	}
-	if _, ok := repositoryReviewIssueCollectionField(
-		repositoryReviewIssueCollectionSummary{},
-		"unknown",
-	); ok {
-		t.Fatal("unknown issue field resolved")
-	}
-	if repositoryReviewSeverityRank("medium") != 2 ||
-		repositoryReviewSeverityRank("unknown") != 0 {
-		t.Fatal("severity ranks were not complete")
-	}
-	for status, expected := range map[repositoryReviewRunFindingStatus]string{
-		repositoryReviewRunFindingAssociatedNew:      "new",
-		repositoryReviewRunFindingAssociatedExisting: "existing",
-		repositoryReviewRunFindingNeedsReview:        "needs_review",
-		repositoryReviewRunFindingPending:            "unassociated",
-	} {
-		if got := repositoryReviewRunFindingAssociation(status); got != expected {
-			t.Fatalf("association %s=%s, want %s", status, got, expected)
-		}
-	}
-	contributors := repositoryReviewFindingContributors(repoaudit.Finding{
-		Models: []string{"model-b", "", "REVIEWER-A"},
-		Observations: []repoaudit.FindingObservation{
-			{Reviewer: " reviewer-a ", Model: "ignored"},
-			{Model: "model-c"},
-			{Reviewer: " ", Model: ""},
-		},
-	})
-	if strings.Join(contributors, ",") != "model-b,model-c,reviewer-a" {
-		t.Fatalf("contributors=%v", contributors)
-	}
-
-	contextID := repositoryReviewCollectionCursorContext("run-findings", automation.ID)
-	if _, err := repositoryReviewCollectionCursorItemID("bad", "rfn"); err == nil {
-		t.Fatal("invalid cursor context was accepted")
-	}
-	if _, err := repositoryReviewCollectionCursorItemID(
-		contextID,
-		strings.Repeat("x", (16<<10)+1),
-	); err == nil {
-		t.Fatal("oversized cursor item identity was accepted")
-	}
-
-	response := httptest.NewRecorder()
-	if _, _, ok := parseRepositoryReviewIssueCollectionRequest(response, nil); ok ||
-		response.Code != http.StatusBadRequest {
-		t.Fatalf("nil issue request status=%d", response.Code)
-	}
-	malformed := httptest.NewRequest(http.MethodGet, base+automation.ID+"/issues", nil)
-	malformed.URL.RawQuery = "%zz"
-	response = httptest.NewRecorder()
-	if _, _, ok := parseRepositoryReviewIssueCollectionRequest(response, malformed); ok ||
-		response.Code != http.StatusBadRequest {
-		t.Fatalf("malformed issue query status=%d", response.Code)
-	}
-	if repositoryReviewUsesIssueCollectionRequest(nil) {
-		t.Fatal("nil issue request selected collection mode")
-	}
-	if !repositoryReviewUsesIssueCollectionRequest(malformed) {
-		t.Fatal("malformed issue request did not fail into collection validation")
 	}
 }
 

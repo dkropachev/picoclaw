@@ -61,12 +61,9 @@ export function RepositoryReviewLinkIssuePage({
     query.data?.repository_finding?.id === findingID ? query.data : undefined
   const finding = detail?.finding
   const issue = detail?.issue
-  const actionFinding =
-    (detail?.action_finding?.id ? detail.action_finding : undefined) ??
-    detail?.occurrences?.find(
-      (occurrence) => occurrence.issue_draft_id === issue?.id,
-    ) ??
-    finding
+  const actionFinding = detail?.action_finding?.id
+    ? detail.action_finding
+    : undefined
   const actionFindingID = actionFinding?.id ?? ""
   const notFound =
     (query.error instanceof RepositoryReviewAPIError &&
@@ -203,9 +200,7 @@ export function RepositoryReviewLinkIssuePage({
                           {issue.title || issue.external_url || issue.id}
                         </p>
                       </div>
-                      <Badge variant="outline">
-                        {issue.origin || "legacy"}
-                      </Badge>
+                      <Badge variant="outline">{issue.origin}</Badge>
                     </div>
                     {canUnlink && (
                       <Button
@@ -219,8 +214,7 @@ export function RepositoryReviewLinkIssuePage({
                     )}
                     {!canReplace && !canUnlink && (
                       <p className="text-muted-foreground text-xs">
-                        Created and legacy canonical issues cannot be replaced
-                        from this route.
+                        Created issues cannot be replaced from this route.
                       </p>
                     )}
                   </section>

@@ -250,6 +250,11 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		) {
 			return nil, errors.New("repository bug finder requires a canonical automation ID")
 		}
+		if !repoaudit.ValidRepositoryReviewCampaignID(
+			strings.TrimSpace(fmt.Sprint(req.Inputs["campaign_id"])),
+		) {
+			return nil, errors.New("repository bug finder requires a canonical campaign ID")
+		}
 	}
 	admittedExecutor, admissionErr := e.admitHumanTaskClosure(
 		ctx,
@@ -2496,7 +2501,7 @@ func repositoryReviewManagedAssignmentCallbacks(
 		return nil, nil, errors.New("repository review managed assignments require a durable plan")
 	}
 	if len(plan.AssignmentCatalog) == 0 {
-		return nil, nil, nil
+		return nil, nil, errors.New("repository review plan has no assignment catalog")
 	}
 	store := repoaudit.NewSQLiteStore(nativeWorkspace(exec))
 	dispatch := func(event ManagedAssignmentDispatchEvent) error {

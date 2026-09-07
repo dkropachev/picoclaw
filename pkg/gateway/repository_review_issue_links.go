@@ -168,7 +168,7 @@ func (handler *repositoryReviewPublicationHandler) serveRepositoryReviewAutomati
 		return
 	}
 	finding, found := repositoryReviewStateFinding(state, operation.FindingID)
-	if !found {
+	if !found || automation.CampaignID == "" || finding.CampaignID != automation.CampaignID {
 		writeRepositoryReviewPublicationError(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -529,7 +529,6 @@ func projectRepositoryReviewGatewayAutomation(
 	automation repoaudit.RepositoryReviewAutomation,
 ) repoaudit.RepositoryReviewAutomation {
 	automation.CampaignID = ""
-	automation.CampaignRecoveryPending = false
 	automation.ModelCoverageSketches = nil
 	automation.Progress.ScopeFrozen = automation.ScopeSelection != nil
 	automation.ScopeSelection = nil
@@ -556,11 +555,7 @@ func repositoryReviewAutomationState(
 	store repoaudit.Store,
 	automation repoaudit.RepositoryReviewAutomation,
 ) (repoaudit.RepositoryState, bool, error) {
-	return store.ResolveRepositoryState(automation.Repository, automation.RunIDs)
-}
-
-func repositoryReviewGatewayLedgerIdentities(repository string) []string {
-	return repoaudit.RepositoryLedgerIdentities(repository)
+	return store.ResolveRepositoryState(automation.Repository)
 }
 
 func repositoryReviewGatewayGitHubIdentity(repository string) string {
@@ -603,6 +598,7 @@ func repositoryReviewGatewayFindingContexts(
 	for _, candidate := range state.Contexts {
 		if _, ok := selected[candidate.ID]; ok {
 			candidate.CampaignID = ""
+			candidate.RawDigest = ""
 			contexts = append(contexts, candidate)
 		}
 	}
@@ -611,6 +607,11 @@ func repositoryReviewGatewayFindingContexts(
 
 func projectRepositoryReviewGatewayFinding(finding repoaudit.Finding) repoaudit.Finding {
 	finding.CampaignID = ""
+	finding.AdmissionBucket = ""
+	finding.CreationOrdinal = 0
+	finding.DiagnosisDigest = ""
+	finding.RawSourceIDs = nil
+	finding.History = nil
 	return finding
 }
 

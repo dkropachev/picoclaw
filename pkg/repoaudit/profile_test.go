@@ -629,16 +629,9 @@ func TestUpdateRepositoryReviewProfileIsBlockedByActiveAssignment(t *testing.T) 
 	automation.Status = RepositoryReviewAutomationRunning
 	automation.ActiveRunID = "wfr_active"
 	automation.RunIDs = []string{automation.ActiveRunID}
-	created, createErr := store.CreateAutomation(context.Background(), automation)
+	_, createErr := store.CreateAutomation(context.Background(), automation)
 	if createErr != nil {
 		t.Fatal(createErr)
-	}
-	if deleteErr := store.DeleteAutomation(
-		context.Background(),
-		created.ID,
-		created.Version,
-	); !errors.Is(deleteErr, ErrAutomationActive) {
-		t.Fatalf("DeleteAutomation() active error = %v", deleteErr)
 	}
 	_, err = store.UpdateProfile(
 		context.Background(), profile.ID, profile.Version,

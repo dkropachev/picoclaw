@@ -108,67 +108,6 @@ func repositoryReviewValidationFindingForTest(
 	}
 }
 
-func recordRepositoryReviewControllerFinding(
-	t *testing.T,
-	store repoaudit.Store,
-	fixture repositoryReviewValidationGitFixture,
-) (repoaudit.RepositoryState, repoaudit.Finding) {
-	t.Helper()
-	file := repoaudit.FileRef{
-		Path: "src/waiter.go", BlobSHA: strings.Repeat("a", 40), SizeBytes: 64,
-		Category: "code", Mode: "100644",
-	}
-	plan, err := store.Plan(
-		t.Context(), fixture.directory, fixture.base, "controller-inventory",
-		[]repoaudit.FileRef{file}, false,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err = repoaudit.BindPlanBranch(plan, "main", "main", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	line := 3
-	result, err := store.Record(t.Context(), repoaudit.RecordRequest{
-		Plan: plan, RunID: "controller-run", TargetBranch: "main",
-		AdvertisedDefaultBranch: "main", TargetIsDefault: true,
-		Observations: []repoaudit.Observation{{
-			Model: "cheap", Reviewer: "cheap", ScopeFiles: []repoaudit.FileRef{file},
-			Findings: []repoaudit.FindingCandidate{{
-				Severity: "high", Title: "waiter remains blocked after move",
-				Symbol: "add_waiter", File: file.Path, Line: &line,
-				Message:  "The failed wake path retains the old owner.",
-				Evidence: "The moved waiter is requeued on the stale queue.",
-				Impact:   "The coroutine remains blocked indefinitely.",
-				Validation: repoaudit.Validation{
-					Status: "confirmed", Summary: "traced owner", Checks: []string{"wake path"},
-				},
-				MatchHints: repoaudit.MatchHints{
-					Component: "core scheduling", Operation: "requeue waiter after move",
-					FailureMode: "waiter remains on moved owner", Trigger: "move then failed wake",
-					ViolatedInvariant: "waiter requeues on current owner",
-					ObservableOutcome: "coroutine remains blocked indefinitely",
-					RelatedSymbols:    []string{"add_waiter"}, SourceAnchors: []string{"add_waiter"},
-					DistinguishingFacts: []string{"requires a moved owner"},
-				},
-				FixEffort: repoaudit.FixEffort{
-					Quick: repoaudit.FixEffortEstimate{
-						LOCMin: 5, LOCMax: 20, Class: "small", Rationale: "Localized containment.",
-					},
-					Quality: repoaudit.FixEffortEstimate{
-						LOCMin: 30, LOCMax: 100, Class: "medium", Rationale: "Ownership spans units.",
-					},
-				},
-			}},
-		}},
-	})
-	if err != nil || len(result.State.Findings) != 1 {
-		t.Fatalf("record state=%#v err=%v", result.State, err)
-	}
-	return result.State, result.State.Findings[0]
-}
-
 func TestRepositoryValidationGitEvidenceHelpers(t *testing.T) {
 	fixture := newRepositoryReviewValidationGitFixture(t)
 	finding := repositoryReviewValidationFindingForTest(fixture)
@@ -426,109 +365,6 @@ func TestRepositoryValidationCurrentSourceEnforcesAggregateBound(t *testing.T) {
 	}
 }
 
-func TestRepositoryMappingHelpersAndSnapshots(t *testing.T) {
-	if repositoryReviewMappingPromptRevision != "repository-finding-matcher-v2" {
-		t.Fatalf("mapping prompt revision=%q", repositoryReviewMappingPromptRevision)
-	}
-	if repositoryStateHasPendingMapping(repoaudit.RepositoryState{}) {
-		t.Fatal("empty state reported pending mapping")
-	}
-	if !repositoryStateHasPendingMapping(repoaudit.RepositoryState{MappingJobs: []repoaudit.RepositoryMappingJob{
-		{State: repoaudit.RepositoryMappingCompleted},
-		{State: repoaudit.RepositoryMappingPending},
-	}}) {
-		t.Fatal("pending mapping was not detected")
-	}
-	if repositoryStateHasPendingMapping(repoaudit.RepositoryState{MappingJobs: []repoaudit.RepositoryMappingJob{{
-		State:    repoaudit.RepositoryMappingPending,
-		Attempts: repoaudit.RepositoryRunFindingStatusAttemptLimit,
-	}}}) {
-		t.Fatal("capped run finding status was reported as processable")
-	}
-	if repositoryStateHasPendingValidation(repoaudit.RepositoryState{}) {
-		t.Fatal("empty state reported pending validation")
-	}
-	if !repositoryStateHasPendingValidation(
-		repoaudit.RepositoryState{ValidationJobs: []repoaudit.RepositoryValidationJob{
-			{State: repoaudit.RepositoryValidationPending},
-		}},
-	) {
-		t.Fatal("pending validation was not detected")
-	}
-
-	pairs := map[string]struct{}{"old.go\x00new.go": {}}
-	if !hasRenamePair(pairs, "old.go", "new.go") || hasRenamePair(pairs, "new.go", "old.go") {
-		t.Fatalf("rename pair lookup failed: %#v", pairs)
-	}
-	exact := repositoryMappingRenameEquivalent(
-		t.Context(), nil, repoaudit.RepositoryReviewAutomation{}, repoaudit.RepositoryState{},
-	)
-	if !exact(" same.go ", "same.go") || exact("", "") || exact("old.go", "new.go") {
-		t.Fatal("nil-config path equivalence was not exact-only")
-	}
-
-	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.AccountRef = "default-account"
-	cfg.Agents.Defaults.ModelName = "default-model"
-	fallback := repositoryFallbackAutomation(cfg, repoaudit.RepositoryState{
-		ID: "rrp_state", Repository: "owner/repository",
-	})
-	if fallback.ID != "legacy_state" || fallback.AccountRef != "default-account" ||
-		!slices.Equal(fallback.ReviewerModels, []string{"default-model"}) ||
-		fallback.IssueWriterModel != "default-model" {
-		t.Fatalf("fallback=%#v", fallback)
-	}
-	if fallback := repositoryFallbackAutomation(
-		nil,
-		repoaudit.RepositoryState{ID: "rrp_x"},
-	); fallback.ID != "legacy_x" ||
-		fallback.AccountRef != "" {
-		t.Fatalf("nil-config fallback=%#v", fallback)
-	}
-
-	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	store, err := handler.repositoryReviewStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := config.LoadConfig(handler.configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	direct, err := repositoryMappingSnapshot(t.Context(), store, loaded, repoaudit.RepositoryReviewAutomation{
-		ReviewerModels: []string{"reviewer"}, AccountRef: "account",
-	})
-	if err != nil || direct.Model != "reviewer" || direct.Account == "" ||
-		direct.Prompt != repositoryReviewMappingPromptRevision {
-		t.Fatalf("direct snapshot=%#v err=%v", direct, err)
-	}
-	missing, err := repositoryMappingSnapshot(t.Context(), store, loaded, repoaudit.RepositoryReviewAutomation{
-		ProfileID: "rrpf_missing",
-	})
-	if err == nil || missing != (repoaudit.RepositoryMappingModelSnapshot{}) {
-		t.Fatalf("missing profile snapshot=%#v err=%v", missing, err)
-	}
-
-	if _, err := runRepositoryMappingAdjudication(
-		t.Context(), nil, repoaudit.RepositoryMappingModelSnapshot{}, repoaudit.RepositoryMappingAIRequest{},
-	); err == nil {
-		t.Fatal("nil mapping adjudicator was accepted")
-	}
-	if _, err := runRepositoryValidationAdjudication(
-		t.Context(), nil, repoaudit.RepositoryMappingModelSnapshot{}, repoaudit.RepositoryFinding{}, nil,
-	); err == nil {
-		t.Fatal("nil validation adjudicator was accepted")
-	}
-
-	if schema := repositoryReviewMappingSchema(); schema["type"] != "object" {
-		t.Fatalf("mapping schema=%#v", schema)
-	}
-	if schema := repositoryReviewValidationSchema(); schema["type"] != "object" {
-		t.Fatalf("validation schema=%#v", schema)
-	}
-}
-
 func TestWakeRepositoryRunFindingStatusCoverage(t *testing.T) {
 	var nilController *repositoryReviewController
 	nilController.wakeRepositoryRunFindingStatus()
@@ -611,100 +447,6 @@ func TestRepositoryMappingAndValidationControllersUnavailableAndCanceled(t *test
 	); !errors.Is(err, context.Canceled) &&
 		err != nil {
 		t.Fatalf("canceled validation controller=%v", err)
-	}
-}
-
-//nolint:govet // Sequential controller probes intentionally reuse short-lived error names.
-func TestRepositoryMappingAndValidationControllersProcessRealQueues(t *testing.T) {
-	fixture := newRepositoryReviewValidationGitFixture(t)
-	workspace := t.TempDir()
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		var request struct {
-			Messages []struct {
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Errorf("decode provider request: %v", err)
-		}
-		content := `{"outcome":"confirmed","selected_commit_sha":"` + fixture.fix +
-			`","summary":"The supplied fix restores the waiter owner invariant."}`
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"choices": []map[string]any{{
-				"message": map[string]any{"content": content}, "finish_reason": "stop",
-			}},
-		})
-	}))
-	t.Cleanup(provider.Close)
-
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.Workspace = workspace
-	cfg.Agents.Defaults.ModelName = "cheap"
-	cfg.Agents.Defaults.AccountRef = "api"
-	cfg.GitWorkspaces.RootDir = t.TempDir()
-	cfg.ModelAliases = []config.ModelAliasConfig{{Name: "cheap", Model: "openai/test"}}
-	cfg.ModelList = []*config.ModelConfig{{
-		ModelName: "api", Provider: "openai", Model: "openai/test", Enabled: true,
-		APIBase: provider.URL, APIKeys: config.SimpleSecureStrings("test-key"),
-	}}
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		t.Fatal(err)
-	}
-	handler := NewHandler(configPath)
-	t.Cleanup(handler.Shutdown)
-	store := repoaudit.NewStore(workspace)
-	state, _ := recordRepositoryReviewControllerFinding(t, store, fixture)
-	automation := repoaudit.RepositoryReviewAutomation{
-		ID: "rra_controller_queue", Repository: fixture.directory,
-		ReviewerModels: []string{"cheap"}, IssueWriterModel: "cheap", AccountRef: "api",
-		RunIDs: []string{"controller-run"},
-	}
-	controller := newRepositoryReviewController(handler)
-	controller.leasedConfig = cfg
-	controller.leasedStore = store
-	if selected, found := repositoryAutomationForLedger(
-		store, []repoaudit.RepositoryReviewAutomation{automation}, state,
-	); !found || selected.ID != automation.ID {
-		t.Fatalf("automation selection=%#v found=%v", selected, found)
-	}
-	if _, found := repositoryAutomationForLedger(
-		store, []repoaudit.RepositoryReviewAutomation{{Repository: "other/repo"}}, state,
-	); found {
-		t.Fatal("unrelated automation selected")
-	}
-	if err := controller.processRepositoryFindingMappings(
-		t.Context(), []repoaudit.RepositoryReviewAutomation{automation},
-	); err != nil {
-		t.Fatalf("process mappings: %v", err)
-	}
-	state, found, err := store.Get(fixture.directory)
-	if err != nil || !found || len(state.RepositoryFindings) != 1 ||
-		state.MappingJobs[0].State != repoaudit.RepositoryMappingCompleted {
-		t.Fatalf("mapped state=%#v found=%v err=%v", state, found, err)
-	}
-	aggregate := state.RepositoryFindings[0]
-	snapshot := repoaudit.RepositoryMappingModelSnapshot{
-		Model: "cheap", Account: "api", Prompt: repositoryReviewMappingPromptRevision,
-	}
-	_, jobs, err := store.ReserveValidationJobs(
-		state.Repository, []string{aggregate.ID}, snapshot,
-	)
-	if err != nil || len(jobs) != 1 {
-		t.Fatalf("reserve jobs=%#v err=%v", jobs, err)
-	}
-	if err := controller.processRepositoryFindingValidations(
-		t.Context(), []repoaudit.RepositoryReviewAutomation{automation},
-	); err != nil {
-		t.Fatalf("process validations: %v", err)
-	}
-	state, found, err = store.Get(fixture.directory)
-	if err != nil || !found || state.ValidationJobs[0].State != repoaudit.RepositoryValidationConfirmed ||
-		state.RepositoryFindings[0].FixCommitSHA != fixture.fix ||
-		state.RepositoryFindings[0].FirstContainingTag != "v1.2.3" {
-		t.Fatalf("validated state=%#v found=%v err=%v", state, found, err)
 	}
 }
 
@@ -1112,358 +854,6 @@ func TestRepositoryReviewLifecycleRouteFences(t *testing.T) {
 	}
 }
 
-func TestRepositoryReviewLifecycleDuplicateAndValidationStoreFences(t *testing.T) {
-	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	fixture := newRepositoryReviewValidationGitFixture(t)
-	store := repoaudit.NewStore(workspace)
-	state, firstOccurrence := recordRepositoryReviewControllerFinding(t, store, fixture)
-	firstJob := state.MappingJobs[0]
-	_, claimedFirst, _, claimed, err := store.ClaimMappingJob(
-		state.Repository, firstJob.ID, repoaudit.RepositoryMappingModelSnapshot{},
-	)
-	if err != nil || !claimed {
-		t.Fatalf("claim first=%v job=%#v err=%v", claimed, claimedFirst, err)
-	}
-	_, candidate, err := store.CompleteMappingJob(
-		state.Repository, repoaudit.RepositoryMappingCompletion{
-			JobID: claimedFirst.ID, CreateMatchState: repoaudit.RepositoryMatchNew,
-			DefaultBranchVerified: true,
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	file := repoaudit.FileRef{
-		Path: "src/predicate_waiter.go", BlobSHA: strings.Repeat("b", 40), SizeBytes: 64,
-		Category: "code", Mode: "100644",
-	}
-	plan, err := store.Plan(
-		t.Context(), fixture.directory, fixture.rename, "duplicate-inventory",
-		[]repoaudit.FileRef{file}, false,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err = repoaudit.BindPlanBranch(plan, "main", "main", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	line := 3
-	secondResult, err := store.Record(t.Context(), repoaudit.RecordRequest{
-		Plan: plan, RunID: "duplicate-run", TargetBranch: "main",
-		AdvertisedDefaultBranch: "main", TargetIsDefault: true,
-		Observations: []repoaudit.Observation{{
-			Model: "cheap", Reviewer: "cheap", ScopeFiles: []repoaudit.FileRef{file},
-			Findings: []repoaudit.FindingCandidate{{
-				Severity: "high", Title: "possibly identical waiter failure",
-				Symbol: "predicate_waiter", File: file.Path, Line: &line,
-				Message:  "The moved waiter may retain the stale owner.",
-				Evidence: "The causal identity needs adjudication.",
-				Impact:   "The coroutine remains blocked.", Validation: firstOccurrence.Validation,
-				MatchHints: repoaudit.MatchHints{
-					Component: "core scheduling", Operation: "requeue moved waiter",
-					FailureMode: "waiter remains on stale owner", Trigger: "move then failed wake",
-					ViolatedInvariant: "waiter requeues on current owner",
-					ObservableOutcome: "coroutine remains blocked indefinitely",
-					RelatedSymbols:    []string{"predicate_waiter"}, SourceAnchors: []string{"add_waiter"},
-					DistinguishingFacts: []string{"identity is uncertain after rename"},
-				},
-				FixEffort: firstOccurrence.FixEffort,
-			}},
-		}},
-	})
-	if err != nil || len(secondResult.AcceptedFindingIDs) != 1 {
-		t.Fatalf("second result=%#v err=%v", secondResult, err)
-	}
-	state = secondResult.State
-	secondID := secondResult.AcceptedFindingIDs[0]
-	var secondJob repoaudit.RepositoryMappingJob
-	for _, job := range state.MappingJobs {
-		if job.ReviewFindingID == secondID {
-			secondJob = job
-			break
-		}
-	}
-	_, claimedSecond, _, claimed, err := store.ClaimMappingJob(
-		state.Repository, secondJob.ID, repoaudit.RepositoryMappingModelSnapshot{},
-	)
-	if err != nil || !claimed {
-		t.Fatalf("claim second=%v job=%#v err=%v", claimed, claimedSecond, err)
-	}
-	state, provisional, err := store.CompleteMappingJob(
-		state.Repository, repoaudit.RepositoryMappingCompletion{
-			JobID: claimedSecond.ID, CreateMatchState: repoaudit.RepositoryMatchProvisional,
-			DefaultBranchVerified: true,
-			PossibleDuplicates: []repoaudit.RepositoryFindingPossibleDuplicate{{
-				CandidateID: candidate.ID, Relation: "uncertain", Confidence: .74,
-				MatchingAnchors: []string{"trigger", "invariant"},
-				Explanation:     "The rename leaves causal identity uncertain.",
-			}},
-		},
-	)
-	if err != nil || provisional.MatchState != repoaudit.RepositoryMatchProvisional {
-		t.Fatalf("provisional=%#v err=%v", provisional, err)
-	}
-	automation := seedRepositoryReviewDetailAutomation(
-		t, handler, state.Repository, state.Runs[0].ID,
-	)
-	path := "/api/repository-reviews/automations/" + automation.ID +
-		"/repository-findings/" + provisional.ID + "/duplicates"
-	stale := repositoryReviewAutomationMutation(t, mux, http.MethodPost, path, map[string]any{
-		"candidate_id": candidate.ID, "decision": "distinct",
-		"expected_provisional_version": provisional.Version + 1,
-	})
-	if stale.Code != http.StatusConflict {
-		t.Fatalf("stale duplicate=%d %s", stale.Code, stale.Body.String())
-	}
-	provisionalValidation := repositoryReviewAutomationMutation(
-		t, mux, http.MethodPost,
-		"/api/repository-reviews/automations/"+automation.ID+"/repository-findings/validations",
-		map[string]any{"repository_finding_ids": []string{provisional.ID}},
-	)
-	if provisionalValidation.Code != http.StatusConflict {
-		t.Fatalf(
-			"provisional validation=%d %s",
-			provisionalValidation.Code, provisionalValidation.Body.String(),
-		)
-	}
-	distinct := repositoryReviewAutomationMutation(t, mux, http.MethodPost, path, map[string]any{
-		"candidate_id": candidate.ID, "decision": "distinct",
-		"expected_provisional_version": provisional.Version,
-	})
-	if distinct.Code != http.StatusOK ||
-		!strings.Contains(distinct.Body.String(), `"match_state":"new"`) {
-		t.Fatalf("distinct duplicate=%d %s", distinct.Code, distinct.Body.String())
-	}
-
-	base := "/api/repository-reviews/automations/" + automation.ID
-	missingValidation := repositoryReviewAutomationMutation(
-		t, mux, http.MethodPost, base+"/repository-findings/validations",
-		map[string]any{"repository_finding_ids": []string{"rrf_missing"}},
-	)
-	if missingValidation.Code != http.StatusNotFound {
-		t.Fatalf("missing validation=%d %s", missingValidation.Code, missingValidation.Body.String())
-	}
-	staleLifecycle := repositoryReviewAutomationMutation(
-		t, mux, http.MethodPatch, base+"/repository-findings/"+candidate.ID,
-		map[string]any{"lifecycle": "dismissed", "expected_version": candidate.Version + 100},
-	)
-	if staleLifecycle.Code != http.StatusConflict {
-		t.Fatalf("stale lifecycle=%d %s", staleLifecycle.Code, staleLifecycle.Body.String())
-	}
-	syncResponse := repositoryReviewAutomationMutation(
-		t, mux, http.MethodPost, base+"/repository-findings/"+candidate.ID+"/sync",
-		map[string]any{},
-	)
-	if syncResponse.Code == http.StatusNotFound || syncResponse.Code == http.StatusBadRequest {
-		t.Fatalf("known sync did not reach gateway proxy: %d %s", syncResponse.Code, syncResponse.Body.String())
-	}
-
-	profileStore := repoaudit.NewStore(workspace)
-	profile, err := profileStore.CreateProfile(t.Context(), repoaudit.RepositoryReviewProfile{
-		ID: "rrpf_kttutlpoaklekkcrod5fqpz3qw", Name: "Deleted validation profile",
-		ReviewFocus: "Find concrete bugs.", ScopePolicy: repoaudit.RepositoryReviewScopePolicy{
-			CodeTypes: []repoaudit.RepositoryReviewCodeType{repoaudit.RepositoryReviewCodeTypeCode},
-		},
-		ReviewerModel: "cheap", AutoContinue: true, MaxFilesPerRun: 12,
-		MaxContentBytes: 64 << 10, MaxParallelChildren: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	materialized, err := repoaudit.MaterializeRepositoryReviewAutomation(profile, automation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	automationStore, err := handler.repositoryReviewStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = automationStore.UpdateAutomation(
-		t.Context(), automation.ID, automation.Version,
-		func(value *repoaudit.RepositoryReviewAutomation) error {
-			*value = materialized
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-//nolint:govet // Sequential route probes intentionally reuse short-lived error names.
-func TestRepositoryReviewLifecycleMissingLedgerModelAndIssueTTLBranches(t *testing.T) {
-	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	store, err := handler.repositoryReviewStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	empty := testRepositoryReviewAutomation()
-	empty.ID = "rra_empty_lifecycle_ledger"
-	empty.Repository = "owner/no-ledger"
-	empty.RunIDs = []string{"missing-run"}
-	empty, err = store.CreateAutomation(t.Context(), empty)
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := "/api/repository-reviews/automations/" + empty.ID
-	for _, request := range []struct {
-		method, path string
-		body         map[string]any
-	}{
-		{
-			http.MethodPatch, base + "/repository-findings/rrf_missing",
-			map[string]any{"lifecycle": "dismissed", "expected_version": 1},
-		},
-		{
-			http.MethodPost, base + "/repository-findings/rrf_missing/duplicates",
-			map[string]any{"candidate_id": "rrf_other", "decision": "distinct", "expected_provisional_version": 1},
-		},
-		{
-			http.MethodPost, base + "/repository-findings/validations",
-			map[string]any{"repository_finding_ids": []string{"rrf_missing"}},
-		},
-		{http.MethodPost, base + "/repository-findings/rrf_missing/sync", map[string]any{}},
-	} {
-		response := repositoryReviewAutomationMutation(
-			t, mux, request.method, request.path, request.body,
-		)
-		if response.Code != http.StatusNotFound {
-			t.Fatalf("missing ledger %s=%d %s", request.path, response.Code, response.Body.String())
-		}
-	}
-
-	state := seedRepositoryReviewAPIState(t, workspace)
-	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
-	automation := seedRepositoryReviewDetailAutomation(
-		t, handler, state.Repository, state.Runs[0].ID,
-	)
-	aggregate := state.RepositoryFindings[0]
-	cfg, err := config.LoadConfig(handler.configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	withoutAccount := *cfg
-	withoutAccount.Agents.Defaults.AccountRef = ""
-	if err := config.SaveConfig(handler.configPath, &withoutAccount); err != nil {
-		t.Fatal(err)
-	}
-	validationPath := "/api/repository-reviews/automations/" + automation.ID +
-		"/repository-findings/validations"
-	originalLoad := loadRepositoryReviewLifecycleConfig
-	loadRepositoryReviewLifecycleConfig = func(string) (*config.Config, error) {
-		return nil, errors.New("injected lifecycle config failure")
-	}
-	configFailure := repositoryReviewAutomationMutation(
-		t, mux, http.MethodPost, validationPath,
-		map[string]any{"repository_finding_ids": []string{aggregate.ID}},
-	)
-	loadRepositoryReviewLifecycleConfig = originalLoad
-	if configFailure.Code != http.StatusInternalServerError {
-		t.Fatalf("validation config failure=%d %s", configFailure.Code, configFailure.Body.String())
-	}
-	unavailable := repositoryReviewAutomationMutation(
-		t, mux, http.MethodPost, validationPath,
-		map[string]any{"repository_finding_ids": []string{aggregate.ID}},
-	)
-	if unavailable.Code != http.StatusInternalServerError {
-		t.Fatalf("unavailable validation model=%d %s", unavailable.Code, unavailable.Body.String())
-	}
-	if err := config.SaveConfig(handler.configPath, cfg); err != nil {
-		t.Fatal(err)
-	}
-
-	state, _, err = store.LinkExistingIssue(repoaudit.ExistingIssueLink{
-		Repository: state.Repository, FindingID: state.Findings[0].ID,
-		ExpectedFindingVersion: state.Findings[0].Version,
-		ExternalID:             "12", ExternalURL: "https://github.com/owner/repo/issues/12",
-		Title: "Existing issue", State: "open", Origin: repoaudit.IssueDraftOriginLinked,
-		Confirmed: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	state.RepositoryFindings[0].Issue.SnapshotAt = time.Now().UTC().Add(-time.Hour)
-	state, err = store.RewriteStateForMigration(t.Context(), state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	staleIssue := repositoryReviewAutomationMutation(
-		t, mux, http.MethodPost, validationPath,
-		map[string]any{"repository_finding_ids": []string{state.RepositoryFindings[0].ID}},
-	)
-	if staleIssue.Code != http.StatusBadRequest {
-		t.Fatalf("stale issue validation=%d %s", staleIssue.Code, staleIssue.Body.String())
-	}
-}
-
-func TestRepositoryReviewLegacyAndAutomationOffsetBranches(t *testing.T) {
-	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-
-	for _, action := range []string{"issue-drafts//publish", "other/id/publish"} {
-		request := httptest.NewRequest(http.MethodPost, "/", nil)
-		request.SetPathValue("legacy_action", action)
-		response := httptest.NewRecorder()
-		handler.handleLegacyRepositoryReviewAction(response, request)
-		if response.Code != http.StatusNotFound {
-			t.Fatalf("legacy action %q=%d", action, response.Code)
-		}
-	}
-
-	state := seedRepositoryReviewAPIState(t, workspace)
-	for _, status := range []repoaudit.FindingStatus{
-		repoaudit.FindingOpen, repoaudit.FindingDismissed, repoaudit.FindingStatus("invalid"),
-	} {
-		request := httptest.NewRequest(
-			http.MethodPatch,
-			"/api/repository-reviews/"+state.ID+"/findings/"+state.Findings[0].ID,
-			strings.NewReader(`{"status":"`+string(status)+`","expected_version":1}`),
-		)
-		request.SetPathValue("repository_id", state.ID)
-		request.SetPathValue("finding_id", state.Findings[0].ID)
-		setRepositoryReviewMutationHeaders(request)
-		response := httptest.NewRecorder()
-		handler.handleUpdateRepositoryReviewFinding(response, request)
-		want := http.StatusConflict
-		if status == "invalid" {
-			want = http.StatusBadRequest
-		}
-		if response.Code != want {
-			t.Fatalf("immutable status %q=%d want=%d %s", status, response.Code, want, response.Body.String())
-		}
-	}
-
-	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
-	list := httptest.NewRecorder()
-	mux.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/repository-reviews/automations", nil))
-	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), automation.ID) ||
-		!strings.Contains(list.Body.String(), `"findings":1`) {
-		t.Fatalf("automation list=%d %s", list.Code, list.Body.String())
-	}
-	cfg := config.DefaultConfig()
-	cfg.ModelAliases = []config.ModelAliasConfig{
-		{Name: "subscription", Model: "openai/subscription"},
-		{Name: "metered", Model: "openai/metered"},
-	}
-	cfg.ModelList = []*config.ModelConfig{{
-		ModelName: "api", Provider: "openai", Model: "openai/subscription", Enabled: true,
-		Subscription: true, SubscriptionEquivalentModel: "metered",
-		InputPricePerMTok: 0, OutputPricePerMTok: 0,
-	}}
-	price, ok := repositoryReviewAliasPriceForAccount(
-		cfg, "subscription", "api", make(map[string]bool),
-	)
-	if ok || price != nil {
-		// The equivalent is intentionally unresolved; this also exercises the
-		// subscription inheritance path without inventing a price.
-		t.Fatalf("unresolved inherited price=%#v ok=%v", price, ok)
-	}
-}
-
 func TestRepositoryValidationAdjudicationProjectionDropsEmptyEvidence(t *testing.T) {
 	finding, evidence, source := repositoryValidationAdjudicationProjection(
 		repoaudit.RepositoryFinding{
@@ -1509,8 +899,8 @@ func TestRepositoryMappingDefaultVerifierNoWorkAndInvalidRoot(t *testing.T) {
 	}
 
 	invalidRoot := filepath.Join(t.TempDir(), "root-file")
-	if err := os.WriteFile(invalidRoot, nil, 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(invalidRoot, nil, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	cfg := config.DefaultConfig()
 	cfg.GitWorkspaces.RootDir = invalidRoot
@@ -1526,138 +916,6 @@ func TestRepositoryMappingDefaultVerifierNoWorkAndInvalidRoot(t *testing.T) {
 	if _, err := regression(t.Context(), repoaudit.Finding{}, repoaudit.RepositoryFinding{}); err == nil {
 		t.Fatal("invalid workspace root regression verifier had no error")
 	}
-}
-
-//nolint:govet // Sequential controller probes intentionally reuse short-lived error names.
-func TestRepositoryMappingControllerAndGitFailureBranches(t *testing.T) {
-	handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	cfg, err := config.LoadConfig(handler.configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	poisonedWorkspace := t.TempDir()
-	if err := os.WriteFile(
-		filepath.Join(poisonedWorkspace, "repository_reviews"), []byte("not a directory"), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	poisonedController := newRepositoryReviewController(handler)
-	poisonedController.leasedConfig = cfg
-	poisonedController.leasedStore = repoaudit.NewStore(poisonedWorkspace)
-	if err := poisonedController.processRepositoryFindingMappings(t.Context(), nil); err == nil {
-		t.Fatal("poisoned mapping catalog was accepted")
-	}
-	if err := poisonedController.processRepositoryFindingValidations(t.Context(), nil); err == nil {
-		t.Fatal("poisoned validation catalog was accepted")
-	}
-
-	fixture := newRepositoryReviewValidationGitFixture(t)
-	store := repoaudit.NewStore(workspace)
-	state, _ := recordRepositoryReviewControllerFinding(t, store, fixture)
-	controller := newRepositoryReviewController(handler)
-	controller.leasedConfig = cfg
-	controller.leasedStore = store
-	canceled, cancel := context.WithCancel(t.Context())
-	cancel()
-	if err := controller.processRepositoryFindingMappings(canceled, nil); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled mapping error=%v", err)
-	}
-	if err := controller.processRepositoryFindingValidations(canceled, nil); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled validation error=%v", err)
-	}
-	if err := controller.processRepositoryFindingMappings(t.Context(), nil); err != nil {
-		t.Fatalf("fallback mapping: %v", err)
-	}
-	if err := controller.processRepositoryFindingMappings(t.Context(), nil); err != nil {
-		t.Fatalf("completed mapping replay: %v", err)
-	}
-	state, found, err := store.Get(state.Repository)
-	if err != nil || !found || len(state.RepositoryFindings) != 1 {
-		t.Fatalf("fallback mapped state=%#v found=%v err=%v", state, found, err)
-	}
-
-	missingProfileWorkspace := t.TempDir()
-	missingProfileStore := repoaudit.NewStore(missingProfileWorkspace)
-	missingState, _ := recordRepositoryReviewControllerFinding(t, missingProfileStore, fixture)
-	missingProfileController := newRepositoryReviewController(handler)
-	missingProfileController.leasedConfig = cfg
-	missingProfileController.leasedStore = missingProfileStore
-	if err := missingProfileController.processRepositoryFindingMappings(
-		t.Context(), []repoaudit.RepositoryReviewAutomation{{
-			ID: "rra_missing_profile_snapshot", Repository: missingState.Repository,
-			RunIDs: []string{"controller-run"}, ProfileID: "rrpf_kttutlpoaklekkcrod5fqpz3qw",
-		}},
-	); err != nil {
-		t.Fatalf("missing mapping profile should defer without controller failure: %v", err)
-	}
-
-	unavailable := repoaudit.RepositoryReviewAutomation{
-		ID: "rra_unavailable", Repository: "https://127.0.0.1:1/unavailable.git",
-	}
-	reachabilityState := repoaudit.RepositoryState{Findings: []repoaudit.Finding{{
-		CommitSHA: strings.Repeat("a", 40), TargetIsDefault: true,
-	}}}
-	verify, regression, release := repositoryMappingDefaultVerifier(
-		t.Context(), cfg, unavailable, reachabilityState,
-	)
-	defer release()
-	if _, err := verify(t.Context(), reachabilityState.Findings[0]); err == nil {
-		t.Fatal("unavailable default checkout did not report its acquisition error")
-	}
-	if _, err := regression(
-		t.Context(), reachabilityState.Findings[0], repoaudit.RepositoryFinding{},
-	); err == nil {
-		t.Fatal("unavailable regression checkout did not report its acquisition error")
-	}
-
-	invalidRoot := filepath.Join(t.TempDir(), "rename-root-file")
-	if err := os.WriteFile(invalidRoot, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	invalidCfg := *cfg
-	invalidCfg.GitWorkspaces.RootDir = invalidRoot
-	if equivalent := repositoryMappingRenameEquivalent(
-		t.Context(), &invalidCfg, unavailable,
-		repoaudit.RepositoryState{
-			LastCommitSHA:      strings.Repeat("a", 40),
-			RepositoryFindings: []repoaudit.RepositoryFinding{{FoundCommits: []string{strings.Repeat("b", 40)}}},
-		},
-	); equivalent("old.go", "new.go") {
-		t.Fatal("invalid rename workspace invented equivalence")
-	}
-	if equivalent := repositoryMappingRenameEquivalent(
-		t.Context(), cfg, unavailable,
-		repoaudit.RepositoryState{
-			LastCommitSHA:      strings.Repeat("a", 40),
-			RepositoryFindings: []repoaudit.RepositoryFinding{{FoundCommits: []string{strings.Repeat("b", 40)}}},
-		},
-	); equivalent("old.go", "new.go") {
-		t.Fatal("unavailable rename checkout invented equivalence")
-	}
-	if equivalent := repositoryMappingRenameEquivalent(
-		t.Context(), cfg,
-		repoaudit.RepositoryReviewAutomation{ID: "rra_bad_diff", Repository: fixture.directory},
-		repoaudit.RepositoryState{
-			LastCommitSHA:      fixture.rename,
-			RepositoryFindings: []repoaudit.RepositoryFinding{{FoundCommits: []string{strings.Repeat("f", 40)}}},
-		},
-	); equivalent("old.go", "new.go") {
-		t.Fatal("failed rename diff invented equivalence")
-	}
-	manyCommits := make([]string, 201)
-	for index := range manyCommits {
-		manyCommits[index] = fmt.Sprintf("%040x", index+1000)
-	}
-	_ = repositoryMappingRenameEquivalent(
-		t.Context(), cfg,
-		repoaudit.RepositoryReviewAutomation{ID: "rra_rename_cap", Repository: fixture.directory},
-		repoaudit.RepositoryState{
-			LastCommitSHA:      fixture.rename,
-			RepositoryFindings: []repoaudit.RepositoryFinding{{FoundCommits: manyCommits}},
-		},
-	)
 }
 
 func TestRepositoryMappingSnapshotProfileAndUnavailableBranches(t *testing.T) {
@@ -1704,166 +962,114 @@ func TestRepositoryMappingSnapshotProfileAndUnavailableBranches(t *testing.T) {
 	}
 }
 
-//nolint:govet // Independent controller subtests intentionally reuse short-lived error names.
-func TestRepositoryControllersFallbackAndJoinedErrors(t *testing.T) {
-	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
+func TestRepositoryMappingCanonicalLedgerSelectionCoverage(t *testing.T) {
+	handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
-	cfg, err := config.LoadConfig(handler.configPath)
-	if err != nil {
-		t.Fatal(err)
+	state := seedRepositoryReviewAPIStateWithProcessing(t, workspace, false)
+	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
+	store := repoaudit.NewSQLiteStore(workspace)
+	if !repositoryStateHasPendingMapping(repoaudit.RepositoryState{MappingJobs: []repoaudit.RepositoryMappingJob{{
+		State: repoaudit.RepositoryMappingPending,
+	}}}) || repositoryStateHasPendingMapping(repoaudit.RepositoryState{MappingJobs: []repoaudit.RepositoryMappingJob{{
+		State: repoaudit.RepositoryMappingCompleted,
+	}}}) {
+		t.Fatal("pending mapping detection mismatch")
 	}
-	cfg.GitWorkspaces.RootDir = t.TempDir()
-
-	t.Run("mapping checkout error", func(t *testing.T) {
-		fixture := newRepositoryReviewValidationGitFixture(t)
-		store := repoaudit.NewStore(t.TempDir())
-		_, _ = recordRepositoryReviewControllerFinding(t, store, fixture)
-		moved := fixture.directory + "-moved"
-		if err := os.Rename(fixture.directory, moved); err != nil {
-			t.Fatal(err)
-		}
-		controller := newRepositoryReviewController(handler)
-		controller.leasedConfig = cfg
-		controller.leasedStore = store
-		if err := controller.processRepositoryFindingMappings(t.Context(), nil); err == nil {
-			t.Fatal("mapping checkout failure was not joined")
-		}
-	})
-
-	t.Run("validation no pending and checkout error", func(t *testing.T) {
-		fixture := newRepositoryReviewValidationGitFixture(t)
-		store := repoaudit.NewStore(t.TempDir())
-		state, _ := recordRepositoryReviewControllerFinding(t, store, fixture)
-		_, job, _, claimed, err := store.ClaimMappingJob(
-			state.Repository, state.MappingJobs[0].ID, repoaudit.RepositoryMappingModelSnapshot{},
-		)
-		if err != nil || !claimed {
-			t.Fatalf("claim mapping=%v err=%v", claimed, err)
-		}
-		state, aggregate, err := store.CompleteMappingJob(
-			state.Repository, repoaudit.RepositoryMappingCompletion{
-				JobID: job.ID, CreateMatchState: repoaudit.RepositoryMatchNew,
-				DefaultBranchVerified: true,
-			},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		controller := newRepositoryReviewController(handler)
-		controller.leasedConfig = cfg
-		controller.leasedStore = store
-		if err := controller.processRepositoryFindingValidations(t.Context(), nil); err != nil {
-			t.Fatalf("no-pending validation: %v", err)
-		}
-		state, jobs, err := store.ReserveValidationJobs(
-			state.Repository, []string{aggregate.ID},
-			repoaudit.RepositoryMappingModelSnapshot{Model: "cheap", Account: "api"},
-		)
-		if err != nil || len(jobs) != 1 {
-			t.Fatalf("reserve=%#v err=%v", jobs, err)
-		}
-		moved := fixture.directory + "-moved"
-		if err := os.Rename(fixture.directory, moved); err != nil {
-			t.Fatal(err)
-		}
-		if err := controller.processRepositoryFindingValidations(t.Context(), nil); err != nil {
-			t.Fatalf("validation checkout failure was not safely recorded: %v", err)
-		}
-		_ = state
-	})
+	selected, found := repositoryAutomationForLedger(
+		store, []repoaudit.RepositoryReviewAutomation{automation}, state,
+	)
+	if !found || selected.ID != automation.ID {
+		t.Fatalf("selected automation=%#v found=%v", selected, found)
+	}
+	if _, found := repositoryAutomationForLedger(store, nil, state); found {
+		t.Fatal("empty automation set selected a ledger owner")
+	}
 }
 
-//nolint:govet // Sequential seam probes intentionally reuse short-lived error names.
-func TestRepositoryControllerProcessSeamsCoverCallbacksAndJoinedErrors(t *testing.T) {
-	handler := newRepositoryReviewAIAdjudicationHandler(t, http.StatusOK, `{}`)
+func TestRepositoryCanonicalMappingAndValidationControllerSeams(t *testing.T) {
+	handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	state := seedRepositoryReviewAPIState(t, workspace)
+	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
+	store := repoaudit.NewSQLiteStore(workspace)
 	cfg, err := config.LoadConfig(handler.configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	invalidRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if writeErr := os.WriteFile(invalidRoot, nil, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	cfg.GitWorkspaces.RootDir = invalidRoot
+	controller := newRepositoryReviewController(handler)
+	controller.leasedStore = store
+	controller.leasedConfig = cfg
+
 	originalMappingProcess := processRepositoryMappingJobs
 	originalValidationProcess := processRepositoryValidationJobs
-	originalMappingAgent := runRepositoryMappingAgent
-	originalValidationAgent := runRepositoryValidationAgent
 	t.Cleanup(func() {
 		processRepositoryMappingJobs = originalMappingProcess
 		processRepositoryValidationJobs = originalValidationProcess
-		runRepositoryMappingAgent = originalMappingAgent
-		runRepositoryValidationAgent = originalValidationAgent
 	})
-
-	fixture := newRepositoryReviewValidationGitFixture(t)
-	mappingStore := repoaudit.NewStore(t.TempDir())
-	state, _ := recordRepositoryReviewControllerFinding(t, mappingStore, fixture)
-	mappingController := newRepositoryReviewController(handler)
-	mappingController.leasedConfig = cfg
-	mappingController.leasedStore = mappingStore
-	runRepositoryMappingAgent = func(
-		context.Context, *webWorkflowRuntimeRunner, workflows.AgentRequest,
-	) (map[string]any, error) {
-		return map[string]any{
-			"structured_valid": true,
-			"structured": map[string]any{
-				"decision": "distinct", "candidate_id": "", "confidence": .9,
-				"matching_anchors": []string{}, "conflicting_anchors": []string{},
-				"explanation": "The supplied records are distinct.",
-			},
-		}, nil
-	}
+	mappingCalls := 0
 	processRepositoryMappingJobs = func(
-		_ repoaudit.Store, ctx context.Context, _ string,
+		_ repoaudit.Store,
+		ctx context.Context,
+		repository string,
 		options repoaudit.RepositoryMappingProcessOptions,
 	) (repoaudit.RepositoryMappingProcessResult, error) {
-		if _, err := options.Adjudicate(
-			ctx, options.ModelSnapshot, repoaudit.RepositoryMappingAIRequest{},
-		); err != nil {
-			t.Errorf("mapping callback: %v", err)
+		mappingCalls++
+		if repository != state.Repository || options.Adjudicate == nil ||
+			!options.RenameEquivalent("same.go", "same.go") {
+			t.Errorf("mapping options=%#v repository=%q", options, repository)
 		}
-		return repoaudit.RepositoryMappingProcessResult{}, errors.New("injected mapping processor failure")
+		if verified, verifyErr := options.DefaultBranchVerified(ctx, state.Findings[0]); verifyErr == nil || verified {
+			t.Errorf("default verification=%v err=%v", verified, verifyErr)
+		}
+		return repoaudit.RepositoryMappingProcessResult{}, errors.New("injected mapping failure")
 	}
-	if err := mappingController.processRepositoryFindingMappings(t.Context(), nil); err == nil {
-		t.Fatal("injected mapping processor failure was not joined")
+	if processErr := controller.processRepositoryFindingMappings(
+		t.Context(), []repoaudit.RepositoryReviewAutomation{automation},
+	); processErr == nil || mappingCalls != 1 {
+		t.Fatalf("mapping calls=%d err=%v", mappingCalls, processErr)
 	}
-	_ = state
 
-	validationStore := repoaudit.NewStore(t.TempDir())
-	validationState, _ := recordRepositoryReviewControllerFinding(t, validationStore, fixture)
-	_, mappingJob, _, claimed, err := validationStore.ClaimMappingJob(
-		validationState.Repository, validationState.MappingJobs[0].ID,
-		repoaudit.RepositoryMappingModelSnapshot{},
+	mapped := completeRepositoryReviewAPIMappingJobs(t, workspace, state)
+	_, jobs, err := store.ReserveValidationJobs(
+		mapped.Repository,
+		[]string{mapped.RepositoryFindings[0].ID},
+		repoaudit.RepositoryMappingModelSnapshot{Model: "cheap", Account: "api", Prompt: "validation"},
 	)
-	if err != nil || !claimed {
-		t.Fatalf("claim validation fixture mapping=%v err=%v", claimed, err)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("reserve validation jobs=%#v err=%v", jobs, err)
 	}
-	validationState, aggregate, err := validationStore.CompleteMappingJob(
-		validationState.Repository, repoaudit.RepositoryMappingCompletion{
-			JobID: mappingJob.ID, CreateMatchState: repoaudit.RepositoryMatchNew,
-			DefaultBranchVerified: true,
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _, err = validationStore.ReserveValidationJobs(
-		validationState.Repository, []string{aggregate.ID},
-		repoaudit.RepositoryMappingModelSnapshot{Model: "cheap", Account: "api"},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	validationController := newRepositoryReviewController(handler)
-	validationController.leasedConfig = cfg
-	validationController.leasedStore = validationStore
+	validationCalls := 0
 	processRepositoryValidationJobs = func(
-		_ repoaudit.Store, ctx context.Context, _ string,
+		_ repoaudit.Store,
+		ctx context.Context,
+		repository string,
 		options repoaudit.RepositoryValidationProcessOptions,
 	) (repoaudit.RepositoryValidationProcessResult, error) {
-		if _, err := options.FirstSemanticTag(ctx, strings.Repeat("f", 40)); err == nil {
+		validationCalls++
+		if repository != mapped.Repository || options.Evidence == nil || options.Adjudicate == nil {
+			t.Errorf("validation options=%#v repository=%q", options, repository)
+		}
+		if _, tagErr := options.FirstSemanticTag(ctx, strings.Repeat("f", 40)); tagErr == nil {
 			t.Error("missing validation metadata returned a tag")
 		}
-		return repoaudit.RepositoryValidationProcessResult{}, errors.New("injected validation processor failure")
+		return repoaudit.RepositoryValidationProcessResult{}, errors.New("injected validation failure")
 	}
-	if err := validationController.processRepositoryFindingValidations(t.Context(), nil); err == nil {
-		t.Fatal("injected validation processor failure was not joined")
+	if err := controller.processRepositoryFindingValidations(
+		t.Context(), []repoaudit.RepositoryReviewAutomation{automation},
+	); err == nil || validationCalls != 1 {
+		t.Fatalf("validation calls=%d err=%v", validationCalls, err)
+	}
+	pendingValidation := repoaudit.RepositoryState{ValidationJobs: []repoaudit.RepositoryValidationJob{{
+		State: repoaudit.RepositoryValidationPending,
+	}}}
+	if !repositoryStateHasPendingValidation(pendingValidation) ||
+		repositoryStateHasPendingValidation(repoaudit.RepositoryState{}) {
+		t.Fatal("pending validation detection mismatch")
 	}
 }
 

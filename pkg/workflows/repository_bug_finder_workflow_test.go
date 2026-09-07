@@ -13,7 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
 )
 
-func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) {
+func TestRepositoryBugFinderWorkflowPersistsCanonicalEvidenceThenSkipsReviewedBlob(t *testing.T) {
 	workspace := t.TempDir()
 	repo := filepath.Join(workspace, "repo")
 	if err := os.MkdirAll(repo, 0o755); err != nil {
@@ -39,6 +39,11 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 	if _, err := repoaudit.NewStore(workspace).BeginCampaign(context.Background(), repoaudit.BeginCampaignRequest{
 		Repository: repo, CampaignID: campaignID, CommitSHA: commit,
 		ExpectedReviewVersion: 0, Exact: true,
+		DeduplicationSnapshot: &repoaudit.RepositoryReviewDeduplicationSnapshot{
+			ReviewerModel: "review-a", DeduplicationModel: "review-a",
+			SimilarityThreshold: repoaudit.DeduplicationDefaultThreshold,
+			CandidateLimit:      repoaudit.DeduplicationDefaultCandidateLimit,
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -60,27 +65,24 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 		t.Fatalf("first run=%#v err=%v", first, err)
 	}
 	if agentRunner.calls != 2 {
-		t.Fatalf("first agent calls=%d, want scope planner plus visible managed review", agentRunner.calls)
+		t.Fatalf("first agent calls=%d, want scope planner plus managed review", agentRunner.calls)
 	}
 	state, found, err := repoaudit.NewStore(workspace).Get(repo)
-	if err != nil || !found || len(state.Files) != 1 || len(state.Findings) != 2 ||
-		len(state.RawFindings) != 2 || len(state.DeduplicationJobs) != 2 {
+	if err != nil || !found || len(state.Files) != 1 || len(state.RawFindings) != 2 ||
+		len(state.Findings) != 0 || len(state.DeduplicationJobs) != 2 {
 		t.Fatalf("first durable state found=%v err=%v state=%#v", found, err, state)
 	}
-	for _, finding := range state.Findings {
-		if finding.File.BlobSHA == "" || finding.CommitSHA == "" ||
-			len(finding.ContextIDs) != 1 || len(finding.Models) != 1 {
-			t.Fatalf("assignment finding provenance=%#v contexts=%d", finding, len(state.Contexts))
+	for index, raw := range state.RawFindings {
+		if !strings.HasPrefix(raw.ID, "rrw_") || raw.DeduplicatedFindingID != "" ||
+			raw.State != repoaudit.RawFindingDeduplicationPending {
+			t.Fatalf("raw evidence %d bypassed the canonical worker boundary: %#v", index, raw)
 		}
 	}
-	if len(state.Contexts) != 2 {
-		t.Fatalf("assignment finding contexts=%d, want 2", len(state.Contexts))
-	}
-	metrics := repoaudit.CurrentCampaignMetrics(state, campaignID, nil, time.Time{})
+	metrics := repoaudit.CurrentCampaignMetrics(state, campaignID)
 	if !metrics.CoverageExact || metrics.InspectedFiles != 1 || metrics.CompletedFiles != 1 ||
 		metrics.RemainingFiles != 0 || metrics.FindingOccurrences != 0 ||
 		state.FindingsProcessing.Pending != 2 {
-		t.Fatalf("campaign metrics=%#v", metrics)
+		t.Fatalf("campaign metrics=%#v processing=%#v", metrics, state.FindingsProcessing)
 	}
 
 	request.RunID = ""
@@ -95,15 +97,15 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 		)
 	}
 	if agentRunner.calls != 2 {
-		t.Fatalf("unchanged second run calls=%d, want frozen scope without another planner", agentRunner.calls)
+		t.Fatalf("unchanged second run calls=%d, want no additional planner or review", agentRunner.calls)
 	}
 	if second.Outputs["summary"] != "No changed reviewable files required model review." ||
 		second.Outputs["remainingFiles"] != 0 {
 		t.Fatalf("unchanged explicit outputs=%#v", second.Outputs)
 	}
 	after, _, err := repoaudit.NewStore(workspace).Get(repo)
-	if err != nil || len(after.Runs) != 1 || len(after.Findings) != 2 {
-		t.Fatalf("unchanged second run mutated review ledger: %#v err=%v", after, err)
+	if err != nil || len(after.Runs) != 1 || len(after.RawFindings) != 2 || len(after.Findings) != 0 {
+		t.Fatalf("unchanged second run mutated canonical ledger: %#v err=%v", after, err)
 	}
 	if len(toolRunner.sessions) != 8 || toolRunner.sessions[0] != toolRunner.sessions[1] ||
 		toolRunner.sessions[0] != toolRunner.sessions[2] || toolRunner.sessions[0] != toolRunner.sessions[3] ||
@@ -443,5 +445,24 @@ func TestRepositoryBugFinderRejectsInvalidAutomationBeforeDurableRunCreation(t *
 				t.Fatalf("invalid automation was durably recorded: runs=%#v err=%v", runs, listErr)
 			}
 		})
+	}
+}
+
+func TestRepositoryBugFinderRejectsInvalidCampaignBeforeDurableRunCreation(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewFileRunStore(workspace)
+	_, err := (&Executor{Store: store}).Run(t.Context(), RunRequest{
+		Workflow:    parseWorkflow(t, RepositoryBugFinderWorkflowYAML),
+		WorkflowRef: RepositoryBugFinderWorkflowRef,
+		Inputs: map[string]any{
+			"repository": "owner/repo", "automation_id": "rra_campaign_admission",
+			"campaign_id": "invalid",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "canonical campaign ID") {
+		t.Fatalf("campaign admission error = %v", err)
+	}
+	if runs, listErr := store.ListRuns(t.Context()); listErr != nil || len(runs) != 0 {
+		t.Fatalf("invalid campaign was durably recorded: runs=%#v err=%v", runs, listErr)
 	}
 }

@@ -229,9 +229,14 @@ export function RepositoryReviewRepositoryFindingsPage({
           "One or more selected repository findings no longer exist.",
         )
       }
-      const actionFindingIDs = details.map(
-        (detail) => detail.action_finding?.id || detail.finding.id,
+      const actionFindingIDs = details.flatMap((detail) =>
+        detail.action_finding?.id ? [detail.action_finding.id] : [],
       )
+      if (actionFindingIDs.length !== details.length) {
+        throw new Error(
+          "One or more selected repository findings do not have a current-campaign issue action.",
+        )
+      }
       if (new Set(actionFindingIDs).size !== actionFindingIDs.length) {
         throw new Error(
           "Selected repository findings do not have unique issue actions.",

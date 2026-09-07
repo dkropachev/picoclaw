@@ -252,149 +252,11 @@ func TestRepositoryReviewAssignmentGovernanceCorruptStateErrors(t *testing.T) {
 	})
 }
 
-func TestRepositoryReviewAssignmentGovernanceSemanticMerge(t *testing.T) {
-	fixture := newAssignmentCoverageFixture(t, 1, 1)
-	first := repositoryReviewCampaignFinding(fixture.files[0], "semantic finding")
-	second := first
-	second.Evidence += " Additional corroborating evidence."
-	state := RepositoryState{Findings: []Finding{}, Contexts: []FindingContext{}}
-	accepted, err := persistRepositoryReviewCheckpointObservation(
-		&state, fixture.plan, "run", fixture.catalog[0].ID,
-		Observation{
-			Model: "provider/review-a", ModelAlias: "review-a", Account: "review-account",
-			Reviewer:   fixture.catalog[0].FocusID,
-			ScopeFiles: fixture.files, RawDigest: "sha256:" + strings.Repeat("a", 64),
-			Findings: []FindingCandidate{first, second},
-		},
-		fixture.files, repositoryAuditTestNow,
-	)
-	if err != nil || len(accepted) != 2 || len(state.RawFindings) != 2 ||
-		len(state.DeduplicationJobs) != 2 || len(state.Findings) != 1 || state.Findings[0].Version != 2 {
-		t.Fatalf("semantic merge accepted=%v findings=%#v err=%v", accepted, state.Findings, err)
-	}
-}
-
-func TestRepositoryReviewAssignmentGovernanceFinalizeMergeAndTrim(t *testing.T) {
-	t.Run("plan unsupported conflict", func(t *testing.T) {
-		fixture := newAssignmentCoverageFixture(t, 1, 1)
-		if _, err := fixture.store.BeginRepositoryReviewRun(t.Context(), BeginRepositoryReviewRunRequest{
-			Plan: fixture.plan, RunID: "run", ReviewableFiles: fixture.files,
-		}); err != nil {
-			t.Fatal(err)
-		}
-		state, _, err := fixture.store.Get(fixture.repository)
-		if err != nil {
-			t.Fatal(err)
-		}
-		credited, err := CreditRepositoryReviewAssignment(
-			state.CurrentCampaign.Paths[fixture.files[0].Path], fixture.catalog, fixture.catalog[0].ID,
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		state.CurrentCampaign.Paths[fixture.files[0].Path] = credited
-		plan := fixture.plan
-		plan.UnsupportedFiles = []UnsupportedFile{{FileRef: fixture.files[0], Reason: "historical"}}
-		plan.ID = planDigest(plan)
-		state.ActiveReviewRun.PlanID = plan.ID
-		store := fixture.store
-		store.loadForTest = func(string) (RepositoryState, error) { return state, nil }
-		if _, err := store.FinalizeRepositoryReviewRun(t.Context(), FinalizeRepositoryReviewRunRequest{
-			Plan: plan, RunID: "run",
-		}); !errors.Is(err, ErrConflict) {
-			t.Fatalf("plan unsupported conflict = %v", err)
-		}
-	})
-
-	t.Run("unchanged conflict", func(t *testing.T) {
-		fixture := newAssignmentCoverageFixture(t, 1, 1)
-		if _, err := fixture.store.BeginRepositoryReviewRun(t.Context(), BeginRepositoryReviewRunRequest{
-			Plan: fixture.plan, RunID: "run", ReviewableFiles: fixture.files,
-		}); err != nil {
-			t.Fatal(err)
-		}
-		state, _, err := fixture.store.Get(fixture.repository)
-		if err != nil {
-			t.Fatal(err)
-		}
-		state.CurrentCampaign.Paths[fixture.files[0].Path] = RepositoryReviewCampaignPathCoverage{Unsupported: true}
-		plan := fixture.plan
-		plan.UnchangedFiles = []FileRef{fixture.files[0]}
-		plan.ID = planDigest(plan)
-		state.ActiveReviewRun.PlanID = plan.ID
-		store := fixture.store
-		store.loadForTest = func(string) (RepositoryState, error) { return state, nil }
-		if _, err := store.FinalizeRepositoryReviewRun(t.Context(), FinalizeRepositoryReviewRunRequest{
-			Plan: plan, RunID: "run",
-		}); !errors.Is(err, ErrConflict) {
-			t.Fatalf("unchanged conflict = %v", err)
-		}
-	})
-
-	t.Run("run trimming", func(t *testing.T) {
-		fixture := newAssignmentCoverageFixture(t, 1, 1)
-		if _, err := fixture.store.BeginRepositoryReviewRun(t.Context(), BeginRepositoryReviewRunRequest{
-			Plan: fixture.plan, RunID: "run", ReviewableFiles: fixture.files,
-		}); err != nil {
-			t.Fatal(err)
-		}
-		state, _, err := fixture.store.Get(fixture.repository)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for index := 0; index < 1000; index++ {
-			state.Runs = append(state.Runs, ReviewRun{ID: fmt.Sprintf("old-%04d", index)})
-		}
-		store := fixture.store
-		store.loadForTest = func(string) (RepositoryState, error) { return state, nil }
-		result, err := store.FinalizeRepositoryReviewRun(nil, FinalizeRepositoryReviewRunRequest{
-			Plan: fixture.plan, RunID: "run",
-		})
-		if err != nil || len(result.State.Runs) != 1000 {
-			t.Fatalf("trimmed finalization runs=%d err=%v", len(result.State.Runs), err)
-		}
-	})
-
-	t.Run("interrupted trimming", func(t *testing.T) {
-		fixture := newAssignmentCoverageFixture(t, 1, 1)
-		state := RepositoryState{
-			CurrentCampaign: &RepositoryReviewCampaignCoverage{
-				ID: fixture.campaignID, ScopeDigest: "scope", SelectedFiles: 1,
-				Paths: map[string]RepositoryReviewCampaignPathCoverage{
-					fixture.files[0].Path: {Completed: true},
-				},
-			},
-			ActiveReviewRun: &RepositoryReviewActiveRun{
-				ID: "run", CampaignID: fixture.campaignID,
-				Reservations: map[string]RepositoryReviewAssignmentReservation{
-					fixture.catalog[0].ID: {
-						AssignmentID: fixture.catalog[0].ID, Files: fixture.files,
-					},
-				},
-			},
-		}
-		for index := 0; index < 1000; index++ {
-			state.Runs = append(state.Runs, ReviewRun{ID: fmt.Sprintf("old-%04d", index)})
-		}
-		archiveInterruptedRepositoryReviewRun(&state, repositoryAuditTestNow)
-		if state.ActiveReviewRun != nil || len(state.Runs) != 1000 || state.Runs[999].ReviewedFiles != 1 {
-			t.Fatalf("interrupted trim = %#v", state.Runs[999])
-		}
-	})
-}
-
 //nolint:govet // Boundary assertions intentionally reuse err in short scopes.
 func TestRepositoryReviewAssignmentGovernanceCampaignBranches(t *testing.T) {
 	fixture := newAssignmentCoverageFixture(t, 1, 1)
 	state, _, err := fixture.store.Get(fixture.repository)
 	if err != nil {
-		t.Fatal(err)
-	}
-	coverage := cloneRepositoryReviewCampaignCoverage(*state.CurrentCampaign)
-	if _, err := fixture.store.ReconcileCampaign(t.Context(), ReconcileCampaignRequest{
-		Repository: fixture.repository, ExpectedReviewVersion: state.ReviewVersion,
-		Coverage: coverage, SelectedScope: fixture.files,
-	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -404,23 +266,6 @@ func TestRepositoryReviewAssignmentGovernanceCampaignBranches(t *testing.T) {
 		state.CurrentCampaign.ScopeDigest, fixture.catalog, 1,
 	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("catalog bind conflict = %v", err)
-	}
-
-	corrupt := RepositoryState{CurrentCampaign: &RepositoryReviewCampaignCoverage{
-		ID: fixture.campaignID, CommitSHA: fixture.plan.CommitSHA,
-		InventoryHash: fixture.plan.InventoryHash, ProfileHash: fixture.plan.ProfileHash,
-		ScopeDigest:         state.CurrentCampaign.ScopeDigest,
-		RequiredAssignments: len(fixture.catalog), SelectedFiles: 1,
-		Paths: map[string]RepositoryReviewCampaignPathCoverage{
-			fixture.files[0].Path: {Completed: true, AssignmentBits: "!"},
-		},
-	}}
-	if _, err := bindRepositoryReviewCampaignAssignmentCatalog(
-		&corrupt, fixture.campaignID, fixture.plan.CommitSHA,
-		fixture.plan.InventoryHash, fixture.plan.ProfileHash,
-		state.CurrentCampaign.ScopeDigest, fixture.catalog, 1,
-	); err == nil {
-		t.Fatal("corrupt legacy assignment bits were accepted")
 	}
 
 	mergeCoverage := cloneRepositoryReviewCampaignCoverage(*state.CurrentCampaign)
@@ -438,7 +283,7 @@ func TestRepositoryReviewAssignmentGovernanceCampaignBranches(t *testing.T) {
 		t.Fatal("invalid campaign catalog was accepted")
 	}
 	nonprojected := cloneRepositoryReviewCampaignCoverage(*state.CurrentCampaign)
-	credited, err := CreditRepositoryReviewAssignment(
+	credited, err := creditRepositoryReviewAssignmentForTest(
 		RepositoryReviewCampaignPathCoverage{}, fixture.catalog, fixture.catalog[0].ID,
 	)
 	if err != nil {
@@ -507,11 +352,11 @@ func TestRepositoryReviewAssignmentGovernanceRunMetadataValidation(t *testing.T)
 	}
 }
 
-func TestRepositoryReviewAssignmentGovernanceLegacyIssueBranches(t *testing.T) {
+func TestRepositoryReviewAssignmentGovernanceIssueIntegrityBranches(t *testing.T) {
 	t.Run("draft finding unavailable", func(t *testing.T) {
 		store := NewStore(t.TempDir())
 		state := RepositoryState{IssueDrafts: []IssueDraft{{
-			ID: "draft", Canonical: true, State: IssueDraftPublishing, Version: 1,
+			ID: "draft", State: IssueDraftPublishing, Version: 1,
 			FindingIDs: []string{"missing-finding"},
 		}}}
 		store.loadForTest = func(string) (RepositoryState, error) { return state, nil }

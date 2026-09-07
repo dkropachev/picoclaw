@@ -35,7 +35,7 @@ var repositoryReviewFileAttributionCollectionSchema = mustCollectionQuerySchema(
 		{Name: "model", Type: collectionquery.TypeString, Sortable: true},
 		{
 			Name: "source", Type: collectionquery.TypeEnum, Sortable: true,
-			SuggestedValues: []string{"legacy", "live", "mixed"},
+			SuggestedValues: []string{"live"},
 		},
 		{Name: "attempts", Type: collectionquery.TypeNumber, Sortable: true},
 		{Name: "runs", Type: collectionquery.TypeNumber, Sortable: true},
@@ -224,15 +224,7 @@ func repositoryReviewFileAttributionEffectiveModel(
 }
 
 func repositoryReviewFileAttributionSourceClass(values map[string]struct{}) string {
-	_, legacy := values[string(repoaudit.RepositoryReviewFileAttributionSourceLegacyManagedChild)]
-	_, live := values[string(repoaudit.RepositoryReviewFileAttributionSourceLiveCheckpoint)]
-	if legacy && live {
-		return "mixed"
-	}
-	if live {
-		return "live"
-	}
-	return "legacy"
+	return "live"
 }
 
 func appendRepositoryReviewAttributionSuggestion(values *[]string, value string) {
