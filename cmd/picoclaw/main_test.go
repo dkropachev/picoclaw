@@ -307,6 +307,31 @@ func TestPicoclawMainPlainSuccessBranchesInProcess(t *testing.T) {
 	}
 }
 
+func TestDatabaseFenceInvocationClassification(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "no command", args: []string{"picoclaw"}},
+		{name: "global flags only", args: []string{"picoclaw", "--no-color"}},
+		{name: "database", args: []string{"picoclaw", "database", "status"}},
+		{name: "version after flag", args: []string{"picoclaw", "--no-color", "version"}},
+		{name: "help", args: []string{"picoclaw", "help", "status"}},
+		{name: "completion", args: []string{"picoclaw", "completion", "bash"}},
+		{name: "runtime command", args: []string{"picoclaw", "status"}, want: true},
+		{name: "runtime command after flag", args: []string{"picoclaw", "--no-color", "cron", "list"}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, commandNeedsDatabaseFence(test.args))
+		})
+	}
+
+	assert.True(t, invocationFlagsValid([]string{"version"}))
+	assert.False(t, invocationFlagsValid([]string{"missing-command"}))
+	assert.False(t, invocationFlagsValid([]string{"version", "--definitely-invalid"}))
+}
+
 func TestPicoclawMainProcessHelper(t *testing.T) {
 	switch os.Getenv("PICOCLAW_MAIN_PROCESS_HELPER") {
 	case "1":

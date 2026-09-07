@@ -336,6 +336,17 @@ func validIPCManifest(t *testing.T, stateDir string) Manifest {
 	}
 }
 
+func TestConfigureSupervisorProcessRejectsDirectoryLogTarget(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "logs", "database-supervisor.log")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := configureSupervisorProcess(nil, home); err == nil {
+		t.Fatal("supervisor process accepted a directory log target")
+	}
+}
+
 func TestReadManifestPropagatesRealOverlongLeafPath(t *testing.T) {
 	const targetStateDirectoryLength = 4090
 	root := shortCoverageUnixTempDir(t)

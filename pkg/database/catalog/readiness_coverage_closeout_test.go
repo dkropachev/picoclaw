@@ -414,3 +414,94 @@ func TestCloseProbePoolsUnknownHomeAndHomeKey(t *testing.T) {
 		t.Fatalf("readiness home key = %q", got)
 	}
 }
+
+func TestReadinessAdditionalRealTransitions(t *testing.T) {
+	t.Run("authority", func(t *testing.T) {
+		restore := database.SuspendProviderTestAuthority()
+		statuses, err := ProbeStatuses(t.Context(), t.TempDir(), config.DefaultConfig())
+		restore()
+		if statuses != nil || database.CodeOf(err) != database.CodeUnauthorized {
+			t.Fatalf("unfenced readiness probe = %#v, %v", statuses, err)
+		}
+	})
+
+	t.Run("canceled inspection", func(t *testing.T) {
+		home := t.TempDir()
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		statuses, err := ProbeStatuses(ctx, home, config.DefaultConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = CloseProbePools(home) })
+		failed := false
+		for _, status := range statuses {
+			failed = failed || status.Readiness == database.StoreIntegrityFailed
+		}
+		if len(statuses) == 0 || !failed {
+			t.Fatalf("canceled readiness statuses = %#v", statuses)
+		}
+	})
+
+	for name, schema := range map[string]string{
+		"old version": `CREATE TABLE marker(id INTEGER); PRAGMA user_version = 0;`,
+		"open horizon": `
+			CREATE TABLE storage_imports (component TEXT, source_id TEXT, archive_status TEXT);
+			CREATE TABLE storage_import_issues (component TEXT, source_id TEXT);
+			CREATE TABLE storage_import_horizons (component TEXT PRIMARY KEY, completed_at INTEGER NOT NULL);
+			CREATE INDEX storage_imports_archive_status_idx ON storage_imports(component, archive_status);
+			PRAGMA user_version = 1;
+		`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			workspace := filepath.Join(home, "workspace")
+			cfg := config.DefaultConfig()
+			cfg.Agents.Defaults.Workspace = workspace
+			createCatalogStore(t, filepath.Join(workspace, "state", "workflows.db"), schema)
+			statuses, err := ProbeStatuses(t.Context(), home, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = CloseProbePools(home) })
+			status := statusByID(statuses, "workspace/workflows")
+			if status.Readiness != database.StoreMigrationRequired {
+				t.Fatalf("workflow readiness = %#v", status)
+			}
+		})
+	}
+}
+
+func TestInitializeRequiredMapsRemainingReadinessCodes(t *testing.T) {
+	logical := &Catalog{entries: []Entry{{ID: "required.store", Required: true}}}
+	ready := []database.StoreStatus{{ID: "required.store", Readiness: database.StoreReady}}
+	if err := RequireReady(logical, ready); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, code := range []database.ErrorCode{database.CodeMigrationRequired, database.CodeIntegrity} {
+		initialized, err := InitializeRequired(
+			t.Context(), logical, ready,
+			func(context.Context, Entry) error { return database.NewError(code, "fault") },
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if database.CodeOf(initialized[0].Error) != code {
+			t.Fatalf("initializer code %q status = %#v", code, initialized[0])
+		}
+	}
+
+	notReady := []database.StoreStatus{{
+		ID: "required.store", Readiness: database.StoreMigrationRequired,
+		Error: database.NewError(database.CodeMigrationRequired, "pending"),
+	}}
+	called := false
+	initialized, err := InitializeRequired(t.Context(), logical, notReady, func(context.Context, Entry) error {
+		called = true
+		return nil
+	})
+	if err != nil || called || initialized[0].Readiness != database.StoreMigrationRequired {
+		t.Fatalf("non-ready initialization = %#v, called=%t, err=%v", initialized, called, err)
+	}
+}

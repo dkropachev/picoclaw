@@ -6,9 +6,13 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/database"
 	launcherapi "github.com/sipeed/picoclaw/web/backend/api"
 )
 
@@ -348,5 +352,80 @@ func TestMainAndFatalWrappers(t *testing.T) {
 	if err != nil || exitCode != 1 || !strings.Contains(string(encoded), "main failed") ||
 		!strings.Contains(string(encoded), "fatal test") {
 		t.Fatalf("stderr=%q exit=%d err=%v", encoded, exitCode, err)
+	}
+}
+
+func TestPrepareBackfillDatabaseAttachesToExistingSupervisor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, "")
+	configPath := filepath.Join(home, "config.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, fingerprint, err := database.LoadCatalogConfiguration(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := database.StartServer(context.Background(), database.ServerOptions{
+		Home: home, CatalogFingerprint: fingerprint,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := server.Close(ctx); closeErr != nil {
+			t.Errorf("close database supervisor: %v", closeErr)
+		}
+	})
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PICOCLAW_EXECUTABLE", executable)
+	previous := database.RuntimeClient()
+	t.Cleanup(func() { database.InstallProcessClient(previous) })
+
+	cleanup, err := prepareBackfillDatabase(t.Context(), "ignored-workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil || database.RuntimeClient() == nil {
+		t.Fatal("preparation did not install a broker client and cleanup")
+	}
+	cleanup()
+	if database.RuntimeClient() != nil {
+		t.Fatal("preparation cleanup retained the broker client")
+	}
+}
+
+func TestPrepareBackfillDatabaseRequiresDiscoverableExecutable(t *testing.T) {
+	t.Setenv(config.EnvHome, t.TempDir())
+	t.Setenv("PICOCLAW_EXECUTABLE", "")
+	t.Setenv("PATH", t.TempDir())
+	cleanup, err := prepareBackfillDatabase(t.Context(), "ignored-workspace")
+	if cleanup != nil || err == nil || !strings.Contains(err.Error(), "picoclaw executable is required") {
+		t.Fatalf("prepareBackfillDatabase() cleanup=%t, error=%v", cleanup != nil, err)
+	}
+}
+
+func TestRunWithPreparationPropagatesPreparationFailure(t *testing.T) {
+	want := errors.New("prepare failed")
+	called := false
+	err := runWithPreparation(
+		[]string{"--workspace=w", "--automation=a"},
+		io.Discard,
+		io.Discard,
+		func(context.Context, string, string, launcherapi.RepositoryReviewFileAttributionBackfillOptions) (launcherapi.RepositoryReviewFileAttributionBackfillReport, error) {
+			called = true
+			return launcherapi.RepositoryReviewFileAttributionBackfillReport{}, nil
+		},
+		func(context.Context, string) (func(), error) { return nil, want },
+	)
+	if !errors.Is(err, want) || called {
+		t.Fatalf("runWithPreparation() = %v, backfill called=%t", err, called)
 	}
 }

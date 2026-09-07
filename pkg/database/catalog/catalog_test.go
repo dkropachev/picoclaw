@@ -430,3 +430,39 @@ func TestRequiredStoresMatchNewSnapshotAndBindRequiredPolicy(t *testing.T) {
 		t.Fatalf("required stores after policy change are not sorted: %#v", after)
 	}
 }
+
+func TestCatalogNewRejectsInvalidCallShapesAndAuthority(t *testing.T) {
+	home := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = filepath.Join(home, "workspace")
+
+	for name, build := range map[string]func() (*Catalog, error){
+		"options with positional config": func() (*Catalog, error) {
+			return New(Options{Home: home, Config: cfg}, cfg)
+		},
+		"string without config": func() (*Catalog, error) { return New(home) },
+		"unsupported input":     func() (*Catalog, error) { return New(42) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			projected, err := build()
+			if projected != nil || database.CodeOf(err) != database.CodeInvalid {
+				t.Fatalf("catalog call result = %#v, %v", projected, err)
+			}
+		})
+	}
+
+	restore := database.SuspendProviderTestAuthority()
+	projected, err := New(home, cfg)
+	restore()
+	if projected != nil || database.CodeOf(err) != database.CodeUnauthorized {
+		t.Fatalf("unfenced legacy catalog projection = %#v, %v", projected, err)
+	}
+
+	invalid := config.DefaultConfig()
+	invalid.Agents.Defaults.Workspace = filepath.Join(home, "workspace")
+	invalid.Events.Ingress.DatabasePath = " invalid-event-path "
+	projected, err = New(home, invalid)
+	if projected != nil || database.CodeOf(err) != database.CodeInvalid {
+		t.Fatalf("invalid legacy catalog projection = %#v, %v", projected, err)
+	}
+}
