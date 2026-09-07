@@ -46,6 +46,15 @@ type Catalog struct {
 // New derives a logical catalog without inspecting database generation
 // members. Projection grants no provider, readiness, or migration authority.
 func New(options Options) (*Catalog, error) {
+	projected, err := project(options)
+	if err != nil {
+		return nil, err
+	}
+
+	return newProjectedCatalog(projected.All())
+}
+
+func project(options Options) (*storecatalog.Catalog, error) {
 	projected, err := storecatalog.Project(storecatalog.Options{
 		Home:       options.Home,
 		Config:     options.Config,
@@ -55,9 +64,7 @@ func New(options Options) (*Catalog, error) {
 	if err != nil {
 		return nil, sanitizeProjectionError(err)
 	}
-
-	specs := projected.All()
-	return newProjectedCatalog(specs)
+	return projected, nil
 }
 
 func newProjectedCatalog(specs []storecatalog.Spec) (*Catalog, error) {
@@ -82,6 +89,17 @@ func newProjectedCatalog(specs []storecatalog.Spec) (*Catalog, error) {
 		return entries[left].ID < entries[right].ID
 	})
 	return &Catalog{entries: entries, byID: byID}, nil
+}
+
+func newCatalogSnapshot(
+	specs []storecatalog.Spec,
+	fingerprint string,
+) (*Catalog, string, error) {
+	logical, err := newProjectedCatalog(specs)
+	if err != nil {
+		return nil, "", sanitizeSnapshotError(err)
+	}
+	return logical, fingerprint, nil
 }
 
 // Entries returns a detached, ID-sorted snapshot of every logical entry.
