@@ -84,10 +84,10 @@ Owns: TEST pkg/database/protocol_coverage_test.go *
 
 ## Cross-Feature Behavior
 
-This stage changes no active persistence path. Later PRs add local IPC,
-single-owner server lifecycle, physical providers, catalogs, migration, CLI
-composition, and domain adoption behind these values without changing their
-application-facing meaning.
+This stage changes no active persistence path. `FR-DATABASE-IPC` now supplies
+the dormant local transport and single-owner server lifecycle behind these
+values. Later PRs add physical providers, catalogs, migration, CLI composition,
+and domain adoption without changing their application-facing meaning.
 
 ## Failure And Edge Cases
 
