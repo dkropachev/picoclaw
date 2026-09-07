@@ -160,6 +160,9 @@ for (const target of [
     await expect(
       page.locator('[data-slot="collection-detail-shell"]'),
     ).toBeVisible()
+    await expect(
+      page.getByRole("combobox", { name: "Default upstream model" }),
+    ).toBeEnabled()
     await assertVisualContract(page, errors)
     await expect(page.locator("#main-content")).toHaveScreenshot(
       target.snapshot,
