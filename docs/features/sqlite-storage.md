@@ -101,6 +101,7 @@ write target and is preserved whether migration succeeds or fails.
 
 Owns: CODE internal/sqliteprovider/**
 Owns: CODE internal/sqlitestore/**
+Owns: CODE pkg/sqlitestore/**
 Owns: CODE internal/sqlbridge/**
 Owns: CODE internal/storecatalog/**
 Owns: TEST pkg/database/*
