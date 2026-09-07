@@ -50,7 +50,7 @@ const (
 // ToolAdaptationStoreID is the opaque broker catalog identity for learned tool
 // behavior. Application surfaces expose this identifier instead of a provider
 // path or filename.
-const ToolAdaptationStoreID database.StoreID = "global.tool-adaptation"
+const ToolAdaptationStoreID database.StoreID = "global/tool-adaptation"
 
 const toolAdaptationObservationsSchema = `CREATE TABLE tool_adaptation_observations (
     provider                 TEXT NOT NULL,

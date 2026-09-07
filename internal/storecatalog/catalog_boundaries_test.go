@@ -10,7 +10,7 @@ import (
 )
 
 func TestCatalogSnapshotsAndChannelIdentities(t *testing.T) {
-	if _, ok := (*Catalog)(nil).Lookup("global.auth"); ok {
+	if _, ok := (*Catalog)(nil).Lookup("global/auth"); ok {
 		t.Fatal("nil catalog lookup succeeded")
 	}
 	if got := (*Catalog)(nil).All(); got != nil {
@@ -18,12 +18,15 @@ func TestCatalogSnapshotsAndChannelIdentities(t *testing.T) {
 	}
 
 	home := t.TempDir()
-	catalog, err := Project(home, &config.Config{})
+	catalog, err := Project(catalogTestOptions(t, home, &config.Config{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := catalog.Lookup("missing"); ok {
 		t.Fatal("unknown catalog entry resolved")
+	}
+	if catalog.Home != home {
+		t.Fatalf("catalog home = %q", catalog.Home)
 	}
 	snapshot := catalog.All()
 	if len(snapshot) == 0 {
@@ -41,8 +44,8 @@ func TestCatalogSnapshotsAndChannelIdentities(t *testing.T) {
 		prefix      string
 		ok          bool
 	}{
-		{config.ChannelMatrix, " Team / Main ", "channel.matrix.team---main-", true},
-		{config.ChannelWhatsAppNative, "...", "channel.whatsapp.unnamed-", true},
+		{config.ChannelMatrix, " Team / Main ", "channel/matrix/team---main-", true},
+		{config.ChannelWhatsAppNative, "...", "channel/whatsapp/unnamed-", true},
 		{"telegram", "main", "", false},
 	} {
 		id, ok := ChannelStoreID(test.channelType, test.name)
@@ -53,9 +56,6 @@ func TestCatalogSnapshotsAndChannelIdentities(t *testing.T) {
 	long := logicalComponent(strings.Repeat("a", 100))
 	if len(strings.Split(long, "-")[0]) > 72 || !strings.Contains(long, "-") {
 		t.Fatalf("bounded logical component = %q", long)
-	}
-	if validID("") || validID("UPPER") || validID("bad/path") || validID(strings.Repeat("a", 129)) {
-		t.Fatal("invalid logical store identity accepted")
 	}
 }
 
@@ -76,19 +76,19 @@ func TestCatalogPathResolutionBoundaries(t *testing.T) {
 		})
 	}
 
-	resolved, err := eventDatabasePath(workspace, "~/events.db", projectedStorePath)
+	resolved, err := eventDatabasePath(workspace, "~/events.db", home, projectedStorePath)
 	if err != nil || resolved != filepath.Join(home, "events.db") {
 		t.Fatalf("home event database = %q, %v", resolved, err)
 	}
-	resolved, err = eventDatabasePath(workspace, "relative/events.db", projectedStorePath)
+	resolved, err = eventDatabasePath(workspace, "relative/events.db", home, projectedStorePath)
 	if err != nil || resolved != filepath.Join(workspace, "relative", "events.db") {
 		t.Fatalf("relative event database = %q, %v", resolved, err)
 	}
-	if _, err := eventDatabasePath(workspace, "bad\x00path", projectedStorePath); err == nil {
+	if _, err := eventDatabasePath(workspace, "bad\x00path", home, projectedStorePath); err == nil {
 		t.Fatal("event database accepted NUL")
 	}
 	for _, configured := range []string{"~", "~/nested", "relative", ""} {
-		if _, err := resolveWorkspaceWith(home, configured, projectedStorePath); err != nil {
+		if _, err := resolveWorkspaceWith(home, configured, home, projectedStorePath); err != nil {
 			t.Fatalf("resolve workspace %q: %v", configured, err)
 		}
 	}
@@ -135,7 +135,7 @@ func TestBuildDynamicChannelFaultsAndRelativeRoots(t *testing.T) {
 		GitWorkspaces: config.GitWorkspacesConfig{RootDir: "git-root"},
 		Channels:      config.ChannelsConfig{"matrix": matrix, "whatsapp": whatsapp, "off": nil},
 	}
-	catalog, err := Project(home, cfg)
+	catalog, err := Project(catalogTestOptions(t, home, cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,30 +148,30 @@ func TestBuildDynamicChannelFaultsAndRelativeRoots(t *testing.T) {
 	}
 
 	badDecode := &config.Channel{Enabled: true, Type: config.ChannelMatrix, Settings: config.RawNode(`{`)}
-	if _, err := Project(home, &config.Config{
+	if _, err := Project(catalogTestOptions(t, home, &config.Config{
 		Agents:   config.AgentsConfig{Defaults: config.AgentDefaults{Workspace: workspace}},
 		Channels: config.ChannelsConfig{"bad": badDecode},
-	}); err == nil || !strings.Contains(err.Error(), "matrix channel") {
+	})); err == nil || !strings.Contains(err.Error(), "matrix channel") {
 		t.Fatalf("matrix decode error = %v", err)
 	}
 	wrongMatrix := &config.Channel{Enabled: true, Type: config.ChannelMatrix, Settings: config.RawNode(`{}`)}
 	if err := wrongMatrix.Decode(&struct{}{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Project(home, &config.Config{
+	if _, err := Project(catalogTestOptions(t, home, &config.Config{
 		Agents:   config.AgentsConfig{Defaults: config.AgentDefaults{Workspace: workspace}},
 		Channels: config.ChannelsConfig{"wrong": wrongMatrix},
-	}); err == nil || !strings.Contains(err.Error(), "invalid settings") {
+	})); err == nil || !strings.Contains(err.Error(), "invalid settings") {
 		t.Fatalf("matrix settings error = %v", err)
 	}
 	wrongWhatsApp := &config.Channel{Enabled: true, Type: config.ChannelWhatsAppNative, Settings: config.RawNode(`{}`)}
 	if err := wrongWhatsApp.Decode(&struct{}{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Project(home, &config.Config{
+	if _, err := Project(catalogTestOptions(t, home, &config.Config{
 		Agents:   config.AgentsConfig{Defaults: config.AgentDefaults{Workspace: workspace}},
 		Channels: config.ChannelsConfig{"wrong": wrongWhatsApp},
-	}); err == nil || !strings.Contains(err.Error(), "invalid settings") {
+	})); err == nil || !strings.Contains(err.Error(), "invalid settings") {
 		t.Fatalf("WhatsApp settings error = %v", err)
 	}
 }
@@ -203,7 +203,7 @@ func TestCatalogBuildRejectsInvalidConfiguredRoots(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Project(home, cfg); err == nil {
+			if _, err := Project(catalogTestOptions(t, home, cfg)); err == nil {
 				t.Fatal("invalid configured root was accepted")
 			}
 		})
@@ -219,21 +219,21 @@ func TestCatalogBuildRejectsInvalidConfiguredRoots(t *testing.T) {
 		if err := channel.Decode(settings); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Project(home, &config.Config{
+		if _, err := Project(catalogTestOptions(t, home, &config.Config{
 			Agents:   config.AgentsConfig{Defaults: config.AgentDefaults{Workspace: workspace}},
 			Channels: config.ChannelsConfig{"bad": channel},
-		}); err == nil {
+		})); err == nil {
 			t.Fatalf("%s NUL store path was accepted", channelType)
 		}
 	}
-	if _, err := Project(" bad-home ", &config.Config{}); err == nil {
+	if _, err := Project(Options{Home: " bad-home ", Config: &config.Config{}}); err == nil {
 		t.Fatal("invalid catalog home was accepted")
 	}
-	if _, err := Build(home, &config.Config{
+	if _, err := Build(catalogTestOptions(t, home, &config.Config{
 		Agents:        config.AgentsConfig{Defaults: config.AgentDefaults{Workspace: workspace}},
 		GitWorkspaces: config.GitWorkspacesConfig{RootDir: "relative-git"},
 		Evolution:     config.EvolutionConfig{StateDir: "relative-evolution"},
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("relative physical roots: %v", err)
 	}
 }
@@ -264,19 +264,9 @@ func TestCatalogCanonicalSymlinkAndLegacyBoundaries(t *testing.T) {
 		t.Fatalf("missing legacy projection = %q, %v", got, err)
 	}
 
-	t.Setenv(config.EnvConfig, filepath.Join("relative", "config.json"))
-	if got := launcherConfigLegacyPath(root); filepath.Base(got) != "launcher-config.json" || !filepath.IsAbs(got) {
-		t.Fatalf("relative launcher legacy path = %q", got)
-	}
-	if channelTypeEnabled(&config.Config{Channels: config.ChannelsConfig{
-		"nil": nil, "off": {Enabled: false, Type: config.ChannelMatrix},
-	}}, config.ChannelMatrix) {
-		t.Fatal("disabled channel type reported enabled")
-	}
-	if !channelTypeEnabled(&config.Config{Channels: config.ChannelsConfig{
-		"on": {Enabled: true, Type: config.ChannelMatrix},
-	}}, config.ChannelMatrix) {
-		t.Fatal("enabled channel type was not detected")
+	got := launcherConfigLegacyPath(filepath.Join(root, "config.json"))
+	if filepath.Base(got) != "launcher-config.json" || !filepath.IsAbs(got) {
+		t.Fatalf("launcher legacy path = %q", got)
 	}
 	for _, invalid := range []string{" ", "bad\x00path"} {
 		if _, _, err := canonicalPath(invalid); err == nil {

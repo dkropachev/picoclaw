@@ -470,7 +470,7 @@ func configuredSessionWorkspaces(
 		seenSelector[selector] = input.workspace
 		storeID := memory.SessionsStoreID
 		if !input.primary {
-			parsed, parseErr := database.ParseStoreID("workspace." + selector + ".sessions")
+			parsed, parseErr := database.ParseStoreID("workspace/" + selector + "/sessions")
 			if parseErr != nil {
 				return nil, parseErr
 			}

@@ -27,7 +27,7 @@ const (
 	weixinBrokerTokenPageSize          = 64
 )
 
-const WeixinStoreID database.StoreID = "channel.weixin"
+const WeixinStoreID database.StoreID = "channel/weixin"
 
 type weixinBrokerTarget struct {
 	StoreID database.StoreID `json:"store_id"`

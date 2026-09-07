@@ -111,7 +111,7 @@ func TestModelCatalogBrokerRejectsWrongStoreID(t *testing.T) {
 	handler := NewModelCatalogBrokerHandler(t.TempDir())
 	t.Cleanup(func() { _ = handler.Close() })
 	payload, err := database.MarshalCanonical(modelCatalogPageRequest{
-		StoreID: "workspace.model-catalogs",
+		StoreID: "workspace/model-catalogs",
 	})
 	if err != nil {
 		t.Fatal(err)

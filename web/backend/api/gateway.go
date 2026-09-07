@@ -32,11 +32,17 @@ import (
 	"github.com/sipeed/picoclaw/web/backend/utils"
 )
 
-// gateway holds the state for the managed gateway process.
+// gateway holds lifecycle state for the launcher's embedded runtime and the
+// retained standalone-process compatibility path used by headless tooling.
 var gateway = struct {
+	operationMu         sync.Mutex
 	mu                  sync.Mutex
 	cmd                 *exec.Cmd
-	owned               bool // true if we started the process, false if we attached to an existing one
+	embedded            *embeddedGatewayRuntime
+	embeddedBlocked     bool
+	embeddedGeneration  uint64
+	hostClosing         bool
+	owned               bool // true when the launcher owns the active runtime
 	bootDefaultModel    string
 	bootConfigSignature string
 	runtimeStatus       string
@@ -267,6 +273,31 @@ func (h *Handler) validateGatewayPidData(
 	if pidData == nil || pidData.PID <= 0 {
 		return false, true, "invalid pid data"
 	}
+	if h != nil && h.embedGateway {
+		if pidData.PID != os.Getpid() {
+			return false, false, fmt.Sprintf(
+				"standalone gateway PID %d conflicts with embedded hosting",
+				pidData.PID,
+			)
+		}
+		gateway.mu.Lock()
+		matches := embeddedGatewayPIDDataMatchesLocked(pidData)
+		closing := gateway.hostClosing
+		starting := gateway.embedded != nil &&
+			(gateway.runtimeStatus == "starting" || gateway.runtimeStatus == "restarting" ||
+				gateway.runtimeStatus == "stopping")
+		gateway.mu.Unlock()
+		if matches {
+			return true, true, ""
+		}
+		if closing {
+			return false, false, "launcher is shutting down"
+		}
+		if starting {
+			return false, false, "embedded gateway has not published readiness"
+		}
+		return false, true, "PID metadata does not match the live embedded gateway generation"
+	}
 
 	if gatewayProcess, inspected := gatewayProcessMatcher(pidData.PID); inspected {
 		if !gatewayProcess {
@@ -299,13 +330,19 @@ func (h *Handler) sanitizeGatewayPidData(pidData *ppid.PidFileData, cfg *config.
 	}
 
 	logger.Warnf("ignore pid file for PID %d: %s", pidData.PID, reason)
-	if decisive && ppid.RemovePidFileIfPID(globalConfigDir(), pidData.PID) {
+	removed := false
+	if decisive && pidData.Token != "" {
+		removed = ppid.RemovePidFileIfMatch(globalConfigDir(), pidData.PID, pidData.Token)
+	} else if decisive && (h == nil || !h.embedGateway) {
+		removed = ppid.RemovePidFileIfPID(globalConfigDir(), pidData.PID)
+	}
+	if removed {
 		logger.Warnf("removed stale pid file for PID %d", pidData.PID)
 	}
 	return nil
 }
 
-// registerGatewayRoutes binds gateway lifecycle endpoints to the ServeMux.
+// registerGatewayRoutes binds gateway runtime lifecycle endpoints to the ServeMux.
 func (h *Handler) registerGatewayRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/gateway/status", h.handleGatewayStatus)
 	mux.HandleFunc("GET /api/gateway/logs", h.handleGatewayLogs)
@@ -318,6 +355,10 @@ func (h *Handler) registerGatewayRoutes(mux *http.ServeMux) {
 // TryAutoStartGateway checks whether gateway start preconditions are met and
 // starts it when possible. Intended to be called by the backend at startup.
 func (h *Handler) TryAutoStartGateway() {
+	if h.embedGateway {
+		h.tryAutoStartEmbeddedGateway()
+		return
+	}
 	// Check PID file first to detect an already-running gateway.
 	pidData := h.sanitizeGatewayPidData(ppid.ReadPidFileWithCheck(globalConfigDir()), nil)
 	if pidData != nil {
@@ -1148,10 +1189,13 @@ func gatewayStatusWithoutHealthLocked() string {
 		}
 		return "error"
 	}
+	if gateway.runtimeStatus == "stopping" && gateway.embedded != nil {
+		return "stopping"
+	}
 	if gateway.runtimeStatus == "running" {
 		// For attached processes there is no waiter goroutine; degrade stale
 		// running state once the tracked process exits.
-		if !isCmdProcessAliveLocked(gateway.cmd) {
+		if !gatewayRuntimeAliveLocked() {
 			gateway.cmd = nil
 			gateway.owned = false
 			gateway.bootDefaultModel = ""
@@ -1188,6 +1232,17 @@ func waitForGatewayProcessExit(cmd *exec.Cmd, timeout time.Duration) bool {
 // is properly terminated. It only stops processes that were started by this handler,
 // not processes that were attached to from existing instances.
 func (h *Handler) StopGateway() {
+	if h != nil && h.embedGateway {
+		pid, running, err := h.stopEmbeddedGateway()
+		if err != nil {
+			logger.ErrorC("gateway", fmt.Sprintf("Failed to stop embedded gateway (PID %d): %v", pid, err))
+			return
+		}
+		if running {
+			logger.InfoC("gateway", fmt.Sprintf("Embedded gateway stopped (PID: %d)", pid))
+		}
+		return
+	}
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
 
@@ -1452,10 +1507,14 @@ func (h *Handler) startGatewayLocked(initialStatus string, existingPid int) (int
 	return pid, nil
 }
 
-// handleGatewayStart starts the picoclaw gateway subprocess.
+// handleGatewayStart starts the configured gateway runtime.
 //
 //	POST /api/gateway/start
 func (h *Handler) handleGatewayStart(w http.ResponseWriter, r *http.Request) {
+	if h.embedGateway {
+		h.handleEmbeddedGatewayStart(w)
+		return
+	}
 	// Check PID file first to detect an already-running gateway.
 	pidData := h.sanitizeGatewayPidData(ppid.ReadPidFileWithCheck(globalConfigDir()), nil)
 	if pidData != nil {
@@ -1539,12 +1598,16 @@ func (h *Handler) handleGatewayStart(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleGatewayStop stops the running gateway subprocess gracefully.
+// handleGatewayStop stops the running gateway runtime gracefully.
 // Note: Unlike StopGateway (which only stops self-started processes), this API endpoint
 // stops any gateway process, including attached ones. This is intentional for user control.
 //
 //	POST /api/gateway/stop
 func (h *Handler) handleGatewayStop(w http.ResponseWriter, r *http.Request) {
+	if h.embedGateway {
+		h.handleEmbeddedGatewayStop(w)
+		return
+	}
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
 
@@ -1569,10 +1632,13 @@ func (h *Handler) handleGatewayStop(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// RestartGateway restarts the gateway process. This is a non-blocking operation
-// that stops the current gateway (if running) and starts a new one.
-// Returns the PID of the new gateway process or an error.
+// RestartGateway restarts the gateway runtime. Embedded mode joins the retired
+// generation before starting its replacement; standalone compatibility mode
+// retains the historical process behavior.
 func (h *Handler) RestartGateway() (int, error) {
+	if h != nil && h.embedGateway {
+		return h.restartEmbeddedGateway()
+	}
 	ready, reason, err := h.gatewayStartReady()
 	if err != nil {
 		return 0, fmt.Errorf("failed to validate gateway start conditions: %w", err)
@@ -1647,7 +1713,7 @@ func (e *preconditionFailedError) IsBadRequest() bool {
 	return true
 }
 
-// handleGatewayRestart stops the gateway (if running) and starts a new instance.
+// handleGatewayRestart stops the gateway (if running) and starts a new runtime.
 //
 //	POST /api/gateway/restart
 func (h *Handler) handleGatewayRestart(w http.ResponseWriter, r *http.Request) {
@@ -1714,8 +1780,14 @@ func (h *Handler) gatewayStatusData() map[string]any {
 		}
 	}
 
-	// Primary detection: read PID file and check if process is alive.
-	pidData := h.sanitizeGatewayPidData(ppid.ReadPidFileWithCheck(globalConfigDir()), cfg)
+	// Primary detection: read PID authority. Embedded hosting never adopts a
+	// foreign runtime; report that state as an explicit conflict instead.
+	observedPIDData := ppid.ReadPidFileWithCheck(globalConfigDir())
+	externalConflict := h.embedGateway && observedPIDData != nil && observedPIDData.PID != os.Getpid()
+	var pidData *ppid.PidFileData
+	if !externalConflict {
+		pidData = h.sanitizeGatewayPidData(observedPIDData, cfg)
+	}
 	if pidData != nil {
 		gateway.mu.Lock()
 		gateway.pidData = pidData
@@ -1725,7 +1797,8 @@ func (h *Handler) gatewayStatusData() map[string]any {
 		setGatewayRuntimeStatusLocked("running")
 
 		// Attach if we don't already track this PID.
-		if gateway.cmd == nil || gateway.cmd.Process == nil || gateway.cmd.Process.Pid != pidData.PID {
+		if !h.embedGateway &&
+			(gateway.cmd == nil || gateway.cmd.Process == nil || gateway.cmd.Process.Pid != pidData.PID) {
 			_ = attachToGatewayProcessLocked(pidData.PID, cfg)
 		}
 
@@ -1751,6 +1824,33 @@ func (h *Handler) gatewayStatusData() map[string]any {
 		}
 		gateway.mu.Unlock()
 	}
+	if h.embedGateway {
+		gateway.mu.Lock()
+		blocked := gateway.embeddedBlocked
+		closing := gateway.hostClosing
+		embeddedStatus := gateway.runtimeStatus
+		gateway.mu.Unlock()
+		data["gateway_embedded"] = true
+		if closing {
+			data["gateway_start_allowed"] = false
+			data["gateway_start_reason"] = "launcher is shutting down"
+		} else if externalConflict {
+			data["gateway_status"] = "error"
+			data["gateway_external_conflict"] = true
+			data["gateway_start_allowed"] = false
+			data["gateway_start_reason"] = fmt.Sprintf(
+				"standalone gateway PID %d must stop before embedded startup",
+				observedPIDData.PID,
+			)
+		} else if blocked {
+			data["gateway_start_allowed"] = false
+			data["gateway_start_reason"] = "embedded gateway did not retire cleanly; restart the launcher"
+		} else if embeddedStatus == "starting" || embeddedStatus == "restarting" ||
+			embeddedStatus == "stopping" {
+			data["gateway_start_allowed"] = false
+			data["gateway_start_reason"] = "embedded gateway lifecycle transition is in progress"
+		}
+	}
 
 	gatewayStatus, _ := data["gateway_status"].(string)
 	currentConfigSignature := computeGatewayRuntimeSignature(cfg)
@@ -1763,14 +1863,16 @@ func (h *Handler) gatewayStatusData() map[string]any {
 		gatewayStatus,
 	)
 
-	ready, reason, readyErr := h.gatewayStartReady()
-	if readyErr != nil {
-		data["gateway_start_allowed"] = false
-		data["gateway_start_reason"] = readyErr.Error()
-	} else {
-		data["gateway_start_allowed"] = ready
-		if !ready {
-			data["gateway_start_reason"] = reason
+	if allowed, fixed := data["gateway_start_allowed"].(bool); !fixed || allowed {
+		ready, reason, readyErr := h.gatewayStartReady()
+		if readyErr != nil {
+			data["gateway_start_allowed"] = false
+			data["gateway_start_reason"] = readyErr.Error()
+		} else {
+			data["gateway_start_allowed"] = ready
+			if !ready {
+				data["gateway_start_reason"] = reason
+			}
 		}
 	}
 

@@ -22,7 +22,7 @@ func TestWindowsOwnerOnlySDDL(t *testing.T) {
 
 func TestWindowsOwnerOnlySDDLRejectsInjection(t *testing.T) {
 	for _, value := range []string{
-		"", "BA", "S-1", "S-1-5-21)D:(A;;GA;;;WD", "S-1-5-name",
+		"", "BA", "S-1", "S-123", "S-1--2", "S-1-5-21)D:(A;;GA;;;WD", "S-1-5-name",
 	} {
 		if _, err := windowsOwnerOnlySDDL(value, true); err == nil {
 			t.Errorf("SID %q accepted", value)

@@ -5,46 +5,62 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
+	"unicode/utf8"
+)
+
+const (
+	maxSQLiteSchemaIdentifierBytes = 1024
+	maxSQLiteExpectedUniqueIndexes = 256
 )
 
 type schemaQueryer interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryRowContext(ctx context.Context, query string, arguments ...any) *sql.Row
 }
 
-// ValidateUniqueIndexes owns the SQLite-specific index catalog query used by
-// broker-side schema adapters.
+// ValidateUniqueIndexes requires a main-schema table to have exactly the named
+// set of manually-created unique indexes. PRIMARY KEY and inline UNIQUE
+// auto-indexes are represented by table DDL and are intentionally ignored.
 func ValidateUniqueIndexes(
 	ctx context.Context,
 	queryer schemaQueryer,
 	table string,
 	expected ...string,
 ) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if queryer == nil || strings.TrimSpace(table) == "" || strings.ContainsRune(table, 0) {
+	if ctx == nil || queryer == nil || !validSQLiteSchemaIdentifier(table) ||
+		len(expected) > maxSQLiteExpectedUniqueIndexes {
 		return errors.New("SQLite provider unique-index validation is invalid")
 	}
-	expected = append([]string(nil), expected...)
+
+	seen := make(map[string]struct{}, len(expected))
 	for _, name := range expected {
-		if strings.TrimSpace(name) == "" || strings.ContainsRune(name, 0) {
+		if !validSQLiteSchemaIdentifier(name) {
 			return errors.New("SQLite provider expected unique-index name is invalid")
 		}
-	}
-	sort.Strings(expected)
-	for index := 1; index < len(expected); index++ {
-		if expected[index-1] == expected[index] {
+		if _, duplicate := seen[name]; duplicate {
 			return errors.New("SQLite provider expected unique-index name is duplicated")
 		}
+		seen[name] = struct{}{}
 	}
+
+	var tableCount int
+	if err := queryer.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM main.sqlite_schema WHERE type = 'table' AND name = ? COLLATE BINARY`,
+		table,
+	).Scan(&tableCount); err != nil {
+		return fmt.Errorf("inspect SQLite provider table: %w", err)
+	}
+	if tableCount != 1 {
+		return errors.New("required SQLite provider table is missing")
+	}
+
 	for _, name := range expected {
 		var count int
 		if err := queryer.QueryRowContext(
 			ctx,
-			`SELECT COUNT(*) FROM pragma_index_list(?)
-			  WHERE name = ? AND "unique" = 1 AND origin = 'c'`,
+			`SELECT COUNT(*) FROM pragma_index_list(?, 'main')
+			  WHERE name = ? COLLATE BINARY AND "unique" = 1 AND origin = 'c'`,
 			table,
 			name,
 		).Scan(&count); err != nil {
@@ -54,21 +70,23 @@ func ValidateUniqueIndexes(
 			return errors.New("required SQLite provider unique index is missing")
 		}
 	}
-	query := `SELECT COUNT(*) FROM pragma_index_list(?)
-		WHERE "unique" = 1 AND origin = 'c'`
-	arguments := []any{table}
-	if len(expected) > 0 {
-		query += " AND name NOT IN (" + strings.TrimRight(strings.Repeat("?,", len(expected)), ",") + ")"
-		for _, name := range expected {
-			arguments = append(arguments, name)
-		}
-	}
-	var unexpected int
-	if err := queryer.QueryRowContext(ctx, query, arguments...).Scan(&unexpected); err != nil {
+
+	var total int
+	if err := queryer.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM pragma_index_list(?, 'main')
+		  WHERE "unique" = 1 AND origin = 'c'`,
+		table,
+	).Scan(&total); err != nil {
 		return fmt.Errorf("inspect SQLite provider unique indexes: %w", err)
 	}
-	if unexpected != 0 {
+	if total != len(expected) {
 		return errors.New("unexpected SQLite provider unique index exists")
 	}
 	return nil
+}
+
+func validSQLiteSchemaIdentifier(value string) bool {
+	return value != "" && value == strings.TrimSpace(value) && utf8.ValidString(value) &&
+		len(value) <= maxSQLiteSchemaIdentifierBytes && !strings.ContainsRune(value, 0)
 }

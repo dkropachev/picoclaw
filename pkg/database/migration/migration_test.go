@@ -59,7 +59,7 @@ func TestMigrationBacksUpSelectedStoreAndLegacyInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := mustStoreID(t, "workspace.workflows")
+	id := mustStoreID(t, "workspace/workflows")
 	result, err := engine.Run(t.Context(), Options{
 		Stores:    []catalog.StoreID{id},
 		BackupDir: filepath.Join(home, "safe-backups"),
@@ -107,7 +107,7 @@ func TestMigrationDryRunCreatesBackupWithoutMutatingStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := mustStoreID(t, "workspace.workflows")
+	id := mustStoreID(t, "workspace/workflows")
 	backupParent := filepath.Join(home, "dry-run-backup")
 	result, err := engine.Run(t.Context(), Options{
 		Stores: []catalog.StoreID{id}, BackupDir: backupParent, DryRun: true,
@@ -182,7 +182,7 @@ func TestMigrationPreservesBackupWhenGenerationIsCorrupt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := mustStoreID(t, "global.auth")
+	id := mustStoreID(t, "global/auth")
 	result, err := engine.Run(t.Context(), Options{
 		Stores: []catalog.StoreID{id}, BackupDir: filepath.Join(home, "backups"),
 	})
@@ -216,7 +216,7 @@ func TestMigrationRejectsTooNewSchemaAfterBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := mustStoreID(t, "workspace.workflows")
+	id := mustStoreID(t, "workspace/workflows")
 	result, err := engine.Run(t.Context(), Options{
 		Stores: []catalog.StoreID{id}, BackupDir: filepath.Join(home, "backups"),
 	})
@@ -247,7 +247,7 @@ func TestMigrationRejectsSymlinkedBackupAncestor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := mustStoreID(t, "workspace.workflows")
+	id := mustStoreID(t, "workspace/workflows")
 	result, err := engine.Run(t.Context(), Options{
 		Stores: []catalog.StoreID{id}, BackupDir: filepath.Join(alias, "nested"),
 	})
@@ -279,7 +279,7 @@ func TestMigrationSnapshotsAndRecoversHotWALGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := mustStoreID(t, "global.auth")
+	id := mustStoreID(t, "global/auth")
 	result, err := engine.Run(t.Context(), Options{
 		Stores: []catalog.StoreID{id}, BackupDir: filepath.Join(home, "backups"),
 	})
@@ -331,7 +331,7 @@ func TestMigrationSnapshotsAndRecoversHotRollbackJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := engine.Run(t.Context(), Options{
-		Stores:    []catalog.StoreID{mustStoreID(t, "global.auth")},
+		Stores:    []catalog.StoreID{mustStoreID(t, "global/auth")},
 		BackupDir: filepath.Join(home, "backups"),
 	})
 	if err != nil {
@@ -339,7 +339,7 @@ func TestMigrationSnapshotsAndRecoversHotRollbackJournal(t *testing.T) {
 	}
 	journalBackedUp := false
 	for _, file := range readManifest(t, result.BackupDir).Files {
-		journalBackedUp = journalBackedUp || file.StoreID == "global.auth" && file.Role == "journal"
+		journalBackedUp = journalBackedUp || file.StoreID == "global/auth" && file.Role == "journal"
 	}
 	if !journalBackedUp {
 		t.Fatal("mandatory backup omitted the hot rollback journal")
@@ -396,7 +396,7 @@ func TestCurrentWorkflowRecoverySignatureIsBackedUpRecoveredAndClassified(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := mustStoreID(t, "workspace.workflows")
+	id := mustStoreID(t, "workspace/workflows")
 	result, err := engine.Run(t.Context(), Options{
 		Stores: []catalog.StoreID{id}, BackupDir: filepath.Join(home, "backups"),
 	})
@@ -456,7 +456,7 @@ func TestWorkflowMigrationVerificationFailurePreservesMalformedLegacyInput(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := mustStoreID(t, "workspace.workflows")
+	id := mustStoreID(t, "workspace/workflows")
 	result, err := engine.Run(t.Context(), Options{
 		Stores: []catalog.StoreID{id}, BackupDir: filepath.Join(home, "backups"),
 	})
@@ -492,7 +492,7 @@ func TestMigrationPreservesCurrent166MiBWorkflowFixtureBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := mustStoreID(t, "workspace.workflows")
+	id := mustStoreID(t, "workspace/workflows")
 	result, err := engine.Run(t.Context(), Options{
 		Stores: []catalog.StoreID{id}, BackupDir: filepath.Join(home, "backups"),
 	})
@@ -502,7 +502,7 @@ func TestMigrationPreservesCurrent166MiBWorkflowFixtureBackup(t *testing.T) {
 	manifest := readManifest(t, result.BackupDir)
 	var backedUp bool
 	for _, file := range manifest.Files {
-		if file.StoreID == "workspace.workflows" && file.Role == "database" {
+		if file.StoreID == "workspace/workflows" && file.Role == "database" {
 			backedUp = true
 			if file.Size != fixtureSize {
 				t.Fatalf("large workflow backup size = %d, want %d", file.Size, fixtureSize)
@@ -645,9 +645,9 @@ func TestMigrationAcceptsStableStoreIDPresentInFencedCatalog(t *testing.T) {
 	}
 	// Stable logical identity selects only the matching entry in the catalog
 	// rebuilt under this home's fence; it cannot smuggle a physical path.
-	id := mustStoreID(t, "global.auth")
+	id := mustStoreID(t, "global/auth")
 	result, err := engine.Run(t.Context(), Options{Stores: []catalog.StoreID{id}, DryRun: true})
-	if err != nil || len(result.Stores) != 1 || result.Stores[0].ID.String() != "global.auth" {
+	if err != nil || len(result.Stores) != 1 || result.Stores[0].ID.String() != "global/auth" {
 		t.Fatalf("stable logical selection = %#v, error=%v", result, err)
 	}
 }

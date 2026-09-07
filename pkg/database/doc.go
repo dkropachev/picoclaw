@@ -1,6 +1,7 @@
-// Package database defines PicoClaw's provider-neutral, single-owner database
-// broker boundary. It contains only logical store identities, typed readiness,
-// structured errors, authenticated local IPC, discovery, process fencing, and
-// broker lifecycle primitives. Physical database providers and offline
-// migration implementations live behind this boundary.
+// Package database defines the provider-neutral protocol and owner-only local
+// IPC foundation for PicoClaw's database broker. It provides opaque store
+// identities, readiness, bounded errors, canonical frames, authenticated local
+// client/server transport, secure discovery, process fences, broker lifecycle,
+// and idempotency records. Physical providers, catalogs, supervision, migration,
+// commands, and application adoption are introduced by later layers.
 package database

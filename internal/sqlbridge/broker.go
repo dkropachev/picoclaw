@@ -145,7 +145,7 @@ func (handler *BrokerHandler) pool(target Target) (*sql.DB, error) {
 	if err := validateTarget(target); err != nil || target.Mode != ModeRuntime {
 		return nil, database.NewError(database.CodeUnauthorized, "SQL bridge target is not available online")
 	}
-	spec, ok := handler.catalog.Lookup(string(target.StoreID))
+	spec, ok := handler.catalog.Lookup(target.StoreID.String())
 	if !ok || (spec.Domain != "channel-matrix" && spec.Domain != "channel-whatsapp") {
 		return nil, database.NewError(database.CodeUnauthorized, "SQL bridge store is not cataloged")
 	}

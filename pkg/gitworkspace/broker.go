@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	InventoryStoreID database.StoreID = "global.git-workspace-inventory"
+	InventoryStoreID database.StoreID = "global/git-workspace-inventory"
 	BrokerDomain                      = "git-workspace-inventory"
 	BrokerVersion                     = 1
 

@@ -49,7 +49,7 @@ commit. The callback receives the canonical normalized repository identity,
 never the caller's raw repository spelling.
 
 Inventory persistence is the required logical
-`global.git-workspace-inventory` broker store. Clients hold a renewable broker
+`global/git-workspace-inventory` broker store. Clients hold a renewable broker
 lease across load, Git/filesystem effects, and generation-CAS save; snapshots
 cross IPC in bounded digest-checked chunks, while the supervisor retains the
 only provider pool. Runtime manager construction never opens `inventory.db` or

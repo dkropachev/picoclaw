@@ -23,7 +23,7 @@ const (
 	authBrokerVersion = 1
 )
 
-const GlobalAuthStoreID database.StoreID = "global.auth"
+const GlobalAuthStoreID database.StoreID = "global/auth"
 
 const (
 	authBrokerPageItems  = 64

@@ -13,7 +13,7 @@ import (
 )
 
 func TestDriverConnectionStatementAndTransactionBoundaries(t *testing.T) {
-	target := Target{StoreID: mustStoreID(t, "channel.matrix.coverage"), Mode: ModeRuntime}
+	target := Target{StoreID: mustStoreID(t, "channel/matrix/coverage"), Mode: ModeRuntime}
 	dsn, err := EncodeDSN(target.StoreID, target.Mode)
 	if err != nil {
 		t.Fatal(err)

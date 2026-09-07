@@ -746,7 +746,7 @@ func configuredSessionsDirectory(
 			if selectorErr != nil {
 				return "", selectorErr
 			}
-			candidateID, selectorErr = database.ParseStoreID("workspace." + selector + ".sessions")
+			candidateID, selectorErr = database.ParseStoreID("workspace/" + selector + "/sessions")
 			if selectorErr != nil {
 				return "", selectorErr
 			}

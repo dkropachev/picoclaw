@@ -920,10 +920,12 @@ func TestCoverageStagedGenerationHelperEdges(t *testing.T) {
 func TestCoverageProviderSchemaQueryFailure(t *testing.T) {
 	canary := errors.New("schema query canary")
 	if err := ValidateUniqueIndexes(t.Context(), openProviderScript(t,
+		providerRow("sqlite_schema", int64(1)),
 		providerScriptStep{query: "pragma_index_list", err: canary}), "items", "items_key"); !errors.Is(err, canary) {
 		t.Fatalf("required index query error = %v", err)
 	}
 	if err := ValidateUniqueIndexes(t.Context(), openProviderScript(t,
+		providerRow("sqlite_schema", int64(1)),
 		providerRow("pragma_index_list", int64(1)),
 		providerScriptStep{query: "pragma_index_list", err: canary},
 	), "items", "items_key"); !errors.Is(err, canary) {

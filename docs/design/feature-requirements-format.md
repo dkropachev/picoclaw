@@ -133,9 +133,11 @@ does not increase or the exact coverage ratio does not regress; it fails only
 when debt increases and the ratio regresses. Deleting covered legacy code
 therefore passes when debt does not grow, even if percentage or
 covered-statement count falls. Overlapping ownership evaluates every owning
-feature, while changed blocks are deduplicated. Rare OS, cryptographic, cleanup,
-and uncertain-failure branches remain in the denominator; source-level coverage
-exclusions and waivers are not permitted.
+feature, while changed blocks are deduplicated. Rare cryptographic, cleanup,
+and uncertain-failure branches compiled for the active coverage target remain
+in the denominator; source-level coverage exclusions and waivers are not
+permitted. Target-specific builds remain mandatory for code excluded by the
+active target's build constraints.
 
 ## Why This Format
 

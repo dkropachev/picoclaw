@@ -32,7 +32,7 @@ const (
 
 const defaultEvaluationBrokerLeaseTTL = 30 * time.Second
 
-const EvaluationStoreID database.StoreID = "workspace.repository-evaluations"
+const EvaluationStoreID database.StoreID = "workspace/repository-evaluations"
 
 type evaluationTarget struct {
 	StoreID database.StoreID `json:"store_id"`

@@ -65,7 +65,7 @@ func TestSnapshotPropagatesRealUnreadableSourceFailures(t *testing.T) {
 				t.Skip("current user can open mode-000 files")
 			}
 
-			spec := storecatalog.Spec{ID: "global.test", Path: filepath.Join(home, "store.db")}
+			spec := storecatalog.Spec{ID: "global/test", Path: filepath.Join(home, "store.db")}
 			if test.generation {
 				spec.Path = source
 			} else {

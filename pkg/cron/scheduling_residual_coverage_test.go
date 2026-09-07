@@ -37,7 +37,7 @@ func TestCronBrokerResidualHandlerAndWorkspaceBranches(t *testing.T) {
 		t.Fatalf("nil-context resolve error = %v", err)
 	}
 	if _, err := handler.Handle(t.Context(), request(
-		cronOperationPreflight, cronStoreRequest{StoreID: "global.auth"},
+		cronOperationPreflight, cronStoreRequest{StoreID: "global/auth"},
 	)); database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("foreign preflight error = %v", err)
 	}

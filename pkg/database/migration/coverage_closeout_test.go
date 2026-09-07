@@ -34,7 +34,7 @@ func TestCoverageMigrationAdapterDispatchAndMetadata(t *testing.T) {
 	for _, domain := range domains {
 		t.Run(domain, func(t *testing.T) {
 			spec := storecatalog.Spec{
-				ID: domain + ".store", Domain: domain, Path: path,
+				ID: domain + "/store", Domain: domain, Path: path,
 				LegacyRoots: []string{filepath.Join(root, "launcher-config.json")},
 			}
 			_ = applyDomainMigrationAdapter(t.Context(), spec)
@@ -101,7 +101,7 @@ func TestCoverageMigrationSelectionAndEngineBoundaries(t *testing.T) {
 	if _, _, err := selectStores(physical, []database.StoreID{"invalid id"}); !errors.Is(err, ErrUnknownStore) {
 		t.Fatalf("invalid selection = %v", err)
 	}
-	authID := mustStoreID(t, "global.auth")
+	authID := mustStoreID(t, "global/auth")
 	if _, _, err := selectStores(
 		physical,
 		[]database.StoreID{authID, authID},
@@ -109,13 +109,13 @@ func TestCoverageMigrationSelectionAndEngineBoundaries(t *testing.T) {
 		!strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("duplicate selection = %v", err)
 	}
-	if _, _, err := selectStores(physical, []database.StoreID{"global.unknown"}); !errors.Is(err, ErrUnknownStore) {
+	if _, _, err := selectStores(physical, []database.StoreID{"global/unknown"}); !errors.Is(err, ErrUnknownStore) {
 		t.Fatalf("unknown selection = %v", err)
 	}
 	selected, selectedIDs, err := selectStores(physical, []database.StoreID{
-		mustStoreID(t, "workspace.workflows"), authID,
+		mustStoreID(t, "workspace/workflows"), authID,
 	})
-	if err != nil || len(selected) != 2 || selected[0].ID != "global.auth" ||
+	if err != nil || len(selected) != 2 || selected[0].ID != "global/auth" ||
 		selectedIDs[0] != authID {
 		t.Fatalf("sorted selection = %#v / %#v / %v", selected, selectedIDs, err)
 	}
@@ -320,7 +320,7 @@ func TestCoverageBackupCopyBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	record, err := copyBackupFile(
-		t.Context(), backup, "global.test", "legacy", source, filepath.Join("items", "source"),
+		t.Context(), backup, "global/test", "legacy", source, filepath.Join("items", "source"),
 	)
 	if err != nil || record.Size != int64(len(payload)) || record.SHA256 == "" ||
 		record.Backup != "items/source" {
@@ -399,7 +399,7 @@ func TestCoverageSnapshotRejectsAliasesAndUnsafeMembers(t *testing.T) {
 				if err := os.WriteFile(path+"-wal", []byte("wal"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				spec := storecatalog.Spec{ID: "global.test", Path: path}
+				spec := storecatalog.Spec{ID: "global/test", Path: path}
 				return spec, &storecatalog.Catalog{Home: home, Specs: []storecatalog.Spec{spec}}
 			},
 		},
@@ -410,7 +410,7 @@ func TestCoverageSnapshotRejectsAliasesAndUnsafeMembers(t *testing.T) {
 				if err := os.Mkdir(path, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				spec := storecatalog.Spec{ID: "global.test", Path: path}
+				spec := storecatalog.Spec{ID: "global/test", Path: path}
 				return spec, &storecatalog.Catalog{Home: home, Specs: []storecatalog.Spec{spec}}
 			},
 		},
@@ -437,7 +437,7 @@ func TestCoverageSnapshotRejectsAliasesAndUnsafeMembers(t *testing.T) {
 		if err := os.Link(path, legacy); err != nil {
 			t.Skipf("hard links unavailable: %v", err)
 		}
-		spec := storecatalog.Spec{ID: "global.test", Path: path, LegacyRoots: []string{legacy}}
+		spec := storecatalog.Spec{ID: "global/test", Path: path, LegacyRoots: []string{legacy}}
 		physical := &storecatalog.Catalog{Home: home, Specs: []storecatalog.Spec{spec}}
 		engine := &Engine{home: home, config: &config.Config{}, now: time.Now}
 		if _, err := engine.snapshot(t.Context(), physical, []storecatalog.Spec{spec},
@@ -448,7 +448,7 @@ func TestCoverageSnapshotRejectsAliasesAndUnsafeMembers(t *testing.T) {
 
 	t.Run("canceled", func(t *testing.T) {
 		home := t.TempDir()
-		spec := storecatalog.Spec{ID: "global.test", Path: filepath.Join(home, "store.db")}
+		spec := storecatalog.Spec{ID: "global/test", Path: filepath.Join(home, "store.db")}
 		physical := &storecatalog.Catalog{Home: home, Specs: []storecatalog.Spec{spec}}
 		engine := &Engine{home: home, config: &config.Config{}, now: time.Now}
 		ctx, cancel := context.WithCancel(context.Background())
@@ -469,7 +469,7 @@ func TestCoverageSnapshotDeduplicatesAndRejectsPhysicalLegacyAliases(t *testing.
 			t.Fatal(err)
 		}
 		spec := storecatalog.Spec{
-			ID: "global.test", Path: filepath.Join(home, "store.db"),
+			ID: "global/test", Path: filepath.Join(home, "store.db"),
 			LegacyRoots: []string{legacy, legacy},
 		}
 		physical := &storecatalog.Catalog{Home: home, Specs: []storecatalog.Spec{spec}}
@@ -499,7 +499,7 @@ func TestCoverageSnapshotDeduplicatesAndRejectsPhysicalLegacyAliases(t *testing.
 			t.Skipf("hard links unavailable: %v", err)
 		}
 		spec := storecatalog.Spec{
-			ID: "global.test", Path: filepath.Join(home, "store.db"),
+			ID: "global/test", Path: filepath.Join(home, "store.db"),
 			LegacyRoots: []string{first, second},
 		}
 		physical := &storecatalog.Catalog{Home: home, Specs: []storecatalog.Spec{spec}}

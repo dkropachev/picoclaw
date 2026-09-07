@@ -127,6 +127,8 @@ func resetGatewayTestState(t *testing.T) {
 	originalRestartGracePeriod := gatewayRestartGracePeriod
 	originalRestartForceKillWindow := gatewayRestartForceKillWindow
 	originalRestartPollInterval := gatewayRestartPollInterval
+	originalEmbeddedRunner := gatewayRunEmbedded
+	originalEmbeddedStopLimit := embeddedGatewayStopLimit
 	t.Setenv("PICOCLAW_HOME", t.TempDir())
 	clearGatewayTestState()
 	t.Cleanup(func() {
@@ -137,24 +139,36 @@ func resetGatewayTestState(t *testing.T) {
 		gatewayRestartGracePeriod = originalRestartGracePeriod
 		gatewayRestartForceKillWindow = originalRestartForceKillWindow
 		gatewayRestartPollInterval = originalRestartPollInterval
+		gatewayRunEmbedded = originalEmbeddedRunner
+		embeddedGatewayStopLimit = originalEmbeddedStopLimit
 
 		clearGatewayTestState()
 	})
 }
 
 func clearGatewayTestState() {
+	gateway.operationMu.Lock()
+	defer gateway.operationMu.Unlock()
 	gateway.mu.Lock()
-	defer gateway.mu.Unlock()
+	runtime := gateway.embedded
 
 	// Never signal an inherited process here. A test that owns a subprocess is
 	// responsible for its cleanup; shared-state reset only drops authority.
 	gateway.cmd = nil
+	gateway.embedded = nil
+	gateway.embeddedBlocked = false
+	gateway.embeddedGeneration++
+	gateway.hostClosing = false
 	gateway.pidData = nil
 	gateway.owned = false
 	gateway.bootDefaultModel = ""
 	gateway.bootConfigSignature = ""
 	gateway.picoToken = ""
 	setGatewayRuntimeStatusLocked("stopped")
+	gateway.mu.Unlock()
+	if runtime != nil {
+		runtime.cancel()
+	}
 }
 
 func TestResetGatewayTestStateDropsInheritedProcessWithoutSignalingIt(t *testing.T) {

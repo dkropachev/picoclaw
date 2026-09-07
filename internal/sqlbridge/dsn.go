@@ -103,14 +103,11 @@ func validateTarget(target Target) error {
 
 func bridgeStoreIDAllowed(storeID database.StoreID) bool {
 	value := string(storeID)
-	if strings.Contains(value, "/") {
-		return false
-	}
-	for _, prefix := range []string{"channel.matrix.", "channel.whatsapp."} {
+	for _, prefix := range []string{"channel/matrix/", "channel/whatsapp/"} {
 		if strings.HasPrefix(value, prefix) {
 			suffix := strings.TrimPrefix(value, prefix)
 			return suffix != "" && suffix[0] != '.' && suffix[len(suffix)-1] != '.' &&
-				!strings.Contains(suffix, "..")
+				!strings.Contains(suffix, "..") && !strings.Contains(suffix, "/")
 		}
 	}
 	return false

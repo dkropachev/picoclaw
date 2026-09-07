@@ -40,17 +40,6 @@ func TestStructuredErrorCodesAreStableAndMatchable(t *testing.T) {
 	}
 }
 
-func TestDiscoveryErrorsAreStructuredAndDoNotExposePaths(t *testing.T) {
-	missing := t.TempDir() + "/private/missing-home"
-	_, err := Connect(missing)
-	if CodeOf(err) != CodeUnavailable {
-		t.Fatalf("Connect() error = %v, want Unavailable", err)
-	}
-	if strings.Contains(err.Error(), missing) {
-		t.Fatalf("discovery error exposed path: %v", err)
-	}
-}
-
 func TestStoreIDAndReadinessValidation(t *testing.T) {
 	for _, value := range []string{
 		"global/auth", "workspace/workflows", "channels/matrix.primary", "local-ci/cache_v2",
@@ -116,6 +105,26 @@ func TestBrokerRequiredReadinessFailsClosed(t *testing.T) {
 	status.RequiredStores = nil
 	if err := RequireBrokerReady(status); CodeOf(err) != CodeUnavailable {
 		t.Fatalf("missing required-store catalog error = %v, want Unavailable", err)
+	}
+	for name, stores := range map[string][]StoreStatus{
+		"duplicate": {
+			{ID: "global/auth", Readiness: StoreReady},
+			{ID: "global/auth", Readiness: StoreReady},
+		},
+		"invalid extra status": {
+			{ID: "global/auth", Readiness: StoreReady},
+			{ID: "Bad", Readiness: StoreReady},
+		},
+		"ready with error": {
+			{ID: "global/auth", Readiness: StoreReady, Error: NewError(CodeInternal, "invalid")},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := BrokerStatus{RequiredStores: []StoreID{"global/auth"}, Stores: stores}
+			if err := RequireBrokerReady(candidate); err == nil {
+				t.Fatal("malformed broker readiness snapshot was accepted")
+			}
+		})
 	}
 }
 

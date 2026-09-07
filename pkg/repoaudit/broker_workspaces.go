@@ -205,7 +205,7 @@ func configuredReviewWorkspaces(home string, cfg *config.Config) ([]configuredRe
 		storeID := ReviewStoreID
 		if !item.primary {
 			storeID, selectorErr = database.ParseStoreID(
-				"workspace." + selector + ".repository-reviews",
+				"workspace/" + selector + "/repository-reviews",
 			)
 			if selectorErr != nil {
 				return nil, selectorErr

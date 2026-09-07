@@ -31,7 +31,7 @@ func TestMigrationInitializesMissingWhatsAppStoreOfflineWithBackup(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := database.ParseStoreID("channel.whatsapp.primary-986a1b71")
+	id, err := database.ParseStoreID("channel/whatsapp/primary-986a1b71")
 	if err != nil {
 		t.Fatal(err)
 	}

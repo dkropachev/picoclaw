@@ -65,7 +65,7 @@ func TestMatrixRuntimeHTTPAndMediaOperationMatrix(t *testing.T) {
 	defer messageBus.Close()
 	channel, err := newMatrixChannel(
 		baseConfig, settings, messageBus,
-		mustMatrixStoreID(t, "channel.matrix.coverage"),
+		mustMatrixStoreID(t, "channel/matrix/coverage"),
 	)
 	if err != nil {
 		t.Fatal(err)

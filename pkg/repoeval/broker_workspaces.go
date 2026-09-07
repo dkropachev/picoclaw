@@ -203,7 +203,7 @@ func configuredEvaluationWorkspaces(home string, cfg *config.Config) ([]configur
 		storeID := EvaluationStoreID
 		if !item.primary {
 			storeID, selectorErr = database.ParseStoreID(
-				"workspace." + selector + ".repository-evaluations",
+				"workspace/" + selector + "/repository-evaluations",
 			)
 			if selectorErr != nil {
 				return nil, selectorErr

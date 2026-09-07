@@ -112,7 +112,9 @@ func (e *Engine) snapshot(
 		if err := ctx.Err(); err != nil {
 			return failed(err)
 		}
-		storeRecord := BackupStoreManifest{StoreID: spec.ID}
+		storeID := spec.ID
+		storeDirectory := strings.ReplaceAll(storeID, "/", ".")
+		storeRecord := BackupStoreManifest{StoreID: storeID}
 		mainExists := false
 		for generationIndex, source := range generationPaths(spec.Path) {
 			info, statErr := os.Lstat(source)
@@ -132,8 +134,8 @@ func (e *Engine) snapshot(
 				return failed(fmt.Errorf("store %s has a sidecar without its database", spec.ID))
 			}
 			role := []string{"database", "wal", "shm", "journal"}[generationIndex]
-			destination := filepath.Join("stores", spec.ID, "generation", role)
-			record, copyErr := copyBackupFile(ctx, session.root, spec.ID, role, source, destination)
+			destination := filepath.Join("stores", storeDirectory, "generation", role)
+			record, copyErr := copyBackupFile(ctx, session.root, storeID, role, source, destination)
 			if copyErr != nil {
 				return failed(fmt.Errorf("snapshot store %s %s: %w", spec.ID, role, copyErr))
 			}
@@ -165,10 +167,10 @@ func (e *Engine) snapshot(
 				legacyIdentities = append(legacyIdentities, info)
 				digest := sha256.Sum256([]byte(canonical))
 				destination := filepath.Join(
-					"stores", spec.ID, "legacy", hex.EncodeToString(digest[:8]), filepath.Base(source),
+					"stores", storeDirectory, "legacy", hex.EncodeToString(digest[:8]), filepath.Base(source),
 				)
 				record, copyErr := copyBackupFile(
-					ctx, session.root, spec.ID, "legacy", source, destination,
+					ctx, session.root, storeID, "legacy", source, destination,
 				)
 				if copyErr != nil {
 					return copyErr

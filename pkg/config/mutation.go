@@ -60,35 +60,38 @@ func ConfigRevision(path string) (string, error) {
 	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), nil
 }
 
-// LoadConfigSnapshot atomically loads the runtime config and its exact opaque
-// public-plus-security revision under the config mutation lock.
+// LoadConfigSnapshot loads the runtime config under the config mutation lock
+// and returns it only when its exact public-plus-security revision is unchanged
+// across parsing.
 func LoadConfigSnapshot(path string) (*Config, string, error) {
 	return loadConfigSnapshot(path, true)
 }
 
-// LoadCurrentConfigSnapshot atomically loads a current-schema runtime config
-// and its exact opaque public-plus-security revision without migrating,
-// backing up, or saving configuration. Legacy schemas fail closed with
-// ErrConfigMigrationRequired.
+// LoadCurrentConfigSnapshot loads a current-schema runtime config under the
+// config mutation lock and returns it only when its exact public-plus-security
+// revision is unchanged across parsing. It does not migrate, back up, or save
+// configuration. Legacy schemas fail closed with ErrConfigMigrationRequired.
 func LoadCurrentConfigSnapshot(path string) (*Config, string, error) {
 	return loadCurrentConfigSnapshot(path, true, nil)
 }
 
-// LoadCurrentConfigForUpdateSnapshot atomically loads a current-schema
-// management view and its exact public-plus-security revision without
-// migrating, backing up, or saving configuration. Runtime-only event ingress
-// secret resolution and validation are deferred so a scoped management
-// operation can repair an otherwise unavailable reference. Environment and
-// derived defaults may be present in the returned validation view; callers
-// that must preserve the persisted representation must use a scoped raw saver.
+// LoadCurrentConfigForUpdateSnapshot loads a current-schema management view
+// under the config mutation lock and returns it only when its exact
+// public-plus-security revision is unchanged across parsing. It does not
+// migrate, back up, or save configuration. Runtime-only event ingress secret
+// resolution and validation are deferred so a scoped management operation can
+// repair an otherwise unavailable reference. Environment and derived defaults
+// may be present in the returned validation view; callers that must preserve
+// the persisted representation must use a scoped raw saver.
 func LoadCurrentConfigForUpdateSnapshot(path string) (*Config, string, error) {
 	return loadCurrentConfigSnapshot(path, false, nil)
 }
 
-// LoadCurrentConfigForUpdateSnapshotIfRevision atomically compares the exact
+// LoadCurrentConfigForUpdateSnapshotIfRevision compares the exact
 // public-plus-security revision before parsing a current-schema management
-// view. Comparing first ensures an older caller observes a revision mismatch
-// even when the winning generation is malformed or requires migration.
+// view, then requires it to remain unchanged across parsing. Comparing first
+// ensures an older caller observes a revision mismatch even when the winning
+// generation is malformed or requires migration.
 func LoadCurrentConfigForUpdateSnapshotIfRevision(
 	path string,
 	expectedRevision string,
@@ -123,11 +126,27 @@ func loadCurrentConfigSnapshot(
 	if requiresMigration {
 		return nil, "", ErrConfigMigrationRequired
 	}
-	cfg, err := loadConfigWithOptions(path, validateEventIngressRuntime)
+	cfg, loadErr := loadConfigWithOptions(path, validateEventIngressRuntime)
+	return finishConfigSnapshot(path, revision, cfg, loadErr)
+}
+
+func finishConfigSnapshot(
+	path string,
+	expectedRevision string,
+	cfg *Config,
+	loadErr error,
+) (*Config, string, error) {
+	currentRevision, err := ConfigRevision(path)
 	if err != nil {
 		return nil, "", err
 	}
-	return cfg, revision, nil
+	if currentRevision != expectedRevision {
+		return nil, "", ErrConfigRevisionMismatch
+	}
+	if loadErr != nil {
+		return nil, "", loadErr
+	}
+	return cfg, expectedRevision, nil
 }
 
 func validateConfigSnapshotPresence(path string) error {
@@ -148,8 +167,9 @@ func validateConfigSnapshotPresence(path string) error {
 	return nil
 }
 
-// LoadConfigForUpdateSnapshot atomically loads the update-safe config and its
-// exact opaque public-plus-security revision under the config mutation lock.
+// LoadConfigForUpdateSnapshot loads the update-safe config under the config
+// mutation lock and returns it only when its exact public-plus-security
+// revision is unchanged across the final current-schema parsing attempt.
 func LoadConfigForUpdateSnapshot(path string) (*Config, string, error) {
 	return loadConfigSnapshot(path, false)
 }
@@ -259,16 +279,15 @@ func loadConfigSnapshot(
 			return nil, "", err
 		}
 		if !requiresMigration {
-			cfg, loadErr := loadConfigWithOptions(path, validateEventIngressRuntime)
 			revision, revisionErr := ConfigRevision(path)
-			unlock()
-			if loadErr != nil {
-				return nil, "", loadErr
-			}
 			if revisionErr != nil {
+				unlock()
 				return nil, "", revisionErr
 			}
-			return cfg, revision, nil
+			cfg, loadErr := loadConfigWithOptions(path, validateEventIngressRuntime)
+			cfg, revision, snapshotErr := finishConfigSnapshot(path, revision, cfg, loadErr)
+			unlock()
+			return cfg, revision, snapshotErr
 		}
 		unlock()
 

@@ -23,7 +23,7 @@ import (
 const (
 	BrokerDomain                     = "eventing"
 	BrokerVersion                    = 1
-	EventingStoreID database.StoreID = "workspace.eventing"
+	EventingStoreID database.StoreID = "workspace/eventing"
 
 	eventingOpInsert                        = "insert"
 	eventingOpGet                           = "get"
@@ -763,7 +763,7 @@ func configuredEventingWorkspaces(
 		seenSelectors[workspaceSelector] = databasePath
 		logicalName := EventingStoreID.String()
 		if !item.primary {
-			logicalName = "workspace." + workspaceSelector + ".eventing"
+			logicalName = "workspace/" + workspaceSelector + "/eventing"
 		}
 		storeID, lookupErr := catalog.Lookup(logicalName)
 		if lookupErr != nil {

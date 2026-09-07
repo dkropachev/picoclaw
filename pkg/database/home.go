@@ -80,6 +80,9 @@ func canonicalHome(path string, create bool) (string, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return "", NewError(CodeInvalid, "PicoClaw home must be a real directory")
 	}
+	if err := validateTrustedHomeDirectory(absolute, info); err != nil {
+		return "", err
+	}
 	resolved, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
 		return "", fmt.Errorf("canonicalize PicoClaw home: %w", err)
@@ -97,9 +100,11 @@ func canonicalHome(path string, create bool) (string, error) {
 
 func rejectExistingAncestorAlias(path string) error {
 	ancestor := path
+	var ancestorInfo os.FileInfo
 	for {
-		_, err := os.Lstat(ancestor)
+		info, err := os.Lstat(ancestor)
 		if err == nil {
+			ancestorInfo = info
 			break
 		}
 		if !errors.Is(err, os.ErrNotExist) {
@@ -110,6 +115,12 @@ func rejectExistingAncestorAlias(path string) error {
 			return NewError(CodeInvalid, "PicoClaw home has no existing filesystem ancestor")
 		}
 		ancestor = parent
+	}
+	if ancestorInfo.Mode()&os.ModeSymlink != 0 || !ancestorInfo.IsDir() {
+		return NewError(CodeInvalid, "PicoClaw home ancestor must be a real directory")
+	}
+	if err := validateTrustedHomeDirectory(ancestor, ancestorInfo); err != nil {
+		return err
 	}
 	resolved, err := filepath.EvalSymlinks(ancestor)
 	if err != nil {

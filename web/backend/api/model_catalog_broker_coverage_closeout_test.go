@@ -73,11 +73,11 @@ func TestModelCatalogBrokerHandlerOperationMatrix(t *testing.T) {
 		operation string
 		input     any
 	}{
-		{modelCatalogOperationPreflight, modelCatalogDeleteRequest{StoreID: "workspace.bad"}},
+		{modelCatalogOperationPreflight, modelCatalogDeleteRequest{StoreID: "workspace/bad"}},
 		{modelCatalogOperationLoadPage, modelCatalogPageRequest{StoreID: ModelCatalogStoreID, CatalogCursor: -1}},
 		{modelCatalogOperationLoadPage, modelCatalogPageRequest{StoreID: ModelCatalogStoreID, Revision: "BAD"}},
 		{modelCatalogOperationSaveAll, modelCatalogSaveAllRequest{StoreID: ModelCatalogStoreID}},
-		{modelCatalogOperationSave, modelCatalogSaveRequest{StoreID: "workspace.bad"}},
+		{modelCatalogOperationSave, modelCatalogSaveRequest{StoreID: "workspace/bad"}},
 		{modelCatalogOperationDelete, modelCatalogDeleteRequest{StoreID: ModelCatalogStoreID}},
 	}
 	for _, test := range invalid {

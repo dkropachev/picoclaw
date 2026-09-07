@@ -27,7 +27,7 @@ func TestWhatsAppStartRequiresBroker(t *testing.T) {
 		config.ChannelWhatsAppNative,
 		&config.WhatsAppSettings{},
 		nil,
-		database.StoreID("channel.whatsapp.default"),
+		database.StoreID("channel/whatsapp/default"),
 	)
 	if err != nil {
 		t.Fatal(err)

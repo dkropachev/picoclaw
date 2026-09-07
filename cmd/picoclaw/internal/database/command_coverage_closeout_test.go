@@ -71,12 +71,12 @@ func TestPreflightHelpersUseTypedStoreTargets(t *testing.T) {
 		if err := dblayer.UnmarshalCanonical(
 			request.Payload,
 			&payload,
-		); err != nil || payload.StoreID != "global.auth" {
+		); err != nil || payload.StoreID != "global/auth" {
 			t.Fatalf("broker preflight payload = %#v, %v", payload, err)
 		}
 		return dblayer.EmptyPayload{}, nil
 	})
-	if err := preflightBrokerTarget(t.Context(), broker, "domain", "preflight", "global.auth"); err != nil {
+	if err := preflightBrokerTarget(t.Context(), broker, "domain", "preflight", "global/auth"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -88,12 +88,12 @@ func TestPreflightHelpersUseTypedStoreTargets(t *testing.T) {
 		}
 		var payload sqlbridge.PingRequest
 		if err := dblayer.UnmarshalCanonical(request.Payload, &payload); err != nil ||
-			payload.Target.StoreID != "channel.matrix.main" || payload.Target.Mode != sqlbridge.ModeRuntime {
+			payload.Target.StoreID != "channel/matrix/main" || payload.Target.Mode != sqlbridge.ModeRuntime {
 			t.Fatalf("SQL bridge preflight payload = %#v, %v", payload, err)
 		}
 		return sqlbridge.PingResponse{}, nil
 	})
-	if err := preflightSQLBridge(t.Context(), bridge, "channel.matrix.main"); err != nil {
+	if err := preflightSQLBridge(t.Context(), bridge, "channel/matrix/main"); err != nil {
 		t.Fatal(err)
 	}
 	if brokerCalls.Load() != 1 || bridgeCalls.Load() != 1 {

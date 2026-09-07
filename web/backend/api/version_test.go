@@ -121,6 +121,26 @@ func TestGetSystemVersionFallsBackToLauncherInfoWhenCommandFails(t *testing.T) {
 	}
 }
 
+func TestEmbeddedGatewayVersionAlwaysUsesLauncherBuild(t *testing.T) {
+	setupVersionTestIsolation(t)
+	expected := systemVersionResponse{Version: "embedded", GoVersion: "go-embedded"}
+	launcherBuildInfoForVersion = func() systemVersionResponse { return expected }
+	findPicoclawBinaryForInfo = func() string {
+		t.Fatal("embedded launcher attempted to discover a separate Gateway binary")
+		return ""
+	}
+	runPicoclawVersionOutput = func(context.Context, string) (string, error) {
+		t.Fatal("embedded launcher attempted to execute a separate Gateway binary")
+		return "", nil
+	}
+
+	h := NewHandler("")
+	h.EmbedGateway()
+	if got := h.resolveSystemVersionInfoUncached(context.Background()); got != expected {
+		t.Fatalf("embedded version = %#v, want launcher build %#v", got, expected)
+	}
+}
+
 func TestParsePicoclawVersionOutput(t *testing.T) {
 	setupVersionTestIsolation(t)
 

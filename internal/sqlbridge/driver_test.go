@@ -15,7 +15,7 @@ import (
 func TestDriverRoutesValidatedTypedOperations(t *testing.T) {
 	t.Parallel()
 
-	targetID := mustStoreID(t, "channel.matrix.primary-a1b2c3d4")
+	targetID := mustStoreID(t, "channel/matrix/primary-a1b2c3d4")
 	dsn, err := EncodeDSN(targetID, ModeRuntime)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestDriverEnforcesModeBeforeRPCAndRollsBackOnClose(t *testing.T) {
 		commitResponse:   TransactionResponse{Accepted: true},
 		rollbackResponse: TransactionResponse{Accepted: true},
 	}
-	id := mustStoreID(t, "channel.whatsapp.primary-01234567")
+	id := mustStoreID(t, "channel/whatsapp/primary-01234567")
 	runtimeDSN, _ := EncodeDSN(id, ModeRuntime)
 	runtimeRaw, err := NewDriver(rpc).Open(runtimeDSN)
 	if err != nil {
@@ -188,7 +188,7 @@ func TestDriverRejectsInvalidAuthorityArgumentsAndResponses(t *testing.T) {
 		t.Fatal("driver accepted a URI DSN")
 	}
 
-	id := mustStoreID(t, "channel.matrix.primary-a1b2c3d4")
+	id := mustStoreID(t, "channel/matrix/primary-a1b2c3d4")
 	dsn, _ := EncodeDSN(id, ModeRuntime)
 	raw, err := NewDriver(rpc).Open(dsn)
 	if err != nil {
@@ -239,7 +239,7 @@ func TestDriverRenewsTransactionUntilCommit(t *testing.T) {
 		},
 		commitResponse: TransactionResponse{Accepted: true},
 	}
-	id := mustStoreID(t, "channel.matrix.heartbeat")
+	id := mustStoreID(t, "channel/matrix/heartbeat")
 	dsn, err := EncodeDSN(id, ModeRuntime)
 	if err != nil {
 		t.Fatal(err)

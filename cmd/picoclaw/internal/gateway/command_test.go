@@ -66,9 +66,9 @@ func TestGatewayReadinessUsesBrokerStatus(t *testing.T) {
 	}
 	var migrationRequired atomic.Bool
 	server, err := database.StartServer(context.Background(), database.ServerOptions{
-		Home: home, RequiredStores: []database.StoreID{"workspace.workflows"},
+		Home: home, RequiredStores: []database.StoreID{"workspace/workflows"},
 		StatusProvider: func(context.Context) ([]database.StoreStatus, error) {
-			status := database.StoreStatus{ID: "workspace.workflows", Readiness: database.StoreReady}
+			status := database.StoreStatus{ID: "workspace/workflows", Readiness: database.StoreReady}
 			if migrationRequired.Load() {
 				status.Readiness = database.StoreMigrationRequired
 				status.Error = database.NewError(database.CodeMigrationRequired, "offline migration is required")

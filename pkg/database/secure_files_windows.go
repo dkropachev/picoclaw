@@ -13,11 +13,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var (
-	windowsCreateDirectorySecure = windows.CreateDirectory
-	windowsCreateFileSecure      = windows.CreateFile
-)
-
 func createOwnerOnlyDirectory(path string) error {
 	attributes, descriptor, err := windowsOwnerOnlySecurityAttributes(true)
 	if err != nil {
@@ -27,7 +22,7 @@ func createOwnerOnlyDirectory(path string) error {
 	if err != nil {
 		return err
 	}
-	err = windowsCreateDirectorySecure(pathPointer, attributes)
+	err = windows.CreateDirectory(pathPointer, attributes)
 	runtime.KeepAlive(descriptor)
 	return err
 }
@@ -70,15 +65,6 @@ func createOwnerOnlyTempFile(directory, prefix string, _ os.FileMode) (*os.File,
 	return nil, NewError(CodeConflict, "database owner-only temporary filename space is exhausted")
 }
 
-func createOwnerOnlyExclusiveFile(path string, _ os.FileMode) (*os.File, error) {
-	return openWindowsOwnerOnlyFile(
-		path,
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.CREATE_NEW,
-		true,
-	)
-}
-
 func openOwnerOnlyExistingFile(path string, _ os.FileMode) (*os.File, error) {
 	return openWindowsOwnerOnlyFile(path, windows.GENERIC_READ, windows.OPEN_EXISTING, false)
 }
@@ -110,7 +96,7 @@ func openWindowsOwnerOnlyFile(
 			return nil, err
 		}
 	}
-	handle, err := windowsCreateFileSecure(
+	handle, err := windows.CreateFile(
 		pathPointer,
 		access,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
@@ -144,10 +130,19 @@ func openWindowsOwnerOnlyFile(
 	return file, nil
 }
 
+func createOwnerOnlyExclusiveFile(path string, _ os.FileMode) (*os.File, error) {
+	return openWindowsOwnerOnlyFile(
+		path,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.CREATE_NEW,
+		true,
+	)
+}
+
 func windowsOwnerOnlySecurityAttributes(
 	directory bool,
 ) (*windows.SecurityAttributes, *windows.SECURITY_DESCRIPTOR, error) {
-	sid, err := windowsCurrentProcessUserSID()
+	sid, err := currentWindowsProcessUserSID()
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve Windows owner-only security: %w", err)
 	}

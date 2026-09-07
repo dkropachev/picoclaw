@@ -17,7 +17,7 @@ func TestCopyBackupFileRejectsChangingProcGeneration(t *testing.T) {
 	}
 	backup := t.TempDir()
 	_, err = copyBackupFile(
-		t.Context(), backup, "global.test", "database", source, filepath.Join("generation", "database"),
+		t.Context(), backup, "global/test", "database", source, filepath.Join("generation", "database"),
 	)
 	if err == nil || !strings.Contains(err.Error(), "source changed while copying") {
 		t.Fatalf("changing proc generation error = %v", err)

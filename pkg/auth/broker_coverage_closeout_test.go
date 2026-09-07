@@ -101,7 +101,7 @@ func TestAuthBrokerHandlerOperationAndPaginationBoundaries(t *testing.T) {
 		{"compare-and-set", authCASRequest{StoreID: GlobalAuthStoreID, CredentialID: "x"}},
 		{"update", authCASRequest{StoreID: GlobalAuthStoreID, CredentialID: "x"}},
 		{"delete", authCredentialRequest{StoreID: GlobalAuthStoreID}},
-		{"delete-all", authEmptyRequest{StoreID: "workspace.auth"}},
+		{"delete-all", authEmptyRequest{StoreID: "workspace/auth"}},
 	}
 	for _, test := range invalid {
 		if _, err := request(test.operation, test.input); database.CodeOf(err) != database.CodeInvalid {

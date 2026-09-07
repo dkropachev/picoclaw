@@ -44,7 +44,7 @@ const (
 	workflowRPCOperationPreflight           = "preflight"
 	workflowRPCOperationResolveStore        = "resolve-store"
 
-	workflowDefaultStoreName = "workspace.workflows"
+	workflowDefaultStoreName = "workspace/workflows"
 	workflowRPCPageItems     = 128
 	workflowRPCPageBytes     = 8 << 20
 )
@@ -1050,7 +1050,7 @@ func configuredWorkflowWorkspaces(
 		seenSelectors[selector] = item.workspace
 		logicalName := workflowDefaultStoreName
 		if !item.primary {
-			logicalName = "workspace." + selector + ".workflows"
+			logicalName = "workspace/" + selector + "/workflows"
 		}
 		storeID, lookupErr := catalog.Lookup(logicalName)
 		if lookupErr != nil {

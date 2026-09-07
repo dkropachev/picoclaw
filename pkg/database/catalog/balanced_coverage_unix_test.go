@@ -92,7 +92,7 @@ func TestUnversionedReadinessUsesRetainedInspectionResults(t *testing.T) {
 	if err := RequireReady(&Catalog{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	status := database.StoreStatus{ID: "workspace.matrix", Readiness: database.StoreReady}
+	status := database.StoreStatus{ID: "workspace/matrix", Readiness: database.StoreReady}
 	if err := validateUnversionedReadiness(
 		t.Context(), sqliteprovider.Inspection{},
 		storecatalog.Spec{Domain: "channel-matrix"}, &status,
@@ -107,7 +107,7 @@ func TestUnversionedReadinessUsesRetainedInspectionResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = inspection.Release() })
-	status = database.StoreStatus{ID: "workspace.matrix", Readiness: database.StoreReady}
+	status = database.StoreStatus{ID: "workspace/matrix", Readiness: database.StoreReady}
 	if err := validateUnversionedReadiness(
 		t.Context(), inspection, storecatalog.Spec{Domain: "channel-matrix"}, &status,
 	); err != nil || status.Readiness != database.StoreMigrationRequired {
@@ -116,7 +116,7 @@ func TestUnversionedReadinessUsesRetainedInspectionResults(t *testing.T) {
 
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	status = database.StoreStatus{ID: "workspace.matrix", Readiness: database.StoreReady}
+	status = database.StoreStatus{ID: "workspace/matrix", Readiness: database.StoreReady}
 	if err := validateUnversionedReadiness(
 		canceled, inspection, storecatalog.Spec{Domain: "channel-matrix"}, &status,
 	); err == nil {

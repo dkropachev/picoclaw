@@ -13,7 +13,6 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -408,6 +407,7 @@ type Manager struct {
 	mux                       *dynamicServeMux
 	httpServer                *http.Server
 	httpListeners             []net.Listener
+	httpServerErrors          chan error
 	mu                        sync.RWMutex
 	stopMu                    sync.Mutex
 	stopping                  bool
@@ -1631,6 +1631,7 @@ func NewManager(
 		mediaStore:         store,
 		channelHashes:      make(map[string]string),
 		pendingRetirements: make(map[string]*channelRetirement),
+		httpServerErrors:   make(chan error, 4),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -1649,6 +1650,26 @@ func NewManager(
 	m.channelHashes = toChannelHashes(cfg)
 
 	return m, nil
+}
+
+// HTTPServerErrors reports terminal shared-listener failures. The gateway
+// runtime owns the response: a standalone command exits, while an embedded
+// runtime can stop without terminating its launcher process.
+func (m *Manager) HTTPServerErrors() <-chan error {
+	if m == nil {
+		return nil
+	}
+	return m.httpServerErrors
+}
+
+func (m *Manager) reportHTTPServerError(err error) {
+	if m == nil || err == nil {
+		return
+	}
+	select {
+	case m.httpServerErrors <- err:
+	default:
+	}
 }
 
 // SetMediaStore updates the store used by the manager and every channel that
@@ -2489,45 +2510,32 @@ func (m *Manager) StartAll(ctx context.Context) error {
 				ln := listener
 				go func() {
 					defer func() {
-						if r := recover(); r != nil {
-							logger.ErrorCF("channels", "HTTP server goroutine panic recovered",
-								map[string]any{
-									"addr":  ln.Addr().String(),
-									"panic": fmt.Sprintf("%v", r),
-									"stack": string(debug.Stack()),
-								})
+						if recover() != nil {
+							m.reportHTTPServerError(errors.New("shared HTTP server goroutine panicked"))
 						}
 					}()
 					logger.InfoCF("channels", "Shared HTTP server listening", map[string]any{
 						"addr": ln.Addr().String(),
 					})
 					if err := httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
-						logger.FatalCF("channels", "Shared HTTP server error", map[string]any{
-							"addr":  ln.Addr().String(),
-							"error": err.Error(),
-						})
+						m.reportHTTPServerError(fmt.Errorf(
+							"serve shared HTTP listener %s: %w", ln.Addr().String(), err,
+						))
 					}
 				}()
 			}
 		} else {
 			go func() {
 				defer func() {
-					if r := recover(); r != nil {
-						logger.ErrorCF("channels", "HTTP server goroutine panic recovered",
-							map[string]any{
-								"addr":  httpServer.Addr,
-								"panic": fmt.Sprintf("%v", r),
-								"stack": string(debug.Stack()),
-							})
+					if recover() != nil {
+						m.reportHTTPServerError(errors.New("shared HTTP server goroutine panicked"))
 					}
 				}()
 				logger.InfoCF("channels", "Shared HTTP server listening", map[string]any{
 					"addr": httpServer.Addr,
 				})
 				if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					logger.FatalCF("channels", "Shared HTTP server error", map[string]any{
-						"error": err.Error(),
-					})
+					m.reportHTTPServerError(fmt.Errorf("serve shared HTTP listener: %w", err))
 				}
 			}()
 		}

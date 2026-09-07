@@ -290,7 +290,7 @@ func TestEventingBrokerConcurrentClientsRetainOnePool(t *testing.T) {
 		BrokerDomain,
 		BrokerVersion,
 		eventingOpList,
-		eventingBrokerRequest{StoreID: "global.auth", EventFilter: EventFilter{Limit: 1}},
+		eventingBrokerRequest{StoreID: "global/auth", EventFilter: EventFilter{Limit: 1}},
 		&out,
 	)
 	if database.CodeOf(err) != database.CodeUnauthorized {

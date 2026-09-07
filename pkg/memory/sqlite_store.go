@@ -34,7 +34,7 @@ type SQLiteStore struct {
 	storeID      database.StoreID
 }
 
-const SessionsStoreID database.StoreID = "workspace.sessions"
+const SessionsStoreID database.StoreID = "workspace/sessions"
 
 var allowUnfencedSessionsProviderForTests atomic.Bool
 

@@ -18,7 +18,7 @@ const (
 	BrokerDomain  = "account-routing"
 	BrokerVersion = 1
 
-	AccountRoutingStoreID database.StoreID = "workspace.account-routing"
+	AccountRoutingStoreID database.StoreID = "workspace/account-routing"
 
 	accountRouterOperationSelect      = "select"
 	accountRouterOperationRecord      = "record-result"

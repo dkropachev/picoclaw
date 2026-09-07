@@ -54,11 +54,11 @@ func TestWeComBrokerHandlerOperationAndErrorMatrix(t *testing.T) {
 		operation string
 		input     any
 	}{
-		{wecomBrokerOperationPreflight, wecomBrokerTarget{StoreID: "workspace.bad"}},
+		{wecomBrokerOperationPreflight, wecomBrokerTarget{StoreID: "workspace/bad"}},
 		{wecomBrokerOperationPut, wecomBrokerPutRequest{StoreID: WeComStoreID, ChatID: "chat"}},
 		{wecomBrokerOperationPut, wecomBrokerPutRequest{StoreID: WeComStoreID, ChatID: "bad\x00", RequestID: "r"}},
 		{wecomBrokerOperationGet, wecomBrokerChatRequest{StoreID: WeComStoreID, ChatID: "bad\x00"}},
-		{wecomBrokerOperationDelete, wecomBrokerChatRequest{StoreID: "workspace.bad", ChatID: "chat"}},
+		{wecomBrokerOperationDelete, wecomBrokerChatRequest{StoreID: "workspace/bad", ChatID: "chat"}},
 	}
 	for _, test := range invalid {
 		if _, err := call(test.operation, test.input); database.CodeOf(err) != database.CodeInvalid {

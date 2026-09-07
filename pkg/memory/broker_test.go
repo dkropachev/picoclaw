@@ -256,7 +256,7 @@ func TestSessionBrokerFailureNeverFallsBackToCallerPath(t *testing.T) {
 	var response sessionBrokerResponse
 	err = client.Call(
 		context.Background(), SessionsBrokerDomain, SessionsBrokerVersion,
-		sessionOperationPing, sessionStoreRequest{StoreID: "workspace.workflows"}, &response,
+		sessionOperationPing, sessionStoreRequest{StoreID: "workspace/workflows"}, &response,
 	)
 	if database.CodeOf(err) != database.CodeInvalid {
 		t.Fatalf("wrong StoreID error = %v", err)

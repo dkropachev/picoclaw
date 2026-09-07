@@ -1,102 +1,225 @@
-// Package catalog exposes provider-neutral logical database identities. It
-// deliberately does not expose filesystem locations or SQLite terminology.
+// Package catalog exposes a provider-neutral logical database catalog. It
+// projects only opaque store identities, domain names, and required-store
+// policy; physical provider details remain inside the internal catalog.
 package catalog
 
 import (
-	"errors"
 	"sort"
-	"strings"
 
 	"github.com/sipeed/picoclaw/internal/storecatalog"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/database"
 )
 
-// StoreID is the protocol-wide opaque, comparable logical identity. The alias
-// keeps catalog consumers on the same type used by broker envelopes/statuses.
+const (
+	maxDomainBytes                  = 64
+	catalogProjectionFailureMessage = "database catalog projection failed"
+	catalogInvalidMessage           = "database catalog projection is invalid"
+)
+
+// StoreID is the protocol-wide opaque logical store identity.
 type StoreID = database.StoreID
 
-// Entry describes application-relevant readiness policy without revealing the
-// physical provider catalog.
+// Options supplies every explicit context used to derive a logical catalog.
+// Values are consumed synchronously and are not retained by Catalog.
+type Options struct {
+	Home       string
+	Config     *config.Config
+	ConfigPath string
+	UserHome   string
+}
+
+// Entry is the provider-neutral projection of one catalog store.
 type Entry struct {
 	ID       StoreID
 	Domain   string
 	Required bool
 }
 
-// Catalog is the immutable trusted store inventory for one canonical home.
+// Catalog is an immutable logical store inventory. Its retained state contains
+// no configuration, filesystem location, or provider object.
 type Catalog struct {
 	entries []Entry
-	byName  map[string]Entry
+	byID    map[StoreID]Entry
 }
 
-// New builds a logical catalog from the canonical home and validated
-// configuration without inspecting any database generation member. Physical
-// validation belongs to broker/provider startup and offline maintenance.
-func New(home string, cfg *config.Config) (*Catalog, error) {
-	if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
-		!database.ProviderTestAuthorityHeld() {
-		return nil, database.NewError(
-			database.CodeUnauthorized,
-			"database catalog projection requires owner authority",
-		)
+// New derives a logical catalog without inspecting database generation
+// members. Projection grants no provider, readiness, or migration authority.
+func New(input any, configurations ...*config.Config) (*Catalog, error) {
+	var (
+		projected *storecatalog.Catalog
+		err       error
+	)
+	switch value := input.(type) {
+	case Options:
+		if len(configurations) != 0 {
+			return nil, database.NewError(database.CodeInvalid, catalogProjectionFailureMessage)
+		}
+		projected, err = project(value)
+	case string:
+		if len(configurations) != 1 {
+			return nil, database.NewError(database.CodeInvalid, catalogProjectionFailureMessage)
+		}
+		if !database.BrokerAuthorityHeld() && !database.MigrationFenceHeld() &&
+			!database.ProviderTestAuthorityHeld() {
+			return nil, database.NewError(
+				database.CodeUnauthorized,
+				"database catalog projection requires owner authority",
+			)
+		}
+		projected, err = storecatalog.Project(value, configurations[0])
+		if err != nil {
+			err = sanitizeProjectionError(err)
+		}
+	default:
+		return nil, database.NewError(database.CodeInvalid, catalogProjectionFailureMessage)
 	}
-	physical, err := storecatalog.Project(home, cfg)
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]Entry, 0, len(physical.Specs))
-	byName := make(map[string]Entry, len(physical.Specs))
-	for _, spec := range physical.Specs {
-		id, parseErr := database.ParseStoreID(spec.ID)
-		if parseErr != nil {
-			return nil, parseErr
+
+	return newProjectedCatalog(projected.All())
+}
+
+func project(options Options) (*storecatalog.Catalog, error) {
+	projected, err := storecatalog.Project(storecatalog.Options{
+		Home:       options.Home,
+		Config:     options.Config,
+		ConfigPath: options.ConfigPath,
+		UserHome:   options.UserHome,
+	})
+	if err != nil {
+		return nil, sanitizeProjectionError(err)
+	}
+	return projected, nil
+}
+
+func newProjectedCatalog(specs []storecatalog.Spec) (*Catalog, error) {
+	if len(specs) == 0 {
+		return nil, database.NewError(database.CodeIntegrity, catalogInvalidMessage)
+	}
+
+	entries := make([]Entry, 0, len(specs))
+	byID := make(map[StoreID]Entry, len(specs))
+	for _, spec := range specs {
+		id, err := database.ParseStoreID(spec.ID)
+		if err != nil || !validDomain(spec.Domain) {
+			return nil, database.NewError(database.CodeIntegrity, catalogInvalidMessage)
+		}
+		if _, duplicate := byID[id]; duplicate {
+			return nil, database.NewError(database.CodeIntegrity, catalogInvalidMessage)
 		}
 		entry := Entry{ID: id, Domain: spec.Domain, Required: spec.Required}
 		entries = append(entries, entry)
-		byName[spec.ID] = entry
+		byID[entry.ID] = entry
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
-	return &Catalog{entries: entries, byName: byName}, nil
+	sort.Slice(entries, func(left, right int) bool {
+		return entries[left].ID < entries[right].ID
+	})
+	return &Catalog{entries: entries, byID: byID}, nil
 }
 
-// Entries returns a detached, stable-ID-sorted snapshot.
-func (c *Catalog) Entries() []Entry {
-	if c == nil {
+func newCatalogSnapshot(
+	specs []storecatalog.Spec,
+	fingerprint string,
+) (*Catalog, string, error) {
+	logical, err := newProjectedCatalog(specs)
+	if err != nil {
+		return nil, "", sanitizeSnapshotError(err)
+	}
+	return logical, fingerprint, nil
+}
+
+// Entries returns a detached, ID-sorted snapshot of every logical entry.
+func (catalog *Catalog) Entries() []Entry {
+	if catalog == nil {
 		return nil
 	}
-	return append([]Entry(nil), c.entries...)
+	return append([]Entry(nil), catalog.entries...)
 }
 
-// Lookup resolves user input only against the trusted catalog. Arbitrary
-// paths, DSNs, and unknown logical IDs fail closed.
-func (c *Catalog) Lookup(value string) (StoreID, error) {
-	if c == nil {
-		return "", errors.New("database catalog is unavailable")
+// RequiredStores returns a detached, ID-sorted snapshot of store IDs marked
+// required by this catalog's frozen admission policy. Required policy does not
+// imply that a store exists, is ready, or is authorized for provider access.
+func (catalog *Catalog) RequiredStores() []StoreID {
+	if catalog == nil {
+		return nil
 	}
-	value = strings.TrimSpace(value)
-	entry, ok := c.byName[value]
-	if !ok || value == "" {
-		return "", errors.New("unknown database store ID")
+	var required []StoreID
+	for _, entry := range catalog.entries {
+		if entry.Required {
+			required = append(required, entry.ID)
+		}
+	}
+	return required
+}
+
+// Lookup validates value exactly and returns its catalog-owned StoreID.
+// Whitespace and case are never normalized.
+func (catalog *Catalog) Lookup(value string) (StoreID, error) {
+	id, err := database.ParseStoreID(value)
+	if err != nil {
+		return "", err
+	}
+	if catalog == nil {
+		return "", database.NewError(database.CodeUnavailable, "database catalog is unavailable")
+	}
+	entry, found := catalog.byID[id]
+	if !found {
+		return "", database.NewError(database.CodeNotFound, "database store ID is not in the catalog")
 	}
 	return entry.ID, nil
 }
 
-// LookupChannel resolves an enabled Matrix or WhatsApp channel through the
-// trusted catalog without exposing or reconstructing its physical store.
-func (c *Catalog) LookupChannel(channelType, name string) (StoreID, error) {
-	logicalID, ok := storecatalog.ChannelStoreID(channelType, name)
-	if !ok {
-		return "", errors.New("channel has no database store")
+// Entry returns the detached logical entry for an exact StoreID.
+func (catalog *Catalog) Entry(id StoreID) (Entry, bool) {
+	if catalog == nil || !id.Valid() {
+		return Entry{}, false
 	}
-	return c.Lookup(logicalID)
+	entry, found := catalog.byID[id]
+	return entry, found
 }
 
-// Contains reports whether id belongs to this exact catalog snapshot.
-func (c *Catalog) Contains(id StoreID) bool {
-	if c == nil || !id.Valid() {
+// LookupChannel derives a supported channel identity and returns it only when
+// that exact identity belongs to this catalog.
+func (catalog *Catalog) LookupChannel(channelType, name string) (StoreID, error) {
+	id, supported := storecatalog.ChannelStoreID(channelType, name)
+	if !supported {
+		return "", database.NewError(database.CodeNotFound, "channel has no database store")
+	}
+	return catalog.Lookup(id)
+}
+
+// Contains reports whether id belongs to this exact logical snapshot.
+func (catalog *Catalog) Contains(id StoreID) bool {
+	_, found := catalog.Entry(id)
+	return found
+}
+
+func sanitizeProjectionError(err error) error {
+	code := database.CodeOf(err)
+	switch code {
+	case database.CodeUnavailable, database.CodeUnauthorized, database.CodeIntegrity:
+	default:
+		code = database.CodeInvalid
+	}
+	return database.NewError(code, catalogProjectionFailureMessage)
+}
+
+func validDomain(value string) bool {
+	if value == "" || len(value) > maxDomainBytes {
 		return false
 	}
-	_, ok := c.byName[string(id)]
-	return ok
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		alphaNumeric := character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9'
+		if alphaNumeric {
+			continue
+		}
+		if character != '-' || index == 0 || index == len(value)-1 {
+			return false
+		}
+	}
+	return true
 }

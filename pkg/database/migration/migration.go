@@ -457,7 +457,7 @@ func selectStores(
 	selected := make([]selectedStore, 0, len(requested))
 	seen := make(map[string]struct{}, len(requested))
 	for _, requestedID := range requested {
-		name := string(requestedID)
+		name := requestedID.String()
 		if !requestedID.Valid() {
 			return nil, nil, fmt.Errorf("%w: %q", ErrUnknownStore, name)
 		}
@@ -465,7 +465,7 @@ func selectStores(
 			return nil, nil, fmt.Errorf("duplicate database store ID %q", name)
 		}
 		seen[name] = struct{}{}
-		spec, ok := physical.Lookup(name)
+		spec, ok := physical.Lookup(requestedID.String())
 		if !ok {
 			return nil, nil, fmt.Errorf("%w: %q", ErrUnknownStore, name)
 		}

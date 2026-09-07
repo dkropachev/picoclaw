@@ -1069,7 +1069,7 @@ func TestReviewBrokerWorkspaceAndLocalProviderBoundaries(t *testing.T) {
 		t.Fatalf("invalid outer store request = %v", err)
 	}
 	if _, err := handler.Handle(t.Context(), reviewRequest(
-		t, reviewOperationGetByID, reviewIDRequest{StoreID: "workspace.unknown", ID: "id"},
+		t, reviewOperationGetByID, reviewIDRequest{StoreID: "workspace/unknown", ID: "id"},
 	)); database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("unknown store = %v", err)
 	}
@@ -1234,7 +1234,7 @@ func TestReviewBrokerWorkspaceAndLocalProviderBoundaries(t *testing.T) {
 	if err := (Store{}).Close(); err != nil {
 		t.Fatal(err)
 	}
-	if got := (Store{storeID: "workspace.custom"}).StoreID(); got != "workspace.custom" {
+	if got := (Store{storeID: "workspace/custom"}).StoreID(); got != "workspace/custom" {
 		t.Fatalf("local StoreID = %q", got)
 	}
 	if got := (Store{}).StoreID(); got != ReviewStoreID {

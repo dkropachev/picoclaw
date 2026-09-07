@@ -768,8 +768,8 @@ func (h *Handler) preflightRepositoryReviewDatabases(ctx context.Context) error 
 		return err
 	}
 	required := map[database.StoreID]struct{}{
-		"workspace.workflows":          {},
-		"workspace.repository-reviews": {},
+		"workspace/workflows":          {},
+		"workspace/repository-reviews": {},
 	}
 	for _, store := range status.Stores {
 		if _, needed := required[store.ID]; !needed {

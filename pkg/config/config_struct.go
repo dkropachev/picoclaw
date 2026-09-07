@@ -288,9 +288,23 @@ func (s *SecureString) fromRaw(v string) error {
 }
 
 var (
-	secResolverMu sync.RWMutex
-	secResolver   *credential.Resolver
+	configResolverScopeMu sync.Mutex
+	secResolverMu         sync.RWMutex
+	secResolver           *credential.Resolver
 )
+
+func beginConfigResolverScope(configPath string) func() {
+	configResolverScopeMu.Lock()
+	updateResolver(filepath.Dir(configPath))
+	released := false
+	return func() {
+		if released {
+			return
+		}
+		released = true
+		configResolverScopeMu.Unlock()
+	}
+}
 
 func updateResolver(path string) {
 	secResolverMu.Lock()

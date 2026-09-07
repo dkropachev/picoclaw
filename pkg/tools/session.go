@@ -292,6 +292,30 @@ func (sm *SessionManager) Stop() {
 	})
 }
 
+// ActiveCount returns the number of published processes that have not reached
+// terminal state. It snapshots pointers without holding the manager lock while
+// inspecting per-session state.
+func (sm *SessionManager) ActiveCount() int {
+	if sm == nil {
+		return 0
+	}
+	sm.mu.RLock()
+	sessions := make([]*ProcessSession, 0, len(sm.sessions))
+	for _, entry := range sm.sessions {
+		if entry != nil && entry.session != nil {
+			sessions = append(sessions, entry.session)
+		}
+	}
+	sm.mu.RUnlock()
+	active := 0
+	for _, session := range sessions {
+		if !session.IsDone() {
+			active++
+		}
+	}
+	return active
+}
+
 // cleanupOldSessions removes sessions that are done and older than 30 minutes
 func (sm *SessionManager) cleanupOldSessions() {
 	sm.mu.Lock()

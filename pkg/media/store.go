@@ -96,11 +96,13 @@ type FileMediaStore struct {
 	pendingPathDeletions map[string]pendingPathDeletion
 	nextDeletionToken    uint64
 
-	cleanerCfg MediaCleanerConfig
-	stop       chan struct{}
-	startOnce  sync.Once
-	stopOnce   sync.Once
-	nowFunc    func() time.Time // for testing
+	cleanerCfg  MediaCleanerConfig
+	stop        chan struct{}
+	cleanerMu   sync.Mutex
+	cleanerDone chan struct{}
+	startOnce   sync.Once
+	stopOnce    sync.Once
+	nowFunc     func() time.Time // for testing
 }
 
 // NewFileMediaStore creates a new FileMediaStore without background cleanup.
@@ -471,7 +473,12 @@ func (s *FileMediaStore) Start() {
 			"max_age":  s.cleanerCfg.MaxAge.String(),
 		})
 
+		done := make(chan struct{})
+		s.cleanerMu.Lock()
+		s.cleanerDone = done
+		s.cleanerMu.Unlock()
 		go func() {
+			defer close(done)
 			ticker := time.NewTicker(s.cleanerCfg.Interval)
 			defer ticker.Stop()
 
@@ -500,4 +507,10 @@ func (s *FileMediaStore) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stop)
 	})
+	s.cleanerMu.Lock()
+	done := s.cleanerDone
+	s.cleanerMu.Unlock()
+	if done != nil {
+		<-done
+	}
 }

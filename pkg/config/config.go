@@ -2182,7 +2182,8 @@ func LoadConfigForUpdate(path string) (*Config, error) {
 }
 
 func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Config, error) {
-	updateResolver(filepath.Dir(path))
+	releaseResolverScope := beginConfigResolverScope(path)
+	defer releaseResolverScope()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -2627,6 +2628,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 	cfg.Session.DeriveDmScope()
 
 	if migratedFrom >= 0 {
+		// SaveConfig acquires the mutation lock before saveConfigUnlocked enters
+		// its own resolver scope. Release this parsing scope first so every
+		// operation that holds both locks uses mutation-then-resolver ordering.
+		releaseResolverScope()
 		if saveErr := SaveConfig(path, cfg); saveErr != nil {
 			logger.WarnF(
 				"config migration validated but could not be persisted",
@@ -2778,6 +2783,9 @@ func saveConfigUnlocked(path string, cfg *Config) error {
 	if cfg == nil {
 		return errors.New("config is required")
 	}
+	releaseResolverScope := beginConfigResolverScope(path)
+	defer releaseResolverScope()
+
 	if err := cfg.Isolation.ValidateEnvironmentAllowlist(); err != nil {
 		return fmt.Errorf("invalid isolation config: %w", err)
 	}
@@ -3453,6 +3461,9 @@ func (c *Config) SecurityCopyFromForUpdate(path string) error {
 }
 
 func (c *Config) securityCopyFrom(path string, resolveEventWebhooks bool) error {
+	releaseResolverScope := beginConfigResolverScope(path)
+	defer releaseResolverScope()
+
 	if err := loadSecurityConfig(c, securityPath(path)); err != nil {
 		return err
 	}

@@ -182,7 +182,7 @@ func configuredSeahorseTargets(home string, cfg *config.Config) (map[database.St
 	if err != nil {
 		return nil, err
 	}
-	if err := add("workspace.seahorse", primary); err != nil {
+	if err := add("workspace/seahorse", primary); err != nil {
 		return nil, err
 	}
 	seen := map[string]struct{}{primary: {}}
@@ -199,7 +199,7 @@ func configuredSeahorseTargets(home string, cfg *config.Config) (map[database.St
 		}
 		seen[workspace] = struct{}{}
 		sum := sha256.Sum256([]byte(filepath.Clean(workspace)))
-		id, err := database.ParseStoreID("workspace." + hex.EncodeToString(sum[:8]) + ".seahorse")
+		id, err := database.ParseStoreID("workspace/" + hex.EncodeToString(sum[:8]) + "/seahorse")
 		if err != nil {
 			return nil, err
 		}

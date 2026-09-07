@@ -24,7 +24,7 @@ type Store struct {
 	broker *database.Client
 }
 
-const launcherAuthStoreID database.StoreID = "launcher.auth"
+const launcherAuthStoreID database.StoreID = "launcher/auth"
 
 var allowUnfencedLauncherAuthProviderForTests atomic.Bool
 

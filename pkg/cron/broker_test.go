@@ -287,7 +287,7 @@ func TestCronBrokerFailuresAreStructuredAndNeverFallBack(t *testing.T) {
 	var raw cronBrokerResponse
 	err := client.Call(
 		context.Background(), BrokerDomain, BrokerVersion, cronOperationList,
-		cronListRequest{StoreID: "workspace.sessions", IncludeDisabled: true}, &raw,
+		cronListRequest{StoreID: "workspace/sessions", IncludeDisabled: true}, &raw,
 	)
 	if database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("wrong StoreID error = %v", err)

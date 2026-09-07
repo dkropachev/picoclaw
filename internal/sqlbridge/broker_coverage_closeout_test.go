@@ -30,7 +30,7 @@ func TestBrokerHandlerRequestAndTransactionBoundaries(t *testing.T) {
 			Domain: RPCDomain, Version: RPCVersion, Operation: operation, Payload: payload,
 		})
 	}
-	target := Target{StoreID: mustStoreID(t, "channel.matrix.coverage"), Mode: ModeRuntime}
+	target := Target{StoreID: mustStoreID(t, "channel/matrix/coverage"), Mode: ModeRuntime}
 	offline := target
 	offline.Mode = ModeOffline
 	invalid := []struct {

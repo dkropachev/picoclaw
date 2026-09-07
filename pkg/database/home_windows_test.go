@@ -24,15 +24,14 @@ func TestWindowsOwnerOnlyStateAndFiles(t *testing.T) {
 		t.Fatalf("owner-only state directory rejected: %v", err)
 	}
 
-	bootstrap := filepath.Join(stateDir, ".bootstrap-test")
-	bootstrapFile, err := createOwnerOnlyExclusiveFile(bootstrap, 0o600)
+	bootstrapFile, err := createOwnerOnlyTempFile(stateDir, ".bootstrap-test-", 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := bootstrapFile.Close(); err != nil {
 		t.Fatal(err)
 	}
-	assertWindowsOwnerOnlyFile(t, bootstrap)
+	assertWindowsOwnerOnlyFile(t, bootstrapFile.Name())
 
 	temporary, err := createOwnerOnlyTempFile(stateDir, ".manifest-", 0o600)
 	if err != nil {
@@ -55,18 +54,9 @@ func TestWindowsOwnerOnlyStateAndFiles(t *testing.T) {
 	assertWindowsOwnerOnlyFile(t, lockPath)
 }
 
-func TestWindowsManifestBootstrapAndLocksAreOwnerOnly(t *testing.T) {
+func TestWindowsManifestAndLocksAreOwnerOnly(t *testing.T) {
 	home := t.TempDir()
-	bootstrap, err := prepareSupervisorBootstrap(home, strings.Repeat("a", tokenBytes*2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertWindowsOwnerOnlyFile(t, bootstrap)
-	if err := os.Remove(bootstrap); err != nil {
-		t.Fatal(err)
-	}
-
-	stateDir, err := StateDirectory(home)
+	stateDir, err := prepareStateDirectory(home)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,24 +114,59 @@ func TestWindowsEndpointAndManifestAcceptCaseAlias(t *testing.T) {
 	}
 }
 
-func TestWindowsOwnerValidationUsesCurrentUserSeam(t *testing.T) {
-	stateDir := filepath.Join(t.TempDir(), StateDirectoryName)
-	if err := createOwnerOnlyDirectory(stateDir); err != nil {
+func TestWindowsTrustedHomeRejectsUntrustedWriteAccess(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	if err := createOwnerOnlyDirectory(home); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Lstat(stateDir)
+	current, err := currentWindowsProcessUserSID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	foreign, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	world, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	original := windowsCurrentProcessUserSID
-	windowsCurrentProcessUserSID = func() (*windows.SID, error) { return foreign, nil }
-	t.Cleanup(func() { windowsCurrentProcessUserSID = original })
-	if err := validateOwnerOnlyDirectory(stateDir, info); CodeOf(err) != CodeUnauthorized {
-		t.Fatalf("foreign owner error = %v, want Unauthorized", err)
+	setAccess := func(access windows.ACCESS_MASK) {
+		t.Helper()
+		entries := []windows.EXPLICIT_ACCESS{
+			windowsFullControlEntry(current),
+			{
+				AccessPermissions: access,
+				AccessMode:        windows.GRANT_ACCESS,
+				Trustee: windows.TRUSTEE{
+					TrusteeForm:  windows.TRUSTEE_IS_SID,
+					TrusteeValue: windows.TrusteeValueFromSID(world),
+				},
+			},
+		}
+		acl, aclErr := windows.ACLFromEntries(entries, nil)
+		if aclErr != nil {
+			t.Fatal(aclErr)
+		}
+		if setErr := windows.SetNamedSecurityInfo(
+			home,
+			windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil,
+			nil,
+			acl,
+			nil,
+		); setErr != nil {
+			t.Fatal(setErr)
+		}
+	}
+	setAccess(windows.GENERIC_READ)
+	info, err := os.Lstat(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateTrustedHomeDirectory(home, info); err != nil {
+		t.Fatalf("read-only public home grant rejected: %v", err)
+	}
+	setAccess(windows.GENERIC_WRITE)
+	if err := validateTrustedHomeDirectory(home, info); CodeOf(err) != CodeIntegrity {
+		t.Fatalf("writable public home grant error = %v", err)
 	}
 }
 
@@ -150,14 +175,14 @@ func TestWindowsOwnerValidationRejectsAdditionalTrustee(t *testing.T) {
 	if err := createOwnerOnlyDirectory(stateDir); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(stateDir, "permissive.lock")
-	file, err := createOwnerOnlyExclusiveFile(path, 0o600)
+	file, err := createOwnerOnlyTempFile(stateDir, "permissive-", 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
+	path := file.Name()
 	owner, err := currentWindowsProcessUserSID()
 	if err != nil {
 		t.Fatal(err)

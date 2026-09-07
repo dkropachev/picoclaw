@@ -29,7 +29,7 @@ const (
 	runtimeStateOperationSetLastChatID  = "set-last-chat-id"
 )
 
-const RuntimeStateStoreID database.StoreID = "workspace.runtime-state"
+const RuntimeStateStoreID database.StoreID = "workspace/runtime-state"
 
 type runtimeStateResolveRequest struct {
 	WorkspaceSelector string `json:"workspace_selector"`
@@ -339,7 +339,7 @@ func configuredRuntimeWorkspaces(home string, cfg *config.Config) ([]configuredR
 		selectors[selector] = item.workspace
 		storeID := RuntimeStateStoreID
 		if !item.primary {
-			storeID, selectorErr = database.ParseStoreID("workspace." + selector + ".runtime-state")
+			storeID, selectorErr = database.ParseStoreID("workspace/" + selector + "/runtime-state")
 			if selectorErr != nil {
 				return nil, selectorErr
 			}

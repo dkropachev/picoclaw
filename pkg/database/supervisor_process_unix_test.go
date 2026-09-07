@@ -99,9 +99,9 @@ func TestSupervisorProcessHelper(t *testing.T) {
 	}
 	server, err := StartServer(context.Background(), ServerOptions{
 		Home: home, CatalogFingerprint: fingerprint,
-		RequiredStores: []StoreID{"global.auth"},
+		RequiredStores: []StoreID{"global/auth"},
 		StatusProvider: func(context.Context) ([]StoreStatus, error) {
-			return []StoreStatus{{ID: "global.auth", Readiness: StoreReady}}, nil
+			return []StoreStatus{{ID: "global/auth", Readiness: StoreReady}}, nil
 		},
 	})
 	if err != nil {

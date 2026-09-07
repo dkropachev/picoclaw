@@ -183,7 +183,7 @@ func TestWorkflowBrokerHandlerOperationMatrix(t *testing.T) {
 		t.Fatalf("resolved store = %#v, %v", resolved, err)
 	}
 	if _, err := handler.Handle(t.Context(), request(
-		workflowRPCOperationPreflight, workflowTargetRequest{StoreID: "global.auth"},
+		workflowRPCOperationPreflight, workflowTargetRequest{StoreID: "global/auth"},
 	)); database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("foreign store error = %v", err)
 	}
@@ -229,7 +229,7 @@ func TestWorkflowBrokerHandlerOperationMatrix(t *testing.T) {
 	if err := handler.validateStoreID(""); database.CodeOf(err) != database.CodeInvalid {
 		t.Fatalf("empty StoreID error = %v", err)
 	}
-	if err := handler.validateStoreID("global.auth"); database.CodeOf(err) != database.CodeUnauthorized {
+	if err := handler.validateStoreID("global/auth"); database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("foreign StoreID error = %v", err)
 	}
 	if _, err := workflowRequestStoreID(database.Request{Payload: []byte("{")}); database.CodeOf(

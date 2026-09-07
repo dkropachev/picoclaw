@@ -1,4 +1,4 @@
-//go:build unix
+//go:build unix && !aix
 
 package database
 
@@ -19,20 +19,13 @@ func acquirePlatformFileLock(path string, shared bool) (*os.File, error) {
 		return nil, fmt.Errorf("open database storage lock: %w", err)
 	}
 	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = unix.Close(fd)
-		return nil, errors.New("open database storage lock returned no file")
-	}
-	if err := unix.Fchmod(fd, 0o600); err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("secure database storage lock: %w", err)
-	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("inspect database storage lock: %w", err)
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) {
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) ||
+		stat.Mode&0o777 != 0o600 {
 		_ = file.Close()
 		return nil, NewError(CodeIntegrity, "database storage lock boundary is invalid")
 	}

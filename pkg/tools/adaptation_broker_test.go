@@ -19,7 +19,7 @@ func TestToolAdaptationBrokerRejectsStoreBeforeOpen(t *testing.T) {
 	home := t.TempDir()
 	handler := NewAdaptationBrokerHandler(home)
 	payload, err := database.MarshalCanonical(adaptationProfileRequest{
-		StoreID: "workspace.tool-adaptation",
+		StoreID: "workspace/tool-adaptation",
 		Profile: ToolAdaptationProfile{Provider: "openai", Model: "model"},
 	})
 	if err != nil {

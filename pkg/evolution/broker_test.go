@@ -104,7 +104,7 @@ func newEvolutionBrokerFixture(t *testing.T) *evolutionBrokerFixture {
 	}
 	for id, target := range targets {
 		store := &Store{paths: Paths{Workspace: target.paths.Workspace}, broker: client, storeID: id}
-		if id == "workspace.evolution" {
+		if id == "workspace/evolution" {
 			fixture.primaryStore = store
 		} else {
 			fixture.agentStore = store
@@ -196,7 +196,7 @@ func TestEvolutionBrokerMixedWorkspaceReadinessIsStoreLocal(t *testing.T) {
 	}
 	var agentID database.StoreID
 	for id, target := range targets {
-		if id == "workspace.evolution" {
+		if id == "workspace/evolution" {
 			continue
 		}
 		agentID = id
@@ -245,7 +245,7 @@ func TestEvolutionBrokerMixedWorkspaceReadinessIsStoreLocal(t *testing.T) {
 			evolutionBrokerTargetRequest{StoreID: id}, &response,
 		)
 	}
-	primaryID := database.StoreID("workspace.evolution")
+	primaryID := database.StoreID("workspace/evolution")
 	if err := preflight(primaryID); err != nil {
 		t.Fatalf("primary preflight: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestEvolutionBrokerConcurrentClientsRetainPools(t *testing.T) {
 		BrokerDomain,
 		BrokerVersion,
 		evolutionOpLoadRecords,
-		evolutionBrokerRequest{StoreID: "global.auth", Class: "task"},
+		evolutionBrokerRequest{StoreID: "global/auth", Class: "task"},
 		&out,
 	)
 	if database.CodeOf(err) != database.CodeUnauthorized {
@@ -430,7 +430,7 @@ func TestEvolutionConfiguredRelativeRootMatchesPrimaryCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := targets["workspace.evolution"]
+	target := targets["workspace/evolution"]
 	want := filepath.Join(workspace, "custom-evolution", "evolution.db")
 	if target.paths.Database != want {
 		t.Fatalf("relative evolution database = %q, want %q", target.paths.Database, want)

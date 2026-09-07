@@ -672,6 +672,50 @@ func TestShutdownGatewayClosesMessageBus(t *testing.T) {
 	}
 }
 
+func TestEmbeddedShutdownRejectsActiveProcessSessions(t *testing.T) {
+	original := gatewayActiveProcessSessionCount
+	gatewayActiveProcessSessionCount = func() int { return 2 }
+	t.Cleanup(func() { gatewayActiveProcessSessionCount = original })
+
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	msgBus := bus.NewMessageBus()
+	al := agent.NewAgentLoop(cfg, msgBus, &startupBlockedProvider{reason: "not used"})
+	err := shutdownGateway(
+		&services{}, al, &startupBlockedProvider{reason: "not used"}, msgBus, true, true,
+	)
+	if !errors.Is(err, ErrRuntimeNotRetired) || !strings.Contains(err.Error(), "2 background") {
+		t.Fatalf("embedded shutdown error = %v, want active-session retirement failure", err)
+	}
+	msgBus.Close()
+	al.Close()
+}
+
+func TestEmbeddedShutdownRejectsUnsafeChannelReplacement(t *testing.T) {
+	original := gatewayActiveProcessSessionCount
+	gatewayActiveProcessSessionCount = func() int { return 0 }
+	t.Cleanup(func() { gatewayActiveProcessSessionCount = original })
+
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	msgBus := bus.NewMessageBus()
+	al := agent.NewAgentLoop(cfg, msgBus, &startupBlockedProvider{reason: "not used"})
+	err := shutdownGateway(
+		&services{embeddedReplacementUnsafe: true},
+		al,
+		&startupBlockedProvider{reason: "not used"},
+		msgBus,
+		true,
+		true,
+	)
+	if !errors.Is(err, ErrRuntimeNotRetired) ||
+		!strings.Contains(err.Error(), "channel adapters") {
+		t.Fatalf("embedded shutdown error = %v, want channel retirement failure", err)
+	}
+	msgBus.Close()
+	al.Close()
+}
+
 func receiveGatewayRuntimeEvent(t *testing.T, ch <-chan runtimeevents.Event) runtimeevents.Event {
 	t.Helper()
 

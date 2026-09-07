@@ -58,9 +58,9 @@ func TestLauncherAuthBrokerHandlerOperationMatrix(t *testing.T) {
 		operation string
 		input     any
 	}{
-		{launcherAuthOperationInitialized, launcherAuthEmptyRequest{StoreID: "global.auth"}},
+		{launcherAuthOperationInitialized, launcherAuthEmptyRequest{StoreID: "global/auth"}},
 		{launcherAuthOperationSetPassword, launcherAuthPasswordRequest{StoreID: launcherAuthStoreID}},
-		{launcherAuthOperationVerifyPassword, launcherAuthPasswordRequest{StoreID: "global.auth"}},
+		{launcherAuthOperationVerifyPassword, launcherAuthPasswordRequest{StoreID: "global/auth"}},
 	}
 	for _, test := range invalid {
 		if _, err := call(test.operation, test.input); database.CodeOf(err) != database.CodeInvalid {

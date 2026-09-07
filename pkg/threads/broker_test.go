@@ -234,7 +234,7 @@ func TestThreadBrokerPaginatesListsAndFailsClosed(t *testing.T) {
 	err = client.Call(
 		context.Background(), memory.SessionsBrokerDomain, memory.SessionsBrokerVersion,
 		threadOperationPing,
-		threadStoreRequest{StoreID: "workspace.deadbeef.sessions"}, &response,
+		threadStoreRequest{StoreID: "workspace/deadbeef/sessions"}, &response,
 	)
 	if database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("spoofed StoreID error = %v", err)

@@ -50,7 +50,7 @@ const (
 var allowUnfencedModelCatalogProviderForTests atomic.Bool
 
 // ModelCatalogStoreID is the opaque identity used by launcher catalog clients.
-const ModelCatalogStoreID database.StoreID = "global.model-catalogs"
+const ModelCatalogStoreID database.StoreID = "global/model-catalogs"
 
 const modelCatalogsSchema = `CREATE TABLE model_catalogs (
     catalog_id       TEXT PRIMARY KEY,

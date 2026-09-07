@@ -598,7 +598,7 @@ func TestSessionBrokerCatalogResolutionAndDeepCloneBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentID, err := database.ParseStoreID("workspace." + selector + ".sessions")
+	agentID, err := database.ParseStoreID("workspace/" + selector + "/sessions")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +609,7 @@ func TestSessionBrokerCatalogResolutionAndDeepCloneBoundaries(t *testing.T) {
 	if _, err := configuredSessionsDirectory(
 		home,
 		cfg,
-		"workspace.unknown.sessions",
+		"workspace/unknown/sessions",
 	); database.CodeOf(
 		err,
 	) != database.CodeUnauthorized {
@@ -658,7 +658,7 @@ func TestSessionBrokerAuthorityAndResolutionFailureBoundaries(t *testing.T) {
 	if _, err := NewBrokerAdapter(
 		home,
 		nil,
-		"workspace.unknown.sessions",
+		"workspace/unknown/sessions",
 	); database.CodeOf(
 		err,
 	) != database.CodeUnauthorized {

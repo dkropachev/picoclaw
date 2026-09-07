@@ -20,7 +20,7 @@ const (
 	CacheBrokerDomain  = "local-ci-cache"
 	CacheBrokerVersion = 1
 
-	CacheStoreID database.StoreID = "workspace.local-ci"
+	CacheStoreID database.StoreID = "workspace/local-ci"
 
 	cacheOperationResolve   = "resolve-store"
 	cacheOperationPreflight = "preflight"
@@ -318,7 +318,7 @@ func configuredCacheStores(home string, cfg *config.Config) ([]configuredCacheSt
 			if workspaceErr != nil {
 				return nil, workspaceErr
 			}
-			storeID, workspaceErr = database.ParseStoreID("workspace." + workspaceSelector + ".local-ci")
+			storeID, workspaceErr = database.ParseStoreID("workspace/" + workspaceSelector + "/local-ci")
 			if workspaceErr != nil {
 				return nil, workspaceErr
 			}

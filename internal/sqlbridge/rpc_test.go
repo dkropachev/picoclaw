@@ -12,14 +12,14 @@ func TestTypedRPCValidationRepeatsAuthorityAndStatementPolicy(t *testing.T) {
 
 	rpc := NewBrokerRPC(nil)
 	runtimeTarget := Target{
-		StoreID: mustStoreID(t, "channel.matrix.primary-a1b2c3d4"),
+		StoreID: mustStoreID(t, "channel/matrix/primary-a1b2c3d4"),
 		Mode:    ModeRuntime,
 	}
 	offlineTarget := runtimeTarget
 	offlineTarget.Mode = ModeOffline
 
 	_, err := rpc.Exec(context.Background(), ExecRequest{
-		Target:    Target{StoreID: mustStoreID(t, "global.auth"), Mode: ModeRuntime},
+		Target:    Target{StoreID: mustStoreID(t, "global/auth"), Mode: ModeRuntime},
 		Statement: "SELECT 1",
 	})
 	if database.CodeOf(err) != database.CodeInvalid {
@@ -60,7 +60,7 @@ func TestWireValueValidationRejectsConflictingOrOversizedShapes(t *testing.T) {
 	t.Parallel()
 
 	target := Target{
-		StoreID: mustStoreID(t, "channel.whatsapp.primary-01234567"),
+		StoreID: mustStoreID(t, "channel/whatsapp/primary-01234567"),
 		Mode:    ModeRuntime,
 	}
 	requests := []QueryRequest{

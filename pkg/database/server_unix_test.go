@@ -289,8 +289,11 @@ func TestMutationDisconnectReturnsOutcomeUnknown(t *testing.T) {
 	defer os.Remove(filepath.Join(stateDir, manifestFileName))
 	accepted := make(chan struct{})
 	go func() {
-		connection, acceptErr := listener.Accept()
-		if acceptErr == nil {
+		for range 2 {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				break
+			}
 			var request RequestEnvelope
 			_ = readFrameStrict(connection, &request)
 			_ = connection.Close()
@@ -302,14 +305,20 @@ func TestMutationDisconnectReturnsOutcomeUnknown(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 	var output echoResponse
+	requestContext, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 	err = client.CallWithOptions(
-		context.Background(), "test-domain", 1, "mutate", echoRequest{Value: "x"}, &output,
+		requestContext, "test-domain", 1, "mutate", echoRequest{Value: "x"}, &output,
 		CallOptions{Mutation: true, IdempotencyKey: "mutation-1"},
 	)
 	if CodeOf(err) != CodeOutcomeUnknown {
 		t.Fatalf("disconnect mutation error = %v, want OutcomeUnknown", err)
 	}
-	<-accepted
+	select {
+	case <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("mutation retry connections did not close")
+	}
 }
 
 func exchangeEnvelope(t *testing.T, manifest Manifest, request RequestEnvelope) ResponseEnvelope {

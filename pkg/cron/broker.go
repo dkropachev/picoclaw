@@ -23,7 +23,7 @@ const (
 	BrokerDomain  = "cron"
 	BrokerVersion = 1
 
-	BrokerStoreID database.StoreID = "workspace.cron"
+	BrokerStoreID database.StoreID = "workspace/cron"
 
 	cronBrokerPageItems = 128
 	cronBrokerPageBytes = 8 << 20
@@ -490,7 +490,7 @@ func configuredCronWorkspaces(
 		seenSelectors[selector] = item.workspace
 		logicalName := BrokerStoreID.String()
 		if !item.primary {
-			logicalName = "workspace." + selector + ".cron"
+			logicalName = "workspace/" + selector + "/cron"
 		}
 		storeID, lookupErr := catalog.Lookup(logicalName)
 		if lookupErr != nil {

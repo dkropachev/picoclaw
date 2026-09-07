@@ -17,10 +17,10 @@ func TestLogicalCatalogLookupAndSnapshotBoundaries(t *testing.T) {
 	if (*Catalog)(nil).Entries() != nil {
 		t.Fatal("nil catalog returned entries")
 	}
-	if _, err := (*Catalog)(nil).Lookup("global.auth"); err == nil {
+	if _, err := (*Catalog)(nil).Lookup("global/auth"); err == nil {
 		t.Fatal("nil catalog resolved an entry")
 	}
-	if (*Catalog)(nil).Contains("global.auth") || (&Catalog{}).Contains("") {
+	if (*Catalog)(nil).Contains("global/auth") || (&Catalog{}).Contains("") {
 		t.Fatal("invalid catalog containment succeeded")
 	}
 
@@ -278,7 +278,7 @@ func TestProbeStatusesClassifiesVersionsAndUnversionedDomains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflow := statusByID(statuses, "workspace.workflows")
+	workflow := statusByID(statuses, "workspace/workflows")
 	if workflow.Readiness != database.StoreUnavailable || database.CodeOf(workflow.Error) != database.CodeUnsupported {
 		t.Fatalf("too-new workflow status = %#v", workflow)
 	}
@@ -306,7 +306,7 @@ func TestProbeStatusesImportHorizonAndLegacyTransitions(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = CloseProbePools(home) })
-			status := statusByID(statuses, "workspace.workflows")
+			status := statusByID(statuses, "workspace/workflows")
 			want := database.StoreMigrationRequired
 			if name == "closed import horizon" {
 				want = database.StoreReady
@@ -326,7 +326,7 @@ func TestProbeStatusesImportHorizonAndLegacyTransitions(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = CloseProbePools(home) })
-	auth := statusByID(statuses, "global.auth")
+	auth := statusByID(statuses, "global/auth")
 	if auth.Readiness != database.StoreMigrationRequired ||
 		database.CodeOf(auth.Error) != database.CodeMigrationRequired {
 		t.Fatalf("legacy auth readiness = %#v", auth)
@@ -353,7 +353,7 @@ func TestProbeStatusesRejectsInvalidCatalogAndImportHorizon(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = CloseProbePools(home) })
-	status := statusByID(statuses, "workspace.workflows")
+	status := statusByID(statuses, "workspace/workflows")
 	if status.Readiness != database.StoreIntegrityFailed || database.CodeOf(status.Error) != database.CodeIntegrity {
 		t.Fatalf("invalid import horizon status = %#v", status)
 	}

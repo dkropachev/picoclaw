@@ -112,12 +112,12 @@ func TestEvolutionBrokerHandlerValidationDispatchAndClose(t *testing.T) {
 		}
 	}
 	if _, err := handler.Handle(t.Context(), evolutionRequest(
-		t, BrokerPreflightOperation, evolutionBrokerTargetRequest{StoreID: "workspace.unknown"},
+		t, BrokerPreflightOperation, evolutionBrokerTargetRequest{StoreID: "workspace/unknown"},
 	)); database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("unknown preflight store = %v", err)
 	}
 	if _, err := handler.Handle(t.Context(), evolutionRequest(
-		t, evolutionOpLoadRecords, evolutionBrokerRequest{StoreID: "workspace.unknown"},
+		t, evolutionOpLoadRecords, evolutionBrokerRequest{StoreID: "workspace/unknown"},
 	)); database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("unknown operation store = %v", err)
 	}
@@ -150,15 +150,15 @@ func TestEvolutionBrokerHandlerValidationDispatchAndClose(t *testing.T) {
 	poisoned := &evolutionBrokerStore{}
 	poisoned.once.Do(func() { poisoned.err = errors.New("provider failed") })
 	poisonedHandler := &BrokerHandler{
-		stores: map[database.StoreID]*evolutionBrokerStore{"workspace.evolution": poisoned},
+		stores: map[database.StoreID]*evolutionBrokerStore{"workspace/evolution": poisoned},
 	}
 	if _, err := poisonedHandler.Handle(t.Context(), evolutionRequest(
-		t, BrokerPreflightOperation, evolutionBrokerTargetRequest{StoreID: "workspace.evolution"},
+		t, BrokerPreflightOperation, evolutionBrokerTargetRequest{StoreID: "workspace/evolution"},
 	)); database.CodeOf(err) != database.CodeInternal {
 		t.Fatalf("poisoned preflight = %v", err)
 	}
 	if _, err := poisonedHandler.Handle(t.Context(), evolutionRequest(
-		t, evolutionOpLoadRecords, evolutionBrokerRequest{StoreID: "workspace.evolution"},
+		t, evolutionOpLoadRecords, evolutionBrokerRequest{StoreID: "workspace/evolution"},
 	)); database.CodeOf(err) != database.CodeInternal {
 		t.Fatalf("poisoned operation = %v", err)
 	}
@@ -269,7 +269,7 @@ func TestEvolutionBrokerStoreResolutionContracts(t *testing.T) {
 	if storeID, err := resolveEvolutionBrokerStoreID(
 		NewPaths(fixture.primary, ""),
 	); err != nil ||
-		storeID != "workspace.evolution" {
+		storeID != "workspace/evolution" {
 		t.Fatalf("primary broker StoreID = %q, %v", storeID, err)
 	}
 	if _, err := resolveEvolutionBrokerStoreID(

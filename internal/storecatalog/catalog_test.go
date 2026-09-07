@@ -11,6 +11,14 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
+func catalogTestOptions(t *testing.T, home string, cfg *config.Config) Options {
+	t.Helper()
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatalf("secure catalog test home: %v", err)
+	}
+	return Options{Home: home, Config: cfg}
+}
+
 func TestCanonicalPathToleratesDisappearingRegularLeaf(t *testing.T) {
 	t.Parallel()
 
@@ -78,7 +86,7 @@ func TestBuildRejectsFreshMainToSidecarCollision(t *testing.T) {
 			DatabasePath: filepath.Join(home, "auth.db-wal"),
 		}},
 	}
-	if _, err := Build(home, cfg); err == nil || !strings.Contains(err.Error(), "aliases") {
+	if _, err := Build(catalogTestOptions(t, home, cfg)); err == nil || !strings.Contains(err.Error(), "aliases") {
 		t.Fatalf("fresh main-to-sidecar collision error = %v", err)
 	}
 }
@@ -101,29 +109,29 @@ func TestBuildCataloguesDynamicRuntimeDomainsPerConfiguredWorkspace(t *testing.T
 			Enabled: true, DatabasePath: primaryEvents,
 		}},
 	}
-	catalog, err := Build(home, cfg)
+	catalog, err := Build(catalogTestOptions(t, home, cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentPrefix := "workspace." + shortPathID(agent)
+	agentPrefix := "workspace/" + shortPathID(agent)
 	wanted := map[string]struct {
 		path     string
 		required bool
 	}{
-		"global.git-workspace-inventory": {
+		"global/git-workspace-inventory": {
 			filepath.Join(primary, ".git-workspaces", "inventory.db"), true,
 		},
-		"global.pr-workspace-checkpoints": {
+		"global/pr-workspace-checkpoints": {
 			filepath.Join(
 				primary, ".git-workspaces", ".pr-workspace-implementation", "active", "checkpoints.db",
 			), true,
 		},
-		"workspace.workflows":      {filepath.Join(primary, "state", "workflows.db"), true},
-		"workspace.eventing":       {primaryEvents, true},
-		"workspace.cron":           {filepath.Join(primary, "cron", "jobs.db"), true},
-		agentPrefix + ".workflows": {filepath.Join(agent, "state", "workflows.db"), true},
-		agentPrefix + ".eventing":  {filepath.Join(agent, "eventing", "events.db"), true},
-		agentPrefix + ".cron":      {filepath.Join(agent, "cron", "jobs.db"), true},
+		"workspace/workflows":      {filepath.Join(primary, "state", "workflows.db"), true},
+		"workspace/eventing":       {primaryEvents, true},
+		"workspace/cron":           {filepath.Join(primary, "cron", "jobs.db"), true},
+		agentPrefix + "/workflows": {filepath.Join(agent, "state", "workflows.db"), true},
+		agentPrefix + "/eventing":  {filepath.Join(agent, "eventing", "events.db"), true},
+		agentPrefix + "/cron":      {filepath.Join(agent, "cron", "jobs.db"), true},
 	}
 	for id, expected := range wanted {
 		spec, ok := catalog.Lookup(id)
@@ -137,7 +145,7 @@ func TestBuildCataloguesDynamicRuntimeDomainsPerConfiguredWorkspace(t *testing.T
 	}
 	for _, domain := range []string{"workflows", "eventing", "cron"} {
 		count := 0
-		for _, spec := range catalog.Specs {
+		for _, spec := range catalog.All() {
 			if spec.Domain == domain {
 				count++
 			}

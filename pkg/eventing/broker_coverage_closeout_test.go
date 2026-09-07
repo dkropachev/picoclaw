@@ -161,7 +161,7 @@ func TestEventingBrokerDispatchAndRequestMatrix(t *testing.T) {
 		t.Fatalf("resolved store = %#v, %v", resolved, err)
 	}
 	if _, err := fixture.handler.Handle(t.Context(), request(
-		BrokerPreflightOperation, eventingBrokerTarget{StoreID: "global.auth"},
+		BrokerPreflightOperation, eventingBrokerTarget{StoreID: "global/auth"},
 	)); database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("foreign preflight error = %v", err)
 	}

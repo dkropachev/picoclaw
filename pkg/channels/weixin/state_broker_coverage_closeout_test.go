@@ -29,7 +29,7 @@ func TestWeixinBrokerInvalidRequestAndErrorMatrix(t *testing.T) {
 		operation string
 		input     any
 	}{
-		{weixinBrokerOperationPreflight, weixinBrokerTarget{StoreID: "workspace.bad"}},
+		{weixinBrokerOperationPreflight, weixinBrokerTarget{StoreID: "workspace/bad"}},
 		{weixinBrokerOperationLoadCursor, weixinBrokerAccountRequest{StoreID: WeixinStoreID, AccountKey: "bad/key"}},
 		{weixinBrokerOperationSaveCursor, weixinBrokerCursorRequest{StoreID: WeixinStoreID, AccountKey: "bad/key"}},
 		{

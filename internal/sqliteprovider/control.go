@@ -1,11 +1,23 @@
+// Package sqliteprovider owns SQLite-specific control statements and schema
+// catalog queries for the future single-owner database provider. This
+// foundation neither registers a driver nor opens a database connection.
 package sqliteprovider
 
 import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"strconv"
+)
+
+const maxSQLiteSchemaVersion int64 = 1<<31 - 1
+
+var (
+	errInvalidControlBoundary = errors.New("SQLite provider control boundary is invalid")
+	errInvalidSchemaVersion   = errors.New("SQLite provider schema version is invalid")
+	errIntegrityCheck         = errors.New("SQLite provider integrity check failed")
+	errForeignKeyCheck        = errors.New("SQLite provider foreign-key check failed")
+	errForeignKeyViolation    = errors.New("SQLite provider reported a foreign-key violation")
 )
 
 type controlQueryer interface {
@@ -17,32 +29,39 @@ type controlExecer interface {
 	ExecContext(ctx context.Context, query string, arguments ...any) (sql.Result, error)
 }
 
-// SchemaVersion returns the provider schema-version control value.
+// SchemaVersion returns the main database schema-version control value.
 func SchemaVersion(ctx context.Context, queryer controlQueryer) (int, error) {
-	if queryer == nil {
-		return 0, errors.New("SQLite provider query boundary is unavailable")
+	if ctx == nil || queryer == nil {
+		return 0, errInvalidControlBoundary
 	}
-	var version int
-	if err := queryer.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+	var version int64
+	if err := queryer.QueryRowContext(ctx, "PRAGMA main.user_version").Scan(&version); err != nil {
 		return 0, err
 	}
-	return version, nil
+	if version < 0 || version > maxSQLiteSchemaVersion {
+		return 0, errInvalidSchemaVersion
+	}
+	return int(version), nil
 }
 
-// SetSchemaVersion changes the provider schema-version control value inside a
-// broker-owned migration transaction.
+// SetSchemaVersion changes the main database schema-version control value.
+// Callers must already own the required migration transaction and fence.
 func SetSchemaVersion(ctx context.Context, execer controlExecer, version int) error {
-	if execer == nil || version < 0 {
-		return errors.New("SQLite provider schema version is invalid")
+	if ctx == nil || execer == nil {
+		return errInvalidControlBoundary
 	}
-	_, err := execer.ExecContext(ctx, "PRAGMA user_version = "+strconv.Itoa(version))
+	if version < 0 || int64(version) > maxSQLiteSchemaVersion {
+		return errInvalidSchemaVersion
+	}
+	_, err := execer.ExecContext(ctx, "PRAGMA main.user_version = "+strconv.Itoa(version))
 	return err
 }
 
-// CheckIntegrity runs both physical and referential provider checks.
+// CheckIntegrity runs both physical and referential checks against the main
+// database. Diagnostic details from SQLite are deliberately not returned.
 func CheckIntegrity(ctx context.Context, queryer controlQueryer) error {
-	if queryer == nil {
-		return errors.New("SQLite provider query boundary is unavailable")
+	if ctx == nil || queryer == nil {
+		return errInvalidControlBoundary
 	}
 	if err := CheckIntegrityOnly(ctx, queryer); err != nil {
 		return err
@@ -50,33 +69,45 @@ func CheckIntegrity(ctx context.Context, queryer controlQueryer) error {
 	return CheckForeignKeys(ctx, queryer)
 }
 
-// CheckIntegrityOnly runs the provider's physical integrity diagnostic.
+// CheckIntegrityOnly runs the main database physical integrity diagnostic.
+// Diagnostic details from SQLite are deliberately not returned.
 func CheckIntegrityOnly(ctx context.Context, queryer controlQueryer) error {
-	if queryer == nil {
-		return errors.New("SQLite provider query boundary is unavailable")
+	if ctx == nil || queryer == nil {
+		return errInvalidControlBoundary
 	}
 	var result string
-	if err := queryer.QueryRowContext(ctx, "PRAGMA integrity_check(1)").Scan(&result); err != nil {
-		return err
+	if err := queryer.QueryRowContext(ctx, "PRAGMA main.integrity_check(1)").Scan(&result); err != nil {
+		return controlDiagnosticError(ctx, errIntegrityCheck)
 	}
 	if result != "ok" {
-		return fmt.Errorf("SQLite provider reported corruption")
+		return errIntegrityCheck
 	}
 	return nil
 }
 
-// CheckForeignKeys runs the provider's referential-integrity diagnostic.
+// CheckForeignKeys runs the main database referential-integrity diagnostic.
+// Row details and SQLite diagnostics are deliberately not returned.
 func CheckForeignKeys(ctx context.Context, queryer controlQueryer) error {
-	if queryer == nil {
-		return errors.New("SQLite provider query boundary is unavailable")
+	if ctx == nil || queryer == nil {
+		return errInvalidControlBoundary
 	}
-	rows, err := queryer.QueryContext(ctx, "PRAGMA foreign_key_check")
+	rows, err := queryer.QueryContext(ctx, "PRAGMA main.foreign_key_check")
 	if err != nil {
-		return err
+		return controlDiagnosticError(ctx, errForeignKeyCheck)
 	}
 	defer rows.Close()
 	if rows.Next() {
-		return errors.New("SQLite provider reported a foreign-key violation")
+		return errForeignKeyViolation
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return controlDiagnosticError(ctx, errForeignKeyCheck)
+	}
+	return nil
+}
+
+func controlDiagnosticError(ctx context.Context, fallback error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fallback
 }

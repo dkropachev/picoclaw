@@ -35,7 +35,7 @@ func (h *Handler) proxyPRWorkspaceGateway(
 	if loaded, err := config.LoadConfig(h.configPath); err == nil {
 		cfg = loaded
 	}
-	pidData := prWorkspaceGatewayPIDData()
+	pidData := h.gatewayPIDDataForProxy(prWorkspaceGatewayPIDData())
 	if !validAgentActivityPIDData(pidData) {
 		writePRWorkspaceAPIError(w, http.StatusServiceUnavailable, "gateway_unavailable")
 		return

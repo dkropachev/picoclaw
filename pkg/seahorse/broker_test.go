@@ -37,7 +37,7 @@ func TestSeahorseBrokerLazilyIsolatesCorruptWorkspace(t *testing.T) {
 	var siblingID database.StoreID
 	var siblingPath string
 	for id, target := range targets {
-		if id != "workspace.seahorse" {
+		if id != "workspace/seahorse" {
 			siblingID = id
 			siblingPath = target.path
 		}
@@ -62,7 +62,7 @@ func TestSeahorseBrokerLazilyIsolatesCorruptWorkspace(t *testing.T) {
 			t.Fatalf("constructor opened %q", id)
 		}
 	}
-	primaryPath := targets["workspace.seahorse"].path
+	primaryPath := targets["workspace/seahorse"].path
 	if _, statErr := os.Lstat(primaryPath); !os.IsNotExist(statErr) {
 		t.Fatalf("constructor touched primary store: %v", statErr)
 	}
@@ -75,7 +75,7 @@ func TestSeahorseBrokerLazilyIsolatesCorruptWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = fence.Close() })
-	primaryID := database.StoreID("workspace.seahorse")
+	primaryID := database.StoreID("workspace/seahorse")
 	if _, err = handler.Handle(t.Context(), seahorseBrokerTestRequest(
 		t, opPreflight, seahorseStoreRequest{StoreID: primaryID},
 	)); err != nil {
@@ -306,7 +306,7 @@ func TestSeahorseBrokerConcurrentClientsAndAuthorization(t *testing.T) {
 		BrokerDomain,
 		BrokerVersion,
 		opGetStatuses,
-		seahorseRequest{StoreID: "global.auth"},
+		seahorseRequest{StoreID: "global/auth"},
 		&out,
 	)
 	if database.CodeOf(err) != database.CodeUnauthorized {

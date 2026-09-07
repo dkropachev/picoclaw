@@ -63,7 +63,7 @@ func TestDatabaseStatusAndShutdownUseTypedBroker(t *testing.T) {
 	server, err := dblayer.StartServer(context.Background(), dblayer.ServerOptions{
 		Home: home, CatalogFingerprint: fingerprint,
 		StatusProvider: func(context.Context) ([]dblayer.StoreStatus, error) {
-			return []dblayer.StoreStatus{{ID: "global.auth", Readiness: dblayer.StoreReady}}, nil
+			return []dblayer.StoreStatus{{ID: "global/auth", Readiness: dblayer.StoreReady}}, nil
 		},
 	})
 	if err != nil {
@@ -124,7 +124,7 @@ func TestDatabaseMigrateDryRunAcceptsOnlyCatalogIDs(t *testing.T) {
 	command := NewDatabaseCommand()
 	var output bytes.Buffer
 	command.SetOut(&output)
-	command.SetArgs([]string{"migrate", "--dry-run", "--store", "workspace.workflows"})
+	command.SetArgs([]string{"migrate", "--dry-run", "--store", "workspace/workflows"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}

@@ -295,6 +295,222 @@ func TestCurrentConfigSnapshotsRejectSecuritySidecarWithoutPublicConfig(
 	}
 }
 
+func TestFinishConfigSnapshotResultPrecedence(t *testing.T) {
+	t.Run("stable success", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		content := []byte(`{"version":6}`)
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		revision, err := ConfigRevision(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := &Config{Version: CurrentVersion}
+		cfg, gotRevision, err := finishConfigSnapshot(path, revision, expected, nil)
+		if err != nil || cfg != expected || gotRevision != revision {
+			t.Fatalf("finishConfigSnapshot() = (%p, %q, %v), want (%p, %q, nil)",
+				cfg, gotRevision, err, expected, revision)
+		}
+		if after, readErr := os.ReadFile(path); readErr != nil || string(after) != string(content) {
+			t.Fatalf("stable snapshot changed config: %q, %v", after, readErr)
+		}
+	})
+
+	t.Run("stable load error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(`{"version":6}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		revision, err := ConfigRevision(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		loadErr := errors.New("stable parse failure")
+		cfg, gotRevision, err := finishConfigSnapshot(
+			path,
+			revision,
+			&Config{Version: CurrentVersion},
+			loadErr,
+		)
+		if cfg != nil || gotRevision != "" || !errors.Is(err, loadErr) {
+			t.Fatalf("finishConfigSnapshot() = (%#v, %q, %v), want nil, empty, load error",
+				cfg, gotRevision, err)
+		}
+	})
+
+	t.Run("changed revision outranks load error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(`{"version":6,"workflows":{"enabled":true}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		revision, err := ConfigRevision(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if writeErr := os.WriteFile(
+			path,
+			[]byte(`{"version":6,"workflows":{"enabled":false}}`),
+			0o600,
+		); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		loadErr := errors.New("stale parse failure")
+		cfg, gotRevision, err := finishConfigSnapshot(
+			path,
+			revision,
+			&Config{Version: CurrentVersion},
+			loadErr,
+		)
+		if cfg != nil || gotRevision != "" || !errors.Is(err, ErrConfigRevisionMismatch) ||
+			errors.Is(err, loadErr) {
+			t.Fatalf("finishConfigSnapshot() = (%#v, %q, %v), want nil, empty, revision mismatch",
+				cfg, gotRevision, err)
+		}
+	})
+
+	t.Run("post-read failure outranks load error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(`{"version":6}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		revision, err := ConfigRevision(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if removeErr := os.Remove(path); removeErr != nil {
+			t.Fatal(removeErr)
+		}
+		if mkdirErr := os.Mkdir(path, 0o700); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+		loadErr := errors.New("stale parse failure")
+		cfg, gotRevision, err := finishConfigSnapshot(
+			path,
+			revision,
+			&Config{Version: CurrentVersion},
+			loadErr,
+		)
+		if cfg != nil || gotRevision != "" || err == nil ||
+			errors.Is(err, ErrConfigRevisionMismatch) || errors.Is(err, loadErr) {
+			t.Fatalf("finishConfigSnapshot() = (%#v, %q, %v), want nil, empty, revision read error",
+				cfg, gotRevision, err)
+		}
+	})
+}
+
+func TestWithConfigMutationLockValidatesAndRunsOperation(t *testing.T) {
+	if err := WithConfigMutationLock("unused", nil); err == nil {
+		t.Fatal("nil config mutation operation succeeded")
+	}
+
+	called := false
+	if err := WithConfigMutationLock("", func() error {
+		called = true
+		return nil
+	}); err == nil || called {
+		t.Fatalf("empty config path = %v, operation called = %t", err, called)
+	}
+
+	wantErr := errors.New("operation sentinel")
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := WithConfigMutationLock(path, func() error {
+		called = true
+		return wantErr
+	}); !errors.Is(err, wantErr) || !called {
+		t.Fatalf("locked operation = %v, called = %t", err, called)
+	}
+}
+
+func TestConfigSnapshotFamiliesReturnStableCurrentRevision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	configuration := DefaultConfig()
+	configuration.Workflows.Enabled = true
+	if err := SaveConfig(path, configuration); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := ConfigRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicBefore, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	securityBefore, err := os.ReadFile(securityPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaders := []struct {
+		name string
+		load func(string) (*Config, string, error)
+	}{
+		{name: "current runtime", load: LoadCurrentConfigSnapshot},
+		{name: "current update", load: LoadCurrentConfigForUpdateSnapshot},
+		{name: "current expected revision", load: func(path string) (*Config, string, error) {
+			return LoadCurrentConfigForUpdateSnapshotIfRevision(path, revision)
+		}},
+		{name: "migration capable runtime", load: LoadConfigSnapshot},
+		{name: "migration capable update", load: LoadConfigForUpdateSnapshot},
+	}
+	for _, loader := range loaders {
+		t.Run(loader.name, func(t *testing.T) {
+			cfg, gotRevision, loadErr := loader.load(path)
+			if loadErr != nil || cfg == nil || gotRevision != revision || !cfg.Workflows.Enabled {
+				t.Fatalf("snapshot = (%#v, %q, %v), want current revision %q",
+					cfg, gotRevision, loadErr, revision)
+			}
+			publicAfter, readErr := os.ReadFile(path)
+			if readErr != nil || string(publicAfter) != string(publicBefore) {
+				t.Fatalf("snapshot changed public config: %q, %v", publicAfter, readErr)
+			}
+			securityAfter, readErr := os.ReadFile(securityPath(path))
+			if readErr != nil || string(securityAfter) != string(securityBefore) {
+				t.Fatalf("snapshot changed security config: %q, %v", securityAfter, readErr)
+			}
+		})
+	}
+}
+
+func TestConfigSnapshotFamiliesPreserveStableLoadError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	content := []byte(`{"version":6`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := ConfigRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaders := []struct {
+		name string
+		load func(string) (*Config, string, error)
+	}{
+		{name: "current runtime", load: LoadCurrentConfigSnapshot},
+		{name: "current update", load: LoadCurrentConfigForUpdateSnapshot},
+		{name: "current expected revision", load: func(path string) (*Config, string, error) {
+			return LoadCurrentConfigForUpdateSnapshotIfRevision(path, revision)
+		}},
+		{name: "migration capable runtime", load: LoadConfigSnapshot},
+		{name: "migration capable update", load: LoadConfigForUpdateSnapshot},
+	}
+	for _, loader := range loaders {
+		t.Run(loader.name, func(t *testing.T) {
+			cfg, gotRevision, loadErr := loader.load(path)
+			if cfg != nil || gotRevision != "" || loadErr == nil ||
+				errors.Is(loadErr, ErrConfigRevisionMismatch) {
+				t.Fatalf("snapshot = (%#v, %q, %v), want nil, empty, stable parse error",
+					cfg, gotRevision, loadErr)
+			}
+			if after, readErr := os.ReadFile(path); readErr != nil || string(after) != string(content) {
+				t.Fatalf("snapshot changed malformed config: %q, %v", after, readErr)
+			}
+		})
+	}
+}
+
 func TestSaveConfigIfRevisionRejectsStaleWriter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	initial := DefaultConfig()

@@ -22,9 +22,13 @@ This starts one container containing:
 
 - the embedded WebUI and launcher API on port `18800`, mapped only to host
   loopback by default;
-- the launcher-managed Gateway child process on container loopback;
+- the Gateway runtime hosted by that launcher process, with its internal
+  listener on container loopback;
 - file-backed SQLite databases and workspace data persisted together under
   `docker/data/`.
+
+Compose grants the launcher 120 seconds to cancel and join the embedded runtime
+before container termination, including active workflow and SQLite cleanup.
 
 Browser chat and media use authenticated same-origin launcher proxies, so the
 Gateway port does not need to be published. Public `GET`/`HEAD` probes at
@@ -54,14 +58,16 @@ docker compose -f docker/docker-compose.yml \
   -f docker/docker-compose.gateway-public.yml up -d --remove-orphans
 ```
 
-The override changes the managed Gateway bind address to `0.0.0.0` and publishes
-`18790`. Protect that port with a firewall or TLS reverse proxy. Channels using
-socket, stream, or long-polling delivery do not need this override.
+The override changes the in-process Gateway listener bind address to `0.0.0.0`
+and publishes `18790`. It does not start another process. Protect that port with
+a firewall or TLS reverse proxy. Channels using socket, stream, or long-polling
+delivery do not need this override.
 
 ### Gateway-Only Mode
 
-The optional `gateway` profile keeps the headless deployment available. Name the
-service explicitly from the separate headless file:
+The optional `gateway` profile keeps a standalone headless deployment available
+as an explicit alternative to the launcher. Name the service explicitly from
+the separate headless file:
 
 ```bash
 docker compose -f docker/docker-compose.headless.yml \
@@ -70,8 +76,9 @@ docker compose -f docker/docker-compose.headless.yml \
 
 `--remove-orphans` stops an existing launcher container in the same Compose
 project before the standalone Gateway starts. The default launcher startup uses
-the same option for the reverse transition, preventing two Gateway process trees
-from sharing the PID file and SQLite home.
+the same option for the reverse transition, preventing the launcher-hosted
+runtime and a standalone Gateway process from sharing the PID file and SQLite
+home.
 
 On a fresh volume, the core image generates `docker/data/config.json` and exits.
 Set provider/channel values, then start that service again with `-d`. Gateway-only

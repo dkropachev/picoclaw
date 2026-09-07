@@ -35,10 +35,10 @@ func TestSnapshotSortsRealStoreAndLegacyInventory(t *testing.T) {
 		}
 	}
 	alpha := storecatalog.Spec{
-		ID: "global.alpha", Path: filepath.Join(home, "alpha.db"),
+		ID: "global/alpha", Path: filepath.Join(home, "alpha.db"),
 		LegacyRoots: []string{zetaLegacy, alphaLegacy},
 	}
-	zeta := storecatalog.Spec{ID: "global.zeta", Path: filepath.Join(home, "zeta.db")}
+	zeta := storecatalog.Spec{ID: "global/zeta", Path: filepath.Join(home, "zeta.db")}
 	if err := os.WriteFile(alpha.Path, []byte("alpha database"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestSnapshotReportsRealPathValidationFailures(t *testing.T) {
 			if _, err := os.Lstat(path); err == nil || errors.Is(err, os.ErrNotExist) {
 				t.Skip("filesystem does not expose an overlong-path inspection error")
 			}
-			spec := storecatalog.Spec{ID: "global.test", Path: path}
+			spec := storecatalog.Spec{ID: "global/test", Path: path}
 			physical := &storecatalog.Catalog{Home: home}
 			selected := []storecatalog.Spec{spec}
 			if test.includePhysical {
@@ -174,7 +174,7 @@ func TestCopyBackupFileRejectsRealBlockedDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := copyBackupFile(
-		t.Context(), blockedRoot, "global.test", "database", source, filepath.Join("nested", "copy"),
+		t.Context(), blockedRoot, "global/test", "database", source, filepath.Join("nested", "copy"),
 	); err == nil {
 		t.Fatal("backup copy accepted a regular file as its destination root")
 	}
@@ -219,7 +219,7 @@ func TestMigrationRunRealFenceAndSelectionFailures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		unknown, err := database.ParseStoreID("global.unknown")
+		unknown, err := database.ParseStoreID("global/unknown")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -237,7 +237,7 @@ func TestMigrationHelpersUseRealAdaptersAndFilesystemErrors(t *testing.T) {
 		path := filepath.Join(home, "workspace", "cron", "jobs.db")
 		withMigrationFence(t, home, func() {
 			if err := applyDomainMigrationAdapter(t.Context(), storecatalog.Spec{
-				ID: "workspace.cron", Domain: "cron", Path: path,
+				ID: "workspace/cron", Domain: "cron", Path: path,
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -292,7 +292,7 @@ func TestMigrationReportsMalformedExistingDomainSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := database.ParseStoreID("global.auth")
+	id, err := database.ParseStoreID("global/auth")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestMigrationRunPropagatesRealPostSnapshotChanges(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		id, err := database.ParseStoreID("global.auth")
+		id, err := database.ParseStoreID("global/auth")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -368,7 +368,7 @@ func TestMigrationRunPropagatesRealPostSnapshotChanges(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		id, err := database.ParseStoreID("global.auth")
+		id, err := database.ParseStoreID("global/auth")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -415,7 +415,7 @@ func TestMigrationRunPropagatesRealPostSnapshotChanges(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		id, err := database.ParseStoreID("global.auth")
+		id, err := database.ParseStoreID("global/auth")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -451,7 +451,7 @@ func TestMigrateUnversionedStorePropagatesRealCanceledRevalidation(t *testing.T)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		_, err := migrateUnversionedStore(ctx, storecatalog.Spec{
-			ID: "workspace.cron", Domain: "cron", Path: path,
+			ID: "workspace/cron", Domain: "cron", Path: path,
 		})
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("canceled cron revalidation = %v", err)

@@ -29,6 +29,11 @@ func runTray() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	<-ctx.Done()
-	shutdownApp()
+	select {
+	case <-ctx.Done():
+	case serveErr := <-launcherServeErrors:
+		if serveErr != nil {
+			logger.ErrorC("web", serveErr.Error())
+		}
+	}
 }

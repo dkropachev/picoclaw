@@ -253,13 +253,13 @@ func TestEvaluationBrokerHandlerValidationPaginationAndLeaseLifecycle(t *testing
 			Domain:    evaluationBrokerDomain,
 			Version:   evaluationBrokerVersion,
 			Operation: evaluationOperationUnlock,
-			Payload:   json.RawMessage(`{"store_id":"workspace.repository-evaluations","lease_id":""}`),
+			Payload:   json.RawMessage(`{"store_id":"workspace/repository-evaluations","lease_id":""}`),
 		},
 		{
 			Domain:    evaluationBrokerDomain,
 			Version:   evaluationBrokerVersion,
 			Operation: evaluationOperationRenewLease,
-			Payload:   json.RawMessage(`{"store_id":"workspace.repository-evaluations","lease_id":""}`),
+			Payload:   json.RawMessage(`{"store_id":"workspace/repository-evaluations","lease_id":""}`),
 		},
 		{
 			Domain:    evaluationBrokerDomain,
@@ -384,7 +384,7 @@ func TestEvaluationBrokerHandlerValidationPaginationAndLeaseLifecycle(t *testing
 	}
 	if _, err := handler.Handle(t.Context(), database.Request{
 		Domain: evaluationBrokerDomain, Version: evaluationBrokerVersion,
-		Operation: evaluationOperationGet, Payload: json.RawMessage(`{"store_id":"workspace.unknown"}`),
+		Operation: evaluationOperationGet, Payload: json.RawMessage(`{"store_id":"workspace/unknown"}`),
 	}); database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("unknown store = %v", err)
 	}
@@ -792,7 +792,7 @@ func TestEvaluationBrokerMalformedResponsesAndProviderFailures(t *testing.T) {
 			t.Fatalf("broker-owned lock conflict = %v", err)
 		}
 		unlock()
-		if got := (Store{storeID: "workspace.custom"}).StoreID(); got != "workspace.custom" {
+		if got := (Store{storeID: "workspace/custom"}).StoreID(); got != "workspace/custom" {
 			t.Fatalf("local StoreID = %q", got)
 		}
 		if got := (Store{}).StoreID(); got != EvaluationStoreID {

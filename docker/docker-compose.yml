@@ -12,6 +12,7 @@ services:
     image: docker.io/sipeed/picoclaw:launcher
     container_name: picoclaw-launcher
     restart: unless-stopped
+    stop_grace_period: 120s
     environment:
       PICOCLAW_GATEWAY_HOST: 127.0.0.1
     ports:

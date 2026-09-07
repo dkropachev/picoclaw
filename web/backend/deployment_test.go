@@ -21,6 +21,7 @@ type launcherComposeService struct {
 	Environment map[string]string `yaml:"environment"`
 	Ports       []string          `yaml:"ports"`
 	Volumes     []string          `yaml:"volumes"`
+	StopGrace   string            `yaml:"stop_grace_period"`
 }
 
 func launcherRepositoryRoot(t *testing.T) string {
@@ -74,6 +75,9 @@ func TestDefaultComposeIsSingleNodeLauncherOnly(t *testing.T) {
 	}
 	if !slices.Equal(launcher.Volumes, []string{"./data:/root/.picoclaw"}) {
 		t.Fatalf("launcher volumes = %v, want complete PicoClaw home", launcher.Volumes)
+	}
+	if launcher.StopGrace != "120s" {
+		t.Fatalf("launcher stop_grace_period = %q, want 120s", launcher.StopGrace)
 	}
 }
 
@@ -135,5 +139,32 @@ func TestLauncherDockerfilesProbeLauncherHealth(t *testing.T) {
 				t.Fatalf("%s still couples health to Gateway", relative)
 			}
 		})
+	}
+}
+
+func TestLauncherHostsGatewayInProcess(t *testing.T) {
+	root := launcherRepositoryRoot(t)
+	mainSource, err := os.ReadFile(filepath.Join(root, "web/backend/main.go"))
+	if err != nil {
+		t.Fatalf("ReadFile(web/backend/main.go) error = %v", err)
+	}
+	mainContents := string(mainSource)
+	if !strings.Contains(mainContents, "apiHandler.EmbedGateway(runEmbeddedGatewayRuntime)") {
+		t.Fatal("launcher does not enable in-process Gateway hosting")
+	}
+	if !strings.Contains(mainContents, "coregateway.RunContext") {
+		t.Fatal("launcher does not inject the context-owned Gateway runtime")
+	}
+
+	embeddedSource, err := os.ReadFile(filepath.Join(root, "web/backend/api/gateway_embedded.go"))
+	if err != nil {
+		t.Fatalf("ReadFile(gateway_embedded.go) error = %v", err)
+	}
+	contents := string(embeddedSource)
+	if strings.Contains(contents, "pkg/gateway") {
+		t.Fatal("embedded Gateway supervisor imports core Gateway and recreates the storage-test cycle")
+	}
+	if strings.Contains(contents, "exec.Command") {
+		t.Fatal("embedded Gateway supervisor starts an OS child process")
 	}
 }

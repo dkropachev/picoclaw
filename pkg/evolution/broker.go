@@ -136,7 +136,7 @@ func configuredEvolutionTargets(home string, cfg *config.Config) (map[database.S
 	if primaryRoot != "" && !filepath.IsAbs(primaryRoot) {
 		primaryRoot = filepath.Join(primary, primaryRoot)
 	}
-	if err := add("workspace.evolution", NewPaths(primary, primaryRoot)); err != nil {
+	if err := add("workspace/evolution", NewPaths(primary, primaryRoot)); err != nil {
 		return nil, err
 	}
 	seen := map[string]struct{}{primary: {}}
@@ -154,7 +154,7 @@ func configuredEvolutionTargets(home string, cfg *config.Config) (map[database.S
 		}
 		seen[workspace] = struct{}{}
 		digest := sha256.Sum256([]byte(filepath.Clean(workspace)))
-		id, err := database.ParseStoreID("workspace." + hex.EncodeToString(digest[:8]) + ".evolution")
+		id, err := database.ParseStoreID("workspace/" + hex.EncodeToString(digest[:8]) + "/evolution")
 		if err != nil {
 			return nil, err
 		}

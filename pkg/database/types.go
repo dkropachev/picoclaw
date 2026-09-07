@@ -129,8 +129,12 @@ func RequireBrokerReady(status BrokerStatus) error {
 	if len(status.RequiredStores) == 0 {
 		return NewError(CodeUnavailable, "database broker required-store catalog is unavailable")
 	}
-	byID := make(map[StoreID]StoreStatus, len(status.Stores))
-	for _, store := range status.Stores {
+	stores, err := ValidateStoreStatuses(status.Stores)
+	if err != nil {
+		return err
+	}
+	byID := make(map[StoreID]StoreStatus, len(stores))
+	for _, store := range stores {
 		byID[store.ID] = store
 	}
 	seen := make(map[StoreID]struct{}, len(status.RequiredStores))

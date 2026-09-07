@@ -22,7 +22,7 @@ const (
 
 	// PRWorkspaceCheckpointStoreID is the fixed opaque catalog identity. The
 	// physical location is derived only inside the trusted broker process.
-	PRWorkspaceCheckpointStoreID database.StoreID = "global.pr-workspace-checkpoints"
+	PRWorkspaceCheckpointStoreID database.StoreID = "global/pr-workspace-checkpoints"
 
 	prWorkspaceCheckpointOperationSave               = "save"
 	prWorkspaceCheckpointOperationLoad               = "load"

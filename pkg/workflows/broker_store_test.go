@@ -362,7 +362,7 @@ func TestWorkflowBrokerConcurrentClientsShareOnePool(t *testing.T) {
 	var response workflowRunsResponse
 	err = fixture.client.Call(
 		t.Context(), workflowRPCDomain, workflowRPCVersion, workflowRPCOperationListRuns,
-		workflowTargetRequest{StoreID: "global.auth"}, &response,
+		workflowTargetRequest{StoreID: "global/auth"}, &response,
 	)
 	if database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("foreign store ID error = %v, want Unauthorized", err)

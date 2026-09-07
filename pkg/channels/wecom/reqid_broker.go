@@ -22,7 +22,7 @@ const (
 	wecomBrokerOperationDelete    = "delete-route"
 )
 
-const WeComStoreID database.StoreID = "channel.wecom"
+const WeComStoreID database.StoreID = "channel/wecom"
 
 type wecomBrokerTarget struct {
 	StoreID database.StoreID `json:"store_id"`

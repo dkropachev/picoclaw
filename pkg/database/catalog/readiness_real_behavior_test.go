@@ -51,7 +51,7 @@ func TestProbeStatusesClassifiesRealSQLiteLockContention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := statusByID(statuses, "global.auth")
+	status := statusByID(statuses, "global/auth")
 	if status.Readiness != database.StoreUnavailable ||
 		database.CodeOf(status.Error) != database.CodeUnavailable {
 		t.Fatalf("locked auth readiness = %#v", status)
@@ -77,7 +77,7 @@ func TestProbeStatusesRejectsRealNestedLegacyAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := statusByID(statuses, "global.auth")
+	status := statusByID(statuses, "global/auth")
 	if status.Readiness != database.StoreUnavailable ||
 		database.CodeOf(status.Error) != database.CodeUnavailable {
 		t.Fatalf("unsafe legacy readiness = %#v", status)
@@ -142,4 +142,13 @@ func TestProbeStatusesPropagatesRealMalformedSeahorseViewMetadata(t *testing.T) 
 		database.CodeOf(status.Error) != database.CodeUnavailable {
 		t.Fatalf("malformed Seahorse readiness = %#v", status)
 	}
+}
+
+func statusByID(statuses []database.StoreStatus, id database.StoreID) database.StoreStatus {
+	for _, status := range statuses {
+		if status.ID == id {
+			return status
+		}
+	}
+	return database.StoreStatus{}
 }

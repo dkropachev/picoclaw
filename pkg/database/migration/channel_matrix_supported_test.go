@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/internal/sqliteprovider"
+	"github.com/sipeed/picoclaw/internal/storecatalog"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/database"
 )
@@ -31,7 +32,11 @@ func TestMigrationInitializesMissingMatrixStoreOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := database.ParseStoreID("channel.matrix.primary-986a1b71")
+	rawID, ok := storecatalog.ChannelStoreID(config.ChannelMatrix, "primary")
+	if !ok {
+		t.Fatal("matrix channel store ID is invalid")
+	}
+	id, err := database.ParseStoreID(rawID)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -74,9 +74,13 @@ func (h *Handler) createPicoHTTPProxy(token string) *httputil.ReverseProxy {
 
 func (h *Handler) gatewayAvailableForProxy() bool {
 	gateway.mu.Lock()
+	if h.embedGateway && (gateway.hostClosing || gateway.runtimeStatus != "running" ||
+		gateway.embedded == nil || gateway.embedded.pidData == nil) {
+		gateway.mu.Unlock()
+		return false
+	}
 	ensurePicoTokenCachedLocked(h.configPath)
 	cachedPID := gateway.pidData
-	trackedCmd := gateway.cmd
 	gateway.mu.Unlock()
 
 	if pidData := h.sanitizeGatewayPidData(ppid.ReadPidFileWithCheck(globalConfigDir()), nil); pidData != nil {
@@ -91,15 +95,13 @@ func (h *Handler) gatewayAvailableForProxy() bool {
 		return false
 	}
 
-	if isCmdProcessAliveLocked(trackedCmd) {
+	gateway.mu.Lock()
+	if gatewayRuntimeAliveLocked() {
+		gateway.mu.Unlock()
 		return true
 	}
-
-	gateway.mu.Lock()
-	if gateway.cmd == trackedCmd {
-		gateway.pidData = nil
-		setGatewayRuntimeStatusLocked("stopped")
-	}
+	gateway.pidData = nil
+	setGatewayRuntimeStatusLocked("stopped")
 	available := gateway.pidData != nil
 	gateway.mu.Unlock()
 	return available

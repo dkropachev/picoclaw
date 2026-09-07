@@ -267,7 +267,7 @@ func TestThreadBrokerRejectsMalformedTypedOperations(t *testing.T) {
 		},
 		"preflight unknown": {
 			BrokerPreflightOperation,
-			threadStoreRequest{StoreID: "workspace.unknown.sessions"},
+			threadStoreRequest{StoreID: "workspace/unknown/sessions"},
 			database.CodeUnauthorized,
 		},
 		"ping": {

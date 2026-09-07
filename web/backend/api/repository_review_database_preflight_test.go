@@ -15,8 +15,8 @@ func TestRepositoryReviewDatabasePreflightFailsClosedForMaintenance(t *testing.T
 		Home: home,
 		StatusProvider: func(context.Context) ([]database.StoreStatus, error) {
 			statuses := []database.StoreStatus{
-				{ID: "workspace.workflows", Readiness: database.StoreReady},
-				{ID: "workspace.repository-reviews", Readiness: readiness},
+				{ID: "workspace/workflows", Readiness: database.StoreReady},
+				{ID: "workspace/repository-reviews", Readiness: readiness},
 			}
 			if readiness != database.StoreReady {
 				statuses[1].Error = database.NewError(

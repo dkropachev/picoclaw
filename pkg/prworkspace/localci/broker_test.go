@@ -245,7 +245,7 @@ func TestLocalCICacheBrokerRejectsUncatalogedAndSpoofedRoots(t *testing.T) {
 	err := client.Call(
 		context.Background(), CacheBrokerDomain, CacheBrokerVersion, cacheOperationLookup,
 		cacheLookupRequest{
-			StoreID: "workspace.deadbeef.local-ci", ResultKey: string(make([]byte, 64)),
+			StoreID: "workspace/deadbeef/local-ci", ResultKey: string(make([]byte, 64)),
 		},
 		&response,
 	)

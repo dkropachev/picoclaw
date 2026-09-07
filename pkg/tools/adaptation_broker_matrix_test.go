@@ -85,10 +85,10 @@ func TestAdaptationBrokerHandlerOperationMatrix(t *testing.T) {
 		operation string
 		input     any
 	}{
-		{"preflight", adaptationProfileRequest{StoreID: "workspace.bad"}},
-		{"observe-cache", adaptationObservationRequest{StoreID: "workspace.bad"}},
-		{"latest-observation", adaptationProfileRequest{StoreID: "workspace.bad"}},
-		{"observe-outcome", adaptationOutcomeRequest{StoreID: "workspace.bad"}},
+		{"preflight", adaptationProfileRequest{StoreID: "workspace/bad"}},
+		{"observe-cache", adaptationObservationRequest{StoreID: "workspace/bad"}},
+		{"latest-observation", adaptationProfileRequest{StoreID: "workspace/bad"}},
+		{"observe-outcome", adaptationOutcomeRequest{StoreID: "workspace/bad"}},
 		{"latest-outcomes-page", adaptationOutcomesPageRequest{StoreID: ToolAdaptationStoreID, Offset: -1}},
 		{"latest-outcomes-page", adaptationOutcomesPageRequest{StoreID: ToolAdaptationStoreID, Revision: "BAD"}},
 	}

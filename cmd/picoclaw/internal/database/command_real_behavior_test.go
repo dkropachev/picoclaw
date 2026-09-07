@@ -164,7 +164,7 @@ func TestDatabaseMigrateReportsRealWorkspaceAndBackupFailures(t *testing.T) {
 		command.SetOut(&bytes.Buffer{})
 		command.SetErr(&bytes.Buffer{})
 		command.SetArgs([]string{
-			"migrate", "--dry-run", "--store", "workspace.workflows",
+			"migrate", "--dry-run", "--store", "workspace/workflows",
 			"--backup-dir", backupParent,
 		})
 		if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "backup") {

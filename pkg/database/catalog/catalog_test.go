@@ -1,389 +1,432 @@
-//nolint:govet // Independent assertions intentionally use narrow error scopes.
 package catalog
 
 import (
-	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/sipeed/picoclaw/internal/sqliteprovider"
+	"github.com/sipeed/picoclaw/internal/storecatalog"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/database"
 )
 
-func TestCatalogProjectionAndReadinessRequireOwnerAuthority(t *testing.T) {
-	restoreAuthority := database.SuspendProviderTestAuthority()
-	t.Cleanup(restoreAuthority)
-	home := t.TempDir()
-	cfg := &config.Config{}
-	if value, err := New(home, cfg); value != nil || database.CodeOf(err) != database.CodeUnauthorized {
-		t.Fatalf("unfenced catalog = %#v, %v", value, err)
-	}
-	if statuses, err := ProbeStatuses(t.Context(), home, cfg); statuses != nil ||
-		database.CodeOf(err) != database.CodeUnauthorized {
-		t.Fatalf("unfenced readiness = %#v, %v", statuses, err)
-	}
-}
+func logicalCatalogTestOptions(t *testing.T, cfg *config.Config) Options {
+	t.Helper()
 
-func TestProbeStatusesClassifiesFreshMigrationAndIntegrity(t *testing.T) {
 	home := t.TempDir()
-	t.Cleanup(func() { _ = CloseProbePools(home) })
-	workspace := filepath.Join(home, "workspace")
-	if err := os.MkdirAll(filepath.Join(workspace, "state"), 0o700); err != nil {
+	if err := os.Chmod(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	if cfg.Agents.Defaults.Workspace == "" {
+		cfg.Agents.Defaults.Workspace = filepath.Join(home, "workspace")
+	}
+	return Options{Home: home, Config: cfg}
+}
+
+func TestCatalogProjectsSortedDetachedLogicalEntries(t *testing.T) {
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.Workspace = workspace
-	cfg.Workflows.Enabled = true
-
-	statuses, err := ProbeStatuses(context.Background(), home, cfg)
+	options := logicalCatalogTestOptions(t, cfg)
+	catalog, err := New(options)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if statusByID(statuses, "workspace.workflows").Readiness != database.StoreReady {
-		t.Fatalf("missing empty workflow store is not ready: %#v", statuses)
-	}
-
-	workflowPath := filepath.Join(workspace, "state", "workflows.db")
-	pool, err := sqliteprovider.OpenStore(workflowPath, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(`CREATE TABLE retained (id TEXT PRIMARY KEY)`); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.Close(); err != nil {
-		t.Fatal(err)
-	}
-	statuses, err = ProbeStatuses(context.Background(), home, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	workflowStatus := statusByID(statuses, "workspace.workflows")
-	if workflowStatus.Readiness != database.StoreMigrationRequired {
-		t.Fatalf("version-zero workflow readiness = %#v", workflowStatus)
-	}
-	logical, err := New(home, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := RequireReady(logical, statuses); database.CodeOf(err) != database.CodeMigrationRequired {
-		t.Fatalf("RequireReady() error = %v", err)
-	}
-	if err := CloseProbePools(home); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(workflowPath, []byte("not a database"), 0o600); err != nil {
-		t.Fatal(err)
+	entries := catalog.Entries()
+	if len(entries) == 0 {
+		t.Fatal("logical catalog is empty")
 	}
-	statuses, err = ProbeStatuses(context.Background(), home, cfg)
-	if err != nil {
-		t.Fatal(err)
+	if !slices.IsSortedFunc(entries, func(left, right Entry) int {
+		return strings.Compare(left.ID.String(), right.ID.String())
+	}) {
+		t.Fatalf("entries are not ID-sorted: %#v", entries)
 	}
-	if got := statusByID(statuses, "workspace.workflows").Readiness; got != database.StoreIntegrityFailed {
-		t.Fatalf("corrupt workflow readiness = %q", got)
-	}
-}
 
-func TestProbeStatusesClassifiesCurrentPreHorizonStoreForMigration(t *testing.T) {
-	home := t.TempDir()
-	t.Cleanup(func() { _ = CloseProbePools(home) })
-	workspace := filepath.Join(home, "workspace")
-	if err := os.MkdirAll(filepath.Join(workspace, "state"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.Workspace = workspace
-	cfg.Workflows.Enabled = true
-	workflowPath := filepath.Join(workspace, "state", "workflows.db")
-	pool, err := sqliteprovider.OpenStore(workflowPath, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(`
-		CREATE TABLE storage_imports (component TEXT, source_id TEXT);
-		CREATE TABLE storage_import_issues (component TEXT, source_id TEXT);
-		CREATE TABLE storage_import_horizons (component TEXT PRIMARY KEY, completed_at INTEGER NOT NULL);
-		CREATE INDEX storage_imports_archive_status_idx ON storage_imports(component, source_id);
-	`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(`PRAGMA user_version = 1`); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.Close(); err != nil {
-		t.Fatal(err)
-	}
-	statuses, err := ProbeStatuses(t.Context(), home, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	status := statusByID(statuses, "workspace.workflows")
-	if status.Readiness != database.StoreMigrationRequired ||
-		database.CodeOf(status.Error) != database.CodeMigrationRequired {
-		t.Fatalf("pre-horizon workflow readiness = %#v", status)
-	}
-}
-
-func statusByID(statuses []database.StoreStatus, id database.StoreID) database.StoreStatus {
-	for _, status := range statuses {
-		if status.ID == id {
-			return status
+	var auth Entry
+	for _, entry := range entries {
+		if !entry.ID.Valid() {
+			t.Errorf("invalid projected ID %q", entry.ID)
+		}
+		if entry.Domain == "" {
+			t.Errorf("empty domain for %q", entry.ID)
+		}
+		if strings.Contains(entry.ID.String(), `\`) || strings.Contains(entry.ID.String(), ".db") ||
+			filepath.IsAbs(entry.ID.String()) {
+			t.Errorf("logical entry leaks physical identity: %#v", entry)
+		}
+		if entry.ID == "global/auth" {
+			auth = entry
 		}
 	}
-	return database.StoreStatus{}
+	if auth != (Entry{ID: "global/auth", Domain: "auth", Required: true}) {
+		t.Fatalf("global auth entry = %#v", auth)
+	}
+
+	entries[0] = Entry{ID: "forged/id", Domain: "forged", Required: !entries[0].Required}
+	if slices.Equal(entries, catalog.Entries()) {
+		t.Fatal("Entries returned retained storage")
+	}
+	if got, found := catalog.Entry("global/auth"); !found || got != auth {
+		t.Fatalf("Entry(global/auth) = %#v, %t", got, found)
+	}
+	if got, found := catalog.Entry("forged/id"); found || got != (Entry{}) {
+		t.Fatalf("forged entry became retained: %#v, %t", got, found)
+	}
+	beforeConfigMutation := catalog.Entries()
+	cfg.Agents.Defaults.Workspace = filepath.Join(options.Home, "other-workspace")
+	cfg.Workflows.Enabled = !cfg.Workflows.Enabled
+	if !slices.Equal(beforeConfigMutation, catalog.Entries()) {
+		t.Fatal("catalog retained caller configuration")
+	}
 }
 
-func TestLegacyReadinessIgnoresEmptyAndDatabaseOnlyDirectories(t *testing.T) {
-	root := t.TempDir()
-	if found, err := legacyInputExists([]string{root}); err != nil || found {
-		t.Fatalf("empty legacy directory = %v, %v", found, err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "other.db"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if found, err := legacyInputExists([]string{root}); err != nil || found {
-		t.Fatalf("database-only legacy directory = %v, %v", found, err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "retained.json"), []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if found, err := legacyInputExists([]string{root}); err != nil || !found {
-		t.Fatalf("retained legacy directory = %v, %v", found, err)
-	}
-}
-
-func TestCatalogExposesOnlyLogicalStores(t *testing.T) {
-	home := t.TempDir()
-	workspace := filepath.Join(home, "workspace")
-	cfg := &config.Config{
-		Agents:    config.AgentsConfig{Defaults: config.AgentDefaults{Workspace: workspace}},
-		Workflows: config.WorkflowsConfig{Enabled: true},
-	}
-	catalog, err := New(home, cfg)
+func TestCatalogExactLookupEntryAndContains(t *testing.T) {
+	catalog, err := New(logicalCatalogTestOptions(t, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{
-		"global.auth",
-		"launcher.auth",
-		"workspace.workflows",
-		"workspace.sessions",
-		"workspace.eventing",
-		"workspace.seahorse",
-		"channel.wecom",
-		"channel.weixin",
+	id, err := catalog.Lookup("global/auth")
+	if err != nil || id != "global/auth" {
+		t.Fatalf("Lookup(global/auth) = %q, %v", id, err)
+	}
+	if !catalog.Contains(id) || catalog.Contains("global/missing") || catalog.Contains("bad//id") ||
+		catalog.Contains("") {
+		t.Fatal("Contains did not enforce exact catalog membership")
+	}
+	if _, found := catalog.Entry("bad//id"); found {
+		t.Fatal("Entry accepted invalid ID")
+	}
+
+	for _, value := range []string{
+		" global/auth", "global/auth ", "GLOBAL/auth", "/tmp/auth.db", "file:auth.db", "",
 	} {
-		id, lookupErr := catalog.Lookup(name)
-		if lookupErr != nil {
-			t.Errorf("Lookup(%q): %v", name, lookupErr)
-			continue
-		}
-		if id.String() != name {
-			t.Errorf("Lookup(%q) = %q", name, id.String())
-		}
-		if strings.Contains(id.String(), string(os.PathSeparator)) || strings.Contains(id.String(), ".db") {
-			t.Errorf("logical store ID leaks a physical location: %q", id.String())
+		if _, lookupErr := catalog.Lookup(value); database.CodeOf(lookupErr) != database.CodeInvalid {
+			t.Errorf("Lookup(%q) error = %v", value, lookupErr)
 		}
 	}
-	if _, err := catalog.Lookup(filepath.Join(home, "auth.db")); err == nil {
-		t.Fatal("catalog accepted a physical path as a store ID")
+	for _, value := range []string{"global/missing", "global.auth"} {
+		if _, lookupErr := catalog.Lookup(value); database.CodeOf(lookupErr) != database.CodeNotFound {
+			t.Errorf("Lookup(%q) error = %v", value, lookupErr)
+		}
 	}
-	if _, err := catalog.Lookup("unknown.store"); err == nil {
-		t.Fatal("catalog accepted an unknown logical store ID")
+
+	var nilCatalog *Catalog
+	if nilCatalog.Entries() != nil {
+		t.Fatal("nil catalog returned entries")
+	}
+	if entry, found := nilCatalog.Entry("global/auth"); found || entry != (Entry{}) {
+		t.Fatalf("nil Entry = %#v, %t", entry, found)
+	}
+	if nilCatalog.Contains("global/auth") {
+		t.Fatal("nil catalog contains entry")
+	}
+	if _, lookupErr := nilCatalog.Lookup("global/auth"); database.CodeOf(lookupErr) != database.CodeUnavailable {
+		t.Fatalf("nil Lookup error = %v", lookupErr)
 	}
 }
 
-func TestCatalogLoadsDynamicChannelStores(t *testing.T) {
-	home := t.TempDir()
-	workspace := filepath.Join(home, "workspace")
+func TestCatalogLookupChannelRequiresConfiguredExactIdentity(t *testing.T) {
 	matrix := &config.Channel{Enabled: true, Type: config.ChannelMatrix}
 	if err := matrix.Decode(&config.MatrixSettings{
-		CryptoDatabasePath: filepath.Join(home, "matrix-data"),
+		CryptoDatabasePath: filepath.Join(t.TempDir(), "matrix"),
 		CryptoPassphrase:   "configured",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	whatsapp := &config.Channel{Enabled: true, Type: config.ChannelWhatsAppNative}
 	if err := whatsapp.Decode(&config.WhatsAppSettings{
-		SessionStorePath: filepath.Join(home, "whatsapp-data"),
+		SessionStorePath: filepath.Join(t.TempDir(), "whatsapp"),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{
-		Agents:   config.AgentsConfig{Defaults: config.AgentDefaults{Workspace: workspace}},
-		Channels: config.ChannelsConfig{"secure matrix": matrix, "work-phone": whatsapp},
+	cfg := config.DefaultConfig()
+	cfg.Channels = config.ChannelsConfig{
+		"secure matrix": matrix,
+		"work-phone":    whatsapp,
 	}
-	catalog, err := New(home, cfg)
+	catalog, err := New(logicalCatalogTestOptions(t, cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var matrixFound, whatsappFound bool
-	for _, entry := range catalog.Entries() {
-		switch entry.Domain {
-		case "channel-matrix":
-			matrixFound = entry.Required
-		case "channel-whatsapp":
-			whatsappFound = entry.Required
+
+	for _, test := range []struct {
+		channelType string
+		name        string
+		prefix      string
+	}{
+		{channelType: config.ChannelMatrix, name: "secure matrix", prefix: "channel/matrix/secure-matrix-"},
+		{channelType: config.ChannelWhatsAppNative, name: "work-phone", prefix: "channel/whatsapp/work-phone-"},
+	} {
+		id, lookupErr := catalog.LookupChannel(test.channelType, test.name)
+		if lookupErr != nil || !strings.HasPrefix(id.String(), test.prefix) || !catalog.Contains(id) {
+			t.Errorf("LookupChannel(%q, %q) = %q, %v", test.channelType, test.name, id, lookupErr)
 		}
 	}
-	if !matrixFound || !whatsappFound {
-		t.Fatalf("dynamic stores missing: matrix=%v whatsapp=%v", matrixFound, whatsappFound)
+	for _, test := range []struct{ channelType, name string }{
+		{config.ChannelMatrix, "Secure Matrix"},
+		{config.ChannelMatrix, "not configured"},
+		{"unsupported", "secure matrix"},
+	} {
+		_, lookupErr := catalog.LookupChannel(test.channelType, test.name)
+		if database.CodeOf(lookupErr) != database.CodeNotFound {
+			t.Errorf("LookupChannel(%q, %q) error = %v", test.channelType, test.name, lookupErr)
+		}
+	}
+
+	var nilCatalog *Catalog
+	if _, lookupErr := nilCatalog.LookupChannel(
+		config.ChannelMatrix, "secure matrix",
+	); database.CodeOf(lookupErr) != database.CodeUnavailable {
+		t.Fatalf("nil LookupChannel error = %v", lookupErr)
 	}
 }
 
-func TestCatalogRejectsStoreCollision(t *testing.T) {
-	home := t.TempDir()
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
-			Workspace: filepath.Join(home, "workspace"),
-		}},
-		Events: config.EventsConfig{Ingress: config.EventIngressConfig{
-			Enabled:      true,
-			DatabasePath: filepath.Join(home, "auth.db"),
-		}},
-	}
-	if _, err := New(home, cfg); err == nil || !strings.Contains(err.Error(), "resolve to one path") {
-		t.Fatalf("collision error = %v", err)
-	}
-}
-
-func TestLogicalCatalogDoesNotInspectExistingHardlinkAlias(t *testing.T) {
-	home := t.TempDir()
-	workspace := filepath.Join(home, "workspace")
-	if err := os.MkdirAll(filepath.Join(workspace, "eventing"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	authPath := filepath.Join(home, "auth.db")
-	if err := os.WriteFile(authPath, []byte("physical identity"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+func TestCatalogProjectionDoesNotInspectGenerationAliases(t *testing.T) {
+	options := logicalCatalogTestOptions(t, nil)
+	workspace := options.Config.Agents.Defaults.Workspace
 	eventPath := filepath.Join(workspace, "eventing", "events.db")
+	if err := os.MkdirAll(filepath.Dir(eventPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(options.Home, "auth.db")
+	if err := os.WriteFile(authPath, []byte("same physical file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Link(authPath, eventPath); err != nil {
 		t.Skipf("hard links unavailable: %v", err)
 	}
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{Workspace: workspace}},
-		Events: config.EventsConfig{Ingress: config.EventIngressConfig{
-			Enabled: true,
+	options.Config.Events.Ingress.Enabled = true
+	if _, err := New(options); err != nil {
+		t.Fatalf("logical projection inspected generation hardlinks: %v", err)
+	}
+}
+
+func TestCatalogProjectionErrorsAreStructuredAndSanitized(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "secret-home") + "\x00"
+	_, err := New(Options{Home: secret, Config: config.DefaultConfig()})
+	if database.CodeOf(err) != database.CodeInvalid {
+		t.Fatalf("invalid projection code = %s, error = %v", database.CodeOf(err), err)
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(strings.ToLower(err.Error()), "sqlite") {
+		t.Fatalf("projection error leaked implementation detail: %v", err)
+	}
+
+	for _, test := range []struct {
+		input error
+		code  database.ErrorCode
+	}{
+		{errors.New("secret /physical/store.db"), database.CodeInvalid},
+		{database.NewError(database.CodeUnavailable, "secret /physical/store.db"), database.CodeUnavailable},
+		{database.NewError(database.CodeUnauthorized, "secret /physical/store.db"), database.CodeUnauthorized},
+		{database.NewError(database.CodeIntegrity, "secret /physical/store.db"), database.CodeIntegrity},
+		{database.NewError(database.CodeDeadline, "secret /physical/store.db"), database.CodeInvalid},
+	} {
+		sanitized := sanitizeProjectionError(test.input)
+		if database.CodeOf(sanitized) != test.code || strings.Contains(sanitized.Error(), "secret") ||
+			strings.Contains(sanitized.Error(), "/physical") || strings.Contains(sanitized.Error(), ".db") {
+			t.Errorf("sanitizeProjectionError(%v) = %v", test.input, sanitized)
+		}
+	}
+}
+
+func TestCatalogPublicValuesExposeOnlyLogicalMetadata(t *testing.T) {
+	entryType := reflect.TypeOf(Entry{})
+	expectedEntryFields := []struct {
+		name   string
+		typeOf reflect.Type
+	}{
+		{name: "ID", typeOf: reflect.TypeOf(database.StoreID(""))},
+		{name: "Domain", typeOf: reflect.TypeOf("")},
+		{name: "Required", typeOf: reflect.TypeOf(false)},
+	}
+	if entryType.NumField() != len(expectedEntryFields) {
+		t.Fatalf("Entry field count = %d", entryType.NumField())
+	}
+	for index, expected := range expectedEntryFields {
+		field := entryType.Field(index)
+		if field.Name != expected.name || field.Type != expected.typeOf || !field.IsExported() {
+			t.Fatalf("Entry field %d = %s %s", index, field.Name, field.Type)
+		}
+	}
+
+	optionsType := reflect.TypeOf(Options{})
+	expectedOptionFields := []struct {
+		name   string
+		typeOf reflect.Type
+	}{
+		{name: "Home", typeOf: reflect.TypeOf("")},
+		{name: "Config", typeOf: reflect.TypeOf((*config.Config)(nil))},
+		{name: "ConfigPath", typeOf: reflect.TypeOf("")},
+		{name: "UserHome", typeOf: reflect.TypeOf("")},
+	}
+	if optionsType.NumField() != len(expectedOptionFields) {
+		t.Fatalf("Options field count = %d", optionsType.NumField())
+	}
+	for index, expected := range expectedOptionFields {
+		field := optionsType.Field(index)
+		if field.Name != expected.name || field.Type != expected.typeOf || !field.IsExported() {
+			t.Fatalf("Options field %d = %s %s", index, field.Name, field.Type)
+		}
+	}
+
+	catalogType := reflect.TypeOf(Catalog{})
+	for index := range catalogType.NumField() {
+		field := catalogType.Field(index)
+		if field.IsExported() {
+			t.Fatalf("Catalog exposes retained field %s", field.Name)
+		}
+		if strings.Contains(field.Type.String(), "storecatalog") {
+			t.Fatalf("Catalog retains physical provider type %s", field.Type)
+		}
+	}
+}
+
+func TestProjectedCatalogRejectsForgedPhysicalRecords(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		specs []storecatalog.Spec
+	}{
+		{name: "empty"},
+		{name: "invalid ID", specs: []storecatalog.Spec{{ID: "bad//id", Domain: "auth"}}},
+		{name: "empty domain", specs: []storecatalog.Spec{{ID: "global/auth"}}},
+		{name: "long domain", specs: []storecatalog.Spec{{
+			ID: "global/auth", Domain: strings.Repeat("a", maxDomainBytes+1),
+		}}},
+		{name: "leading hyphen", specs: []storecatalog.Spec{{ID: "global/auth", Domain: "-auth"}}},
+		{name: "trailing hyphen", specs: []storecatalog.Spec{{ID: "global/auth", Domain: "auth-"}}},
+		{name: "invalid domain character", specs: []storecatalog.Spec{{ID: "global/auth", Domain: "auth_name"}}},
+		{name: "duplicate ID", specs: []storecatalog.Spec{
+			{ID: "global/auth", Domain: "auth"},
+			{ID: "global/auth", Domain: "launcher-auth"},
 		}},
-	}
-	if _, err := New(home, cfg); err != nil {
-		t.Fatalf("logical catalog inspected a physical hardlink alias: %v", err)
-	}
-}
-
-func TestCatalogRejectsSymlinkedHomeWithoutInspectingSidecar(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation is not generally available to unprivileged Windows tests")
-	}
-	realHome := t.TempDir()
-	alias := filepath.Join(t.TempDir(), "home-link")
-	if err := os.Symlink(realHome, alias); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := New(alias, &config.Config{}); err == nil {
-		t.Fatal("catalog accepted a symlinked home")
-	}
-
-	target := filepath.Join(t.TempDir(), "wal")
-	if err := os.WriteFile(target, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, filepath.Join(realHome, "auth.db-wal")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := New(realHome, &config.Config{}); err != nil {
-		t.Fatalf("logical catalog inspected a SQLite sidecar: %v", err)
-	}
-}
-
-func TestInitializeRequiredInitializesEveryReadyStore(t *testing.T) {
-	logical := &Catalog{entries: []Entry{
-		{ID: "required.missing", Domain: "missing", Required: true},
-		{ID: "required.unwritable", Domain: "unwritable", Required: true},
-		{ID: "required.legacy", Domain: "legacy", Required: true},
-		{ID: "optional.missing", Domain: "optional"},
-	}}
-	statuses := []database.StoreStatus{
-		{ID: "required.missing", Readiness: database.StoreReady},
-		{ID: "required.unwritable", Readiness: database.StoreReady},
-		{
-			ID: "required.legacy", Readiness: database.StoreMigrationRequired,
-			Error: database.NewError(database.CodeMigrationRequired, "migration required"),
-		},
-		{ID: "optional.missing", Readiness: database.StoreReady},
-	}
-	called := make(map[database.StoreID]int)
-	initialized, err := InitializeRequired(
-		t.Context(), logical, statuses,
-		func(_ context.Context, entry Entry) error {
-			called[entry.ID]++
-			if entry.ID == "required.unwritable" {
-				return database.NewError(database.CodeUnavailable, "unwritable")
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			catalog, err := newProjectedCatalog(test.specs)
+			if catalog != nil || database.CodeOf(err) != database.CodeIntegrity ||
+				strings.Contains(err.Error(), "bad//id") || strings.Contains(err.Error(), "auth_name") {
+				t.Fatalf("newProjectedCatalog() = %#v, %v", catalog, err)
 			}
-			return nil
-		},
-	)
+		})
+	}
+}
+
+func TestProjectedCatalogDropsPhysicalMetadataAndCopiesOrder(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "secret-store.db")
+	specs := []storecatalog.Spec{
+		{ID: "workspace/sessions", Domain: "sessions", Path: secret, LegacyRoots: []string{secret + ".json"}},
+		{ID: "global/auth", Domain: "auth", Path: secret + "-other", Required: true},
+	}
+	catalog, err := newProjectedCatalog(specs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if called["required.missing"] != 1 || called["required.unwritable"] != 1 ||
-		called["required.legacy"] != 0 || called["optional.missing"] != 1 {
-		t.Fatalf("readiness initialization calls = %#v", called)
+	specs[0].ID = "forged/id"
+	specs[0].Domain = "forged"
+	specs[0].LegacyRoots[0] = "forged"
+
+	entries := catalog.Entries()
+	if !slices.Equal(entries, []Entry{
+		{ID: "global/auth", Domain: "auth", Required: true},
+		{ID: "workspace/sessions", Domain: "sessions"},
+	}) {
+		t.Fatalf("projected entries = %#v", entries)
 	}
-	byID := make(map[database.StoreID]database.StoreStatus, len(initialized))
-	for _, status := range initialized {
-		byID[status.ID] = status
-	}
-	if byID["required.missing"].Readiness != database.StoreReady {
-		t.Fatalf("missing required status = %#v", byID["required.missing"])
-	}
-	if byID["required.unwritable"].Readiness != database.StoreUnavailable ||
-		byID["required.unwritable"].Error == nil ||
-		byID["required.unwritable"].Error.Code != database.CodeUnavailable {
-		t.Fatalf("unwritable required status = %#v", byID["required.unwritable"])
-	}
-	if byID["required.legacy"].Readiness != database.StoreMigrationRequired {
-		t.Fatalf("legacy required status = %#v", byID["required.legacy"])
-	}
-	if byID["optional.missing"].Readiness != database.StoreReady {
-		t.Fatalf("optional status = %#v", byID["optional.missing"])
-	}
-	if err := RequireReady(logical, initialized); database.CodeOf(err) != database.CodeUnavailable {
-		t.Fatalf("initialized readiness admission error = %v, want Unavailable", err)
+	if strings.Contains(fmt.Sprintf("%#v", catalog), secret) {
+		t.Fatal("catalog retained physical metadata")
 	}
 }
 
-func TestInitializeRequiredMapsIntegrityAndMigrationFailures(t *testing.T) {
-	logical := &Catalog{entries: []Entry{
-		{ID: "required.integrity", Required: true},
-		{ID: "required.migration", Required: true},
-	}}
-	statuses := []database.StoreStatus{
-		{ID: "required.integrity", Readiness: database.StoreReady},
-		{ID: "required.migration", Readiness: database.StoreReady},
+func TestRequiredStoresNilAndNoRequiredPolicy(t *testing.T) {
+	var nilCatalog *Catalog
+	if required := nilCatalog.RequiredStores(); required != nil {
+		t.Fatalf("nil catalog required stores = %#v", required)
 	}
-	initialized, err := InitializeRequired(
-		t.Context(), logical, statuses,
-		func(_ context.Context, entry Entry) error {
-			if entry.ID == "required.integrity" {
-				return database.NewError(database.CodeIntegrity, "bad")
-			}
-			return database.NewError(database.CodeMigrationRequired, "old")
-		},
-	)
+
+	optional, err := newProjectedCatalog([]storecatalog.Spec{
+		{ID: "workspace/optional", Domain: "optional"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if initialized[0].Readiness != database.StoreIntegrityFailed ||
-		initialized[1].Readiness != database.StoreMigrationRequired {
-		t.Fatalf("classified statuses = %#v", initialized)
+	if required := optional.RequiredStores(); required != nil {
+		t.Fatalf("optional-only required stores = %#v", required)
+	}
+}
+
+func TestRequiredStoresFiltersSortsAndDetaches(t *testing.T) {
+	catalog, err := newProjectedCatalog([]storecatalog.Spec{
+		{ID: "workspace/zeta", Domain: "zeta", Required: true},
+		{ID: "global/optional", Domain: "optional"},
+		{ID: "global/auth", Domain: "auth", Required: true},
+		{ID: "workspace/alpha", Domain: "alpha", Required: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []StoreID{"global/auth", "workspace/alpha", "workspace/zeta"}
+	first := catalog.RequiredStores()
+	if !slices.Equal(first, want) {
+		t.Fatalf("RequiredStores() = %#v, want %#v", first, want)
+	}
+	if !slices.IsSorted(first) {
+		t.Fatalf("RequiredStores() is not sorted: %#v", first)
+	}
+
+	first[0] = "forged/id"
+	if repeated := catalog.RequiredStores(); !slices.Equal(repeated, want) {
+		t.Fatalf("caller mutation changed required stores: %#v", repeated)
+	}
+	if entry, found := catalog.Entry("global/optional"); !found || entry.Required {
+		t.Fatalf("optional entry changed: %#v, %t", entry, found)
+	}
+}
+
+func TestRequiredStoresMatchNewSnapshotAndBindRequiredPolicy(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Workflows.Enabled = false
+	options := logicalCatalogTestOptions(t, cfg)
+
+	direct, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, fingerprint, err := NewSnapshot(options, "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint == "" {
+		t.Fatal("NewSnapshot returned empty fingerprint")
+	}
+	if !slices.Equal(direct.RequiredStores(), snapshot.RequiredStores()) {
+		t.Fatalf(
+			"New required stores %#v differ from NewSnapshot %#v",
+			direct.RequiredStores(), snapshot.RequiredStores(),
+		)
+	}
+
+	before := snapshot.RequiredStores()
+	cfg.Workflows.Enabled = true
+	enabled, enabledFingerprint, err := NewSnapshot(options, "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enabledFingerprint == fingerprint {
+		t.Fatalf("required-policy change retained fingerprint %q", fingerprint)
+	}
+	after := enabled.RequiredStores()
+	if slices.Contains(before, StoreID("workspace/workflows")) ||
+		!slices.Contains(after, StoreID("workspace/workflows")) || len(after) != len(before)+1 {
+		t.Fatalf("workflow required policy before=%#v after=%#v", before, after)
+	}
+	if !slices.IsSorted(after) {
+		t.Fatalf("required stores after policy change are not sorted: %#v", after)
 	}
 }

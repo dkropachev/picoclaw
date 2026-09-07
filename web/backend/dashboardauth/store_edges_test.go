@@ -16,7 +16,7 @@ func TestStoreConstructorsAndPasswordStateEdges(t *testing.T) {
 	if openErr != nil {
 		t.Fatalf("New() error = %v", openErr)
 	}
-	if store.StoreID() != "launcher.auth" {
+	if store.StoreID() != "launcher/auth" {
 		t.Fatalf("StoreID() = %q", store.StoreID())
 	}
 	initialized, stateErr := store.IsInitialized(t.Context())

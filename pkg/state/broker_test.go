@@ -211,7 +211,7 @@ func TestRuntimeStateBrokerRejectsUncatalogedAndSpoofedStoresWithoutFallback(t *
 	err := client.Call(
 		context.Background(), RuntimeStateDomain, RuntimeStateVersion,
 		runtimeStateOperationSnapshot,
-		runtimeStateTarget{StoreID: "workspace.deadbeef.runtime-state"}, &response,
+		runtimeStateTarget{StoreID: "workspace/deadbeef/runtime-state"}, &response,
 	)
 	if database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("spoofed StoreID error = %v", err)

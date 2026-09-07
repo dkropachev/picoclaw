@@ -29,7 +29,7 @@ const (
 
 const defaultReviewBrokerLeaseTTL = 30 * time.Second
 
-const ReviewStoreID database.StoreID = "workspace.repository-reviews"
+const ReviewStoreID database.StoreID = "workspace/repository-reviews"
 
 type auditBrokerClientState struct {
 	mu      sync.Mutex

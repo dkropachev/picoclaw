@@ -32,7 +32,7 @@ func TestMatrixCryptoInitializationRequiresBroker(t *testing.T) {
 		CryptoPassphrase: "secret",
 	}
 	channel, err := newMatrixChannel(
-		&config.Channel{}, settings, nil, database.StoreID("channel.matrix.default"),
+		&config.Channel{}, settings, nil, database.StoreID("channel/matrix/default"),
 	)
 	if err != nil {
 		t.Fatal(err)

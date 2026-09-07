@@ -158,7 +158,7 @@ func TestAccountRouterBrokerSelectionRecordingAndSnapshots(t *testing.T) {
 	var response accountRouterSessionKeysResponse
 	err = fixture.client.Call(
 		t.Context(), BrokerDomain, BrokerVersion, accountRouterOperationSessionKeys,
-		accountRouterNamedRequest{StoreID: "global.auth", RouterName: "router-main"}, &response,
+		accountRouterNamedRequest{StoreID: "global/auth", RouterName: "router-main"}, &response,
 	)
 	if database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("foreign StoreID error = %v", err)

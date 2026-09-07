@@ -1,27 +1,28 @@
 import { createFileRoute } from "@tanstack/react-router"
 
-import { ModelAliasDetailPage } from "@/components/models/model-collections"
+import { ModelAliasEditorPage } from "@/components/models/model-collections"
 import { normalizeCollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
 export const Route = createFileRoute("/models_/aliases_/$name")({
   validateSearch: (raw: Record<string, unknown>) =>
     normalizeCollectionRouteSearch(raw, { defaultQuery: "ORDER BY name ASC" }),
-  component: ModelAliasDetailRoute,
+  component: ModelAliasEditorRoute,
 })
 
-function ModelAliasDetailRoute() {
+function ModelAliasEditorRoute() {
   const { name } = Route.useParams()
   const search = Route.useSearch()
   const navigate = Route.useNavigate()
   return (
-    <ModelAliasDetailPage
+    <ModelAliasEditorPage
       name={name}
       onBack={() => void navigate({ to: "/models/aliases", search })}
-      onEdit={() =>
-        void navigate({
-          to: "/models/aliases/$name/edit",
-          params: { name },
+      onSaved={(savedName) =>
+        navigate({
+          to: "/models/aliases/$name",
+          params: { name: savedName },
           search,
+          replace: true,
         })
       }
     />

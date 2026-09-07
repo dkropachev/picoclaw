@@ -79,7 +79,7 @@ func (h *Handler) handleGetAgentActivity(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	pidData := agentActivityGatewayPIDData()
+	pidData := h.gatewayPIDDataForProxy(agentActivityGatewayPIDData())
 	target, ok := agentActivityGatewayURL(pidData, agentID, cursor, limit)
 	if !ok {
 		writeAgentActivityAPIError(
