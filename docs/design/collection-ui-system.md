@@ -163,11 +163,12 @@ maximum page size 200.
 
 ## Routes And Navigation
 
-- List, Add, Detail, and Edit are dedicated stable routes. Mutable array indexes
-  are not UI identities.
+- List, Add, item, and Edit are dedicated stable routes. Item routes render
+  Detail unless an owning feature explicitly declares its bare item route
+  edit-first. Mutable array indexes are not UI identities.
 - Browser Back returns to the same query, view, explicit selection, and in-memory
   scroll position.
-- Direct detail links load the item endpoint and never require a prior list
+- Direct item links load the item endpoint and never require a prior list
   response.
 - Detail pages use the shared header and status/action area, bounded content
   width, and consistent loading, error, and not-found states.
@@ -176,9 +177,9 @@ maximum page size 200.
 
 Canonical pilot routes:
 
-| Collection              | List                                            | New                                        | Detail                                                     | Edit / related                                                       |
+| Collection              | List                                            | New                                        | Detail / item                                              | Edit / related                                                       |
 | ----------------------- | ----------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------- |
-| Model Aliases           | `/models/aliases`                               | `/models/aliases/new`                      | `/models/aliases/:name`                                    | `/:name/edit`                                                        |
+| Model Aliases           | `/models/aliases`                               | `/models/aliases/new`                      | `/models/aliases/:name` (edit-first)                       | `/:name/edit` may remain as an equivalent editor route               |
 | Model Routers           | `/models/routers`                               | `/models/routers/new`                      | `/models/routers/:name`                                    | `/:name/edit`                                                        |
 | MCP Servers             | `/agent/mcp/servers`                            | `/agent/mcp/servers/new`                   | `/agent/mcp/servers/:name`                                 | `/:name/edit`; settings live at `/agent/mcp/settings`                |
 | Agents                  | `/agent/agents`                                 | `/agent/agents/new`                        | `/agent/agents/:id`                                        | `/:id/edit`, `/:id/capabilities`, `/:id/activity`                    |

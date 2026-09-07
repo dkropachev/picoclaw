@@ -565,11 +565,13 @@ export interface FetchModelsResponse {
 
 export async function fetchUpstreamModels(
   req: FetchModelsRequest,
+  signal?: AbortSignal,
 ): Promise<FetchModelsResponse> {
   return request<FetchModelsResponse>("/api/accounts/models/fetch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
+    signal,
   })
 }
 

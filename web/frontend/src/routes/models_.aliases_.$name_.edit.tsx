@@ -16,11 +16,9 @@ function EditModelAliasRoute() {
   return (
     <ModelAliasEditorPage
       name={name}
-      onBack={() =>
-        void navigate({ to: "/models/aliases/$name", params: { name }, search })
-      }
+      onBack={() => void navigate({ to: "/models/aliases", search })}
       onSaved={(savedName) =>
-        void navigate({
+        navigate({
           to: "/models/aliases/$name",
           params: { name: savedName },
           search,

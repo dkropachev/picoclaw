@@ -141,8 +141,16 @@ for (const state of ["empty", "error", "loading"] as const) {
 }
 
 for (const target of [
-  { state: "detail", route: "/models/aliases/code" },
-  { state: "editor", route: "/models/aliases/code/edit" },
+  {
+    state: "edit-first item",
+    route: "/models/aliases/code",
+    snapshot: "shared-detail.png",
+  },
+  {
+    state: "equivalent editor",
+    route: "/models/aliases/code/edit",
+    snapshot: "shared-editor.png",
+  },
 ] as const) {
   test(`shared ${target.state} shell is stable`, async ({ page }) => {
     const errors = collectPageErrors(page)
@@ -154,7 +162,7 @@ for (const target of [
     ).toBeVisible()
     await assertVisualContract(page, errors)
     await expect(page.locator("#main-content")).toHaveScreenshot(
-      `shared-${target.state}.png`,
+      target.snapshot,
     )
   })
 }
