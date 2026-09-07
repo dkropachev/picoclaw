@@ -117,7 +117,9 @@ func runCoverageDelta(root, base, head, tags string, forcedPackages []string, in
 		return nil
 	}
 
-	tmpDir, err := os.MkdirTemp("", "picoclaw-coverage-delta-")
+	// Keep the physical root short: historical tests create Unix sockets below
+	// t.TempDir, and Linux counts the complete pathname against sun_path.
+	tmpDir, err := os.MkdirTemp("", "pc-")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
