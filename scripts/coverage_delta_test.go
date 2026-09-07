@@ -1013,7 +1013,8 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 	assertEnvironmentValue(t, baseEnvironment, "PICOCLAW_CONFIG", "/isolated/base/.picoclaw/config.json")
 	assertEnvironmentValue(t, baseEnvironment, "PICOCLAW_BINARY", "/isolated/base/bin/picoclaw")
 	assertEnvironmentValue(t, baseEnvironment, "XDG_RUNTIME_DIR", "/isolated/base/.xdg/runtime")
-	assertEnvironmentValue(t, baseEnvironment, "TMPDIR", "/isolated/base/.tmp")
+	assertEnvironmentValue(t, baseEnvironment, "TMPDIR", "/isolated/base-tmp")
+	assertEnvironmentValue(t, headEnvironment, "TMPDIR", "/isolated/head-tmp")
 	assertEnvironmentValue(t, baseEnvironment, "GNUPGHOME", "/isolated/base/.gnupg")
 	assertEnvironmentValue(t, baseEnvironment, "GIT_CONFIG_NOSYSTEM", "1")
 	assertEnvironmentValue(

@@ -1031,6 +1031,8 @@ func coverageEnvironment(base []string, home string, caches goCachePaths) []stri
 		environment = append(environment, entry)
 	}
 	picoHome := filepath.Join(home, ".picoclaw")
+	temporaryName := strings.TrimSuffix(filepath.Base(home), "-picoclaw-home") + "-tmp"
+	temporaryDirectory := filepath.Join(filepath.Dir(home), temporaryName)
 	result := append(environment,
 		"HOME="+home,
 		"USERPROFILE="+home,
@@ -1048,9 +1050,9 @@ func coverageEnvironment(base []string, home string, caches goCachePaths) []stri
 		"GNUPGHOME="+filepath.Join(home, ".gnupg"),
 		"GIT_CONFIG_GLOBAL="+filepath.Join(home, ".gitconfig"),
 		"GIT_CONFIG_NOSYSTEM=1",
-		"TMPDIR="+filepath.Join(home, ".tmp"),
-		"TEMP="+filepath.Join(home, ".tmp"),
-		"TMP="+filepath.Join(home, ".tmp"),
+		"TMPDIR="+temporaryDirectory,
+		"TEMP="+temporaryDirectory,
+		"TMP="+temporaryDirectory,
 		"DBUS_SESSION_BUS_ADDRESS=unix:path="+filepath.Join(home, ".no-systemd-bus"),
 		"APPDATA="+filepath.Join(home, "AppData", "Roaming"),
 		"LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"),
@@ -1183,6 +1185,10 @@ func prepareCoverageStorage(home string) error {
 		filepath.Join(home, ".openclaw"),
 		filepath.Join(home, ".gnupg"),
 		filepath.Join(home, ".tmp"),
+		filepath.Join(
+			filepath.Dir(home),
+			strings.TrimSuffix(filepath.Base(home), "-picoclaw-home")+"-tmp",
+		),
 		filepath.Join(home, "bin"),
 		filepath.Join(home, "AppData", "Roaming"),
 		filepath.Join(home, "AppData", "Local"),
