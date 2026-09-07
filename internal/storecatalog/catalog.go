@@ -55,8 +55,9 @@ func Build(options Options) (*Catalog, error) {
 }
 
 // Project derives the same candidate identities without inspecting database
-// generation members. It exists only for filesystem protection policy; broker
-// startup and maintenance must use Build and providers must revalidate on open.
+// generation members. Logical projections must discard its physical fields;
+// filesystem policy may retain them. Broker startup and maintenance must use
+// Build, and providers must revalidate physical identity when opening a store.
 func Project(options Options) (*Catalog, error) {
 	return build(options, false)
 }

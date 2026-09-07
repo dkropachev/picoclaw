@@ -20,8 +20,7 @@ func TestStoreCatalogHasNoProductionImporters(t *testing.T) {
 
 	repositoryRoot := storeCatalogRepositoryRoot(t)
 	allowedImporters := map[string]struct{}{
-		// Keep this allowlist file-specific. Each later integration slice must
-		// name the production file that is allowed to activate the catalog.
+		"pkg/database/catalog/catalog.go": {},
 	}
 	var violations []string
 	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
