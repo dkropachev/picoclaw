@@ -198,3 +198,49 @@ func TestIntegrityCheckRedactsRealNonOKResult(t *testing.T) {
 		t.Fatalf("CheckIntegrityOnly exposed provider result: %v", err)
 	}
 }
+
+func TestForeignKeyCheckPropagatesDeferredRowsCloseFailureSafely(t *testing.T) {
+	closeErr := errors.New("sensitive provider rows close failure")
+	database := openProviderScript(t, providerScriptStep{
+		query: "foreign_key_check", columns: []string{"table"}, closeErr: closeErr,
+		hasNextResultSet: true,
+	})
+	err := CheckForeignKeys(t.Context(), database)
+	if !errors.Is(err, errForeignKeyCheck) {
+		t.Fatalf("CheckForeignKeys close error = %v", err)
+	}
+	if errors.Is(err, closeErr) || strings.Contains(err.Error(), closeErr.Error()) {
+		t.Fatalf("CheckForeignKeys exposed provider close diagnostics: %v", err)
+	}
+}
+
+func TestControlDiagnosticClassifierPreservesOnlyBusyOrLockedCause(t *testing.T) {
+	cause := errors.New("provider contention")
+	fallback := errors.New("redacted diagnostic")
+	classified := false
+	got := controlDiagnosticErrorWithClassifier(
+		t.Context(), cause, fallback, func(err error) bool {
+			classified = true
+			return errors.Is(err, cause)
+		},
+	)
+	if !classified || !errors.Is(got, cause) {
+		t.Fatalf("classified diagnostic = %v, classifier called=%t", got, classified)
+	}
+	if fallbackGot := controlDiagnosticErrorWithClassifier(
+		t.Context(), cause, fallback, nil,
+	); !errors.Is(fallbackGot, fallback) {
+		t.Fatalf("nil-classifier diagnostic = %v", fallbackGot)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	classified = false
+	got = controlDiagnosticErrorWithClassifier(canceled, cause, fallback, func(error) bool {
+		classified = true
+		return true
+	})
+	if !errors.Is(got, context.Canceled) || classified {
+		t.Fatalf("canceled diagnostic = %v, classifier called=%t", got, classified)
+	}
+}

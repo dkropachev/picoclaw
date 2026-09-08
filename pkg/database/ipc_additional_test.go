@@ -3,8 +3,11 @@ package database
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestCatalogFingerprintValidation(t *testing.T) {
@@ -24,14 +27,14 @@ func TestMigrationFenceRejectsInvalidHome(t *testing.T) {
 	}
 }
 
-func TestFenceOwnershipStateTracksLiveFences(t *testing.T) {
+func TestFenceOwnershipTracksExactLiveHome(t *testing.T) {
 	home := t.TempDir()
 	online, err := AcquireOnlineFence(home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !OnlineFenceHeld() || MigrationFenceHeld() {
-		t.Fatal("online fence ownership state is incorrect")
+	if !online.Authorizes(home) || online.Authorizes(t.TempDir()) {
+		t.Fatal("online fence exact-home authority is incorrect")
 	}
 	if closeErr := online.Close(); closeErr != nil {
 		t.Fatal(closeErr)
@@ -40,9 +43,121 @@ func TestFenceOwnershipStateTracksLiveFences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer migration.Close()
-	if OnlineFenceHeld() || !MigrationFenceHeld() {
-		t.Fatal("migration fence ownership state is incorrect")
+	if !migration.Authorizes(home) {
+		t.Fatal("migration fence exact-home authority is incorrect")
+	}
+	if err := migration.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if migration.Authorizes(home) {
+		t.Fatal("closed migration fence retained authority")
+	}
+}
+
+func TestMigrationContextRequiresLiveExactTargetFence(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "stage.db")
+	fence, err := AcquireMigrationFence(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := fence.MigrationContext(t.Context(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !MigrationContextActive(ctx) || !MigrationContextAuthorizes(ctx, target) {
+		t.Fatal("live migration context did not authorize exact target")
+	}
+	if MigrationContextAuthorizes(ctx, filepath.Join(home, "other.db")) {
+		t.Fatal("migration context authorized another target")
+	}
+	if err := fence.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if MigrationContextActive(ctx) || MigrationContextAuthorizes(ctx, target) {
+		t.Fatal("closed migration fence left context active")
+	}
+	if renewed, err := fence.MigrationContext(t.Context(), target); err == nil || renewed != nil {
+		t.Fatalf("closed fence context = %#v, %v", renewed, err)
+	}
+}
+
+func TestFenceAuthorizesConcurrentClose(t *testing.T) {
+	home := t.TempDir()
+	fence, err := AcquireOnlineFence(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 16 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			for range 100 {
+				_ = fence.Authorizes(home)
+			}
+		}()
+	}
+	close(start)
+	if err := fence.Close(); err != nil {
+		t.Fatal(err)
+	}
+	workers.Wait()
+	if fence.Authorizes(home) {
+		t.Fatal("closed fence retained authority")
+	}
+}
+
+func TestFenceGuardDelaysCloseAndRequiresMigrationCapability(t *testing.T) {
+	home := t.TempDir()
+	online, err := AcquireOnlineFence(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release, guardErr := online.GuardMigration(home); release != nil ||
+		CodeOf(guardErr) != CodeUnauthorized {
+		t.Fatalf("online GuardMigration release=%t, err=%v", release != nil, guardErr)
+	}
+	release, err := online.Guard(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	closed := make(chan error, 1)
+	go func() {
+		close(started)
+		closed <- online.Close()
+	}()
+	<-started
+	select {
+	case closeErr := <-closed:
+		t.Fatalf("fence closed through live guard: %v", closeErr)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+	select {
+	case closeErr := <-closed:
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fence close did not resume after guard release")
+	}
+
+	migration, err := AcquireMigrationFence(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err = migration.GuardMigration(home)
+	if err != nil {
+		_ = migration.Close()
+		t.Fatal(err)
+	}
+	release()
+	if err := migration.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

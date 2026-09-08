@@ -30,12 +30,14 @@ type providerScript struct {
 }
 
 type providerScriptStep struct {
-	query    string
-	columns  []string
-	rows     [][]driver.Value
-	err      error
-	rowsErr  error
-	closeErr error
+	query            string
+	columns          []string
+	rows             [][]driver.Value
+	err              error
+	rowsErr          error
+	closeErr         error
+	hasNextResultSet bool
+	action           func()
 }
 
 type providerScriptDriver struct{}
@@ -68,6 +70,9 @@ func (connection *providerScriptConn) QueryContext(
 	_ []driver.NamedValue,
 ) (driver.Rows, error) {
 	step, err := connection.next(query)
+	if step.action != nil {
+		step.action()
+	}
 	if err != nil || step.err != nil {
 		if err != nil {
 			return nil, err
@@ -75,10 +80,11 @@ func (connection *providerScriptConn) QueryContext(
 		return nil, step.err
 	}
 	return &providerScriptRows{
-		columns:  step.columns,
-		rows:     step.rows,
-		final:    step.rowsErr,
-		closeErr: step.closeErr,
+		columns:          step.columns,
+		rows:             step.rows,
+		final:            step.rowsErr,
+		closeErr:         step.closeErr,
+		hasNextResultSet: step.hasNextResultSet,
 	}, nil
 }
 
@@ -88,6 +94,9 @@ func (connection *providerScriptConn) ExecContext(
 	_ []driver.NamedValue,
 ) (driver.Result, error) {
 	step, err := connection.next(query)
+	if step.action != nil {
+		step.action()
+	}
 	if err != nil || step.err != nil {
 		if err != nil {
 			return nil, err
@@ -112,15 +121,26 @@ func (connection *providerScriptConn) next(query string) (providerScriptStep, er
 }
 
 type providerScriptRows struct {
-	columns  []string
-	rows     [][]driver.Value
-	index    int
-	final    error
-	closeErr error
+	columns          []string
+	rows             [][]driver.Value
+	index            int
+	final            error
+	closeErr         error
+	hasNextResultSet bool
 }
 
 func (rows *providerScriptRows) Columns() []string { return rows.columns }
 func (rows *providerScriptRows) Close() error      { return rows.closeErr }
+
+func (rows *providerScriptRows) HasNextResultSet() bool {
+	return rows.hasNextResultSet
+}
+
+func (rows *providerScriptRows) NextResultSet() error {
+	rows.hasNextResultSet = false
+	return nil
+}
+
 func (rows *providerScriptRows) Next(destination []driver.Value) error {
 	if rows.index < len(rows.rows) {
 		copy(destination, rows.rows[rows.index])

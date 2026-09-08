@@ -26,7 +26,13 @@ func TestSQLiteProviderProductionImportersAreExplicit(t *testing.T) {
 	t.Parallel()
 
 	repositoryRoot := sqliteProviderRepositoryRoot(t)
-	allowed := map[string]bool{}
+	allowed := map[string]bool{
+		"internal/databasemigration/backup.go":    true,
+		"internal/databasemigration/migration.go": true,
+		"internal/databasereadiness/readiness.go": true,
+		"internal/sqlitestore/open.go":            false,
+		"internal/sqlitestore/schema.go":          false,
+	}
 	var violations []string
 	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -89,7 +95,9 @@ func TestSQLiteProviderOwnsDriverOpen(t *testing.T) {
 
 	root := filepath.Join(sqliteProviderRepositoryRoot(t), "internal", "sqliteprovider")
 	moderncUsers := map[string]bool{
-		"provider.go": true,
+		"maintenance.go":      true,
+		"provider.go":         true,
+		"staged_migration.go": true,
 	}
 	var violations []string
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {

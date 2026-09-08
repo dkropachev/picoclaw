@@ -12,9 +12,12 @@ single-owner database broker. It alone binds the shipped driver to
 complete SQLite generation, and configures verified live WAL or offline
 rollback-journal operation.
 
-This stage adds no production importer, readiness probe, migration engine,
-database CLI, supervisor wiring, configuration or HTTP surface, or persistence
-cutover. Existing subsystem-local stores remain the active authority.
+The core itself owns no application route. Exact compatibility, readiness, and
+backup/migration implementation filenames are reviewed by architecture guard;
+their separate feature contracts determine when they exist and what they may
+do. No database CLI, supervisor wiring, configuration or HTTP surface, or
+persistence cutover is introduced here. Existing subsystem-local stores remain
+the active authority.
 
 ## Reconstruction Notes
 
@@ -36,7 +39,7 @@ cutover. Existing subsystem-local stores remain the active authority.
 | `FR-DATABASE-SQLITE-PROVIDER-001` | MUST | Trusted infrastructure supplies a memory name or validated filesystem path and bounded busy timeout. | The provider constructs the only shipped-driver DSN, forces one connection open, and returns a pool only after the main generation remains the same exact file. Memory uses a unique shared cache; file DSNs use existing-file mode. | A missing file-backed endpoint may be created durably and privately. | Blank, padded, invalid-UTF-8, NUL-bearing, overlong, URI-shaped, ambiguous Windows device, symlink/reparse, irregular, hardlinked, foreign-owned, or replaced inputs fail without fallback. | Physical addressing and driver binding must have one internal owner. |
 | `FR-DATABASE-SQLITE-PROVIDER-002` | MUST | The provider prepares a directory, main file, or complete generation. | Unix traverses components with descriptor-relative no-follow operations and accepts only protected creation ancestry; Windows rejects reparses, retains the parent handle, and validates a current-user protected DACL. Main and sidecars are single-link owner-private regular files. | Missing components and main files are private at creation, synced, and revalidated; existing owned members may be hardened. | Unsafe ancestry, type, owner, link count, mode/DACL, identity drift, orphan SHM, or mixed WAL and rollback journal fails closed. | SQLite must never follow an attacker-controlled generation member. |
 | `FR-DATABASE-SQLITE-PROVIDER-003` | MUST | Trusted code configures a live, memory, or caller-isolated offline pool. | Live file stores select WAL; offline pools select exclusive locking and DELETE journal; all modes verify foreign keys, bounded busy timeout, and `synchronous=FULL`. Busy/locked classification preserves only SQLite primary codes 5 and 6. | Configuration changes only provider connection state and SQLite journal metadata. | Nil/canceled context, nil pool, invalid timeout, unexpected selected mode, or provider failure returns an error. | Durability and concurrency settings must be explicit and verified. |
-| `FR-DATABASE-SQLITE-PROVIDER-004` | MUST | Repository code adds a driver open, direct provider import, or platform implementation. | An architecture guard allows no production importer in this dormant stage; only `provider.go` calls `database/sql.Open` and imports the shipped driver. Unsupported secure platforms fail closed. | The guard changes no runtime state. | Any unreviewed importer, driver binding, or open call fails tests. | Landing the provider core must not activate a second application owner. |
+| `FR-DATABASE-SQLITE-PROVIDER-004` | MUST | Repository code adds a driver open, direct provider import, or platform implementation. | The exact-file guard permits compatibility open/schema, reserves future readiness and backup/migration implementation filenames, and reserves shipped-driver use by future maintenance/staged-copy files; only `provider.go` calls `database/sql.Open`. Unsupported secure platforms fail closed. | Reserved absent files grant no runtime capability. | Any unreviewed importer, driver binding, or open call fails tests. | Provider evolution must remain auditable without activating a second application owner. |
 
 ## Data And State Model
 
