@@ -13,6 +13,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"maps"
 	"math/bits"
 	"net"
 	"os"
@@ -53,6 +54,14 @@ type coverageBlockIdentity struct {
 	Range string
 }
 
+type coverageBlockStructure struct {
+	StartLine  int
+	StartCol   int
+	EndLine    int
+	EndCol     int
+	Statements int
+}
+
 type goCachePaths struct {
 	Build   string `json:"GOCACHE"`
 	Modules string `json:"GOMODCACHE"`
@@ -64,6 +73,7 @@ type coveragePlan struct {
 	IntegrationSuites []string
 	ImpactedFeature   map[string]bool
 	ChangedLines      map[string]map[int]bool
+	RelocatedFiles    map[string]string
 	GlobalRelevant    bool
 }
 
@@ -90,6 +100,11 @@ type internalPackageRelocation struct {
 	SourceDir      string
 	DestinationDir string
 	Renames        map[string]string
+}
+
+type verifiedInternalPackageRelocation struct {
+	ImportOnlyFiles map[string]bool
+	RelocatedFiles  map[string]string
 }
 
 type sourceEdit struct {
@@ -189,7 +204,7 @@ func buildCoveragePlan(
 	if err != nil {
 		return coveragePlan{}, err
 	}
-	relocationImportChanges, err := verifiedInternalPackageRelocationImportChanges(root, base, head)
+	relocation, err := verifiedInternalPackageRelocationChanges(root, base, head)
 	if err != nil {
 		return coveragePlan{}, err
 	}
@@ -201,6 +216,7 @@ func buildCoveragePlan(
 	plan := coveragePlan{
 		ImpactedFeature: make(map[string]bool),
 		ChangedLines:    changedLines,
+		RelocatedFiles:  relocation.RelocatedFiles,
 	}
 	coverDirs := make(map[string]bool)
 	testDirs := make(map[string]bool)
@@ -234,7 +250,7 @@ func buildCoveragePlan(
 		if !isGoProductionCoverageFile(path) || !isProductionCodePath(path) {
 			continue
 		}
-		if !relocationImportChanges[path] {
+		if !relocation.ImportOnlyFiles[path] {
 			for _, owner := range codeOwnersForPath(specs, path) {
 				plan.ImpactedFeature[owner.SpecRelPath] = true
 			}
@@ -276,24 +292,24 @@ func buildCoveragePlan(
 	return plan, nil
 }
 
-// verifiedInternalPackageRelocationImportChanges recognizes one deliberately
+// verifiedInternalPackageRelocationChanges recognizes one deliberately
 // narrow refactor: one complete, byte- and mode-identical package tree moved
 // from pkg/ to the matching internal/ path, plus consumers changed only to
 // import the new path.
 // The returned files remain in the ordinary cover and test package sets; only
 // their feature-impact fan-out is suppressed. Any other change except modified
 // feature specifications disables the exception for the whole comparison.
-func verifiedInternalPackageRelocationImportChanges(
+func verifiedInternalPackageRelocationChanges(
 	root, base, head string,
-) (map[string]bool, error) {
+) (verifiedInternalPackageRelocation, error) {
 	records, err := changedFileStatusRecords(root, base, head)
 	if err != nil {
-		return nil, err
+		return verifiedInternalPackageRelocation{}, err
 	}
 	for _, record := range records {
 		for _, path := range record.Paths {
 			if path == "go.mod" || path == "go.sum" {
-				return map[string]bool{}, nil
+				return verifiedInternalPackageRelocation{}, nil
 			}
 		}
 	}
@@ -319,7 +335,7 @@ func verifiedInternalPackageRelocationImportChanges(
 		relocationRecords[source+"\x00"+destination] = true
 	}
 	if len(relocations) != 1 {
-		return map[string]bool{}, nil
+		return verifiedInternalPackageRelocation{}, nil
 	}
 	for _, relocation := range relocations {
 		for _, record := range records {
@@ -334,15 +350,15 @@ func verifiedInternalPackageRelocationImportChanges(
 
 	comparisonBase, err := coverageComparisonBase(root, base, head)
 	if err != nil {
-		return nil, err
+		return verifiedInternalPackageRelocation{}, err
 	}
 	baseGoMod, err := gitFileAtRef(root, comparisonBase, "go.mod")
 	if err != nil {
-		return nil, err
+		return verifiedInternalPackageRelocation{}, err
 	}
 	module := modulePathFromGoMod(baseGoMod)
 	if module == "" {
-		return map[string]bool{}, nil
+		return verifiedInternalPackageRelocation{}, nil
 	}
 
 	importReplacements := make(map[string]string)
@@ -354,10 +370,10 @@ func verifiedInternalPackageRelocationImportChanges(
 			relocation,
 		)
 		if verifyErr != nil {
-			return nil, verifyErr
+			return verifiedInternalPackageRelocation{}, verifyErr
 		}
 		if !complete {
-			return map[string]bool{}, nil
+			return verifiedInternalPackageRelocation{}, nil
 		}
 		importReplacements[module+"/"+relocation.SourceDir] =
 			module + "/" + relocation.DestinationDir
@@ -373,26 +389,26 @@ func verifiedInternalPackageRelocationImportChanges(
 			if record.Status == "M" && len(record.Paths) == 1 && isFeatureSpecPath(record.Paths[0]) {
 				continue
 			}
-			return map[string]bool{}, nil
+			return verifiedInternalPackageRelocation{}, nil
 		}
 		if record.Status != "M" || len(record.Paths) != 1 {
-			return map[string]bool{}, nil
+			return verifiedInternalPackageRelocation{}, nil
 		}
 		path := record.Paths[0]
-		baseSource, readErr := gitFileAtRef(root, comparisonBase, path)
+		baseSource, headSource, readErr := gitFilePairAtRefs(root, comparisonBase, head, path)
 		if readErr != nil {
-			return nil, readErr
-		}
-		headSource, readErr := gitFileAtRef(root, head, path)
-		if readErr != nil {
-			return nil, readErr
+			return verifiedInternalPackageRelocation{}, readErr
 		}
 		if !isGofmtImportOnlyRelocationChange(baseSource, headSource, importReplacements) {
-			return map[string]bool{}, nil
+			return verifiedInternalPackageRelocation{}, nil
 		}
 		importOnlyFiles[path] = true
 	}
-	return importOnlyFiles, nil
+	result := verifiedInternalPackageRelocation{ImportOnlyFiles: importOnlyFiles}
+	for _, relocation := range relocations {
+		result.RelocatedFiles = maps.Clone(relocation.Renames)
+	}
+	return result, nil
 }
 
 func coverageComparisonBase(root, base, head string) (string, error) {
@@ -409,6 +425,18 @@ func gitFileAtRef(root, ref, path string) ([]byte, error) {
 		return nil, fmt.Errorf("read %s at %s: %w", path, ref, err)
 	}
 	return []byte(out), nil
+}
+
+func gitFilePairAtRefs(root, base, head, path string) ([]byte, []byte, error) {
+	baseSource, err := gitFileAtRef(root, base, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	headSource, err := gitFileAtRef(root, head, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return baseSource, headSource, nil
 }
 
 func modulePathFromGoMod(contents []byte) string {
@@ -1839,12 +1867,129 @@ func summarizeCoverageBlocks(profile coverageProfile) coverageProfile {
 	return profile
 }
 
+func relocationCoverageStructureMatches(
+	baseProfile, headProfile coverageProfile,
+	relocatedFiles map[string]string,
+) error {
+	canonicalRelocations := make(map[string]string, len(relocatedFiles))
+	destinations := make(map[string]string, len(relocatedFiles))
+	for source, destination := range relocatedFiles {
+		canonicalSource := normalizeRepoPath(source)
+		canonicalDestination := normalizeRepoPath(destination)
+		if source == "" || destination == "" || strings.ContainsRune(source, '\x00') ||
+			strings.ContainsRune(destination, '\x00') || source != canonicalSource ||
+			destination != canonicalDestination || source == destination {
+			return fmt.Errorf("invalid relocation path %q -> %q", source, destination)
+		}
+		if previous, exists := destinations[destination]; exists && previous != source {
+			return fmt.Errorf(
+				"relocation destinations collide at %q for %q and %q",
+				destination,
+				previous,
+				source,
+			)
+		}
+		canonicalRelocations[source] = destination
+		destinations[destination] = source
+	}
+	if len(canonicalRelocations) == 0 {
+		return errors.New("relocation map is empty")
+	}
+	for source, destination := range canonicalRelocations {
+		if _, overlaps := canonicalRelocations[destination]; overlaps {
+			return fmt.Errorf("relocation destination %q is also a source", destination)
+		}
+		if _, represented := baseProfile.Blocks[destination]; represented {
+			return fmt.Errorf(
+				"relocation %q -> %q collides with a base coverage file",
+				source,
+				destination,
+			)
+		}
+	}
+
+	baseStructure, err := coverageStructure(baseProfile, canonicalRelocations)
+	if err != nil {
+		return fmt.Errorf("base profile: %w", err)
+	}
+	headStructure, err := coverageStructure(headProfile, nil)
+	if err != nil {
+		return fmt.Errorf("head profile: %w", err)
+	}
+	if len(baseStructure) != len(headStructure) {
+		return fmt.Errorf(
+			"block count changed from %d to %d",
+			len(baseStructure),
+			len(headStructure),
+		)
+	}
+	for identity, baseBlock := range baseStructure {
+		headBlock, exists := headStructure[identity]
+		if !exists || headBlock != baseBlock {
+			return fmt.Errorf("block structure differs at %s:%s", identity.File, identity.Range)
+		}
+	}
+	return nil
+}
+
+func coverageStructure(
+	profile coverageProfile,
+	pathReplacements map[string]string,
+) (map[coverageBlockIdentity]coverageBlockStructure, error) {
+	structure := make(map[coverageBlockIdentity]coverageBlockStructure)
+	statements := 0
+	for file, blocks := range profile.Blocks {
+		normalizedFile := file
+		if replacement, ok := pathReplacements[file]; ok {
+			normalizedFile = replacement
+		}
+		for rangeKey, block := range blocks {
+			if block.File != file || block.Range != rangeKey {
+				return nil, fmt.Errorf("block map identity differs at %s:%s", file, rangeKey)
+			}
+			startLine, startCol, endLine, endCol, rangeErr := coverageRange(block.Range)
+			if rangeErr != nil || block.StartLine != startLine || block.StartCol != startCol ||
+				block.EndLine != endLine || block.EndCol != endCol || block.Statements < 1 {
+				return nil, fmt.Errorf("block metadata is invalid at %s:%s", file, rangeKey)
+			}
+			identity := coverageBlockIdentity{File: normalizedFile, Range: block.Range}
+			structure[identity] = coverageBlockStructure{
+				StartLine:  block.StartLine,
+				StartCol:   block.StartCol,
+				EndLine:    block.EndLine,
+				EndCol:     block.EndCol,
+				Statements: block.Statements,
+			}
+			statements += block.Statements
+		}
+	}
+	if statements != profile.Global.TotalStatements {
+		return nil, fmt.Errorf(
+			"block statements %d do not match global total %d",
+			statements,
+			profile.Global.TotalStatements,
+		)
+	}
+	return structure, nil
+}
+
 func compareCoverage(
 	specs []featureSpecMetadata,
 	plan coveragePlan,
 	baseProfile, headProfile coverageProfile,
 ) []string {
 	var failures []string
+	changedSummary := changedCodeCoverage(plan.ChangedLines, headProfile)
+	var relocationStructureErr error
+	if len(plan.RelocatedFiles) > 0 {
+		relocationStructureErr = relocationCoverageStructureMatches(
+			baseProfile,
+			headProfile,
+			plan.RelocatedFiles,
+		)
+	}
+	waiveGlobalRegression := len(plan.RelocatedFiles) > 0 &&
+		relocationStructureErr == nil && changedSummary.TotalStatements == 0
 	if baseProfile.Global.TotalStatements == 0 && headProfile.Global.TotalStatements > 0 &&
 		!coverageAtLeastPercent(headProfile.Global, newFeatureMinimumCoveragePercent) {
 		failures = append(failures, fmt.Sprintf(
@@ -1852,7 +1997,7 @@ func compareCoverage(
 			newFeatureMinimumCoveragePercent,
 			formatCoverage(headProfile.Global),
 		))
-	} else if baseProfile.Global.TotalStatements > 0 &&
+	} else if !waiveGlobalRegression && baseProfile.Global.TotalStatements > 0 &&
 		summaryRegressed(baseProfile.Global, headProfile.Global) {
 		failures = append(failures, fmt.Sprintf(
 			"scoped Go coverage regressed: uncovered statement debt %d -> %d and coverage %s -> %s",
@@ -1862,7 +2007,12 @@ func compareCoverage(
 			formatCoverage(headProfile.Global),
 		))
 	}
-	changedSummary := changedCodeCoverage(plan.ChangedLines, headProfile)
+	if relocationStructureErr != nil {
+		failures = append(failures, fmt.Sprintf(
+			"verified internal package relocation coverage structure mismatch: %v",
+			relocationStructureErr,
+		))
+	}
 	if changedSummary.TotalStatements > 0 &&
 		!coverageAtLeastPercent(changedSummary, changedCodeMinimumCoveragePercent) {
 		failures = append(failures, fmt.Sprintf(
