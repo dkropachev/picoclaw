@@ -120,7 +120,7 @@ func runCoverageDelta(root, base, head, tags string, forcedPackages []string, in
 
 	// Keep the physical root short: historical tests create Unix sockets below
 	// t.TempDir, and Linux counts the complete pathname against sun_path.
-	tmpDir, err := os.MkdirTemp("", "pc-")
+	tmpDir, err := createCoverageTemporaryRoot("")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
@@ -149,6 +149,14 @@ func runCoverageDelta(root, base, head, tags string, forcedPackages []string, in
 		changedCodeStatus(changedCodeCoverage(plan.ChangedLines, headProfile)),
 	)
 	return nil
+}
+
+func createCoverageTemporaryRoot(parent string) (string, error) {
+	tmpDir, err := os.MkdirTemp(parent, "pc-")
+	if err != nil {
+		return "", err
+	}
+	return tmpDir, nil
 }
 
 func buildCoveragePlan(

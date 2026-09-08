@@ -274,6 +274,60 @@ func TestCoverageGoTestParallelismIsBounded(t *testing.T) {
 	}
 }
 
+func TestCreateCoverageTemporaryRootUsesShortPrefixAndReportsFailure(t *testing.T) {
+	parent := t.TempDir()
+	root, err := createCoverageTemporaryRoot(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if filepath.Dir(root) != parent || !strings.HasPrefix(filepath.Base(root), "pc-") {
+		t.Fatalf("coverage temporary root = %q, want short pc- child of %q", root, parent)
+	}
+
+	blockedParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err = os.WriteFile(blockedParent, []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if root, err = createCoverageTemporaryRoot(blockedParent); err == nil || root != "" {
+		t.Fatalf("blocked coverage temporary root = (%q, %v), want empty path and error", root, err)
+	}
+}
+
+func TestRunGoCoverageUsesFreshSerializedExecution(t *testing.T) {
+	root := t.TempDir()
+	writeScriptCoverageFixture(t, root, "go.mod", "module example.com/coveragefixture\n\ngo 1.24\n")
+	writeScriptCoverageFixture(
+		t,
+		root,
+		"sample/sample.go",
+		"package sample\n\nfunc Value() int { return 42 }\n",
+	)
+	writeScriptCoverageFixture(
+		t,
+		root,
+		"sample/sample_test.go",
+		"package sample\n\nimport \"testing\"\n\nfunc TestValue(t *testing.T) { if Value() != 42 { t.Fatal(\"wrong value\") } }\n",
+	)
+	profilePath := filepath.Join(root, "coverage.out")
+	profile, err := runGoCoverage(
+		root,
+		"head",
+		"fixture",
+		"",
+		profilePath,
+		[]string{"example.com/coveragefixture/sample"},
+		[]string{"example.com/coveragefixture/sample"},
+		os.Environ(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := profile.Files["sample/sample.go"]; got.TotalStatements == 0 || got.CoveredStatements == 0 {
+		t.Fatalf("fixture coverage = %+v, want covered statements", got)
+	}
+}
+
 func TestCoverageIntegrationSuitesAllowHeadOnlyAddition(t *testing.T) {
 	root := t.TempDir()
 	base := filepath.Join(root, "base")
