@@ -239,6 +239,699 @@ func runCoverageDeltaTestGit(t *testing.T, root string, args ...string) string {
 	return string(out)
 }
 
+const relocationFixtureModule = "example.com/relocation"
+
+type internalRelocationFixture struct {
+	Root string
+	Base string
+}
+
+func newInternalRelocationFixture(t *testing.T) internalRelocationFixture {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+
+	root := t.TempDir()
+	runCoverageDeltaTestGit(t, root, "init", "--quiet")
+	runCoverageDeltaTestGit(t, root, "config", "user.email", "coverage-relocation@example.invalid")
+	runCoverageDeltaTestGit(t, root, "config", "user.name", "Coverage Relocation Test")
+	runCoverageDeltaTestGit(t, root, "config", "commit.gpgSign", "false")
+	runCoverageDeltaTestGit(t, root, "config", "core.fileMode", "true")
+	hooks := filepath.Join(root, "disabled-hooks")
+	if err := os.Mkdir(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runCoverageDeltaTestGit(t, root, "config", "core.hooksPath", hooks)
+
+	files := map[string]string{
+		"go.mod": "module " + relocationFixtureModule + "\n\ngo 1.25\n",
+		"pkg/alpha/alpha.go": `package alpha
+
+func Value() int { return 1 }
+`,
+		"pkg/alpha/alpha_test.go": `package alpha
+
+import "testing"
+
+func TestValue(t *testing.T) { t.Log(Value()) }
+`,
+		"pkg/second/second.go": `package second
+
+func Value() int { return 4 }
+`,
+		"pkg/store/store.go": `package store
+
+func Value() int { return 2 }
+`,
+		"pkg/store/store_linux.go": `//go:build linux
+
+package store
+
+func PlatformValue() int { return 3 }
+`,
+		"pkg/store/store_test.go": `package store
+
+import "testing"
+
+func TestValue(t *testing.T) {
+	if Value() != 2 {
+		t.Fatal("wrong value")
+	}
+}
+`,
+		"pkg/store/testdata/schema.sql": "CREATE TABLE fixture (id INTEGER);\n",
+		"pkg/consumer/consumer.go": relocationFixtureConsumerSource(
+			relocationFixtureModule+"/pkg/store",
+			relocationFixtureModule+"/pkg/alpha",
+			"return alpha.Value() + store.Value()",
+			"",
+		),
+		"pkg/consumer/consumer_test.go": "package consumer_test\n\nimport _ \"" +
+			relocationFixtureModule + "/pkg/store\"\n",
+		"docs/features/fixture.md": "# Fixture\n",
+	}
+	for path, contents := range files {
+		writeCoverageDeltaTestFile(t, root, path, contents)
+	}
+	runCoverageDeltaTestGit(t, root, "add", "--all")
+	runCoverageDeltaTestGit(t, root, "commit", "--quiet", "-m", "base")
+	return internalRelocationFixture{
+		Root: root,
+		Base: strings.TrimSpace(runCoverageDeltaTestGit(t, root, "rev-parse", "HEAD")),
+	}
+}
+
+func relocationFixtureConsumerSource(storeImport, alphaImport, body, buildTag string) string {
+	prefix := ""
+	if buildTag != "" {
+		prefix = "//go:build " + buildTag + "\n\n"
+	}
+	firstImport, secondImport := alphaImport, storeImport
+	if secondImport < firstImport {
+		firstImport, secondImport = secondImport, firstImport
+	}
+	return prefix + `package consumer
+
+import (
+	"` + firstImport + `"
+	"` + secondImport + `"
+)
+
+func Value() int {
+	` + body + `
+}
+`
+}
+
+func (fixture internalRelocationFixture) moveFile(t *testing.T, relative string) {
+	t.Helper()
+	source := filepath.Join(fixture.Root, "pkg", "store", filepath.FromSlash(relative))
+	destination := filepath.Join(fixture.Root, "internal", "store", filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(source, destination); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (fixture internalRelocationFixture) moveCompletePackage(t *testing.T) {
+	t.Helper()
+	for _, path := range []string{
+		"store.go",
+		"store_linux.go",
+		"store_test.go",
+		"testdata/schema.sql",
+	} {
+		fixture.moveFile(t, path)
+	}
+}
+
+func (fixture internalRelocationFixture) rewriteConsumers(t *testing.T) {
+	t.Helper()
+	writeCoverageDeltaTestFile(
+		t,
+		fixture.Root,
+		"pkg/consumer/consumer.go",
+		relocationFixtureConsumerSource(
+			relocationFixtureModule+"/internal/store",
+			relocationFixtureModule+"/pkg/alpha",
+			"return alpha.Value() + store.Value()",
+			"",
+		),
+	)
+	writeCoverageDeltaTestFile(
+		t,
+		fixture.Root,
+		"pkg/consumer/consumer_test.go",
+		"package consumer_test\n\nimport _ \""+relocationFixtureModule+"/internal/store\"\n",
+	)
+}
+
+func (fixture internalRelocationFixture) commitHead(t *testing.T) string {
+	t.Helper()
+	runCoverageDeltaTestGit(t, fixture.Root, "add", "--all")
+	runCoverageDeltaTestGit(t, fixture.Root, "commit", "--quiet", "-m", "head")
+	return strings.TrimSpace(runCoverageDeltaTestGit(t, fixture.Root, "rev-parse", "HEAD"))
+}
+
+func TestVerifiedInternalPackageRelocationLimitsFeatureImpactButKeepsPackageScope(t *testing.T) {
+	t.Parallel()
+	fixture := newInternalRelocationFixture(t)
+	fixture.moveCompletePackage(t)
+	fixture.rewriteConsumers(t)
+	writeCoverageDeltaTestFile(t, fixture.Root, "docs/features/fixture.md", "# Fixture\n\nUpdated.\n")
+	head := fixture.commitHead(t)
+
+	importOnly, err := verifiedInternalPackageRelocationImportChanges(
+		fixture.Root,
+		fixture.Base,
+		head,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantImportOnly := map[string]bool{
+		"pkg/consumer/consumer.go":      true,
+		"pkg/consumer/consumer_test.go": true,
+	}
+	if !reflect.DeepEqual(importOnly, wantImportOnly) {
+		t.Fatalf("verified relocation import-only files = %#v, want %#v", importOnly, wantImportOnly)
+	}
+
+	movedSpec := featureSpecMetadata{
+		RelPath: "docs/features/moved.md",
+		Ownerships: []featureOwnership{
+			{Kind: "CODE", Pattern: "pkg/store/**", SpecRelPath: "docs/features/moved.md"},
+			{Kind: "CODE", Pattern: "internal/store/**", SpecRelPath: "docs/features/moved.md"},
+		},
+	}
+	consumerSpec := featureSpecMetadata{
+		RelPath: "docs/features/consumer.md",
+		Ownerships: []featureOwnership{
+			{Kind: "CODE", Pattern: "pkg/consumer/**", SpecRelPath: "docs/features/consumer.md"},
+		},
+	}
+	plan, err := buildCoveragePlan(
+		fixture.Root,
+		fixture.Base,
+		head,
+		[]featureSpecMetadata{movedSpec, consumerSpec},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.ImpactedFeature[movedSpec.RelPath] {
+		t.Fatal("direct moved package owner was not impacted")
+	}
+	if plan.ImpactedFeature[consumerSpec.RelPath] {
+		t.Fatal("import-only consumer owner was impacted")
+	}
+	for _, dir := range []string{"internal/store", "pkg/consumer"} {
+		if !slices.Contains(plan.CoverPackageDirs, dir) {
+			t.Errorf("cover package dirs %v omit changed package %q", plan.CoverPackageDirs, dir)
+		}
+		if !slices.Contains(plan.TestPackageDirs, dir) {
+			t.Errorf("test package dirs %v omit changed package %q", plan.TestPackageDirs, dir)
+		}
+	}
+	if !plan.GlobalRelevant {
+		t.Fatal("verified relocation was not globally coverage-relevant")
+	}
+}
+
+func TestVerifiedInternalPackageRelocationFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]func(*testing.T, internalRelocationFixture){
+		"content change below R100": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			writeCoverageDeltaTestFile(t, fixture.Root, "internal/store/store.go", `package store
+
+func Value() int { return 99 }
+`)
+		},
+		"copy": func(t *testing.T, fixture internalRelocationFixture) {
+			for _, relative := range []string{"store.go", "store_linux.go", "store_test.go"} {
+				source := filepath.Join(fixture.Root, "pkg", "store", relative)
+				contents, err := os.ReadFile(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeCoverageDeltaTestFile(t, fixture.Root, "internal/store/"+relative, string(contents))
+				writeCoverageDeltaTestFile(t, fixture.Root, "pkg/store/"+relative, string(contents)+"\n// retained source\n")
+			}
+			fixture.rewriteConsumers(t)
+		},
+		"mixed consumer import and code": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			writeCoverageDeltaTestFile(
+				t,
+				fixture.Root,
+				"pkg/consumer/consumer.go",
+				relocationFixtureConsumerSource(
+					relocationFixtureModule+"/internal/store",
+					relocationFixtureModule+"/pkg/alpha",
+					"return alpha.Value() + store.Value() + 1",
+					"",
+				),
+			)
+		},
+		"unbacked module import swap": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			writeCoverageDeltaTestFile(
+				t,
+				fixture.Root,
+				"pkg/consumer/consumer.go",
+				relocationFixtureConsumerSource(
+					relocationFixtureModule+"/internal/store",
+					relocationFixtureModule+"/internal/alpha",
+					"return alpha.Value() + store.Value()",
+					"",
+				),
+			)
+		},
+		"consumer build tag edit": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			writeCoverageDeltaTestFile(
+				t,
+				fixture.Root,
+				"pkg/consumer/consumer.go",
+				relocationFixtureConsumerSource(
+					relocationFixtureModule+"/internal/store",
+					relocationFixtureModule+"/pkg/alpha",
+					"return alpha.Value() + store.Value()",
+					"linux",
+				),
+			)
+		},
+		"consumer declaration edit": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			path := filepath.Join(fixture.Root, "pkg", "consumer", "consumer.go")
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeCoverageDeltaTestFile(
+				t,
+				fixture.Root,
+				"pkg/consumer/consumer.go",
+				strings.Replace(string(contents), "func Value() int", "func ChangedValue() int", 1),
+			)
+		},
+		"partial package move": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveFile(t, "store.go")
+			fixture.rewriteConsumers(t)
+		},
+		"go.mod change": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			writeCoverageDeltaTestFile(
+				t,
+				fixture.Root,
+				"go.mod",
+				"module "+relocationFixtureModule+"\n\ngo 1.24\n",
+			)
+		},
+		"go.sum change": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			writeCoverageDeltaTestFile(t, fixture.Root, "go.sum", "example invalid\n")
+		},
+		"file mode change": func(t *testing.T, fixture internalRelocationFixture) {
+			if runtime.GOOS == "windows" {
+				t.Skip("Win32 does not reliably expose executable-bit changes")
+			}
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			if err := os.Chmod(filepath.Join(fixture.Root, "internal", "store", "store.go"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"second relocation": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			source := filepath.Join(fixture.Root, "pkg", "second", "second.go")
+			destination := filepath.Join(fixture.Root, "internal", "second", "second.go")
+			if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(source, destination); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"unrelated production Go edit": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			writeCoverageDeltaTestFile(t, fixture.Root, "pkg/alpha/alpha.go", `package alpha
+
+func Value() int { return 9 }
+`)
+		},
+		"unrelated test Go edit": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			writeCoverageDeltaTestFile(t, fixture.Root, "pkg/alpha/alpha_test.go", `package alpha
+
+import "testing"
+
+func TestValue(t *testing.T) { t.Log("changed", Value()) }
+`)
+		},
+		"unmoved package asset": func(t *testing.T, fixture internalRelocationFixture) {
+			for _, path := range []string{"store.go", "store_linux.go", "store_test.go"} {
+				fixture.moveFile(t, path)
+			}
+			fixture.rewriteConsumers(t)
+		},
+		"unrelated non-doc file": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			writeCoverageDeltaTestFile(t, fixture.Root, "README.md", "unrelated\n")
+		},
+	}
+
+	for name, mutate := range tests {
+		name, mutate := name, mutate
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newInternalRelocationFixture(t)
+			mutate(t, fixture)
+			head := fixture.commitHead(t)
+			got, err := verifiedInternalPackageRelocationImportChanges(
+				fixture.Root,
+				fixture.Base,
+				head,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("fail-closed relocation files = %#v, want none", got)
+			}
+			consumerSpec := featureSpecMetadata{
+				RelPath: "docs/features/consumer.md",
+				Ownerships: []featureOwnership{
+					{Kind: "CODE", Pattern: "pkg/consumer/**", SpecRelPath: "docs/features/consumer.md"},
+				},
+			}
+			plan, err := buildCoveragePlan(
+				fixture.Root,
+				fixture.Base,
+				head,
+				[]featureSpecMetadata{consumerSpec},
+				nil,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !plan.ImpactedFeature[consumerSpec.RelPath] {
+				t.Fatal("fail-closed comparison did not restore consumer feature impact")
+			}
+		})
+	}
+}
+
+func TestGofmtImportOnlyRelocationChangeRejectsPiggybackEdits(t *testing.T) {
+	t.Parallel()
+	oldImport := relocationFixtureModule + "/pkg/store"
+	newImport := relocationFixtureModule + "/internal/store"
+	alphaImport := relocationFixtureModule + "/pkg/alpha"
+	externalOld := "example.net/dependency/old"
+	externalNew := "example.net/dependency/new"
+	replacements := map[string]string{oldImport: newImport}
+	base := relocationFixtureConsumerSource(
+		oldImport,
+		alphaImport,
+		"return alpha.Value() + store.Value()",
+		"",
+	)
+
+	tests := map[string]struct {
+		head string
+		want bool
+	}{
+		"gofmt import reorder": {
+			head: relocationFixtureConsumerSource(
+				newImport,
+				alphaImport,
+				"return alpha.Value() + store.Value()",
+				"",
+			),
+			want: true,
+		},
+		"mixed import and code": {
+			head: relocationFixtureConsumerSource(
+				newImport,
+				alphaImport,
+				"return alpha.Value() + store.Value() + 1",
+				"",
+			),
+		},
+		"unbacked module import swap": {
+			head: relocationFixtureConsumerSource(
+				newImport,
+				relocationFixtureModule+"/internal/alpha",
+				"return alpha.Value() + store.Value()",
+				"",
+			),
+		},
+		"non-module import swap": {
+			head: relocationFixtureConsumerSource(
+				newImport,
+				externalNew,
+				"return alpha.Value() + store.Value()",
+				"",
+			),
+		},
+		"build tag edit": {
+			head: relocationFixtureConsumerSource(
+				newImport,
+				alphaImport,
+				"return alpha.Value() + store.Value()",
+				"linux",
+			),
+		},
+		"declaration edit": {
+			head: strings.Replace(
+				relocationFixtureConsumerSource(
+					newImport,
+					alphaImport,
+					"return alpha.Value() + store.Value()",
+					"",
+				),
+				"func Value() int",
+				"func ChangedValue() int",
+				1,
+			),
+		},
+	}
+
+	for name, test := range tests {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			testBase := base
+			if name == "non-module import swap" {
+				testBase = relocationFixtureConsumerSource(
+					oldImport,
+					externalOld,
+					"return alpha.Value() + store.Value()",
+					"",
+				)
+			}
+			if got := isGofmtImportOnlyRelocationChange(
+				[]byte(testBase),
+				[]byte(test.head),
+				replacements,
+			); got != test.want {
+				t.Fatalf("isGofmtImportOnlyRelocationChange() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestGofmtImportOnlyRelocationChangeRejectsNonCanonicalAndUnbackedSources(t *testing.T) {
+	t.Parallel()
+	oldImport := relocationFixtureModule + "/pkg/store"
+	newImport := relocationFixtureModule + "/internal/store"
+	replacements := map[string]string{oldImport: newImport}
+	canonicalBase := "package consumer\n\nimport _ \"" + oldImport + "\"\n"
+	canonicalHead := "package consumer\n\nimport _ \"" + newImport + "\"\n"
+
+	tests := map[string]struct {
+		base string
+		head string
+	}{
+		"unchanged": {
+			base: canonicalBase,
+			head: canonicalBase,
+		},
+		"malformed base": {
+			base: "package consumer\nimport (",
+			head: canonicalHead,
+		},
+		"declaration fragment": {
+			base: "import _ \"" + oldImport + "\"\n",
+			head: "import _ \"" + newImport + "\"\n",
+		},
+		"non-gofmt base": {
+			base: "package consumer\n\nimport  _  \"" + oldImport + "\"\n",
+			head: canonicalHead,
+		},
+		"malformed head": {
+			base: canonicalBase,
+			head: "package consumer\nimport (",
+		},
+		"non-gofmt head": {
+			base: canonicalBase,
+			head: "package consumer\n\nimport  _  \"" + newImport + "\"\n",
+		},
+		"no backed import": {
+			base: "package consumer\n\nfunc Value() int { return 1 }\n",
+			head: "package consumer\n\nfunc Value() int { return 2 }\n",
+		},
+		"raw import literal": {
+			base: "package consumer\n\nimport _ `" + oldImport + "`\n",
+			head: canonicalHead,
+		},
+		"import alias edit": {
+			base: "package consumer\n\nimport old \"" + oldImport + "\"\n",
+			head: "package consumer\n\nimport changed \"" + newImport + "\"\n",
+		},
+	}
+	for name, test := range tests {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if isGofmtImportOnlyRelocationChange(
+				[]byte(test.base),
+				[]byte(test.head),
+				replacements,
+			) {
+				t.Fatal("non-import-only source pair was accepted")
+			}
+		})
+	}
+
+	baseWithText := "package consumer\n\nimport _ \"" + oldImport + "\"\n\n" +
+		"// " + oldImport + " stays in comments.\n" +
+		"const documentation = \"" + oldImport + "\"\n"
+	headWithText := "package consumer\n\nimport _ \"" + newImport + "\"\n\n" +
+		"// " + oldImport + " stays in comments.\n" +
+		"const documentation = \"" + oldImport + "\"\n"
+	if !isGofmtImportOnlyRelocationChange(
+		[]byte(baseWithText),
+		[]byte(headWithText),
+		replacements,
+	) {
+		t.Fatal("token-scoped import rewrite did not preserve identical comment and string text")
+	}
+}
+
+func TestModulePathFromGoModIsStrict(t *testing.T) {
+	t.Parallel()
+	for name, test := range map[string]struct {
+		contents string
+		want     string
+	}{
+		"ordinary": {contents: "module example.com/ordinary\n", want: "example.com/ordinary"},
+		"quoted":   {contents: "module \"example.com/quoted\"\n", want: "example.com/quoted"},
+		"missing":  {contents: "go 1.25\n"},
+		"invalid":  {contents: "module example.com/back\\slash\n"},
+		"extra":    {contents: "module example.com/too many fields\n"},
+	} {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := modulePathFromGoMod([]byte(test.contents)); got != test.want {
+				t.Fatalf("modulePathFromGoMod() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCoverageRelocationGitHelpersReportInvalidRepositoryState(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if _, err := verifiedInternalPackageRelocationImportChanges(root, "base", "head"); err == nil {
+		t.Fatal("relocation classifier accepted a non-repository")
+	}
+	if _, err := coverageComparisonBase(root, "base", "head"); err == nil {
+		t.Fatal("coverage comparison base accepted a non-repository")
+	}
+	if _, err := gitFileAtRef(root, "missing", "go.mod"); err == nil {
+		t.Fatal("git file reader accepted a non-repository")
+	}
+	if _, err := trackedPackageFiles(root, "missing", "pkg/store"); err == nil {
+		t.Fatal("package tree reader accepted a non-repository")
+	}
+	relocation := &internalPackageRelocation{
+		SourceDir:      "pkg/store",
+		DestinationDir: "internal/store",
+		Renames:        map[string]string{"pkg/store/store.go": "internal/store/store.go"},
+	}
+	if _, err := verifyInternalPackageRelocation(root, "base", "head", relocation); err == nil {
+		t.Fatal("relocation verifier accepted a non-repository")
+	}
+
+	fixture := newInternalRelocationFixture(t)
+	if _, err := verifyInternalPackageRelocation(
+		fixture.Root,
+		fixture.Base,
+		"missing-head",
+		relocation,
+	); err == nil {
+		t.Fatal("relocation verifier accepted a missing head ref")
+	}
+}
+
+func TestInternalPackageRelocationRecordRequiresExactR100PrefixRewrite(t *testing.T) {
+	t.Parallel()
+	valid := changedFileStatus{
+		Status: "R100",
+		Kind:   'R',
+		Paths:  []string{"pkg/store/store.go", "internal/store/store.go"},
+	}
+	if source, destination, ok := internalPackageRelocationRecord(valid); !ok ||
+		source != "pkg/store" || destination != "internal/store" {
+		t.Fatalf("valid relocation = (%q, %q, %v)", source, destination, ok)
+	}
+
+	for _, record := range []changedFileStatus{
+		{Status: "R099", Kind: 'R', Paths: valid.Paths},
+		{Status: "C100", Kind: 'C', Paths: valid.Paths},
+		{Status: "R100", Kind: 'R', Paths: []string{"pkg/store/store.go", "internal/other/store.go"}},
+		{Status: "R100", Kind: 'R', Paths: []string{"pkg/store/store.go", "internal/store/renamed.go"}},
+		{Status: "R100", Kind: 'R', Paths: []string{"third_party/store/store.go", "internal/store/store.go"}},
+	} {
+		if source, destination, ok := internalPackageRelocationRecord(record); ok {
+			t.Errorf("invalid relocation %#v accepted as (%q, %q)", record, source, destination)
+		}
+	}
+	relocation := &internalPackageRelocation{
+		SourceDir:      "pkg/store",
+		DestinationDir: "internal/store",
+	}
+	if internalPackageRelocationMember(
+		changedFileStatus{
+			Status: "R100",
+			Kind:   'R',
+			Paths:  []string{"pkg/other/file.go", "internal/other/file.go"},
+		},
+		relocation,
+	) {
+		t.Fatal("unrelated exact rename accepted as relocation tree member")
+	}
+}
+
 func TestCoverageNestedBenchmarkSkipPatternIsExact(t *testing.T) {
 	t.Parallel()
 

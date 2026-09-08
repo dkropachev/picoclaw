@@ -31,13 +31,13 @@ func TestParseChangedFileStatusesIncludesRenameEndpointsAndCopyDestination(t *te
 		t.Fatal(err)
 	}
 	wantRecords := []changedFileStatus{
-		{Kind: 'M', Paths: []string{"pkg/z.go"}},
-		{Kind: 'A', Paths: []string{"pkg/a.go"}},
-		{Kind: 'T', Paths: []string{"pkg/type.go"}},
-		{Kind: 'D', Paths: []string{"pkg/deleted.go"}},
-		{Kind: 'R', Paths: []string{"pkg/old.go", "pkg/new.go"}},
-		{Kind: 'C', Paths: []string{"pkg/source.go", "pkg/copied.go"}},
-		{Kind: 'M', Paths: []string{"pkg/old.go"}},
+		{Status: "M", Kind: 'M', Paths: []string{"pkg/z.go"}},
+		{Status: "A", Kind: 'A', Paths: []string{"pkg/a.go"}},
+		{Status: "T", Kind: 'T', Paths: []string{"pkg/type.go"}},
+		{Status: "D", Kind: 'D', Paths: []string{"pkg/deleted.go"}},
+		{Status: "R087", Kind: 'R', Paths: []string{"pkg/old.go", "pkg/new.go"}},
+		{Status: "C100", Kind: 'C', Paths: []string{"pkg/source.go", "pkg/copied.go"}},
+		{Status: "M", Kind: 'M', Paths: []string{"pkg/old.go"}},
 	}
 	if !reflect.DeepEqual(records, wantRecords) {
 		t.Fatalf("parseChangedFileStatusRecords() = %#v, want %#v", records, wantRecords)

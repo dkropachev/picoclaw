@@ -9,6 +9,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"io"
 	"math/bits"
 	"net"
@@ -81,6 +84,24 @@ type listedPackage struct {
 	ImportPath string
 	Dir        string
 	RepoDir    string
+}
+
+type internalPackageRelocation struct {
+	SourceDir      string
+	DestinationDir string
+	Renames        map[string]string
+}
+
+type sourceEdit struct {
+	Start       int
+	End         int
+	Replacement string
+}
+
+type trackedPackageFile struct {
+	Mode   string
+	Type   string
+	Object string
 }
 
 func main() {
@@ -168,6 +189,10 @@ func buildCoveragePlan(
 	if err != nil {
 		return coveragePlan{}, err
 	}
+	relocationImportChanges, err := verifiedInternalPackageRelocationImportChanges(root, base, head)
+	if err != nil {
+		return coveragePlan{}, err
+	}
 	changedLines, err := changedGoLines(root, base, head)
 	if err != nil {
 		return coveragePlan{}, err
@@ -209,8 +234,10 @@ func buildCoveragePlan(
 		if !isGoProductionCoverageFile(path) || !isProductionCodePath(path) {
 			continue
 		}
-		for _, owner := range codeOwnersForPath(specs, path) {
-			plan.ImpactedFeature[owner.SpecRelPath] = true
+		if !relocationImportChanges[path] {
+			for _, owner := range codeOwnersForPath(specs, path) {
+				plan.ImpactedFeature[owner.SpecRelPath] = true
+			}
 		}
 	}
 
@@ -247,6 +274,341 @@ func buildCoveragePlan(
 	plan.TestPackageDirs = sortedKeys(testDirs)
 	plan.IntegrationSuites = sortedKeys(suites)
 	return plan, nil
+}
+
+// verifiedInternalPackageRelocationImportChanges recognizes one deliberately
+// narrow refactor: one complete, byte- and mode-identical package tree moved
+// from pkg/ to the matching internal/ path, plus consumers changed only to
+// import the new path.
+// The returned files remain in the ordinary cover and test package sets; only
+// their feature-impact fan-out is suppressed. Any other change except modified
+// feature specifications disables the exception for the whole comparison.
+func verifiedInternalPackageRelocationImportChanges(
+	root, base, head string,
+) (map[string]bool, error) {
+	records, err := changedFileStatusRecords(root, base, head)
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		for _, path := range record.Paths {
+			if path == "go.mod" || path == "go.sum" {
+				return map[string]bool{}, nil
+			}
+		}
+	}
+
+	relocations := make(map[string]*internalPackageRelocation)
+	relocationRecords := make(map[string]bool)
+	for _, record := range records {
+		sourceDir, destinationDir, ok := internalPackageRelocationRecord(record)
+		if !ok {
+			continue
+		}
+		relocation := relocations[sourceDir]
+		if relocation == nil {
+			relocation = &internalPackageRelocation{
+				SourceDir:      sourceDir,
+				DestinationDir: destinationDir,
+				Renames:        make(map[string]string),
+			}
+			relocations[sourceDir] = relocation
+		}
+		source, destination := record.Paths[0], record.Paths[1]
+		relocation.Renames[source] = destination
+		relocationRecords[source+"\x00"+destination] = true
+	}
+	if len(relocations) != 1 {
+		return map[string]bool{}, nil
+	}
+	for _, relocation := range relocations {
+		for _, record := range records {
+			if !internalPackageRelocationMember(record, relocation) {
+				continue
+			}
+			source, destination := record.Paths[0], record.Paths[1]
+			relocation.Renames[source] = destination
+			relocationRecords[source+"\x00"+destination] = true
+		}
+	}
+
+	comparisonBase, err := coverageComparisonBase(root, base, head)
+	if err != nil {
+		return nil, err
+	}
+	baseGoMod, err := gitFileAtRef(root, comparisonBase, "go.mod")
+	if err != nil {
+		return nil, err
+	}
+	module := modulePathFromGoMod(baseGoMod)
+	if module == "" {
+		return map[string]bool{}, nil
+	}
+
+	importReplacements := make(map[string]string)
+	for _, relocation := range relocations {
+		complete, verifyErr := verifyInternalPackageRelocation(
+			root,
+			comparisonBase,
+			head,
+			relocation,
+		)
+		if verifyErr != nil {
+			return nil, verifyErr
+		}
+		if !complete {
+			return map[string]bool{}, nil
+		}
+		importReplacements[module+"/"+relocation.SourceDir] =
+			module + "/" + relocation.DestinationDir
+	}
+
+	importOnlyFiles := make(map[string]bool)
+	for _, record := range records {
+		if len(record.Paths) == 2 && record.Status == "R100" &&
+			relocationRecords[record.Paths[0]+"\x00"+record.Paths[1]] {
+			continue
+		}
+		if !changedStatusTouchesGo(record) {
+			if record.Status == "M" && len(record.Paths) == 1 && isFeatureSpecPath(record.Paths[0]) {
+				continue
+			}
+			return map[string]bool{}, nil
+		}
+		if record.Status != "M" || len(record.Paths) != 1 {
+			return map[string]bool{}, nil
+		}
+		path := record.Paths[0]
+		baseSource, readErr := gitFileAtRef(root, comparisonBase, path)
+		if readErr != nil {
+			return nil, readErr
+		}
+		headSource, readErr := gitFileAtRef(root, head, path)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if !isGofmtImportOnlyRelocationChange(baseSource, headSource, importReplacements) {
+			return map[string]bool{}, nil
+		}
+		importOnlyFiles[path] = true
+	}
+	return importOnlyFiles, nil
+}
+
+func coverageComparisonBase(root, base, head string) (string, error) {
+	out, err := gitOutput(root, "merge-base", base, head)
+	if err != nil {
+		return "", fmt.Errorf("git merge-base coverage relocation %s...%s: %w", base, head, err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func gitFileAtRef(root, ref, path string) ([]byte, error) {
+	out, err := gitOutput(root, "show", ref+":"+path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s at %s: %w", path, ref, err)
+	}
+	return []byte(out), nil
+}
+
+func modulePathFromGoMod(contents []byte) string {
+	for _, line := range strings.Split(string(contents), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "module" {
+			continue
+		}
+		module := fields[1]
+		if unquoted, err := strconv.Unquote(module); err == nil {
+			module = unquoted
+		}
+		if module != "" && !strings.ContainsAny(module, "\\\x00") {
+			return module
+		}
+		return ""
+	}
+	return ""
+}
+
+func internalPackageRelocationRecord(record changedFileStatus) (string, string, bool) {
+	if record.Status != "R100" || len(record.Paths) != 2 {
+		return "", "", false
+	}
+	source, destination := record.Paths[0], record.Paths[1]
+	if !strings.HasSuffix(source, ".go") || !strings.HasSuffix(destination, ".go") ||
+		filepath.Base(source) != filepath.Base(destination) {
+		return "", "", false
+	}
+	sourceDir := normalizeRepoPath(filepath.Dir(source))
+	destinationDir := normalizeRepoPath(filepath.Dir(destination))
+	if !strings.HasPrefix(sourceDir, "pkg/") {
+		return "", "", false
+	}
+	relative := strings.TrimPrefix(sourceDir, "pkg/")
+	if relative == "" || destinationDir != "internal/"+relative {
+		return "", "", false
+	}
+	return sourceDir, destinationDir, true
+}
+
+func internalPackageRelocationMember(
+	record changedFileStatus,
+	relocation *internalPackageRelocation,
+) bool {
+	if record.Status != "R100" || len(record.Paths) != 2 {
+		return false
+	}
+	source, destination := record.Paths[0], record.Paths[1]
+	prefix := relocation.SourceDir + "/"
+	if !strings.HasPrefix(source, prefix) {
+		return false
+	}
+	relative := strings.TrimPrefix(source, prefix)
+	return relative != "" && destination == relocation.DestinationDir+"/"+relative
+}
+
+func verifyInternalPackageRelocation(
+	root, base, head string,
+	relocation *internalPackageRelocation,
+) (bool, error) {
+	baseSources, err := trackedPackageFiles(root, base, relocation.SourceDir)
+	if err != nil {
+		return false, err
+	}
+	baseDestinations, err := trackedPackageFiles(root, base, relocation.DestinationDir)
+	if err != nil {
+		return false, err
+	}
+	headSources, err := trackedPackageFiles(root, head, relocation.SourceDir)
+	if err != nil {
+		return false, err
+	}
+	headDestinations, err := trackedPackageFiles(root, head, relocation.DestinationDir)
+	if err != nil {
+		return false, err
+	}
+	if len(baseSources) == 0 || len(baseDestinations) != 0 || len(headSources) != 0 ||
+		len(baseSources) != len(relocation.Renames) ||
+		len(headDestinations) != len(relocation.Renames) {
+		return false, nil
+	}
+
+	hasProductionFile := false
+	for source, destination := range relocation.Renames {
+		baseFile, baseExists := baseSources[source]
+		headFile, headExists := headDestinations[destination]
+		if !baseExists || !headExists || baseFile.Type != "blob" || headFile.Type != "blob" ||
+			(baseFile.Mode != "100644" && baseFile.Mode != "100755") ||
+			baseFile.Mode != headFile.Mode || baseFile.Object != headFile.Object {
+			return false, nil
+		}
+		if isGoProductionCoverageFile(source) && isProductionCodePath(source) {
+			hasProductionFile = true
+		}
+	}
+	return hasProductionFile, nil
+}
+
+func trackedPackageFiles(root, ref, dir string) (map[string]trackedPackageFile, error) {
+	out, err := gitOutput(
+		root,
+		"--literal-pathspecs",
+		"ls-tree",
+		"-r",
+		"-z",
+		ref,
+		"--",
+		dir,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list package %s at %s: %w", dir, ref, err)
+	}
+	if out == "" {
+		return nil, nil
+	}
+	if !strings.HasSuffix(out, "\x00") {
+		return nil, fmt.Errorf("list package %s at %s: output is not NUL-terminated", dir, ref)
+	}
+	files := make(map[string]trackedPackageFile)
+	for _, record := range strings.Split(out[:len(out)-1], "\x00") {
+		metadata, path, ok := strings.Cut(record, "\t")
+		fields := strings.Fields(metadata)
+		if !ok || len(fields) != 3 {
+			return nil, fmt.Errorf("list package %s at %s: malformed tree record", dir, ref)
+		}
+		path = normalizeRepoPath(path)
+		if strings.HasPrefix(path, dir+"/") {
+			files[path] = trackedPackageFile{
+				Mode:   fields[0],
+				Type:   fields[1],
+				Object: fields[2],
+			}
+		}
+	}
+	return files, nil
+}
+
+func changedStatusTouchesGo(record changedFileStatus) bool {
+	for _, path := range record.Paths {
+		if strings.HasSuffix(path, ".go") {
+			return true
+		}
+	}
+	return false
+}
+
+func isGofmtImportOnlyRelocationChange(
+	baseSource, headSource []byte,
+	importReplacements map[string]string,
+) bool {
+	if bytes.Equal(baseSource, headSource) {
+		return false
+	}
+	formattedBase, err := format.Source(baseSource)
+	if err != nil || !bytes.Equal(formattedBase, baseSource) {
+		return false
+	}
+	formattedHead, err := format.Source(headSource)
+	if err != nil || !bytes.Equal(formattedHead, headSource) {
+		return false
+	}
+
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, "consumer.go", baseSource, parser.ParseComments)
+	if err != nil {
+		return false
+	}
+	var edits []sourceEdit
+	for _, importSpec := range file.Imports {
+		path, _ := strconv.Unquote(importSpec.Path.Value)
+		replacement, ok := importReplacements[path]
+		if !ok {
+			continue
+		}
+		if importSpec.Path.Value != strconv.Quote(path) {
+			return false
+		}
+		start := fileSet.PositionFor(importSpec.Path.Pos(), false).Offset
+		end := fileSet.PositionFor(importSpec.Path.End(), false).Offset
+		edits = append(edits, sourceEdit{
+			Start:       start,
+			End:         end,
+			Replacement: strconv.Quote(replacement),
+		})
+	}
+	if len(edits) == 0 {
+		return false
+	}
+	sort.Slice(edits, func(i, j int) bool { return edits[i].Start < edits[j].Start })
+	var rewritten bytes.Buffer
+	previousEnd := 0
+	for _, edit := range edits {
+		rewritten.Write(baseSource[previousEnd:edit.Start])
+		rewritten.WriteString(edit.Replacement)
+		previousEnd = edit.End
+	}
+	rewritten.Write(baseSource[previousEnd:])
+	expected, err := format.Source(rewritten.Bytes())
+	return err == nil && bytes.Equal(expected, headSource)
 }
 
 func isCoverageRelevantChange(path string) bool {
