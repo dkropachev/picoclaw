@@ -70,11 +70,12 @@ func openOwnerOnlyExistingFile(path string, _ os.FileMode) (*os.File, error) {
 }
 
 func openOwnerOnlyLockFile(path string) (*os.File, error) {
-	return openWindowsOwnerOnlyFile(
+	return openWindowsOwnerOnlyFileShared(
 		path,
 		windows.GENERIC_READ|windows.GENERIC_WRITE,
 		windows.OPEN_ALWAYS,
 		true,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 	)
 }
 
@@ -83,6 +84,19 @@ func openWindowsOwnerOnlyFile(
 	access uint32,
 	disposition uint32,
 	secureCreation bool,
+) (*os.File, error) {
+	return openWindowsOwnerOnlyFileShared(
+		path, access, disposition, secureCreation,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+	)
+}
+
+func openWindowsOwnerOnlyFileShared(
+	path string,
+	access uint32,
+	disposition uint32,
+	secureCreation bool,
+	shareMode uint32,
 ) (*os.File, error) {
 	pathPointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -99,7 +113,7 @@ func openWindowsOwnerOnlyFile(
 	handle, err := windows.CreateFile(
 		pathPointer,
 		access,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		shareMode,
 		attributes,
 		disposition,
 		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
@@ -126,6 +140,17 @@ func openWindowsOwnerOnlyFile(
 	if err := validateWindowsOwnerOnlyHandle(file); err != nil {
 		_ = file.Close()
 		return nil, err
+	}
+	opened, statErr := file.Stat()
+	current, lstatErr := os.Lstat(path)
+	if statErr != nil || lstatErr != nil || opened == nil || current == nil ||
+		!os.SameFile(opened, current) || current.Mode()&os.ModeSymlink != 0 {
+		_ = file.Close()
+		return nil, errors.Join(
+			NewError(CodeIntegrity, "database owner-only file changed while opening"),
+			statErr,
+			lstatErr,
+		)
 	}
 	return file, nil
 }

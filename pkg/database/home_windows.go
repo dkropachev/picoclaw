@@ -20,6 +20,9 @@ func validateTrustedHomeDirectory(path string, info os.FileInfo) error {
 	if info == nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return NewError(CodeIntegrity, "PicoClaw home is not a real directory")
 	}
+	if err := rejectWindowsReparsePath(path); err != nil {
+		return err
+	}
 	descriptor, err := windows.GetNamedSecurityInfo(
 		path,
 		windows.SE_FILE_OBJECT,
@@ -98,6 +101,9 @@ func validateOwnerOnlyDirectory(path string, info os.FileInfo) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return NewError(CodeIntegrity, "database state boundary is not a real directory")
 	}
+	if err := rejectWindowsReparsePath(path); err != nil {
+		return err
+	}
 	descriptor, err := windows.GetNamedSecurityInfo(
 		path,
 		windows.SE_FILE_OBJECT,
@@ -113,6 +119,9 @@ func validateOwnerOnlyFile(path string, info os.FileInfo, _ os.FileMode) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return NewError(CodeIntegrity, "database broker file is not regular")
 	}
+	if err := rejectWindowsReparsePath(path); err != nil {
+		return err
+	}
 	descriptor, err := windows.GetNamedSecurityInfo(
 		path,
 		windows.SE_FILE_OBJECT,
@@ -122,6 +131,17 @@ func validateOwnerOnlyFile(path string, info os.FileInfo, _ os.FileMode) error {
 		return fmt.Errorf("inspect database broker file security: %w", err)
 	}
 	return validateWindowsOwnerOnlyDescriptor(descriptor, false)
+}
+
+func rejectWindowsReparsePath(path string) error {
+	attributes, err := windows.GetFileAttributes(windows.StringToUTF16Ptr(path))
+	if err != nil {
+		return fmt.Errorf("inspect database Windows path attributes: %w", err)
+	}
+	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return NewError(CodeIntegrity, "database Windows path is a reparse point")
+	}
+	return nil
 }
 
 func validateWindowsOwnerOnlyHandle(file *os.File) error {

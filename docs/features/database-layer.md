@@ -84,12 +84,19 @@ Owns: TEST pkg/database/protocol_coverage_test.go *
 
 ## Cross-Feature Behavior
 
-This stage changes no active persistence path. `FR-DATABASE-IPC` now supplies
-the dormant local transport and single-owner server lifecycle behind these
-values. `FR-DATABASE-PROVIDER-CATALOG` supplies a separate dormant internal
-logical-to-physical inventory without exposing its candidate paths or activating
-a provider. Later PRs add providers, readiness, migration, CLI composition, and
-domain adoption without changing their application-facing meaning.
+This stage changes no active persistence path. `FR-DATABASE-IPC` supplies the
+dormant local transport, storage fences, and single-owner server lifecycle
+behind these values. `FR-DATABASE-PROVIDER-CATALOG` now supplies a separate
+internal logical-to-physical inventory, process-external physical claims,
+explicit adapter contracts, readiness classification, and a backed,
+exclusively fenced offline-migration engine. `FR-DATABASE-SQLITE-CONTROL`
+supplies the internal provider used by those dormant paths and by the existing
+SQLite compatibility boundary. None is connected to the IPC server.
+
+Later features add supervisor composition and domain adapters before a final
+atomic production cutover. This stage adds no database CLI, supervisor/runtime
+wiring, domain adapter registration, configuration or HTTP contract, or active
+application migration path.
 
 ## Failure And Edge Cases
 
@@ -100,8 +107,8 @@ domain adoption without changing their application-facing meaning.
   numbers, unknown strict fields, and trailing content.
 - Frame reads and writes handle short I/O and enforce the size ceiling.
 - Idempotency wait cancellation does not remove or alter the retained operation.
-- This foundation does not imply that a broker, provider, or migration command
-  is active.
+- This foundation does not imply that a broker, supervisor, provider-backed
+  application path, or migration command is active.
 
 ## Acceptance Evidence
 

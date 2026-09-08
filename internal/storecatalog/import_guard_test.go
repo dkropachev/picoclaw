@@ -20,7 +20,12 @@ func TestStoreCatalogHasNoProductionImporters(t *testing.T) {
 
 	repositoryRoot := storeCatalogRepositoryRoot(t)
 	allowedImporters := map[string]struct{}{
-		"pkg/database/catalog/catalog.go": {},
+		"internal/databaseclaims/claims.go":           {},
+		"internal/databasemigration/backup.go":        {},
+		"internal/databasemigration/backup_parent.go": {},
+		"internal/databasemigration/migration.go":     {},
+		"internal/databasereadiness/readiness.go":     {},
+		"pkg/database/catalog/catalog.go":             {},
 	}
 	var violations []string
 	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {

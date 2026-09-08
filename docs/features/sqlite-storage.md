@@ -11,6 +11,12 @@ databases. Every database uses the same durability, schema, migration, and
 legacy-archive contract while each subsystem retains typed ownership of its
 domain rows.
 
+The internal compatibility store now delegates driver binding, DSN creation,
+generation security, control queries, and live/offline configuration to the
+shared SQLite provider. Existing subsystem adapters still open these stores
+directly; this refactor does not route them through broker IPC or perform a
+production cutover.
+
 Human-authored configuration, portable immutable artifacts, external formats,
 and the small recovery journals that must operate before a database opens remain
 file-backed.
@@ -23,7 +29,7 @@ file-backed.
   exactly once.
 - Core types/functions: `sqlitestore.Open`, `Options`, `Migration`,
   `LegacyOptions`, `LegacySource`, `LegacyImporter`, `LegacyResultFinalizer`,
-  `LegacySealer`, and `sqlitestore.Immediate`.
+  `LegacySealer`, and `sqlitestore.Immediate`, backed by the internal provider.
 - Runtime ordering: validate the path and migration catalog, securely prepare
   the directory and database, enable and verify PRAGMAs, reject corruption or a
   future schema, run upgrades and legacy import in `BEGIN IMMEDIATE`, validate
@@ -41,10 +47,10 @@ file-backed.
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
 | `FR-SQLITE-001` | MUST | A subsystem opens a mutable database at a filesystem path. | The returned handle uses WAL, foreign keys, a five-second busy timeout, and `synchronous=FULL`; the parent is private and the database and present companions are `0600` on POSIX hosts or carry a protected owner-only DACL on Windows. Every hardening pass binds each initial pathname identity to its opened handle, the current pathname, and final private-file validation. A WAL/SHM companion that SQLite unlinks during the pass is accepted only after a fresh pathname inspection proves it absent, while its verified opened handle is hardened before close. | A missing directory/database is securely created. | Empty, URI, NUL-bearing, symlinked/reparse, irregular, publicly writable/accessible, replaced, or otherwise unsafe boundaries fail before domain use. The primary database must remain present at every hardening stage; only transient WAL/SHM companions may safely disappear, and a dangling link, another inode, non-not-found error, or handle-hardening failure remains fatal. | Every store needs one durable and secure baseline. |
-| `FR-SQLITE-002` | MUST | The database schema is older, current, too new, malformed, or corrupt. | Contiguous migrations reach the supported `PRAGMA user_version` and the retained schema validates exactly. | Migrations run in one explicit `BEGIN IMMEDIATE` transaction. | Failure rolls back; a future version, invalid schema, or failed integrity check returns a typed error and never falls back to JSON. | Mixed schemas and partial upgrades must fail closed. |
+| `FR-SQLITE-002` | MUST | The database schema is older, current, too new, malformed, or corrupt. | Contiguous migrations reach the supported `PRAGMA user_version` and the retained schema validates exactly. | Migrations run in one explicit `BEGIN IMMEDIATE` transaction during existing runtime use, or `BEGIN EXCLUSIVE` on a single-connection pool in provider-owned rollback-journal mode when the call context carries a live migration-fence capability for that exact path. | Failure rolls back; a future version, invalid schema, failed integrity check, expired capability, or capability for another path returns an error and never falls back to JSON. | Mixed schemas and partial upgrades must fail closed without a process-global migration mode. |
 | `FR-SQLITE-003` | MUST | A subsystem performs its first complete bounded legacy JSON/JSONL enumeration, including an enumeration with no present source. | Valid records are imported deterministically by dependency order and relative path; selected malformed records are skipped with counts and safe issue codes/digests only. Aggregate/dependency importers may resolve relationships in `LegacyResultFinalizer`; their returned per-source outcomes atomically replace provisional counts and issues before commit. An optional idempotent `LegacySealer` may perform subsystem-specific closeout or validation; independently, the shared `storage_import_horizons` row always closes the generic import horizon before validation. | Domain rows, final durable import/issue rows, and the subsystem import-horizon marker commit in the same immediate transaction. A source first appearing after that marker is audited as SQLite-authoritative rather than imported. | Unsafe enumeration, symlinks or modes, size/count bounds, incomplete/extra/invalid final accounting, SQLite errors, importer errors, or seal failure abort without an import commit or closed marker. | Automatic upgrade must preserve valid state and relationships, become authoritative even after an empty first open, and make the audit describe committed rows without exposing secrets. |
 | `FR-SQLITE-004` | MUST | A committed import has an unarchived legacy source. | The exact imported bytes move to `legacy-json/<component>-v1/` without overwriting an existing archive and with their permissions retained. | Archive completion is durably recorded after the filesystem transition. | A crash before/after the move is retried without re-import; changed bytes or a conflicting archive fail closed. | SQLite becomes authoritative immediately while rollback material remains recoverable. |
-| `FR-SQLITE-005` | MUST | Concurrent PicoClaw processes mutate a subsystem store. | Bounded lock waits and immediate write transactions serialize domain operations; version-fenced owners can reject stale updates. | Only the committed SQLite transaction becomes visible. | Busy, canceled, and stale-version operations return errors without partial domain state or JSON dual writes. | CLI, launcher, and gateway processes must share one authority. |
+| `FR-SQLITE-005` | MUST | Concurrent PicoClaw processes mutate a subsystem store. | Bounded lock waits and immediate write transactions serialize domain operations; version-fenced owners can reject stale updates. A live exact-path migration capability instead limits only that opened pool to one connection and uses an exclusive transaction. | Only the committed SQLite transaction becomes visible. | Busy, canceled, stale-version, expired-capability, and wrong-target operations return errors without partial domain state or JSON dual writes. | CLI, launcher, and gateway processes must share one authority without unrelated in-process stores inheriting offline mode. |
 | `FR-SQLITE-006` | MUST | A clean integration runtime exercises persistent subsystems and then starts their owners a second time. | The exact expected private database inventory is present; every surviving JSON, JSONL, migrated snapshot, history slot, or invalidation sidecar matches an intentional configuration, recovery, exact component archive, sidecar, or immutable-artifact path; and the second startup creates no additional candidate path. | The test writes representative typed rows and immutable evidence, mutates and reopens Git workspace inventory through `Manager.Acquire`/`Stats`, and imports, version-fenced updates, and reopens a PR candidate checkpoint. Deliberate non-allowlisted JSON, exact Git/checkpoint archive-label near misses, JSON-like directory, unsafe archive-link, and SQLite-extension canaries are rejected without reading or reporting their payloads. | An unexpected candidate file/directory, unregistered `.db`/`.sqlite`/`.sqlite3` path, unsafe archive ancestry, missing/extra database (including `inventory.db` or `checkpoints.db`), non-private database mode, traversal failure, or changed second-start inventory fails the merge-gating suite. | A subsystem must not silently reintroduce mutable JSON persistence after its focused tests pass. |
 
 Shared helpers `RequireOneRow` and `ScanStrings` retain exact driver errors and
@@ -82,7 +88,6 @@ definition replacement when database state is unavailable.
 ## Surface Ownership
 
 Owns: CODE internal/sqlitestore/**
-Owns: CODE pkg/sqlitestore/**
 Owns: CODE integration/suites/storage-json/**
 Owns: TEST internal/sqlitestore/*
 Owns: TEST pkg/gateway/runtime_storage_json_allowlist_integration_test.go TestIntegrationRuntimeOwnedJSONAllowlist
@@ -90,16 +95,12 @@ Owns: TEST pkg/gateway/runtime_storage_legacy_migration_integration_test.go Test
 Owns: TEST pkg/gitworkspace/runtime_storage_legacy_relations_integration_test.go TestIntegrationRuntimeOwnedJSONLegacyGitInventoryRelations
 Owns: INTEGRATION storage-json
 
-`pkg/sqlitestore/**` remains as a historical ownership tombstone for the
-deleted public package path. Shared storage mechanics now live only in
-`internal/sqlitestore`; recreating the old path requires updating this contract.
-
 ## Auxiliary Interfaces
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
-| Go API | `sqlitestore.Open(ctx, path, options)` | Opens, configures, integrity-checks, migrates, validates, and archives one subsystem database or returns an error without a JSON fallback. | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-003`, `FR-SQLITE-004` |
-| Go API | `sqlitestore.Immediate(ctx, db, callback)` | Runs one callback between explicit `BEGIN IMMEDIATE` and `COMMIT`, rolling back on callback, context, or commit failure. | `FR-SQLITE-002`, `FR-SQLITE-005` |
+| Go API | `sqlitestore.Open(ctx, path, options)` | Uses the internal provider to open/configure one subsystem database, then integrity-checks, migrates, validates, and archives without a JSON fallback. | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-003`, `FR-SQLITE-004` |
+| Go API | `sqlitestore.Immediate(ctx, db, callback)` | Runs one callback in `BEGIN IMMEDIATE`, or `BEGIN EXCLUSIVE` when `ctx` carries the live exact-target migration capability used to open that pool, and rolls back on callback, context, or commit failure. | `FR-SQLITE-002`, `FR-SQLITE-005` |
 | Go API | `LegacyOptions.FinalizeResults` / `LegacyResultFinalizer` | Resolve ordered multi-source relationships and return exact final `ImportResult` for every newly imported source; the helper replaces provisional ledger counts/issues inside the import transaction. | `FR-SQLITE-003` |
 | Go API | `LegacyOptions.Seal` / `LegacySealer` | Performs optional idempotent subsystem-specific closeout or validation after every successful deterministic enumeration, including zero-source and already-closed opens, inside the migration transaction and before validation. The shared helper, not this callback, owns the generic durable horizon. | `FR-SQLITE-003` |
 | File | `<root>/*.db`, `<root>/*.db-wal`, `<root>/*.db-shm` | Private mutable SQLite authority owned by its subsystem. | `FR-SQLITE-001`, `FR-SQLITE-005` |
@@ -126,17 +127,16 @@ deleted public package path. Shared storage mechanics now live only in
 
 1. Reject invalid component names, migration catalogs, paths, timeouts, and
    connection bounds before opening SQLite.
-2. Create and inspect the final database directory and file without accepting a
-   symlink or irregular endpoint; set private permissions. During every database,
-   WAL, and SHM hardening pass, compare the initial, opened, current, and finally
-   secured identities. Require the primary database throughout; accept a vanished
-   companion only after reinspection proves absence, and harden any verified open
-   companion handle before closing it.
-3. Build the internal filesystem URI and configure every pooled connection with
-   foreign keys, the bounded busy timeout, and FULL synchronization. Select and
-   verify WAL for file-backed stores.
+2. Ask the internal provider to prepare and inspect the final database
+   directory and main/WAL/SHM/rollback-journal generation without accepting an
+   unsafe endpoint, alias, owner, or mode.
+3. Let the provider build the internal filesystem URI and configure foreign
+   keys, bounded busy timeout, and FULL synchronization. Select WAL normally;
+   under the explicit migration fence, limit the pool to one connection and
+   select exclusive locking with the rollback journal.
 4. Check existing integrity, acquire one connection, and enter
-   `BEGIN IMMEDIATE`. Read `user_version`, reject a future version, apply each
+   `BEGIN IMMEDIATE`, or `BEGIN EXCLUSIVE` under the migration fence. Read
+   `user_version`, reject a future version, apply each
    contiguous schema/data migration, enumerate and import deterministic legacy
    inputs, finalize aggregate relationships/accounting when configured, run
    optional subsystem closeout, always close the shared generic import horizon
@@ -149,10 +149,13 @@ deleted public package path. Shared storage mechanics now live only in
 
 ## Cross-Feature Behavior
 
-`FR-DATABASE-PROVIDER-CATALOG` adds only a dormant internal inventory of future
-provider candidates. The subsystem-local SQLite stores defined here remain the
-active persistence authority; this catalog stage opens no store and creates no
-second owner.
+`FR-DATABASE-PROVIDER-CATALOG` now adds dormant physical claims, explicit
+adapter contracts, readiness, and a mandatory-backup offline engine.
+`FR-DATABASE-SQLITE-CONTROL` supplies their provider mechanics and those now
+used by this compatibility store. Subsystem-local SQLite stores remain active
+persistence authority. No database CLI, supervisor/runtime wiring, concrete
+broker domain adapter, configuration or HTTP contract, or production cutover
+is added here.
 
 Each owning subsystem defines its own relational schema, normalization rules,
 version fences, and compatibility constructors. Workspace protection treats
@@ -197,6 +200,7 @@ selecting a mutable JSON fallback.
 | Requirement IDs | Evidence |
 | --- | --- |
 | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-005` | [internal/sqlitestore/open_test.go](../../internal/sqlitestore/open_test.go) |
+| `FR-SQLITE-002`, `FR-SQLITE-005` | [internal/sqlitestore/offline_test.go](../../internal/sqlitestore/offline_test.go), [internal/sqlitestore/permission_routing_coverage_test.go](../../internal/sqlitestore/permission_routing_coverage_test.go) |
 | `FR-SQLITE-003`, `FR-SQLITE-004` | [internal/sqlitestore/open_test.go](../../internal/sqlitestore/open_test.go), [internal/sqlitestore/legacy_finalize_results_test.go](../../internal/sqlitestore/legacy_finalize_results_test.go), [pkg/memory/sqlite_store_test.go](../../pkg/memory/sqlite_store_test.go) |
 | `FR-SQLITE-003`, `FR-SQLITE-004`, `FR-SQLITE-006` | [pkg/gateway/runtime_storage_legacy_migration_integration_test.go](../../pkg/gateway/runtime_storage_legacy_migration_integration_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/auth/store_sqlite_test.go](../../pkg/auth/store_sqlite_test.go), [web/backend/api/model_catalog_sqlite_test.go](../../web/backend/api/model_catalog_sqlite_test.go), [pkg/tools/adaptation_state_sqlite_test.go](../../pkg/tools/adaptation_state_sqlite_test.go) |

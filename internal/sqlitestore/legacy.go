@@ -1149,7 +1149,7 @@ func ensureArchiveParent(root, destination string) error {
 	if !pathWithin(root, destination) {
 		return errors.New("archive destination escapes its root")
 	}
-	if err := ensurePrivateDir(root); err != nil {
+	if err := EnsurePrivateDir(root); err != nil {
 		return err
 	}
 	parent := filepath.Dir(destination)

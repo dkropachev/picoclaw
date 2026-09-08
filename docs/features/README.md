@@ -38,14 +38,22 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Portability, updates, and packaging    | [portability-updates.md](portability-updates.md)                   |
 | Database protocol foundation           | [database-layer.md](database-layer.md)                             |
 | Database owner-only local IPC          | [database-local-ipc.md](database-local-ipc.md)                     |
-| Database provider catalog foundation   | [database-provider-catalog.md](database-provider-catalog.md)       |
-| Database SQLite control foundation     | [database-sqlite-control.md](database-sqlite-control.md)           |
+| Database provider catalog and migration foundation | [database-provider-catalog.md](database-provider-catalog.md)       |
+| Database SQLite provider foundation    | [database-sqlite-control.md](database-sqlite-control.md)           |
 | SQLite runtime storage                 | [sqlite-storage.md](sqlite-storage.md)                             |
 | Workflows and reusable automation      | [workflows.md](workflows.md)                                       |
 | Git workspaces and checkout retention  | [git-workspaces.md](git-workspaces.md)                             |
 | Agent execution optimization           | [agent-execution-optimization.md](agent-execution-optimization.md) |
 | Repository pre-review and findings     | [repository-reviews.md](repository-reviews.md)                     |
 | Repository model evaluations           | [repository-model-evaluations.md](repository-model-evaluations.md) |
+
+The database provider, physical claims, readiness probe, explicit adapter
+registry, and backed offline-migration engine are additive dormant
+infrastructure. This stage adds no database CLI or supervisor/runtime wiring,
+registers no domain adapter, loads no configuration, changes no HTTP contract,
+and performs no production persistence cutover. Existing subsystem-local
+SQLite stores remain the active authority until later composition and cutover
+features say otherwise.
 
 ## Workflow
 

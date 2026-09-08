@@ -176,7 +176,7 @@ func TestOpenRejectsUnsafeDatabaseEndpointsAndSidecars(t *testing.T) {
 	})
 }
 
-func TestPrivateDirectoryAndDatabasePreparationEdges(t *testing.T) {
+func TestPrivateDirectoryEdges(t *testing.T) {
 	for _, invalid := range []string{"", " \t", "bad\x00dir"} {
 		if err := EnsurePrivateDir(invalid); err == nil {
 			t.Fatalf("EnsurePrivateDir(%q) unexpectedly succeeded", invalid)
@@ -207,21 +207,6 @@ func TestPrivateDirectoryAndDatabasePreparationEdges(t *testing.T) {
 		}
 	}
 
-	databasePath := filepath.Join(private, "prepared.db")
-	if err := prepareDatabaseFile(databasePath); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(databasePath, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := prepareDatabaseFile(databasePath); err != nil {
-		t.Fatalf("prepareDatabaseFile(reopen) error = %v", err)
-	}
-	if runtime.GOOS != "windows" {
-		if info, err := os.Stat(databasePath); err != nil || info.Mode().Perm() != 0o600 {
-			t.Fatalf("prepared database = %v, %v", info, err)
-		}
-	}
 }
 
 //nolint:govet // Narrow test assertions intentionally use independent error scopes.
@@ -249,7 +234,7 @@ func TestSQLiteDSNAndConfigurationEdges(t *testing.T) {
 	if err := closed.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := configure(t.Context(), closed, DefaultBusyTimeout, true, "test"); err == nil {
+	if err := configure(t.Context(), closed, DefaultBusyTimeout, true, false, "test"); err == nil {
 		t.Fatal("configure() accepted a closed database")
 	}
 
@@ -258,11 +243,11 @@ func TestSQLiteDSNAndConfigurationEdges(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer memory.Close()
-	if err := configure(t.Context(), memory, DefaultBusyTimeout, false, "test"); err == nil ||
+	if err := configure(t.Context(), memory, DefaultBusyTimeout, false, false, "test"); err == nil ||
 		!strings.Contains(err.Error(), "selected") {
 		t.Fatalf("configure(file contract on memory) error = %v", err)
 	}
-	if err := configure(t.Context(), memory, DefaultBusyTimeout, true, "test"); err == nil ||
+	if err := configure(t.Context(), memory, DefaultBusyTimeout, true, false, "test"); err == nil ||
 		!strings.Contains(err.Error(), "configuration") {
 		t.Fatalf("configure(unconfigured memory) error = %v", err)
 	}
@@ -428,7 +413,7 @@ func TestMigrationApplyValidationAndImmediateEdges(t *testing.T) {
 }
 
 //nolint:govet // Narrow test assertions intentionally use independent error scopes.
-func TestIntegrityAndSQLiteFileHelpersRejectInvalidState(t *testing.T) {
+func TestIntegrityHelpersRejectInvalidState(t *testing.T) {
 	closed, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -450,35 +435,6 @@ func TestIntegrityAndSQLiteFileHelpersRejectInvalidState(t *testing.T) {
 		t.Fatalf("foreignKeyCheckQuery() error = %v, want ErrIntegrity", err)
 	}
 
-	root := t.TempDir()
-	if err := secureSQLiteFiles(filepath.Join(root, "missing.db")); !os.IsNotExist(err) {
-		t.Fatalf("secureSQLiteFiles(missing) error = %v, want not-exist", err)
-	}
-	regular := filepath.Join(root, "regular.db")
-	if err := os.WriteFile(regular, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := secureSQLiteFiles(regular); err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS != "windows" {
-		if info, err := os.Stat(regular); err != nil || info.Mode().Perm() != 0o600 {
-			t.Fatalf("secured SQLite file = %v, %v", info, err)
-		}
-	}
-	directory := filepath.Join(root, "directory.db")
-	if err := os.Mkdir(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := secureSQLiteFiles(directory); err == nil {
-		t.Fatal("secureSQLiteFiles() accepted a directory")
-	}
-	alias := filepath.Join(root, "alias.db")
-	if err := os.Symlink(regular, alias); err == nil {
-		if err := secureSQLiteFiles(alias); err == nil {
-			t.Fatal("secureSQLiteFiles() accepted a symlink")
-		}
-	}
 }
 
 func TestIdentifierAndPathValidationTables(t *testing.T) {

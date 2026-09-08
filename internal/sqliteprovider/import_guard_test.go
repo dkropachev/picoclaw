@@ -16,10 +16,17 @@ import (
 
 const sqliteProviderImportPath = "github.com/sipeed/picoclaw/internal/sqliteprovider"
 
-func TestSQLiteProviderHasNoProductionImporters(t *testing.T) {
+func TestSQLiteProviderProductionImportersAreExplicit(t *testing.T) {
 	t.Parallel()
 
 	repositoryRoot := sqliteProviderRepositoryRoot(t)
+	allowed := map[string]bool{
+		"internal/databasemigration/backup.go":    false,
+		"internal/databasemigration/migration.go": false,
+		"internal/databasereadiness/readiness.go": false,
+		"internal/sqlitestore/open.go":            false,
+		"internal/sqlitestore/schema.go":          false,
+	}
 	var violations []string
 	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -35,25 +42,30 @@ func TestSQLiteProviderHasNoProductionImporters(t *testing.T) {
 			filepath.Clean(filepath.Dir(path)) == filepath.Join(repositoryRoot, "internal", "sqliteprovider") {
 			return nil
 		}
-
 		relative, err := filepath.Rel(repositoryRoot, path)
 		if err != nil {
 			return err
 		}
+		relative = filepath.ToSlash(relative)
 		fileSet := token.NewFileSet()
 		parsed, err := parser.ParseFile(fileSet, path, nil, parser.ImportsOnly)
 		if err != nil {
-			return fmt.Errorf("parse production Go file %s: %w", filepath.ToSlash(relative), err)
+			return fmt.Errorf("parse production Go file %s: %w", relative, err)
 		}
 		for _, imported := range parsed.Imports {
 			importPath, err := strconv.Unquote(imported.Path.Value)
 			if err != nil {
 				return err
 			}
-			if importPath == sqliteProviderImportPath {
+			if importPath != sqliteProviderImportPath {
+				continue
+			}
+			if _, ok := allowed[relative]; !ok {
 				violations = append(violations, fmt.Sprintf(
-					"%s:%d", filepath.ToSlash(relative), fileSet.Position(imported.Pos()).Line,
+					"%s:%d", relative, fileSet.Position(imported.Pos()).Line,
 				))
+			} else {
+				allowed[relative] = true
 			}
 		}
 		return nil
@@ -61,38 +73,34 @@ func TestSQLiteProviderHasNoProductionImporters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scan production imports: %v", err)
 	}
+	for path, found := range allowed {
+		if !found {
+			violations = append(violations, path+": expected provider importer is missing")
+		}
+	}
 	if len(violations) != 0 {
 		sort.Strings(violations)
-		t.Fatalf("dormant SQLite provider imported by production code:\n%s", strings.Join(violations, "\n"))
+		t.Fatalf("SQLite provider importer allowlist mismatch:\n%s", strings.Join(violations, "\n"))
 	}
 }
 
-func TestSQLiteProviderSliceHasNoDriverOpenOrFilesystemBinding(t *testing.T) {
+func TestSQLiteProviderOwnsDriverOpen(t *testing.T) {
 	t.Parallel()
 
-	packageRoot := filepath.Join(sqliteProviderRepositoryRoot(t), "internal", "sqliteprovider")
-	allowedFiles := map[string]bool{"control.go": true, "schema.go": true}
-	forbiddenImports := map[string]bool{
-		"database/sql/driver": true,
-		"io/fs":               true,
-		"net/url":             true,
-		"os":                  true,
-		"path/filepath":       true,
-		"syscall":             true,
-		"modernc.org/sqlite":  true,
+	root := filepath.Join(sqliteProviderRepositoryRoot(t), "internal", "sqliteprovider")
+	moderncUsers := map[string]bool{
+		"maintenance.go":      true,
+		"provider.go":         true,
+		"staged_migration.go": true,
 	}
 	var violations []string
-	err := filepath.WalkDir(packageRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		if !allowedFiles[entry.Name()] {
-			violations = append(violations, filepath.ToSlash(entry.Name())+": production file is outside control slice")
-		}
-
 		fileSet := token.NewFileSet()
 		parsed, err := parser.ParseFile(fileSet, path, nil, parser.AllErrors)
 		if err != nil {
@@ -104,10 +112,8 @@ func TestSQLiteProviderSliceHasNoDriverOpenOrFilesystemBinding(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if forbiddenImports[importPath] {
-				violations = append(violations, fmt.Sprintf(
-					"%s:%d imports %s", entry.Name(), fileSet.Position(imported.Pos()).Line, importPath,
-				))
+			if importPath == "modernc.org/sqlite" && !moderncUsers[entry.Name()] {
+				violations = append(violations, entry.Name()+": unexpected SQLite driver import")
 			}
 			if importPath == "database/sql" {
 				name := "sql"
@@ -127,7 +133,7 @@ func TestSQLiteProviderSliceHasNoDriverOpenOrFilesystemBinding(t *testing.T) {
 				return true
 			}
 			identifier, ok := selector.X.(*ast.Ident)
-			if ok && sqlNames[identifier.Name] {
+			if ok && sqlNames[identifier.Name] && entry.Name() != "provider.go" {
 				violations = append(violations, fmt.Sprintf(
 					"%s:%d calls database/sql.Open", entry.Name(), fileSet.Position(call.Pos()).Line,
 				))
@@ -137,17 +143,16 @@ func TestSQLiteProviderSliceHasNoDriverOpenOrFilesystemBinding(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("inspect SQLite provider slice: %v", err)
+		t.Fatalf("inspect SQLite provider: %v", err)
 	}
 	if len(violations) != 0 {
 		sort.Strings(violations)
-		t.Fatalf("dormant SQLite control slice grew a driver/open/path binding:\n%s", strings.Join(violations, "\n"))
+		t.Fatalf("SQLite provider driver boundary mismatch:\n%s", strings.Join(violations, "\n"))
 	}
 }
 
 func sqliteProviderRepositoryRoot(t *testing.T) string {
 	t.Helper()
-
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve SQLite provider guard source path")

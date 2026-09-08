@@ -971,7 +971,7 @@ func TestAuthSQLiteRejectsUnsafeHomeBeforeCreatingLockArtifacts(t *testing.T) {
 		}
 		t.Setenv(config.EnvHome, linkedHome)
 		if err := SetCredential("openai", &AuthCredential{Provider: "openai"}); err == nil ||
-			!strings.Contains(err.Error(), "real directory") {
+			!strings.Contains(err.Error(), "unsafe") {
 			t.Fatalf("SetCredential() symlinked-home error = %v", err)
 		}
 		for _, unexpected := range []string{
