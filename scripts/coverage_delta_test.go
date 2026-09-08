@@ -266,6 +266,9 @@ func TestCoverageNestedBenchmarkSkipPatternIsExact(t *testing.T) {
 
 func TestCoverageGoTestParallelismIsBounded(t *testing.T) {
 	t.Parallel()
+	if coverageGoTestCount != 1 {
+		t.Fatalf("coverage Go test count = %d, want 1", coverageGoTestCount)
+	}
 	if coverageGoTestParallelism != 1 {
 		t.Fatalf("coverage Go test parallelism = %d, want 1", coverageGoTestParallelism)
 	}
@@ -1013,7 +1016,10 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 	assertEnvironmentValue(t, baseEnvironment, "PICOCLAW_CONFIG", "/isolated/base/.picoclaw/config.json")
 	assertEnvironmentValue(t, baseEnvironment, "PICOCLAW_BINARY", "/isolated/base/bin/picoclaw")
 	assertEnvironmentValue(t, baseEnvironment, "XDG_RUNTIME_DIR", "/isolated/base/.xdg/runtime")
-	assertEnvironmentValue(t, baseEnvironment, "TMPDIR", "/isolated/base/.tmp")
+	assertEnvironmentValue(t, baseEnvironment, "TMPDIR", "/isolated/base-tmp")
+	assertEnvironmentValue(t, baseEnvironment, "TEMP", "/isolated/base-tmp")
+	assertEnvironmentValue(t, baseEnvironment, "TMP", "/isolated/base-tmp")
+	assertEnvironmentValue(t, headEnvironment, "TMPDIR", "/isolated/head-tmp")
 	assertEnvironmentValue(t, baseEnvironment, "GNUPGHOME", "/isolated/base/.gnupg")
 	assertEnvironmentValue(t, baseEnvironment, "GIT_CONFIG_NOSYSTEM", "1")
 	assertEnvironmentValue(
@@ -1078,6 +1084,13 @@ func TestPrepareCoverageStorageDefersConfigUntilAfterUnitCoverage(t *testing.T) 
 	}
 	if info, err := os.Stat(configPath); err != nil || !info.Mode().IsRegular() {
 		t.Fatalf("coverage config = (%v, %v), want regular file", info, err)
+	}
+	temporaryDirectory := coverageTemporaryDirectory(home)
+	if info, err := os.Stat(temporaryDirectory); err != nil || !info.IsDir() {
+		t.Fatalf("coverage temporary directory = (%v, %v), want directory", info, err)
+	}
+	if filepath.Dir(temporaryDirectory) != filepath.Dir(home) {
+		t.Fatalf("coverage temporary directory %q is not a sibling of home %q", temporaryDirectory, home)
 	}
 }
 

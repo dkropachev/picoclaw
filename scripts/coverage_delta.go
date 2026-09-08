@@ -73,6 +73,7 @@ const (
 	newFeatureMinimumCoveragePercent   = 95
 	changedCodeMinimumCoveragePercent  = 90
 	coverageNestedBenchmarkSkipPattern = `^Test(GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath|WorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig)$`
+	coverageGoTestCount                = 1
 	coverageGoTestParallelism          = 1
 )
 
@@ -117,7 +118,9 @@ func runCoverageDelta(root, base, head, tags string, forcedPackages []string, in
 		return nil
 	}
 
-	tmpDir, err := os.MkdirTemp("", "picoclaw-coverage-delta-")
+	// Keep the physical root short: historical tests create Unix sockets below
+	// t.TempDir, and Linux counts the complete pathname against sun_path.
+	tmpDir, err := os.MkdirTemp("", "pc-")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
@@ -597,6 +600,8 @@ func runGoCoverage(
 	args := []string{
 		"test",
 		"-buildvcs=false",
+		"-count",
+		strconv.Itoa(coverageGoTestCount),
 		"-p",
 		strconv.Itoa(coverageGoTestParallelism),
 	}
@@ -700,6 +705,8 @@ func runScriptCoverage(
 		args := []string{
 			"test",
 			"-buildvcs=false",
+			"-count",
+			strconv.Itoa(coverageGoTestCount),
 			"-tags",
 			scriptCoverageBuildTags(tags),
 			"-covermode=atomic",
@@ -1029,6 +1036,7 @@ func coverageEnvironment(base []string, home string, caches goCachePaths) []stri
 		environment = append(environment, entry)
 	}
 	picoHome := filepath.Join(home, ".picoclaw")
+	temporaryDirectory := coverageTemporaryDirectory(home)
 	result := append(environment,
 		"HOME="+home,
 		"USERPROFILE="+home,
@@ -1046,9 +1054,9 @@ func coverageEnvironment(base []string, home string, caches goCachePaths) []stri
 		"GNUPGHOME="+filepath.Join(home, ".gnupg"),
 		"GIT_CONFIG_GLOBAL="+filepath.Join(home, ".gitconfig"),
 		"GIT_CONFIG_NOSYSTEM=1",
-		"TMPDIR="+filepath.Join(home, ".tmp"),
-		"TEMP="+filepath.Join(home, ".tmp"),
-		"TMP="+filepath.Join(home, ".tmp"),
+		"TMPDIR="+temporaryDirectory,
+		"TEMP="+temporaryDirectory,
+		"TMP="+temporaryDirectory,
 		"DBUS_SESSION_BUS_ADDRESS=unix:path="+filepath.Join(home, ".no-systemd-bus"),
 		"APPDATA="+filepath.Join(home, "AppData", "Roaming"),
 		"LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"),
@@ -1070,6 +1078,11 @@ func coverageEnvironment(base []string, home string, caches goCachePaths) []stri
 		)
 	}
 	return result
+}
+
+func coverageTemporaryDirectory(home string) string {
+	name := strings.TrimSuffix(filepath.Base(home), "-picoclaw-home") + "-tmp"
+	return filepath.Join(filepath.Dir(home), name)
 }
 
 // Historical base tests intentionally override HOME to exercise fallback
@@ -1180,7 +1193,7 @@ func prepareCoverageStorage(home string) error {
 		filepath.Join(home, ".claude"),
 		filepath.Join(home, ".openclaw"),
 		filepath.Join(home, ".gnupg"),
-		filepath.Join(home, ".tmp"),
+		coverageTemporaryDirectory(home),
 		filepath.Join(home, "bin"),
 		filepath.Join(home, "AppData", "Roaming"),
 		filepath.Join(home, "AppData", "Local"),
