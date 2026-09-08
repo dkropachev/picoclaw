@@ -58,7 +58,7 @@ Owns: CODE internal/sqliteprovider/control.go
 Owns: CODE internal/sqliteprovider/schema.go
 Owns: TEST internal/sqliteprovider/control_test.go *
 Owns: TEST internal/sqliteprovider/schema_test.go *
-Owns: TEST internal/sqliteprovider/import_guard_test.go *
+Owns: TEST internal/sqliteprovider/import_guard_test.go TestSQLiteProviderProductionImportersAreExplicit
 
 ## Auxiliary Interfaces
 
@@ -121,4 +121,4 @@ features must explicitly connect and constrain this foundation before use.
 
 - [internal/sqliteprovider/control.go](../../internal/sqliteprovider/control.go)
 - [internal/sqliteprovider/schema.go](../../internal/sqliteprovider/schema.go)
-- [internal/sqliteprovider/import_guard_test.go](../../internal/sqliteprovider/import_guard_test.go)
+- [database-sqlite-provider.md](database-sqlite-provider.md)
