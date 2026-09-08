@@ -15,8 +15,8 @@ func TestShutdownReplacementAcceptsRealPostShutdownPingFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	endpoint := endpointForStateDirectory(stateDir)
-	if err := prepareEndpoint(endpoint); err != nil {
-		t.Fatal(err)
+	if prepareErr := prepareEndpoint(endpoint); prepareErr != nil {
+		t.Fatal(prepareErr)
 	}
 	listener, err := listenLocal(endpoint)
 	if err != nil {
@@ -36,9 +36,9 @@ func TestShutdownReplacementAcceptsRealPostShutdownPingFailure(t *testing.T) {
 		PID: os.Getpid(), Protocol: ProtocolVersion, Token: token,
 		Endpoint: endpoint, Epoch: epoch,
 	}
-	if err := writeManifest(stateDir, manifest); err != nil {
+	if writeErr := writeManifest(stateDir, manifest); writeErr != nil {
 		_ = listener.Close()
-		t.Fatal(err)
+		t.Fatal(writeErr)
 	}
 	var shutdown atomic.Bool
 	done := make(chan struct{})

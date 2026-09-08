@@ -2,6 +2,7 @@ package sqliteprovider
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -39,9 +40,9 @@ func TestRealBehaviorInspectionPoolRejectsLateGenerationChanges(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Mkdir(path+"-journal", 0o700); err != nil {
+		if mkdirErr := os.Mkdir(path+"-journal", 0o700); mkdirErr != nil {
 			_ = inspection.Release()
-			t.Fatal(err)
+			t.Fatal(mkdirErr)
 		}
 		adopted, err := OpenStore(path, realBehaviorProviderTimeout)
 		if err == nil || adopted != nil || !strings.Contains(err.Error(), "not a regular file") {
@@ -147,15 +148,10 @@ func createRealBehaviorProviderGeneration(t *testing.T, foreignKeyViolation bool
 		t.Fatal(err)
 	}
 	if foreignKeyViolation {
-		rows, err := database.QueryContext(context.Background(), "PRAGMA foreign_key_check")
-		if err != nil {
+		violated, queryErr := realBehaviorForeignKeyViolation(database)
+		if queryErr != nil {
 			_ = database.Close()
-			t.Fatal(err)
-		}
-		violated := rows.Next()
-		if closeErr := rows.Close(); closeErr != nil {
-			_ = database.Close()
-			t.Fatal(closeErr)
+			t.Fatal(queryErr)
 		}
 		if !violated {
 			_ = database.Close()
@@ -166,4 +162,17 @@ func createRealBehaviorProviderGeneration(t *testing.T, foreignKeyViolation bool
 		t.Fatal(err)
 	}
 	return path
+}
+
+func realBehaviorForeignKeyViolation(database *sql.DB) (bool, error) {
+	rows, err := database.QueryContext(context.Background(), "PRAGMA foreign_key_check")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	violated := rows.Next()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return violated, nil
 }
