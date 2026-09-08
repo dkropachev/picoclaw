@@ -12,10 +12,10 @@ caller-owned `database/sql` query or execution boundary, these helpers read or
 set the `main` schema version, run bounded integrity diagnostics, and validate
 the exact set of manually created unique indexes.
 
-This stage does not import or register a SQLite driver, construct a DSN, accept
-or open a path, own a connection or transaction, consume the provider catalog,
-compute readiness, run migration, connect to IPC, or change any application
-persistence path. No production package imports it.
+The existing internal SQLite compatibility store now consumes these helpers and
+the separately specified provider core. This stage does not consume the
+provider catalog, compute readiness, run an offline migration engine, connect
+to IPC, or change any application persistence path.
 
 ## Reconstruction Notes
 
@@ -41,7 +41,7 @@ persistence path. No production package imports it.
 | `FR-DATABASE-SQLITE-CONTROL-001` | MUST | Trusted internal code supplies an explicit non-nil context and caller-owned query or execution boundary to read or set the `main` schema `user_version`. | `SchemaVersion` returns a value from `0` through `MaxInt32`; `SetSchemaVersion` emits only the decimal representation of a value in that range. | Reading changes nothing. Setting changes only the caller's current SQLite connection or transaction according to SQLite semantics. The helper does not begin, commit, or roll back a transaction. | A nil context, nil boundary, negative value, value above `MaxInt32`, unavailable value, or query/execute failure returns an error. No helper claims that the caller holds a migration fence or transaction. | Schema control must be centralized without letting a primitive imply lifecycle authority it cannot enforce. |
 | `FR-DATABASE-SQLITE-CONTROL-002` | MUST | Trusted internal code requests physical integrity, referential integrity, or both through an explicit context and caller-owned query boundary. | Physical integrity accepts only the exact successful result from a bounded one-result `main` integrity check. Referential integrity succeeds only when the `main` foreign-key check yields no row. `CheckIntegrity` runs the physical check first and the referential check only after it succeeds. | Diagnostics do not repair, configure, or mutate the database. Every opened row iterator is closed. | A nil context or boundary, unexpected integrity result, returned foreign-key row, row iteration error, or SQL failure returns an error. Reported corruption and foreign-key violations use generic messages and never include SQLite diagnostic content, table names, row values, or caller data. | Diagnostics must fail closed without turning provider details or stored values into application-visible output. |
 | `FR-DATABASE-SQLITE-CONTROL-003` | MUST | Trusted internal code supplies one `main` schema table and an expected list of manually created unique-index names. | The named table must exist exactly once. Validation succeeds only when every expected unique index exists exactly once with SQLite origin `c` and no other origin-`c` unique index exists for that table. Primary-key and automatic indexes, including indexes created for table-level unique constraints, are outside this set. | Validation mutates neither schema nor caller-owned table/index inputs. | A nil context or boundary; empty, padded, invalid-UTF-8, NUL-bearing, or over-1,024-byte table/name; more than 256 expected indexes; a duplicate expected name; a missing table/index; an unexpected manual unique index; or catalog-query failure returns an error. An empty expected list requires zero manual unique indexes. | Domain schema adapters need an exact provider catalog check without confusing SQLite-maintained indexes with explicitly declared schema objects. |
-| `FR-DATABASE-SQLITE-CONTROL-004` | MUST | Repository code attempts to consume or extend this foundation. | Production imports of `internal/sqliteprovider` remain empty and an architecture guard rejects every production consumer. The owned production files import no SQLite driver and expose no path, DSN, open, pool, catalog, readiness, migration, transport, or application operation. | This stage creates no process-global or durable state and changes no active persistence behavior. | Test-only use is allowed. Adding a production consumer or provider-binding surface requires a separately specified integration stage and an explicit guard update. | Landing control semantics separately must not create a second database owner or activate unfinished broker infrastructure. |
+| `FR-DATABASE-SQLITE-CONTROL-004` | MUST | Repository code attempts to consume or extend this foundation. | Exact-file architecture guards permit active provider imports only from `internal/sqlitestore/open.go` and `internal/sqlitestore/schema.go`, while reserving exact future readiness and backup/migration implementation filenames; only the provider core binds or opens the driver. | The allowlist changes no runtime composition; compatibility callers retain their existing direct-store behavior and reserved files are absent. | Any additional provider importer or unreviewed driver/open use fails architecture tests until separately specified. | Compatibility reuse and future dormant slices must not make the provider an application-accessible second owner. |
 
 ## Data And State Model
 
@@ -67,7 +67,7 @@ Owns: TEST internal/sqliteprovider/import_guard_test.go TestSQLiteProviderProduc
 | Internal Go API | `SchemaVersion`, `SetSchemaVersion` | Read or set a bounded `main.user_version` through a caller-owned SQL boundary without providing transaction or fence ownership. | `FR-DATABASE-SQLITE-CONTROL-001` |
 | Internal Go API | `CheckIntegrity`, `CheckIntegrityOnly`, `CheckForeignKeys` | Run ordered, non-repairing `main` integrity diagnostics and suppress stored/provider diagnostic detail. | `FR-DATABASE-SQLITE-CONTROL-002` |
 | Internal Go API | `ValidateUniqueIndexes` | Validate the exact expected origin-`c` unique-index set while excluding SQLite-created primary-key and automatic indexes. | `FR-DATABASE-SQLITE-CONTROL-003` |
-| Architecture gate | SQLite-control import guard | Keep every production package disconnected from the dormant primitives. | `FR-DATABASE-SQLITE-CONTROL-004` |
+| Architecture gate | SQLite-provider import guard | Keep production consumers exact and the driver boundary singular. | `FR-DATABASE-SQLITE-CONTROL-004` |
 
 ## Algorithms And Ordering
 
@@ -88,12 +88,11 @@ Owns: TEST internal/sqliteprovider/import_guard_test.go TestSQLiteProviderProduc
 
 ## Cross-Feature Behavior
 
-`FR-SQLITE` remains the active subsystem-owned SQLite storage behavior and does
-not consume this package. `FR-DATABASE-PROVIDER-CATALOG` remains a separate
-dormant logical-to-physical inventory and neither package imports the other.
-`FR-DATABASE` and `FR-DATABASE-IPC` remain provider-neutral and cannot reach
-these helpers. Later provider, readiness, migration, and owner-composition
-features must explicitly connect and constrain this foundation before use.
+`FR-SQLITE` remains the active subsystem-owned SQLite storage behavior and now
+consumes these helpers through `internal/sqlitestore`. The provider catalog
+remains separate and dormant. `FR-DATABASE` and IPC stay provider-neutral.
+Later readiness, migration, and owner-composition features must explicitly
+connect and constrain this foundation before use.
 
 ## Failure And Edge Cases
 

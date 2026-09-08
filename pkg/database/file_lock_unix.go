@@ -40,6 +40,18 @@ func acquirePlatformFileLock(path string, shared bool) (*os.File, error) {
 		}
 		return nil, fmt.Errorf("lock database storage root: %w", err)
 	}
+	opened, statErr := file.Stat()
+	current, lstatErr := os.Lstat(path)
+	if statErr != nil || lstatErr != nil || opened == nil || current == nil ||
+		!os.SameFile(opened, current) || current.Mode()&os.ModeSymlink != 0 {
+		_ = unix.Flock(fd, unix.LOCK_UN)
+		_ = file.Close()
+		return nil, errors.Join(
+			NewError(CodeIntegrity, "database storage lock changed while opening"),
+			statErr,
+			lstatErr,
+		)
+	}
 	return file, nil
 }
 

@@ -5,10 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 )
 
 // migrationStatementForbidden rejects transaction control and connection or
@@ -107,56 +108,10 @@ func ValidateUniqueIndexSet(
 	table string,
 	expected ...string,
 ) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if conn == nil || strings.TrimSpace(table) == "" || strings.ContainsRune(table, '\x00') {
+	if conn == nil {
 		return errors.New("SQLite unique-index validation is invalid")
 	}
-	expected = append([]string(nil), expected...)
-	for _, name := range expected {
-		if strings.TrimSpace(name) == "" || strings.ContainsRune(name, '\x00') {
-			return errors.New("SQLite expected unique-index name is invalid")
-		}
-	}
-	sort.Strings(expected)
-	for index := 1; index < len(expected); index++ {
-		if expected[index-1] == expected[index] {
-			return errors.New("SQLite expected unique-index name is duplicated")
-		}
-	}
-	for _, name := range expected {
-		var count int
-		if err := conn.QueryRowContext(
-			ctx,
-			`SELECT COUNT(*) FROM pragma_index_list(?)
-			  WHERE name = ? AND "unique" = 1 AND origin = 'c'`,
-			table,
-			name,
-		).Scan(&count); err != nil {
-			return fmt.Errorf("inspect table %s index %s: %w", table, name, err)
-		}
-		if count != 1 {
-			return fmt.Errorf("table %s is missing manual unique index %s", table, name)
-		}
-	}
-	query := `SELECT COUNT(*) FROM pragma_index_list(?)
-		WHERE "unique" = 1 AND origin = 'c'`
-	arguments := []any{table}
-	if len(expected) > 0 {
-		query += " AND name NOT IN (" + strings.TrimRight(strings.Repeat("?,", len(expected)), ",") + ")"
-		for _, name := range expected {
-			arguments = append(arguments, name)
-		}
-	}
-	var unexpected int
-	if err := conn.QueryRowContext(ctx, query, arguments...).Scan(&unexpected); err != nil {
-		return fmt.Errorf("inspect table %s unique indexes: %w", table, err)
-	}
-	if unexpected != 0 {
-		return fmt.Errorf("table %s has %d unexpected manual unique indexes", table, unexpected)
-	}
-	return nil
+	return sqliteprovider.ValidateUniqueIndexes(ctx, conn, table, expected...)
 }
 
 func canonicalSQLiteSQL(statement string) (string, error) {

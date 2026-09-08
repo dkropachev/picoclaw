@@ -1,6 +1,3 @@
-// Package sqliteprovider owns SQLite-specific control statements and schema
-// catalog queries for the future single-owner database provider. This
-// foundation neither registers a driver nor opens a database connection.
 package sqliteprovider
 
 import (
@@ -77,7 +74,7 @@ func CheckIntegrityOnly(ctx context.Context, queryer controlQueryer) error {
 	}
 	var result string
 	if err := queryer.QueryRowContext(ctx, "PRAGMA main.integrity_check(1)").Scan(&result); err != nil {
-		return controlDiagnosticError(ctx, errIntegrityCheck)
+		return controlDiagnosticError(ctx, err, errIntegrityCheck)
 	}
 	if result != "ok" {
 		return errIntegrityCheck
@@ -87,27 +84,46 @@ func CheckIntegrityOnly(ctx context.Context, queryer controlQueryer) error {
 
 // CheckForeignKeys runs the main database referential-integrity diagnostic.
 // Row details and SQLite diagnostics are deliberately not returned.
-func CheckForeignKeys(ctx context.Context, queryer controlQueryer) error {
+func CheckForeignKeys(ctx context.Context, queryer controlQueryer) (returnErr error) {
 	if ctx == nil || queryer == nil {
 		return errInvalidControlBoundary
 	}
 	rows, err := queryer.QueryContext(ctx, "PRAGMA main.foreign_key_check")
 	if err != nil {
-		return controlDiagnosticError(ctx, errForeignKeyCheck)
+		return controlDiagnosticError(ctx, err, errForeignKeyCheck)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			returnErr = errors.Join(
+				returnErr,
+				controlDiagnosticError(ctx, closeErr, errForeignKeyCheck),
+			)
+		}
+	}()
 	if rows.Next() {
 		return errForeignKeyViolation
 	}
 	if err := rows.Err(); err != nil {
-		return controlDiagnosticError(ctx, errForeignKeyCheck)
+		return controlDiagnosticError(ctx, err, errForeignKeyCheck)
 	}
 	return nil
 }
 
-func controlDiagnosticError(ctx context.Context, fallback error) error {
+func controlDiagnosticError(ctx context.Context, cause, fallback error) error {
+	return controlDiagnosticErrorWithClassifier(ctx, cause, fallback, IsBusyOrLocked)
+}
+
+func controlDiagnosticErrorWithClassifier(
+	ctx context.Context,
+	cause,
+	fallback error,
+	busyOrLocked func(error) bool,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if busyOrLocked != nil && busyOrLocked(cause) {
+		return cause
 	}
 	return fallback
 }

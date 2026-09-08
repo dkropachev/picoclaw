@@ -7,18 +7,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io/fs"
-	"net/url"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
-	moderncsqlite "modernc.org/sqlite"
-
-	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
+	dblayer "github.com/sipeed/picoclaw/pkg/database"
 )
 
 const (
@@ -36,35 +30,18 @@ var (
 	// ErrIntegrity reports a failed SQLite integrity check.
 	ErrIntegrity = errors.New("SQLite database integrity check failed")
 
-	memoryDatabaseSequence atomic.Uint64
-
-	openSQLiteDatabase             = sql.Open
+	openSQLiteDatabase             = sqliteprovider.OpenStore
 	absoluteSQLitePath             = filepath.Abs
-	lstatSQLitePath                = os.Lstat
-	chmodSQLitePath                = os.Chmod
-	mkdirAllSQLiteDirectories      = fileutil.MkdirAllDurable
-	syncSQLiteDirectory            = fileutil.SyncDirectory
 	configureOpenedSQLiteDatabase  = configure
-	secureOpenedSQLiteFiles        = secureSQLiteFiles
+	secureOpenedSQLiteFiles        = sqliteprovider.SecureGeneration
 	migrateOpenedSQLiteDatabase    = migrate
 	checkOpenedSQLiteIntegrity     = integrityCheck
 	archiveOpenedSQLiteLegacyFiles = archiveImportedSources
-	securePrivateSQLiteFile        = fileutil.SecurePrivateFile
-	openSQLiteFile                 = func(path string, flag int, mode os.FileMode) (sqliteFile, error) {
-		return os.OpenFile(path, flag, mode)
-	}
 )
 
-type sqliteFile interface {
-	Stat() (os.FileInfo, error)
-	Chmod(mode os.FileMode) error
-	Sync() error
-	Close() error
-}
-
 // Migration upgrades a database from Version-1 to Version. Versions must be
-// contiguous and start at one. Statements run inside one BEGIN IMMEDIATE
-// transaction together with any legacy import.
+// contiguous and start at one. Statements run inside one transaction together
+// with any legacy import; a held migration fence selects BEGIN EXCLUSIVE.
 type Migration struct {
 	Version    int
 	Statements []string
@@ -103,17 +80,11 @@ func Open(ctx context.Context, path string, options Options) (_ *sql.DB, returnE
 	}
 
 	fileBacked := path != ":memory:"
-	if fileBacked {
-		if err := prepareDatabaseFile(path); err != nil {
-			return nil, fmt.Errorf("prepare %s database: %w", component, err)
-		}
-		// Reject unsafe or stale sidecars before SQLite has an opportunity to
-		// follow them. A second pass below covers sidecars created while opening.
-		if err := secureOpenedSQLiteFiles(path); err != nil {
-			return nil, fmt.Errorf("secure %s database files: %w", component, err)
-		}
+	if dblayer.MigrationContextPresent(ctx) &&
+		(!fileBacked || !dblayer.MigrationContextAuthorizes(ctx, path)) {
+		return nil, fmt.Errorf("%s database migration authority does not match path", component)
 	}
-
+	offline := fileBacked && dblayer.MigrationContextAuthorizes(ctx, path)
 	busyTimeout := options.BusyTimeout
 	if busyTimeout == 0 {
 		busyTimeout = DefaultBusyTimeout
@@ -121,11 +92,11 @@ func Open(ctx context.Context, path string, options Options) (_ *sql.DB, returnE
 	if busyTimeout < time.Millisecond || busyTimeout > time.Minute {
 		return nil, fmt.Errorf("%s busy timeout is outside the supported range", component)
 	}
-	dsn, err := sqliteDSN(path, busyTimeout)
+	_, err := sqliteDSN(path, busyTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s database DSN: %w", component, err)
 	}
-	db, err := openSQLiteDatabase("sqlite", dsn)
+	db, err := openSQLiteDatabase(path, busyTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("open %s database: %w", component, err)
 	}
@@ -142,11 +113,16 @@ func Open(ctx context.Context, path string, options Options) (_ *sql.DB, returnE
 	if maxOpen < 1 || maxOpen > 32 {
 		return nil, fmt.Errorf("%s max open connections is outside the supported range", component)
 	}
+	if offline {
+		maxOpen = 1
+	}
 	db.SetMaxOpenConns(maxOpen)
 	db.SetMaxIdleConns(maxOpen)
 	db.SetConnMaxLifetime(0)
 
-	if err = configureOpenedSQLiteDatabase(ctx, db, busyTimeout, !fileBacked, component); err != nil {
+	if err = configureOpenedSQLiteDatabase(
+		ctx, db, busyTimeout, !fileBacked, offline, component,
+	); err != nil {
 		return nil, err
 	}
 	if fileBacked {
@@ -186,107 +162,23 @@ func validateDatabasePath(path string) error {
 	return nil
 }
 
-func prepareDatabaseFile(path string) error {
-	parent := filepath.Dir(path)
-	if err := ensurePrivateDir(parent); err != nil {
-		return err
-	}
-	created := false
-	if info, err := lstatSQLitePath(path); err == nil {
-		if info == nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("database must be a regular file")
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	} else {
-		created = true
-	}
-	file, err := openSQLiteFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	openedInfo, statErr := file.Stat()
-	pathInfo, lstatErr := lstatSQLitePath(path)
-	if statErr != nil || lstatErr != nil || !openedInfo.Mode().IsRegular() ||
-		!pathInfo.Mode().IsRegular() || pathInfo.Mode()&os.ModeSymlink != 0 ||
-		!os.SameFile(openedInfo, pathInfo) {
-		_ = file.Close()
-		return errors.Join(
-			errors.New("database changed while opening"),
-			statErr,
-			lstatErr,
-		)
-	}
-	if chmodErr := file.Chmod(0o600); chmodErr != nil {
-		_ = file.Close()
-		return chmodErr
-	}
-	if syncErr := file.Sync(); syncErr != nil {
-		_ = file.Close()
-		return syncErr
-	}
-	if closeErr := file.Close(); closeErr != nil {
-		return closeErr
-	}
-	if created {
-		return syncSQLiteDirectory(parent)
-	}
-	return nil
-}
-
 // EnsurePrivateDir creates path as a private directory and rejects a symlink
 // at the database directory boundary.
-func EnsurePrivateDir(path string) error { return ensurePrivateDir(path) }
-
-func ensurePrivateDir(path string) error {
-	if strings.TrimSpace(path) == "" || strings.ContainsRune(path, '\x00') {
-		return errors.New("database directory is invalid")
-	}
-	if err := mkdirAllSQLiteDirectories(path, 0o700); err != nil {
-		return err
-	}
-	info, err := lstatSQLitePath(path)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("database directory must be a real directory")
-	}
-	if chmodErr := chmodSQLitePath(path, 0o700); chmodErr != nil {
-		return chmodErr
-	}
-	_, err = fileutil.SecurePrivateDirectory(path)
-	return err
-}
+func EnsurePrivateDir(path string) error { return sqliteprovider.EnsurePrivateDirectory(path) }
 
 func sqliteDSN(path string, busyTimeout time.Duration) (string, error) {
-	if path == ":memory:" {
-		name := "picoclaw-memory-" + strconv.FormatUint(memoryDatabaseSequence.Add(1), 10)
-		return "file:" + name + "?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(" +
-			strconv.FormatInt(busyTimeout.Milliseconds(), 10) + ")&_pragma=synchronous(FULL)", nil
+	if path != ":memory:" {
+		absolutePath, err := absoluteSQLitePath(path)
+		if err != nil {
+			return "", err
+		}
+		path = absolutePath
 	}
-	abs, err := absoluteSQLitePath(path)
-	if err != nil {
-		return "", err
-	}
-	slashPath := sqliteFilePath(
-		filepath.ToSlash(abs),
-		filepath.ToSlash(filepath.VolumeName(abs)),
-	)
-	u := &url.URL{Scheme: "file", Path: slashPath}
-	query := url.Values{}
-	query.Add("_pragma", "foreign_keys(1)")
-	query.Add("_pragma", "busy_timeout("+strconv.FormatInt(busyTimeout.Milliseconds(), 10)+")")
-	query.Add("_pragma", "synchronous(FULL)")
-	u.RawQuery = query.Encode()
-	return u.String(), nil
+	return sqliteprovider.DSN(path, busyTimeout)
 }
 
 func sqliteFilePath(slashPath, slashVolume string) string {
-	if slashVolume != "" && !strings.HasPrefix(slashPath, "/") {
-		return "/" + slashPath
-	}
-	return slashPath
+	return sqliteprovider.FileURLPath(slashPath, slashVolume)
 }
 
 func configure(
@@ -294,29 +186,17 @@ func configure(
 	db *sql.DB,
 	busyTimeout time.Duration,
 	memory bool,
+	offline bool,
 	component string,
 ) error {
-	var journal string
-	if err := configureWAL(ctx, db, busyTimeout, &journal); err != nil {
-		return fmt.Errorf("enable %s WAL: %w", component, err)
+	if !memory && offline {
+		if err := sqliteprovider.ConfigureOffline(ctx, db, busyTimeout); err != nil {
+			return fmt.Errorf("configure %s offline SQLite provider: %w", component, err)
+		}
+		return nil
 	}
-	if !memory && !strings.EqualFold(journal, "wal") {
-		return fmt.Errorf("enable %s WAL: SQLite selected %q", component, journal)
-	}
-	var foreignKeys, configuredBusy, synchronous int
-	if err := db.QueryRowContext(ctx, `
-		SELECT fk.foreign_keys, bt.timeout, sm.synchronous
-		  FROM pragma_foreign_keys AS fk
-		 CROSS JOIN pragma_busy_timeout AS bt
-		 CROSS JOIN pragma_synchronous AS sm
-	`).Scan(&foreignKeys, &configuredBusy, &synchronous); err != nil {
-		return fmt.Errorf("verify %s SQLite configuration: %w", component, err)
-	}
-	if foreignKeys != 1 || configuredBusy != int(busyTimeout.Milliseconds()) || synchronous != 2 {
-		return fmt.Errorf(
-			"verify %s SQLite configuration: foreign_keys=%d busy_timeout=%d synchronous=%d",
-			component, foreignKeys, configuredBusy, synchronous,
-		)
+	if err := sqliteprovider.Configure(ctx, db, busyTimeout, memory); err != nil {
+		return fmt.Errorf("configure %s SQLite provider: %w", component, err)
 	}
 	return nil
 }
@@ -327,38 +207,13 @@ func configureWAL(
 	busyTimeout time.Duration,
 	journal *string,
 ) error {
-	retryCtx, cancel := context.WithTimeout(ctx, busyTimeout)
-	defer cancel()
-	delay := time.Millisecond
-	for {
-		err := db.QueryRowContext(retryCtx, "PRAGMA journal_mode = WAL").Scan(journal)
-		if err == nil || !sqliteBusyOrLocked(err) {
-			return err
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-retryCtx.Done():
-			timer.Stop()
-			return retryCtx.Err()
-		case <-timer.C:
-		}
-		if delay < 50*time.Millisecond {
-			delay *= 2
-		}
-	}
+	selected, err := sqliteprovider.EnableWAL(ctx, db, busyTimeout)
+	*journal = selected
+	return err
 }
 
 func sqliteBusyOrLocked(err error) bool {
-	var sqliteErr *moderncsqlite.Error
-	if !errors.As(err, &sqliteErr) {
-		return false
-	}
-	switch sqliteErr.Code() & 0xff {
-	case 5, 6: // SQLITE_BUSY, SQLITE_LOCKED
-		return true
-	default:
-		return false
-	}
+	return sqliteprovider.IsBusyOrLocked(err)
 }
 
 func validateMigrations(migrations []Migration) error {
@@ -392,8 +247,8 @@ func migrate(ctx context.Context, db *sql.DB, options Options) error {
 		if err := integrityCheckConn(ctx, conn, options.Component); err != nil {
 			return err
 		}
-		var current int
-		if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
+		current, err := sqliteprovider.SchemaVersion(ctx, conn)
+		if err != nil {
 			return fmt.Errorf("read %s schema version: %w", options.Component, err)
 		}
 		latest := len(options.Migrations)
@@ -424,10 +279,7 @@ func migrate(ctx context.Context, db *sql.DB, options Options) error {
 					)
 				}
 			}
-			if _, err := conn.ExecContext(
-				ctx,
-				"PRAGMA user_version = "+strconv.Itoa(migration.Version),
-			); err != nil {
+			if err := sqliteprovider.SetSchemaVersion(ctx, conn, migration.Version); err != nil {
 				return fmt.Errorf("record %s schema version: %w", options.Component, err)
 			}
 		}
@@ -460,7 +312,8 @@ func migrate(ctx context.Context, db *sql.DB, options Options) error {
 	return nil
 }
 
-// Immediate executes fn inside an explicit BEGIN IMMEDIATE transaction.
+// Immediate executes fn inside BEGIN IMMEDIATE, or BEGIN EXCLUSIVE when ctx
+// carries the exact-target offline migration capability used to open the pool.
 func Immediate(ctx context.Context, db *sql.DB, fn func(*sql.Conn) error) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -473,7 +326,24 @@ func Immediate(ctx context.Context, db *sql.DB, fn func(*sql.Conn) error) (err e
 		return err
 	}
 	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+	begin := "BEGIN IMMEDIATE"
+	if dblayer.MigrationContextPresent(ctx) {
+		var sequence int
+		var name, path string
+		queryErr := conn.QueryRowContext(
+			ctx,
+			"SELECT seq, name, file FROM pragma_database_list WHERE name='main'",
+		).Scan(&sequence, &name, &path)
+		if queryErr != nil {
+			return fmt.Errorf("resolve SQLite migration transaction target: %w", queryErr)
+		}
+		if sequence != 0 || name != "main" ||
+			!dblayer.MigrationContextAuthorizes(ctx, path) {
+			return errors.New("SQLite migration authority does not match transaction target")
+		}
+		begin = "BEGIN EXCLUSIVE"
+	}
+	if _, err = conn.ExecContext(ctx, begin); err != nil {
 		return err
 	}
 	committed := false
@@ -545,109 +415,15 @@ func integrityCheckConn(ctx context.Context, conn *sql.Conn, component string) e
 }
 
 func integrityCheckQuery(ctx context.Context, queryer contextQueryer, component string) error {
-	var result string
-	if err := queryer.QueryRowContext(ctx, "PRAGMA integrity_check(1)").Scan(&result); err != nil {
+	if err := sqliteprovider.CheckIntegrityOnly(ctx, queryer); err != nil {
 		return fmt.Errorf("%w: check %s database: %v", ErrIntegrity, component, err)
-	}
-	if result != "ok" {
-		return fmt.Errorf("%w: check %s database: corruption reported", ErrIntegrity, component)
 	}
 	return nil
 }
 
 func foreignKeyCheckQuery(ctx context.Context, queryer contextQueryer, component string) error {
-	rows, err := queryer.QueryContext(ctx, "PRAGMA foreign_key_check")
-	if err != nil {
+	if err := sqliteprovider.CheckForeignKeys(ctx, queryer); err != nil {
 		return fmt.Errorf("%w: check %s database foreign keys: %v", ErrIntegrity, component, err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		return fmt.Errorf("%w: check %s database foreign keys: violation reported", ErrIntegrity, component)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("%w: check %s database foreign keys: %v", ErrIntegrity, component, err)
-	}
-	return nil
-}
-
-func secureSQLiteFiles(path string) error {
-	for index, candidate := range []string{path, path + "-wal", path + "-shm"} {
-		optionalCompanion := index > 0
-		info, err := lstatSQLitePath(candidate)
-		if optionalCompanion && errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s is not a regular SQLite file", filepath.Base(candidate))
-		}
-		file, err := openSQLiteFile(candidate, os.O_RDWR, 0)
-		if err != nil {
-			if optionalCompanion && errors.Is(err, fs.ErrNotExist) {
-				_, currentErr := lstatSQLitePath(candidate)
-				if errors.Is(currentErr, fs.ErrNotExist) {
-					continue
-				}
-				if currentErr != nil {
-					return currentErr
-				}
-				return fmt.Errorf("%s changed while opening", filepath.Base(candidate))
-			}
-			return err
-		}
-		openedInfo, statErr := file.Stat()
-		currentInfo, lstatErr := lstatSQLitePath(candidate)
-		if optionalCompanion && errors.Is(lstatErr, fs.ErrNotExist) && statErr == nil &&
-			openedInfo != nil && openedInfo.Mode().IsRegular() && os.SameFile(info, openedInfo) {
-			if chmodErr := file.Chmod(0o600); chmodErr != nil {
-				_ = file.Close()
-				return chmodErr
-			}
-			if closeErr := file.Close(); closeErr != nil {
-				return closeErr
-			}
-			continue
-		}
-		if statErr != nil || lstatErr != nil || openedInfo == nil || currentInfo == nil ||
-			!openedInfo.Mode().IsRegular() ||
-			!currentInfo.Mode().IsRegular() || currentInfo.Mode()&os.ModeSymlink != 0 ||
-			!os.SameFile(info, openedInfo) || !os.SameFile(openedInfo, currentInfo) {
-			_ = file.Close()
-			return errors.Join(
-				fmt.Errorf("%s changed while opening", filepath.Base(candidate)),
-				statErr,
-				lstatErr,
-			)
-		}
-		if chmodErr := file.Chmod(0o600); chmodErr != nil {
-			_ = file.Close()
-			return chmodErr
-		}
-		if closeErr := file.Close(); closeErr != nil {
-			return closeErr
-		}
-		securedInfo, err := securePrivateSQLiteFile(candidate)
-		if err != nil {
-			// SQLite may remove an unused WAL or SHM companion after its opened
-			// handle is hardened and closed. A vanished companion no longer has an
-			// ACL to validate; the primary database must always remain strict.
-			if optionalCompanion && errors.Is(err, fs.ErrNotExist) {
-				_, currentErr := lstatSQLitePath(candidate)
-				if errors.Is(currentErr, fs.ErrNotExist) {
-					continue
-				}
-				if currentErr != nil {
-					return currentErr
-				}
-				return fmt.Errorf("%s changed while securing", filepath.Base(candidate))
-			}
-			return err
-		}
-		if securedInfo == nil || !os.SameFile(openedInfo, securedInfo) {
-			return fmt.Errorf("%s changed while securing", filepath.Base(candidate))
-		}
 	}
 	return nil
 }
