@@ -86,6 +86,11 @@ Owns: TOOL cron
 Scheduled delivery uses chat channels and gateway delivery. Command jobs use
 tool execution and security gates. Agent conversations process scheduled prompts.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics now live in `internal/sqlitestore`. Scheduling still owns the
+`jobs.db` domain schema, migrations, legacy job compatibility mapping, and
+cron-specific claim and execution-state behavior.
+
 ## Failure And Edge Cases
 
 - Invalid schedules are rejected before persistence.

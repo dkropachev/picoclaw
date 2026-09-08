@@ -425,6 +425,11 @@ direct registry execution for already validated deterministic `tool/*` and
 `mcp/*` graph steps; a model-authored outer `workflow` tool call still crosses
 the Agent Pipeline seam before that separate graph authority begins.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics used by tool adaptation state now live in `internal/sqlitestore`.
+Tool Execution still owns the adaptation domain schema, migrations, legacy
+compatibility mapping, version fences, and observation/outcome mutations.
+
 ## Failure And Edge Cases
 
 - Missing required tool args return tool errors.

@@ -86,6 +86,11 @@ drafts. Agent routing supplies the resolved account-and-alias candidate for
 model-backed cold-path work. Security guidance treats generated skills as
 prompt-sensitive material.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics now live in `internal/sqlitestore`. Self Evolution still owns the
+`evolution.db` domain schema, migrations, legacy record compatibility mapping,
+and learning- and draft-specific persistence behavior.
+
 ## Failure And Edge Cases
 
 - Heartbeat turns are skipped.

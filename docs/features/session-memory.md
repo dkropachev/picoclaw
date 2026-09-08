@@ -153,6 +153,11 @@ semantics. SQLite storage owns hardening/migration protocol. Security isolation
 protects database, companions, and archives from file tools. Workflows consume
 strict snapshots and frozen media. Seahorse is derived, never canonical.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics now live in `internal/sqlitestore`. Session Memory still owns its
+session and memory domain schemas, migrations, legacy compatibility mappings,
+and typed relationship semantics.
+
 ## Failure And Edge Cases
 
 - Too-new version, unknown schema object, failed integrity/FK check, invalid

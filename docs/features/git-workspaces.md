@@ -646,6 +646,11 @@ remain controller-only recovery primitives whose caller must persist intent
 and exact results; they create no legacy PR lifecycle, route, or storage
 contract.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics now live in `internal/sqlitestore`. Git Workspaces still owns the
+`inventory.db` domain schema, migrations, legacy inventory compatibility
+mapping, and Git-specific relationship and mutation fences.
+
 ## Failure And Edge Cases
 
 - Missing manager, root, repository, session key, or workspace ID returns a
