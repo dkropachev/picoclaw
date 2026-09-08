@@ -31,7 +31,7 @@ compatible with low-cost hardware.
 | `FR-PORT-001` | MUST | Makefile and release builds produce core binaries for supported Linux, Darwin, Windows, FreeBSD, Android ARM64, ARM, RISC-V, and LoongArch targets, and pull-request CI executes the complete Makefile `build-all` matrix before merge. Linux/MIPSLE, every NetBSD target, FreeBSD/ARM (32-bit), and FreeBSD/RISC-V are unsupported and absent from applicable build and release matrices; FreeBSD AMD64 and ARM64 remain supported release targets. | Portability is a project-level promise, architecture-specific type errors must fail before reaching `main`, and SQLite-backed runtime storage must not silently fall back to legacy persistence on targets unsupported by its dependency stack. |
 | `FR-PORT-002` | MUST | Launcher builds include frontend assets and backend binary packaging for supported desktop targets. | Web UI distribution must be reproducible. |
 | `FR-PORT-003` | MUST | Updater downloads release assets, validates target platform naming, retries transient HTTP failures, and reports clear status. | Updates must be safe and diagnosable. |
-| `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. Repository-wide pull-request tests bound ordinary `go test` package parallelism to four, while coverage-delta serializes instrumented package processes. Coverage execution isolates the compared refs' product, credential, home, temporary, Git, and user-bus state; derives integration and package scope from the head; and applies statement-weighted thresholds with exact integer ratios. A feature with zero base statements must reach 95%, and distinct head coverage blocks intersecting changed production Go lines must reach 90%. Existing feature and scoped global coverage fail only when uncovered debt increases and the exact ratio regresses; covered-code deletion with unchanged debt passes, and overlapping ownership does not duplicate changed blocks. Rare cryptographic, cleanup, and uncertain-failure branches compiled for the active target remain in the denominator, with no source exclusions or waivers; target-specific builds remain mandatory for build-constrained code. A failing immutable-base command is rerun once, while the second result and every head failure are final. | CI and release validation must be repeatable, isolated between refs, exact at threshold boundaries, and strict about newly introduced executable debt without forcing test-only production seams. |
+| `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. Repository-wide pull-request tests bound ordinary `go test` package parallelism to four, while coverage-delta serializes instrumented package processes and disables cached test results with `-count=1`. Coverage execution uses a short physical temporary root and distinct sibling `TMPDIR`, `TEMP`, and `TMP` roots while isolating the compared refs' product, credential, home, Git, and user-bus state; derives integration and package scope from the head; and applies statement-weighted thresholds with exact integer ratios. A feature with zero base statements must reach 95%, and distinct head coverage blocks intersecting changed production Go lines must reach 90%. Existing feature and scoped global coverage fail only when uncovered debt increases and the exact ratio regresses; covered-code deletion with unchanged debt passes, and overlapping ownership does not duplicate changed blocks. Rare cryptographic, cleanup, and uncertain-failure branches compiled for the active target remain in the denominator, with no source exclusions or waivers; target-specific builds remain mandatory for build-constrained code. A failing immutable-base command is rerun once, while the second result and every head failure are final. | CI and release validation must be repeatable, isolated between refs, exact at threshold boundaries, and strict about newly introduced executable debt without forcing test-only production seams. |
 | `FR-PORT-005` | SHOULD | Memory benchmark tools measure ingestion/evaluation behavior without affecting runtime packages. | Low-resource goals need measurable support. |
 
 ## Data And State Model
@@ -79,10 +79,13 @@ Owns: TEST scripts/portability_requirements_test.go *
    clear final status.
 5. Memory benchmark commands load fixtures, run ingestion/evaluation paths,
    record metrics, and avoid importing benchmark behavior into runtime packages.
-6. Coverage-delta creates separate temporary runtime homes for the base and head
-   worktrees, clears inherited `PICOCLAW_HOME`, and replaces inherited `HOME`
-   before executing code from either ref. It intersects added or modified
-   production Go lines with the head coverage profile, deduplicates every
+6. Coverage-delta creates a short physical temporary root, separate runtime
+   homes, and separate sibling temporary directories for the base and head
+   worktrees; clears inherited `PICOCLAW_HOME`; and replaces inherited `HOME`,
+   `TMPDIR`, `TEMP`, and `TMP` before executing code from either ref. Its Go
+   coverage commands request uncached results with `-count=1` and serialize
+   package processes. It intersects added or modified production Go lines with
+   the head coverage profile, deduplicates every
    matching file/range block, and uses statement weights to require at least 90%
    changed-code coverage. An impacted feature with zero base statements must
    reach at least 95% head coverage. For the scoped global profile and each
@@ -115,7 +118,8 @@ credentialed release publishing.
   AMD64/ARM64 and Android ARM64 remain supported.
 - Android and WhatsApp-native variants remain build-tag controlled.
 - Coverage comparison does not reuse launcher or test state across refs, even
-  when the two revisions use incompatible lock-file or state formats.
+  when the two revisions use incompatible lock-file or state formats. Nested
+  temporary paths remain short enough for Unix-domain socket fixtures.
 - Coverage comparison fails when a new feature is below 95%, changed executable
   code is below 90%, or an existing impacted feature or scoped global profile
   both gains uncovered debt and loses exact coverage ratio. Exact thresholds

@@ -266,8 +266,65 @@ func TestCoverageNestedBenchmarkSkipPatternIsExact(t *testing.T) {
 
 func TestCoverageGoTestParallelismIsBounded(t *testing.T) {
 	t.Parallel()
+	if coverageGoTestCount != 1 {
+		t.Fatalf("coverage Go test count = %d, want 1", coverageGoTestCount)
+	}
 	if coverageGoTestParallelism != 1 {
 		t.Fatalf("coverage Go test parallelism = %d, want 1", coverageGoTestParallelism)
+	}
+}
+
+func TestCreateCoverageTemporaryRootUsesShortPrefixAndReportsFailure(t *testing.T) {
+	parent := t.TempDir()
+	root, err := createCoverageTemporaryRoot(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if filepath.Dir(root) != parent || !strings.HasPrefix(filepath.Base(root), "pc-") {
+		t.Fatalf("coverage temporary root = %q, want short pc- child of %q", root, parent)
+	}
+
+	blockedParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err = os.WriteFile(blockedParent, []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if root, err = createCoverageTemporaryRoot(blockedParent); err == nil || root != "" {
+		t.Fatalf("blocked coverage temporary root = (%q, %v), want empty path and error", root, err)
+	}
+}
+
+func TestRunGoCoverageUsesFreshSerializedExecution(t *testing.T) {
+	root := t.TempDir()
+	writeScriptCoverageFixture(t, root, "go.mod", "module example.com/coveragefixture\n\ngo 1.24\n")
+	writeScriptCoverageFixture(
+		t,
+		root,
+		"sample/sample.go",
+		"package sample\n\nfunc Value() int { return 42 }\n",
+	)
+	writeScriptCoverageFixture(
+		t,
+		root,
+		"sample/sample_test.go",
+		"package sample\n\nimport \"testing\"\n\nfunc TestValue(t *testing.T) { if Value() != 42 { t.Fatal(\"wrong value\") } }\n",
+	)
+	profilePath := filepath.Join(root, "coverage.out")
+	profile, err := runGoCoverage(
+		root,
+		"head",
+		"fixture",
+		"",
+		profilePath,
+		[]string{"example.com/coveragefixture/sample"},
+		[]string{"example.com/coveragefixture/sample"},
+		os.Environ(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := profile.Files["sample/sample.go"]; got.TotalStatements == 0 || got.CoveredStatements == 0 {
+		t.Fatalf("fixture coverage = %+v, want covered statements", got)
 	}
 }
 
@@ -1013,7 +1070,10 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 	assertEnvironmentValue(t, baseEnvironment, "PICOCLAW_CONFIG", "/isolated/base/.picoclaw/config.json")
 	assertEnvironmentValue(t, baseEnvironment, "PICOCLAW_BINARY", "/isolated/base/bin/picoclaw")
 	assertEnvironmentValue(t, baseEnvironment, "XDG_RUNTIME_DIR", "/isolated/base/.xdg/runtime")
-	assertEnvironmentValue(t, baseEnvironment, "TMPDIR", "/isolated/base/.tmp")
+	assertEnvironmentValue(t, baseEnvironment, "TMPDIR", "/isolated/base-tmp")
+	assertEnvironmentValue(t, baseEnvironment, "TEMP", "/isolated/base-tmp")
+	assertEnvironmentValue(t, baseEnvironment, "TMP", "/isolated/base-tmp")
+	assertEnvironmentValue(t, headEnvironment, "TMPDIR", "/isolated/head-tmp")
 	assertEnvironmentValue(t, baseEnvironment, "GNUPGHOME", "/isolated/base/.gnupg")
 	assertEnvironmentValue(t, baseEnvironment, "GIT_CONFIG_NOSYSTEM", "1")
 	assertEnvironmentValue(
@@ -1078,6 +1138,13 @@ func TestPrepareCoverageStorageDefersConfigUntilAfterUnitCoverage(t *testing.T) 
 	}
 	if info, err := os.Stat(configPath); err != nil || !info.Mode().IsRegular() {
 		t.Fatalf("coverage config = (%v, %v), want regular file", info, err)
+	}
+	temporaryDirectory := coverageTemporaryDirectory(home)
+	if info, err := os.Stat(temporaryDirectory); err != nil || !info.IsDir() {
+		t.Fatalf("coverage temporary directory = (%v, %v), want directory", info, err)
+	}
+	if filepath.Dir(temporaryDirectory) != filepath.Dir(home) {
+		t.Fatalf("coverage temporary directory %q is not a sibling of home %q", temporaryDirectory, home)
 	}
 }
 
