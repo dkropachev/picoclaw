@@ -27,6 +27,35 @@ type Fence struct {
 	closed    atomic.Bool
 }
 
+type checkedFenceGuard struct {
+	mu       sync.Mutex
+	once     sync.Once
+	fence    *Fence
+	home     string
+	released bool
+}
+
+func (guard *checkedFenceGuard) check() bool {
+	if guard == nil {
+		return false
+	}
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	return !guard.released && guard.fence != nil && guard.fence.authorizesLocked(guard.home)
+}
+
+func (guard *checkedFenceGuard) release() {
+	if guard == nil {
+		return
+	}
+	guard.once.Do(func() {
+		guard.mu.Lock()
+		defer guard.mu.Unlock()
+		guard.released = true
+		guard.fence.mu.RUnlock()
+	})
+}
+
 type migrationContextKey struct{}
 
 type migrationContextAuthority struct {
@@ -139,30 +168,47 @@ func (fence *Fence) authorizesLocked(home string) bool {
 // Guard keeps the exact fence boundary live across a short ownership transfer.
 // The returned release function must be called exactly once when err is nil.
 func (fence *Fence) Guard(home string) (func(), error) {
+	_, release, err := fence.GuardChecked(home)
+	return release, err
+}
+
+// GuardChecked keeps the exact fence boundary live and returns a non-reentrant
+// checker for use while the guard remains held. The checker must not be called
+// after release.
+func (fence *Fence) GuardChecked(home string) (func() bool, func(), error) {
 	if fence == nil {
-		return nil, NewError(CodeUnavailable, "storage fence is unavailable")
+		return nil, nil, NewError(CodeUnavailable, "storage fence is unavailable")
 	}
 	fence.mu.RLock()
 	if !fence.authorizesLocked(home) {
 		fence.mu.RUnlock()
-		return nil, NewError(CodeIntegrity, "storage fence lost authority")
+		return nil, nil, NewError(CodeIntegrity, "storage fence lost authority")
 	}
-	return fence.mu.RUnlock, nil
+	guard := &checkedFenceGuard{fence: fence, home: home}
+	return guard.check, guard.release, nil
 }
 
 // GuardMigration keeps the exact exclusive migration fence live across a
 // short ownership transfer. Shared online fences are never migration
 // capabilities.
 func (fence *Fence) GuardMigration(home string) (func(), error) {
+	_, release, err := fence.GuardMigrationChecked(home)
+	return release, err
+}
+
+// GuardMigrationChecked is GuardChecked restricted to the exact exclusive
+// migration capability.
+func (fence *Fence) GuardMigrationChecked(home string) (func() bool, func(), error) {
 	if fence == nil {
-		return nil, NewError(CodeUnavailable, "storage migration fence is unavailable")
+		return nil, nil, NewError(CodeUnavailable, "storage migration fence is unavailable")
 	}
 	fence.mu.RLock()
 	if !fence.migration || !fence.authorizesLocked(home) {
 		fence.mu.RUnlock()
-		return nil, NewError(CodeUnauthorized, "exclusive storage migration fence is required")
+		return nil, nil, NewError(CodeUnauthorized, "exclusive storage migration fence is required")
 	}
-	return fence.mu.RUnlock, nil
+	guard := &checkedFenceGuard{fence: fence, home: home}
+	return guard.check, guard.release, nil
 }
 
 func fenceLockIdentity(file *os.File, path string) (os.FileInfo, error) {

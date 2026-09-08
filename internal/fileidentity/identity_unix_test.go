@@ -35,6 +35,45 @@ func TestExistingRejectsNamedPipe(t *testing.T) {
 	}
 }
 
+func TestOpenedRejectsNamedPipe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opened-pipe")
+	if err := unix.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("named pipes unavailable: %v", err)
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if identity, objectType, err := Opened(file); identity.Valid() || objectType != 0 ||
+		!errors.Is(err, ErrUnsafeType) {
+		_ = file.Close()
+		t.Fatalf("Opened(pipe) = %#v, %v, %v", identity, objectType, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenedRejectsUnavailablePlatformInformation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		info os.FileInfo
+	}{
+		{name: "missing info"},
+		{name: "missing system data", info: identityTestFileInfo{name: "file", mode: 0o600}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			identity, objectType, err := openedWithStat(func() (os.FileInfo, error) {
+				return test.info, nil
+			})
+			if identity.Valid() || objectType != 0 || !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("openedWithStat() = %#v, %v, %v", identity, objectType, err)
+			}
+		})
+	}
+}
+
 func TestExistingFailsClosedAcrossInspectionTransitions(t *testing.T) {
 	root := t.TempDir()
 	firstPath := filepath.Join(root, "first")

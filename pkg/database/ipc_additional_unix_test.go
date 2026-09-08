@@ -6,13 +6,20 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
+)
+
+const (
+	ipcFileSizeLimitChildEnvironment  = "PICOCLAW_IPC_FILE_SIZE_LIMIT_CHILD"
+	ipcFileSizeLimitParentEnvironment = "PICOCLAW_IPC_FILE_SIZE_LIMIT_PARENT_PID"
 )
 
 type foreignOwnerFileInfo struct{ os.FileInfo }
@@ -279,6 +286,34 @@ func TestReadManifestPropagatesRealDescriptorExhaustion(t *testing.T) {
 }
 
 func TestWriteManifestPropagatesRealFileSizeLimit(t *testing.T) {
+	if os.Getenv(ipcFileSizeLimitChildEnvironment) == "1" {
+		parentPID, err := strconv.Atoi(os.Getenv(ipcFileSizeLimitParentEnvironment))
+		if err != nil || parentPID <= 0 || os.Getppid() != parentPID {
+			t.Fatal("file-size-limit child authority is invalid")
+		}
+		testWriteManifestFileSizeLimitChild(t)
+		return
+	}
+
+	arguments := []string{"-test.run=^TestWriteManifestPropagatesRealFileSizeLimit$"}
+	for _, argument := range os.Args {
+		if strings.HasPrefix(argument, "-test.gocoverdir=") {
+			arguments = append(arguments, argument)
+			break
+		}
+	}
+	command := exec.Command(os.Args[0], arguments...)
+	command.Env = append(
+		os.Environ(),
+		ipcFileSizeLimitChildEnvironment+"=1",
+		ipcFileSizeLimitParentEnvironment+"="+strconv.Itoa(os.Getpid()),
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("file-size-limit child failed: %v\n%s", err, output)
+	}
+}
+
+func testWriteManifestFileSizeLimitChild(t *testing.T) {
 	home := t.TempDir()
 	stateDir, err := prepareStateDirectory(home)
 	if err != nil {

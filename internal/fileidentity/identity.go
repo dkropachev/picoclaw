@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	// ErrInvalidPath means identity lookup received an unusable path string.
+	// ErrInvalidPath means identity lookup received an unusable input path or handle.
 	ErrInvalidPath = errors.New("physical file identity path is invalid")
 	// ErrUnsafeType means an existing object is not a regular file or directory.
 	ErrUnsafeType = errors.New("physical file identity object has an unsafe type")
@@ -24,13 +24,23 @@ type Identity struct {
 	key string
 }
 
+// ObjectType is the identity-bound filesystem type returned by
+// ExistingWithType and Opened.
+type ObjectType uint8
+
+const (
+	ObjectTypeRegular ObjectType = iota + 1
+	ObjectTypeDirectory
+)
+
 // String returns the platform-qualified identity. It is intended only for
 // deriving opaque hashes; paths and other user-controlled data are absent.
 func (identity Identity) String() string {
 	return identity.key
 }
 
-// Valid reports whether Identity came from a successful Existing call.
+// Valid reports whether Identity came from a successful Existing,
+// ExistingWithType, or Opened call.
 func (identity Identity) Valid() bool {
 	return identity.key != ""
 }

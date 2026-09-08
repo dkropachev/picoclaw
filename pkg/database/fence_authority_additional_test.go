@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestFenceNilClosedAndWrongHomeAuthorityFailsClosed(t *testing.T) {
@@ -70,6 +71,69 @@ func TestFenceNilClosedAndWrongHomeAuthorityFailsClosed(t *testing.T) {
 		CodeOf(guardErr) != CodeUnauthorized {
 		t.Fatalf("closed GuardMigration() release=%t, err=%v", release != nil, guardErr)
 	}
+}
+
+func TestFenceCheckedGuardsDoNotReenterWithQueuedClose(t *testing.T) {
+	for _, migration := range []bool{false, true} {
+		name := "online"
+		if migration {
+			name = "migration"
+		}
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			var fence *Fence
+			var err error
+			if migration {
+				fence, err = AcquireMigrationFence(home)
+			} else {
+				fence, err = AcquireOnlineFence(home)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var check func() bool
+			var release func()
+			if migration {
+				check, release, err = fence.GuardMigrationChecked(home)
+			} else {
+				check, release, err = fence.GuardChecked(home)
+			}
+			if err != nil || check == nil || release == nil {
+				t.Fatalf("checked guard = check:%t release:%t err:%v", check != nil, release != nil, err)
+			}
+			closeDone := make(chan error, 1)
+			go func() { closeDone <- fence.Close() }()
+			select {
+			case closeErr := <-closeDone:
+				t.Fatalf("Close passed checked guard: %v", closeErr)
+			case <-time.After(25 * time.Millisecond):
+			}
+			if !check() {
+				t.Fatal("checked guard lost unchanged boundary with queued Close")
+			}
+			release()
+			release()
+			if check() {
+				t.Fatal("checked guard remained live after release")
+			}
+			select {
+			case closeErr := <-closeDone:
+				if closeErr != nil {
+					t.Fatal(closeErr)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Close did not resume after checked guard release")
+			}
+		})
+	}
+}
+
+func TestNilCheckedFenceGuardIsInert(t *testing.T) {
+	var guard *checkedFenceGuard
+	if guard.check() {
+		t.Fatal("nil checked fence guard authorized")
+	}
+	guard.release()
 }
 
 func TestMigrationContextPresenceExactTargetAndExpiration(t *testing.T) {
