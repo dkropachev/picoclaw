@@ -199,7 +199,7 @@ function rawFindingCount(review: RepositoryReviewAutomation): number {
 }
 
 function deduplicatedFindingCount(review: RepositoryReviewAutomation): number {
-  return review.progress.deduplicated_findings ?? review.progress.findings ?? 0
+  return review.progress.deduplicated_findings ?? 0
 }
 
 function isQueuedHandoff(review: RepositoryReviewAutomation): boolean {

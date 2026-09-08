@@ -46,9 +46,7 @@ export function RepositoryReviewIssueEditorPage({
   })
   const detail = query.data
   const issue = detail?.issue
-  const canonical = issue?.canonical !== false && !issue?.read_only
-  const editable =
-    canonical && (detail?.capabilities?.can_edit ?? issue?.state === "editing")
+  const editable = detail?.capabilities?.can_edit ?? issue?.state === "editing"
   const notFound =
     query.error instanceof RepositoryReviewAPIError &&
     query.error.status === 404

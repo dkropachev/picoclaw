@@ -135,38 +135,25 @@ export function RepositoryReviewIssuePage({
   const github =
     detail?.capabilities?.github ??
     Boolean(detail && githubRepositoryPath(detail.automation.repository))
-  const canonical = issue?.canonical !== false
-  const editable =
-    canonical &&
-    !issue?.read_only &&
-    (detail?.capabilities?.can_edit ?? issue?.state === "editing")
+  const editable = detail?.capabilities?.can_edit ?? issue?.state === "editing"
   const deletable =
-    canonical &&
-    !issue?.read_only &&
-    (detail?.capabilities?.can_delete ??
-      issue?.deletable ??
-      (issue?.state === "editing" || issue?.state === "failed"))
+    detail?.capabilities?.can_delete ??
+    issue?.deletable ??
+    (issue?.state === "editing" || issue?.state === "failed")
   const regeneratable =
-    canonical &&
-    !issue?.read_only &&
-    (detail?.capabilities?.can_regenerate ??
-      issue?.regeneratable ??
-      (issue?.origin === "ai_generated" &&
-        new Set(["generating", "editing", "failed"]).has(issue?.state ?? "")))
-  const publishable =
-    github &&
-    canonical &&
-    !issue?.read_only &&
-    detail?.capabilities?.can_publish === true
+    detail?.capabilities?.can_regenerate ??
+    issue?.regeneratable ??
+    (issue?.origin === "ai_generated" &&
+      new Set(["generating", "editing", "failed"]).has(issue?.state ?? ""))
+  const publishable = github && detail?.capabilities?.can_publish === true
   const publishBlockers = detail?.capabilities?.publish_blockers ?? []
   const externalURL = safeRepositoryReviewGitHubIssueURL(
     issue?.external_url,
     detail?.automation.repository,
   )
   const showOpenAction =
-    github && canonical && issue?.state === "posted" && Boolean(externalURL)
-  const showPostAction =
-    github && canonical && !issue?.read_only && !showOpenAction
+    github && issue?.state === "posted" && Boolean(externalURL)
+  const showPostAction = github && !showOpenAction
   const publicationNoticeID = "issue-publication-notice"
 
   return (
@@ -187,10 +174,7 @@ export function RepositoryReviewIssuePage({
               <Badge variant="outline">
                 {repositoryReviewIssueStateLabel(issue.state)}
               </Badge>
-              <Badge variant="secondary">{issue.origin || "legacy"}</Badge>
-              {(issue.read_only || !canonical) && (
-                <Badge variant="destructive">read only</Badge>
-              )}
+              <Badge variant="secondary">{issue.origin}</Badge>
             </div>
           ) : undefined
         }
@@ -271,18 +255,7 @@ export function RepositoryReviewIssuePage({
                 )}
               </div>
             )}
-            {!canonical && (
-              <div
-                id={publicationNoticeID}
-                role="status"
-                className="border-border rounded-lg border p-3 text-sm"
-              >
-                This preserved legacy record is not the finding’s canonical
-                association and cannot be edited or posted.
-                {issue.conflict_reason ? ` ${issue.conflict_reason}` : ""}
-              </div>
-            )}
-            {canonical && !github && (
+            {!github && (
               <div
                 id={publicationNoticeID}
                 role="status"
@@ -292,7 +265,7 @@ export function RepositoryReviewIssuePage({
                 this review is not bound to a canonical GitHub repository.
               </div>
             )}
-            {canonical && github && !showOpenAction && !publishable && (
+            {github && !showOpenAction && !publishable && (
               <div
                 id={publicationNoticeID}
                 role="status"
@@ -322,9 +295,7 @@ export function RepositoryReviewIssuePage({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h2 className="font-semibold">Finding association</h2>
                 <span className="text-muted-foreground text-xs">
-                  {issue.finding_ids.length === 1
-                    ? "One finding"
-                    : `${issue.finding_ids.length} grouped legacy findings`}
+                  One finding
                 </span>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -342,16 +313,12 @@ export function RepositoryReviewIssuePage({
                   </Button>
                 ))}
                 {(issue.origin === "linked" || issue.origin === "discovered") &&
-                  issue.finding_ids[0] && (
+                  repositoryFindingID && (
                     <Button
                       type="button"
                       size="sm"
                       variant="outline"
-                      onClick={() =>
-                        onManageLink(
-                          repositoryFindingID || issue.finding_ids[0]!,
-                        )
-                      }
+                      onClick={() => onManageLink(repositoryFindingID)}
                     >
                       Manage{" "}
                       {issue.origin === "discovered" ? "discovered" : "manual"}{" "}
@@ -373,7 +340,7 @@ export function RepositoryReviewIssuePage({
                 />
                 <DetailRow
                   label="Instruction mode"
-                  value={issue.instructions_mode || "legacy"}
+                  value={issue.instructions_mode || "Not applicable"}
                 />
                 <DetailRow
                   label="Generator model"

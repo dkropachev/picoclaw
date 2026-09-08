@@ -16,29 +16,22 @@ export function repositoryReviewFileProgress(
 ): RepositoryReviewFileProgress {
   const progress = review.progress
   const selected = count(review.scope_plan?.counts.selected_files)
-  if (progress.scope_frozen === true && selected > 0) {
-    const noFileEvidence =
-      review.status !== "completed" &&
-      count(progress.reviewed_files) === 0 &&
-      count(progress.remaining_files) === 0 &&
-      count(progress.unsupported_files) === 0
-    const resolved =
-      review.status === "completed"
-        ? selected
-        : noFileEvidence
-          ? 0
-          : clamp(selected - count(progress.remaining_files), 0, selected)
-    return fileProgress(resolved, selected, review.status === "completed")
+  if (progress.scope_frozen !== true || selected === 0) {
+    return fileProgress(0, 0, review.status === "completed")
   }
 
+  const noFileEvidence =
+    review.status !== "completed" &&
+    count(progress.reviewed_files) === 0 &&
+    count(progress.remaining_files) === 0 &&
+    count(progress.unsupported_files) === 0
   const resolved =
-    count(progress.reviewed_files) + count(progress.unsupported_files)
-  const total = Math.max(resolved + count(progress.remaining_files), resolved)
-  return fileProgress(
-    review.status === "completed" ? total : resolved,
-    total,
-    review.status === "completed",
-  )
+    review.status === "completed"
+      ? selected
+      : noFileEvidence
+        ? 0
+        : clamp(selected - count(progress.remaining_files), 0, selected)
+  return fileProgress(resolved, selected, review.status === "completed")
 }
 
 export function repositoryReviewFileProgressLabel(

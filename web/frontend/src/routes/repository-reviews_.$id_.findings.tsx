@@ -16,18 +16,6 @@ export const Route = createFileRoute("/repository-reviews_/$id_/findings")({
   validateSearch: normalizeRepositoryReviewRunFindingsSearch,
   beforeLoad: ({ params, location }) => {
     const raw = rawSearch(location.searchStr)
-    if (raw.scope === "all") {
-      throw redirect({
-        to: "/repository-reviews/repositories/$id/findings",
-        params: { id: params.id },
-        search: normalizeRepositoryReviewRepositoryFindingsSearch(raw),
-        state: repositoryReviewParentNavigationState(
-          {},
-          repositoryReviewRepositoryDefaultQuery,
-        ),
-        replace: true,
-      })
-    }
     const canonical = normalizeRepositoryReviewRunFindingsSearch(raw)
     if (!repositoryReviewSearchIsCanonical(raw, canonical)) {
       throw redirect({

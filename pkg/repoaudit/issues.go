@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/url"
 	"os"
-	"sort"
 	"strings"
 )
 
@@ -46,58 +45,6 @@ type ExistingIssueLink struct {
 	Replace                bool
 }
 
-// SetFindingStatusByVersion is the automation-owned status mutation fence.
-// The repository-ID compatibility route continues to fence the aggregate
-// ledger version through SetFindingStatus.
-func (s Store) SetFindingStatusByVersion(
-	repository, findingID string,
-	status FindingStatus,
-	expectedFindingVersion int64,
-) (RepositoryState, Finding, error) {
-	if status != FindingOpen && status != FindingDismissed {
-		return RepositoryState{}, Finding{}, errors.New("invalid repository review finding status")
-	}
-	repository = strings.TrimSpace(repository)
-	findingID = strings.TrimSpace(findingID)
-	unlock, err := s.lock(repository)
-	if err != nil {
-		return RepositoryState{}, Finding{}, err
-	}
-	defer unlock()
-	state, err := s.load(repository)
-	if err != nil {
-		return RepositoryState{}, Finding{}, err
-	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, Finding{}, err
-	}
-	index := findingIndexByID(state.Findings, findingID)
-	if index < 0 {
-		return RepositoryState{}, Finding{}, os.ErrNotExist
-	}
-	finding := &state.Findings[index]
-	if finding.Status == status {
-		return state, *finding, nil
-	}
-	if finding.Status == FindingPosted || finding.IssueDraftID != "" ||
-		expectedFindingVersion < 1 || finding.Version != expectedFindingVersion {
-		return RepositoryState{}, Finding{}, ErrConflict
-	}
-	now := s.clock()
-	finding.Status = status
-	finding.Version++
-	finding.UpdatedAt = now
-	state.Version++
-	state.UpdatedAt = now
-	if err := s.save(&state); err != nil {
-		return RepositoryState{}, Finding{}, err
-	}
-	return state, *finding, nil
-}
-
-// ReserveIssueGeneration associates one open finding before the provider call.
-// Repeating the same generation ID is idempotent and never creates a second
-// preview.
 func (s Store) ReserveIssueGeneration(
 	request IssueGenerationRequest,
 ) (RepositoryState, IssueDraft, bool, error) {
@@ -112,9 +59,6 @@ func (s Store) ReserveIssueGeneration(
 	defer unlock()
 	state, err := s.load(request.Repository)
 	if err != nil {
-		return RepositoryState{}, IssueDraft{}, false, err
-	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, IssueDraft{}, false, err
 	}
 	findingIndex := findingIndexByID(state.Findings, request.FindingID)
@@ -161,7 +105,6 @@ func (s Store) ReserveIssueGeneration(
 		AttemptGeneratorAccount:        request.GeneratorAccount,
 		AttemptGeneratorProfileID:      request.GeneratorProfileID,
 		AttemptGeneratorProfileVersion: request.GeneratorProfileVersion,
-		Canonical:                      true,
 		State:                          IssueDraftGenerating,
 		Version:                        1,
 		CreatedAt:                      now,
@@ -199,15 +142,12 @@ func (s Store) BeginIssueRegeneration(
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, false, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, IssueDraft{}, false, err
-	}
 	draftIndex := issueDraftIndexByID(state.IssueDrafts, draftID)
 	if draftIndex < 0 {
 		return RepositoryState{}, IssueDraft{}, false, os.ErrNotExist
 	}
 	draft := &state.IssueDrafts[draftIndex]
-	if draft.Origin != IssueDraftOriginAIGenerated || !draft.Canonical ||
+	if draft.Origin != IssueDraftOriginAIGenerated ||
 		len(draft.FindingIDs) != 1 || draft.FindingIDs[0] != request.FindingID {
 		return RepositoryState{}, IssueDraft{}, false, ErrConflict
 	}
@@ -264,15 +204,12 @@ func (s Store) CompleteIssueGeneration(
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, IssueDraft{}, err
-	}
 	draftIndex := issueDraftIndexByID(state.IssueDrafts, draftID)
 	if draftIndex < 0 {
 		return RepositoryState{}, IssueDraft{}, os.ErrNotExist
 	}
 	draft := &state.IssueDrafts[draftIndex]
-	if draft.Origin != IssueDraftOriginAIGenerated || !draft.Canonical ||
+	if draft.Origin != IssueDraftOriginAIGenerated ||
 		issueDraftAttemptGenerationID(*draft) != generationID {
 		return RepositoryState{}, IssueDraft{}, ErrConflict
 	}
@@ -335,15 +272,12 @@ func (s Store) DeleteIssueDraft(
 	if err != nil {
 		return RepositoryState{}, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, err
-	}
 	draftIndex := issueDraftIndexByID(state.IssueDrafts, draftID)
 	if draftIndex < 0 {
 		return RepositoryState{}, os.ErrNotExist
 	}
 	draft := state.IssueDrafts[draftIndex]
-	if !draft.Canonical || (draft.State != IssueDraftEditing && draft.State != IssueDraftFailed) ||
+	if (draft.State != IssueDraftEditing && draft.State != IssueDraftFailed) ||
 		expectedVersion < 1 || draft.Version != expectedVersion {
 		return RepositoryState{}, ErrConflict
 	}
@@ -397,9 +331,6 @@ func (s Store) LinkExistingIssue(
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, IssueDraft{}, err
-	}
 	findingIndex := findingIndexByID(state.Findings, request.FindingID)
 	if findingIndex < 0 {
 		return RepositoryState{}, IssueDraft{}, os.ErrNotExist
@@ -415,7 +346,6 @@ func (s Store) LinkExistingIssue(
 		existingIndex := issueDraftIndexByID(state.IssueDrafts, finding.IssueDraftID)
 		if !request.Replace || existingIndex < 0 ||
 			!reversibleIssueDraftOrigin(state.IssueDrafts[existingIndex].Origin) ||
-			!state.IssueDrafts[existingIndex].Canonical ||
 			state.IssueDrafts[existingIndex].State != IssueDraftPosted {
 			return RepositoryState{}, IssueDraft{}, ErrConflict
 		}
@@ -433,8 +363,8 @@ func (s Store) LinkExistingIssue(
 	draft := IssueDraft{
 		ID:         stableID("rid_", state.Repository, finding.ID, string(request.Origin), request.ExternalURL),
 		Repository: state.Repository, FindingIDs: []string{finding.ID},
-		Origin: request.Origin, Canonical: true,
-		Title: request.Title, Body: request.Body, Labels: request.Labels,
+		Origin: request.Origin,
+		Title:  request.Title, Body: request.Body, Labels: request.Labels,
 		State: IssueDraftPosted, ExternalID: request.ExternalID, ExternalURL: request.ExternalURL,
 		ExternalState: request.State,
 		Version:       1, CreatedAt: now, UpdatedAt: now,
@@ -473,9 +403,6 @@ func (s Store) UnlinkExistingIssue(
 	if err != nil {
 		return RepositoryState{}, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, err
-	}
 	findingIndex := findingIndexByID(state.Findings, findingID)
 	if findingIndex < 0 {
 		return RepositoryState{}, os.ErrNotExist
@@ -486,7 +413,7 @@ func (s Store) UnlinkExistingIssue(
 	}
 	draftIndex := issueDraftIndexByID(state.IssueDrafts, finding.IssueDraftID)
 	if draftIndex < 0 || !reversibleIssueDraftOrigin(state.IssueDrafts[draftIndex].Origin) ||
-		!state.IssueDrafts[draftIndex].Canonical || state.IssueDrafts[draftIndex].State != IssueDraftPosted {
+		state.IssueDrafts[draftIndex].State != IssueDraftPosted {
 		return RepositoryState{}, ErrConflict
 	}
 	now := s.clock()
@@ -615,128 +542,6 @@ func issueDraftIndexByID(drafts []IssueDraft, id string) int {
 	return -1
 }
 
-// backfillCanonicalIssueAssociations upgrades legacy grouped drafts in place.
-// It never discards conflicts: the selected draft becomes canonical and every
-// other matching record remains visible and read-only.
-func backfillCanonicalIssueAssociations(state *RepositoryState) bool {
-	if state == nil {
-		return false
-	}
-	changed := false
-	for index := range state.IssueDrafts {
-		draft := &state.IssueDrafts[index]
-		if draft.Origin == "" {
-			draft.Origin = IssueDraftOriginLegacy
-			changed = true
-		}
-	}
-	byID := make(map[string]int, len(state.IssueDrafts))
-	for index := range state.IssueDrafts {
-		byID[state.IssueDrafts[index].ID] = index
-	}
-	assigned := make(map[string]int, len(state.Findings))
-	canonical := make(map[int]struct{})
-	// New one-finding associations are authoritative. Legacy associations are
-	// recomputed below so a grouped record can never overlap another canonical
-	// record for only part of its membership.
-	for _, finding := range state.Findings {
-		index, ok := byID[finding.IssueDraftID]
-		if !ok || state.IssueDrafts[index].Origin == IssueDraftOriginLegacy ||
-			!issueDraftContainsFinding(state.IssueDrafts[index], finding.ID) {
-			continue
-		}
-		if issueDraftCanClaimFindings(state.IssueDrafts[index], assigned) {
-			assignIssueDraft(state.IssueDrafts[index], index, assigned)
-			canonical[index] = struct{}{}
-		}
-	}
-	legacy := make([]int, 0, len(state.IssueDrafts))
-	for index, draft := range state.IssueDrafts {
-		if draft.Origin == IssueDraftOriginLegacy {
-			legacy = append(legacy, index)
-		}
-	}
-	sort.SliceStable(legacy, func(left, right int) bool {
-		leftDraft := state.IssueDrafts[legacy[left]]
-		rightDraft := state.IssueDrafts[legacy[right]]
-		leftPriority := legacyIssueDraftPriority(leftDraft.State)
-		rightPriority := legacyIssueDraftPriority(rightDraft.State)
-		if leftPriority != rightPriority {
-			return leftPriority > rightPriority
-		}
-		// Provider-side legacy states are indivisible. Prefer the grouped record
-		// so every finding it already affected retains one consistent canonical
-		// issue. Editable drafts still follow the required newest-first rule.
-		if leftPriority >= 2 && len(leftDraft.FindingIDs) != len(rightDraft.FindingIDs) {
-			return len(leftDraft.FindingIDs) > len(rightDraft.FindingIDs)
-		}
-		if !leftDraft.UpdatedAt.Equal(rightDraft.UpdatedAt) {
-			return leftDraft.UpdatedAt.After(rightDraft.UpdatedAt)
-		}
-		if !leftDraft.CreatedAt.Equal(rightDraft.CreatedAt) {
-			return leftDraft.CreatedAt.After(rightDraft.CreatedAt)
-		}
-		return leftDraft.ID < rightDraft.ID
-	})
-	for _, index := range legacy {
-		draft := state.IssueDrafts[index]
-		if !issueDraftCanClaimFindings(draft, assigned) {
-			continue
-		}
-		assignIssueDraft(draft, index, assigned)
-		canonical[index] = struct{}{}
-	}
-	for findingIndex := range state.Findings {
-		finding := &state.Findings[findingIndex]
-		selected, ok := assigned[finding.ID]
-		expectedDraftID := ""
-		if ok {
-			expectedDraftID = state.IssueDrafts[selected].ID
-		}
-		if finding.IssueDraftID != expectedDraftID {
-			finding.IssueDraftID = expectedDraftID
-			changed = true
-		}
-		if ok && state.IssueDrafts[selected].State == IssueDraftPosted {
-			if finding.Status != FindingPosted {
-				finding.Status = FindingPosted
-				changed = true
-			}
-		} else if finding.Status == FindingPosted {
-			// Historical UI versions allowed an untracked manual "posted"
-			// transition. Posted now requires a durable provider-validated issue.
-			finding.Status = FindingOpen
-			changed = true
-		}
-	}
-	for index := range state.IssueDrafts {
-		_, shouldBeCanonical := canonical[index]
-		if state.IssueDrafts[index].Canonical != shouldBeCanonical {
-			state.IssueDrafts[index].Canonical = shouldBeCanonical
-			changed = true
-		}
-	}
-	return changed
-}
-
-func issueDraftCanClaimFindings(draft IssueDraft, assigned map[string]int) bool {
-	if len(draft.FindingIDs) == 0 {
-		return false
-	}
-	for _, findingID := range draft.FindingIDs {
-		if _, exists := assigned[findingID]; exists {
-			return false
-		}
-	}
-	return true
-}
-
-func assignIssueDraft(draft IssueDraft, index int, assigned map[string]int) {
-	for _, findingID := range draft.FindingIDs {
-		assigned[findingID] = index
-	}
-}
-
 func issueDraftContainsFinding(draft IssueDraft, findingID string) bool {
 	for _, candidate := range draft.FindingIDs {
 		if candidate == findingID {
@@ -744,19 +549,6 @@ func issueDraftContainsFinding(draft IssueDraft, findingID string) bool {
 		}
 	}
 	return false
-}
-
-func legacyIssueDraftPriority(state IssueDraftState) int {
-	switch state {
-	case IssueDraftPosted:
-		return 3
-	case IssueDraftPublishing, IssueDraftUnknown:
-		return 2
-	case IssueDraftEditing:
-		return 1
-	default:
-		return 0
-	}
 }
 
 func validateIssueAssociations(state RepositoryState) error {
@@ -778,16 +570,15 @@ func validateIssueAssociations(state RepositoryState) error {
 	for _, draft := range state.IssueDrafts {
 		if !validBoundedText(draft.ID, 256) || draft.Repository != state.Repository ||
 			draft.Version < 1 || draft.CreatedAt.IsZero() || draft.UpdatedAt.IsZero() ||
-			draft.UpdatedAt.Before(draft.CreatedAt) || len(draft.FindingIDs) == 0 ||
-			len(draft.FindingIDs) > 200 || len(draft.Labels) > 20 {
+			draft.UpdatedAt.Before(draft.CreatedAt) || len(draft.FindingIDs) != 1 ||
+			len(draft.Labels) > 20 {
 			return errors.New("invalid repository review issue preview")
 		}
 		if _, duplicate := drafts[draft.ID]; duplicate {
 			return errors.New("duplicate repository review issue preview")
 		}
 		drafts[draft.ID] = draft
-		if draft.Origin != IssueDraftOriginAIGenerated && !reversibleIssueDraftOrigin(draft.Origin) &&
-			draft.Origin != IssueDraftOriginLegacy {
+		if draft.Origin != IssueDraftOriginAIGenerated && !reversibleIssueDraftOrigin(draft.Origin) {
 			return errors.New("invalid repository review issue preview origin")
 		}
 		if draft.State != IssueDraftGenerating && draft.State != IssueDraftFailed &&
@@ -894,14 +685,13 @@ func validateIssueAssociations(state RepositoryState) error {
 			continue
 		}
 		draft, exists := drafts[finding.IssueDraftID]
-		if !exists || !draft.Canonical || !issueDraftContainsFinding(draft, finding.ID) {
+		if !exists || !issueDraftContainsFinding(draft, finding.ID) {
 			return errors.New("invalid repository review canonical issue association")
 		}
 		canonicalReferences[draft.ID]++
 	}
 	for _, draft := range state.IssueDrafts {
-		if draft.Canonical && canonicalReferences[draft.ID] != len(draft.FindingIDs) ||
-			!draft.Canonical && canonicalReferences[draft.ID] != 0 {
+		if canonicalReferences[draft.ID] != len(draft.FindingIDs) {
 			return errors.New("invalid repository review canonical issue preview")
 		}
 	}

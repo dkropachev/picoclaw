@@ -43,7 +43,6 @@ func (c *repositoryReviewController) startRepositoryFindingDeduplication() {
 		defer c.wg.Done()
 		defer c.deduplicationMu.Unlock()
 		if c.processRepositoryFindingDeduplications(c.ctx) == nil {
-			c.wakeHistoricalFindingDeduplication()
 			c.wakeRepositoryRunFindingStatus()
 		}
 	}()

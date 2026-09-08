@@ -21,10 +21,7 @@ import {
   type StandardCollectionSelectionState,
 } from "@/components/collection"
 import { discussionPrompt } from "@/components/repository-reviews/repository-review-actions"
-import {
-  RepositoryReviewFindingsProcessing,
-  RepositoryReviewHistoricalConsolidationNotice,
-} from "@/components/repository-reviews/repository-review-findings-processing"
+import { RepositoryReviewFindingsProcessing } from "@/components/repository-reviews/repository-review-findings-processing"
 import {
   runFindingRepositoryFindingID,
   runFindingStatusCanRetry,
@@ -43,7 +40,6 @@ import { threadOpenSessionIdAtom } from "@/store/threads"
 
 import {
   repositoryReviewFindingHealthNeedsPolling,
-  repositoryReviewHistoricalConsolidationIsActive,
   useRepositoryReviewFindingHealth,
 } from "./repository-review-finding-health"
 import {
@@ -109,9 +105,6 @@ export function RepositoryReviewFindingsPage({
             page.findings_processing &&
             (page.findings_processing.pending > 0 ||
               page.findings_processing.processing > 0),
-          ) ||
-          repositoryReviewHistoricalConsolidationIsActive(
-            page.historical_deduplication,
           )
         )
       })
@@ -445,13 +438,6 @@ export function RepositoryReviewFindingsPage({
             <RepositoryReviewFindingsProcessing
               counters={firstPage.findings_processing}
               onOpenRawFindings={onOpenRawFindings}
-            />
-            <RepositoryReviewHistoricalConsolidationNotice
-              automationID={automationID}
-              consolidation={healthQuery.data?.historical_consolidation}
-              onRefresh={() =>
-                Promise.all([query.refetch(), healthQuery.refetch()])
-              }
             />
             <div className="flex justify-end">
               <Button

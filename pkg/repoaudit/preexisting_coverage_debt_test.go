@@ -56,34 +56,7 @@ func TestPreexistingCoverageDebtStoreValidationAndPlanning(t *testing.T) {
 	}
 }
 
-func TestPreexistingCoverageDebtFinalizeFallbackAndMergeError(t *testing.T) {
-	fixture := newAssignmentCoverageFixture(t, 1, 1)
-	if _, err := fixture.store.BeginRepositoryReviewRun(t.Context(), BeginRepositoryReviewRunRequest{
-		Plan: fixture.plan, RunID: "legacy-context-run", ReviewableFiles: fixture.files,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	state, _, err := fixture.store.Get(fixture.repository)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state.Contexts = append(state.Contexts, FindingContext{
-		ID: "legacy-context", CampaignID: fixture.campaignID,
-		Repository: fixture.repository, CommitSHA: fixture.plan.CommitSHA,
-		InventoryHash: fixture.plan.InventoryHash, ProfileHash: fixture.plan.ProfileHash,
-		RunID: "legacy-context-run", Model: "provider/legacy", Reviewer: "legacy",
-		Files: fixture.files, CreatedAt: repositoryAuditTestNow,
-	})
-	if saveErr := fixture.store.save(&state); saveErr != nil {
-		t.Fatal(saveErr)
-	}
-	result, err := fixture.store.FinalizeRepositoryReviewRun(t.Context(), FinalizeRepositoryReviewRunRequest{
-		Plan: fixture.plan, RunID: "legacy-context-run", CompletedAt: repositoryAuditTestNow,
-	})
-	if err != nil || len(result.Run.Models) != 1 || result.Run.Models[0] != "provider/legacy" {
-		t.Fatalf("legacy finalize models=%v err=%v", result.Run.Models, err)
-	}
-
+func TestPreexistingCoverageDebtFinalizeMergeError(t *testing.T) {
 	mergeFixture := newAssignmentCoverageFixture(t, 1, 1)
 	if _, beginErr := mergeFixture.store.BeginRepositoryReviewRun(t.Context(), BeginRepositoryReviewRunRequest{
 		Plan: mergeFixture.plan, RunID: "merge-error-run", ReviewableFiles: mergeFixture.files,

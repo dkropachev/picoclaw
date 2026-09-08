@@ -376,12 +376,6 @@ func writeRepositoryReviewPublicationStoreError(w http.ResponseWriter, err error
 		writeRepositoryReviewPublicationError(w, http.StatusConflict, "stale_repository_review")
 	case errors.Is(err, repoaudit.ErrRepositoryReviewPurgeInProgress):
 		writeRepositoryReviewPublicationError(w, http.StatusConflict, "repository_review_purge_in_progress")
-	case errors.Is(err, repoaudit.ErrHistoricalDeduplicationInProgress):
-		writeRepositoryReviewPublicationError(
-			w,
-			http.StatusConflict,
-			string(repoaudit.IssuePublicationHistoricalMergeActive),
-		)
 	default:
 		writeRepositoryReviewPublicationError(w, http.StatusServiceUnavailable, "publication_unavailable")
 	}

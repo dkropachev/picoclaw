@@ -369,8 +369,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         currentPath === item.url ||
         (currentPath.startsWith(`${item.url}/`) &&
           !currentPath.startsWith("/repository-reviews/repositories") &&
-          !currentPath.startsWith("/repository-reviews/profiles") &&
-          currentPath !== "/repository-reviews/results")
+          !currentPath.startsWith("/repository-reviews/profiles"))
       )
     }
     const pathActive =

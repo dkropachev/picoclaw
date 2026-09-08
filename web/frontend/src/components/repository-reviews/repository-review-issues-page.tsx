@@ -166,7 +166,7 @@ export function RepositoryReviewIssuesPage({
         {
           id: "generation",
           header: "Generation",
-          cell: (issue) => issue.generation_id || "Legacy",
+          cell: (issue) => issue.generation_id || "Not generated",
         },
         {
           id: "state",
@@ -177,7 +177,7 @@ export function RepositoryReviewIssuesPage({
         {
           id: "origin",
           header: "Origin",
-          cell: (issue) => issue.origin || "legacy",
+          cell: (issue) => issue.origin,
           className: "w-28",
         },
         {
@@ -202,7 +202,7 @@ export function RepositoryReviewIssuesPage({
         {
           id: "generation",
           label: "Generation",
-          value: (issue) => issue.generation_id || "Legacy",
+          value: (issue) => issue.generation_id || "Not generated",
         },
         {
           id: "state",
@@ -220,11 +220,6 @@ export function RepositoryReviewIssuesPage({
           id: "state",
           label: (issue) => repositoryReviewIssueStateLabel(issue.state),
           variant: "outline",
-        },
-        {
-          id: "conflict",
-          label: (issue) => (issue.canonical === false ? "read only" : null),
-          variant: "destructive",
         },
       ],
     }),
@@ -349,9 +344,7 @@ export function RepositoryReviewIssuesPage({
 }
 
 function publishable(issue: RepositoryReviewIssueSummary): boolean {
-  return (
-    issue.canonical && issue.publishable && issue.publish_blockers.length === 0
-  )
+  return issue.publishable && issue.publish_blockers.length === 0
 }
 
 function formatTimestamp(value: string): string {

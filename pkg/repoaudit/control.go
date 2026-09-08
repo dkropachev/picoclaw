@@ -129,20 +129,18 @@ type RepositoryReviewAssignmentProgress struct {
 }
 
 type RepositoryReviewProgress struct {
-	Stage                string `json:"stage,omitempty"`
-	CompletedBatches     int    `json:"completed_batches"`
-	TotalBatches         int    `json:"total_batches"`
-	CoverageAvailable    bool   `json:"coverage_available"`
-	CoverageExact        bool   `json:"coverage_exact"`
-	SelectedFiles        int    `json:"selected_files"`
-	InspectedFiles       int    `json:"inspected_files"`
-	ReviewedFiles        int    `json:"reviewed_files"`
-	RemainingFiles       int    `json:"remaining_files"`
-	UnsupportedFiles     int    `json:"unsupported_files"`
-	RawFindings          int    `json:"raw_findings"`
-	DeduplicatedFindings int    `json:"deduplicated_findings"`
-	// Findings is the deprecated alias for DeduplicatedFindings.
-	Findings               int                                `json:"findings"`
+	Stage                  string                             `json:"stage,omitempty"`
+	CompletedBatches       int                                `json:"completed_batches"`
+	TotalBatches           int                                `json:"total_batches"`
+	CoverageAvailable      bool                               `json:"coverage_available"`
+	CoverageExact          bool                               `json:"coverage_exact"`
+	SelectedFiles          int                                `json:"selected_files"`
+	InspectedFiles         int                                `json:"inspected_files"`
+	ReviewedFiles          int                                `json:"reviewed_files"`
+	RemainingFiles         int                                `json:"remaining_files"`
+	UnsupportedFiles       int                                `json:"unsupported_files"`
+	RawFindings            int                                `json:"raw_findings"`
+	DeduplicatedFindings   int                                `json:"deduplicated_findings"`
 	FindingAggregates      int                                `json:"finding_aggregates"`
 	PendingFindingMappings int                                `json:"unaggregated_findings"`
 	AssignmentProgress     RepositoryReviewAssignmentProgress `json:"assignment_progress"`
@@ -162,8 +160,7 @@ type RepositoryReviewFileProgress struct {
 }
 
 // RepositoryReviewAutomationFileProgress derives campaign progress from fully
-// completed and unsupported files. A frozen scope supplies the authoritative
-// total; legacy campaigns fall back to their durable file counters.
+// completed and unsupported files. A frozen scope supplies the authoritative total.
 func RepositoryReviewAutomationFileProgress(
 	automation RepositoryReviewAutomation,
 ) RepositoryReviewFileProgress {
@@ -194,16 +191,7 @@ func RepositoryReviewAutomationFileProgress(
 		return repositoryReviewFileProgress(resolved, selected, automation.Status)
 	}
 
-	resolved := max(0, progress.ReviewedFiles) + max(0, progress.UnsupportedFiles)
-	total := max(
-		max(0, progress.ReviewedFiles)+max(0, progress.RemainingFiles)+
-			max(0, progress.UnsupportedFiles),
-		resolved,
-	)
-	if automation.Status == RepositoryReviewAutomationCompleted {
-		resolved = total
-	}
-	return repositoryReviewFileProgress(resolved, total, automation.Status)
+	return repositoryReviewFileProgress(0, 0, automation.Status)
 }
 
 func repositoryReviewFileProgress(
@@ -295,7 +283,6 @@ type RepositoryReviewAutomation struct {
 	RequestedPauseReason             RepositoryReviewPauseReason            `json:"requested_pause_reason,omitempty"`
 	RequestedPauseDetail             string                                 `json:"requested_pause_detail,omitempty"`
 	CampaignID                       string                                 `json:"campaign_id,omitempty"`
-	CampaignRecoveryPending          bool                                   `json:"campaign_recovery_pending,omitempty"`
 	ActiveRunID                      string                                 `json:"active_run_id,omitempty"`
 	RunIDs                           []string                               `json:"run_ids"`
 	Usage                            RepositoryReviewTokenUsage             `json:"usage"`
@@ -528,57 +515,6 @@ func (s Store) UpdateAutomation(
 	return cloneAutomation(candidate), nil
 }
 
-// DeleteAutomation is the legacy configuration-only storage primitive.
-// Product/API removal must use DeleteAutomationAndHistory so a repository
-// assignment cannot leave an undiscoverable ledger behind.
-//
-// Deprecated: use DeleteAutomationAndHistory.
-func (s Store) DeleteAutomation(ctx context.Context, id string, expectedVersion int64) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	id = strings.TrimSpace(id)
-	if !validAutomationID(id) {
-		return fmt.Errorf("%w: invalid ID", ErrInvalidAutomation)
-	}
-	unlock, lockErr := s.lock("automation:" + id)
-	if lockErr != nil {
-		return lockErr
-	}
-	defer unlock()
-	if contextErr := ctx.Err(); contextErr != nil {
-		return contextErr
-	}
-	automation, found, err := s.loadAutomation(id)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return os.ErrNotExist
-	}
-	if expectedVersion < 1 || automation.Version != expectedVersion {
-		return ErrConflict
-	}
-	if automation.Status == RepositoryReviewAutomationRunning ||
-		automation.Status == RepositoryReviewAutomationStopping {
-		return ErrAutomationActive
-	}
-	database, err := s.openDatabase(ctx)
-	if err != nil {
-		return err
-	}
-	defer database.Close()
-	return sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
-		result, deleteErr := conn.ExecContext(ctx, `
-			DELETE FROM repository_review_automations
-			 WHERE automation_id = ? AND version = ?`, id, expectedVersion)
-		if deleteErr != nil {
-			return deleteErr
-		}
-		return sqlitestore.RequireOneRow(result, ErrConflict)
-	})
-}
-
 func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, error) {
 	return s.loadAutomationState(id, true)
 }
@@ -689,12 +625,6 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	automation.CampaignID = strings.TrimSpace(automation.CampaignID)
 	automation.ActiveRunID = strings.TrimSpace(automation.ActiveRunID)
 	automation.Progress.Stage = strings.TrimSpace(automation.Progress.Stage)
-	if automation.Progress.DeduplicatedFindings == 0 && automation.Progress.Findings > 0 {
-		automation.Progress.DeduplicatedFindings = automation.Progress.Findings
-	}
-	if automation.Progress.Findings == 0 && automation.Progress.DeduplicatedFindings > 0 {
-		automation.Progress.Findings = automation.Progress.DeduplicatedFindings
-	}
 	automation.Status = RepositoryReviewAutomationStatus(strings.ToLower(strings.TrimSpace(string(automation.Status))))
 	automation.PauseReason = RepositoryReviewPauseReason(
 		strings.ToLower(strings.TrimSpace(string(automation.PauseReason))),
@@ -843,16 +773,6 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		!validOptionalAutomationText(automation.PauseDetail, 4096) ||
 		!validOptionalAutomationText(automation.RequestedPauseDetail, 4096) ||
 		(automation.CampaignID != "" && !ValidRepositoryReviewCampaignID(automation.CampaignID)) ||
-		(automation.CampaignRecoveryPending && (automation.CampaignID == "" ||
-			automation.ScopeSelection == nil || repositoryReviewScopePlanEmpty(automation.ScopePlan) ||
-			automation.ResolvedCommitSHA == "" ||
-			automation.ScopePlan.CommitSHA != automation.ResolvedCommitSHA ||
-			len(automation.RunIDs) == 0 || automation.StartedAt.IsZero() ||
-			!automation.CompletedAt.IsZero() || automation.ActiveRunID != "" ||
-			(automation.Status != RepositoryReviewAutomationPaused &&
-				automation.Status != RepositoryReviewAutomationFailed &&
-				(automation.Status != RepositoryReviewAutomationIdle ||
-					automation.Progress.Stage != "next batch queued")))) ||
 		!validOptionalAutomationText(automation.ActiveRunID, 1024) ||
 		len(automation.RunIDs) > maxAutomationRunIDs ||
 		!finiteNonnegative(automation.EstimatedCostUSD, maxAutomationEstimatedCost) ||
@@ -1074,11 +994,9 @@ func validateProgress(progress RepositoryReviewProgress) error {
 		progress.UnsupportedFiles < 0 || progress.UnsupportedFiles > maxReviewFiles ||
 		progress.RawFindings < 0 || progress.RawFindings > maxReviewObservations ||
 		progress.DeduplicatedFindings < 0 || progress.DeduplicatedFindings > maxReviewObservations ||
-		progress.Findings < 0 || progress.Findings > maxReviewObservations ||
-		progress.DeduplicatedFindings != progress.Findings ||
 		progress.FindingAggregates < 0 || progress.FindingAggregates > maxReviewObservations ||
 		progress.PendingFindingMappings < 0 || progress.PendingFindingMappings > maxReviewObservations ||
-		progress.FindingAggregates+progress.PendingFindingMappings > progress.Findings ||
+		progress.FindingAggregates+progress.PendingFindingMappings > progress.DeduplicatedFindings ||
 		(progress.CoverageAvailable && (progress.InspectedFiles > progress.SelectedFiles ||
 			progress.ReviewedFiles+progress.UnsupportedFiles > progress.SelectedFiles ||
 			progress.CoverageExact && progress.RemainingFiles !=

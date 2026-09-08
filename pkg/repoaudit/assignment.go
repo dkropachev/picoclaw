@@ -23,8 +23,8 @@ var repositoryReviewFocusIDs = []string{
 	RepositoryReviewFocusIntegrationValidation,
 }
 
-// RepositoryReviewFocusIDs returns the immutable built-in focus order. The
-// same order is used by live planning and positional legacy-run recovery.
+// RepositoryReviewFocusIDs returns the immutable built-in focus order used by
+// live planning and assignment checkpoints.
 func RepositoryReviewFocusIDs() []string {
 	return append([]string(nil), repositoryReviewFocusIDs...)
 }
@@ -268,38 +268,6 @@ func setAllRequiredRepositoryReviewAssignments(
 	coverage.AssignmentBits = encodeRepositoryReviewAssignmentBits(bits)
 	coverage, err = projectRepositoryReviewAssignmentCoverage(coverage, catalog)
 	return coverage, changed, err
-}
-
-// CreditRepositoryReviewAssignment returns a path projection with exactly one
-// additional catalog bit. It is exposed for trusted legacy recovery adapters;
-// persistence still requires ReconcileCampaign or a live checkpoint CAS.
-func CreditRepositoryReviewAssignment(
-	coverage RepositoryReviewCampaignPathCoverage,
-	catalog []RepositoryReviewAssignment,
-	assignmentID string,
-) (RepositoryReviewCampaignPathCoverage, error) {
-	normalized, err := NormalizeRepositoryReviewAssignmentCatalog(catalog)
-	if err != nil {
-		return RepositoryReviewCampaignPathCoverage{}, err
-	}
-	next, _, err := setRepositoryReviewAssignmentComplete(
-		coverage, normalized, assignmentID,
-	)
-	return next, err
-}
-
-// CreditAllRequiredRepositoryReviewAssignments promotes an exact historical
-// full-file checkpoint into every required catalog credit.
-func CreditAllRequiredRepositoryReviewAssignments(
-	coverage RepositoryReviewCampaignPathCoverage,
-	catalog []RepositoryReviewAssignment,
-) (RepositoryReviewCampaignPathCoverage, error) {
-	normalized, err := NormalizeRepositoryReviewAssignmentCatalog(catalog)
-	if err != nil {
-		return RepositoryReviewCampaignPathCoverage{}, err
-	}
-	next, _, err := setAllRequiredRepositoryReviewAssignments(coverage, normalized)
-	return next, err
 }
 
 func repositoryReviewAssignmentCatalogEqual(

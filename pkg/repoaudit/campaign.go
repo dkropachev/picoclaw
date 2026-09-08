@@ -3,12 +3,9 @@ package repoaudit
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"reflect"
-	"sort"
 	"strings"
-	"time"
 )
 
 const (
@@ -55,38 +52,7 @@ type BeginCampaignRequest struct {
 	DeduplicationSnapshot *RepositoryReviewDeduplicationSnapshot `json:"deduplication_snapshot,omitempty"`
 }
 
-// ReconcileCampaignRequest is the trusted recovery/backfill mutation for an
-// already-authorized current campaign. Coverage is merged monotonically and
-// Exact may only be promoted from false to true. Legacy record IDs are tagged
-// atomically with the same state update.
-type ReconcileCampaignRequest struct {
-	Repository            string                                `json:"repository"`
-	ExpectedReviewVersion int64                                 `json:"expected_review_version"`
-	Coverage              RepositoryReviewCampaignCoverage      `json:"coverage"`
-	SelectedScope         []FileRef                             `json:"selected_scope"`
-	Runs                  []RepositoryReviewCampaignRunRecovery `json:"runs,omitempty"`
-	ContextIDs            []string                              `json:"context_ids,omitempty"`
-	FindingIDs            []string                              `json:"finding_ids,omitempty"`
-}
-
-// RepositoryReviewCampaignRunRecovery tags one retained legacy run, installs
-// its exact successful-child inspection count, and may carry the corresponding
-// file proof for legacy record binding during backfill.
-type RepositoryReviewCampaignRunRecovery struct {
-	ID             string `json:"id"`
-	Plan           Plan   `json:"plan"`
-	InspectedFiles int    `json:"inspected_files"`
-	// InspectedFileRefs carries exact legacy provenance for record tagging only.
-	// It does not grant reusable assignment or completion credit to the current
-	// campaign profile.
-	InspectedFileRefs []FileRef `json:"inspected_file_refs,omitempty"`
-	LegacyRecovered   bool      `json:"legacy_recovered,omitempty"`
-}
-
-// BeginCampaign installs controller-owned campaign authority without accepting
-// inventory or profile data from the controller. The first matching Plan or
-// Record binds that remaining immutable metadata. Plan and Record can never
-// replace an already-authorized campaign.
+// BeginCampaign installs controller-owned campaign and deduplication authority.
 func (s Store) BeginCampaign(
 	ctx context.Context,
 	request BeginCampaignRequest,
@@ -106,9 +72,8 @@ func (s Store) BeginCampaign(
 		(request.ExpectedCampaignID != "" &&
 			!ValidRepositoryReviewCampaignID(request.ExpectedCampaignID)) ||
 		!validRepositoryReviewCommitSHA(request.CommitSHA) ||
-		request.ExpectedReviewVersion < 0 ||
-		request.DeduplicationSnapshot != nil &&
-			validateRepositoryReviewDeduplicationSnapshot(*request.DeduplicationSnapshot) != nil {
+		request.ExpectedReviewVersion < 0 || request.DeduplicationSnapshot == nil ||
+		validateRepositoryReviewDeduplicationSnapshot(*request.DeduplicationSnapshot) != nil {
 		return RepositoryState{}, ErrInvalidPlan
 	}
 	unlock, err := s.lock(request.Repository)
@@ -127,22 +92,8 @@ func (s Store) BeginCampaign(
 		if current.CommitSHA != request.CommitSHA || request.Exact && !current.Exact {
 			return RepositoryState{}, ErrConflict
 		}
-		if request.DeduplicationSnapshot != nil {
-			if current.DeduplicationSnapshot == nil {
-				// A campaign authorized by an older binary has no deduplication
-				// policy. Bind it once before its first gated raw insertion.
-				current.DeduplicationSnapshot = request.DeduplicationSnapshot
-				state.Version++
-				state.ReviewVersion++
-				state.UpdatedAt = s.clock()
-				if err := s.save(&state); err != nil {
-					return RepositoryState{}, err
-				}
-			} else if !reflect.DeepEqual(
-				current.DeduplicationSnapshot, request.DeduplicationSnapshot,
-			) {
-				return RepositoryState{}, ErrConflict
-			}
+		if !reflect.DeepEqual(current.DeduplicationSnapshot, request.DeduplicationSnapshot) {
+			return RepositoryState{}, ErrConflict
 		}
 		return state, nil
 	}
@@ -180,269 +131,9 @@ func (s Store) BeginCampaign(
 	return state, nil
 }
 
-// ReconcileCampaign installs recovered lower-bound coverage and legacy tags
-// without granting authority to create or replace a campaign. Exact replays
-// are idempotent even after the review version advances.
-func (s Store) ReconcileCampaign(
-	ctx context.Context,
-	request ReconcileCampaignRequest,
-) (RepositoryState, error) {
-	if contextErr := ctx.Err(); contextErr != nil {
-		return RepositoryState{}, contextErr
-	}
-	request.Repository = strings.TrimSpace(request.Repository)
-	pathsDeclared := request.Coverage.Paths != nil
-	scopeDeclared := request.SelectedScope != nil
-	recoveryDigestDeclared := request.Coverage.RecoveryDigest != ""
-	request.Coverage = cloneRepositoryReviewCampaignCoverage(request.Coverage)
-	if !validBoundedText(request.Repository, maxRepositoryIdentityBytes) ||
-		request.ExpectedReviewVersion < 0 ||
-		!pathsDeclared ||
-		!scopeDeclared ||
-		recoveryDigestDeclared ||
-		!repositoryReviewCampaignScopeBound(&request.Coverage) ||
-		validateRepositoryReviewCampaignCoverage(&request.Coverage) != nil {
-		return RepositoryState{}, ErrInvalidPlan
-	}
-	var err error
-	request.SelectedScope, err = canonicalRepositoryReviewCampaignFiles(request.SelectedScope)
-	if err != nil || len(request.SelectedScope) != request.Coverage.SelectedFiles {
-		return RepositoryState{}, ErrInvalidPlan
-	}
-	scopeDigest, err := repositoryReviewCampaignScopeDigestForFiles(request.SelectedScope)
-	if err != nil || scopeDigest != request.Coverage.ScopeDigest {
-		return RepositoryState{}, ErrInvalidPlan
-	}
-	selectedScope := make(map[string]FileRef, len(request.SelectedScope))
-	for _, file := range request.SelectedScope {
-		selectedScope[file.Path] = file
-	}
-	for pathValue := range request.Coverage.Paths {
-		if _, selected := selectedScope[pathValue]; !selected {
-			return RepositoryState{}, ErrInvalidPlan
-		}
-	}
-	request.Runs, err = normalizeRepositoryReviewCampaignRuns(request.Runs)
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	for _, recoveredRun := range request.Runs {
-		if !recoveredRun.LegacyRecovered {
-			continue
-		}
-		if recoveredRun.Plan.CampaignID != "" || recoveredRun.Plan.RequiredAssignments != 0 ||
-			recoveredRun.Plan.Repository != request.Repository ||
-			recoveredRun.Plan.CommitSHA != request.Coverage.CommitSHA ||
-			recoveredRun.Plan.InventoryHash != request.Coverage.InventoryHash ||
-			!recoveredRun.Plan.Authoritative {
-			return RepositoryState{}, ErrInvalidPlan
-		}
-		// normalizeRepositoryReviewCampaignRuns already validated this exact
-		// immutable plan manifest.
-		manifest, _ := repositoryReviewCampaignFilesForPlan(recoveredRun.Plan)
-		for _, file := range manifest {
-			if selectedScope[file.Path] != file {
-				return RepositoryState{}, ErrInvalidPlan
-			}
-		}
-	}
-	request.ContextIDs, err = normalizeRepositoryReviewCampaignRecordIDs(
-		request.ContextIDs, 1_000_000, 256,
-	)
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	request.FindingIDs, err = normalizeRepositoryReviewCampaignRecordIDs(
-		request.FindingIDs, maxReviewObservations, 256,
-	)
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	recoveryDigest, err := repositoryReviewCampaignRecoveryDigest(request)
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	unlock, err := s.lock(request.Repository)
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	defer unlock()
-	if contextErr := ctx.Err(); contextErr != nil {
-		return RepositoryState{}, contextErr
-	}
-	state, err := s.load(request.Repository)
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	current := state.CurrentCampaign
-	if current == nil || current.ID != request.Coverage.ID ||
-		current.CommitSHA != request.Coverage.CommitSHA {
-		return RepositoryState{}, ErrConflict
-	}
-	if request.Coverage.DeduplicationSnapshot != nil &&
-		!reflect.DeepEqual(current.DeduplicationSnapshot, request.Coverage.DeduplicationSnapshot) {
-		return RepositoryState{}, ErrConflict
-	}
-	// load validates unique retained record identities while holding the same
-	// repository lock, so index construction cannot conflict here.
-	indexes, _ := newRepositoryReviewCampaignIndexes(state)
-	recoveredRuns := make(map[string]RepositoryReviewCampaignRunRecovery, len(request.Runs))
-	historicalInspectedFiles := make(map[string]map[string]FileRef, len(request.Runs))
-	for _, recoveredRun := range request.Runs {
-		recoveredRuns[recoveredRun.ID] = recoveredRun
-		if len(recoveredRun.InspectedFileRefs) == 0 {
-			continue
-		}
-		runInspectedFiles := make(map[string]FileRef, len(recoveredRun.InspectedFileRefs))
-		for _, file := range recoveredRun.InspectedFileRefs {
-			runInspectedFiles[file.Path] = file
-		}
-		historicalInspectedFiles[recoveredRun.ID] = runInspectedFiles
-	}
-	if state.ReviewVersion != request.ExpectedReviewVersion {
-		if current.RecoveryDigest == recoveryDigest {
-			return state, nil
-		}
-		return RepositoryState{}, ErrConflict
-	}
-	nextCoverage := cloneRepositoryReviewCampaignCoverage(*current)
-	temporary := RepositoryState{CurrentCampaign: &nextCoverage}
-	var bound bool
-	if len(request.Coverage.AssignmentCatalog) > 0 {
-		bound, err = bindRepositoryReviewCampaignAssignmentCatalog(
-			&temporary,
-			request.Coverage.ID,
-			request.Coverage.CommitSHA,
-			request.Coverage.InventoryHash,
-			request.Coverage.ProfileHash,
-			request.Coverage.ScopeDigest,
-			request.Coverage.AssignmentCatalog,
-			request.Coverage.SelectedFiles,
-		)
-	} else {
-		bound, err = bindRepositoryReviewCampaignScope(
-			&temporary,
-			request.Coverage.ID,
-			request.Coverage.CommitSHA,
-			request.Coverage.InventoryHash,
-			request.Coverage.ProfileHash,
-			request.Coverage.ScopeDigest,
-			request.Coverage.RequiredAssignments,
-			request.Coverage.SelectedFiles,
-		)
-	}
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	changed := bound
-	for pathValue, pathCoverage := range request.Coverage.Paths {
-		merged, mergeErr := mergeRepositoryReviewCampaignPath(
-			temporary.CurrentCampaign, pathValue, pathCoverage,
-		)
-		if mergeErr != nil {
-			return RepositoryState{}, mergeErr
-		}
-		changed = changed || merged
-	}
-	if request.Coverage.Exact && !temporary.CurrentCampaign.Exact {
-		temporary.CurrentCampaign.Exact = true
-		changed = true
-	}
-	if err := validateRepositoryReviewCampaignCoverage(temporary.CurrentCampaign); err != nil {
-		return RepositoryState{}, err
-	}
-	state.CurrentCampaign = temporary.CurrentCampaign
-	for _, recoveredRun := range request.Runs {
-		index, matched := indexes.runs[recoveredRun.ID]
-		if !matched {
-			return RepositoryState{}, ErrConflict
-		}
-		run := &state.Runs[index]
-		if recoveredRun.Plan.Repository != state.Repository ||
-			!repositoryReviewCampaignRunMatchesCoverage(*run, recoveredRun, request.Coverage) {
-			return RepositoryState{}, ErrConflict
-		}
-		wasTagged := run.CampaignID != ""
-		if wasTagged && run.CampaignID != request.Coverage.ID {
-			return RepositoryState{}, ErrConflict
-		}
-		expectedProfileHash := request.Coverage.ProfileHash
-		expectedScopeDigest := request.Coverage.ScopeDigest
-		if recoveredRun.LegacyRecovered {
-			expectedProfileHash = recoveredRun.Plan.ProfileHash
-			expectedScopeDigest, _ = repositoryReviewCampaignScopeDigestForPlan(recoveredRun.Plan)
-		}
-		if wasTagged && (run.ProfileHash != expectedProfileHash ||
-			run.ScopeDigest != expectedScopeDigest ||
-			run.LegacyRecovered != recoveredRun.LegacyRecovered ||
-			run.InspectedFiles != recoveredRun.InspectedFiles) {
-			return RepositoryState{}, ErrConflict
-		}
-		if !wasTagged {
-			run.CampaignID = request.Coverage.ID
-			run.ProfileHash = expectedProfileHash
-			run.ScopeDigest = expectedScopeDigest
-			run.InspectedFiles = recoveredRun.InspectedFiles
-			run.LegacyRecovered = recoveredRun.LegacyRecovered
-			changed = true
-		}
-	}
-	for _, contextID := range request.ContextIDs {
-		index, found := indexes.contexts[contextID]
-		if !found {
-			return RepositoryState{}, ErrConflict
-		}
-		contextRecord := &state.Contexts[index]
-		if !repositoryReviewCampaignContextMatchesCoverage(
-			state, *contextRecord, request.Coverage, selectedScope, indexes, recoveredRuns,
-		) {
-			return RepositoryState{}, ErrConflict
-		}
-		if contextRecord.CampaignID != "" && contextRecord.CampaignID != request.Coverage.ID {
-			return RepositoryState{}, ErrConflict
-		}
-		if contextRecord.CampaignID == "" {
-			contextRecord.CampaignID = request.Coverage.ID
-			changed = true
-		}
-	}
-	for _, findingID := range request.FindingIDs {
-		index, found := indexes.findings[findingID]
-		if !found {
-			return RepositoryState{}, ErrConflict
-		}
-		finding := &state.Findings[index]
-		if !repositoryReviewCampaignFindingMatchesRecovery(
-			state, *finding, request.Coverage, selectedScope, indexes, recoveredRuns,
-			historicalInspectedFiles,
-		) {
-			return RepositoryState{}, ErrConflict
-		}
-		if finding.CampaignID == "" {
-			finding.CampaignID = request.Coverage.ID
-			changed = true
-		}
-	}
-	if state.CurrentCampaign.RecoveryDigest != recoveryDigest {
-		state.CurrentCampaign.RecoveryDigest = recoveryDigest
-		changed = true
-	}
-	if !changed {
-		return state, nil
-	}
-	state.Version++
-	state.ReviewVersion++
-	state.UpdatedAt = s.clock()
-	if err := s.save(&state); err != nil {
-		return RepositoryState{}, err
-	}
-	return state, nil
-}
-
 // RepositoryReviewCampaignMetrics is an exact current-campaign projection when
 // CoverageAvailable and CoverageExact are both true. Otherwise path counts are
-// durable lower bounds. Finding counts are exact for a nonempty CampaignID and
-// use legacy run/context membership only when CampaignID is empty.
+// durable lower bounds. Finding counts are selected by the canonical campaign.
 type RepositoryReviewCampaignMetrics struct {
 	CampaignID             string `json:"campaign_id,omitempty"`
 	CoverageAvailable      bool   `json:"coverage_available"`
@@ -457,18 +148,14 @@ type RepositoryReviewCampaignMetrics struct {
 	PendingFindingMappings int    `json:"pending_finding_mappings"`
 }
 
-// CurrentCampaignFindingsByID selects new campaign-tagged findings without
-// consulting bounded run history. An empty campaign ID retains the legacy
-// run/context selection contract.
-func CurrentCampaignFindingsByID(
+// CurrentCampaignFindings selects canonical findings by durable campaign.
+func CurrentCampaignFindings(
 	state RepositoryState,
 	campaignID string,
-	legacyRunIDs []string,
-	legacyStartedAt time.Time,
 ) []Finding {
 	campaignID = strings.TrimSpace(campaignID)
 	if campaignID == "" {
-		return CurrentCampaignFindings(state, legacyRunIDs, legacyStartedAt)
+		return []Finding{}
 	}
 	out := make([]Finding, 0)
 	for _, finding := range state.Findings {
@@ -479,235 +166,19 @@ func CurrentCampaignFindingsByID(
 	return out
 }
 
-// CurrentCampaignDeduplicatedFindings selects only deduplicated occurrences
-// owned by one automation campaign. Legacy automations without a recovered
-// campaign ID are scoped through their retained run and context membership;
-// they must never inherit every deduplicated occurrence in the repository.
-func CurrentCampaignDeduplicatedFindings(
-	state RepositoryState,
-	campaignID string,
-	legacyRunIDs []string,
-	legacyStartedAt time.Time,
-) []DeduplicatedReviewFinding {
-	campaignID = strings.TrimSpace(campaignID)
-	if campaignID != "" {
-		out := make([]DeduplicatedReviewFinding, 0, len(state.DeduplicatedFindings))
-		for _, finding := range state.DeduplicatedFindings {
-			if DeduplicatedFindingBelongsToCampaign(state, finding, campaignID) {
-				out = append(out, finding)
-			}
-		}
-		return out
-	}
-
-	selectedFindings := CurrentCampaignFindings(state, legacyRunIDs, legacyStartedAt)
-	selectedFindingIDs := make(map[string]struct{}, len(selectedFindings))
-	for _, finding := range selectedFindings {
-		selectedFindingIDs[finding.ID] = struct{}{}
-	}
-	wantedRuns := make(map[string]struct{}, len(legacyRunIDs))
-	for _, runID := range legacyRunIDs {
-		if runID = strings.TrimSpace(runID); runID != "" {
-			wantedRuns[runID] = struct{}{}
-		}
-	}
-	selectedRawIDs := make(map[string]struct{})
-	for _, raw := range state.RawFindings {
-		_, selectedLegacy := selectedFindingIDs[raw.LegacyFindingID]
-		_, selectedRun := wantedRuns[raw.RunID]
-		if selectedLegacy || selectedRun &&
-			(legacyStartedAt.IsZero() || raw.CreatedAt.IsZero() || !raw.CreatedAt.Before(legacyStartedAt)) {
-			selectedRawIDs[raw.ID] = struct{}{}
-		}
-	}
-	out := make([]DeduplicatedReviewFinding, 0, len(state.DeduplicatedFindings))
-	for _, finding := range state.DeduplicatedFindings {
-		_, selected := selectedFindingIDs[finding.ID]
-		if !selected {
-			for _, rawID := range finding.RawSourceIDs {
-				if _, selected = selectedRawIDs[rawID]; selected {
-					break
-				}
-			}
-		}
-		if selected {
-			out = append(out, finding)
-		}
-	}
-	return out
-}
-
-// CurrentCampaignRawFindings returns the stable pre-deduplication source
-// collection for one automation campaign. A pre-v4 legacy occurrence is
-// projected as its deterministic future rrw_* source until replay admits the
-// durable RawReviewFinding. LegacyFindingID then suppresses only that virtual
-// row, leaving multiple independently admitted native sources intact.
+// CurrentCampaignRawFindings returns persisted raw evidence for one campaign.
 func CurrentCampaignRawFindings(
 	state RepositoryState,
 	campaignID string,
-	legacyRunIDs []string,
-	legacyStartedAt time.Time,
 ) []RawReviewFinding {
 	campaignID = strings.TrimSpace(campaignID)
-	selectedFindings := CurrentCampaignFindingsByID(
-		state, campaignID, legacyRunIDs, legacyStartedAt,
-	)
-	deduplicatedIDs := make(map[string]struct{}, len(state.DeduplicatedFindings))
-	for _, finding := range state.DeduplicatedFindings {
-		deduplicatedIDs[finding.ID] = struct{}{}
-	}
-	legacyFindings := make([]Finding, 0, len(selectedFindings))
-	legacyFindingIDs := make(map[string]struct{}, len(selectedFindings))
-	for _, finding := range selectedFindings {
-		if _, deduplicated := deduplicatedIDs[finding.ID]; deduplicated ||
-			strings.HasPrefix(finding.ID, "rdf_") {
-			continue
-		}
-		legacyFindings = append(legacyFindings, finding)
-		legacyFindingIDs[finding.ID] = struct{}{}
-	}
-	currentDeduplicated := CurrentCampaignDeduplicatedFindings(
-		state, campaignID, legacyRunIDs, legacyStartedAt,
-	)
-	currentDeduplicatedIDs := make(map[string]struct{}, len(currentDeduplicated))
-	for _, finding := range currentDeduplicated {
-		currentDeduplicatedIDs[finding.ID] = struct{}{}
-	}
-	wantedRuns := make(map[string]struct{}, len(legacyRunIDs))
-	for _, runID := range legacyRunIDs {
-		if runID = strings.TrimSpace(runID); runID != "" {
-			wantedRuns[runID] = struct{}{}
-		}
-	}
-
-	result := make([]RawReviewFinding, 0, len(state.RawFindings)+len(legacyFindings))
-	representedLegacyIDs := make(map[string]struct{})
+	result := make([]RawReviewFinding, 0, len(state.RawFindings))
 	for _, raw := range state.RawFindings {
-		_, selectedLegacy := legacyFindingIDs[raw.LegacyFindingID]
-		_, selectedDeduplicated := currentDeduplicatedIDs[raw.DeduplicatedFindingID]
-		selected := selectedLegacy || selectedDeduplicated
-		if campaignID != "" {
-			selected = selected || raw.CampaignID == campaignID
-		} else {
-			_, selectedRun := wantedRuns[raw.RunID]
-			selected = selected || selectedRun &&
-				(legacyStartedAt.IsZero() || raw.CreatedAt.IsZero() || !raw.CreatedAt.Before(legacyStartedAt))
+		if campaignID != "" && raw.CampaignID == campaignID {
+			result = append(result, raw)
 		}
-		if !selected {
-			continue
-		}
-		result = append(result, raw)
-		if selectedLegacy {
-			representedLegacyIDs[raw.LegacyFindingID] = struct{}{}
-		}
-	}
-	for index, finding := range legacyFindings {
-		if _, represented := representedLegacyIDs[finding.ID]; represented {
-			continue
-		}
-		result = append(result, projectLegacyRawReviewFinding(state, finding, uint64(index+1)))
 	}
 	return result
-}
-
-func projectLegacyRawReviewFinding(
-	state RepositoryState,
-	finding Finding,
-	ordinal uint64,
-) RawReviewFinding {
-	contexts := make(map[string]FindingContext, len(state.Contexts))
-	for _, contextRecord := range state.Contexts {
-		contexts[contextRecord.ID] = contextRecord
-	}
-	contextID, runID, model, modelAlias, account, reviewer := "", "", "", "", "", ""
-	for _, id := range finding.ContextIDs {
-		contextRecord, found := contexts[id]
-		if !found {
-			continue
-		}
-		contextID = contextRecord.ID
-		runID = strings.TrimSpace(contextRecord.RunID)
-		model = strings.TrimSpace(contextRecord.Model)
-		candidateAlias := strings.TrimSpace(contextRecord.ModelAlias)
-		candidateAccount := strings.TrimSpace(contextRecord.Account)
-		if candidateAlias != "" && candidateAccount != "" {
-			modelAlias = candidateAlias
-			account = candidateAccount
-		}
-		reviewer = strings.TrimSpace(contextRecord.Reviewer)
-		break
-	}
-	if contextID == "" {
-		contextID = stableID("legacy-context_", finding.ID)
-	}
-	if runID == "" {
-		for _, run := range state.Runs {
-			if containsExactString(run.FindingIDs, finding.ID) {
-				runID = run.ID
-				break
-			}
-		}
-	}
-	if runID == "" {
-		runID = "legacy:" + finding.ID
-	}
-	if model == "" && len(finding.Models) > 0 {
-		model = strings.TrimSpace(finding.Models[0])
-	}
-	if model == "" && len(finding.Observations) > 0 {
-		model = strings.TrimSpace(finding.Observations[0].Model)
-	}
-	if reviewer == "" && len(finding.Observations) > 0 {
-		reviewer = strings.TrimSpace(finding.Observations[0].Reviewer)
-	}
-	if model == "" {
-		model = "historical-review"
-	}
-	if reviewer == "" {
-		reviewer = model
-	}
-	processingCampaignID := strings.TrimSpace(finding.CampaignID)
-	if !ValidRepositoryReviewCampaignID(processingCampaignID) {
-		processingCampaignID = stableID(
-			"rrc_", state.Repository, "historical-projection", runID, finding.CommitSHA,
-		)
-	}
-	bucket, err := DeduplicationAdmissionBucket(
-		processingCampaignID, finding.File, finding.Symbol,
-	)
-	if err != nil {
-		bucket = stableID("rdb_", processingCampaignID, finding.ID)
-	}
-	createdAt := finding.CreatedAt.UTC()
-	if createdAt.IsZero() {
-		createdAt = state.UpdatedAt.UTC()
-	}
-	if createdAt.IsZero() {
-		createdAt = time.Unix(0, 0).UTC()
-	}
-	updatedAt := finding.UpdatedAt.UTC()
-	if updatedAt.IsZero() || updatedAt.Before(createdAt) {
-		updatedAt = createdAt
-	}
-	raw := RawReviewFinding{
-		ID: stableID("rrw_", state.Repository, "historical", finding.ID), Version: 1,
-		CampaignID: processingCampaignID, AdmissionBucket: bucket,
-		InsertionOrdinal: ordinal, LegacyFindingID: finding.ID,
-		Repository: finding.Repository, CommitSHA: finding.CommitSHA,
-		File: finding.File, Line: finding.Line, Severity: finding.Severity,
-		Title: finding.Title, Symbol: finding.Symbol, Message: finding.Message,
-		Evidence: finding.Evidence, Impact: finding.Impact, Validation: finding.Validation,
-		MatchHints: finding.MatchHints, FixEffort: finding.FixEffort,
-		ContextID: contextID, RunID: runID, AssignmentID: "historical-replay",
-		Model: model, ModelAlias: modelAlias, Account: account, Reviewer: reviewer,
-		State:       RawFindingDeduplicationPending,
-		Disposition: RawFindingDispositionUndecided, CreatedAt: createdAt, UpdatedAt: updatedAt,
-	}
-	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(raw)
-	raw.History = []RawFindingHistoryEntry{{
-		State: raw.State, Disposition: raw.Disposition, At: updatedAt,
-	}}
-	return raw
 }
 
 // CurrentCampaignMetrics derives unique path and finding counts from durable
@@ -716,8 +187,6 @@ func projectLegacyRawReviewFinding(
 func CurrentCampaignMetrics(
 	state RepositoryState,
 	campaignID string,
-	legacyRunIDs []string,
-	legacyStartedAt time.Time,
 ) RepositoryReviewCampaignMetrics {
 	campaignID = strings.TrimSpace(campaignID)
 	metrics := RepositoryReviewCampaignMetrics{CampaignID: campaignID}
@@ -743,27 +212,7 @@ func CurrentCampaignMetrics(
 		metrics.RemainingFiles = max(0, coverage.SelectedFiles-terminal)
 	}
 	aggregates := make(map[string]struct{})
-	if len(state.RawFindings) > 0 || len(state.DeduplicationJobs) > 0 ||
-		len(state.DeduplicatedFindings) > 0 {
-		for _, finding := range state.DeduplicatedFindings {
-			if campaignID != "" && !DeduplicatedFindingBelongsToCampaign(
-				state, finding, campaignID,
-			) {
-				continue
-			}
-			metrics.FindingOccurrences++
-			if finding.RepositoryFindingID == "" {
-				metrics.PendingFindingMappings++
-				continue
-			}
-			aggregates[finding.RepositoryFindingID] = struct{}{}
-		}
-		metrics.FindingAggregates = len(aggregates)
-		return metrics
-	}
-	for _, finding := range CurrentCampaignFindingsByID(
-		state, campaignID, legacyRunIDs, legacyStartedAt,
-	) {
+	for _, finding := range CurrentCampaignFindings(state, campaignID) {
 		metrics.FindingOccurrences++
 		if finding.RepositoryFindingID == "" {
 			metrics.PendingFindingMappings++
@@ -775,20 +224,13 @@ func CurrentCampaignMetrics(
 	return metrics
 }
 
-// DeduplicatedFindingBelongsToCampaign also honors a legacy Record projection
-// tagged by campaign recovery without rewriting immutable raw provenance.
+// DeduplicatedFindingBelongsToCampaign checks the finding's durable campaign.
 func DeduplicatedFindingBelongsToCampaign(
-	state RepositoryState,
-	finding DeduplicatedReviewFinding,
+	_ RepositoryState,
+	finding Finding,
 	campaignID string,
 ) bool {
-	if finding.CampaignID == campaignID {
-		return true
-	}
-	if index := findingIndexByID(state.Findings, finding.ID); index >= 0 {
-		return state.Findings[index].CampaignID == campaignID
-	}
-	return false
+	return finding.CampaignID == strings.TrimSpace(campaignID)
 }
 
 func repositoryReviewCampaignScopeBound(coverage *RepositoryReviewCampaignCoverage) bool {
@@ -879,26 +321,6 @@ func bindRepositoryReviewCampaignAssignmentCatalog(
 		return changed, nil
 	}
 	coverage.AssignmentCatalog = normalized
-	for pathValue, pathCoverage := range coverage.Paths {
-		// A historical full-file checkpoint is strong enough to seed every
-		// required credit. Inspection-only legacy evidence is deliberately not
-		// guessed into an assignment bit.
-		if pathCoverage.Completed && !pathCoverage.Unsupported {
-			pathCoverage, _, err = setAllRequiredRepositoryReviewAssignments(pathCoverage, normalized)
-		} else {
-			pathCoverage.Inspected = false
-			pathCoverage.Completed = false
-		}
-		if err != nil {
-			return false, err
-		}
-		if !pathCoverage.Inspected && !pathCoverage.Completed &&
-			!pathCoverage.Unsupported && pathCoverage.AssignmentBits == "" {
-			delete(coverage.Paths, pathValue)
-		} else {
-			coverage.Paths[pathValue] = pathCoverage
-		}
-	}
 	return true, nil
 }
 
@@ -908,6 +330,7 @@ func mergeRepositoryReviewCampaignPath(
 	update RepositoryReviewCampaignPathCoverage,
 ) (bool, error) {
 	if coverage == nil || !repositoryReviewCampaignScopeBound(coverage) ||
+		len(coverage.AssignmentCatalog) == 0 ||
 		!validRepositoryReviewPath(pathValue) ||
 		(!update.Inspected && !update.Completed && !update.Unsupported && update.AssignmentBits == "") ||
 		(update.Unsupported && (update.Inspected || update.Completed)) {
@@ -917,69 +340,53 @@ func mergeRepositoryReviewCampaignPath(
 		coverage.Paths = make(map[string]RepositoryReviewCampaignPathCoverage)
 	}
 	current := coverage.Paths[pathValue]
-	if len(coverage.AssignmentCatalog) > 0 {
-		if update.Unsupported {
-			if current.AssignmentBits != "" {
-				return false, ErrConflict
-			}
-			next := RepositoryReviewCampaignPathCoverage{Unsupported: true}
-			if current == next {
-				return false, nil
-			}
-			coverage.Paths[pathValue] = next
-			return true, nil
+	if update.Unsupported {
+		if current.AssignmentBits != "" {
+			return false, ErrConflict
 		}
-		currentBits, err := decodeRepositoryReviewAssignmentBits(
-			current.AssignmentBits, coverage.AssignmentCatalog,
-		)
-		if err != nil {
-			return false, err
-		}
-		updateBits, err := decodeRepositoryReviewAssignmentBits(
-			update.AssignmentBits, coverage.AssignmentCatalog,
-		)
-		if err != nil {
-			return false, err
-		}
-		if update.Completed && update.AssignmentBits == "" {
-			for index, assignment := range coverage.AssignmentCatalog {
-				if assignment.Required {
-					setRepositoryReviewAssignmentBit(updateBits, index)
-				}
-			}
-		}
-		changed := false
-		for index := range currentBits {
-			next := currentBits[index] | updateBits[index]
-			changed = changed || next != currentBits[index]
-			currentBits[index] = next
-		}
-		current.AssignmentBits = encodeRepositoryReviewAssignmentBits(currentBits)
-		projected, err := projectRepositoryReviewAssignmentCoverage(
-			current, coverage.AssignmentCatalog,
-		)
-		if err != nil {
-			return false, err
-		}
-		if !changed && projected == coverage.Paths[pathValue] {
+		next := RepositoryReviewCampaignPathCoverage{Unsupported: true}
+		if current == next {
 			return false, nil
 		}
-		coverage.Paths[pathValue] = projected
+		coverage.Paths[pathValue] = next
 		return true, nil
 	}
-	if current.Unsupported && (update.Inspected || update.Completed) ||
-		update.Unsupported && (current.Inspected || current.Completed) {
-		return false, ErrConflict
+	currentBits, err := decodeRepositoryReviewAssignmentBits(
+		current.AssignmentBits, coverage.AssignmentCatalog,
+	)
+	if err != nil {
+		return false, err
 	}
-	next := RepositoryReviewCampaignPathCoverage{
-		Inspected:   current.Inspected || update.Inspected,
-		Completed:   current.Completed || update.Completed,
-		Unsupported: current.Unsupported || update.Unsupported,
+	updateBits, err := decodeRepositoryReviewAssignmentBits(
+		update.AssignmentBits, coverage.AssignmentCatalog,
+	)
+	if err != nil {
+		return false, err
 	}
-	if next == current {
+	if update.Completed && update.AssignmentBits == "" {
+		for index, assignment := range coverage.AssignmentCatalog {
+			if assignment.Required {
+				setRepositoryReviewAssignmentBit(updateBits, index)
+			}
+		}
+	}
+	changed := false
+	for index := range currentBits {
+		next := currentBits[index] | updateBits[index]
+		changed = changed || next != currentBits[index]
+		currentBits[index] = next
+	}
+	current.AssignmentBits = encodeRepositoryReviewAssignmentBits(currentBits)
+	projected, err := projectRepositoryReviewAssignmentCoverage(
+		current, coverage.AssignmentCatalog,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !changed && projected == coverage.Paths[pathValue] {
 		return false, nil
 	}
-	coverage.Paths[pathValue] = next
+	coverage.Paths[pathValue] = projected
 	return true, nil
 }
 
@@ -991,9 +398,8 @@ func validateRepositoryReviewCampaignCoverage(
 	}
 	if !ValidRepositoryReviewCampaignID(coverage.ID) ||
 		!validRepositoryReviewCommitSHA(coverage.CommitSHA) ||
-		(coverage.DeduplicationSnapshot != nil &&
-			validateRepositoryReviewDeduplicationSnapshot(*coverage.DeduplicationSnapshot) != nil) ||
-		(coverage.RecoveryDigest != "" && !validRepositoryReviewCampaignRecoveryDigest(coverage.RecoveryDigest)) ||
+		coverage.DeduplicationSnapshot == nil ||
+		validateRepositoryReviewDeduplicationSnapshot(*coverage.DeduplicationSnapshot) != nil ||
 		coverage.Paths == nil || coverage.SelectedFiles < 0 ||
 		coverage.SelectedFiles > maxReviewFiles || len(coverage.Paths) > maxReviewFiles {
 		return errors.New("invalid repository review campaign coverage")
@@ -1061,69 +467,6 @@ func validateRepositoryReviewCampaignHistory(history map[string]string) error {
 	return nil
 }
 
-func migrateRepositoryReviewCampaignHistory(state *RepositoryState) (bool, error) {
-	if state == nil {
-		return false, nil
-	}
-	bindings := make(map[string]string)
-	add := func(campaignID, commitSHA string) error {
-		if campaignID == "" {
-			return nil
-		}
-		if !ValidRepositoryReviewCampaignID(campaignID) ||
-			!validRepositoryReviewCommitSHA(commitSHA) {
-			return errors.New("invalid tagged repository review campaign history")
-		}
-		if existing := bindings[campaignID]; existing != "" && existing != commitSHA {
-			return errors.New("repository review campaign history commit conflict")
-		}
-		bindings[campaignID] = commitSHA
-		return nil
-	}
-	if state.CurrentCampaign != nil {
-		if err := add(state.CurrentCampaign.ID, state.CurrentCampaign.CommitSHA); err != nil {
-			return false, err
-		}
-	}
-	for _, run := range state.Runs {
-		if err := add(run.CampaignID, run.CommitSHA); err != nil {
-			return false, err
-		}
-	}
-	for _, contextRecord := range state.Contexts {
-		if err := add(contextRecord.CampaignID, contextRecord.CommitSHA); err != nil {
-			return false, err
-		}
-	}
-	for _, finding := range state.Findings {
-		if err := add(finding.CampaignID, finding.CommitSHA); err != nil {
-			return false, err
-		}
-	}
-	if len(bindings) == 0 {
-		return false, nil
-	}
-	if state.CampaignHistory == nil {
-		state.CampaignHistory = make(map[string]string, len(bindings))
-	}
-	changed := false
-	for campaignID, commitSHA := range bindings {
-		if existing := state.CampaignHistory[campaignID]; existing != "" && existing != commitSHA {
-			return false, errors.New("repository review campaign history commit conflict")
-		}
-		if state.CampaignHistory[campaignID] == "" {
-			state.CampaignHistory[campaignID] = commitSHA
-			changed = true
-		}
-	}
-	return changed, nil
-}
-
-func validRepositoryReviewCampaignRecoveryDigest(value string) bool {
-	digest, ok := strings.CutPrefix(value, "sha256:")
-	return ok && len(digest) == 64 && validHexDigest(digest)
-}
-
 func validRepositoryReviewCampaignScopeDigest(value string) bool {
 	digest, ok := strings.CutPrefix(value, "sha256:")
 	return ok && len(digest) == 64 && validHexDigest(digest)
@@ -1149,328 +492,11 @@ func cloneRepositoryReviewCampaignCoverage(
 	return coverage
 }
 
-func normalizeRepositoryReviewCampaignRecordIDs(
-	values []string,
-	maximum int,
-	maximumBytes int,
-) ([]string, error) {
-	if len(values) > maximum {
-		return nil, ErrInvalidPlan
-	}
-	out := make([]string, 0, len(values))
-	seen := make(map[string]struct{}, len(values))
-	metadataBytes := 0
-	for _, raw := range values {
-		value := strings.TrimSpace(raw)
-		metadataBytes += len(value) + 8
-		if value != raw || !validBoundedText(value, maximumBytes) ||
-			metadataBytes > maxRepositoryReviewCampaignRecoveryBytes {
-			return nil, ErrInvalidPlan
-		}
-		if _, duplicate := seen[value]; duplicate {
-			return nil, ErrInvalidPlan
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-func normalizeRepositoryReviewCampaignRuns(
-	runs []RepositoryReviewCampaignRunRecovery,
-) ([]RepositoryReviewCampaignRunRecovery, error) {
-	if len(runs) > maxAutomationRunIDs {
-		return nil, ErrInvalidPlan
-	}
-	out := make([]RepositoryReviewCampaignRunRecovery, 0, len(runs))
-	seen := make(map[string]struct{}, len(runs))
-	envelopeBytes := 0
-	for _, run := range runs {
-		id := strings.TrimSpace(run.ID)
-		if _, err := repositoryReviewCampaignScopeDigestForPlan(run.Plan); err != nil {
-			return nil, ErrInvalidPlan
-		}
-		if run.InspectedFileRefs != nil {
-			if !run.LegacyRecovered {
-				return nil, ErrInvalidPlan
-			}
-			canonical, canonicalErr := canonicalRepositoryReviewCampaignFiles(run.InspectedFileRefs)
-			if canonicalErr != nil || len(canonical) != run.InspectedFiles {
-				return nil, ErrInvalidPlan
-			}
-			manifest, _ := repositoryReviewCampaignFilesForPlan(run.Plan)
-			manifestByPath := make(map[string]FileRef, len(manifest))
-			for _, file := range manifest {
-				manifestByPath[file.Path] = file
-			}
-			for _, file := range canonical {
-				if manifestByPath[file.Path] != file {
-					return nil, ErrInvalidPlan
-				}
-			}
-			run.InspectedFileRefs = canonical
-		}
-		encodedPlan, _ := json.Marshal(run.Plan)
-		encodedInspection, _ := json.Marshal(run.InspectedFileRefs)
-		envelopeBytes += len(encodedPlan) + len(encodedInspection) + len(id) + 32
-		if id != run.ID || !validBoundedText(id, 1024) ||
-			envelopeBytes > maxRepositoryReviewCampaignRecoveryBytes ||
-			run.Plan.ID == "" || run.Plan.ID != planDigest(run.Plan) &&
-			(!run.LegacyRecovered || run.Plan.ID != legacyRepositoryReviewPlanDigest(run.Plan)) ||
-			(run.LegacyRecovered && (run.Plan.CampaignID != "" || !run.Plan.Authoritative ||
-				run.Plan.RequiredAssignments != 0)) ||
-			run.InspectedFiles < 0 ||
-			run.InspectedFiles > maxReviewFiles {
-			return nil, ErrInvalidPlan
-		}
-		if _, duplicate := seen[id]; duplicate {
-			return nil, ErrInvalidPlan
-		}
-		seen[id] = struct{}{}
-		out = append(out, run)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
-}
-
-func legacyRepositoryReviewPlanDigest(plan Plan) string {
-	if plan.TargetBranch != "" || plan.AdvertisedDefaultBranch != "" || plan.TargetIsDefault {
-		return ""
-	}
-	legacy, _ := json.Marshal(struct {
-		ID                 string            `json:"id"`
-		Repository         string            `json:"repository"`
-		CommitSHA          string            `json:"commit_sha"`
-		InventoryHash      string            `json:"inventory_hash"`
-		ProfileHash        string            `json:"profile_hash"`
-		ForceCampaignID    string            `json:"force_campaign_id,omitempty"`
-		Authoritative      bool              `json:"authoritative,omitempty"`
-		StateVersion       int64             `json:"state_version"`
-		PendingFiles       []FileRef         `json:"pending_files"`
-		DeferredFiles      []FileRef         `json:"deferred_files,omitempty"`
-		UnchangedFiles     []FileRef         `json:"unchanged_files"`
-		UnsupportedFiles   []UnsupportedFile `json:"unsupported_files,omitempty"`
-		PreviouslyReviewed int               `json:"previously_reviewed"`
-		CreatedAt          time.Time         `json:"created_at"`
-	}{
-		Repository: plan.Repository, CommitSHA: plan.CommitSHA,
-		InventoryHash: plan.InventoryHash, ProfileHash: plan.ProfileHash,
-		ForceCampaignID: plan.ForceCampaignID, Authoritative: plan.Authoritative,
-		StateVersion: plan.StateVersion, PendingFiles: plan.PendingFiles,
-		DeferredFiles: plan.DeferredFiles, UnchangedFiles: plan.UnchangedFiles,
-		UnsupportedFiles: plan.UnsupportedFiles, PreviouslyReviewed: plan.PreviouslyReviewed,
-		CreatedAt: plan.CreatedAt,
-	})
-	return stableID("rpl_", string(legacy))
-}
-
-// ValidateRepositoryReviewCampaignRunRecovery verifies one retained legacy
-// run and its digest-bound plan without mutating repository state.
-func ValidateRepositoryReviewCampaignRunRecovery(
-	run RepositoryReviewCampaignRunRecovery,
-) error {
-	_, err := normalizeRepositoryReviewCampaignRuns([]RepositoryReviewCampaignRunRecovery{run})
-	return err
-}
-
-func repositoryReviewCampaignRecoveryDigest(request ReconcileCampaignRequest) (string, error) {
-	fullData, _ := json.Marshal(request)
-	if len(fullData) > maxRepositoryReviewCampaignRecoveryBytes {
-		return "", ErrInvalidPlan
-	}
-	request.ExpectedReviewVersion = 0
-	request.Coverage.RecoveryDigest = ""
-	// Exact file refs are transient proof for validating legacy record binding.
-	// The durable mutation is already bound by the normalized run, context, and
-	// finding identities, so excluding refs preserves lost-response idempotency
-	// for recoveries committed by versions that did not carry this proof.
-	request.Runs = append([]RepositoryReviewCampaignRunRecovery(nil), request.Runs...)
-	for index := range request.Runs {
-		request.Runs[index].InspectedFileRefs = nil
-	}
-	data, _ := json.Marshal(request)
-	if len(data) > maxRepositoryReviewCampaignRecoveryBytes {
-		return "", ErrInvalidPlan
-	}
-	return stableID("sha256:", string(data)), nil
-}
-
-func repositoryReviewCampaignRunMatchesCoverage(
-	run ReviewRun,
-	recovered RepositoryReviewCampaignRunRecovery,
-	coverage RepositoryReviewCampaignCoverage,
-) bool {
-	scopeDigest, err := repositoryReviewCampaignScopeDigestForPlan(recovered.Plan)
-	if err != nil {
-		return false
-	}
-	baseMatches := run.ID == recovered.ID && run.PlanID == recovered.Plan.ID &&
-		run.CommitSHA == coverage.CommitSHA && run.InventoryHash == coverage.InventoryHash &&
-		recovered.Plan.Repository != "" && recovered.Plan.CommitSHA == coverage.CommitSHA &&
-		recovered.Plan.InventoryHash == coverage.InventoryHash
-	if !baseMatches {
-		return false
-	}
-	if recovered.LegacyRecovered {
-		return recovered.Plan.CampaignID == "" &&
-			recovered.Plan.Authoritative && recovered.Plan.RequiredAssignments == 0 &&
-			validBoundedText(recovered.Plan.ProfileHash, 256) &&
-			validRepositoryReviewCampaignScopeDigest(scopeDigest)
-	}
-	return recovered.Plan.ProfileHash == coverage.ProfileHash && scopeDigest == coverage.ScopeDigest &&
-		(recovered.Plan.CampaignID == "" || recovered.Plan.CampaignID == coverage.ID)
-}
-
-type repositoryReviewCampaignIndexes struct {
-	runs     map[string]int
-	contexts map[string]int
-	findings map[string]int
-}
-
-func newRepositoryReviewCampaignIndexes(
-	state RepositoryState,
-) (repositoryReviewCampaignIndexes, error) {
-	indexes := repositoryReviewCampaignIndexes{
-		runs:     make(map[string]int, len(state.Runs)),
-		contexts: make(map[string]int, len(state.Contexts)),
-		findings: make(map[string]int, len(state.Findings)),
-	}
-	for index, run := range state.Runs {
-		if run.ID == "" {
-			continue
-		}
-		if _, duplicate := indexes.runs[run.ID]; duplicate {
-			return repositoryReviewCampaignIndexes{}, ErrConflict
-		}
-		indexes.runs[run.ID] = index
-	}
-	for index, contextRecord := range state.Contexts {
-		if contextRecord.ID == "" {
-			continue
-		}
-		if _, duplicate := indexes.contexts[contextRecord.ID]; duplicate {
-			return repositoryReviewCampaignIndexes{}, ErrConflict
-		}
-		indexes.contexts[contextRecord.ID] = index
-	}
-	for index, finding := range state.Findings {
-		if finding.ID == "" {
-			continue
-		}
-		if _, duplicate := indexes.findings[finding.ID]; duplicate {
-			return repositoryReviewCampaignIndexes{}, ErrConflict
-		}
-		indexes.findings[finding.ID] = index
-	}
-	return indexes, nil
-}
-
-func repositoryReviewCampaignContextMatchesCoverage(
-	state RepositoryState,
-	contextRecord FindingContext,
-	coverage RepositoryReviewCampaignCoverage,
-	selectedScope map[string]FileRef,
-	indexes repositoryReviewCampaignIndexes,
-	recoveredRuns map[string]RepositoryReviewCampaignRunRecovery,
-) bool {
-	if contextRecord.Repository != state.Repository || contextRecord.CommitSHA != coverage.CommitSHA ||
-		contextRecord.InventoryHash != coverage.InventoryHash {
-		return false
-	}
-	if len(contextRecord.Files) == 0 {
-		return false
-	}
-	for _, file := range contextRecord.Files {
-		if selected, exists := selectedScope[file.Path]; !exists || selected != file {
-			return false
-		}
-	}
-	runIndex, matchedRun := indexes.runs[contextRecord.RunID]
-	if !matchedRun {
-		return false
-	}
-	run := state.Runs[runIndex]
-	if run.CommitSHA != coverage.CommitSHA || run.InventoryHash != coverage.InventoryHash ||
-		(run.CampaignID != "" && run.CampaignID != coverage.ID) {
-		return false
-	}
-	recovered, recoveredExists := recoveredRuns[run.ID]
-	expectedProfileHash := coverage.ProfileHash
-	if recoveredExists && recovered.LegacyRecovered {
-		expectedProfileHash = recovered.Plan.ProfileHash
-	}
-	if contextRecord.ProfileHash != expectedProfileHash {
-		return false
-	}
-	if run.CampaignID == "" {
-		recovered, exists := recoveredRuns[run.ID]
-		if !exists || !repositoryReviewCampaignRunMatchesCoverage(run, recovered, coverage) {
-			return false
-		}
-	}
-	return contextRecord.RunID != ""
-}
-
-func repositoryReviewCampaignFindingMatchesCoverage(
-	state RepositoryState,
-	finding Finding,
-	coverage RepositoryReviewCampaignCoverage,
-	selectedScope map[string]FileRef,
-	indexes repositoryReviewCampaignIndexes,
-	recoveredRuns map[string]RepositoryReviewCampaignRunRecovery,
-) bool {
-	return repositoryReviewCampaignFindingMatchesRecovery(
-		state, finding, coverage, selectedScope, indexes, recoveredRuns, nil,
-	)
-}
-
-func repositoryReviewCampaignFindingMatchesRecovery(
-	state RepositoryState,
-	finding Finding,
-	coverage RepositoryReviewCampaignCoverage,
-	selectedScope map[string]FileRef,
-	indexes repositoryReviewCampaignIndexes,
-	recoveredRuns map[string]RepositoryReviewCampaignRunRecovery,
-	historicalInspectedFiles map[string]map[string]FileRef,
-) bool {
-	coverageInspected := coverage.Paths[finding.File.Path].Inspected
-	if finding.Repository != state.Repository || finding.CommitSHA != coverage.CommitSHA ||
-		len(finding.ContextIDs) == 0 ||
-		selectedScope[finding.File.Path] != finding.File {
-		return false
-	}
-	for _, contextID := range finding.ContextIDs {
-		index, found := indexes.contexts[contextID]
-		if found && !coverageInspected &&
-			historicalInspectedFiles[state.Contexts[index].RunID][finding.File.Path] != finding.File {
-			return false
-		}
-		if !found || !repositoryReviewCampaignContextMatchesCoverage(
-			state, state.Contexts[index], coverage, selectedScope, indexes, recoveredRuns,
-		) || (state.Contexts[index].CampaignID != "" &&
-			state.Contexts[index].CampaignID != coverage.ID) {
-			return false
-		}
-		containsPrimary := false
-		for _, file := range state.Contexts[index].Files {
-			if file == finding.File {
-				containsPrimary = true
-				break
-			}
-		}
-		if !containsPrimary {
-			return false
-		}
-	}
-	return true
-}
-
 func validateRepositoryReviewCampaignRecordBindings(state RepositoryState) error {
 	runCampaigns := make(map[string]string, len(state.Runs))
 	for _, run := range state.Runs {
-		if run.ID == "" {
-			continue
+		if run.ID == "" || !ValidRepositoryReviewCampaignID(run.CampaignID) {
+			return errors.New("invalid repository review run identity")
 		}
 		if _, duplicate := runCampaigns[run.ID]; duplicate {
 			return errors.New("duplicate repository review run identity")
@@ -1479,6 +505,9 @@ func validateRepositoryReviewCampaignRecordBindings(state RepositoryState) error
 	}
 	contextCampaigns := make(map[string]string, len(state.Contexts))
 	for _, contextRecord := range state.Contexts {
+		if !ValidRepositoryReviewCampaignID(contextRecord.CampaignID) {
+			return errors.New("invalid repository review context campaign")
+		}
 		if runCampaign := runCampaigns[contextRecord.RunID]; runCampaign != "" &&
 			contextRecord.CampaignID != "" && runCampaign != contextRecord.CampaignID {
 			return errors.New("repository review context campaign does not match its run")
@@ -1491,94 +520,44 @@ func validateRepositoryReviewCampaignRecordBindings(state RepositoryState) error
 		}
 		contextCampaigns[contextRecord.ID] = contextRecord.CampaignID
 	}
-	findingCampaigns := make(map[string]string, len(state.Findings)+len(state.RawFindings))
+	findingIDs := make(map[string]struct{}, len(state.Findings))
 	for _, finding := range state.Findings {
-		if finding.CampaignID != "" && len(finding.ContextIDs) == 0 {
+		if len(finding.ContextIDs) == 0 {
 			return errors.New("repository review campaign finding has no context")
 		}
 		for _, contextID := range finding.ContextIDs {
 			contextCampaign, exists := contextCampaigns[contextID]
-			if finding.CampaignID != "" &&
-				(!exists || contextCampaign != finding.CampaignID) {
+			if !exists || contextCampaign != finding.CampaignID {
 				return errors.New("repository review campaign finding has an invalid context")
 			}
 		}
 		if finding.ID != "" {
-			if _, duplicate := findingCampaigns[finding.ID]; duplicate {
+			if _, duplicate := findingIDs[finding.ID]; duplicate {
 				return errors.New("duplicate repository review finding identity")
 			}
-			findingCampaigns[finding.ID] = finding.CampaignID
+			findingIDs[finding.ID] = struct{}{}
 		}
 	}
+	rawFindingCampaigns := make(map[string]string, len(state.RawFindings))
 	for _, finding := range state.RawFindings {
 		if finding.ID == "" {
 			continue
 		}
-		if _, duplicate := findingCampaigns[finding.ID]; duplicate {
+		if _, duplicate := findingIDs[finding.ID]; duplicate {
 			return errors.New("duplicate repository review raw finding identity")
 		}
-		findingCampaigns[finding.ID] = finding.CampaignID
+		if _, duplicate := rawFindingCampaigns[finding.ID]; duplicate {
+			return errors.New("duplicate repository review raw finding identity")
+		}
+		rawFindingCampaigns[finding.ID] = finding.CampaignID
 	}
 	for _, run := range state.Runs {
-		if run.CampaignID == "" {
-			continue
-		}
 		for _, findingID := range run.FindingIDs {
-			findingCampaign, exists := findingCampaigns[findingID]
+			findingCampaign, exists := rawFindingCampaigns[findingID]
 			if !exists || findingCampaign != run.CampaignID {
 				return errors.New("repository review run campaign does not match its finding")
 			}
 		}
 	}
 	return nil
-}
-
-// CurrentCampaignFindings selects immutable review occurrences belonging to an
-// automation campaign. Run FindingIDs are authoritative, while context
-// membership preserves findings recorded by legacy checkpoints that omitted
-// the run-level ID projection.
-func CurrentCampaignFindings(
-	state RepositoryState,
-	runIDs []string,
-	startedAt time.Time,
-) []Finding {
-	wantedRuns := make(map[string]struct{}, len(runIDs))
-	for _, runID := range runIDs {
-		if runID != "" {
-			wantedRuns[runID] = struct{}{}
-		}
-	}
-	selected := make(map[string]struct{})
-	for _, run := range state.Runs {
-		if _, ok := wantedRuns[run.ID]; !ok ||
-			!startedAt.IsZero() && run.CompletedAt.Before(startedAt) {
-			continue
-		}
-		for _, findingID := range run.FindingIDs {
-			selected[findingID] = struct{}{}
-		}
-	}
-	currentContexts := make(map[string]struct{})
-	for _, contextRecord := range state.Contexts {
-		if _, ok := wantedRuns[contextRecord.RunID]; !ok ||
-			!startedAt.IsZero() && contextRecord.CreatedAt.Before(startedAt) {
-			continue
-		}
-		currentContexts[contextRecord.ID] = struct{}{}
-	}
-	for _, finding := range state.Findings {
-		for _, contextID := range finding.ContextIDs {
-			if _, ok := currentContexts[contextID]; ok {
-				selected[finding.ID] = struct{}{}
-				break
-			}
-		}
-	}
-	out := make([]Finding, 0, len(selected))
-	for _, finding := range state.Findings {
-		if _, ok := selected[finding.ID]; ok {
-			out = append(out, finding)
-		}
-	}
-	return out
 }

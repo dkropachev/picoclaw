@@ -83,7 +83,7 @@ func (c *repositoryReviewController) processRepositoryFindingValidations(
 		}
 		automation, found := repositoryAutomationForLedger(c.leasedStore, automations, state)
 		if !found {
-			automation = repositoryFallbackAutomation(c.leasedConfig, state)
+			continue
 		}
 		metadata := sync.Map{}
 		evidenceProvider := c.repositoryValidationEvidenceProvider(automation, &metadata)

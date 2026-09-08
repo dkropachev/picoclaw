@@ -72,9 +72,8 @@ assigned profile snapshot and chosen exact commit are unchanged. Choose the
 remembered commit to retry unfinished work against the exact source revision
 used before the failure. Choosing latest/custom after the branch moves starts a
 new campaign, as does a changed profile. **Run again** always begins a new
-campaign and resets its campaign progress and accounting; the
-repository ledger may still skip matching blob and profile checkpoints unless
-the profile uses force mode.
+campaign and resets its campaign progress, assignment checkpoints, and
+accounting. Canonical repository findings remain available across campaigns.
 
 The launcher does not poll quotas or auto-resume a stopped guard. After a
 launcher restart, orphaned work becomes an explicit `service_restart` pause and
@@ -92,24 +91,24 @@ Repository-review history is kept indefinitely unless you explicitly remove
 it. On an inactive repository detail page, **Purge review history** deletes the
 review ledger and resets campaign/runtime state to a fresh idle configuration;
 the repository, branch, and assigned profile remain configured. **Remove
-repository** always deletes both the assignment and every resolved review
+repository** always deletes both the assignment and its canonical review
 ledger.
 
 Both dialogs show aggregate deletion counts and require typing the exact
 displayed normalized repository identity. PicoClaw also checks the current
-configuration version, primary ledger version, and opaque composite ledger
+configuration version, canonical ledger version, and opaque ledger
 fence at confirmation time. If inventory cannot be read, deletion fails closed
 with a `retention_unavailable` blocker. If review, deduplication, mapping, a
-Resolution check, issue generation/publication, or historical consolidation is
-active, the action is blocked with a server-owned reason. Refresh after a
-stale-version conflict and review the counts again.
+Resolution check, or issue generation/publication is active, the action is
+blocked with a server-owned reason. Refresh after a stale-version conflict and
+review the counts again.
 
 These actions delete PicoClaw Repository Review data only. They do not delete or
 modify GitHub issues, do not remove profiles or discussion threads, and do not
 delete generic workflow run records; thread- and workflow-owned retention still
 applies to those resources. Migration-audited, digest-matching imported
-repository/automation archives represented by the confirmed inventory are
-deleted with the active ledger; skipped/uncounted and profile archives remain.
+automation archives represented by the configuration are deleted with the
+active ledger; skipped/uncounted and profile archives remain.
 An interrupted purge/removal is completed safely
 before repository-review workers start after the next launcher restart.
 
@@ -144,8 +143,7 @@ Choose **View repository findings** or follow a mapped finding link to inspect
 canonical cross-commit aggregates below `/repository-reviews/repositories`.
 That list/detail flow owns issue drafting, publication, existing-issue
 association, duplicate decisions, Resolution checks, and dismiss/reopen
-lifecycle controls. Deprecated Run findings URLs remain compatibility surfaces,
-not a separate canonical diagnosis layer.
+lifecycle controls.
 
 New review findings also retain causal `match_hints` (component, operation,
 failure mode, trigger, violated invariant, outcome, related symbols, source
@@ -156,8 +154,6 @@ plus deletions and is classified by its upper bound: tiny through 10 LOC, small
 through 40, medium through 150, large through 500, and refactor above 500 or
 for cross-subsystem contract migration. These fields identify and size a
 defect; they never contain a fix design, patch, recommendation, or next step.
-Older findings display unknown hints and effort and are not re-reviewed merely
-to populate them.
 
 Discussion creates a separate reviewing thread seeded with the exact
 finding and context provenance. Returning from chat does not generate, link,
@@ -167,10 +163,7 @@ Each Findings, Raw findings, Findings processing, repository-finding, and
 issue-preview collection preserves its own query, view, explicit selection,
 loaded cursor pages, and in-memory scroll through detail and action routes.
 Browser Back restores that state without overwriting the parent collection's
-query. Legacy `scope` links still reach the correct campaign or repository
-collection; legacy offsets normalize to the first canonical cursor page. The
-former **Results** sidebar destination is gone; old
-`/repository-reviews/results` links return to the review collection.
+query.
 
 ## Draft Issue Previews
 
@@ -217,8 +210,7 @@ unknown, and posted previews cannot be deleted.
 
 Each finding can have at most one active preview or canonical issue. Retrying
 the same generation ID is idempotent, and concurrent attempts cannot reserve
-the same finding twice. Older grouped drafts remain visible for history;
-conflicting noncanonical legacy drafts are read-only and cannot publish.
+the same finding twice.
 
 ## Post To GitHub
 
@@ -286,43 +278,7 @@ containing it.
 Later observation of the same causal defect marks the finding `regressed`
 without erasing its earlier resolution history.
 
-## Install And Run From The CLI
-
-Install the built-in workflow once:
-
-```sh
-picoclaw workflow install repository-bug-finder
-```
-
-Run it with a local checkout or clone URL:
-
-```sh
-picoclaw workflow run workflows/repository-bug-finder.yml \
-  --inputs '{"repository":"https://github.com/owner/repository.git","ref":"main"}'
-```
-
-The default standalone run admits at most 24 pending files, groups related
-files into bounded contexts of up to three, and may reduce the effective file
-count when several required reviewer aliases are supplied. Inspect
-`remainingFiles` in the run output and run the workflow again until it reaches
-zero. Unchanged blob SHA/size pairs under the same review profile are not sent
-to a model again. A relevant alias, account route, or model configuration
-change invalidates that checkpoint.
-
-To challenge every file with several configured reviewer aliases in a direct
-workflow run:
-
-```sh
-picoclaw workflow run workflows/repository-bug-finder.yml \
-  --inputs '{"repository":"https://github.com/owner/repository.git","ref":"main","review_models":"review-a,review-b"}'
-```
-
-The profile-backed dashboard deliberately uses one reviewer alias; comparative
-testing belongs to **Model review probes**. Direct workflow `review_models`
-remains a standalone compatibility input. Every requested alias receives the
-same immutable chunks as an independent required reviewer with inherited
-fallbacks disabled. Without it, the main agent's configured fallback chain is
-used and safe fallback aliases may corroborate findings.
+## Reviewer Provider Boundary
 
 Use passive API-backed reviewer providers. Repository review rejects
 `codex-cli` and `claude-cli` aliases because agentic CLIs have local execution

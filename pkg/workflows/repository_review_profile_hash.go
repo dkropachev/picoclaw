@@ -14,8 +14,7 @@ const (
 	RepositoryBugFinderPromptRevision = "repository-bug-finder-prompt-v2"
 )
 
-// RepositoryBugFinderProfileHashInput is the complete immutable profile
-// identity shared by native campaign planning and legacy campaign recovery.
+// RepositoryBugFinderProfileHashInput is the complete immutable campaign profile identity.
 type RepositoryBugFinderProfileHashInput struct {
 	Schema                 string   `json:"schema"`
 	PromptRevision         string   `json:"prompt_revision"`
@@ -93,29 +92,6 @@ func RepositoryBugFinderProfileHash(input RepositoryBugFinderProfileHashInput) (
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
 
-// RepositoryBugFinderLegacyResolvedProfileHash reproduces the exact
-// resolver-bound profile map used by legacy native planning. It is used only
-// to decide whether a historical completion checkpoint remains reusable.
-func RepositoryBugFinderLegacyResolvedProfileHash(
-	input RepositoryBugFinderProfileHashInput,
-) (string, error) {
-	if _, err := RepositoryBugFinderProfileHash(input); err != nil {
-		return "", err
-	}
-	data, _ := json.Marshal(map[string]any{
-		"schema": input.Schema, "prompt_revision": input.PromptRevision,
-		"account_ref": input.AccountRef, "target": input.Target, "focus": input.Focus,
-		"scope_policy": input.ScopePolicy, "scope_plan_hash": input.ScopePlanHash,
-		"models":                   repositoryReviewModelNames(input.Models),
-		"model_graph_revision":     input.ModelGraphRevision,
-		"effective_models":         input.EffectiveModels,
-		"include_default_reviewer": input.IncludeDefaultReviewer,
-		"max_content_bytes":        input.MaxContentBytes,
-	})
-	digest := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
-}
-
 func canonicalRepositoryBugFinderEffectiveModels(values []string, deduplicate bool) ([]string, bool) {
 	canonical := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
@@ -137,7 +113,7 @@ func canonicalRepositoryBugFinderEffectiveModels(values []string, deduplicate bo
 }
 
 // RepositoryBugFinderEffectiveMaxContentBytes applies the resolver clamp used
-// by workflow admission and legacy recovery.
+// by workflow admission.
 func RepositoryBugFinderEffectiveMaxContentBytes(requested int64, resolvedMaximum int) (int64, error) {
 	if resolvedMaximum < 1 {
 		return 0, errors.New("invalid repository bug finder content bound")

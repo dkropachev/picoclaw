@@ -61,10 +61,9 @@ func repositoryReviewStateFromEntry(root string, entry os.DirEntry) (RepositoryS
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 		return RepositoryState{}, jsonErr
 	}
-	if _, migrationErr := migrateRepositoryState(&state); migrationErr != nil {
-		return RepositoryState{}, migrationErr
+	if versionErr := validateRepositoryStateVersion(&state); versionErr != nil {
+		return RepositoryState{}, versionErr
 	}
-	backfillCanonicalIssueAssociations(&state)
 	if err := validateState(state); err != nil {
 		return RepositoryState{}, err
 	}

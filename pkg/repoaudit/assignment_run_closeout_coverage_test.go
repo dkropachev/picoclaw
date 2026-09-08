@@ -56,7 +56,7 @@ func TestRepositoryReviewAssignmentRunCloseoutDefenses(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		credited, err := CreditRepositoryReviewAssignment(
+		credited, err := creditRepositoryReviewAssignmentForTest(
 			state.CurrentCampaign.Paths[fixture.files[0].Path], fixture.catalog, fixture.catalog[0].ID,
 		)
 		if err != nil {
@@ -115,7 +115,7 @@ func TestRepositoryReviewAssignmentVerifyCloseoutDefenses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	credited, err := CreditRepositoryReviewAssignment(
+	credited, err := creditRepositoryReviewAssignmentForTest(
 		state.CurrentCampaign.Paths[fixture.files[0].Path], fixture.catalog, fixture.catalog[0].ID,
 	)
 	if err != nil {

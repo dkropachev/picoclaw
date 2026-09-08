@@ -9,14 +9,12 @@ type IssuePublicationBlockerCode string
 
 const (
 	IssuePublicationRepositoryNotGitHub      IssuePublicationBlockerCode = "repository_not_github"
-	IssuePublicationPreviewNotCanonical      IssuePublicationBlockerCode = "preview_not_canonical"
 	IssuePublicationOriginNotPublishable     IssuePublicationBlockerCode = "origin_not_publishable"
 	IssuePublicationStateNotPublishable      IssuePublicationBlockerCode = "state_not_publishable"
 	IssuePublicationFindingMissing           IssuePublicationBlockerCode = "finding_missing"
 	IssuePublicationFindingStatusUnresolved  IssuePublicationBlockerCode = "finding_status_unresolved"
 	IssuePublicationDuplicateReviewRequired  IssuePublicationBlockerCode = "duplicate_review_required"
 	IssuePublicationIssueAssociationConflict IssuePublicationBlockerCode = "issue_association_conflict"
-	IssuePublicationHistoricalMergeActive    IssuePublicationBlockerCode = "historical_merge_in_progress"
 	IssuePublicationFindingNotPublishable    IssuePublicationBlockerCode = "finding_not_publishable"
 )
 
@@ -42,20 +40,18 @@ type issuePublicationBlockerDefinition struct {
 
 var issuePublicationBlockerDefinitions = []issuePublicationBlockerDefinition{
 	{IssuePublicationRepositoryNotGitHub, "This repository is not a canonical GitHub repository."},
-	{IssuePublicationPreviewNotCanonical, "This preview is not the finding's canonical issue preview."},
 	{IssuePublicationOriginNotPublishable, "This preview represents an existing issue and cannot be posted."},
 	{IssuePublicationStateNotPublishable, "This preview is not in a publishable state."},
 	{IssuePublicationFindingMissing, "One or more linked findings are unavailable."},
 	{IssuePublicationFindingStatusUnresolved, "One or more linked findings do not yet have a publishable status."},
 	{IssuePublicationDuplicateReviewRequired, "A duplicate decision is required before publication."},
 	{IssuePublicationIssueAssociationConflict, "A linked finding has conflicting issue associations."},
-	{IssuePublicationHistoricalMergeActive, "Historical finding consolidation is in progress."},
 	{IssuePublicationFindingNotPublishable, "One or more linked findings are not eligible for publication."},
 }
 
 // EvaluateIssuePublication determines whether draft can be sent to the
 // protected GitHub publication boundary. It intentionally reports every
-// independent blocker so grouped legacy previews remain diagnosable.
+// independent blocker so rejected previews remain diagnosable.
 func EvaluateIssuePublication(
 	state RepositoryState,
 	draft IssueDraft,
@@ -66,20 +62,13 @@ func EvaluateIssuePublication(
 	if !IsCanonicalGitHubRepository(state.Repository) {
 		add(IssuePublicationRepositoryNotGitHub)
 	}
-	if !draft.Canonical {
-		add(IssuePublicationPreviewNotCanonical)
-	}
-	if draft.Origin != IssueDraftOriginAIGenerated && draft.Origin != IssueDraftOriginLegacy {
+	if draft.Origin != IssueDraftOriginAIGenerated {
 		add(IssuePublicationOriginNotPublishable)
 	}
 	if draft.State != IssueDraftEditing && draft.State != IssueDraftPublishing &&
 		draft.State != IssueDraftUnknown {
 		add(IssuePublicationStateNotPublishable)
 	}
-	if HistoricalDeduplicationMergeInProgress(state) {
-		add(IssuePublicationHistoricalMergeActive)
-	}
-
 	for _, findingID := range draft.FindingIDs {
 		index := findingIndexByID(state.Findings, findingID)
 		if index < 0 {
@@ -135,7 +124,7 @@ func issuePublicationFindingStatusUnresolved(
 	state RepositoryState,
 	finding Finding,
 ) bool {
-	if finding.Status != FindingOpen || finding.DeduplicationPending {
+	if finding.Status != FindingOpen {
 		return true
 	}
 	if finding.RepositoryFindingID != "" {

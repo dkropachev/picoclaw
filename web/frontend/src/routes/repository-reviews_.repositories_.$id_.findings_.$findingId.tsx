@@ -1,4 +1,4 @@
-import { createFileRoute, redirect } from "@tanstack/react-router"
+import { createFileRoute } from "@tanstack/react-router"
 
 import { RepositoryReviewFindingPage } from "@/components/repository-reviews/repository-review-finding-page"
 import {
@@ -6,24 +6,12 @@ import {
   normalizeRepositoryReviewRepositoryFindingsSearch,
   repositoryReviewDefaultQuery,
   repositoryReviewParentNavigationState,
-  repositoryReviewSearchHasLegacyPaging,
 } from "@/components/repository-reviews/repository-review-route-state"
 
 export const Route = createFileRoute(
   "/repository-reviews_/repositories_/$id_/findings_/$findingId",
 )({
   validateSearch: normalizeRepositoryReviewRepositoryFindingsSearch,
-  beforeLoad: ({ params, location }) => {
-    const raw = rawSearch(location.searchStr)
-    if (!repositoryReviewSearchHasLegacyPaging(raw)) return
-    throw redirect({
-      to: "/repository-reviews/repositories/$id/findings/$findingId",
-      params: { id: params.id, findingId: params.findingId },
-      search: normalizeRepositoryReviewRepositoryFindingsSearch(raw),
-      state: true,
-      replace: true,
-    })
-  },
   component: RepositoryReviewRepositoryFindingRoute,
 })
 
@@ -96,8 +84,4 @@ function RepositoryReviewRepositoryFindingRoute() {
       }
     />
   )
-}
-
-function rawSearch(searchString: string): Record<string, unknown> {
-  return Object.fromEntries(new URLSearchParams(searchString))
 }

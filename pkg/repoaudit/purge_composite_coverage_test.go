@@ -119,29 +119,6 @@ func TestRepositoryReviewPurgeEligibilitySnapshotFailures(t *testing.T) {
 	})
 }
 
-func TestRepositoryReviewAutomationSnapshotKeepsPrimaryWhenAliasInventoryFails(t *testing.T) {
-	store := newAutomationTestStore(t)
-	input := validAutomationForTest("rra_snapshot_alias_failure", "snapshot alias failure")
-	input.Repository = "https://github.com/Owner/Repo.git"
-	automation, err := store.CreateAutomation(context.Background(), input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	primary := repositoryReviewCoverageState(CanonicalRepositoryIdentity(automation.Repository))
-	sentinel := errors.New("injected secondary alias failure")
-	store.loadForTest = func(repository string) (RepositoryState, error) {
-		if repository == primary.Repository {
-			return primary, nil
-		}
-		return RepositoryState{}, sentinel
-	}
-	snapshot, err := store.RepositoryReviewAutomationSnapshot(context.Background(), automation.ID)
-	if err != nil || !snapshot.HistoryFound || snapshot.State.Repository != primary.Repository ||
-		!errors.Is(snapshot.PurgeInventoryError, sentinel) {
-		t.Fatalf("snapshot=%#v err=%v", snapshot, err)
-	}
-}
-
 func TestRepositoryReviewAutomationSnapshotRejectsInventoryPrimaryDrift(t *testing.T) {
 	store := newAutomationTestStore(t)
 	automation := createAutomationForTest(t, store, "rra_snapshot_primary_drift", "snapshot drift")
@@ -251,7 +228,7 @@ func TestRepositoryReviewPurgeMultiLedgerRemovalIsAtomicOnFailure(t *testing.T) 
 		{Repository: first.Repository, Version: first.Version},
 		{Repository: second.Repository, Version: second.Version + 1},
 	})
-	if !errors.Is(err, ErrConflict) {
+	if !errors.Is(err, ErrInvalidAutomation) {
 		t.Fatalf("multi-ledger removal error = %v", err)
 	}
 	for _, state := range []RepositoryState{first, second} {

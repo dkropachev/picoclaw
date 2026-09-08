@@ -294,6 +294,9 @@ Owns: CODE web/frontend/src/app-providers.tsx
 Owns: CODE web/frontend/src/components/app-sidebar.tsx
 The shared sidebar may change another feature's nested navigation entries while
 preserving Event sources and Events placement and active-route behavior.
+Repository-review entries expose only the canonical review, repository,
+profile, and model-probe destinations; retired report/results entries are not
+restored by shared navigation ownership.
 Owns: CODE web/frontend/src/components/development-workspaces/**
 Owns: CODE web/frontend/src/components/events/**
 Owns: CODE web/frontend/src/components/notifications/**

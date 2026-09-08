@@ -18,9 +18,9 @@ func TestRepositoryReviewPurgeEligibility(t *testing.T) {
 	automation := validAutomationForTest("rra_purge_eligibility", "purge")
 	automation.Status = RepositoryReviewAutomationCompleted
 	state := RepositoryState{
-		Version:              7,
-		RawFindings:          make([]RawReviewFinding, 2),
-		DeduplicatedFindings: make([]DeduplicatedReviewFinding, 1),
+		Version:     7,
+		RawFindings: make([]RawReviewFinding, 2),
+		Findings:    make([]Finding, 1),
 		RepositoryFindings: []RepositoryFinding{{
 			Issue: RepositoryFindingIssueAssociation{
 				URL: "https://github.com/owner/repo/issues/1",
@@ -49,9 +49,6 @@ func TestRepositoryReviewPurgeEligibility(t *testing.T) {
 	state.MappingJobs = []RepositoryMappingJob{{State: RepositoryMappingRunning}}
 	state.ValidationJobs = []RepositoryValidationJob{{State: RepositoryValidationRunning}}
 	state.IssueDrafts = []IssueDraft{{State: IssueDraftGenerating}, {State: IssueDraftPublishing}}
-	state.HistoricalDeduplication = HistoricalDeduplicationReplay{
-		Required: true, Status: HistoricalDeduplicationReplaying,
-	}
 	automation.Status = RepositoryReviewAutomationRunning
 	blocked := EvaluateRepositoryReviewPurge(automation, state, true)
 	wantCodes := []RepositoryReviewPurgeBlockerCode{
@@ -60,7 +57,6 @@ func TestRepositoryReviewPurgeEligibility(t *testing.T) {
 		RepositoryReviewPurgeBlockerResolutionCheckActive,
 		RepositoryReviewPurgeBlockerIssueGenerationActive,
 		RepositoryReviewPurgeBlockerPublicationActive,
-		RepositoryReviewPurgeBlockerHistoricalConsolidationActive,
 	}
 	if blocked.CanPurge || blocked.CanRemove || len(blocked.Blockers) != len(wantCodes) {
 		t.Fatalf("blocked purge = %#v", blocked)
@@ -195,198 +191,6 @@ func TestDeleteAutomationAndHistoryRequiresFencesAndLeavesExternalSystemsUntouch
 	}
 	if _, found, getErr := store.Get(ledgerRepository); getErr != nil || found {
 		t.Fatalf("ledger found=%v err=%v", found, getErr)
-	}
-}
-
-//nolint:govet // Independent test assertions intentionally reuse err.
-func TestRepositoryReviewPurgeUsesAuthoritativeLegacyLedgerIdentity(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		repository string
-		ledger     string
-		runID      string
-	}{
-		{
-			name: "original URL fallback", repository: "https://github.com/Owner/Repo.git",
-			ledger: "https://github.com/Owner/Repo.git",
-		},
-		{
-			name: "retained run fallback", repository: "owner/missing",
-			ledger: "legacy/location", runID: "wr_legacy_purge",
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			store := newAutomationTestStore(t)
-			id := "rra_legacy_" + strings.ToLower(strings.ReplaceAll(test.name, " ", "_"))
-			input := validAutomationForTest(id, test.name)
-			input.Repository = test.repository
-			if test.runID != "" {
-				input.RunIDs = []string{test.runID}
-			}
-			automation, err := store.CreateAutomation(context.Background(), input)
-			if err != nil {
-				t.Fatal(err)
-			}
-			state := createPurgeTestLedger(t, store, test.ledger)
-			if test.runID != "" {
-				state.Runs = []ReviewRun{{ID: test.runID}}
-				state.Version++
-				if err := store.save(&state); err != nil {
-					t.Fatal(err)
-				}
-			}
-			eligibility, err := store.DeleteAutomationAndHistory(
-				context.Background(), automation.ID, automation.Version,
-				state.Version, purgeTestFence(state), automation.Repository,
-			)
-			if err != nil || !eligibility.CanRemove {
-				t.Fatalf("delete eligibility=%#v err=%v", eligibility, err)
-			}
-			if _, found, err := store.Get(test.ledger); err != nil || found {
-				t.Fatalf("authoritative ledger found=%v err=%v", found, err)
-			}
-		})
-	}
-}
-
-//nolint:govet // Independent test assertions intentionally reuse err.
-func TestRepositoryReviewPurgeDeletesAllConfiguredIdentityLedgersWithCompositeFence(t *testing.T) {
-	store := newAutomationTestStore(t)
-	input := validAutomationForTest("rra_alias_inventory", "aliases")
-	input.Repository = "https://github.com/Owner/Repo.git"
-	automation, err := store.CreateAutomation(context.Background(), input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	canonical := createPurgeTestLedger(t, store, CanonicalRepositoryIdentity(automation.Repository))
-	legacy := createPurgeTestLedger(t, store, automation.Repository)
-	eligibility, err := store.RepositoryReviewPurgeEligibilityForAutomation(automation)
-	if err != nil || !eligibility.CanRemove ||
-		eligibility.Summary.RepositoryVersion != canonical.Version ||
-		eligibility.Summary.LedgerFence != purgeTestFence(canonical, legacy) {
-		t.Fatalf("alias eligibility=%#v err=%v", eligibility, err)
-	}
-
-	legacy.Version++
-	legacy.UpdatedAt = automationTestNow
-	if err := store.save(&legacy); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DeleteAutomationAndHistory(
-		context.Background(), automation.ID, automation.Version, canonical.Version,
-		eligibility.Summary.LedgerFence, automation.Repository,
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("stale composite fence error = %v", err)
-	}
-	eligibility, err = store.RepositoryReviewPurgeEligibilityForAutomation(automation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DeleteAutomationAndHistory(
-		context.Background(), automation.ID, automation.Version, canonical.Version,
-		eligibility.Summary.LedgerFence, automation.Repository,
-	); err != nil {
-		t.Fatal(err)
-	}
-	for _, repository := range []string{canonical.Repository, legacy.Repository} {
-		if _, found, err := store.Get(repository); err != nil || found {
-			t.Fatalf("alias ledger %q found=%v err=%v", repository, found, err)
-		}
-	}
-}
-
-func TestPurgeAutomationHistoryDeletesAllConfiguredIdentityLedgers(t *testing.T) {
-	store := newAutomationTestStore(t)
-	input := validAutomationForTest("rra_alias_history", "alias history")
-	input.Repository = "https://github.com/Owner/Repo.git"
-	automation, err := store.CreateAutomation(context.Background(), input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	canonical := createPurgeTestLedger(t, store, CanonicalRepositoryIdentity(automation.Repository))
-	legacy := createPurgeTestLedger(t, store, automation.Repository)
-	eligibility, err := store.RepositoryReviewPurgeEligibilityForAutomation(automation)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	updated, applied, err := store.PurgeAutomationHistory(
-		context.Background(), automation.ID, automation.Version, canonical.Version,
-		eligibility.Summary.LedgerFence, automation.Repository,
-	)
-	if err != nil || !applied.CanPurge || !repositoryReviewAutomationHistoryReset(updated) {
-		t.Fatalf("purged automation=%#v eligibility=%#v err=%v", updated, applied, err)
-	}
-	if updated.Version != automation.Version+1 || updated.Repository != automation.Repository {
-		t.Fatalf("retained configuration=%#v", updated)
-	}
-	for _, repository := range []string{canonical.Repository, legacy.Repository} {
-		if _, found, err := store.Get(repository); err != nil || found {
-			t.Fatalf("alias ledger %q found=%v err=%v", repository, found, err)
-		}
-	}
-	if _, found, err := store.ResolveRepositoryState(updated.Repository, updated.RunIDs); err != nil ||
-		found {
-		t.Fatalf("reset automation resolved deleted history found=%v err=%v", found, err)
-	}
-}
-
-//nolint:govet // Independent test assertions intentionally reuse err.
-func TestRepositoryReviewPurgeRecoversPartialMultiLedgerDeletion(t *testing.T) {
-	store := newAutomationTestStore(t)
-	input := validAutomationForTest("rra_alias_partial_recovery", "alias recovery")
-	input.Repository = "https://github.com/Owner/Repo.git"
-	automation, err := store.CreateAutomation(context.Background(), input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	canonical := createPurgeTestLedger(t, store, CanonicalRepositoryIdentity(automation.Repository))
-	legacy := createPurgeTestLedger(t, store, automation.Repository)
-	targets := []repositoryReviewPurgeLedgerTarget{
-		{Repository: canonical.Repository, Version: canonical.Version},
-		{Repository: legacy.Repository, Version: legacy.Version},
-	}
-	sort.Slice(
-		targets,
-		func(i, j int) bool { return targets[i].Repository < targets[j].Repository },
-	)
-	intent := repositoryReviewPurgeIntent{
-		SchemaVersion:             repositoryReviewPurgeIntentSchemaVersion,
-		Mode:                      repositoryReviewPurgeReset,
-		Phase:                     repositoryReviewPurgeLedgerCommitting,
-		AutomationID:              automation.ID,
-		ConfiguredRepository:      automation.Repository,
-		Repository:                canonical.Repository,
-		LedgerTargets:             targets,
-		ExpectedAutomationVersion: automation.Version,
-		ExpectedRepositoryVersion: canonical.Version,
-		CreatedAt:                 automationTestNow,
-	}
-	reset := cloneAutomation(automation)
-	resetRepositoryReviewAutomationHistory(&reset)
-	reset.Version++
-	reset.UpdatedAt = automationTestNow
-	if err := store.saveAutomation(reset); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.savePurgeIntent(intent); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.removeRepositoryReviewLedger(targets[0].Repository); err != nil {
-		t.Fatal(err)
-	}
-
-	if count, err := store.ReconcilePurgeIntents(context.Background()); err != nil || count != 1 {
-		t.Fatalf("reconcile count=%d err=%v", count, err)
-	}
-	for _, target := range targets {
-		if _, found, err := store.Get(target.Repository); err != nil || found {
-			t.Fatalf("recovered ledger %q found=%v err=%v", target.Repository, found, err)
-		}
-	}
-	loaded, found, err := store.GetAutomation(context.Background(), automation.ID)
-	if err != nil || !found || !repositoryReviewAutomationHistoryReset(loaded) {
-		t.Fatalf("recovered automation=%#v found=%v err=%v", loaded, found, err)
 	}
 }
 
@@ -565,13 +369,7 @@ func TestRepositoryReviewPurgeIntentRejectsUnsafeOrUnboundState(t *testing.T) {
 		assigned := createPurgeTestLedger(t, store, automation.Repository)
 		unrelated := createPurgeTestLedger(t, store, "other/repository")
 		intent := purgeTestIntent(automation, unrelated)
-		if err := store.savePurgeIntent(intent); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.ReconcilePurgeIntents(context.Background()); !errors.Is(
-			err,
-			ErrConflict,
-		) {
+		if err := store.savePurgeIntent(intent); !errors.Is(err, ErrInvalidAutomation) {
 			t.Fatalf("unbound intent error = %v", err)
 		}
 		if retained, err := store.loadIgnoringPurge(assigned.Repository); err != nil ||
@@ -583,6 +381,35 @@ func TestRepositoryReviewPurgeIntentRejectsUnsafeOrUnboundState(t *testing.T) {
 			t.Fatalf("unrelated ledger changed=%#v err=%v", retained, err)
 		}
 	})
+}
+
+func TestRepositoryReviewPurgeReconcileRemovesRetiredConfiguredIdentityFence(t *testing.T) {
+	store := newAutomationTestStore(t)
+	input := validAutomationForTest("rra_retired_identity_fence", "Retired identity fence")
+	input.Repository = "https://github.com/Owner/Retired-Fence.git"
+	automation, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := createPurgeTestLedger(t, store, CanonicalRepositoryIdentity(automation.Repository))
+	intent := purgeTestIntent(automation, state)
+	if saveErr := store.savePurgeIntent(intent); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	encoded, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retiredFence := store.purgeRepositoryFencePath(automation.Repository)
+	if err := os.WriteFile(retiredFence, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if reconciled, err := store.ReconcilePurgeIntents(t.Context()); err != nil || reconciled != 1 {
+		t.Fatalf("reconciled=%d err=%v", reconciled, err)
+	}
+	if _, err := os.Stat(retiredFence); !os.IsNotExist(err) {
+		t.Fatalf("retired configured-identity fence remains: %v", err)
+	}
 }
 
 func TestRepositoryReviewPurgeBlocksRunningEffectsWithoutMutation(t *testing.T) {
@@ -725,147 +552,17 @@ func TestRepositoryReviewPurgeIntentRecoveryIsIdempotent(t *testing.T) {
 	}
 }
 
-//nolint:govet // Independent test assertions intentionally reuse err.
-func TestRepositoryReviewPurgeRemovesMigratedLegacyHistoryArchives(t *testing.T) {
-	seed := newAutomationTestStore(t)
-	profile, err := seed.CreateProfile(
-		context.Background(),
-		validProfileForTest("rrpf_legacy_purge_archive", "Legacy purge archive"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	automation := createAutomationForTest(t, seed, "rra_legacy_purge_archive", "legacy archive")
-	state := createPurgeTestLedger(t, seed, automation.Repository)
-
-	workspace := t.TempDir()
-	store := NewStore(workspace)
-	if err := os.MkdirAll(store.root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	writeLegacy := func(path string, value any) {
-		t.Helper()
-		data, err := json.Marshal(value)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	writeLegacy(store.profilePath(profile.ID), profile)
-	writeLegacy(store.automationPath(automation.ID), automation)
-	writeLegacy(store.path(state.Repository), state)
-	writeLegacy(
-		strings.TrimSuffix(store.path(state.Repository), ".json")+".summary.json",
-		Summarize(state),
-	)
-
-	loadedAutomation, found, err := store.GetAutomation(context.Background(), automation.ID)
-	if err != nil || !found {
-		t.Fatalf("migrated automation=%#v found=%v err=%v", loadedAutomation, found, err)
-	}
-	loadedState, found, err := store.Get(state.Repository)
-	if err != nil || !found {
-		t.Fatalf("migrated state=%#v found=%v err=%v", loadedState, found, err)
-	}
-	archiveRoot := filepath.Join(store.root, "legacy-json", repositoryReviewLegacyArchiveLabel)
-	profileArchive := filepath.Join(archiveRoot, profileFilename(profile.ID))
-	for _, path := range []string{
-		profileArchive,
-		filepath.Join(archiveRoot, automationFilename(automation.ID)),
-		filepath.Join(archiveRoot, repositoryReviewLegacyStateFilename(state.Repository)),
-		filepath.Join(
-			archiveRoot,
-			strings.TrimSuffix(repositoryReviewLegacyStateFilename(state.Repository), ".json")+".summary.json",
-		),
-	} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("legacy archive %q missing before purge: %v", path, err)
-		}
-	}
-	eligibility, err := store.RepositoryReviewPurgeEligibilityForAutomation(loadedAutomation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := store.PurgeAutomationHistory(
-		context.Background(), loadedAutomation.ID, loadedAutomation.Version, loadedState.Version,
-		eligibility.Summary.LedgerFence, loadedAutomation.Repository,
-	); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{
-		automationFilename(automation.ID),
-		repositoryReviewLegacyStateFilename(state.Repository),
-		strings.TrimSuffix(repositoryReviewLegacyStateFilename(state.Repository), ".json") + ".summary.json",
-	} {
-		if _, err := os.Stat(filepath.Join(archiveRoot, name)); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("purged legacy archive %q remains: %v", name, err)
-		}
-	}
-	if _, err := os.Stat(profileArchive); err != nil {
-		t.Fatalf("profile archive was removed: %v", err)
-	}
-}
-
-//nolint:govet // Independent test assertions intentionally reuse err.
-func TestRepositoryReviewRemovalRetainsSkippedLegacyArchiveOutsideInventory(t *testing.T) {
-	seed := newAutomationTestStore(t)
-	automation := createAutomationForTest(t, seed, "rra_skipped_legacy_archive", "skipped archive")
-	workspace := t.TempDir()
-	store := NewStore(workspace)
-	if err := os.MkdirAll(store.root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	automationData, err := json.Marshal(automation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(store.automationPath(automation.ID), automationData, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	stateName := repositoryReviewLegacyStateFilename(automation.Repository)
-	if err := os.WriteFile(filepath.Join(store.root, stateName), []byte(`{`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	loaded, found, err := store.GetAutomation(context.Background(), automation.ID)
-	if err != nil || !found {
-		t.Fatalf("migrated automation=%#v found=%v err=%v", loaded, found, err)
-	}
-	eligibility, err := store.RepositoryReviewPurgeEligibilityForAutomation(loaded)
-	if err != nil || eligibility.HistoryFound || !eligibility.CanRemove {
-		t.Fatalf("empty inventory eligibility=%#v err=%v", eligibility, err)
-	}
-	if _, err := store.DeleteAutomationAndHistory(
-		context.Background(), loaded.ID, loaded.Version, 0,
-		eligibility.Summary.LedgerFence, loaded.Repository,
-	); err != nil {
-		t.Fatal(err)
-	}
-	archiveRoot := filepath.Join(store.root, "legacy-json", repositoryReviewLegacyArchiveLabel)
-	if _, err := os.Stat(filepath.Join(archiveRoot, stateName)); err != nil {
-		t.Fatalf("skipped uncounted archive was deleted: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(archiveRoot, automationFilename(automation.ID))); !errors.Is(
-		err,
-		os.ErrNotExist,
-	) {
-		t.Fatalf("imported automation archive remains: %v", err)
-	}
-}
-
-//nolint:govet // Independent test assertions intentionally reuse err.
 func TestRepositoryReviewPurgeRejectsArchiveDriftBeforePublishingIntent(t *testing.T) {
 	store := newAutomationTestStore(t)
 	automation := createAutomationForTest(t, store, "rra_archive_drift", "archive drift")
 	name := automationFilename(automation.ID)
 	original := []byte(`{"original":true}`)
 	digest := sha256.Sum256(original)
-	database, err := store.openDatabase(t.Context())
-	if err != nil {
-		t.Fatal(err)
+	database, openErr := store.openDatabase(t.Context())
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
-	if _, err := database.ExecContext(t.Context(), `
+	if _, execErr := database.ExecContext(t.Context(), `
 		INSERT INTO storage_imports (
 			component, source_id, source_relative, source_digest, source_size,
 			source_limit, source_mode, imported_count, skipped_count,
@@ -878,19 +575,21 @@ func TestRepositoryReviewPurgeRejectsArchiveDriftBeforePublishingIntent(t *testi
 		len(original),
 		len(original),
 		0o600,
-	); err != nil {
+	); execErr != nil {
 		_ = database.Close()
-		t.Fatal(err)
+		t.Fatal(execErr)
 	}
-	if err := database.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := database.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	archiveRoot := filepath.Join(store.root, "legacy-json", repositoryReviewLegacyArchiveLabel)
-	if err := os.MkdirAll(archiveRoot, 0o700); err != nil {
-		t.Fatal(err)
+	if mkdirErr := os.MkdirAll(archiveRoot, 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
-	if err := os.WriteFile(filepath.Join(archiveRoot, name), []byte(`{"drifted":true}`), 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(
+		filepath.Join(archiveRoot, name), []byte(`{"drifted":true}`), 0o600,
+	); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	eligibility, err := store.RepositoryReviewPurgeEligibilityForAutomation(automation)
 	if err != nil {

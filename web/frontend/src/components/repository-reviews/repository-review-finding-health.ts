@@ -3,7 +3,6 @@ import { useQuery } from "@tanstack/react-query"
 import {
   type RepositoryReviewAutomation,
   type RepositoryReviewFindingHealth,
-  type RepositoryReviewHistoricalConsolidation,
   getRepositoryReviewFindingHealth,
 } from "@/api/repository-reviews"
 
@@ -46,23 +45,7 @@ export function repositoryReviewFindingHealthNeedsPolling(
     health.run_findings.pending > 0 ||
     health.run_findings.processing > 0 ||
     health.findings_processing.pending > 0 ||
-    health.findings_processing.processing > 0 ||
-    repositoryReviewHistoricalConsolidationIsActive(
-      health.historical_consolidation,
-    )
-  )
-}
-
-export function repositoryReviewHistoricalConsolidationIsActive(
-  consolidation?:
-    | Pick<RepositoryReviewHistoricalConsolidation, "required" | "status">
-    | { required: boolean; status?: string },
-): boolean {
-  return Boolean(
-    consolidation?.required &&
-    new Set(["pending", "replaying", "merging"]).has(
-      consolidation.status ?? "",
-    ),
+    health.findings_processing.processing > 0
   )
 }
 

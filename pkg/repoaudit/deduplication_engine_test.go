@@ -63,9 +63,8 @@ func TestDeduplicationAdmissionBucketIgnoresLineAndSeparatesIdentity(t *testing.
 	if err != nil || equivalent != bucket {
 		t.Fatalf("equivalent symbol bucket = %q, %v; want %q", equivalent, err, bucket)
 	}
-	missing, err := DeduplicationAdmissionBucket("rrc_campaign", base, "")
-	if err != nil || missing == "" {
-		t.Fatalf("missing legacy symbol bucket = %q, %v", missing, err)
+	if _, err := DeduplicationAdmissionBucket("rrc_campaign", base, ""); err == nil {
+		t.Fatal("missing symbol was accepted")
 	}
 	variants := []struct {
 		campaign string

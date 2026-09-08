@@ -68,7 +68,7 @@ const DeduplicationJudgeInstructions = `Using only the original diagnosis and su
 
 // NormalizeDeduplicationSymbol produces the symbol component of an admission
 // bucket. Location lines are intentionally absent from the bucket. The empty
-// string is a valid result for legacy findings which did not persist a symbol.
+// string is valid for diagnoses that have no symbol.
 func NormalizeDeduplicationSymbol(symbol string) string {
 	var normalized strings.Builder
 	normalized.Grow(len(symbol))
@@ -103,15 +103,16 @@ func DeduplicationAdmissionBucket(campaignID string, file FileRef, symbol string
 	campaignID = strings.TrimSpace(campaignID)
 	pathValue := strings.TrimSpace(file.Path)
 	blobSHA := strings.ToLower(strings.TrimSpace(file.BlobSHA))
-	if campaignID == "" || pathValue == "" || blobSHA == "" {
-		return "", errors.New("campaign, path, and blob SHA are required for deduplication")
+	normalizedSymbol := NormalizeDeduplicationSymbol(symbol)
+	if campaignID == "" || pathValue == "" || blobSHA == "" || normalizedSymbol == "" {
+		return "", errors.New("campaign, path, blob SHA, and symbol are required for deduplication")
 	}
 	if !utf8.ValidString(campaignID) || !utf8.ValidString(pathValue) ||
 		strings.ContainsRune(campaignID, 0) || strings.ContainsRune(pathValue, 0) {
 		return "", errors.New("invalid deduplication admission identity")
 	}
 	return stableID(
-		"rdb_", campaignID, pathValue, blobSHA, NormalizeDeduplicationSymbol(symbol),
+		"rdb_", campaignID, pathValue, blobSHA, normalizedSymbol,
 	), nil
 }
 

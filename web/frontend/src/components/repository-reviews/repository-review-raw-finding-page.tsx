@@ -4,7 +4,6 @@ import {
   IconRefresh,
 } from "@tabler/icons-react"
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { useEffect } from "react"
 import { toast } from "sonner"
 
 import {
@@ -20,13 +19,11 @@ export function RepositoryReviewRawFindingPage({
   automationID,
   sourceID,
   onBack,
-  onCanonicalSource,
   onOpenFinding,
 }: {
   automationID: string
   sourceID: string
   onBack: () => void
-  onCanonicalSource: (sourceID: string) => void
   onOpenFinding: (findingID: string) => void
 }) {
   const query = useQuery({
@@ -35,33 +32,14 @@ export function RepositoryReviewRawFindingPage({
       getRepositoryReviewRawSource(automationID, sourceID, signal),
     retry: false,
     refetchInterval: (current) => {
-      const detail = current.state.data
-      const source = detail?.source
-      const isHistoricalSource = Boolean(
-        source?.assignment_id === "historical-replay" ||
-        (source?.legacy_finding_id && !source.assignment_id),
-      )
-      if (
-        isHistoricalSource &&
-        detail?.historical_deduplication?.status === "failed"
-      ) {
-        return false
-      }
-      const state = source?.deduplication_state
+      const state = current.state.data?.source.deduplication_state
       return state === "pending" || state === "running" ? 2_000 : false
     },
   })
   const detail = query.data
   const source = detail?.source
   const parentFindingID = source?.deduplicated_finding_id || detail?.finding?.id
-  const canRetrySource = Boolean(
-    source?.failure?.retryable &&
-    source.assignment_id !== "historical-replay" &&
-    !(source.legacy_finding_id && !source.assignment_id),
-  )
-  useEffect(() => {
-    if (source?.id && source.id !== sourceID) onCanonicalSource(source.id)
-  }, [onCanonicalSource, source?.id, sourceID])
+  const canRetrySource = Boolean(source?.failure?.retryable)
   const retryMutation = useMutation({
     mutationFn: () =>
       retryRepositoryReviewRawSource(automationID, source?.id || sourceID),

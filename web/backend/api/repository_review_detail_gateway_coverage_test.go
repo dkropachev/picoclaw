@@ -9,146 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
-	"github.com/sipeed/picoclaw/pkg/workflows"
 )
-
-func TestRepositoryReviewAggregateFindingDetailProjectsOccurrencesAndDuplicates(t *testing.T) {
-	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	state := seedRepositoryReviewGenerationFindings(t, workspace, 4)
-	store := repoaudit.NewStore(workspace)
-	var first, second repoaudit.RepositoryFinding
-	for index, occurrence := range state.Findings {
-		var pending repoaudit.RepositoryMappingJob
-		for _, job := range state.MappingJobs {
-			if job.ReviewFindingID == occurrence.ID {
-				pending = job
-				break
-			}
-		}
-		claimedState, job, _, claimed, err := store.ClaimMappingJob(
-			state.Repository, pending.ID, repoaudit.RepositoryMappingModelSnapshot{},
-		)
-		if err != nil || !claimed {
-			t.Fatalf("claim mapping %d: claimed=%v err=%v", index, claimed, err)
-		}
-		state = claimedState
-		completion := repoaudit.RepositoryMappingCompletion{
-			JobID: job.ID, DefaultBranchVerified: true,
-		}
-		switch index {
-		case 0, 1:
-			completion.CreateMatchState = repoaudit.RepositoryMatchNew
-		case 2:
-			completion.RepositoryFindingID = first.ID
-		case 3:
-			completion.CreateMatchState = repoaudit.RepositoryMatchProvisional
-			completion.PossibleDuplicates = []repoaudit.RepositoryFindingPossibleDuplicate{
-				{CandidateID: first.ID, Relation: "uncertain", Confidence: .7},
-				{CandidateID: second.ID, Relation: "related", Confidence: .6},
-			}
-		}
-		var aggregate repoaudit.RepositoryFinding
-		state, aggregate, err = store.CompleteMappingJob(state.Repository, completion)
-		if err != nil {
-			t.Fatalf("complete mapping %d: %v", index, err)
-		}
-		if index == 0 {
-			first = aggregate
-		} else if index == 1 {
-			second = aggregate
-		}
-	}
-	laterFile := repoaudit.FileRef{
-		Path: "pkg/later.go", BlobSHA: strings.Repeat("f", 40), SizeBytes: 100,
-		Category: "code", Mode: "100644",
-	}
-	plan, err := store.Plan(
-		t.Context(), state.Repository, strings.Repeat("9", 40), "inventory-later",
-		[]repoaudit.FileRef{laterFile}, true,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	laterResult, err := store.Record(t.Context(), repoaudit.RecordRequest{
-		Plan: plan, RunID: "aggregate-later",
-		Observations: []repoaudit.Observation{{
-			Model: "review-model", ScopeFiles: []repoaudit.FileRef{laterFile},
-			Findings: []repoaudit.FindingCandidate{{
-				Severity: "high", Title: "Later occurrence", File: laterFile.Path,
-				Evidence: "The immutable source shows the failure.", Impact: "Data is lost.",
-				Validation: repoaudit.Validation{Status: "confirmed", Summary: "Confirmed."},
-			}},
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	laterID := laterResult.AcceptedFindingIDs[0]
-	laterJob := laterResult.State.MappingJobs[len(laterResult.State.MappingJobs)-1]
-	_, claimedLater, _, claimed, err := store.ClaimMappingJob(
-		state.Repository, laterJob.ID, repoaudit.RepositoryMappingModelSnapshot{},
-	)
-	if err != nil || !claimed {
-		t.Fatalf("claim later occurrence: claimed=%v err=%v", claimed, err)
-	}
-	state, _, err = store.CompleteMappingJob(state.Repository, repoaudit.RepositoryMappingCompletion{
-		JobID: claimedLater.ID, RepositoryFindingID: first.ID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if laterID == "" {
-		t.Fatal("later occurrence was not recorded")
-	}
-	automation := seedRepositoryReviewDetailAutomation(
-		t, handler, state.Repository, state.Runs[0].ID,
-	)
-	get := func(id string) *httptest.ResponseRecorder {
-		t.Helper()
-		response := httptest.NewRecorder()
-		mux.ServeHTTP(response, httptest.NewRequest(
-			http.MethodGet,
-			"/api/repository-reviews/automations/"+automation.ID+"/repository-findings/"+id,
-			nil,
-		))
-		return response
-	}
-
-	joined := get(first.ID)
-	if joined.Code != http.StatusOK ||
-		!strings.Contains(joined.Body.String(), `"can_generate":true`) ||
-		strings.Count(joined.Body.String(), `"repository_finding_id":"`+first.ID+`"`) < 2 {
-		t.Fatalf("joined aggregate detail=%d %s", joined.Code, joined.Body.String())
-	}
-	provisional := state.RepositoryFindings[len(state.RepositoryFindings)-1]
-	preview := get(provisional.ID)
-	if preview.Code != http.StatusOK ||
-		!strings.Contains(preview.Body.String(), `"can_generate":false`) ||
-		!strings.Contains(preview.Body.String(), first.ID) ||
-		!strings.Contains(preview.Body.String(), second.ID) {
-		t.Fatalf("provisional aggregate detail=%d %s", preview.Code, preview.Body.String())
-	}
-	missing := get("rrf_missing")
-	if missing.Code != http.StatusNotFound {
-		t.Fatalf("missing aggregate detail=%d %s", missing.Code, missing.Body.String())
-	}
-	missingAutomation := httptest.NewRecorder()
-	mux.ServeHTTP(missingAutomation, httptest.NewRequest(
-		http.MethodGet,
-		"/api/repository-reviews/automations/rra_missing/findings/rrf_missing",
-		nil,
-	))
-	if missingAutomation.Code != http.StatusNotFound {
-		t.Fatalf("missing automation detail=%d %s", missingAutomation.Code, missingAutomation.Body.String())
-	}
-}
 
 func TestRepositoryReviewDirectPostBoundaryOutcomes(t *testing.T) {
 	t.Run("request validation", func(t *testing.T) {
@@ -385,64 +251,6 @@ func TestRepositoryReviewAdvertisedDefaultBranchAndGitOutputBoundaries(t *testin
 	}
 }
 
-func TestRepositoryReviewRemainingDetailProjectionBranches(t *testing.T) {
-	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	state := seedRepositoryReviewGenerationFindings(t, workspace, 3)
-	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
-	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
-	page := httptest.NewRecorder()
-	mux.ServeHTTP(page, httptest.NewRequest(
-		http.MethodGet,
-		"/api/repository-reviews/automations/"+automation.ID+"/findings?scope=all&offset=50&limit=2",
-		nil,
-	))
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `"repository_finding_offset":2`) {
-		t.Fatalf("bounded aggregate page=%d %s", page.Code, page.Body.String())
-	}
-	firstPage := httptest.NewRecorder()
-	mux.ServeHTTP(firstPage, httptest.NewRequest(
-		http.MethodGet,
-		"/api/repository-reviews/automations/"+automation.ID+"/findings?scope=all&offset=0&limit=1",
-		nil,
-	))
-	if firstPage.Code != http.StatusOK ||
-		!strings.Contains(firstPage.Body.String(), `"next_repository_finding_offset":1`) {
-		t.Fatalf("next aggregate page=%d %s", firstPage.Code, firstPage.Body.String())
-	}
-
-	orphan := state.Findings[0]
-	orphan.RepositoryFindingID = "rrf_missing"
-	capabilities := repositoryReviewFindingCapabilities(state, orphan)
-	if capabilities.CanGenerate {
-		t.Fatalf("orphan aggregate capabilities=%#v", capabilities)
-	}
-	projection := repositoryReviewFindingDetail(
-		repositoryReviewAutomationLedger{Automation: automation, State: state, Found: true}, orphan,
-	)
-	if _, found := projection["repository_finding"]; found {
-		t.Fatalf("orphan detail unexpectedly projected aggregate: %#v", projection)
-	}
-	if _, found := repositoryReviewAggregateIssueByFinding(state, orphan); found {
-		t.Fatal("orphan aggregate issue was projected")
-	}
-
-	aggregate := state.RepositoryFindings[0]
-	aggregate.Issue.State = repoaudit.RepositoryFindingIssueOpen
-	state.RepositoryFindings[0] = aggregate
-	associated := state.Findings[0]
-	associated.RepositoryFindingID = aggregate.ID
-	if _, found := repositoryReviewAggregateIssueByFinding(state, associated); found {
-		t.Fatal("aggregate issue without an occurrence draft was projected")
-	}
-	state.RepositoryFindings[0].ReviewFindingIDs = append(
-		[]string{"rf_missing_occurrence"}, state.RepositoryFindings[0].ReviewFindingIDs...,
-	)
-	if _, found := repositoryReviewAggregateIssueByFinding(state, associated); found {
-		t.Fatal("missing occurrence issue was projected")
-	}
-}
-
 func TestRepositoryReviewCurrentIssueProfileErrorAndFallbackBranches(t *testing.T) {
 	handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
@@ -566,35 +374,6 @@ func TestRepositoryReviewCurrentIssueProfileRejectsUnknownWriterAlias(t *testing
 	}
 }
 
-func TestRepositoryReviewAggregateIssueFallbackProjection(t *testing.T) {
-	issue := repoaudit.IssueDraft{
-		ID: "rrid_linked", Origin: repoaudit.IssueDraftOriginLinked,
-		State: repoaudit.IssueDraftPosted, Canonical: true,
-	}
-	older := repoaudit.Finding{ID: "rf_old", Status: repoaudit.FindingOpen, IssueDraftID: issue.ID}
-	current := repoaudit.Finding{
-		ID: "rf_current", Status: repoaudit.FindingOpen, RepositoryFindingID: "rrf_aggregate",
-	}
-	state := repoaudit.RepositoryState{
-		Repository: "owner/repo", Findings: []repoaudit.Finding{older, current},
-		IssueDrafts: []repoaudit.IssueDraft{issue},
-		RepositoryFindings: []repoaudit.RepositoryFinding{{
-			ID: "rrf_aggregate", MatchState: repoaudit.RepositoryMatchKnown,
-			Lifecycle:        repoaudit.RepositoryFindingOpen,
-			ReviewFindingIDs: []string{"rf_missing", older.ID, current.ID},
-			Issue:            repoaudit.RepositoryFindingIssueAssociation{State: repoaudit.RepositoryFindingIssueOpen},
-		}},
-	}
-	projected := repositoryReviewFindingDetail(repositoryReviewAutomationLedger{State: state}, current)
-	if projectedIssue, ok := projected["issue"].(repoaudit.IssueDraft); !ok || projectedIssue.ID != issue.ID {
-		t.Fatalf("aggregate issue projection=%#v", projected)
-	}
-	capabilities := repositoryReviewFindingCapabilities(state, current)
-	if capabilities.CanGenerate || capabilities.CanUnlinkIssue {
-		t.Fatalf("aggregate issue capabilities=%#v", capabilities)
-	}
-}
-
 func TestRepositoryReviewControllerStartReconcileFailureAndCanceledReconcile(t *testing.T) {
 	handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
@@ -679,80 +458,6 @@ func TestRepositoryReviewControllerAdmissionUsesAdvertisedDefaultResolver(t *tes
 				t.Fatal("admission unexpectedly succeeded")
 			}
 		})
-	}
-}
-
-func TestRepositoryReviewControllerRestoresLegacyRememberedCommitForAdmission(t *testing.T) {
-	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	store, err := handler.repositoryReviewStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	automation := testRepositoryReviewAutomation()
-	automation.Repository = newRepositoryReviewDefaultBranchGitFixture(t)
-	automation.Ref = "main"
-	automation, err = store.CreateAutomation(t.Context(), automation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	automation.Ref = "HEAD"
-	automation.ResolvedCommitSHA = strings.Repeat("f", 40)
-	automation, err = store.RewriteAutomationForMigration(t.Context(), automation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	controller := newRepositoryReviewController(handler)
-	t.Cleanup(controller.Stop)
-	controller.resolveCommit = func(
-		_ context.Context, _ *config.Config,
-		candidate repoaudit.RepositoryReviewAutomation, _ string,
-	) (string, error) {
-		if candidate.ResolvedCommitSHA != strings.Repeat("f", 40) {
-			t.Fatalf("remembered commit was not restored: %#v", candidate)
-		}
-		return "", errors.New("stop after remembered commit restoration")
-	}
-	if _, err := controller.startAutomationAtCommit(
-		t.Context(), automation.ID, automation.Version, false, "start", "",
-	); err == nil {
-		t.Fatal("unreachable remembered commit unexpectedly admitted")
-	}
-}
-
-func TestRepositoryReviewFinishSnapshotsUnmappedCampaign(t *testing.T) {
-	handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
-	t.Cleanup(handler.Shutdown)
-	state := seedRepositoryReviewAPIState(t, workspace)
-	store := repoaudit.NewStore(workspace)
-	cfg, err := config.LoadConfig(handler.configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	automation := testRepositoryReviewAutomation()
-	automation.Repository = state.Repository
-	automation.Status = repoaudit.RepositoryReviewAutomationRunning
-	automation.ActiveRunID = "run-finish-snapshot"
-	automation.RunIDs = append([]string{state.Runs[0].ID}, automation.ActiveRunID)
-	automation.StartedAt = state.Findings[0].CreatedAt.Add(-time.Minute)
-	automation, err = store.CreateAutomation(t.Context(), automation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	controller := newRepositoryReviewController(handler)
-	controller.active[automation.ID] = &repositoryReviewActiveRun{
-		runID: automation.ActiveRunID, store: store, config: cfg,
-		reservations: make(map[int]repositoryReviewTaskReservation), guardMu: &sync.Mutex{},
-	}
-	controller.finishAutomationRun(
-		automation.ID, automation.ActiveRunID,
-		&workflows.RunResult{Status: workflows.RunStatusFailed}, errors.New("run failed"), false,
-		nil,
-	)
-	updated, found, err := store.Get(state.Repository)
-	if err != nil || !found || len(updated.MappingJobs) == 0 ||
-		updated.MappingJobs[0].ModelSnapshot.Model == "" {
-		t.Fatalf("snapshotted mapping state=%#v found=%v err=%v", updated.MappingJobs, found, err)
 	}
 }
 

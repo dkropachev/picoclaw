@@ -2,322 +2,13 @@ package repoaudit
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
-	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
-
-func TestRecordPersistsLifecycleProvenanceAndMappingJobAtomically(t *testing.T) {
-	store := NewStore(t.TempDir())
-	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
-	store.now = func() time.Time { return now }
-	state, finding := recordLifecycleFinding(
-		t, store, strings.Repeat("a", 40), strings.Repeat("b", 40), "run-one",
-		"main", "main", true, "first defect",
-	)
-	if finding.MatchHints.Component != "scheduler" || finding.FixEffort.Quick.Class != "small" ||
-		finding.TargetBranch != "main" || finding.AdvertisedDefaultBranch != "main" ||
-		!finding.TargetIsDefault || len(state.MappingJobs) != 1 || len(state.RawFindings) != 1 ||
-		len(state.DeduplicatedFindings) != 1 || len(state.DeduplicationJobs) != 1 ||
-		!strings.HasPrefix(state.RawFindings[0].ID, "rrw_") ||
-		!strings.HasPrefix(state.DeduplicatedFindings[0].ID, "rdf_") ||
-		state.MappingJobs[0].ReviewFindingID != state.DeduplicatedFindings[0].ID ||
-		state.RawFindings[0].DeduplicatedFindingID != state.DeduplicatedFindings[0].ID {
-		t.Fatalf("recorded lifecycle state = %#v / %#v", finding, state.MappingJobs)
-	}
-	job := state.MappingJobs[0]
-	if job.ID != mappingJobID(finding.ID) || job.ReviewFindingID != finding.ID ||
-		job.State != RepositoryMappingPending || !job.CreatedAt.Equal(now) {
-		t.Fatalf("mapping job = %#v", job)
-	}
-	if len(state.Runs) != 1 || state.Runs[0].TargetBranch != "main" ||
-		!state.Runs[0].TargetIsDefault {
-		t.Fatalf("run provenance = %#v", state.Runs)
-	}
-}
-
-func TestSchemaOneListMigrationAndExplicitJobReconciliation(t *testing.T) {
-	t.Skip("post-open JSON rewrite was replaced by first-open transactional migration")
-	workspace := t.TempDir()
-	store := NewStore(workspace)
-	state, _ := recordLifecycleFinding(
-		t, store, strings.Repeat("a", 40), strings.Repeat("b", 40), "legacy-run",
-		"", "", false, "legacy defect",
-	)
-	state.SchemaVersion = 1
-	state.RawFindings = nil
-	state.DeduplicatedFindings = nil
-	state.DeduplicationJobs = nil
-	state.NextDeduplicationOrdinal = 0
-	state.FindingsProcessing = FindingsProcessingCounters{}
-	state.RepositoryFindings = nil
-	state.MappingJobs = nil
-	state.ValidationJobs = nil
-	data, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if writeErr := os.WriteFile(store.path(state.Repository), data, 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	legacySummary := Summarize(state)
-	legacySummary.SchemaVersion = 1
-	summaryData, _ := json.Marshal(legacySummary)
-	summaryPath := strings.TrimSuffix(store.path(state.Repository), ".json") + ".summary.json"
-	if writeErr := os.WriteFile(summaryPath, summaryData, 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
-	summaries, err := store.ListSummaries()
-	if err != nil || len(summaries) != 1 || summaries[0].SchemaVersion != SchemaVersion {
-		t.Fatalf("summaries = %#v, err=%v", summaries, err)
-	}
-	migrated, found, err := store.Get(state.Repository)
-	if err != nil || !found || migrated.SchemaVersion != SchemaVersion ||
-		migrated.RepositoryFindings == nil || migrated.MappingJobs == nil || migrated.ValidationJobs == nil {
-		t.Fatalf("migrated = %#v, found=%v err=%v", migrated, found, err)
-	}
-	if len(migrated.MappingJobs) != 0 {
-		t.Fatalf("ordinary migration unexpectedly reconciled jobs: %#v", migrated.MappingJobs)
-	}
-	reconciled, err := store.ReconcileJobs(context.Background())
-	if err != nil || reconciled.MappingJobsCreated != 0 {
-		t.Fatalf("reconcile = %#v, err=%v", reconciled, err)
-	}
-	after, _, _ := store.Get(state.Repository)
-	if len(after.MappingJobs) != 0 || !after.HistoricalDeduplication.Required {
-		t.Fatalf(
-			"legacy mappings bypassed replay: jobs=%#v replay=%#v",
-			after.MappingJobs,
-			after.HistoricalDeduplication,
-		)
-	}
-
-	persisted, err := os.ReadFile(store.path(state.Repository))
-	if err != nil || !strings.Contains(string(persisted), fmt.Sprintf(`"schema_version":%d`, SchemaVersion)) ||
-		!strings.Contains(string(persisted), `"mapping_jobs"`) {
-		t.Fatalf("persisted migration = %s, err=%v", persisted, err)
-	}
-}
-
-func TestRawFindingIDMigrationRewritesEveryDurableReference(t *testing.T) {
-	for _, oldID := range []string{"rrf_native", "rrl_compatibility"} {
-		t.Run(oldID, func(t *testing.T) {
-			state := RepositoryState{
-				RawFindings:       []RawReviewFinding{{ID: oldID}},
-				DeduplicationJobs: []DeduplicationJob{{RawFindingID: oldID}},
-				DeduplicatedFindings: []DeduplicatedReviewFinding{{
-					RawSourceIDs: []string{oldID},
-					History:      []DeduplicatedFindingHistoryEntry{{RawFindingID: oldID}},
-				}},
-				Findings: []Finding{{RawFindingIDs: []string{oldID}}},
-				Runs:     []ReviewRun{{FindingIDs: []string{oldID}}},
-				ActiveReviewRun: &RepositoryReviewActiveRun{
-					FindingIDs: []string{oldID},
-				},
-			}
-			migrated, err := migrateRepositoryReviewRawFindingIDs(&state)
-			want := "rrw_" + oldID[len("rrf_"):]
-			if err != nil || !migrated || state.RawFindings[0].ID != want ||
-				state.DeduplicationJobs[0].RawFindingID != want ||
-				state.DeduplicatedFindings[0].RawSourceIDs[0] != want ||
-				state.DeduplicatedFindings[0].History[0].RawFindingID != want ||
-				state.Findings[0].RawFindingIDs[0] != want ||
-				state.Runs[0].FindingIDs[0] != want ||
-				state.ActiveReviewRun.FindingIDs[0] != want {
-				t.Fatalf("migrated=%v state=%#v err=%v", migrated, state, err)
-			}
-			if migratedAgain, err := migrateRepositoryReviewRawFindingIDs(&state); err != nil || migratedAgain {
-				t.Fatalf("second migration=%v err=%v", migratedAgain, err)
-			}
-		})
-	}
-	collision := RepositoryState{RawFindings: []RawReviewFinding{
-		{ID: "rrf_same"}, {ID: "rrw_same"},
-	}}
-	if _, err := migrateRepositoryReviewRawFindingIDs(&collision); err == nil {
-		t.Fatal("raw ID collision was accepted")
-	}
-}
-
-func TestCompatibilityParentMigrationRewritesLifecycleReferences(t *testing.T) {
-	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
-	oldRawID := "rrl_compatibility"
-	newRawID := "rrw_compatibility"
-	oldParentID := "rfn_compatibility"
-	newParentID := stableID("rdf_", newRawID)
-	raw := RawReviewFinding{
-		ID: oldRawID, DeduplicatedFindingID: oldParentID,
-		AssignmentID: "record-000-000",
-		History:      []RawFindingHistoryEntry{{DeduplicatedFindingID: oldParentID}},
-	}
-	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(raw)
-	state := RepositoryState{
-		RawFindings: []RawReviewFinding{raw},
-		DeduplicationJobs: []DeduplicationJob{{
-			RawFindingID:      oldRawID,
-			CandidateVersions: []DeduplicationCandidateVersion{{CandidateID: oldParentID}},
-			ShortlistedScores: []DeduplicationCandidateScore{{CandidateID: oldParentID}},
-			Decision:          DeduplicationJudgment{CandidateID: oldParentID},
-		}},
-		DeduplicatedFindings: []DeduplicatedReviewFinding{{
-			ID: oldParentID, DiagnosisDigest: raw.DiagnosisDigest,
-			RawSourceIDs: []string{oldRawID},
-			History:      []DeduplicatedFindingHistoryEntry{{RawFindingID: oldRawID}},
-		}},
-		Findings: []Finding{{
-			ID: oldParentID, RawFindingIDs: []string{oldRawID},
-			PostResolutionFindingID: oldParentID,
-		}},
-		MappingJobs: []RepositoryMappingJob{{
-			ID: mappingJobID(oldParentID), ReviewFindingID: oldParentID,
-		}},
-		RepositoryFindings: []RepositoryFinding{{
-			ReviewFindingIDs: []string{oldParentID},
-			PathSymbolHistory: []RepositoryFindingPathSymbol{{
-				ReviewFindingID: oldParentID, ObservedAt: now,
-			}},
-		}},
-		IssueDrafts: []IssueDraft{{FindingIDs: []string{oldParentID}}},
-		Runs:        []ReviewRun{{FindingIDs: []string{oldParentID}}},
-		ActiveReviewRun: &RepositoryReviewActiveRun{
-			FindingIDs: []string{oldRawID},
-		},
-	}
-	migrated, err := migrateRepositoryReviewRawFindingIDs(&state)
-	if err != nil || !migrated {
-		t.Fatalf("migration=%v err=%v", migrated, err)
-	}
-	migratedRaw := state.RawFindings[0]
-	if migratedRaw.ID != newRawID || migratedRaw.LegacyFindingID != oldParentID ||
-		migratedRaw.DeduplicatedFindingID != newParentID ||
-		migratedRaw.History[0].DeduplicatedFindingID != newParentID ||
-		migratedRaw.DiagnosisDigest != RawReviewFindingDiagnosisDigest(migratedRaw) ||
-		state.DeduplicatedFindings[0].ID != newParentID ||
-		state.DeduplicatedFindings[0].DiagnosisDigest != migratedRaw.DiagnosisDigest ||
-		state.DeduplicatedFindings[0].RawSourceIDs[0] != newRawID ||
-		state.DeduplicatedFindings[0].History[0].RawFindingID != newRawID ||
-		state.Findings[0].ID != newParentID ||
-		state.Findings[0].PostResolutionFindingID != newParentID ||
-		state.Findings[0].RawFindingIDs[0] != newRawID ||
-		state.MappingJobs[0].ReviewFindingID != newParentID ||
-		state.MappingJobs[0].ID != mappingJobID(newParentID) ||
-		state.RepositoryFindings[0].ReviewFindingIDs[0] != newParentID ||
-		state.RepositoryFindings[0].PathSymbolHistory[0].ReviewFindingID != newParentID ||
-		state.IssueDrafts[0].FindingIDs[0] != newParentID ||
-		state.Runs[0].FindingIDs[0] != newParentID ||
-		state.ActiveReviewRun.FindingIDs[0] != newRawID ||
-		state.DeduplicationJobs[0].RawFindingID != newRawID ||
-		state.DeduplicationJobs[0].CandidateVersions[0].CandidateID != newParentID ||
-		state.DeduplicationJobs[0].ShortlistedScores[0].CandidateID != newParentID ||
-		state.DeduplicationJobs[0].Decision.CandidateID != newParentID {
-		t.Fatalf("migrated state=%#v", state)
-	}
-	if migratedAgain, err := migrateRepositoryReviewRawFindingIDs(&state); err != nil || migratedAgain {
-		t.Fatalf("second migration=%v err=%v", migratedAgain, err)
-	}
-
-	collisionRaw := raw
-	collision := RepositoryState{
-		RawFindings: []RawReviewFinding{collisionRaw},
-		DeduplicatedFindings: []DeduplicatedReviewFinding{
-			{ID: oldParentID}, {ID: newParentID},
-		},
-		Findings: []Finding{{ID: oldParentID}, {ID: newParentID}},
-	}
-	if _, err := migrateRepositoryReviewRawFindingIDs(&collision); err == nil {
-		t.Fatal("compatibility parent collision was accepted")
-	}
-}
-
-func TestCompatibilityParentMigrationPersistsCanonicalIdentityOnLoad(t *testing.T) {
-	t.Skip("post-open JSON rewrite was replaced by first-open transactional migration")
-	workspace := t.TempDir()
-	store := NewStore(workspace)
-	state, _ := recordLifecycleFinding(
-		t, store, strings.Repeat("a", 40), strings.Repeat("b", 40), "legacy-record-run",
-		"main", "main", true, "legacy compatibility parent",
-	)
-	oldParentID := "rfn_persisted_compatibility"
-	newRawID := state.RawFindings[0].ID
-	oldRawID := "rrl_" + strings.TrimPrefix(newRawID, "rrw_")
-	newParentID := stableID("rdf_", newRawID)
-	originalParentID := state.DeduplicatedFindings[0].ID
-	raw := &state.RawFindings[0]
-	raw.ID = oldRawID
-	raw.LegacyFindingID = ""
-	raw.DeduplicatedFindingID = oldParentID
-	for index := range raw.History {
-		raw.History[index].DeduplicatedFindingID = oldParentID
-	}
-	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(*raw)
-	deduplicated := &state.DeduplicatedFindings[0]
-	deduplicated.ID = oldParentID
-	deduplicated.DiagnosisDigest = raw.DiagnosisDigest
-	deduplicated.RawSourceIDs[0] = oldRawID
-	for index := range deduplicated.History {
-		deduplicated.History[index].RawFindingID = oldRawID
-	}
-	for index := range state.Findings {
-		if state.Findings[index].ID == originalParentID {
-			state.Findings[index].ID = oldParentID
-		}
-	}
-	for index := range state.DeduplicationJobs {
-		state.DeduplicationJobs[index].RawFindingID = oldRawID
-	}
-	for index := range state.MappingJobs {
-		state.MappingJobs[index].ID = mappingJobID(oldParentID)
-		state.MappingJobs[index].ReviewFindingID = oldParentID
-	}
-	for runIndex := range state.Runs {
-		for findingIndex := range state.Runs[runIndex].FindingIDs {
-			if state.Runs[runIndex].FindingIDs[findingIndex] == originalParentID {
-				state.Runs[runIndex].FindingIDs[findingIndex] = oldParentID
-			}
-		}
-	}
-	encoded, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if writeErr := os.WriteFile(store.path(state.Repository), encoded, 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
-	loaded, found, err := store.Get(state.Repository)
-	if err != nil || !found {
-		t.Fatalf("load found=%v err=%v", found, err)
-	}
-	if loaded.RawFindings[0].ID != newRawID ||
-		loaded.RawFindings[0].LegacyFindingID != oldParentID ||
-		loaded.RawFindings[0].DeduplicatedFindingID != newParentID ||
-		loaded.RawFindings[0].DiagnosisDigest != RawReviewFindingDiagnosisDigest(loaded.RawFindings[0]) ||
-		loaded.DeduplicatedFindings[0].ID != newParentID ||
-		loaded.DeduplicatedFindings[0].DiagnosisDigest != loaded.RawFindings[0].DiagnosisDigest ||
-		loaded.Findings[0].ID != newParentID ||
-		loaded.MappingJobs[0].ID != mappingJobID(newParentID) ||
-		loaded.MappingJobs[0].ReviewFindingID != newParentID ||
-		loaded.Runs[0].FindingIDs[0] != newParentID {
-		t.Fatalf("loaded migration=%#v", loaded)
-	}
-	persisted, err := os.ReadFile(store.path(state.Repository))
-	if err != nil || !strings.Contains(string(persisted), `"legacy_finding_id":"`+oldParentID+`"`) ||
-		!strings.Contains(string(persisted), `"id":"`+newParentID+`"`) {
-		t.Fatalf("persisted migration=%s err=%v", persisted, err)
-	}
-	reloaded, found, err := store.Get(state.Repository)
-	if err != nil || !found || !reflect.DeepEqual(loaded, reloaded) {
-		t.Fatalf("idempotent reload found=%v err=%v\nfirst=%#v\nsecond=%#v", found, err, loaded, reloaded)
-	}
-}
 
 func TestMappingAdjudicationAssociationDefaultBranchFenceAndRestart(t *testing.T) {
 	store := NewStore(t.TempDir())
@@ -389,6 +80,39 @@ func TestMappingAdjudicationAssociationDefaultBranchFenceAndRestart(t *testing.T
 	if err != nil || len(known.ReviewFindingIDs) != 2 ||
 		joined.Findings[findingIndexByID(joined.Findings, second.ID)].RepositoryMatchState != RepositoryMatchKnown {
 		t.Fatalf("non-default association = %#v err=%v", known, err)
+	}
+	for name, mutate := range map[string]func(*RepositoryState){
+		"identity": func(candidate *RepositoryState) {
+			oldID := candidate.RepositoryFindings[0].ID
+			newID := stableID("rrf_", candidate.Repository, "forged-first-occurrence")
+			candidate.RepositoryFindings[0].ID = newID
+			for index := range candidate.Findings {
+				if candidate.Findings[index].RepositoryFindingID == oldID {
+					candidate.Findings[index].RepositoryFindingID = newID
+				}
+			}
+			for index := range candidate.MappingJobs {
+				if candidate.MappingJobs[index].RepositoryFindingID == oldID {
+					candidate.MappingJobs[index].RepositoryFindingID = newID
+				}
+			}
+		},
+		"commit set": func(candidate *RepositoryState) {
+			candidate.RepositoryFindings[0].FoundCommits = append(
+				candidate.RepositoryFindings[0].FoundCommits, strings.Repeat("9", 40),
+			)
+		},
+		"path history": func(candidate *RepositoryState) {
+			candidate.RepositoryFindings[0].PathSymbolHistory[0].Path = "forged.go"
+		},
+	} {
+		t.Run("rejects repository finding "+name+" drift", func(t *testing.T) {
+			candidate := dedupDeepCloneState(t, joined)
+			mutate(&candidate)
+			if err := validateState(candidate); err == nil {
+				t.Fatalf("repository finding %s drift was accepted", name)
+			}
+		})
 	}
 
 	thirdState, third := recordLifecycleFinding(
@@ -602,161 +326,6 @@ func TestValidationRestartAndPostResolutionOccurrenceRegresses(t *testing.T) {
 	}
 }
 
-func TestPossibleDuplicateDistinctAndMergePreserveIssueConflicts(t *testing.T) {
-	store := NewStore(t.TempDir())
-	clock := time.Date(2026, 8, 26, 17, 0, 0, 0, time.UTC)
-	store.now = func() time.Time { return clock }
-	state, first := recordLifecycleFinding(
-		t, store, strings.Repeat("a", 40), strings.Repeat("1", 40), "duplicate-target",
-		"main", "main", true, "canonical defect",
-	)
-	job := lifecycleJobForFinding(t, state, first.ID)
-	job = claimLifecycleMappingJob(t, store, state.Repository, job, RepositoryMappingModelSnapshot{})
-	state, target, err := store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
-		JobID: job.ID, CreateMatchState: RepositoryMatchNew, DefaultBranchVerified: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, target, err = store.UpdateRepositoryFindingIssueSnapshot(state.Repository, RepositoryIssueSnapshotUpdate{
-		RepositoryFindingID: target.ID, ExpectedVersion: target.Version,
-		ExternalID: "11", URL: "https://github.com/owner/repo/issues/11",
-		Origin: IssueDraftOriginLinked, State: RepositoryFindingIssueOpen, Title: "First issue",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	clock = clock.Add(time.Minute)
-	state, second := recordLifecycleFinding(
-		t, store, strings.Repeat("b", 40), strings.Repeat("2", 40), "duplicate-source",
-		"main", "main", true, "ambiguous moved defect", MatchHints{
-			Component: "scheduler", Operation: "resume migrated waiter", FailureMode: "stale waiter generation",
-			Trigger: "retry after scheduler migration", ViolatedInvariant: "resumed waiters use the active generation",
-			ObservableOutcome: "waiter remains blocked", RelatedSymbols: []string{"Scheduler.Run", "Scheduler.Resume"},
-			SourceAnchors: []string{"generation"}, DistinguishingFacts: []string{"requires scheduler migration"},
-		},
-	)
-	// Model an existing pre-queue issue association. Startup reconciliation must
-	// restore its mapping job, and mapping must preserve the issue so a later
-	// merge can surface both GitHub associations as a manual conflict.
-	persistedJobs := make([]RepositoryMappingJob, 0, len(state.MappingJobs))
-	for _, existingJob := range state.MappingJobs {
-		if existingJob.ReviewFindingID != second.ID {
-			persistedJobs = append(persistedJobs, existingJob)
-		}
-	}
-	state.MappingJobs = persistedJobs
-	state.Version++
-	state.UpdatedAt = clock
-	if saveErr := store.save(&state); saveErr != nil {
-		t.Fatal(saveErr)
-	}
-	state, _, err = store.LinkExistingIssue(ExistingIssueLink{
-		Repository: state.Repository, FindingID: second.ID,
-		ExpectedFindingVersion: second.Version, ExternalID: "22",
-		ExternalURL: "https://github.com/owner/repo/issues/22", Title: "Second issue",
-		Confirmed: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, reconcileErr := store.ReconcileJobs(context.Background()); reconcileErr != nil {
-		t.Fatal(reconcileErr)
-	}
-	state, _, err = store.Get(state.Repository)
-	if err != nil {
-		t.Fatal(err)
-	}
-	job = lifecycleJobForFinding(t, state, second.ID)
-	job = claimLifecycleMappingJob(t, store, state.Repository, job, RepositoryMappingModelSnapshot{})
-	adjudication := RepositoryMappingAdjudication{
-		Decision: "uncertain", CandidateID: target.ID, Confidence: .74,
-		MatchingAnchors: []string{"Scheduler.Run"}, Explanation: "The code moved and one anchor conflicts.",
-	}
-	if _, _, saveErr := store.SaveMappingAdjudication(
-		state.Repository,
-		job.ID,
-		adjudication,
-	); saveErr != nil {
-		t.Fatal(saveErr)
-	}
-	state, provisional, err := store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
-		JobID: job.ID, CreateMatchState: RepositoryMatchProvisional, DefaultBranchVerified: true,
-		PossibleDuplicates: []RepositoryFindingPossibleDuplicate{{
-			CandidateID: target.ID, Relation: "uncertain", Confidence: .74,
-			MatchingAnchors: []string{"Scheduler.Run"}, Explanation: "The code moved.",
-		}},
-	})
-	if err != nil || provisional.MatchState != RepositoryMatchProvisional ||
-		provisional.Issue.URL != "https://github.com/owner/repo/issues/22" {
-		t.Fatalf("provisional=%#v err=%v", provisional, err)
-	}
-	state, merged, err := store.ResolvePossibleDuplicate(state.Repository, RepositoryDuplicateResolution{
-		ProvisionalID: provisional.ID, CandidateID: target.ID, Decision: "merge",
-		ExpectedProvisionalVersion: provisional.Version, ExpectedCandidateVersion: target.Version,
-	})
-	if err != nil || len(state.RepositoryFindings) != 1 || !merged.Issue.Conflict ||
-		!containsExactString(merged.Issue.ConflictURLs, "https://github.com/owner/repo/issues/11") ||
-		!containsExactString(merged.Issue.ConflictURLs, "https://github.com/owner/repo/issues/22") ||
-		len(merged.ReviewFindingIDs) != 2 {
-		t.Fatalf("merged=%#v repositories=%#v err=%v", merged, state.RepositoryFindings, err)
-	}
-
-	clock = clock.Add(time.Minute)
-	state, third := recordLifecycleFinding(
-		t, store, strings.Repeat("c", 40), strings.Repeat("3", 40), "duplicate-distinct",
-		"main", "main", true, "independent nearby defect", MatchHints{
-			Component:           "scheduler",
-			Operation:           "discard canceled waiter",
-			FailureMode:         "canceled waiter is retained",
-			Trigger:             "cancellation during queue rotation",
-			ViolatedInvariant:   "canceled waiters leave every queue",
-			ObservableOutcome:   "queue capacity is exhausted",
-			RelatedSymbols:      []string{"Scheduler.Run", "Scheduler.Cancel"},
-			SourceAnchors:       []string{"canceled"},
-			DistinguishingFacts: []string{"requires cancellation"},
-		},
-	)
-	job = lifecycleJobForFinding(t, state, third.ID)
-	job = claimLifecycleMappingJob(t, store, state.Repository, job, RepositoryMappingModelSnapshot{})
-	if _, _, saveErr := store.SaveMappingAdjudication(state.Repository, job.ID, RepositoryMappingAdjudication{
-		Decision: "uncertain", CandidateID: target.ID, Confidence: .51,
-	}); saveErr != nil {
-		t.Fatal(saveErr)
-	}
-	state, provisional, err = store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
-		JobID: job.ID, CreateMatchState: RepositoryMatchProvisional, DefaultBranchVerified: true,
-		PossibleDuplicates: []RepositoryFindingPossibleDuplicate{{
-			CandidateID: target.ID, Relation: "uncertain", Confidence: .51,
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reservedState, reservedDraft, reserved, reserveErr := store.ReserveIssueGeneration(IssueGenerationRequest{
-		Repository: state.Repository, FindingID: third.ID, GenerationID: "rrig_provisional",
-		ResolvedInstructions: "Present the diagnosis.", InstructionsMode: IssueDraftInstructionsDefault,
-		GeneratorModel: "writer", GeneratorAccount: "account",
-	})
-	if !errors.Is(reserveErr, ErrConflict) || reserved || reservedState.Repository != "" || reservedDraft.ID != "" {
-		t.Fatalf(
-			"provisional issue reservation=%#v / %#v / %v, error=%v",
-			reservedState,
-			reservedDraft,
-			reserved,
-			reserveErr,
-		)
-	}
-	_, distinct, err := store.ResolvePossibleDuplicate(state.Repository, RepositoryDuplicateResolution{
-		ProvisionalID: provisional.ID, CandidateID: target.ID, Decision: "distinct",
-		ExpectedProvisionalVersion: provisional.Version,
-	})
-	if err != nil || distinct.MatchState != RepositoryMatchNew || len(distinct.PossibleDuplicates) != 0 {
-		t.Fatalf("distinct=%#v err=%v", distinct, err)
-	}
-}
-
 func TestIssueDraftStateProjectsOntoRepositoryFindingWithoutChangingPublicationFences(t *testing.T) {
 	store := NewStore(t.TempDir())
 	state, occurrence := recordLifecycleFinding(
@@ -922,6 +491,82 @@ func TestMappingCreationRequeuesWhenCandidateUniverseChanges(t *testing.T) {
 	}
 }
 
+func TestCanonicalRepositoryIssueAssociationMergeBoundaries(t *testing.T) {
+	now := repositoryAuditTestNow
+	open := RepositoryFindingIssueAssociation{
+		ExternalID: "1", URL: "https://github.com/owner/repo/issues/1",
+		Origin: IssueDraftOriginLinked, State: RepositoryFindingIssueOpen,
+		Title: "open", SnapshotAt: now,
+	}
+	closed := open
+	closed.State = RepositoryFindingIssueClosed
+	closed.Title = "closed"
+	closed.SnapshotAt = now.Add(time.Minute)
+	if merged := mergeRepositoryIssueAssociations(
+		RepositoryFindingIssueAssociation{State: RepositoryFindingIssueNone}, open,
+	); merged.URL != open.URL {
+		t.Fatalf("empty-left merge=%#v", merged)
+	}
+	if merged := mergeRepositoryIssueAssociations(open, RepositoryFindingIssueAssociation{}); merged.URL != open.URL {
+		t.Fatalf("empty-right merge=%#v", merged)
+	}
+	if merged := mergeRepositoryIssueAssociations(open, closed); merged.State != RepositoryFindingIssueClosed {
+		t.Fatalf("newer snapshot merge=%#v", merged)
+	}
+	if merged := mergeRepositoryIssueAssociations(closed, open); merged.State != RepositoryFindingIssueClosed {
+		t.Fatalf("older snapshot merge=%#v", merged)
+	}
+	withoutURL := open
+	withoutURL.URL = ""
+	if merged := mergeRepositoryIssueAssociations(withoutURL, open); merged.URL != open.URL {
+		t.Fatalf("missing-left URL merge=%#v", merged)
+	}
+	if merged := mergeRepositoryIssueAssociations(open, withoutURL); merged.URL != open.URL {
+		t.Fatalf("missing-right URL merge=%#v", merged)
+	}
+	other := open
+	other.ExternalID = "2"
+	other.URL = "https://github.com/owner/repo/issues/2"
+	other.ConflictURLs = []string{"https://github.com/owner/repo/issues/3"}
+	conflict := mergeRepositoryIssueAssociations(open, other)
+	if !conflict.Conflict || len(conflict.ConflictURLs) != 3 {
+		t.Fatalf("conflicting association merge=%#v", conflict)
+	}
+
+	target := RepositoryFinding{Issue: RepositoryFindingIssueAssociation{State: RepositoryFindingIssueNone}}
+	state := RepositoryState{IssueDrafts: []IssueDraft{{
+		ID: "draft", Origin: IssueDraftOriginDiscovered, State: IssueDraftPosted,
+		ExternalID: "2", ExternalURL: other.URL, ExternalState: "closed",
+		Title: "discovered", UpdatedAt: now,
+	}}}
+	mergeOccurrenceIssueAssociation(nil, &target, Finding{IssueDraftID: "draft"})
+	mergeOccurrenceIssueAssociation(&state, nil, Finding{IssueDraftID: "draft"})
+	mergeOccurrenceIssueAssociation(&state, &target, Finding{})
+	mergeOccurrenceIssueAssociation(&state, &target, Finding{IssueDraftID: "missing"})
+	mergeOccurrenceIssueAssociation(&state, &target, Finding{IssueDraftID: "draft"})
+	if target.Issue.URL != other.URL || target.Issue.State != RepositoryFindingIssueClosed {
+		t.Fatalf("occurrence issue projection=%#v", target.Issue)
+	}
+	for _, test := range []struct {
+		state    IssueDraftState
+		external string
+		want     RepositoryFindingIssueState
+	}{
+		{IssueDraftPosted, "open", RepositoryFindingIssueOpen},
+		{IssueDraftPosted, "closed", RepositoryFindingIssueClosed},
+		{IssueDraftPublishing, "", RepositoryFindingIssueUnknown},
+		{IssueDraftUnknown, "", RepositoryFindingIssueUnknown},
+		{IssueDraftEditing, "", RepositoryFindingIssueDraft},
+	} {
+		projected := repositoryIssueAssociationFromDraft(IssueDraft{
+			State: test.state, ExternalState: test.external,
+		})
+		if projected.State != test.want {
+			t.Fatalf("draft state %q projected as %q, want %q", test.state, projected.State, test.want)
+		}
+	}
+}
+
 func recordLifecycleFinding(
 	t *testing.T,
 	store Store,
@@ -936,12 +581,47 @@ func recordLifecycleFinding(
 ) (RepositoryState, Finding) {
 	t.Helper()
 	file := FileRef{Path: "service.go", BlobSHA: blob, SizeBytes: 20, Category: "code", Mode: "100644"}
-	plan, err := store.Plan(context.Background(), "owner/repo", commit, "inventory-"+runID, []FileRef{file}, false)
+	current, _, err := store.Get("owner/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	campaignID := NewRepositoryReviewCampaignID()
+	expectedCampaignID := ""
+	if current.CurrentCampaign != nil {
+		expectedCampaignID = current.CurrentCampaign.ID
+	}
+	profileHash := stableID("sha256:", runID)
+	snapshot := RepositoryReviewDeduplicationSnapshot{
+		ReviewerModel: "reviewer", DeduplicationModel: "reviewer",
+		SimilarityThreshold: DeduplicationDefaultThreshold, CandidateLimit: 0,
+	}
+	if _, err = store.BeginCampaign(context.Background(), BeginCampaignRequest{
+		Repository: "owner/repo", CampaignID: campaignID, ExpectedCampaignID: expectedCampaignID,
+		CommitSHA: commit, ExpectedReviewVersion: current.ReviewVersion, Exact: true,
+		DeduplicationSnapshot: &snapshot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assignment, err := NewRepositoryReviewAssignment(
+		RepositoryReviewFocusCorrectnessState, "reviewer", "test-v1", profileHash, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := store.PlanAssignmentsForCampaign(
+		context.Background(), "owner/repo", commit, "inventory-"+runID, profileHash,
+		campaignID, []RepositoryReviewAssignment{assignment}, []FileRef{file}, false, 1, true,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan, err = BindPlanBranch(plan, targetBranch, defaultBranch, targetIsDefault)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.BeginRepositoryReviewRun(context.Background(), BeginRepositoryReviewRunRequest{
+		Plan: plan, RunID: runID, ReviewableFiles: []FileRef{file},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	matchHints := MatchHints{
@@ -954,55 +634,80 @@ func recordLifecycleFinding(
 	if len(matchHintsOverride) > 0 {
 		matchHints = matchHintsOverride[0]
 	}
-	result, err := store.Record(context.Background(), RecordRequest{
-		Plan: plan, RunID: runID, TargetBranch: targetBranch,
-		AdvertisedDefaultBranch: defaultBranch, TargetIsDefault: targetIsDefault,
-		Observations: []Observation{{
-			Model: "reviewer", Reviewer: "reviewer", ScopeFiles: []FileRef{file},
-			Findings: []FindingCandidate{
-				{
-					Severity: "high",
-					Title:    title,
-					Symbol:   "Scheduler.Run",
-					File:     file.Path,
-					Message:  "The waiter remains attached to the old queue.",
-					Evidence: "The failed wake path uses the stale queue owner.",
-					Impact:   "The waiter remains blocked.",
-					Validation: Validation{
-						Status:  "confirmed",
-						Summary: "Traced the stale owner.",
-						Checks:  []string{"followed wake path"},
-					},
-					MatchHints: matchHints,
-					FixEffort: FixEffort{
-						Quick: FixEffortEstimate{
-							LOCMin:    5,
-							LOCMax:    20,
-							Class:     "small",
-							Rationale: "Localized containment.",
-						},
-						Quality: FixEffortEstimate{
-							LOCMin:    30,
-							LOCMax:    100,
-							Class:     "medium",
-							Rationale: "Ownership spans related units.",
-						},
-					},
+	observation := Observation{
+		Model: "provider/reviewer", ModelAlias: "reviewer", Account: "account",
+		Reviewer: RepositoryReviewFocusCorrectnessState, ScopeFiles: []FileRef{file},
+		RawDigest: "sha256:" + strings.Repeat("a", 64),
+		Findings: []FindingCandidate{{
+			Severity: "high",
+			Title:    title,
+			Symbol:   "Scheduler.Run",
+			File:     file.Path,
+			Message:  "The waiter remains attached to the old queue.",
+			Evidence: "The failed wake path uses the stale queue owner.",
+			Impact:   "The waiter remains blocked.",
+			Validation: Validation{
+				Status:  "confirmed",
+				Summary: "Traced the stale owner.",
+				Checks:  []string{"followed wake path"},
+			},
+			MatchHints: matchHints,
+			FixEffort: FixEffort{
+				Quick: FixEffortEstimate{
+					LOCMin:    5,
+					LOCMax:    20,
+					Class:     "small",
+					Rationale: "Localized containment.",
+				},
+				Quality: FixEffortEstimate{
+					LOCMin:    30,
+					LOCMax:    100,
+					Class:     "medium",
+					Rationale: "Ownership spans related units.",
 				},
 			},
 		}},
-	})
+	}
+	checkpoint, err := store.CheckpointRepositoryReviewAssignment(
+		context.Background(), CheckpointRepositoryReviewAssignmentRequest{
+			Plan: plan, RunID: runID, AssignmentID: assignment.ID,
+			AutomationID: "rra_lifecycle", AgentID: "main", ChildIndex: 1,
+			Digest: "sha256:" + strings.Repeat("b", 64), AcknowledgedFiles: []FileRef{file},
+			Observation: observation,
+		},
+	)
+	if err != nil || len(checkpoint.AcceptedFindingIDs) != 1 {
+		t.Fatal(err)
+	}
+	if _, err = store.FinalizeRepositoryReviewRun(
+		context.Background(),
+		FinalizeRepositoryReviewRunRequest{Plan: plan, RunID: runID},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.ProcessPendingDeduplicationJobs(
+		context.Background(), "owner/repo", DeduplicationProcessOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.FinalizeRepositoryReviewRun(
+		context.Background(), FinalizeRepositoryReviewRunRequest{Plan: plan, RunID: runID},
+	); err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := store.Get("owner/repo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.AcceptedFindingIDs) != 1 {
-		t.Fatalf("accepted=%#v", result.AcceptedFindingIDs)
+	rawIndex := rawFindingIndexByID(result.RawFindings, checkpoint.AcceptedFindingIDs[0])
+	if rawIndex < 0 {
+		t.Fatal("recorded raw finding missing")
 	}
-	index := findingIndexByID(result.State.Findings, result.AcceptedFindingIDs[0])
+	index := findingIndexByID(result.Findings, result.RawFindings[rawIndex].DeduplicatedFindingID)
 	if index < 0 {
 		t.Fatal("recorded finding missing")
 	}
-	return result.State, result.State.Findings[index]
+	return result, result.Findings[index]
 }
 
 func lifecycleJobForFinding(t *testing.T, state RepositoryState, findingID string) RepositoryMappingJob {

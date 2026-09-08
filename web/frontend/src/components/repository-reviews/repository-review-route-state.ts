@@ -115,12 +115,6 @@ export function collectionSearchFromReviewSearch(search: {
   }
 }
 
-export function repositoryReviewSearchHasLegacyPaging(
-  raw: Record<string, unknown>,
-): boolean {
-  return raw.scope !== undefined || raw.offset !== undefined
-}
-
 export function repositoryReviewSearchIsCanonical(
   raw: Record<string, unknown>,
   normalized:

@@ -62,7 +62,7 @@ func TestRepositoryReviewSQLiteSchemaConfigurationAndReopen(t *testing.T) {
 	if err := database.QueryRow("PRAGMA journal_mode").Scan(&journal); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 || foreignKeys != 1 || synchronous != 2 || journal != "wal" {
+	if version != 2 || foreignKeys != 1 || synchronous != 2 || journal != "wal" {
 		t.Fatalf("SQLite configuration version=%d fk=%d sync=%d journal=%q", version, foreignKeys, synchronous, journal)
 	}
 	info, err := os.Stat(filepath.Join(store.root, repositoryReviewDatabaseFilename))
@@ -85,314 +85,6 @@ func TestRepositoryReviewSQLiteSchemaConfigurationAndReopen(t *testing.T) {
 	loadedAutomation, found, err := reopened.GetAutomation(t.Context(), automation.ID)
 	if err != nil || !found || !reflect.DeepEqual(loadedAutomation, automation) {
 		t.Fatalf("reopened automation=%#v found=%v err=%v", loadedAutomation, found, err)
-	}
-}
-
-//nolint:govet // Boundary tests intentionally keep setup and assertion errors in local scopes.
-func TestRepositoryReviewSQLiteRewriteAndImporterBoundaries(t *testing.T) {
-	store := newRepositoryAuditTestStore(t)
-	file := repositoryAuditTestFile("pkg/rewrite.go", "d", 80)
-	recorded := recordRepositoryAuditCoverage(
-		t, store, "owner/rewrite", "commit-d", "inventory-d", []FileRef{file}, "rewrite-run",
-	)
-	profile, err := store.CreateProfile(t.Context(), validProfileForTest("rrpf_rewrite", "Rewrite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	automationInput, err := MaterializeRepositoryReviewAutomation(
-		profile, validAutomationForTest("rra_rewrite", "Rewrite automation"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	automation, err := store.CreateAutomation(t.Context(), automationInput)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	state := recorded.State
-	state.LastExcludedFiles = 7
-	if rewritten, err := store.RewriteStateForMigration(nil, state); err != nil ||
-		rewritten.LastExcludedFiles != 7 {
-		t.Fatalf("state rewrite=%#v err=%v", rewritten, err)
-	}
-	profile.Name = "Rewritten"
-	if rewritten, err := store.RewriteProfileForMigration(nil, profile); err != nil ||
-		rewritten.Name != "Rewritten" {
-		t.Fatalf("profile rewrite=%#v err=%v", rewritten, err)
-	}
-	automation.Ref = "release"
-	if rewritten, err := store.RewriteAutomationForMigration(nil, automation); err != nil ||
-		rewritten.Ref != "release" {
-		t.Fatalf("automation rewrite=%#v err=%v", rewritten, err)
-	}
-
-	canceled, cancel := context.WithCancel(t.Context())
-	cancel()
-	if _, err := store.RewriteStateForMigration(canceled, state); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled state rewrite=%v", err)
-	}
-	if _, err := store.RewriteProfileForMigration(canceled, profile); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled profile rewrite=%v", err)
-	}
-	if _, err := store.RewriteAutomationForMigration(canceled, automation); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled automation rewrite=%v", err)
-	}
-	if _, err := store.RewriteStateForMigration(t.Context(), RepositoryState{}); err == nil {
-		t.Fatal("invalid state rewrite succeeded")
-	}
-	invalidProfile := profile
-	invalidProfile.Name = ""
-	if _, err := store.RewriteProfileForMigration(t.Context(), invalidProfile); err == nil {
-		t.Fatal("invalid profile rewrite succeeded")
-	}
-	invalidAutomation := automation
-	invalidAutomation.Name = ""
-	if _, err := store.RewriteAutomationForMigration(t.Context(), invalidAutomation); err == nil {
-		t.Fatal("invalid automation rewrite succeeded")
-	}
-	missingState := state
-	missingState.ID = RepositoryID("owner/missing-rewrite")
-	missingState.Repository = "owner/missing-rewrite"
-	if _, err := store.RewriteStateForMigration(t.Context(), missingState); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("missing state rewrite=%v", err)
-	}
-	missingProfile := profile
-	missingProfile.ID = "rrpf_missing_rewrite"
-	if _, err := store.RewriteProfileForMigration(t.Context(), missingProfile); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("missing profile rewrite=%v", err)
-	}
-	missingAutomation := automation
-	missingAutomation.ID = "rra_missing_rewrite"
-	if _, err := store.RewriteAutomationForMigration(t.Context(), missingAutomation); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("missing automation rewrite=%v", err)
-	}
-	staleRewriteState := state
-	staleRewriteState.Version += 20
-	if _, err := store.RewriteStateForMigration(t.Context(), staleRewriteState); !errors.Is(err, ErrConflict) {
-		t.Fatalf("stale state rewrite=%v", err)
-	}
-	staleRewriteProfile := profile
-	staleRewriteProfile.Version += 20
-	if _, err := store.RewriteProfileForMigration(t.Context(), staleRewriteProfile); !errors.Is(err, ErrConflict) {
-		t.Fatalf("stale profile rewrite=%v", err)
-	}
-	staleRewriteAutomation := automation
-	staleRewriteAutomation.Version += 20
-	if _, err := store.RewriteAutomationForMigration(
-		t.Context(),
-		staleRewriteAutomation,
-	); !errors.Is(
-		err,
-		ErrConflict,
-	) {
-		t.Fatalf("stale automation rewrite=%v", err)
-	}
-	if err := prepareRepositoryStateForMigrationRewrite(nil); err == nil {
-		t.Fatal("nil migration state prepared")
-	}
-
-	database, err := store.openDatabase(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn, err := database.Conn(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyInput := func(relative string, value any) sqlitestore.LegacyInput {
-		data, marshalErr := json.Marshal(value)
-		if marshalErr != nil {
-			t.Fatal(marshalErr)
-		}
-		return sqlitestore.LegacyInput{
-			Relative: relative, Data: data, Digest: sha256.Sum256(data),
-		}
-	}
-	validSummary := Summarize(state)
-	if result, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput("repo_summary.summary.json", validSummary),
-	); err != nil || result.Imported != 0 || result.Skipped != 0 || len(result.Issues) != 0 {
-		t.Fatalf("summary import=%#v err=%v", result, err)
-	}
-	invalidSummary := validSummary
-	invalidSummary.ID = "rrp_wrong"
-	if result, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput("repo_invalid.summary.json", invalidSummary),
-	); err != nil || result.Skipped != 1 || result.Issues[0].Code != "invalid_summary" {
-		t.Fatalf("invalid summary=%#v err=%v", result, err)
-	}
-	if result, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput("repo_wrong.json", state),
-	); err != nil || result.Issues[0].Code != "invalid_identity" {
-		t.Fatalf("state identity=%#v err=%v", result, err)
-	}
-	malformedState := sqlitestore.LegacyInput{
-		Relative: "repo_malformed.json", Data: []byte("{"), Digest: sha256.Sum256([]byte("{")),
-	}
-	if result, err := importLegacyRepositoryReviewSource(t.Context(), conn, malformedState); err != nil ||
-		result.Issues[0].Code != "malformed_json" {
-		t.Fatalf("malformed state=%#v err=%v", result, err)
-	}
-	futureState := state
-	futureState.SchemaVersion = SchemaVersion + 1
-	futureName := "repo_" + strings.TrimPrefix(futureState.ID, "rrp_") + ".json"
-	if result, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput(futureName, futureState),
-	); err != nil || result.Issues[0].Code != "invalid_record" {
-		t.Fatalf("future state=%#v err=%v", result, err)
-	}
-	stateName := "repo_" + strings.TrimPrefix(state.ID, "rrp_") + ".json"
-	if result, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput(stateName, state),
-	); err != nil || result.Issues[0].Code != "duplicate_identity" {
-		t.Fatalf("duplicate state=%#v err=%v", result, err)
-	}
-	if result, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput(profileFilename(profile.ID), profile),
-	); err != nil || result.Issues[0].Code != "duplicate_identity" {
-		t.Fatalf("duplicate profile=%#v err=%v", result, err)
-	}
-	invalidLegacyProfile := profile
-	invalidLegacyProfile.ID = "rrpf_invalid_legacy"
-	invalidLegacyProfile.Name = ""
-	if result, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput(profileFilename(invalidLegacyProfile.ID), invalidLegacyProfile),
-	); err != nil || result.Issues[0].Code != "invalid_profile" {
-		t.Fatalf("invalid profile=%#v err=%v", result, err)
-	}
-	brokenAutomation := automation
-	brokenAutomation.ID = "rra_broken_profile"
-	brokenAutomation.ProfileID = "rrpf_absent"
-	if result, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput(automationFilename(brokenAutomation.ID), brokenAutomation),
-	); err != nil || result.Issues[0].Code != "broken_profile_reference" {
-		t.Fatalf("broken automation=%#v err=%v", result, err)
-	}
-	if result, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput(automationFilename(automation.ID), automation),
-	); err != nil || result.Issues[0].Code != "duplicate_identity" {
-		t.Fatalf("duplicate automation=%#v err=%v", result, err)
-	}
-	invalidLegacyAutomation := automation
-	invalidLegacyAutomation.ID = "rra_invalid_legacy"
-	invalidLegacyAutomation.Name = ""
-	if result, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput(automationFilename(invalidLegacyAutomation.ID), invalidLegacyAutomation),
-	); err != nil || result.Issues[0].Code != "invalid_automation" {
-		t.Fatalf("invalid automation=%#v err=%v", result, err)
-	}
-	if result, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput("unknown.json", map[string]any{}),
-	); err != nil || result.Issues[0].Code != "unknown_source" {
-		t.Fatalf("unknown source=%#v err=%v", result, err)
-	}
-	if err := conn.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput(stateName, state),
-	); err == nil {
-		t.Fatal("closed import connection succeeded")
-	}
-	closedProfile := profileCoverageFixture("rrpf_closed_import")
-	if _, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput(profileFilename(closedProfile.ID), closedProfile),
-	); err == nil {
-		t.Fatal("closed profile import succeeded")
-	}
-	closedAutomation := validAutomationForTest("rra_closed_import", "Closed import")
-	closedAutomation.SchemaVersion = RepositoryReviewAutomationSchemaVersion
-	closedAutomation.Version = 1
-	closedAutomation.Status = RepositoryReviewAutomationIdle
-	closedAutomation.CreatedAt = automationTestNow
-	closedAutomation.UpdatedAt = automationTestNow
-	if err := normalizeAutomation(&closedAutomation); err != nil {
-		t.Fatal(err)
-	}
-	withProfile := automation
-	withProfile.ID = "rra_closed_profile_query"
-	if _, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput(automationFilename(withProfile.ID), withProfile),
-	); err == nil {
-		t.Fatal("closed profile query import succeeded")
-	}
-	if _, err := importLegacyRepositoryReviewSource(
-		t.Context(), conn, legacyInput(automationFilename(closedAutomation.ID), closedAutomation),
-	); err == nil {
-		t.Fatal("closed automation import succeeded")
-	}
-	_ = database.Close()
-}
-
-//nolint:govet // Boundary tests intentionally keep setup and assertion errors in local scopes.
-func TestRepositoryReviewSQLiteLegacyDecoderDefaults(t *testing.T) {
-	profile := profileCoverageFixture("rrpf_legacy_decoder")
-	profile.SchemaVersion = 1
-	profile.IssuePrompt = ""
-	profile.DeduplicationSimilarityThreshold = 0
-	profile.DeduplicationCandidateLimit = 0
-	encodedProfile, err := json.Marshal(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var profileFields map[string]json.RawMessage
-	_ = json.Unmarshal(encodedProfile, &profileFields)
-	delete(profileFields, "deduplication_similarity_threshold")
-	delete(profileFields, "deduplication_candidate_limit")
-	encodedProfile, _ = json.Marshal(profileFields)
-	decodedProfile, err := decodeLegacyRepositoryReviewProfile(profile.ID, encodedProfile)
-	if err != nil || decodedProfile.SchemaVersion != RepositoryReviewProfileSchemaVersion ||
-		decodedProfile.IssuePrompt != DefaultRepositoryReviewIssuePrompt ||
-		decodedProfile.DeduplicationSimilarityThreshold != DeduplicationDefaultThreshold ||
-		decodedProfile.DeduplicationCandidateLimit != DeduplicationDefaultCandidateLimit {
-		t.Fatalf("decoded profile=%#v err=%v", decodedProfile, err)
-	}
-	if _, err := decodeLegacyRepositoryReviewProfile("rrpf_other", encodedProfile); err == nil {
-		t.Fatal("profile identity mismatch decoded")
-	}
-	if _, err := decodeLegacyRepositoryReviewProfile(profile.ID, []byte("{")); err == nil {
-		t.Fatal("malformed profile decoded")
-	}
-
-	automation := validAutomationForTest("rra_legacy_decoder", "Legacy")
-	automation.SchemaVersion = RepositoryReviewAutomationSchemaVersion
-	automation.Version = 1
-	automation.Status = RepositoryReviewAutomationIdle
-	automation.CreatedAt = automationTestNow
-	automation.UpdatedAt = automationTestNow
-	automation.Progress.Findings = 3
-	if err := normalizeAutomation(&automation); err != nil {
-		t.Fatal(err)
-	}
-	automation.SchemaVersion = 1
-	encodedAutomation, _ := json.Marshal(automation)
-	var automationFields map[string]json.RawMessage
-	_ = json.Unmarshal(encodedAutomation, &automationFields)
-	delete(automationFields, "deduplication_similarity_threshold")
-	delete(automationFields, "deduplication_candidate_limit")
-	var progressFields map[string]json.RawMessage
-	_ = json.Unmarshal(automationFields["progress"], &progressFields)
-	delete(progressFields, "deduplicated_findings")
-	automationFields["progress"], _ = json.Marshal(progressFields)
-	encodedAutomation, _ = json.Marshal(automationFields)
-	decodedAutomation, err := decodeLegacyRepositoryReviewAutomation(automation.ID, encodedAutomation)
-	if err != nil || decodedAutomation.SchemaVersion != RepositoryReviewAutomationSchemaVersion ||
-		decodedAutomation.DeduplicationSimilarityThreshold != DeduplicationDefaultThreshold ||
-		decodedAutomation.DeduplicationCandidateLimit != DeduplicationDefaultCandidateLimit ||
-		decodedAutomation.Progress.DeduplicatedFindings != 3 {
-		t.Fatalf("decoded automation=%#v err=%v", decodedAutomation, err)
-	}
-	if _, err := decodeLegacyRepositoryReviewAutomation("rra_other", encodedAutomation); err == nil {
-		t.Fatal("automation identity mismatch decoded")
-	}
-	if _, err := decodeLegacyRepositoryReviewAutomation(automation.ID, []byte("{")); err == nil {
-		t.Fatal("malformed automation decoded")
-	}
-	automationFields["name"] = json.RawMessage(`""`)
-	invalidAutomation, _ := json.Marshal(automationFields)
-	if _, err := decodeLegacyRepositoryReviewAutomation(automation.ID, invalidAutomation); err == nil {
-		t.Fatal("invalid automation decoded")
 	}
 }
 
@@ -841,58 +533,6 @@ func TestRepositoryReviewSQLiteRelationshipWriteFailures(t *testing.T) {
 	}
 }
 
-func TestRepositoryReviewSQLiteMigrationRewriteFailureBoundaries(t *testing.T) {
-	store := newRepositoryAuditTestStore(t)
-	file := repositoryAuditTestFile("pkg/generic.go", "1", 1)
-	state := recordRepositoryAuditCoverage(
-		t, store, "owner/generic", "commit", "inventory", []FileRef{file}, "run",
-	).State
-	query := `SELECT version FROM repository_review_states WHERE state_id = ?`
-	if err := store.rewriteMigrationRow(t.Context(), "generic", "", state.ID, state.Version, nil); err == nil {
-		t.Fatal("invalid migration rewrite succeeded")
-	}
-	want := errors.New("write failed")
-	if err := store.rewriteMigrationRow(
-		t.Context(), "generic", query, state.ID, state.Version,
-		func(context.Context, *sql.Conn, int64) (bool, error) { return false, want },
-	); !errors.Is(err, want) {
-		t.Fatalf("write error=%v", err)
-	}
-	if err := store.rewriteMigrationRow(
-		t.Context(), "generic", query, state.ID, state.Version,
-		func(context.Context, *sql.Conn, int64) (bool, error) { return false, nil },
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("ignored rewrite error=%v", err)
-	}
-	if err := store.rewriteMigrationRow(
-		t.Context(), "generic", `SELECT missing FROM absent`, state.ID, state.Version,
-		func(context.Context, *sql.Conn, int64) (bool, error) { return true, nil },
-	); err == nil {
-		t.Fatal("rewrite query error ignored")
-	}
-
-	lockStore := NewSQLiteStore(t.TempDir())
-	if err := os.Mkdir(repositoryReviewTestLockPath(t, lockStore.root, "store.lock"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := lockStore.rewriteMigrationRow(
-		t.Context(), "generic", query, state.ID, state.Version,
-		func(context.Context, *sql.Conn, int64) (bool, error) { return true, nil },
-	); err == nil {
-		t.Fatal("rewrite lock error ignored")
-	}
-	openStore := NewSQLiteStore(t.TempDir())
-	if err := os.WriteFile(openStore.root, []byte("not-a-directory"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := openStore.rewriteMigrationRow(
-		t.Context(), "generic", query, state.ID, state.Version,
-		func(context.Context, *sql.Conn, int64) (bool, error) { return true, nil },
-	); err == nil {
-		t.Fatal("rewrite open error ignored")
-	}
-}
-
 func TestRepositoryReviewSQLiteSaveConflictAndQueryFailures(t *testing.T) {
 	for name, run := range map[string]func(*testing.T, Store, *sql.DB){
 		"state query": func(t *testing.T, store Store, database *sql.DB) {
@@ -1118,9 +758,6 @@ func TestRepositoryReviewSQLiteFacadesPropagateDatabaseFailure(t *testing.T) {
 			)
 			requireSQLiteFailure(t, err)
 		},
-		"delete automation": func(t *testing.T, f fixture) {
-			requireSQLiteFailure(t, f.store.DeleteAutomation(t.Context(), f.automation.ID, f.automation.Version))
-		},
 	}
 	for name, run := range tests {
 		t.Run(name, func(t *testing.T) { run(t, newFixture(t)) })
@@ -1188,217 +825,45 @@ func TestRepositoryReviewSQLiteCatalogQueryAndScanFailures(t *testing.T) {
 
 //nolint:govet // Boundary tests intentionally keep setup and assertion errors in local scopes.
 func TestRepositoryReviewSQLiteDeleteFailureBoundaries(t *testing.T) {
-	for _, kind := range []string{"profile", "automation"} {
-		for _, mode := range []string{"open", "reject", "ignore"} {
-			t.Run(kind+" "+mode, func(t *testing.T) {
-				store := newRepositoryAuditTestStore(t)
-				profile, err := store.CreateProfile(t.Context(), validProfileForTest("rrpf_delete_boundary", "Delete"))
+	for _, mode := range []string{"open", "reject", "ignore"} {
+		t.Run("profile "+mode, func(t *testing.T) {
+			store := newRepositoryAuditTestStore(t)
+			profile, err := store.CreateProfile(t.Context(), validProfileForTest("rrpf_delete_boundary", "Delete"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(store.root, repositoryReviewDatabaseFilename)
+			if mode != "open" {
+				database, err := sql.Open("sqlite", path)
 				if err != nil {
 					t.Fatal(err)
 				}
-				var automation RepositoryReviewAutomation
-				if kind == "automation" {
-					automation, err = store.CreateAutomation(
-						t.Context(),
-						validAutomationForTest("rra_delete_boundary", "Delete"),
-					)
-					if err != nil {
-						t.Fatal(err)
-					}
+				action := "FAIL, 'reject'"
+				if mode == "ignore" {
+					action = "IGNORE"
 				}
-				path := filepath.Join(store.root, repositoryReviewDatabaseFilename)
-				if mode != "open" {
-					database, err := sql.Open("sqlite", path)
-					if err != nil {
-						t.Fatal(err)
-					}
-					table := "repository_review_profiles"
-					if kind == "automation" {
-						table = "repository_review_automations"
-					}
-					action := "FAIL, 'reject'"
-					if mode == "ignore" {
-						action = "IGNORE"
-					}
-					if _, err := database.Exec(fmt.Sprintf(
-						`CREATE TRIGGER delete_boundary BEFORE DELETE ON %s BEGIN SELECT RAISE(%s); END`, table, action,
-					)); err != nil {
-						database.Close()
-						t.Fatal(err)
-					}
-					_ = database.Close()
+				trigger := fmt.Sprintf(`CREATE TRIGGER delete_boundary
+					BEFORE DELETE ON repository_review_profiles
+					BEGIN SELECT RAISE(%s); END`, action)
+				if _, err := database.Exec(trigger); err != nil {
+					database.Close()
+					t.Fatal(err)
 				}
-				calls := 0
-				store.openForTest = func(context.Context) (*sql.DB, error) {
-					calls++
-					openFailureCall := 2
-					if kind == "profile" {
-						openFailureCall = 3
-					}
-					if mode == "open" && calls == openFailureCall {
-						return nil, errors.New("open failed")
-					}
-					return sql.Open("sqlite", path)
+				_ = database.Close()
+			}
+			calls := 0
+			store.openForTest = func(context.Context) (*sql.DB, error) {
+				calls++
+				if mode == "open" && calls == 3 {
+					return nil, errors.New("open failed")
 				}
-				if kind == "profile" {
-					err = store.DeleteProfile(t.Context(), profile.ID, profile.Version)
-				} else {
-					err = store.DeleteAutomation(t.Context(), automation.ID, automation.Version)
-				}
-				if err == nil {
-					t.Fatal("delete boundary succeeded")
-				}
-			})
-		}
-	}
-}
-
-func TestRepositoryReviewSQLiteProfileAndStateResidualBoundaries(t *testing.T) {
-	profile := profileCoverageFixture("rrpf_bad_timestamp")
-	profile.CreatedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
-	profile.UpdatedAt = profile.CreatedAt
-	if err := NewSQLiteStore(t.TempDir()).saveProfile(profile); err == nil {
-		t.Fatal("unencodable profile saved")
-	}
-	if err := NewSQLiteStore(
-		t.TempDir(),
-	).ensureRepositoryAutomationUniqueUnlocked("rra_blank", ""); !errors.Is(
-		err,
-		ErrInvalidAutomation,
-	) {
-		t.Fatalf("blank repository uniqueness=%v", err)
-	}
-	if err := prepareRepositoryStateForPersistence(nil); err == nil {
-		t.Fatal("nil repository state prepared")
-	}
-	blocked := NewSQLiteStore(t.TempDir())
-	if err := os.WriteFile(blocked.root, []byte("not-a-directory"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	state := repositoryReviewCoverageState("owner/blocked-save")
-	if err := blocked.save(&state); err == nil {
-		t.Fatal("blocked state save succeeded")
-	}
-	store := newRepositoryAuditTestStore(t)
-	file := repositoryAuditTestFile("pkg/residual.go", "8", 8)
-	_ = recordRepositoryAuditCoverage(
-		t, store, "owner/residual", "commit", "inventory", []FileRef{file}, "run",
-	)
-	if _, found, err := store.GetByID("invalid"); err != nil || found {
-		t.Fatalf("invalid GetByID found=%v err=%v", found, err)
-	}
-	if _, found, err := store.GetByID(RepositoryID("owner/absent")); err != nil || found {
-		t.Fatalf("missing GetByID found=%v err=%v", found, err)
-	}
-	if _, err := store.listSummaries(0); err == nil {
-		t.Fatal("zero-bound summary list succeeded")
-	}
-	_, invalidAssociation := repositoryReviewIssueState(t, 1)
-	invalidAssociation.Findings[0].IssueDraftID = "missing"
-	if err := validateState(invalidAssociation); err == nil {
-		t.Fatal("invalid issue association validated")
-	}
-	if legacyIssueDraftPriority(IssueDraftPublishing) != 2 {
-		t.Fatal("publishing legacy priority changed")
-	}
-	priorityState := invalidAssociation
-	priorityState.IssueDrafts = []IssueDraft{
-		{
-			ID:         "editing",
-			Origin:     IssueDraftOriginLegacy,
-			State:      IssueDraftEditing,
-			FindingIDs: []string{priorityState.Findings[0].ID},
-		},
-		{
-			ID:         "posted",
-			Origin:     IssueDraftOriginLegacy,
-			State:      IssueDraftPosted,
-			FindingIDs: []string{priorityState.Findings[0].ID},
-		},
-	}
-	backfillCanonicalIssueAssociations(&priorityState)
-	if _, err := repositoryReviewFileAttributionCreditCandidates(
-		make([]RepositoryReviewFileAttribution, maxRepositoryReviewFileAttributions+1),
-	); !errors.Is(err, ErrInvalidPlan) {
-		t.Fatalf("oversized attribution candidates=%v", err)
-	}
-	creditFixture := newRepositoryReviewAttributionCreditFixture(t)
-	firstAssignment := creditFixture.state.CurrentCampaign.AssignmentCatalog[0]
-	duplicateAssignment, err := NewRepositoryReviewAssignment(
-		firstAssignment.FocusID, firstAssignment.Reviewer,
-		firstAssignment.PromptRevision+"-duplicate", firstAssignment.ProfileHash,
-		firstAssignment.Required,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	creditFixture.state.CurrentCampaign.AssignmentCatalog = append(
-		creditFixture.state.CurrentCampaign.AssignmentCatalog,
-		duplicateAssignment,
-	)
-	if _, err := PreviewRepositoryReviewFileAttributionCredits(
-		creditFixture.state, creditFixture.fence, creditFixture.attributions,
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("ambiguous assignment credit=%v", err)
-	}
-	creditFixture = newRepositoryReviewAttributionCreditFixture(t)
-	targetPath := creditFixture.attributions[0].AcknowledgedFiles[0].Path
-	invalidCoverage := creditFixture.state.CurrentCampaign.Paths[targetPath]
-	invalidCoverage.AssignmentBits = "***"
-	creditFixture.state.CurrentCampaign.Paths[targetPath] = invalidCoverage
-	if _, err := PreviewRepositoryReviewFileAttributionCredits(
-		creditFixture.state, creditFixture.fence, creditFixture.attributions,
-	); err == nil {
-		t.Fatal("invalid assignment bits received attribution credit")
-	}
-	conflictingAttribution := creditFixture.attributions[0]
-	conflictingAttribution.UsageModel = "different-model"
-	if _, err := repositoryReviewFileAttributionCreditCandidates([]RepositoryReviewFileAttribution{
-		creditFixture.attributions[0], conflictingAttribution,
-	}); !errors.Is(err, ErrConflict) {
-		t.Fatalf("conflicting attribution candidates=%v", err)
-	}
-	creditFixture = newRepositoryReviewAttributionCreditFixture(t)
-	wrongFence := creditFixture.fence
-	wrongFence.CampaignID = NewRepositoryReviewCampaignID()
-	if _, err := creditFixture.store.MergeRepositoryReviewFileAttributions(
-		t.Context(), MergeRepositoryReviewFileAttributionsRequest{
-			Repository: creditFixture.repository, ExpectedVersion: creditFixture.state.Version,
-			Attributions: creditFixture.attributions, CampaignCredit: &wrongFence,
-		},
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("mismatched attribution credit fence=%v", err)
-	}
-	dedupFixture := dedupDeepPendingFixture(t, 1)
-	dedupState := dedupDeepState(t, dedupFixture)
-	if len(dedupState.DeduplicatedFindings) == 0 {
-		dedupState.DeduplicatedFindings = []DeduplicatedReviewFinding{{
-			ID: "rdf_invalid", Version: 1, CampaignID: dedupFixture.campaignID,
-			AdmissionBucket: "bucket", CreationOrdinal: 1,
-			DiagnosisDigest: "sha256:" + strings.Repeat("a", 64),
-			Repository:      dedupFixture.repository, CommitSHA: strings.Repeat("a", 40),
-			File: dedupFixture.files[0], RawSourceIDs: []string{"missing"},
-			Status: FindingOpen, RepositoryFindingID: "missing",
-			RepositoryMatchState: RepositoryMatchKnown,
-			CreatedAt:            repositoryAuditTestNow, UpdatedAt: repositoryAuditTestNow,
-		}}
-	} else {
-		dedupState.DeduplicatedFindings[0].RepositoryFindingID = "missing"
-		dedupState.DeduplicatedFindings[0].RepositoryMatchState = RepositoryMatchKnown
-	}
-	if err := validateDeduplicationState(dedupState); err == nil {
-		t.Fatal("missing repository finding deduplication reference validated")
-	}
-}
-
-func TestRepositoryReviewSQLiteReconcilePropagatesSemanticStateFailure(t *testing.T) {
-	store, request, _ := repositoryReviewCampaignReconcileFixture(t, "owner/sqlite-reconcile")
-	want := errors.New("semantic state failure")
-	store.loadForTest = func(string) (RepositoryState, error) {
-		return RepositoryState{}, want
-	}
-	if _, err := store.ReconcileCampaign(t.Context(), request); !errors.Is(err, want) {
-		t.Fatalf("semantic campaign reconciliation error=%v", err)
+				return sql.Open("sqlite", path)
+			}
+			err = store.DeleteProfile(t.Context(), profile.ID, profile.Version)
+			if err == nil {
+				t.Fatal("delete boundary succeeded")
+			}
+		})
 	}
 }
 
@@ -1441,56 +906,6 @@ func TestRepositoryReviewSQLiteSnapshotMappingSaveFailure(t *testing.T) {
 		state.Repository, []string{finding.ID}, RepositoryMappingModelSnapshot{Model: "reviewer"},
 	); err == nil {
 		t.Fatal("mapping snapshot ignored SQLite save failure")
-	}
-}
-
-func TestRepositoryReviewSQLiteLegacyRawIdentityMigration(t *testing.T) {
-	store := newRepositoryAuditTestStore(t)
-	state, _ := recordLifecycleFinding(
-		t, store, strings.Repeat("a", 40), strings.Repeat("b", 40), "legacy-sqlite-run",
-		"main", "main", true, "legacy sqlite identity",
-	)
-	oldParentID := "rfn_sqlite_compatibility"
-	newRawID := state.RawFindings[0].ID
-	oldRawID := "rrl_" + strings.TrimPrefix(newRawID, "rrw_")
-	originalParentID := state.DeduplicatedFindings[0].ID
-	raw := &state.RawFindings[0]
-	raw.ID = oldRawID
-	raw.LegacyFindingID = ""
-	raw.DeduplicatedFindingID = oldParentID
-	for index := range raw.History {
-		raw.History[index].DeduplicatedFindingID = oldParentID
-	}
-	raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(*raw)
-	deduplicated := &state.DeduplicatedFindings[0]
-	deduplicated.ID = oldParentID
-	deduplicated.DiagnosisDigest = raw.DiagnosisDigest
-	deduplicated.RawSourceIDs[0] = oldRawID
-	for index := range deduplicated.History {
-		deduplicated.History[index].RawFindingID = oldRawID
-	}
-	for index := range state.Findings {
-		if state.Findings[index].ID == originalParentID {
-			state.Findings[index].ID = oldParentID
-		}
-	}
-	for index := range state.DeduplicationJobs {
-		state.DeduplicationJobs[index].RawFindingID = oldRawID
-	}
-	for index := range state.MappingJobs {
-		state.MappingJobs[index].ID = mappingJobID(oldParentID)
-		state.MappingJobs[index].ReviewFindingID = oldParentID
-	}
-	for runIndex := range state.Runs {
-		for findingIndex := range state.Runs[runIndex].FindingIDs {
-			if state.Runs[runIndex].FindingIDs[findingIndex] == originalParentID {
-				state.Runs[runIndex].FindingIDs[findingIndex] = oldParentID
-			}
-		}
-	}
-	migrated, err := migrateRepositoryState(&state)
-	if err != nil || !migrated || state.RawFindings[0].ID != newRawID {
-		t.Fatalf("legacy raw migration migrated=%v state=%#v err=%v", migrated, state.RawFindings, err)
 	}
 }
 
@@ -1543,455 +958,6 @@ func TestRepositoryReviewSQLiteProfileAutomationCatalogFailuresReachCallers(t *t
 	}
 	if err := store.DeleteProfile(t.Context(), profile.ID, profile.Version); err == nil {
 		t.Fatal("catalog-error profile delete succeeded")
-	}
-}
-
-func TestRepositoryReviewSQLiteFacadesPropagateSemanticRowFailure(t *testing.T) {
-	store := newRepositoryAuditTestStore(t)
-	file := repositoryAuditTestFile("pkg/semantic.go", "7", 7)
-	recorded := recordRepositoryAuditCoverage(
-		t, store, "owner/semantic", "commit", "inventory", []FileRef{file}, "run",
-	)
-	profile, err := store.CreateProfile(t.Context(), validProfileForTest("rrpf_semantic", "Semantic"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	automationInput, err := MaterializeRepositoryReviewAutomation(
-		profile, validAutomationForTest("rra_semantic", "Semantic"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	automation, err := store.CreateAutomation(t.Context(), automationInput)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changedFile := file
-	changedFile.BlobSHA = strings.Repeat("8", 40)
-	recordPlan, err := store.Plan(
-		t.Context(), recorded.State.Repository, "commit-next", "inventory-next",
-		[]FileRef{changedFile}, false,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	noopPlan, err := store.PlanWithProfileLimitAuthoritative(
-		t.Context(), recorded.State.Repository, "commit", "inventory",
-		"repository-bug-finder-v1", []FileRef{file}, false, maxReviewFiles, true,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database, err := store.openDatabase(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	badState := recorded.State
-	badState.Runs[0].InspectedFiles = -1
-	statePayload, _ := json.Marshal(badState)
-	if _, err := database.Exec(
-		`UPDATE repository_review_states SET payload_json = ? WHERE state_id = ?`,
-		statePayload, badState.ID,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.Exec(
-		`UPDATE repository_review_profiles SET name = '' WHERE profile_id = ?`, profile.ID,
-	); err != nil {
-		t.Fatal(err)
-	}
-	var automationPayload []byte
-	if err := database.QueryRow(
-		`SELECT payload_json FROM repository_review_automations WHERE automation_id = ?`, automation.ID,
-	).Scan(&automationPayload); err != nil {
-		t.Fatal(err)
-	}
-	var badAutomation RepositoryReviewAutomation
-	_ = json.Unmarshal(automationPayload, &badAutomation)
-	badAutomation.MaxFilesPerRun = -1
-	automationPayload, _ = json.Marshal(badAutomation)
-	if _, err := database.Exec(
-		`UPDATE repository_review_automations SET payload_json = ? WHERE automation_id = ?`,
-		automationPayload, automation.ID,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.Close(); err != nil {
-		t.Fatal(err)
-	}
-	databasePath := filepath.Join(store.root, repositoryReviewDatabaseFilename)
-	store.openForTest = func(context.Context) (*sql.DB, error) {
-		return sql.Open("sqlite", databasePath)
-	}
-
-	if _, _, err := store.loadProfile(profile.ID); err == nil {
-		t.Fatal("semantic profile loaded")
-	}
-	if _, err := store.listProfilesUnlocked(maxProfileCount); err == nil {
-		t.Fatal("semantic profile listed")
-	}
-	if _, err := store.CreateProfile(t.Context(), profile); err == nil {
-		t.Fatal("semantic profile duplicate created")
-	}
-	if _, err := store.UpdateProfile(
-		t.Context(), profile.ID, profile.Version, func(*RepositoryReviewProfile) error { return nil },
-	); err == nil {
-		t.Fatal("semantic profile updated")
-	}
-	if err := store.DeleteProfile(t.Context(), profile.ID, profile.Version); err == nil {
-		t.Fatal("semantic profile deleted")
-	}
-	if err := store.validateAutomationProfileSnapshotUnlocked(automation); err == nil {
-		t.Fatal("semantic profile snapshot validated")
-	}
-
-	if _, _, err := store.loadAutomation(automation.ID); err == nil {
-		t.Fatal("semantic automation loaded")
-	}
-	if _, err := store.listAutomationsUnlocked(maxAutomationCount); err == nil {
-		t.Fatal("semantic automation listed")
-	}
-	if _, err := store.CreateAutomation(t.Context(), automation); err == nil {
-		t.Fatal("semantic automation duplicate created")
-	}
-	if _, err := store.UpdateAutomation(
-		t.Context(), automation.ID, automation.Version, func(*RepositoryReviewAutomation) error { return nil },
-	); err == nil {
-		t.Fatal("semantic automation updated")
-	}
-	if err := store.DeleteAutomation(t.Context(), automation.ID, automation.Version); err == nil {
-		t.Fatal("semantic automation deleted")
-	}
-	if err := store.ensureRepositoryAutomationUniqueUnlocked("rra_other", "owner/other"); err == nil {
-		t.Fatal("semantic automation uniqueness succeeded")
-	}
-	if _, err := store.profileAssignedUnlocked(profile.ID); err == nil {
-		t.Fatal("semantic assignment lookup succeeded")
-	}
-	if _, err := store.profileActiveUnlocked(profile.ID); err == nil {
-		t.Fatal("semantic active lookup succeeded")
-	}
-
-	if _, _, err := store.Get(recorded.State.Repository); err == nil {
-		t.Fatal("semantic state loaded")
-	}
-	if _, _, err := store.GetByID(recorded.State.ID); err == nil {
-		t.Fatal("semantic state ID loaded")
-	}
-	if _, err := store.List(); err == nil {
-		t.Fatal("semantic state listed")
-	}
-	if _, err := store.SetFindingStatus(recorded.State.Repository, "missing", FindingOpen, 1); err == nil {
-		t.Fatal("semantic finding status succeeded")
-	}
-	if _, _, err := store.PrepareIssue(IssueDraftRequest{
-		Repository: recorded.State.Repository, FindingIDs: []string{"missing"},
-	}); err == nil {
-		t.Fatal("semantic issue preparation succeeded")
-	}
-	if _, _, err := store.UpdateIssueDraft(
-		recorded.State.Repository, "missing", "title", "body", nil, 1,
-	); err == nil {
-		t.Fatal("semantic issue update succeeded")
-	}
-	if _, _, _, err := store.ClaimIssueDraftPublication(
-		recorded.State.Repository, "missing", 1,
-	); err == nil {
-		t.Fatal("semantic issue claim succeeded")
-	}
-	if _, _, err := store.SetIssueDraftPublication(
-		recorded.State.Repository, "missing", 1, IssueDraftUnknown, "", "",
-	); err == nil {
-		t.Fatal("semantic issue publication succeeded")
-	}
-	if _, err := store.Record(t.Context(), RecordRequest{Plan: recordPlan, RunID: "semantic-record"}); err == nil {
-		t.Fatal("semantic review record succeeded")
-	}
-	if _, err := store.FinalizeNoopPlan(noopPlan); err == nil {
-		t.Fatal("semantic no-op finalization succeeded")
-	}
-	if _, _, err := store.SetFindingStatusByVersion(
-		recorded.State.Repository, "missing", FindingOpen, 1,
-	); err == nil {
-		t.Fatal("semantic versioned finding status succeeded")
-	}
-	generation := testIssueGenerationRequest(recorded.State.Repository, "missing", "generation-semantic")
-	if _, _, _, err := store.ReserveIssueGeneration(generation); err == nil {
-		t.Fatal("semantic issue reservation succeeded")
-	}
-	if _, _, _, err := store.BeginIssueRegeneration(
-		recorded.State.Repository, "missing", generation,
-	); err == nil {
-		t.Fatal("semantic issue regeneration succeeded")
-	}
-	if _, _, err := store.CompleteIssueGeneration(
-		recorded.State.Repository, "missing", generation.GenerationID,
-		"title", "body", nil, "",
-	); err == nil {
-		t.Fatal("semantic issue completion succeeded")
-	}
-	if _, err := store.DeleteIssueDraft(recorded.State.Repository, "missing", 1); err == nil {
-		t.Fatal("semantic issue deletion succeeded")
-	}
-	if _, _, err := store.LinkExistingIssue(ExistingIssueLink{
-		Repository: recorded.State.Repository, FindingID: "missing",
-		ExpectedFindingVersion: 1, ExternalID: "1",
-		ExternalURL: "https://github.com/owner/semantic/issues/1",
-		Title:       "Existing", State: "open", Confirmed: true,
-	}); err == nil {
-		t.Fatal("semantic existing issue link succeeded")
-	}
-	if _, err := store.UnlinkExistingIssue(
-		recorded.State.Repository, "missing", 1, true,
-	); err == nil {
-		t.Fatal("semantic existing issue unlink succeeded")
-	}
-
-	if _, _, _, err := store.reconcileRepositoryJobs(recorded.State.Repository); err == nil {
-		t.Fatal("semantic repository reconciliation succeeded")
-	}
-	if _, _, err := store.RetryRunFindingStatus(
-		recorded.State.Repository, []string{"missing"},
-	); err == nil {
-		t.Fatal("semantic run finding retry succeeded")
-	}
-	if _, _, _, _, err := store.ClaimMappingJob(
-		recorded.State.Repository, "missing", RepositoryMappingModelSnapshot{},
-	); err == nil {
-		t.Fatal("semantic mapping claim succeeded")
-	}
-	if _, _, err := store.ResolvePossibleDuplicate(
-		recorded.State.Repository,
-		RepositoryDuplicateResolution{
-			ProvisionalID: "provisional", CandidateID: "candidate", Decision: "distinct",
-			ExpectedProvisionalVersion: 1,
-		},
-	); err == nil {
-		t.Fatal("semantic duplicate resolution succeeded")
-	}
-	if _, _, err := store.ReserveValidationJobs(
-		recorded.State.Repository, []string{"missing"}, RepositoryMappingModelSnapshot{},
-	); err == nil {
-		t.Fatal("semantic validation reservation succeeded")
-	}
-	if _, _, _, _, err := store.ClaimValidationJob(
-		recorded.State.Repository, "missing",
-	); err == nil {
-		t.Fatal("semantic validation claim succeeded")
-	}
-	if _, _, err := store.SetValidationJobCandidates(
-		recorded.State.Repository, "missing", []string{strings.Repeat("a", 40)},
-	); err == nil {
-		t.Fatal("semantic validation candidates succeeded")
-	}
-	if _, _, _, err := store.CompleteValidationJob(
-		recorded.State.Repository,
-		RepositoryValidationCompletion{JobID: "missing", Outcome: RepositoryValidationNotFixed},
-	); err == nil {
-		t.Fatal("semantic validation completion succeeded")
-	}
-	if _, _, err := store.UpdateRepositoryFindingIssueSnapshot(
-		recorded.State.Repository,
-		RepositoryIssueSnapshotUpdate{
-			RepositoryFindingID: "missing", ExpectedVersion: 1,
-			State: RepositoryFindingIssueNone,
-		},
-	); err == nil {
-		t.Fatal("semantic issue snapshot succeeded")
-	}
-	if _, _, err := store.SetRepositoryFindingLifecycle(
-		recorded.State.Repository, "missing", RepositoryFindingOpen, 1,
-	); err == nil {
-		t.Fatal("semantic lifecycle mutation succeeded")
-	}
-	if _, err := store.BeginCampaign(t.Context(), BeginCampaignRequest{
-		Repository: recorded.State.Repository, CampaignID: NewRepositoryReviewCampaignID(),
-		CommitSHA: strings.Repeat("a", 40), ExpectedReviewVersion: recorded.State.ReviewVersion,
-	}); err == nil {
-		t.Fatal("semantic campaign begin succeeded")
-	}
-	if _, _, err := store.RetryDeduplications(
-		recorded.State.Repository, []string{"missing"},
-	); err == nil {
-		t.Fatal("semantic deduplication retry succeeded")
-	}
-	if err := store.releaseValidationJob(recorded.State.Repository, "missing"); err == nil {
-		t.Fatal("semantic validation release succeeded")
-	}
-	if _, _, err := store.ResolveRepositoryState(
-		"owner/missing-semantic", []string{"run"},
-	); err == nil {
-		t.Fatal("semantic repository resolution succeeded")
-	}
-}
-
-//nolint:govet // Boundary tests intentionally keep setup and assertion errors in local scopes.
-func TestRepositoryReviewSQLiteMigratesArchivesAndAuditsLegacySources(t *testing.T) {
-	seed := newRepositoryAuditTestStore(t)
-	profile, err := seed.CreateProfile(t.Context(), validProfileForTest("rrpf_migrate", "Migration"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	automationInput, err := MaterializeRepositoryReviewAutomation(
-		profile,
-		validAutomationForTest("rra_migrate", "Migration automation"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	automation, err := seed.CreateAutomation(t.Context(), automationInput)
-	if err != nil {
-		t.Fatal(err)
-	}
-	file := repositoryAuditTestFile("pkg/migrate.go", "b", 48)
-	recorded := recordRepositoryAuditCoverage(
-		t, seed, "owner/migrate", "commit-b", "inventory-b", []FileRef{file}, "migration-run",
-	)
-
-	workspace := t.TempDir()
-	root := filepath.Join(workspace, storeDirectory)
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	stateName := "repo_" + strings.TrimPrefix(recorded.State.ID, "rrp_") + ".json"
-	sources := map[string]any{
-		stateName: recorded.State,
-		strings.TrimSuffix(stateName, ".json") + ".summary.json": Summarize(recorded.State),
-		profileFilename(profile.ID):                              profile,
-		automationFilename(automation.ID):                        automation,
-	}
-	for name, value := range sources {
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, name), encoded, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	badName := "profile_rrpf_malformed.json"
-	if err := os.WriteFile(filepath.Join(root, badName), []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	store := NewSQLiteStore(workspace)
-	states, err := store.List()
-	if err != nil || len(states) != 1 || states[0].ID != recorded.State.ID {
-		t.Fatalf("migrated states=%#v err=%v", states, err)
-	}
-	if _, found, err := store.GetProfile(t.Context(), profile.ID); err != nil || !found {
-		t.Fatalf("migrated profile found=%v err=%v", found, err)
-	}
-	if _, found, err := store.GetAutomation(t.Context(), automation.ID); err != nil || !found {
-		t.Fatalf("migrated automation found=%v err=%v", found, err)
-	}
-	for name := range sources {
-		requireReviewLegacyArchived(t, root, name)
-	}
-	requireReviewLegacyArchived(t, root, badName)
-	database, err := store.openDatabase(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	var imported, skipped, complete, issues int
-	if err := database.QueryRow(`
-		SELECT COALESCE(SUM(imported_count), 0), COALESCE(SUM(skipped_count), 0),
-		       COUNT(*) FILTER (WHERE archive_status = 'complete')
-		  FROM storage_imports WHERE component = ?`, repositoryReviewDatabaseComponent,
-	).Scan(&imported, &skipped, &complete); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.QueryRow(`
-		SELECT COUNT(*) FROM storage_import_issues WHERE component = ?`,
-		repositoryReviewDatabaseComponent,
-	).Scan(&issues); err != nil {
-		t.Fatal(err)
-	}
-	if imported != 3 || skipped != 1 || complete != 5 || issues != 1 {
-		t.Fatalf("accounting imported=%d skipped=%d complete=%d issues=%d", imported, skipped, complete, issues)
-	}
-	if summaries, err := NewSQLiteStore(workspace).ListSummaries(); err != nil || len(summaries) != 1 {
-		t.Fatalf("idempotent reopen summaries=%#v err=%v", summaries, err)
-	}
-}
-
-//nolint:govet // Boundary tests intentionally keep setup and assertion errors in local scopes.
-func TestRepositoryReviewSQLiteRejectsTooNewAndTamperedSchema(t *testing.T) {
-	for name, mutate := range map[string]func(*testing.T, *sql.DB){
-		"too new": func(t *testing.T, database *sql.DB) {
-			if _, err := database.Exec("PRAGMA user_version = 2"); err != nil {
-				t.Fatal(err)
-			}
-		},
-		"schema": func(t *testing.T, database *sql.DB) {
-			if _, err := database.Exec("DROP INDEX repository_review_states_updated_idx"); err != nil {
-				t.Fatal(err)
-			}
-		},
-		"rogue table": func(t *testing.T, database *sql.DB) {
-			if _, err := database.Exec(`CREATE TABLE rogue_review_table(id INTEGER)`); err != nil {
-				t.Fatal(err)
-			}
-		},
-		"rogue view": func(t *testing.T, database *sql.DB) {
-			if _, err := database.Exec(`CREATE VIEW rogue_review_view AS
-				SELECT state_id FROM repository_review_states`); err != nil {
-				t.Fatal(err)
-			}
-		},
-		"rogue index": func(t *testing.T, database *sql.DB) {
-			if _, err := database.Exec(`CREATE INDEX rogue_review_index
-				ON repository_review_states(last_commit_sha)`); err != nil {
-				t.Fatal(err)
-			}
-		},
-		"rogue trigger": func(t *testing.T, database *sql.DB) {
-			if _, err := database.Exec(`CREATE TRIGGER rogue_review_trigger
-				AFTER INSERT ON repository_review_states BEGIN SELECT 1; END`); err != nil {
-				t.Fatal(err)
-			}
-		},
-		"profile scope": func(t *testing.T, database *sql.DB) {
-			if _, err := database.Exec(`
-				INSERT INTO repository_review_profiles (
-					profile_id, schema_version, version, name, review_focus, scope_free_text,
-					reviewer_model, deduplication_model, deduplication_similarity_threshold,
-					deduplication_candidate_limit, issue_writer_model, issue_prompt, account_ref,
-					force_enabled, auto_continue, max_files_per_run, max_content_bytes,
-					max_parallel_children, assignment_timeout_seconds, guard_expression,
-					created_at_unix_nano, updated_at_unix_nano
-				) VALUES ('rrpf_tampered', 4, 1, 'tampered', 'focus', '', 'reviewer', '', 90, 4,
-				          '', 'prompt', '', 0, 0, 1, 1, 1, 60, '', 1, 1)`); err != nil {
-				t.Fatal(err)
-			}
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			workspace := t.TempDir()
-			store := NewSQLiteStore(workspace)
-			if _, err := store.List(); err != nil {
-				t.Fatal(err)
-			}
-			database, err := sql.Open("sqlite", filepath.Join(store.root, repositoryReviewDatabaseFilename))
-			if err != nil {
-				t.Fatal(err)
-			}
-			mutate(t, database)
-			if err := database.Close(); err != nil {
-				t.Fatal(err)
-			}
-			_, err = store.List()
-			if name == "too new" && !errors.Is(err, sqlitestore.ErrTooNew) {
-				t.Fatalf("too-new error=%v", err)
-			}
-			if name != "too new" && !errors.Is(err, sqlitestore.ErrInvalidSchema) {
-				t.Fatalf("schema error=%v", err)
-			}
-		})
 	}
 }
 
@@ -2094,13 +1060,156 @@ func TestRepositoryReviewSQLitePrimitiveEncodings(t *testing.T) {
 	}
 }
 
-func requireReviewLegacyArchived(t *testing.T, root, name string) {
-	t.Helper()
-	if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
-		t.Fatalf("legacy source %s remains: %v", name, err)
+func TestRepositoryReviewSQLiteConfigurationImportAndDecoderBoundaries(t *testing.T) {
+	profile := profileCoverageFixture("rrpf_config_decoder")
+	profile.SchemaVersion = 1
+	profile.IssuePrompt = ""
+	encodedProfile, err := json.Marshal(profile)
+	if err != nil {
+		t.Fatal(err)
 	}
-	archive := filepath.Join(root, "legacy-json", repositoryReviewLegacyArchiveLabel, name)
-	if _, err := os.Stat(archive); err != nil {
-		t.Fatalf("archive %s: %v", archive, err)
+	var profileFields map[string]json.RawMessage
+	_ = json.Unmarshal(encodedProfile, &profileFields)
+	delete(profileFields, "deduplication_similarity_threshold")
+	delete(profileFields, "deduplication_candidate_limit")
+	encodedProfile, _ = json.Marshal(profileFields)
+	decodedProfile, err := decodeLegacyRepositoryReviewProfile(profile.ID, encodedProfile)
+	if err != nil || decodedProfile.SchemaVersion != RepositoryReviewProfileSchemaVersion ||
+		decodedProfile.IssuePrompt != DefaultRepositoryReviewIssuePrompt ||
+		decodedProfile.DeduplicationSimilarityThreshold != DeduplicationDefaultThreshold ||
+		decodedProfile.DeduplicationCandidateLimit != DeduplicationDefaultCandidateLimit {
+		t.Fatalf("decoded profile=%#v err=%v", decodedProfile, err)
+	}
+	if _, decodeErr := decodeLegacyRepositoryReviewProfile("rrpf_other", encodedProfile); decodeErr == nil {
+		t.Fatal("profile identity mismatch decoded")
+	}
+	if _, decodeErr := decodeLegacyRepositoryReviewProfile(profile.ID, []byte("{")); decodeErr == nil {
+		t.Fatal("malformed profile decoded")
+	}
+
+	automation := validAutomationForTest("rra_config_decoder", "Configuration decoder")
+	automation.SchemaVersion = RepositoryReviewAutomationSchemaVersion
+	automation.Version = 1
+	automation.Status = RepositoryReviewAutomationIdle
+	automation.CreatedAt = automationTestNow
+	automation.UpdatedAt = automationTestNow
+	if normalizeErr := normalizeAutomation(&automation); normalizeErr != nil {
+		t.Fatal(normalizeErr)
+	}
+	automation.SchemaVersion = 1
+	automation.CampaignID = NewRepositoryReviewCampaignID()
+	automation.RunIDs = []string{"run-old"}
+	encodedAutomation, _ := json.Marshal(automation)
+	var automationFields map[string]json.RawMessage
+	_ = json.Unmarshal(encodedAutomation, &automationFields)
+	delete(automationFields, "deduplication_similarity_threshold")
+	delete(automationFields, "deduplication_candidate_limit")
+	encodedAutomation, _ = json.Marshal(automationFields)
+	decodedAutomation, err := decodeLegacyRepositoryReviewAutomation(automation.ID, encodedAutomation)
+	if err != nil || decodedAutomation.SchemaVersion != RepositoryReviewAutomationSchemaVersion ||
+		decodedAutomation.DeduplicationSimilarityThreshold != DeduplicationDefaultThreshold ||
+		decodedAutomation.DeduplicationCandidateLimit != DeduplicationDefaultCandidateLimit ||
+		!repositoryReviewAutomationHistoryReset(decodedAutomation) {
+		t.Fatalf("decoded automation=%#v err=%v", decodedAutomation, err)
+	}
+	if _, decodeErr := decodeLegacyRepositoryReviewAutomation("rra_other", encodedAutomation); decodeErr == nil {
+		t.Fatal("automation identity mismatch decoded")
+	}
+	if _, decodeErr := decodeLegacyRepositoryReviewAutomation(automation.ID, []byte("{")); decodeErr == nil {
+		t.Fatal("malformed automation decoded")
+	}
+	automationFields["name"] = json.RawMessage(`""`)
+	invalidAutomation, _ := json.Marshal(automationFields)
+	if _, decodeErr := decodeLegacyRepositoryReviewAutomation(automation.ID, invalidAutomation); decodeErr == nil {
+		t.Fatal("invalid automation decoded")
+	}
+
+	store := newRepositoryAuditTestStore(t)
+	database, err := store.openDatabase(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := database.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyInput := func(relative string, value any) sqlitestore.LegacyInput {
+		data, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return sqlitestore.LegacyInput{
+			Relative: relative, Data: data, Digest: sha256.Sum256(data),
+		}
+	}
+	importProfile := profileCoverageFixture("rrpf_config_import")
+	if result, err := importLegacyRepositoryReviewSource(
+		t.Context(), conn, legacyInput(profileFilename(importProfile.ID), importProfile),
+	); err != nil || result.Imported != 1 {
+		t.Fatalf("profile import=%#v err=%v", result, err)
+	}
+	if result, err := importLegacyRepositoryReviewSource(
+		t.Context(), conn, legacyInput(profileFilename(importProfile.ID), importProfile),
+	); err != nil || result.Skipped != 1 || result.Issues[0].Code != "duplicate_identity" {
+		t.Fatalf("duplicate profile import=%#v err=%v", result, err)
+	}
+	invalidProfile := importProfile
+	invalidProfile.ID = "rrpf_invalid_config_import"
+	invalidProfile.Name = ""
+	if result, err := importLegacyRepositoryReviewSource(
+		t.Context(), conn, legacyInput(profileFilename(invalidProfile.ID), invalidProfile),
+	); err != nil || result.Skipped != 1 || result.Issues[0].Code != "invalid_profile" {
+		t.Fatalf("invalid profile import=%#v err=%v", result, err)
+	}
+	brokenAutomation := validAutomationForTest("rra_broken_config_profile", "Broken profile")
+	brokenAutomation.SchemaVersion = RepositoryReviewAutomationSchemaVersion
+	brokenAutomation.Version = 1
+	brokenAutomation.Status = RepositoryReviewAutomationIdle
+	brokenAutomation.CreatedAt = automationTestNow
+	brokenAutomation.UpdatedAt = automationTestNow
+	brokenAutomation.ProfileID = "rrpf_absent"
+	brokenAutomation.ProfileVersion = 1
+	brokenAutomation.Target = "all"
+	brokenAutomation.ReviewerModels = []string{"review-a"}
+	brokenAutomation.CompareModels = false
+	delete(brokenAutomation.ModelPrices, "review-b")
+	if err := normalizeAutomation(&brokenAutomation); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := importLegacyRepositoryReviewSource(
+		t.Context(), conn, legacyInput(automationFilename(brokenAutomation.ID), brokenAutomation),
+	); err != nil || result.Skipped != 1 || result.Issues[0].Code != "broken_profile_reference" {
+		t.Fatalf("broken automation import=%#v err=%v", result, err)
+	}
+	importAutomation := decodedAutomation
+	importAutomation.ID = "rra_config_import"
+	if result, err := importLegacyRepositoryReviewSource(
+		t.Context(), conn, legacyInput(automationFilename(importAutomation.ID), importAutomation),
+	); err != nil || result.Imported != 1 {
+		t.Fatalf("automation import=%#v err=%v", result, err)
+	}
+	if result, err := importLegacyRepositoryReviewSource(
+		t.Context(), conn, legacyInput("unknown.json", map[string]any{}),
+	); err != nil || result.Skipped != 1 || result.Issues[0].Code != "unknown_source" {
+		t.Fatalf("unknown import=%#v err=%v", result, err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closedProfile := profileCoverageFixture("rrpf_closed_config_import")
+	if _, err := importLegacyRepositoryReviewSource(
+		t.Context(), conn, legacyInput(profileFilename(closedProfile.ID), closedProfile),
+	); err == nil {
+		t.Fatal("closed profile import connection succeeded")
+	}
+	closedAutomation := decodedAutomation
+	closedAutomation.ID = "rra_closed_config_import"
+	if _, err := importLegacyRepositoryReviewSource(
+		t.Context(), conn, legacyInput(automationFilename(closedAutomation.ID), closedAutomation),
+	); err == nil {
+		t.Fatal("closed automation import connection succeeded")
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

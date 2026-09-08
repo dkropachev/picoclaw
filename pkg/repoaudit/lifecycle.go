@@ -125,492 +125,57 @@ func (s Store) AcquireValidationSlot(ctx context.Context) (func(), error) {
 	}
 }
 
-func migrateRepositoryState(state *RepositoryState) (bool, error) {
+func validateRepositoryStateVersion(state *RepositoryState) error {
 	if state == nil {
-		return false, errors.New("repository review state is required")
+		return errors.New("repository review state is required")
 	}
-	migrated := false
-	// Historical deduplication was introduced by schema 4. The schema 5
-	// attribution-only migration must not requeue already migrated findings.
-	legacyDeduplicationSchema := state.SchemaVersion > 0 && state.SchemaVersion < 4
-	switch state.SchemaVersion {
-	case 1, 2, 3, 4:
-		state.SchemaVersion = SchemaVersion
-		migrated = true
-	case SchemaVersion:
-	default:
-		return false, errors.New("invalid repository review state")
+	if state.SchemaVersion != SchemaVersion {
+		return errors.New("invalid repository review state version")
 	}
 	if state.Files == nil {
 		state.Files = make(map[string]ReviewedFile)
-		migrated = true
 	}
 	if state.Unsupported == nil {
 		state.Unsupported = make(map[string]UnsupportedFile)
-		migrated = true
 	}
 	if state.ReviewAttempts == nil {
 		state.ReviewAttempts = make(map[string]int)
-		migrated = true
 	}
 	if state.ReviewAttemptIdentities == nil {
 		state.ReviewAttemptIdentities = make(map[string]string)
-		migrated = true
+	}
+	if state.CampaignHistory == nil {
+		state.CampaignHistory = make(map[string]string)
 	}
 	if state.Findings == nil {
 		state.Findings = []Finding{}
-		migrated = true
 	}
 	if state.RawFindings == nil {
 		state.RawFindings = []RawReviewFinding{}
-		migrated = true
-	}
-	if state.DeduplicatedFindings == nil {
-		state.DeduplicatedFindings = []DeduplicatedReviewFinding{}
-		migrated = true
 	}
 	if state.DeduplicationJobs == nil {
 		state.DeduplicationJobs = []DeduplicationJob{}
-		migrated = true
-	}
-	rawIDsMigrated, rawIDsErr := migrateRepositoryReviewRawFindingIDs(state)
-	if rawIDsErr != nil {
-		return false, rawIDsErr
-	}
-	if rawIDsMigrated {
-		migrated = true
-	}
-	if reconcileFindingsProcessingCounters(state) {
-		migrated = true
-	}
-	if legacyDeduplicationSchema && (len(state.Findings) > 0 || len(state.RepositoryFindings) > 0) &&
-		!state.HistoricalDeduplication.Required {
-		state.HistoricalDeduplication.Required = true
-		state.HistoricalDeduplication.Status = HistoricalDeduplicationPending
-		state.HistoricalDeduplication.UpdatedAt = state.UpdatedAt.UTC()
-		migrated = true
-	}
-	if state.HistoricalDeduplication.Status == HistoricalDeduplicationFailed &&
-		state.HistoricalDeduplication.FailurePhase == "" {
-		state.HistoricalDeduplication.FailurePhase = HistoricalDeduplicationFailurePhaseForState(*state)
-		migrated = true
 	}
 	if state.Contexts == nil {
 		state.Contexts = []FindingContext{}
-		migrated = true
 	}
 	if state.Runs == nil {
 		state.Runs = []ReviewRun{}
-		migrated = true
 	}
 	if state.FileAttributions == nil {
 		state.FileAttributions = []RepositoryReviewFileAttribution{}
-		migrated = true
 	}
 	if state.IssueDrafts == nil {
 		state.IssueDrafts = []IssueDraft{}
-		migrated = true
 	}
 	if state.RepositoryFindings == nil {
 		state.RepositoryFindings = []RepositoryFinding{}
-		migrated = true
 	}
 	if state.MappingJobs == nil {
 		state.MappingJobs = []RepositoryMappingJob{}
-		migrated = true
 	}
 	if state.ValidationJobs == nil {
 		state.ValidationJobs = []RepositoryValidationJob{}
-		migrated = true
-	}
-	if state.CurrentCampaign != nil && state.CurrentCampaign.Paths == nil {
-		state.CurrentCampaign.Paths = make(map[string]RepositoryReviewCampaignPathCoverage)
-		// A missing legacy path ledger can never prove exact coverage.
-		state.CurrentCampaign.Exact = false
-		migrated = true
-	}
-	historyMigrated, historyErr := migrateRepositoryReviewCampaignHistory(state)
-	if historyErr != nil {
-		return false, historyErr
-	}
-	if historyMigrated {
-		migrated = true
-	}
-	if backfillRepositoryFindingEvidence(state) {
-		migrated = true
-	}
-	for index := range state.MappingJobs {
-		job := &state.MappingJobs[index]
-		if mappingAdjudicationEmpty(job.Adjudication) || job.CandidateUniverse != "" {
-			continue
-		}
-		if job.State == RepositoryMappingCompleted {
-			job.CandidateUniverse = repositoryMatchingUniverseFingerprint(state.RepositoryFindings)
-		} else {
-			job.Adjudication = RepositoryMappingAdjudication{}
-			job.Error = ""
-		}
-		migrated = true
-	}
-	for index := range state.ValidationJobs {
-		job := &state.ValidationJobs[index]
-		if job.FindingVersion > 0 {
-			continue
-		}
-		if findingIndex := repositoryFindingIndexByID(
-			state.RepositoryFindings, job.RepositoryFindingID,
-		); findingIndex >= 0 {
-			job.FindingVersion = state.RepositoryFindings[findingIndex].Version
-			if !repositoryValidationTerminal(job.State) {
-				job.CandidateCommits = nil
-			}
-			migrated = true
-		}
-	}
-	for index := range state.Findings {
-		finding := &state.Findings[index]
-		if finding.PostResolutionVerified &&
-			(finding.PostResolutionFixCommit == "" || finding.PostResolutionFindingID == "") {
-			finding.PostResolutionVerified = false
-			finding.PostResolutionFixCommit = ""
-			finding.PostResolutionFindingID = ""
-			migrated = true
-		}
-	}
-	return migrated, nil
-}
-
-// migrateRepositoryReviewRawFindingIDs repairs both pre-canonical identity
-// shapes. Native raw findings used rrf_* while the compatibility Record path
-// used rrl_* and promoted an rfn_* parent. Raw suffixes remain stable. An old
-// compatibility parent is rewritten to the rdf_* identity derived from its
-// migrated rrw_* source, while its rfn_* identity is retained only as the raw
-// alias used by old bookmarks.
-func migrateRepositoryReviewRawFindingIDs(state *RepositoryState) (bool, error) {
-	if state == nil || len(state.RawFindings) == 0 {
-		return false, nil
-	}
-	rawReplacements := make(map[string]string)
-	parentReplacements := make(map[string]string)
-	compatibilityAliases := make(map[int]string)
-	seen := make(map[string]struct{}, len(state.RawFindings))
-	for index, raw := range state.RawFindings {
-		id := raw.ID
-		legacyCompatibilityRaw := strings.HasPrefix(id, "rrl_")
-		if strings.HasPrefix(id, "rrf_") || legacyCompatibilityRaw {
-			id = "rrw_" + id[len("rrf_"):]
-			rawReplacements[raw.ID] = id
-		}
-		if _, duplicate := seen[id]; duplicate {
-			return false, errors.New("repository review raw finding ID migration conflicts")
-		}
-		seen[id] = struct{}{}
-		oldParentID := strings.TrimSpace(raw.DeduplicatedFindingID)
-		compatibilityRecord := legacyCompatibilityRaw ||
-			strings.HasPrefix(raw.AssignmentID, "record-")
-		if !compatibilityRecord || !strings.HasPrefix(oldParentID, "rfn_") {
-			continue
-		}
-		if raw.LegacyFindingID != "" && raw.LegacyFindingID != oldParentID {
-			return false, errors.New("repository review compatibility raw alias conflicts")
-		}
-		canonicalParentID := stableID("rdf_", id)
-		if existing := parentReplacements[oldParentID]; existing != "" &&
-			existing != canonicalParentID {
-			return false, errors.New("repository review compatibility parent migration is ambiguous")
-		}
-		parentReplacements[oldParentID] = canonicalParentID
-		compatibilityAliases[index] = oldParentID
-	}
-	if len(rawReplacements) == 0 && len(parentReplacements) == 0 {
-		return false, nil
-	}
-	replaceRaw := func(id string) string {
-		if replacement := rawReplacements[id]; replacement != "" {
-			return replacement
-		}
-		return id
-	}
-	replaceParent := func(id string) string {
-		if replacement := parentReplacements[id]; replacement != "" {
-			return replacement
-		}
-		return id
-	}
-	if err := validateRepositoryReviewParentIdentityMigration(state, parentReplacements); err != nil {
-		return false, err
-	}
-
-	rawDigests := make(map[string]string, len(state.RawFindings))
-	for index := range state.RawFindings {
-		raw := &state.RawFindings[index]
-		raw.ID = replaceRaw(raw.ID)
-		if alias := compatibilityAliases[index]; alias != "" {
-			raw.LegacyFindingID = alias
-		}
-		raw.DeduplicatedFindingID = replaceParent(raw.DeduplicatedFindingID)
-		for historyIndex := range raw.History {
-			raw.History[historyIndex].DeduplicatedFindingID = replaceParent(
-				raw.History[historyIndex].DeduplicatedFindingID,
-			)
-		}
-		if alias := compatibilityAliases[index]; alias != "" {
-			raw.DiagnosisDigest = RawReviewFindingDiagnosisDigest(*raw)
-		}
-		rawDigests[raw.ID] = raw.DiagnosisDigest
-	}
-	for index := range state.DeduplicationJobs {
-		job := &state.DeduplicationJobs[index]
-		job.RawFindingID = replaceRaw(
-			state.DeduplicationJobs[index].RawFindingID,
-		)
-		job.Decision.CandidateID = replaceParent(job.Decision.CandidateID)
-		for candidateIndex := range job.CandidateVersions {
-			job.CandidateVersions[candidateIndex].CandidateID = replaceParent(
-				job.CandidateVersions[candidateIndex].CandidateID,
-			)
-		}
-		for candidateIndex := range job.ShortlistedScores {
-			job.ShortlistedScores[candidateIndex].CandidateID = replaceParent(
-				job.ShortlistedScores[candidateIndex].CandidateID,
-			)
-		}
-	}
-	for index := range state.DeduplicatedFindings {
-		finding := &state.DeduplicatedFindings[index]
-		oldFindingID := finding.ID
-		finding.ID = replaceParent(oldFindingID)
-		for sourceIndex := range finding.RawSourceIDs {
-			finding.RawSourceIDs[sourceIndex] = replaceRaw(finding.RawSourceIDs[sourceIndex])
-		}
-		for historyIndex := range finding.History {
-			finding.History[historyIndex].RawFindingID = replaceRaw(
-				finding.History[historyIndex].RawFindingID,
-			)
-		}
-		if finding.ID != oldFindingID && len(finding.RawSourceIDs) > 0 {
-			finding.DiagnosisDigest = rawDigests[finding.RawSourceIDs[0]]
-		}
-	}
-	for index := range state.Findings {
-		state.Findings[index].ID = replaceParent(state.Findings[index].ID)
-		state.Findings[index].PostResolutionFindingID = replaceParent(
-			state.Findings[index].PostResolutionFindingID,
-		)
-		for rawIndex := range state.Findings[index].RawFindingIDs {
-			state.Findings[index].RawFindingIDs[rawIndex] = replaceRaw(
-				state.Findings[index].RawFindingIDs[rawIndex],
-			)
-		}
-	}
-	for index := range state.MappingJobs {
-		job := &state.MappingJobs[index]
-		oldFindingID := job.ReviewFindingID
-		job.ReviewFindingID = replaceParent(oldFindingID)
-		if job.ReviewFindingID != oldFindingID {
-			job.ID = mappingJobID(job.ReviewFindingID)
-		}
-	}
-	for index := range state.RepositoryFindings {
-		finding := &state.RepositoryFindings[index]
-		for occurrenceIndex := range finding.ReviewFindingIDs {
-			finding.ReviewFindingIDs[occurrenceIndex] = replaceParent(
-				finding.ReviewFindingIDs[occurrenceIndex],
-			)
-		}
-		for historyIndex := range finding.PathSymbolHistory {
-			finding.PathSymbolHistory[historyIndex].ReviewFindingID = replaceParent(
-				finding.PathSymbolHistory[historyIndex].ReviewFindingID,
-			)
-		}
-	}
-	for index := range state.IssueDrafts {
-		for findingIndex := range state.IssueDrafts[index].FindingIDs {
-			state.IssueDrafts[index].FindingIDs[findingIndex] = replaceParent(
-				state.IssueDrafts[index].FindingIDs[findingIndex],
-			)
-		}
-	}
-	for index := range state.Runs {
-		for findingIndex := range state.Runs[index].FindingIDs {
-			id := replaceRaw(state.Runs[index].FindingIDs[findingIndex])
-			state.Runs[index].FindingIDs[findingIndex] = replaceParent(id)
-		}
-	}
-	if state.ActiveReviewRun != nil {
-		for findingIndex := range state.ActiveReviewRun.FindingIDs {
-			id := replaceRaw(state.ActiveReviewRun.FindingIDs[findingIndex])
-			state.ActiveReviewRun.FindingIDs[findingIndex] = replaceParent(id)
-		}
-	}
-	return true, nil
-}
-
-func validateRepositoryReviewParentIdentityMigration(
-	state *RepositoryState,
-	replacements map[string]string,
-) error {
-	if len(replacements) == 0 {
-		return nil
-	}
-	validateUnique := func(ids []string, kind string) error {
-		seen := make(map[string]struct{}, len(ids))
-		for _, id := range ids {
-			if replacement := replacements[id]; replacement != "" {
-				id = replacement
-			}
-			if _, duplicate := seen[id]; duplicate {
-				return fmt.Errorf("repository review %s identity migration conflicts", kind)
-			}
-			seen[id] = struct{}{}
-		}
-		return nil
-	}
-	deduplicatedIDs := make([]string, 0, len(state.DeduplicatedFindings))
-	for _, finding := range state.DeduplicatedFindings {
-		deduplicatedIDs = append(deduplicatedIDs, finding.ID)
-	}
-	if err := validateUnique(deduplicatedIDs, "deduplicated finding"); err != nil {
-		return err
-	}
-	projectionIDs := make([]string, 0, len(state.Findings))
-	for _, finding := range state.Findings {
-		projectionIDs = append(projectionIDs, finding.ID)
-	}
-	if err := validateUnique(projectionIDs, "finding projection"); err != nil {
-		return err
-	}
-	mappingIDs := make([]string, 0, len(state.MappingJobs))
-	for _, job := range state.MappingJobs {
-		findingID := job.ReviewFindingID
-		if replacement := replacements[findingID]; replacement != "" {
-			findingID = replacement
-		}
-		mappingIDs = append(mappingIDs, mappingJobID(findingID))
-	}
-	if err := validateUnique(mappingIDs, "mapping job"); err != nil {
-		return err
-	}
-	for oldID := range replacements {
-		if deduplicatedFindingIndexByID(state.DeduplicatedFindings, oldID) < 0 ||
-			findingIndexByID(state.Findings, oldID) < 0 {
-			return errors.New("repository review compatibility parent migration is incomplete")
-		}
-	}
-	return nil
-}
-
-func backfillRepositoryFindingEvidence(state *RepositoryState) bool {
-	if state == nil || len(state.RepositoryFindings) == 0 {
-		return false
-	}
-	occurrences := make(map[string]Finding, len(state.Findings))
-	occurrenceIndexes := make(map[string]int, len(state.Findings))
-	for index, finding := range state.Findings {
-		occurrences[finding.ID] = finding
-		occurrenceIndexes[finding.ID] = index
-	}
-	changed := false
-	for aggregateIndex := range state.RepositoryFindings {
-		aggregate := &state.RepositoryFindings[aggregateIndex]
-		aggregateChanged := false
-		previousHistory := append([]RepositoryFindingPathSymbol(nil), aggregate.PathSymbolHistory...)
-		sortRepositoryPathSymbolHistory(aggregate.PathSymbolHistory)
-		if !reflect.DeepEqual(previousHistory, aggregate.PathSymbolHistory) {
-			aggregateChanged = true
-		}
-		expectedMatchState := aggregate.MatchState
-		if repositoryPossibleDuplicatesAreAmbiguous(aggregate.PossibleDuplicates) {
-			expectedMatchState = RepositoryMatchProvisional
-		} else if expectedMatchState == RepositoryMatchProvisional {
-			expectedMatchState = RepositoryMatchNew
-		}
-		if aggregate.MatchState != expectedMatchState {
-			aggregate.MatchState = expectedMatchState
-			aggregateChanged = true
-		}
-		for _, occurrenceID := range aggregate.ReviewFindingIDs {
-			if index, ok := occurrenceIndexes[occurrenceID]; ok &&
-				state.Findings[index].RepositoryMatchState != expectedMatchState {
-				state.Findings[index].RepositoryMatchState = expectedMatchState
-				state.Findings[index].Version++
-				aggregateChanged = true
-			}
-		}
-		for historyIndex := range aggregate.PathSymbolHistory {
-			history := &aggregate.PathSymbolHistory[historyIndex]
-			if occurrence, ok := occurrences[history.ReviewFindingID]; ok &&
-				occurrence.DefaultBranchVerified && !history.DefaultBranchVerified {
-				history.DefaultBranchVerified = true
-				aggregateChanged = true
-			}
-		}
-		for _, occurrenceID := range aggregate.ReviewFindingIDs {
-			occurrence, ok := occurrences[occurrenceID]
-			if !ok {
-				continue
-			}
-			if matchHintsEmpty(aggregate.MatchHints) && !matchHintsEmpty(occurrence.MatchHints) {
-				aggregate.MatchHints = occurrence.MatchHints
-				aggregateChanged = true
-			}
-			if aggregate.FixEffort == (FixEffort{}) && occurrence.FixEffort != (FixEffort{}) {
-				aggregate.FixEffort = occurrence.FixEffort
-				aggregateChanged = true
-			}
-		}
-		if aggregateChanged {
-			aggregate.Version++
-			changed = true
-		}
-	}
-	return changed
-}
-
-func normalizeRecordBranchProvenance(request *RecordRequest) error {
-	if request == nil {
-		return ErrInvalidPlan
-	}
-	if request.TargetBranch == "" && request.AdvertisedDefaultBranch == "" &&
-		!request.TargetIsDefault {
-		request.TargetBranch = request.Plan.TargetBranch
-		request.AdvertisedDefaultBranch = request.Plan.AdvertisedDefaultBranch
-		request.TargetIsDefault = request.Plan.TargetIsDefault
-	}
-	request.TargetBranch = strings.TrimSpace(request.TargetBranch)
-	request.AdvertisedDefaultBranch = strings.TrimSpace(request.AdvertisedDefaultBranch)
-	if request.TargetBranch != strings.TrimSpace(request.Plan.TargetBranch) ||
-		request.AdvertisedDefaultBranch != strings.TrimSpace(request.Plan.AdvertisedDefaultBranch) ||
-		request.TargetIsDefault != request.Plan.TargetIsDefault {
-		return fmt.Errorf("%w: branch provenance does not match the immutable plan", ErrInvalidPlan)
-	}
-	if request.TargetBranch == "" && request.AdvertisedDefaultBranch == "" {
-		// A checkout acquired from an advertised default can be detached at its
-		// exact admitted commit, leaving both human branch names unavailable.
-		// TargetIsDefault still preserves the server-verified relationship.
-		return nil
-	}
-	if request.TargetBranch != "" && request.AdvertisedDefaultBranch == "" &&
-		!request.TargetIsDefault {
-		target, err := NormalizeRepositoryReviewBranch(request.TargetBranch)
-		if err != nil || target == "" {
-			return fmt.Errorf("%w: target branch is invalid", ErrInvalidPlan)
-		}
-		request.TargetBranch = target
-		return nil
-	}
-	target, err := NormalizeRepositoryReviewBranch(request.TargetBranch)
-	if err != nil || target == "" {
-		return fmt.Errorf("%w: target branch is invalid", ErrInvalidPlan)
-	}
-	advertised, err := NormalizeRepositoryReviewBranch(request.AdvertisedDefaultBranch)
-	if err != nil || advertised == "" {
-		return fmt.Errorf("%w: advertised default branch is invalid", ErrInvalidPlan)
-	}
-	request.TargetBranch = target
-	request.AdvertisedDefaultBranch = advertised
-	if request.TargetIsDefault != (target == advertised) {
-		return fmt.Errorf("%w: default-branch provenance is contradictory", ErrInvalidPlan)
 	}
 	return nil
 }
@@ -631,23 +196,11 @@ func ensureMappingJobsForFindings(state *RepositoryState, findingIDs []string, n
 	for _, finding := range state.Findings {
 		byID[finding.ID] = finding
 	}
-	// Once the raw/deduplicated ledger is in use, compatibility Finding
-	// projections are not themselves admission authority. Only a decided
-	// DeduplicatedReviewFinding may enter repository mapping.
-	deduplicated := make(map[string]struct{}, len(state.DeduplicatedFindings))
-	for _, finding := range state.DeduplicatedFindings {
-		deduplicated[finding.ID] = struct{}{}
-	}
 	created := 0
 	for _, findingID := range findingIDs {
 		finding, found := byID[strings.TrimSpace(findingID)]
-		if !found || finding.DeduplicationPending || finding.RepositoryFindingID != "" {
+		if !found || finding.RepositoryFindingID != "" {
 			continue
-		}
-		if len(state.RawFindings) > 0 || state.HistoricalDeduplication.Required {
-			if _, admitted := deduplicated[finding.ID]; !admitted {
-				continue
-			}
 		}
 		if _, found := existing[finding.ID]; found {
 			continue
@@ -699,31 +252,9 @@ func (s Store) reconcileRepositoryJobs(repository string) (int, int, int, error)
 		return 0, 0, 0, err
 	}
 	now := s.clock()
-	historicalMergeReleased := false
-	if HistoricalDeduplicationMergeInProgress(state) {
-		// The controller lease proves that no previous replay process remains
-		// live. Preserve all model checkpoints, release only the stale merge
-		// fence, and let the controller recompute groups and current versions.
-		state.HistoricalDeduplication.Status = HistoricalDeduplicationReplaying
-		state.HistoricalDeduplication.Attempts++
-		state.HistoricalDeduplication.Error = ""
-		state.HistoricalDeduplication.FailurePhase = ""
-		state.HistoricalDeduplication.MergeLease = HistoricalDeduplicationMergeLease{}
-		state.HistoricalDeduplication.UpdatedAt = now
-		historicalMergeReleased = true
-	}
 	ids := make([]string, 0, len(state.Findings))
-	rawProjections := make(map[string]struct{}, len(state.RawFindings))
-	for _, raw := range state.RawFindings {
-		if raw.LegacyFindingID != "" {
-			rawProjections[raw.LegacyFindingID] = struct{}{}
-		}
-	}
 	for _, finding := range state.Findings {
 		if finding.RepositoryFindingID == "" {
-			if _, undecidedRawProjection := rawProjections[finding.ID]; undecidedRawProjection {
-				continue
-			}
 			ids = append(ids, finding.ID)
 		}
 	}
@@ -765,7 +296,7 @@ func (s Store) reconcileRepositoryJobs(repository string) (int, int, int, error)
 		}
 		validationReset++
 	}
-	if created == 0 && mappingReset == 0 && validationReset == 0 && !historicalMergeReleased {
+	if created == 0 && mappingReset == 0 && validationReset == 0 {
 		return 0, 0, 0, nil
 	}
 	state.Version++
@@ -851,27 +382,11 @@ func (s Store) ClaimMappingJob(
 	if err != nil {
 		return RepositoryState{}, RepositoryMappingJob{}, Finding{}, false, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, RepositoryMappingJob{}, Finding{}, false, err
-	}
 	jobIndex := mappingJobIndexByID(state.MappingJobs, jobID)
 	if jobIndex < 0 {
 		return RepositoryState{}, RepositoryMappingJob{}, Finding{}, false, os.ErrNotExist
 	}
 	job := &state.MappingJobs[jobIndex]
-	if len(state.RawFindings) > 0 || state.HistoricalDeduplication.Required {
-		admitted := false
-		for _, finding := range state.DeduplicatedFindings {
-			if finding.ID == job.ReviewFindingID {
-				admitted = true
-				break
-			}
-		}
-		if !admitted {
-			return RepositoryState{}, RepositoryMappingJob{}, Finding{}, false,
-				errors.New("repository mapping requires a deduplicated finding")
-		}
-	}
 	findingIndex := findingIndexByID(state.Findings, job.ReviewFindingID)
 	if findingIndex < 0 {
 		return RepositoryState{}, RepositoryMappingJob{}, Finding{}, false, errors.New(
@@ -879,13 +394,6 @@ func (s Store) ClaimMappingJob(
 		)
 	}
 	finding := &state.Findings[findingIndex]
-	if state.HistoricalDeduplication.Required &&
-		historicalReplayDeduplicatedFinding(state, job.ReviewFindingID) {
-		// Replay-derived occurrences are mapped only after the historical
-		// identity merge completes. New campaign findings in the same ledger
-		// remain eligible throughout replay.
-		return state, *job, *finding, false, nil
-	}
 	if finding.RepositoryFindingID != "" {
 		if job.State == RepositoryMappingCompleted && job.RepositoryFindingID == finding.RepositoryFindingID {
 			return state, *job, *finding, false, nil
@@ -920,23 +428,6 @@ func (s Store) ClaimMappingJob(
 	return state, *job, *finding, true, nil
 }
 
-func historicalReplayDeduplicatedFinding(state RepositoryState, findingID string) bool {
-	index := deduplicatedFindingIndexByID(state.DeduplicatedFindings, findingID)
-	if index < 0 {
-		return false
-	}
-	rawIDs := make(map[string]struct{}, len(state.DeduplicatedFindings[index].RawSourceIDs))
-	for _, rawID := range state.DeduplicatedFindings[index].RawSourceIDs {
-		rawIDs[rawID] = struct{}{}
-	}
-	for _, raw := range state.RawFindings {
-		if _, selected := rawIDs[raw.ID]; selected && HistoricalDeduplicationRawFinding(raw) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s Store) SaveMappingAdjudication(
 	repository, jobID string,
 	adjudication RepositoryMappingAdjudication,
@@ -964,9 +455,6 @@ func (s Store) SaveMappingAdjudication(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
-		return RepositoryState{}, RepositoryMappingJob{}, err
-	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, RepositoryMappingJob{}, err
 	}
 	if candidateUniverse == "" {
@@ -1042,9 +530,6 @@ func (s Store) CompleteMappingJob(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
-		return RepositoryState{}, RepositoryFinding{}, err
-	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, RepositoryFinding{}, err
 	}
 	jobIndex := mappingJobIndexByID(state.MappingJobs, completion.JobID)
@@ -1206,6 +691,12 @@ mappingTargetSelected:
 	}
 	occurrence.RepositoryFindingID = target.ID
 	occurrence.RepositoryMatchState = target.MatchState
+	occurrence.History = appendDeduplicatedFindingHistory(
+		occurrence.History,
+		DeduplicatedFindingHistoryEntry{
+			Action: "repository_associated", RepositoryFindingID: target.ID, At: now,
+		},
+	)
 	occurrence.Version++
 	occurrence.UpdatedAt = now
 	job.State = RepositoryMappingCompleted
@@ -1243,9 +734,6 @@ func (s Store) ResolvePossibleDuplicate(
 	if err != nil {
 		return RepositoryState{}, RepositoryFinding{}, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, RepositoryFinding{}, err
-	}
 	provisionalIndex := repositoryFindingIndexByID(state.RepositoryFindings, request.ProvisionalID)
 	candidateIndex := repositoryFindingIndexByID(state.RepositoryFindings, request.CandidateID)
 	if provisionalIndex < 0 || candidateIndex < 0 {
@@ -1253,6 +741,7 @@ func (s Store) ResolvePossibleDuplicate(
 	}
 	provisional := &state.RepositoryFindings[provisionalIndex]
 	candidate := &state.RepositoryFindings[candidateIndex]
+	candidateID := candidate.ID
 	if provisional.MatchState != RepositoryMatchProvisional ||
 		provisional.Version != request.ExpectedProvisionalVersion ||
 		(request.Decision == "merge" &&
@@ -1298,10 +787,29 @@ func (s Store) ResolvePossibleDuplicate(
 			break
 		}
 	}
+	provisionalOccurrences := make(map[string]struct{}, len(provisional.ReviewFindingIDs))
+	for _, findingID := range provisional.ReviewFindingIDs {
+		provisionalOccurrences[findingID] = struct{}{}
+	}
 	for _, findingID := range merged.ReviewFindingIDs {
 		if index := findingIndexByID(state.Findings, findingID); index >= 0 {
 			state.Findings[index].RepositoryFindingID = candidate.ID
 			state.Findings[index].RepositoryMatchState = merged.MatchState
+			if _, reassociated := provisionalOccurrences[findingID]; reassociated {
+				state.Findings[index].History = appendDeduplicatedFindingHistory(
+					state.Findings[index].History,
+					DeduplicatedFindingHistoryEntry{
+						Action: "repository_associated", RepositoryFindingID: candidate.ID, At: now,
+					},
+				)
+			}
+			state.Findings[index].Version++
+			state.Findings[index].UpdatedAt = now
+		}
+	}
+	for index := range state.Findings {
+		if state.Findings[index].PostResolutionFindingID == provisional.ID {
+			state.Findings[index].PostResolutionFindingID = candidate.ID
 			state.Findings[index].Version++
 			state.Findings[index].UpdatedAt = now
 		}
@@ -1370,7 +878,7 @@ func (s Store) ResolvePossibleDuplicate(
 	if err := s.save(&state); err != nil {
 		return RepositoryState{}, RepositoryFinding{}, err
 	}
-	index := repositoryFindingIndexByID(state.RepositoryFindings, candidate.ID)
+	index := repositoryFindingIndexByID(state.RepositoryFindings, candidateID)
 	if index < 0 {
 		return RepositoryState{}, RepositoryFinding{}, errors.New("merged repository finding disappeared")
 	}
@@ -1408,9 +916,6 @@ func (s Store) ReserveValidationJobs(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
-		return RepositoryState{}, nil, err
-	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, nil, err
 	}
 	selected := make([]int, len(ids))
@@ -1472,9 +977,6 @@ func (s Store) ClaimValidationJob(
 	if err != nil {
 		return RepositoryState{}, RepositoryValidationJob{}, RepositoryFinding{}, false, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, RepositoryValidationJob{}, RepositoryFinding{}, false, err
-	}
 	jobIndex := validationJobIndexByID(state.ValidationJobs, jobID)
 	if jobIndex < 0 {
 		return RepositoryState{}, RepositoryValidationJob{}, RepositoryFinding{}, false, os.ErrNotExist
@@ -1532,9 +1034,6 @@ func (s Store) SetValidationJobCandidates(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
-		return RepositoryState{}, RepositoryValidationJob{}, err
-	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, RepositoryValidationJob{}, err
 	}
 	index := validationJobIndexByID(state.ValidationJobs, jobID)
@@ -1607,9 +1106,6 @@ func (s Store) CompleteValidationJob(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
-		return RepositoryState{}, RepositoryFinding{}, RepositoryValidationJob{}, err
-	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, RepositoryFinding{}, RepositoryValidationJob{}, err
 	}
 	jobIndex := validationJobIndexByID(state.ValidationJobs, completion.JobID)
@@ -1721,8 +1217,7 @@ func (s Store) UpdateRepositoryFindingIssueSnapshot(
 		!validOptionalLifecycleText(update.Title, 256) ||
 		(update.URL != "" && !validHTTPSURL(update.URL)) ||
 		(update.Origin != "" && update.Origin != IssueDraftOriginAIGenerated &&
-			update.Origin != IssueDraftOriginLinked && update.Origin != IssueDraftOriginDiscovered &&
-			update.Origin != IssueDraftOriginLegacy) {
+			update.Origin != IssueDraftOriginLinked && update.Origin != IssueDraftOriginDiscovered) {
 		return RepositoryState{}, RepositoryFinding{}, errors.New("invalid issue snapshot")
 	}
 	if update.State != RepositoryFindingIssueNone && (update.ExternalID == "" || update.URL == "") {
@@ -1735,9 +1230,6 @@ func (s Store) UpdateRepositoryFindingIssueSnapshot(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
-		return RepositoryState{}, RepositoryFinding{}, err
-	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, RepositoryFinding{}, err
 	}
 	index := repositoryFindingIndexByID(state.RepositoryFindings, update.RepositoryFindingID)
@@ -1838,9 +1330,6 @@ func (s Store) SetRepositoryFindingLifecycle(
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
-		return RepositoryState{}, RepositoryFinding{}, err
-	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
 		return RepositoryState{}, RepositoryFinding{}, err
 	}
 	index := repositoryFindingIndexByID(state.RepositoryFindings, repositoryFindingID)
@@ -2060,12 +1549,7 @@ func mappingCompletionMatchesAdjudication(
 }
 
 func occurrenceMayCreateRepositoryFinding(finding Finding, defaultBranchVerified bool) bool {
-	if finding.TargetIsDefault {
-		return defaultBranchVerified
-	}
-	// Legacy occurrences did not retain either branch name. Their worker must
-	// establish reachability from the current advertised default before create.
-	return finding.TargetBranch == "" && finding.AdvertisedDefaultBranch == "" && defaultBranchVerified
+	return finding.TargetIsDefault && defaultBranchVerified
 }
 
 func repositoryFindingFromOccurrence(
@@ -2547,16 +2031,11 @@ func containsExactString(values []string, target string) bool {
 }
 
 func repositoryFindingAllowsIssueActions(state RepositoryState, finding Finding) bool {
-	if finding.DeduplicationPending || finding.RepositoryMatchState == RepositoryMatchProvisional {
+	if finding.RepositoryMatchState == RepositoryMatchProvisional {
 		return false
 	}
 	if finding.RepositoryFindingID == "" {
-		for _, job := range state.MappingJobs {
-			if job.ReviewFindingID == finding.ID && job.State != RepositoryMappingCompleted {
-				return false
-			}
-		}
-		return true // pre-queue legacy compatibility
+		return false
 	}
 	index := repositoryFindingIndexByID(state.RepositoryFindings, finding.RepositoryFindingID)
 	if index < 0 || state.RepositoryFindings[index].MatchState == RepositoryMatchProvisional {
@@ -2640,6 +2119,10 @@ func validateRepositoryLifecycleState(state RepositoryState) error {
 			}
 		}
 		seenOccurrences := make(map[string]struct{}, len(finding.ReviewFindingIDs))
+		expectedCommits := make([]string, 0)
+		expectedPathHistory := make(
+			[]RepositoryFindingPathSymbol, 0, len(finding.ReviewFindingIDs),
+		)
 		for _, reviewFindingID := range finding.ReviewFindingIDs {
 			occurrence, exists := reviewFindings[reviewFindingID]
 			if !exists || occurrence.RepositoryFindingID != finding.ID {
@@ -2649,6 +2132,21 @@ func validateRepositoryLifecycleState(state RepositoryState) error {
 				return errors.New("duplicate repository finding occurrence")
 			}
 			seenOccurrences[reviewFindingID] = struct{}{}
+			expectedCommits = appendUnique(expectedCommits, occurrence.CommitSHA)
+			expectedPathHistory = append(expectedPathHistory, RepositoryFindingPathSymbol{
+				ReviewFindingID:       occurrence.ID,
+				CommitSHA:             occurrence.CommitSHA,
+				Path:                  occurrence.File.Path,
+				Symbol:                occurrence.Symbol,
+				ObservedAt:            occurrence.CreatedAt,
+				DefaultBranchVerified: occurrence.DefaultBranchVerified,
+			})
+		}
+		sortRepositoryPathSymbolHistory(expectedPathHistory)
+		if finding.ID != stableID("rrf_", state.Repository, finding.ReviewFindingIDs[0]) ||
+			!reflect.DeepEqual(finding.FoundCommits, expectedCommits) ||
+			!reflect.DeepEqual(finding.PathSymbolHistory, expectedPathHistory) {
+			return errors.New("repository finding provenance does not match its occurrences")
 		}
 		seenCommits := make(map[string]struct{}, len(finding.FoundCommits))
 		for _, commit := range finding.FoundCommits {
@@ -2692,8 +2190,7 @@ func validateRepositoryLifecycleState(state RepositoryState) error {
 		}
 		if finding.Issue.Origin != "" && finding.Issue.Origin != IssueDraftOriginAIGenerated &&
 			finding.Issue.Origin != IssueDraftOriginLinked &&
-			finding.Issue.Origin != IssueDraftOriginDiscovered &&
-			finding.Issue.Origin != IssueDraftOriginLegacy {
+			finding.Issue.Origin != IssueDraftOriginDiscovered {
 			return errors.New("invalid repository finding issue origin")
 		}
 		seenConflictURLs := make(map[string]struct{}, len(finding.Issue.ConflictURLs))

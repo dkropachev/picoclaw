@@ -46,10 +46,26 @@ const repositoryReviewStatesSchema = `CREATE TABLE repository_review_states (
     CHECK(length(CAST(last_commit_sha AS BLOB)) <= 256)
 ) STRICT`
 
+const repositoryReviewRecordsV1Schema = `CREATE TABLE repository_review_records (
+	    state_id              TEXT NOT NULL,
+	    record_kind           TEXT NOT NULL CHECK(record_kind IN (
+	        'run', 'finding', 'raw_finding', 'deduplicated_finding', 'issue_draft', 'repository_finding'
+	    )),
+	    position              INTEGER NOT NULL CHECK(position >= 0 AND position < 100000),
+	    record_id             TEXT NOT NULL CHECK(length(CAST(record_id AS BLOB)) BETWEEN 1 AND 1024),
+	    status                TEXT NOT NULL,
+	    version               INTEGER NOT NULL CHECK(version >= 0),
+	    created_at_unix_nano  INTEGER NOT NULL,
+	    updated_at_unix_nano  INTEGER NOT NULL,
+	    PRIMARY KEY(state_id, record_kind, position),
+	    UNIQUE(state_id, record_kind, record_id),
+	    FOREIGN KEY(state_id) REFERENCES repository_review_states(state_id) ON DELETE CASCADE
+	) STRICT`
+
 const repositoryReviewRecordsSchema = `CREATE TABLE repository_review_records (
     state_id              TEXT NOT NULL,
-    record_kind           TEXT NOT NULL CHECK(record_kind IN (
-        'run', 'finding', 'raw_finding', 'deduplicated_finding', 'issue_draft', 'repository_finding'
+	    record_kind           TEXT NOT NULL CHECK(record_kind IN (
+	        'run', 'raw_finding', 'deduplicated_finding', 'issue_draft', 'repository_finding'
     )),
     position              INTEGER NOT NULL CHECK(position >= 0 AND position < 100000),
     record_id             TEXT NOT NULL CHECK(length(CAST(record_id AS BLOB)) BETWEEN 1 AND 1024),
@@ -177,6 +193,18 @@ const repositoryReviewAutomationsRepositoryIndexSchema = `CREATE INDEX repositor
 const repositoryReviewAutomationsCanonicalIndexSchema = `CREATE UNIQUE INDEX repository_review_automations_canonical_idx
     ON repository_review_automations(canonical_repository) WHERE profile_id IS NOT NULL`
 
+const repositoryReviewRetiredLedgersSchema = `CREATE TABLE repository_review_retired_ledgers (
+    automation_id         TEXT NOT NULL,
+    configured_repository TEXT NOT NULL,
+    ledger_repository     TEXT NOT NULL,
+    ledger_version        INTEGER NOT NULL CHECK(ledger_version > 0),
+    PRIMARY KEY(automation_id, ledger_repository),
+    CHECK(length(CAST(automation_id AS BLOB)) BETWEEN 5 AND 128),
+    CHECK(substr(automation_id, 1, 4) = 'rra_'),
+    CHECK(length(CAST(configured_repository AS BLOB)) BETWEEN 1 AND 4096),
+    CHECK(length(CAST(ledger_repository AS BLOB)) BETWEEN 1 AND 4096)
+) STRICT`
+
 func (s Store) openDatabase(ctx context.Context) (*sql.DB, error) {
 	if s.openForTest != nil {
 		return s.openForTest(ctx)
@@ -193,26 +221,76 @@ func (s Store) openDatabase(ctx context.Context) (*sql.DB, error) {
 func repositoryReviewStoreOptions(root string) sqlitestore.Options {
 	return sqlitestore.Options{
 		Component: repositoryReviewDatabaseComponent,
-		Migrations: []sqlitestore.Migration{{
-			Version: 1,
-			Statements: []string{
-				repositoryReviewStatesSchema,
-				repositoryReviewRecordsSchema,
-				repositoryReviewProfilesSchema,
-				repositoryReviewProfileScopeSchema,
-				repositoryReviewAutomationsSchema,
-				repositoryReviewAutomationModelsSchema,
-				repositoryReviewAutomationRunsSchema,
-				repositoryReviewStatesUpdatedIndexSchema,
-				repositoryReviewRecordsStatusIndexSchema,
-				repositoryReviewProfilesUpdatedIndexSchema,
-				repositoryReviewAutomationsUpdatedIndexSchema,
-				repositoryReviewAutomationsStatusIndexSchema,
-				repositoryReviewAutomationsProfileIndexSchema,
-				repositoryReviewAutomationsRepositoryIndexSchema,
-				repositoryReviewAutomationsCanonicalIndexSchema,
+		Migrations: []sqlitestore.Migration{
+			{
+				Version: 1,
+				Statements: []string{
+					repositoryReviewStatesSchema,
+					repositoryReviewRecordsV1Schema,
+					repositoryReviewProfilesSchema,
+					repositoryReviewProfileScopeSchema,
+					repositoryReviewAutomationsSchema,
+					repositoryReviewAutomationModelsSchema,
+					repositoryReviewAutomationRunsSchema,
+					repositoryReviewStatesUpdatedIndexSchema,
+					repositoryReviewRecordsStatusIndexSchema,
+					repositoryReviewProfilesUpdatedIndexSchema,
+					repositoryReviewAutomationsUpdatedIndexSchema,
+					repositoryReviewAutomationsStatusIndexSchema,
+					repositoryReviewAutomationsProfileIndexSchema,
+					repositoryReviewAutomationsRepositoryIndexSchema,
+					repositoryReviewAutomationsCanonicalIndexSchema,
+				},
 			},
-		}},
+			{
+				Version: 2,
+				Statements: []string{
+					repositoryReviewRetiredLedgersSchema,
+					`INSERT INTO repository_review_retired_ledgers (
+					    automation_id, configured_repository, ledger_repository, ledger_version
+					 ) SELECT automation.automation_id, automation.repository,
+					          state.repository, state.version
+					     FROM repository_review_automations AS automation
+					     JOIN repository_review_states AS state
+					       ON automation.repository = state.repository
+					       OR automation.canonical_repository = state.repository
+					    WHERE state.schema_version <> 6
+					    UNION
+					   SELECT automation.automation_id, automation.repository,
+					          state.repository, state.version
+					     FROM repository_review_automations AS automation
+					     JOIN repository_review_automation_runs AS automation_run
+					       ON automation_run.automation_id = automation.automation_id
+					     JOIN repository_review_records AS run_record
+					       ON run_record.record_kind = 'run'
+					      AND run_record.record_id = automation_run.run_id
+					     JOIN repository_review_states AS state
+					       ON state.state_id = run_record.state_id
+					    WHERE state.schema_version <> 6
+					      AND NOT EXISTS (
+					        SELECT 1 FROM repository_review_states AS identity_state
+					         WHERE identity_state.repository = automation.repository
+					            OR identity_state.repository = automation.canonical_repository
+					      )`,
+					`DELETE FROM repository_review_automations
+					  WHERE automation_id IN (
+					    SELECT automation_id FROM repository_review_retired_ledgers
+					  )`,
+					`DELETE FROM repository_review_states WHERE schema_version <> 6`,
+					`DROP INDEX repository_review_records_status_idx`,
+					`ALTER TABLE repository_review_records RENAME TO repository_review_records_v1`,
+					repositoryReviewRecordsSchema,
+					`INSERT INTO repository_review_records (
+					    state_id, record_kind, position, record_id, status, version,
+					    created_at_unix_nano, updated_at_unix_nano
+					 ) SELECT state_id, record_kind, position, record_id, status, version,
+					          created_at_unix_nano, updated_at_unix_nano
+					     FROM repository_review_records_v1 WHERE record_kind <> 'finding'`,
+					`DROP TABLE repository_review_records_v1`,
+					repositoryReviewRecordsStatusIndexSchema,
+				},
+			},
+		},
 		Validate: validateRepositoryReviewDatabaseSchema,
 		Legacy: &sqlitestore.LegacyOptions{
 			SourceRoot:    root,
@@ -235,6 +313,7 @@ func validateRepositoryReviewDatabaseSchema(ctx context.Context, conn *sql.Conn)
 		{"table", "repository_review_automations", repositoryReviewAutomationsSchema},
 		{"table", "repository_review_automation_models", repositoryReviewAutomationModelsSchema},
 		{"table", "repository_review_automation_runs", repositoryReviewAutomationRunsSchema},
+		{"table", "repository_review_retired_ledgers", repositoryReviewRetiredLedgersSchema},
 		{"index", "repository_review_states_updated_idx", repositoryReviewStatesUpdatedIndexSchema},
 		{"index", "repository_review_records_status_idx", repositoryReviewRecordsStatusIndexSchema},
 		{"index", "repository_review_profiles_updated_idx", repositoryReviewProfilesUpdatedIndexSchema},
@@ -253,6 +332,7 @@ func validateRepositoryReviewDatabaseSchema(ctx context.Context, conn *sql.Conn)
 		"repository_review_states", "repository_review_records", "repository_review_profiles",
 		"repository_review_profile_scope", "repository_review_automations",
 		"repository_review_automation_models", "repository_review_automation_runs",
+		"repository_review_retired_ledgers",
 	} {
 		expected := []string(nil)
 		if table == "repository_review_automations" {
@@ -277,7 +357,7 @@ func validateRepositoryReviewSchemaObjectSet(ctx context.Context, conn *sql.Conn
 		    'repository_review_states', 'repository_review_records',
 		    'repository_review_profiles', 'repository_review_profile_scope',
 		    'repository_review_automations', 'repository_review_automation_models',
-		    'repository_review_automation_runs',
+		    'repository_review_automation_runs', 'repository_review_retired_ledgers',
 		    'repository_review_states_updated_idx', 'repository_review_records_status_idx',
 		    'repository_review_profiles_updated_idx',
 		    'repository_review_automations_updated_idx',
@@ -370,8 +450,6 @@ func legacyRepositoryReviewSources(root string) ([]sqlitestore.LegacySource, err
 		} else if strings.HasPrefix(entry.Name(), "automation_") {
 			maximum = maxAutomationFileBytes
 			order = 2
-		} else if strings.HasSuffix(entry.Name(), ".summary.json") {
-			order = 3
 		}
 		sources = append(sources, sqlitestore.LegacySource{
 			ID: "review-" + hex.EncodeToString(digest[:12]), Relative: relative,
@@ -384,8 +462,7 @@ func legacyRepositoryReviewSources(root string) ([]sqlitestore.LegacySource, err
 
 func legacyRepositoryReviewFilename(name string) bool {
 	return strings.HasSuffix(name, ".json") &&
-		(strings.HasPrefix(name, "repo_") || strings.HasPrefix(name, "profile_") ||
-			strings.HasPrefix(name, "automation_"))
+		(strings.HasPrefix(name, "profile_") || strings.HasPrefix(name, "automation_"))
 }
 
 func importLegacyRepositoryReviewSource(
@@ -400,40 +477,6 @@ func importLegacyRepositoryReviewSource(
 	}
 	name := filepath.Base(filepath.FromSlash(input.Relative))
 	switch {
-	case strings.HasSuffix(name, ".summary.json"):
-		var summary RepositorySummary
-		if err := json.Unmarshal(input.Data, &summary); err != nil ||
-			summary.ID != RepositoryID(summary.Repository) || summary.SchemaVersion < 1 ||
-			summary.SchemaVersion > SchemaVersion {
-			//nolint:nilerr // Invalid legacy records are intentionally audited and skipped.
-			return skipped("invalid_summary"), nil
-		}
-		return sqlitestore.ImportResult{}, nil
-	case strings.HasPrefix(name, "repo_"):
-		var state RepositoryState
-		if err := json.Unmarshal(input.Data, &state); err != nil {
-			//nolint:nilerr // Invalid legacy records are intentionally audited and skipped.
-			return skipped("malformed_json"), nil
-		}
-		if _, err := migrateRepositoryState(&state); err != nil {
-			//nolint:nilerr // Invalid legacy records are intentionally audited and skipped.
-			return skipped("invalid_record"), nil
-		}
-		backfillCanonicalIssueAssociations(&state)
-		expectedID := "rrp_" + strings.TrimSuffix(strings.TrimPrefix(name, "repo_"), ".json")
-		if state.ID != expectedID || state.ID != RepositoryID(state.Repository) ||
-			validateState(state) != nil {
-			//nolint:nilerr // Invalid legacy records are intentionally audited and skipped.
-			return skipped("invalid_identity"), nil
-		}
-		inserted, err := insertRepositoryStateConn(ctx, conn, state, true, 0)
-		if err != nil {
-			return sqlitestore.ImportResult{}, err
-		}
-		if !inserted {
-			return skipped("duplicate_identity"), nil
-		}
-		return sqlitestore.ImportResult{Imported: 1}, nil
 	case strings.HasPrefix(name, "profile_"):
 		id := strings.TrimSuffix(strings.TrimPrefix(name, "profile_"), ".json")
 		profile, err := decodeLegacyRepositoryReviewProfile(id, input.Data)
@@ -526,14 +569,10 @@ func decodeLegacyRepositoryReviewAutomation(id string, data []byte) (RepositoryR
 	if _, exists := persisted["deduplication_candidate_limit"]; !exists {
 		automation.DeduplicationCandidateLimit = DeduplicationDefaultCandidateLimit
 	}
-	var progress map[string]json.RawMessage
-	_ = json.Unmarshal(persisted["progress"], &progress)
-	if _, exists := progress["deduplicated_findings"]; !exists {
-		automation.Progress.DeduplicatedFindings = automation.Progress.Findings
-	}
 	if automation.SchemaVersion == 1 {
 		automation.SchemaVersion = RepositoryReviewAutomationSchemaVersion
 	}
+	resetRepositoryReviewAutomationHistory(&automation)
 	if err := normalizeAutomation(&automation); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
@@ -549,17 +588,11 @@ type repositoryReviewRecord struct {
 
 func repositoryReviewStateRecords(state RepositoryState) []repositoryReviewRecord {
 	records := make([]repositoryReviewRecord, 0,
-		len(state.Runs)+len(state.Findings)+len(state.RawFindings)+len(state.DeduplicatedFindings)+
+		len(state.Runs)+len(state.Findings)+len(state.RawFindings)+
 			len(state.IssueDrafts)+len(state.RepositoryFindings))
 	for position, run := range state.Runs {
 		records = append(records, repositoryReviewRecord{
 			kind: "run", id: run.ID, position: position, created: run.CompletedAt, updated: run.CompletedAt,
-		})
-	}
-	for position, finding := range state.Findings {
-		records = append(records, repositoryReviewRecord{
-			kind: "finding", id: finding.ID, status: string(finding.Status), position: position,
-			version: finding.Version, created: finding.CreatedAt, updated: finding.UpdatedAt,
 		})
 	}
 	for position, finding := range state.RawFindings {
@@ -568,7 +601,7 @@ func repositoryReviewStateRecords(state RepositoryState) []repositoryReviewRecor
 			version: finding.Version, created: finding.CreatedAt, updated: finding.UpdatedAt,
 		})
 	}
-	for position, finding := range state.DeduplicatedFindings {
+	for position, finding := range state.Findings {
 		records = append(records, repositoryReviewRecord{
 			kind: "deduplicated_finding", id: finding.ID, status: string(finding.Status), position: position,
 			version: finding.Version, created: finding.CreatedAt, updated: finding.UpdatedAt,
@@ -726,10 +759,9 @@ func loadRepositoryStateRow(ctx context.Context, database *sql.DB, id string) (R
 	if err := json.Unmarshal(payload, &state); err != nil {
 		return RepositoryState{}, errors.New("repository review payload is invalid")
 	}
-	if _, err := migrateRepositoryState(&state); err != nil {
+	if err := validateRepositoryStateVersion(&state); err != nil {
 		return RepositoryState{}, err
 	}
-	backfillCanonicalIssueAssociations(&state)
 	summary := Summarize(state)
 	if state.ID != row.id || state.Repository != row.repository || state.SchemaVersion != row.schema ||
 		state.Version != row.version || state.ReviewVersion != row.reviewVersion ||
@@ -1223,149 +1255,4 @@ func equalReviewStrings(left, right []string) bool {
 		}
 	}
 	return true
-}
-
-// RewriteStateForMigration replaces one already-persisted repository ledger
-// without changing its public version. It is intentionally narrow: callers
-// must supply the exact current version, and the rewrite is one transactional
-// compare-and-swap used by trusted compatibility/backfill code.
-func (s Store) RewriteStateForMigration(
-	ctx context.Context,
-	state RepositoryState,
-) (RepositoryState, error) {
-	reconcileFindingsProcessingCounters(&state)
-	if err := prepareRepositoryStateForMigrationRewrite(&state); err != nil {
-		return RepositoryState{}, err
-	}
-	err := s.rewriteMigrationRow(
-		ctx,
-		state.Repository,
-		`SELECT version FROM repository_review_states WHERE state_id = ?`,
-		state.ID,
-		state.Version,
-		func(ctx context.Context, conn *sql.Conn, current int64) (bool, error) {
-			return insertRepositoryStateConn(ctx, conn, state, false, current)
-		},
-	)
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	return state, nil
-}
-
-func prepareRepositoryStateForMigrationRewrite(state *RepositoryState) error {
-	if state == nil {
-		return errors.New("repository review state is required")
-	}
-	if state.FileAttributions == nil {
-		state.FileAttributions = []RepositoryReviewFileAttribution{}
-	}
-	backfillCanonicalIssueAssociations(state)
-	summary := Summarize(*state)
-	state.FindingCount = summary.FindingCount
-	state.RepositoryFindingCount = summary.RepositoryFindingCount
-	state.OpenFindingCount = summary.OpenFindingCount
-	state.IssueDraftCount = summary.IssueDraftCount
-	state.UnsupportedCount = summary.UnsupportedCount
-	state.ReviewedFileCount = summary.ReviewedFileCount
-	return validateState(*state)
-}
-
-// RewriteProfileForMigration performs a same-version CAS rewrite for trusted
-// legacy normalization. Ordinary profile mutations must use UpdateProfile.
-func (s Store) RewriteProfileForMigration(
-	ctx context.Context,
-	profile RepositoryReviewProfile,
-) (RepositoryReviewProfile, error) {
-	if err := normalizeProfile(&profile); err != nil {
-		return RepositoryReviewProfile{}, err
-	}
-	err := s.rewriteMigrationRow(
-		ctx,
-		"profile:"+profile.ID,
-		`SELECT version FROM repository_review_profiles WHERE profile_id = ?`,
-		profile.ID,
-		profile.Version,
-		func(ctx context.Context, conn *sql.Conn, current int64) (bool, error) {
-			return insertRepositoryReviewProfileConn(ctx, conn, profile, false, current)
-		},
-	)
-	if err != nil {
-		return RepositoryReviewProfile{}, err
-	}
-	return profile, nil
-}
-
-// RewriteAutomationForMigration performs a same-version CAS rewrite for
-// trusted recovery/backfill code. Ordinary mutations use UpdateAutomation.
-func (s Store) RewriteAutomationForMigration(
-	ctx context.Context,
-	automation RepositoryReviewAutomation,
-) (RepositoryReviewAutomation, error) {
-	if err := normalizeAutomation(&automation); err != nil {
-		return RepositoryReviewAutomation{}, err
-	}
-	err := s.rewriteMigrationRow(
-		ctx,
-		"automation:"+automation.ID,
-		`SELECT version FROM repository_review_automations WHERE automation_id = ?`,
-		automation.ID,
-		automation.Version,
-		func(ctx context.Context, conn *sql.Conn, current int64) (bool, error) {
-			return insertRepositoryReviewAutomationConn(ctx, conn, automation, false, current)
-		},
-	)
-	if err != nil {
-		return RepositoryReviewAutomation{}, err
-	}
-	return automation, nil
-}
-
-func (s Store) rewriteMigrationRow(
-	ctx context.Context,
-	lockKey string,
-	versionQuery string,
-	id string,
-	version int64,
-	write func(context.Context, *sql.Conn, int64) (bool, error),
-) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if write == nil || strings.TrimSpace(versionQuery) == "" {
-		return errors.New("repository review migration rewrite is invalid")
-	}
-	unlock, err := s.lock(lockKey)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	database, err := s.openDatabase(ctx)
-	if err != nil {
-		return err
-	}
-	defer database.Close()
-	return sqlitestore.Immediate(ctx, database, func(conn *sql.Conn) error {
-		var current int64
-		if queryErr := conn.QueryRowContext(ctx, versionQuery, id).Scan(&current); queryErr != nil {
-			if errors.Is(queryErr, sql.ErrNoRows) {
-				return os.ErrNotExist
-			}
-			return queryErr
-		}
-		if version != current && version != current+1 {
-			return ErrConflict
-		}
-		inserted, rewriteErr := write(ctx, conn, current)
-		if rewriteErr != nil {
-			return rewriteErr
-		}
-		if !inserted {
-			return ErrConflict
-		}
-		return nil
-	})
 }

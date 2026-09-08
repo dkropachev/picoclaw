@@ -20,6 +20,31 @@ type assignmentCoverageFixture struct {
 	catalog    []RepositoryReviewAssignment
 }
 
+func creditRepositoryReviewAssignmentForTest(
+	coverage RepositoryReviewCampaignPathCoverage,
+	catalog []RepositoryReviewAssignment,
+	assignmentID string,
+) (RepositoryReviewCampaignPathCoverage, error) {
+	normalized, err := NormalizeRepositoryReviewAssignmentCatalog(catalog)
+	if err != nil {
+		return RepositoryReviewCampaignPathCoverage{}, err
+	}
+	next, _, err := setRepositoryReviewAssignmentComplete(coverage, normalized, assignmentID)
+	return next, err
+}
+
+func creditAllRequiredRepositoryReviewAssignmentsForTest(
+	coverage RepositoryReviewCampaignPathCoverage,
+	catalog []RepositoryReviewAssignment,
+) (RepositoryReviewCampaignPathCoverage, error) {
+	normalized, err := NormalizeRepositoryReviewAssignmentCatalog(catalog)
+	if err != nil {
+		return RepositoryReviewCampaignPathCoverage{}, err
+	}
+	next, _, err := setAllRequiredRepositoryReviewAssignments(coverage, normalized)
+	return next, err
+}
+
 func newAssignmentCoverageFixture(t *testing.T, fileCount, maximumPending int) assignmentCoverageFixture {
 	t.Helper()
 	store := NewStore(t.TempDir())
@@ -37,6 +62,11 @@ func newAssignmentCoverageFixture(t *testing.T, fileCount, maximumPending int) a
 	campaignID := NewRepositoryReviewCampaignID()
 	if _, err := store.BeginCampaign(context.Background(), BeginCampaignRequest{
 		Repository: repository, CampaignID: campaignID, CommitSHA: commit,
+		DeduplicationSnapshot: &RepositoryReviewDeduplicationSnapshot{
+			ReviewerModel: "review-a", DeduplicationModel: "review-a",
+			SimilarityThreshold: DeduplicationDefaultThreshold,
+			CandidateLimit:      DeduplicationDefaultCandidateLimit,
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -216,23 +246,23 @@ func TestRepositoryReviewAssignmentPrimitiveCoverage(t *testing.T) {
 	); err == nil {
 		t.Fatal("bad all-required mask accepted")
 	}
-	if _, err := CreditRepositoryReviewAssignment(
+	if _, err := creditRepositoryReviewAssignmentForTest(
 		RepositoryReviewCampaignPathCoverage{}, nil, catalog[0].ID,
 	); err == nil {
 		t.Fatal("credit accepted empty catalog")
 	}
-	credited, err := CreditRepositoryReviewAssignment(
+	credited, err := creditRepositoryReviewAssignmentForTest(
 		RepositoryReviewCampaignPathCoverage{}, catalog, catalog[0].ID,
 	)
 	if err != nil || !credited.Inspected || credited.Completed {
 		t.Fatalf("single credit = %#v err=%v", credited, err)
 	}
-	if _, err := CreditAllRequiredRepositoryReviewAssignments(
+	if _, err := creditAllRequiredRepositoryReviewAssignmentsForTest(
 		RepositoryReviewCampaignPathCoverage{}, nil,
 	); err == nil {
 		t.Fatal("all-required credit accepted empty catalog")
 	}
-	credited, err = CreditAllRequiredRepositoryReviewAssignments(
+	credited, err = creditAllRequiredRepositoryReviewAssignmentsForTest(
 		RepositoryReviewCampaignPathCoverage{}, catalog,
 	)
 	if err != nil || !credited.Completed {
@@ -340,7 +370,7 @@ func TestRepositoryReviewAssignmentPlanAndProgressCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	state.CurrentCampaign.Paths[fixture.files[1].Path] = RepositoryReviewCampaignPathCoverage{Unsupported: true}
-	credited, err := CreditRepositoryReviewAssignment(
+	credited, err := creditRepositoryReviewAssignmentForTest(
 		RepositoryReviewCampaignPathCoverage{}, fixture.catalog, fixture.catalog[0].ID,
 	)
 	if err != nil {
@@ -620,7 +650,7 @@ func TestRepositoryReviewAssignmentRunDefensiveCoverage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		credited, err := CreditRepositoryReviewAssignment(
+		credited, err := creditRepositoryReviewAssignmentForTest(
 			state.CurrentCampaign.Paths[fixture.files[0].Path], fixture.catalog, fixture.catalog[0].ID,
 		)
 		if err != nil {
@@ -649,7 +679,7 @@ func TestRepositoryReviewAssignmentRunDefensiveCoverage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		credited, err = CreditRepositoryReviewAssignment(
+		credited, err = creditRepositoryReviewAssignmentForTest(
 			freshState.CurrentCampaign.Paths[fresh.files[0].Path], fresh.catalog, fresh.catalog[0].ID,
 		)
 		if err != nil {
@@ -916,7 +946,7 @@ func TestRepositoryReviewAssignmentCheckpointPersistenceCoverage(t *testing.T) {
 		observation, fixture.files, repositoryAuditTestNow,
 	)
 	if err != nil || len(accepted) != 2 || len(state.RawFindings) != 2 ||
-		len(state.DeduplicationJobs) != 2 || len(state.Findings) != 1 || len(state.Contexts) != 1 {
+		len(state.DeduplicationJobs) != 2 || len(state.Findings) != 0 || len(state.Contexts) != 1 {
 		t.Fatalf("merged direct checkpoint accepted=%#v state=%#v err=%v", accepted, state.Findings, err)
 	}
 	// Retain the context while removing the finding to cover deterministic

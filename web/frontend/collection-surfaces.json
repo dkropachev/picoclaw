@@ -316,8 +316,6 @@
       "implementationGlobs": [
         "src/routes/repository-reviews.tsx",
         "src/routes/repository-reviews_.$id.tsx",
-        "src/routes/repository-reviews_.$id_.report.tsx",
-        "src/routes/repository-reviews_.results.tsx",
         "src/components/repository-reviews/repository-review-runs-page.tsx",
         "src/components/repository-reviews/repository-review-detail-page.tsx"
       ],
@@ -347,7 +345,6 @@
       "implementationGlobs": [
         "src/routes/repository-reviews_.$id_.findings.tsx",
         "src/routes/repository-reviews_.$id_.findings_.$findingId.tsx",
-        "src/routes/repository-reviews_.$id_.findings_.$findingId_.link-issue.tsx",
         "src/components/repository-reviews/repository-review-findings-page.tsx",
         "src/components/repository-reviews/repository-review-finding-page.tsx",
         "src/components/repository-reviews/repository-review-findings-processing.tsx",

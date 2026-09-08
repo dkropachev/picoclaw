@@ -7,12 +7,12 @@ import (
 )
 
 func TestRepositoryFindingMatchingAcrossCommitsAndRenames(t *testing.T) {
-	base := repositoryMatchingFinding("rfn_old", "old/scheduler.go", "waiter.signal")
+	base := repositoryMatchingFinding("rdf_old", "old/scheduler.go", "waiter.signal")
 	base.CommitSHA = strings.Repeat("a", 40)
 	aggregate := repositoryMatchingAggregate("rrf_one", base)
 
 	t.Run("same causal defect after rename", func(t *testing.T) {
-		candidate := repositoryMatchingFinding("rfn_new", "core/scheduler.go", "waiter.signal")
+		candidate := repositoryMatchingFinding("rdf_new", "core/scheduler.go", "waiter.signal")
 		candidate.CommitSHA = strings.Repeat("b", 40)
 		result := MatchRepositoryFinding(
 			candidate,
@@ -28,7 +28,7 @@ func TestRepositoryFindingMatchingAcrossCommitsAndRenames(t *testing.T) {
 	})
 
 	t.Run("same symbol different causal defect", func(t *testing.T) {
-		candidate := repositoryMatchingFinding("rfn_distinct", "old/scheduler.go", "waiter.signal")
+		candidate := repositoryMatchingFinding("rdf_distinct", "old/scheduler.go", "waiter.signal")
 		candidate.MatchHints.Operation = "delete expired timer entry"
 		candidate.MatchHints.FailureMode = "live timers are removed with expired timers"
 		candidate.MatchHints.Trigger = "cleanup races with a timer refresh"
@@ -42,7 +42,7 @@ func TestRepositoryFindingMatchingAcrossCommitsAndRenames(t *testing.T) {
 	})
 
 	t.Run("numeric anchor conflict", func(t *testing.T) {
-		candidate := repositoryMatchingFinding("rfn_numeric", "old/scheduler.go", "waiter.signal")
+		candidate := repositoryMatchingFinding("rdf_numeric", "old/scheduler.go", "waiter.signal")
 		candidate.MatchHints.SourceAnchors = []string{"retry_limit_3", "waiters"}
 		aggregateWithNumber := aggregate
 		aggregateWithNumber.MatchHints.SourceAnchors = []string{"retry_limit_5", "waiters"}
@@ -53,7 +53,7 @@ func TestRepositoryFindingMatchingAcrossCommitsAndRenames(t *testing.T) {
 	})
 
 	t.Run("one disjoint trigger blocks deterministic merge", func(t *testing.T) {
-		candidate := repositoryMatchingFinding("rfn_trigger", "old/scheduler.go", "waiter.signal")
+		candidate := repositoryMatchingFinding("rdf_trigger", "old/scheduler.go", "waiter.signal")
 		candidate.MatchHints.Trigger = "shutdown signal arrives before worker startup"
 		result := MatchRepositoryFinding(candidate, []RepositoryFinding{aggregate}, nil, nil)
 		if result.RepositoryFindingID != "" || result.Method != "ai" || len(result.Candidates) != 1 {
@@ -63,9 +63,9 @@ func TestRepositoryFindingMatchingAcrossCommitsAndRenames(t *testing.T) {
 }
 
 func TestRepositoryFindingBM25AndAdjudicationValidation(t *testing.T) {
-	query := repositoryMatchingFinding("rfn_query", "scheduler.go", "waiter.signal")
+	query := repositoryMatchingFinding("rdf_query", "scheduler.go", "waiter.signal")
 	relevant := repositoryMatchingAggregate("rrf_relevant", query)
-	unrelatedFinding := repositoryMatchingFinding("rfn_other", "auth.go", "token.parse")
+	unrelatedFinding := repositoryMatchingFinding("rdf_other", "auth.go", "token.parse")
 	unrelatedFinding.Title = "Expired credentials bypass authorization"
 	unrelatedFinding.MatchHints = MatchHints{
 		Component: "authentication", Operation: "parse access token",
@@ -83,7 +83,8 @@ func TestRepositoryFindingBM25AndAdjudicationValidation(t *testing.T) {
 
 	valid := RepositoryMappingAdjudication{
 		Decision: "same", CandidateID: relevant.ID, Confidence: 0.95,
-		MatchingAnchors: []string{"waiters"}, Explanation: "causal identity agrees",
+		MatchingAnchors: []string{"waiters"}, ConflictFields: []string{},
+		Explanation: "causal identity agrees",
 	}
 	if err := ValidateRepositoryMappingAdjudication(valid, []string{relevant.ID}); err != nil {
 		t.Fatal(err)
@@ -132,16 +133,6 @@ func TestRepositoryMappingAdjudicationConflictFields(t *testing.T) {
 		adjudication.ConflictFields = allowedFields
 		if err := ValidateRepositoryMappingAdjudication(adjudication, []string{candidateID}); err != nil {
 			t.Fatalf("aligned conflict fields rejected: %v", err)
-		}
-	})
-
-	t.Run("legacy missing classifications are accepted", func(t *testing.T) {
-		adjudication := base
-		if adjudication.ConflictFields != nil {
-			t.Fatal("legacy fixture unexpectedly has conflict fields")
-		}
-		if err := ValidateRepositoryMappingAdjudication(adjudication, []string{candidateID}); err != nil {
-			t.Fatalf("legacy adjudication rejected: %v", err)
 		}
 	})
 

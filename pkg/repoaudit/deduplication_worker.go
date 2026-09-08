@@ -69,12 +69,11 @@ type DeduplicationRetryResult struct {
 }
 
 type deduplicationProcessOutcome struct {
-	created    bool
-	duplicate  bool
-	failed     bool
-	deferred   bool
-	historical bool
-	err        error
+	created   bool
+	duplicate bool
+	failed    bool
+	deferred  bool
+	err       error
 }
 
 // ClaimDeduplicationJob atomically freezes the complete existing candidate
@@ -144,9 +143,6 @@ func (s Store) ClaimDeduplicationJob(
 		raw.Disposition != RawFindingDispositionUndecided {
 		return RepositoryState{}, DeduplicationClaim{}, false, ErrConflict
 	}
-	if historicalDeduplicationFailedFence(state, *job) {
-		return state, DeduplicationClaim{Job: *job, RawFinding: *raw}, false, nil
-	}
 	if job.Attempts >= DeduplicationAttemptLimit {
 		markDeduplicationFailed(raw, job, "attempt_limit", now)
 		state.Version++
@@ -214,34 +210,11 @@ func (s Store) ClaimDeduplicationJob(
 	return state, claim, true, nil
 }
 
-func historicalDeduplicationFailedFence(
-	state RepositoryState,
-	job DeduplicationJob,
-) bool {
-	rawIndex := rawFindingIndexByID(state.RawFindings, job.RawFindingID)
-	if rawIndex < 0 || !HistoricalDeduplicationRawFinding(state.RawFindings[rawIndex]) {
-		return false
-	}
-	for _, earlier := range state.DeduplicationJobs {
-		if earlier.ID == job.ID || earlier.AdmissionBucket != job.AdmissionBucket ||
-			earlier.InsertionOrdinal >= job.InsertionOrdinal ||
-			earlier.State != DeduplicationJobFailed {
-			continue
-		}
-		earlierRawIndex := rawFindingIndexByID(state.RawFindings, earlier.RawFindingID)
-		if earlierRawIndex >= 0 &&
-			HistoricalDeduplicationRawFinding(state.RawFindings[earlierRawIndex]) {
-			return true
-		}
-	}
-	return false
-}
-
 func deduplicationCandidateSnapshots(
 	state RepositoryState, campaignID, admissionBucket string,
 ) []DeduplicationCandidateSnapshot {
 	candidates := make([]DeduplicationCandidateSnapshot, 0)
-	for _, finding := range state.DeduplicatedFindings {
+	for _, finding := range state.Findings {
 		if finding.CampaignID != campaignID || finding.AdmissionBucket != admissionBucket {
 			continue
 		}
@@ -262,7 +235,7 @@ func deduplicationDiagnosisFromRaw(raw RawReviewFinding) DeduplicationDiagnosis 
 	}
 }
 
-func deduplicationDiagnosisFromDeduplicated(finding DeduplicatedReviewFinding) DeduplicationDiagnosis {
+func deduplicationDiagnosisFromDeduplicated(finding Finding) DeduplicationDiagnosis {
 	return DeduplicationDiagnosis{
 		Severity: finding.Severity, Title: finding.Title, Symbol: finding.Symbol, Message: finding.Message,
 		Evidence: finding.Evidence, Impact: finding.Impact, Validation: finding.Validation,
@@ -276,7 +249,7 @@ func deduplicationDiagnosisFromDeduplicated(finding DeduplicatedReviewFinding) D
 func (s Store) CompleteDeduplicationJob(
 	repository string,
 	completion DeduplicationCompletion,
-) (RepositoryState, DeduplicatedReviewFinding, bool, error) {
+) (RepositoryState, Finding, bool, error) {
 	repository = strings.TrimSpace(repository)
 	completion.JobID = strings.TrimSpace(completion.JobID)
 	completion.LeaseID = strings.TrimSpace(completion.LeaseID)
@@ -287,46 +260,46 @@ func (s Store) CompleteDeduplicationJob(
 		completion.CandidateUniverseDigest == "" ||
 		(completion.Decision.Decision != "new" && completion.Decision.Decision != "duplicate") ||
 		(completion.Decision.Decision == "new") != (completion.Decision.CandidateID == "") {
-		return RepositoryState{}, DeduplicatedReviewFinding{}, false,
+		return RepositoryState{}, Finding{}, false,
 			errors.New("invalid deduplication completion")
 	}
 	unlock, err := s.lock(repository)
 	if err != nil {
-		return RepositoryState{}, DeduplicatedReviewFinding{}, false, err
+		return RepositoryState{}, Finding{}, false, err
 	}
 	defer unlock()
 	state, err := s.load(repository)
 	if err != nil {
-		return RepositoryState{}, DeduplicatedReviewFinding{}, false, err
+		return RepositoryState{}, Finding{}, false, err
 	}
 	jobIndex := deduplicationJobIndexByID(state.DeduplicationJobs, completion.JobID)
 	if jobIndex < 0 {
-		return RepositoryState{}, DeduplicatedReviewFinding{}, false, os.ErrNotExist
+		return RepositoryState{}, Finding{}, false, os.ErrNotExist
 	}
 	job := &state.DeduplicationJobs[jobIndex]
 	rawIndex := rawFindingIndexByID(state.RawFindings, job.RawFindingID)
 	if rawIndex < 0 {
-		return RepositoryState{}, DeduplicatedReviewFinding{}, false,
+		return RepositoryState{}, Finding{}, false,
 			errors.New("deduplication job raw finding is missing")
 	}
 	raw := &state.RawFindings[rawIndex]
 	if job.State == DeduplicationJobCompleted && raw.State == RawFindingDeduplicationCompleted {
 		targetIndex := deduplicatedFindingIndexByID(
-			state.DeduplicatedFindings, raw.DeduplicatedFindingID,
+			state.Findings, raw.DeduplicatedFindingID,
 		)
 		if targetIndex < 0 || job.Decision != completion.Decision {
-			return RepositoryState{}, DeduplicatedReviewFinding{}, false, ErrConflict
+			return RepositoryState{}, Finding{}, false, ErrConflict
 		}
-		return state, state.DeduplicatedFindings[targetIndex],
+		return state, state.Findings[targetIndex],
 			raw.Disposition == RawFindingDispositionNew, nil
 	}
 	now := s.clock()
 	if job.State != DeduplicationJobRunning || raw.State != RawFindingDeduplicationRunning ||
 		job.LeaseID != completion.LeaseID {
-		return RepositoryState{}, DeduplicatedReviewFinding{}, false, ErrConflict
+		return RepositoryState{}, Finding{}, false, ErrConflict
 	}
 	if !now.Before(job.LeaseExpiresAt) {
-		return RepositoryState{}, DeduplicatedReviewFinding{}, false,
+		return RepositoryState{}, Finding{}, false,
 			ErrDeduplicationLeaseExpired
 	}
 	currentCandidates := deduplicationCandidateSnapshots(
@@ -334,19 +307,19 @@ func (s Store) CompleteDeduplicationJob(
 	)
 	currentDigest, digestErr := DeduplicationCandidateUniverseDigest(currentCandidates)
 	if digestErr != nil {
-		return RepositoryState{}, DeduplicatedReviewFinding{}, false, digestErr
+		return RepositoryState{}, Finding{}, false, digestErr
 	}
 	if completion.CandidateUniverseDigest != job.CandidateUniverseDigest ||
 		currentDigest != job.CandidateUniverseDigest ||
 		!deduplicationCandidateVersionsMatch(job.CandidateVersions, currentCandidates) {
-		return RepositoryState{}, DeduplicatedReviewFinding{}, false,
+		return RepositoryState{}, Finding{}, false,
 			ErrDeduplicationUniverseChanged
 	}
 	shortlisted, shortlistErr := normalizeDurableDeduplicationScores(
 		completion.ShortlistedScores, job, currentCandidates,
 	)
 	if shortlistErr != nil {
-		return RepositoryState{}, DeduplicatedReviewFinding{}, false, shortlistErr
+		return RepositoryState{}, Finding{}, false, shortlistErr
 	}
 	if completion.Decision.Decision == "duplicate" {
 		selected := false
@@ -357,43 +330,52 @@ func (s Store) CompleteDeduplicationJob(
 			}
 		}
 		if !selected {
-			return RepositoryState{}, DeduplicatedReviewFinding{}, false,
+			return RepositoryState{}, Finding{}, false,
 				errors.New("deduplication selected a candidate outside its shortlist")
 		}
 	}
-	var target *DeduplicatedReviewFinding
+	var target *Finding
 	created := completion.Decision.Decision == "new"
 	if created {
 		finding := newDeduplicatedReviewFinding(
-			*raw, job.InsertionOrdinal, state.Findings, now,
+			*raw, job.InsertionOrdinal, now,
 		)
-		if deduplicatedFindingIndexByID(state.DeduplicatedFindings, finding.ID) >= 0 ||
+		if deduplicatedFindingIndexByID(state.Findings, finding.ID) >= 0 ||
 			findingIndexByID(state.Findings, finding.ID) >= 0 {
-			return RepositoryState{}, DeduplicatedReviewFinding{}, false, ErrConflict
+			return RepositoryState{}, Finding{}, false, ErrConflict
 		}
-		state.DeduplicatedFindings = append(state.DeduplicatedFindings, finding)
-		state.Findings = append(state.Findings, deduplicatedFindingProjection(finding, *raw, state.Findings))
-		target = &state.DeduplicatedFindings[len(state.DeduplicatedFindings)-1]
+		state.Findings = append(state.Findings, finding)
+		target = &state.Findings[len(state.Findings)-1]
 		ensureMappingJobsForFindings(&state, []string{target.ID}, now)
 		raw.Disposition = RawFindingDispositionNew
 	} else {
 		targetIndex := deduplicatedFindingIndexByID(
-			state.DeduplicatedFindings, completion.Decision.CandidateID,
+			state.Findings, completion.Decision.CandidateID,
 		)
 		if targetIndex < 0 {
-			return RepositoryState{}, DeduplicatedReviewFinding{}, false,
+			return RepositoryState{}, Finding{}, false,
 				ErrDeduplicationUniverseChanged
 		}
-		target = &state.DeduplicatedFindings[targetIndex]
+		target = &state.Findings[targetIndex]
 		if target.CampaignID != raw.CampaignID || target.AdmissionBucket != raw.AdmissionBucket ||
 			containsExactString(target.RawSourceIDs, raw.ID) {
-			return RepositoryState{}, DeduplicatedReviewFinding{}, false, ErrConflict
+			return RepositoryState{}, Finding{}, false, ErrConflict
 		}
 		target.RawSourceIDs = append(target.RawSourceIDs, raw.ID)
 		target.History = appendDeduplicatedFindingHistory(
 			target.History,
 			DeduplicatedFindingHistoryEntry{Action: "source_attached", RawFindingID: raw.ID, At: now},
 		)
+		observation := findingObservationFrom(
+			rawFindingCandidate(*raw), raw.ContextID, raw.Model, raw.ModelAlias, raw.Account, raw.Reviewer,
+		)
+		target.Observations = appendBoundedFindingObservation(target.Observations, observation)
+		target.ContextIDs = target.ContextIDs[:0]
+		for _, retained := range target.Observations {
+			target.ContextIDs = appendUnique(target.ContextIDs, retained.ContextID)
+		}
+		target.Models = appendUnique(target.Models, raw.ModelAlias)
+		target.ObservationCount = len(target.RawSourceIDs)
 		target.Version++
 		target.UpdatedAt = now
 		raw.Disposition = RawFindingDispositionDuplicate
@@ -417,22 +399,15 @@ func (s Store) CompleteDeduplicationJob(
 	job.History = appendDeduplicationJobHistory(job.History, DeduplicationJobHistoryEntry{
 		State: DeduplicationJobCompleted, Attempt: job.Attempts, At: now,
 	})
-	if HistoricalDeduplicationRawFinding(*raw) {
-		if restoreErr := restoreHistoricalDeduplicatedLifecycle(
-			&state, *raw, target.ID, now,
-		); restoreErr != nil {
-			return RepositoryState{}, DeduplicatedReviewFinding{}, false, restoreErr
-		}
-	}
 	state.Version++
 	state.UpdatedAt = now
 	reconcileFindingsProcessingCounters(&state)
 	state.FindingsProcessing.UpdatedAt = now
 	if err := s.save(&state); err != nil {
-		return RepositoryState{}, DeduplicatedReviewFinding{}, false, err
+		return RepositoryState{}, Finding{}, false, err
 	}
-	targetIndex := deduplicatedFindingIndexByID(state.DeduplicatedFindings, target.ID)
-	return state, state.DeduplicatedFindings[targetIndex], created, nil
+	targetIndex := deduplicatedFindingIndexByID(state.Findings, target.ID)
+	return state, state.Findings[targetIndex], created, nil
 }
 
 func deduplicationCandidateVersionsMatch(
@@ -497,13 +472,30 @@ func normalizeDurableDeduplicationScores(
 	return result, nil
 }
 
+const maxFindingContributorObservations = 64
+
+func appendBoundedFindingObservation(
+	observations []FindingObservation,
+	candidate FindingObservation,
+) []FindingObservation {
+	if len(observations) < maxFindingContributorObservations {
+		return append(observations, candidate)
+	}
+	retained := make([]FindingObservation, 0, maxFindingContributorObservations)
+	retained = append(retained, observations[0])
+	tail := maxFindingContributorObservations - 2
+	retained = append(retained, observations[len(observations)-tail:]...)
+	return append(retained, candidate)
+}
+
 func newDeduplicatedReviewFinding(
 	raw RawReviewFinding,
 	creationOrdinal uint64,
-	projections []Finding,
 	now time.Time,
-) DeduplicatedReviewFinding {
-	finding := DeduplicatedReviewFinding{
+) Finding {
+	candidate := rawFindingCandidate(raw)
+	contributorModel := raw.ModelAlias
+	finding := Finding{
 		ID: stableID("rdf_", raw.ID), Version: 1, CampaignID: raw.CampaignID,
 		AdmissionBucket: raw.AdmissionBucket, CreationOrdinal: creationOrdinal,
 		DiagnosisDigest: raw.DiagnosisDigest,
@@ -512,56 +504,18 @@ func newDeduplicatedReviewFinding(
 		Evidence: raw.Evidence, Impact: raw.Impact, Validation: raw.Validation,
 		MatchHints: raw.MatchHints, FixEffort: raw.FixEffort,
 		RawSourceIDs: []string{raw.ID}, Status: FindingOpen,
-		History:   []DeduplicatedFindingHistoryEntry{{Action: "created", RawFindingID: raw.ID, At: now}},
-		CreatedAt: now, UpdatedAt: now,
-	}
-	if legacyIndex := findingIndexByID(projections, raw.LegacyFindingID); legacyIndex >= 0 {
-		legacy := projections[legacyIndex]
-		if legacy.Status == FindingOpen || legacy.Status == FindingDismissed ||
-			legacy.Status == FindingPosted {
-			finding.Status = legacy.Status
-		}
-		finding.IssueDraftID = legacy.IssueDraftID
-		finding.TargetBranch = legacy.TargetBranch
-		finding.AdvertisedDefaultBranch = legacy.AdvertisedDefaultBranch
-		finding.TargetIsDefault = legacy.TargetIsDefault
-	}
-	return finding
-}
-
-func deduplicatedFindingProjection(
-	finding DeduplicatedReviewFinding,
-	raw RawReviewFinding,
-	legacyProjections []Finding,
-) Finding {
-	candidate := rawFindingCandidate(raw)
-	contributorModel := raw.ModelAlias
-	if contributorModel == "" {
-		contributorModel = raw.Model
-	}
-	projection := Finding{
-		ID: finding.ID, CampaignID: finding.CampaignID,
-		Fingerprint: findingFingerprint(finding.File, candidate),
-		Repository:  finding.Repository, CommitSHA: finding.CommitSHA,
-		File: finding.File, Line: finding.Line, Severity: finding.Severity,
-		Title: finding.Title, Symbol: finding.Symbol, Message: finding.Message,
-		Evidence: finding.Evidence, Impact: finding.Impact, Validation: finding.Validation,
-		MatchHints: finding.MatchHints, FixEffort: finding.FixEffort,
-		ContextIDs: []string{raw.ContextID}, Models: []string{contributorModel},
+		History:     []DeduplicatedFindingHistoryEntry{{Action: "created", RawFindingID: raw.ID, At: now}},
+		Fingerprint: findingFingerprint(raw.File, candidate),
+		ContextIDs:  []string{raw.ContextID}, Models: []string{contributorModel},
 		ObservationCount: 1,
 		Observations: []FindingObservation{findingObservationFrom(
 			candidate, raw.ContextID, raw.Model, raw.ModelAlias, raw.Account, raw.Reviewer,
 		)},
-		Status: finding.Status, TargetBranch: finding.TargetBranch,
-		AdvertisedDefaultBranch: finding.AdvertisedDefaultBranch,
-		TargetIsDefault:         finding.TargetIsDefault,
-		Version:                 1, CreatedAt: finding.CreatedAt, UpdatedAt: finding.UpdatedAt,
+		TargetBranch: raw.TargetBranch, AdvertisedDefaultBranch: raw.AdvertisedDefaultBranch,
+		TargetIsDefault: raw.TargetIsDefault,
+		CreatedAt:       now, UpdatedAt: now,
 	}
-	if legacyIndex := findingIndexByID(legacyProjections, raw.LegacyFindingID); legacyIndex >= 0 {
-		legacy := legacyProjections[legacyIndex]
-		projection.DefaultBranchVerified = legacy.DefaultBranchVerified
-	}
-	return projection
+	return finding
 }
 
 // ProcessPendingDeduplicationJobs runs one FIFO queue per bucket with up to
@@ -623,11 +577,6 @@ func (s Store) ProcessPendingDeduplicationJobs(
 				for _, queuedJob := range queue.jobs {
 					item := s.processOneDeduplicationJob(ctx, repository, queuedJob.ID, options)
 					outcomes <- item
-					if item.historical && item.failed {
-						// A terminal historical failure is a durable bucket
-						// checkpoint fence. Other buckets remain independent.
-						break
-					}
 					if item.err != nil || item.failed || item.deferred {
 						// A pending earlier job must continue to fence later jobs in
 						// this bucket until a later processor pass.
@@ -688,13 +637,11 @@ func (s Store) processOneDeduplicationJob(
 		return result
 	}
 	if !claimed {
-		result.historical = HistoricalDeduplicationRawFinding(claim.RawFinding)
 		result.deferred = claim.Job.State == DeduplicationJobPending ||
 			claim.Job.State == DeduplicationJobRunning
 		result.failed = claim.Job.State == DeduplicationJobFailed
 		return result
 	}
-	result.historical = HistoricalDeduplicationRawFinding(claim.RawFinding)
 	needsModel := claim.Job.ModelSnapshot.CandidateLimit > 0 && len(claim.Candidates) > 0
 	var releaseSlot func()
 	if needsModel {
@@ -953,14 +900,6 @@ func (s Store) RetryDeduplications(
 			))
 			continue
 		}
-		if HistoricalDeduplicationRawFinding(state.RawFindings[rawIndex]) {
-			result.Failures = append(result.Failures, deduplicationRetryFailure(
-				sourceID,
-				"historical_replay_required",
-				"Historical sources must be retried through historical consolidation.",
-			))
-			continue
-		}
 		if _, retryErr := retryDeduplicationInState(&state, sourceID, now); retryErr != nil {
 			result.Failures = append(result.Failures, deduplicationRetryFailure(
 				sourceID,
@@ -1084,7 +1023,7 @@ func deduplicationJobIndexByID(jobs []DeduplicationJob, id string) int {
 	return -1
 }
 
-func deduplicatedFindingIndexByID(findings []DeduplicatedReviewFinding, id string) int {
+func deduplicatedFindingIndexByID(findings []Finding, id string) int {
 	for index := range findings {
 		if findings[index].ID == id {
 			return index

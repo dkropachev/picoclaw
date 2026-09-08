@@ -45,13 +45,12 @@ var (
 type RepositoryReviewPurgeBlockerCode string
 
 const (
-	RepositoryReviewPurgeBlockerReviewActive                  RepositoryReviewPurgeBlockerCode = "review_active"
-	RepositoryReviewPurgeBlockerFindingProcessingActive       RepositoryReviewPurgeBlockerCode = "finding_processing_active"
-	RepositoryReviewPurgeBlockerResolutionCheckActive         RepositoryReviewPurgeBlockerCode = "resolution_check_active"
-	RepositoryReviewPurgeBlockerIssueGenerationActive         RepositoryReviewPurgeBlockerCode = "issue_generation_active"
-	RepositoryReviewPurgeBlockerPublicationActive             RepositoryReviewPurgeBlockerCode = "publication_active"
-	RepositoryReviewPurgeBlockerHistoricalConsolidationActive RepositoryReviewPurgeBlockerCode = "historical_consolidation_active"
-	RepositoryReviewPurgeBlockerRetentionUnavailable          RepositoryReviewPurgeBlockerCode = "retention_unavailable"
+	RepositoryReviewPurgeBlockerReviewActive            RepositoryReviewPurgeBlockerCode = "review_active"
+	RepositoryReviewPurgeBlockerFindingProcessingActive RepositoryReviewPurgeBlockerCode = "finding_processing_active"
+	RepositoryReviewPurgeBlockerResolutionCheckActive   RepositoryReviewPurgeBlockerCode = "resolution_check_active"
+	RepositoryReviewPurgeBlockerIssueGenerationActive   RepositoryReviewPurgeBlockerCode = "issue_generation_active"
+	RepositoryReviewPurgeBlockerPublicationActive       RepositoryReviewPurgeBlockerCode = "publication_active"
+	RepositoryReviewPurgeBlockerRetentionUnavailable    RepositoryReviewPurgeBlockerCode = "retention_unavailable"
 )
 
 // RepositoryReviewPurgeBlocker is deliberately shape-only. It never exposes
@@ -84,9 +83,9 @@ type RepositoryReviewPurgeEligibility struct {
 }
 
 // RepositoryReviewAutomationSnapshot is one lock-linearized read used by
-// launcher detail routes. PurgeInventoryError is deliberately out-of-band:
-// callers may still render the primary ledger while failing destructive
-// capabilities closed when a secondary alias cannot be inventoried.
+// launcher detail routes. PurgeInventoryError is deliberately out-of-band so
+// callers may still render the canonical ledger while failing destructive
+// capabilities closed when its purge inventory cannot be verified.
 type RepositoryReviewAutomationSnapshot struct {
 	Automation          RepositoryReviewAutomation
 	State               RepositoryState
@@ -175,7 +174,7 @@ func evaluateRepositoryReviewPurgeInventory(
 	}
 	for _, state := range states {
 		eligibility.Summary.RawFindings += len(state.RawFindings)
-		eligibility.Summary.DeduplicatedFindings += len(state.DeduplicatedFindings)
+		eligibility.Summary.DeduplicatedFindings += len(state.Findings)
 		eligibility.Summary.RepositoryFindings += len(state.RepositoryFindings)
 		eligibility.Summary.IssuePreviews += len(state.IssueDrafts)
 		for _, draft := range state.IssueDrafts {
@@ -223,12 +222,6 @@ func evaluateRepositoryReviewPurgeInventory(
 				counts[RepositoryReviewPurgeBlockerPublicationActive]++
 			}
 		}
-		replay := state.HistoricalDeduplication
-		if replay.Required && (replay.Status == HistoricalDeduplicationPending ||
-			replay.Status == HistoricalDeduplicationReplaying ||
-			replay.Status == HistoricalDeduplicationMerging) || replay.MergeLease.ID != "" {
-			counts[RepositoryReviewPurgeBlockerHistoricalConsolidationActive]++
-		}
 	}
 	counts[RepositoryReviewPurgeBlockerReviewActive] = len(activeRuns)
 	eligibility.Summary.ExternalIssueAssociations = len(externalIssues)
@@ -238,7 +231,6 @@ func evaluateRepositoryReviewPurgeInventory(
 		RepositoryReviewPurgeBlockerResolutionCheckActive,
 		RepositoryReviewPurgeBlockerIssueGenerationActive,
 		RepositoryReviewPurgeBlockerPublicationActive,
-		RepositoryReviewPurgeBlockerHistoricalConsolidationActive,
 	}
 	for _, code := range ordered {
 		if count := counts[code]; count > 0 {
@@ -264,8 +256,6 @@ func repositoryReviewPurgeBlockerMessage(code RepositoryReviewPurgeBlockerCode) 
 		return "Wait for active issue-preview generation to finish before deleting history."
 	case RepositoryReviewPurgeBlockerPublicationActive:
 		return "Wait for active GitHub publication to settle before deleting history."
-	case RepositoryReviewPurgeBlockerHistoricalConsolidationActive:
-		return "Wait for historical finding consolidation to finish before deleting history."
 	case RepositoryReviewPurgeBlockerRetentionUnavailable:
 		return "History deletion status is unavailable."
 	default:
@@ -536,10 +526,19 @@ func (s Store) ReconcilePurgeIntents(ctx context.Context) (int, error) {
 }
 
 func (s Store) applyPurgeIntent(intent repositoryReviewPurgeIntent) (RepositoryReviewAutomation, error) {
+	if err := validateRepositoryReviewPurgeIntent(intent); err != nil {
+		return RepositoryReviewAutomation{}, err
+	}
+	if completed, err := s.reconcileCompletedRepositoryReviewRemoval(intent); err != nil || completed {
+		return RepositoryReviewAutomation{}, err
+	}
+	if retired, err := s.reconcileRetiredRepositoryReviewPurgeIntent(intent); err != nil || retired {
+		return RepositoryReviewAutomation{}, err
+	}
+	if err := validateCanonicalRepositoryReviewPurgeIntent(intent); err != nil {
+		return RepositoryReviewAutomation{}, err
+	}
 	for {
-		if err := validateRepositoryReviewPurgeIntent(intent); err != nil {
-			return RepositoryReviewAutomation{}, err
-		}
 		switch intent.Phase {
 		case repositoryReviewPurgePrepared:
 			automation, state, _, err := s.validatePreparedPurgeIntent(intent)
@@ -618,6 +617,112 @@ func (s Store) applyPurgeIntent(intent repositoryReviewPurgeIntent) (RepositoryR
 			return RepositoryReviewAutomation{}, nil
 		}
 	}
+}
+
+func (s Store) reconcileCompletedRepositoryReviewRemoval(
+	intent repositoryReviewPurgeIntent,
+) (bool, error) {
+	if intent.Mode != repositoryReviewPurgeRemove {
+		return false, nil
+	}
+	_, automationFound, err := s.loadAutomationIgnoringPurge(intent.AutomationID)
+	if err != nil || automationFound {
+		return false, err
+	}
+	for _, target := range intent.LedgerTargets {
+		if _, found, loadErr := s.loadPurgeTargetLedger(target.Repository); loadErr != nil || found {
+			return false, loadErr
+		}
+	}
+	if err := s.removeRepositoryReviewPurgeArchives(intent); err != nil {
+		return false, err
+	}
+	if err := s.removePurgeIntent(intent); err != nil {
+		return false, err
+	}
+	if err := s.removeRepositoryReviewPurgeRetirement(intent.AutomationID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// A schema-6 upgrade intentionally retires incompatible ledgers together with
+// their assigned automations. If that hard cut crosses a crash-recovery purge
+// intent, both fenced database resources are already gone; finish only the
+// audited archive and marker cleanup so startup cannot deadlock forever.
+func (s Store) reconcileRetiredRepositoryReviewPurgeIntent(
+	intent repositoryReviewPurgeIntent,
+) (bool, error) {
+	retired, err := s.repositoryReviewPurgeRetirementMatches(intent)
+	if err != nil || !retired {
+		return false, err
+	}
+	if err := s.verifyPurgeLedgerTargetsRemoved(intent.LedgerTargets); err != nil {
+		return false, err
+	}
+	if err := s.removeRepositoryReviewPurgeArchives(intent); err != nil {
+		return false, err
+	}
+	if err := s.removePurgeIntent(intent); err != nil {
+		return false, err
+	}
+	if err := s.removeRepositoryReviewPurgeRetirement(intent.AutomationID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s Store) repositoryReviewPurgeRetirementMatches(
+	intent repositoryReviewPurgeIntent,
+) (bool, error) {
+	database, err := s.openDatabase(context.Background())
+	if err != nil {
+		return false, err
+	}
+	defer database.Close()
+	rows, err := database.QueryContext(
+		context.Background(),
+		`SELECT configured_repository, ledger_repository, ledger_version
+		   FROM repository_review_retired_ledgers WHERE automation_id = ?
+		   ORDER BY ledger_repository`,
+		intent.AutomationID,
+	)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	markers := make([]repositoryReviewPurgeLedgerTarget, 0)
+	for rows.Next() {
+		var configuredRepository, ledgerRepository string
+		var ledgerVersion int64
+		if err := rows.Scan(&configuredRepository, &ledgerRepository, &ledgerVersion); err != nil {
+			return false, err
+		}
+		if configuredRepository != intent.ConfiguredRepository {
+			return false, nil
+		}
+		markers = append(markers, repositoryReviewPurgeLedgerTarget{
+			Repository: ledgerRepository, Version: ledgerVersion,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return len(markers) > 0 && reflect.DeepEqual(markers, intent.LedgerTargets), nil
+}
+
+func (s Store) removeRepositoryReviewPurgeRetirement(automationID string) error {
+	database, err := s.openDatabase(context.Background())
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	_, err = database.ExecContext(
+		context.Background(),
+		`DELETE FROM repository_review_retired_ledgers WHERE automation_id = ?`,
+		automationID,
+	)
+	return err
 }
 
 func (s Store) validatePreparedPurgeIntent(
@@ -702,114 +807,22 @@ func (s Store) verifyPurgeAutomationApplied(intent repositoryReviewPurgeIntent) 
 func (s Store) resolveRepositoryStateIgnoringPurge(
 	automation RepositoryReviewAutomation,
 ) (RepositoryState, bool, error) {
-	for _, identity := range RepositoryLedgerIdentities(automation.Repository) {
-		state, err := s.loadIgnoringPurge(identity)
-		if err != nil {
-			return RepositoryState{}, false, err
-		}
-		if state.Version > 0 {
-			return state, true, nil
-		}
-	}
-	wanted := make(map[string]struct{}, len(automation.RunIDs))
-	for _, runID := range automation.RunIDs {
-		if runID = strings.TrimSpace(runID); runID != "" {
-			wanted[runID] = struct{}{}
-		}
-	}
-	if len(wanted) == 0 {
-		return RepositoryState{}, false, nil
-	}
-	states, err := s.listStates(false)
-	if err != nil {
-		return RepositoryState{}, false, err
-	}
-	var selected RepositoryState
-	found := false
-	for _, state := range states {
-		matched := false
-		for _, run := range state.Runs {
-			if _, ok := wanted[run.ID]; ok {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			continue
-		}
-		if found && selected.Repository != state.Repository {
-			return RepositoryState{}, false, errors.New("ambiguous repository review ledger")
-		}
-		selected, found = state, true
-	}
-	return selected, found, nil
+	state, err := s.loadIgnoringPurge(CanonicalRepositoryIdentity(automation.Repository))
+	return state, state.Version > 0, err
 }
 
 func (s Store) resolveRepositoryPurgeInventory(
 	automation RepositoryReviewAutomation,
 ) (RepositoryState, bool, []repositoryReviewPurgeLedgerTarget, []RepositoryState, error) {
-	statesByRepository := make(map[string]RepositoryState)
-	var primary RepositoryState
-	primaryFound := false
-	for _, identity := range RepositoryLedgerIdentities(automation.Repository) {
-		state, err := s.loadIgnoringPurge(identity)
-		if err != nil {
-			return RepositoryState{}, false, nil, nil, err
-		}
-		if state.Version > 0 {
-			statesByRepository[state.Repository] = state
-			if !primaryFound {
-				primary, primaryFound = state, true
-			}
-		}
+	state, found, err := s.resolveRepositoryStateIgnoringPurge(automation)
+	if err != nil || !found {
+		return state, found, nil, nil, err
 	}
-	wanted := make(map[string]struct{}, len(automation.RunIDs))
-	for _, runID := range automation.RunIDs {
-		if runID = strings.TrimSpace(runID); runID != "" {
-			wanted[runID] = struct{}{}
-		}
-	}
-	if !primaryFound && len(wanted) > 0 {
-		states, err := s.listStates(false)
-		if err != nil {
-			return RepositoryState{}, false, nil, nil, err
-		}
-		runMatches := make([]RepositoryState, 0)
-		for _, state := range states {
-			matched := false
-			for _, run := range state.Runs {
-				if _, ok := wanted[run.ID]; ok {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				continue
-			}
-			statesByRepository[state.Repository] = state
-			runMatches = append(runMatches, state)
-		}
-		if !primaryFound {
-			if len(runMatches) > 1 {
-				return RepositoryState{}, false, nil, nil, errors.New("ambiguous repository review ledger")
-			}
-			if len(runMatches) == 1 {
-				primary, primaryFound = runMatches[0], true
-			}
-		}
-	}
-	targets := make([]repositoryReviewPurgeLedgerTarget, 0, len(statesByRepository))
-	states := make([]RepositoryState, 0, len(statesByRepository))
-	for _, state := range statesByRepository {
-		targets = append(targets, repositoryReviewPurgeLedgerTarget{
-			Repository: state.Repository,
-			Version:    state.Version,
-		})
-		states = append(states, state)
-	}
-	sort.Slice(targets, func(i, j int) bool { return targets[i].Repository < targets[j].Repository })
-	sort.Slice(states, func(i, j int) bool { return states[i].Repository < states[j].Repository })
-	return primary, primaryFound, targets, states, nil
+	targets := []repositoryReviewPurgeLedgerTarget{{
+		Repository: state.Repository,
+		Version:    state.Version,
+	}}
+	return state, true, targets, []RepositoryState{state}, nil
 }
 
 func (s Store) loadPurgeTargetLedger(repository string) (RepositoryState, bool, error) {
@@ -882,7 +895,6 @@ func resetRepositoryReviewAutomationHistory(automation *RepositoryReviewAutomati
 	automation.RequestedPauseReason = ""
 	automation.RequestedPauseDetail = ""
 	automation.CampaignID = ""
-	automation.CampaignRecoveryPending = false
 	automation.ActiveRunID = ""
 	automation.RunIDs = nil
 	automation.Usage = RepositoryReviewTokenUsage{}
@@ -904,7 +916,6 @@ func repositoryReviewAutomationHistoryReset(automation RepositoryReviewAutomatio
 		len(automation.ModelPrices) == 0 && automation.PauseReason == "" && automation.PauseDetail == "" &&
 		automation.RequestedPauseReason == "" && automation.RequestedPauseDetail == "" &&
 		automation.ActiveRunID == "" && automation.CampaignID == "" && len(automation.RunIDs) == 0 &&
-		!automation.CampaignRecoveryPending &&
 		automation.Usage == (RepositoryReviewTokenUsage{}) && automation.EstimatedCostUSD == 0 &&
 		automation.Progress == (RepositoryReviewProgress{}) && len(automation.ModelStats) == 0 &&
 		len(automation.ModelCoverageSketches) == 0 && len(automation.AccountLimitSnapshots) == 0 &&
@@ -961,6 +972,9 @@ func (s Store) removeRepositoryReviewLedger(repository string) error {
 func (s Store) removeRepositoryReviewLedgers(
 	targets []repositoryReviewPurgeLedgerTarget,
 ) error {
+	if len(targets) > 1 {
+		return ErrInvalidAutomation
+	}
 	database, err := s.openDatabase(context.Background())
 	if err != nil {
 		return err
@@ -1059,28 +1073,9 @@ func (s Store) validateRepositoryReviewPurgeArchives(intent repositoryReviewPurg
 func repositoryReviewPurgeArchiveCandidates(
 	intent repositoryReviewPurgeIntent,
 ) []repositoryReviewPurgeArchiveCandidate {
-	candidates := []repositoryReviewPurgeArchiveCandidate{{
+	return []repositoryReviewPurgeArchiveCandidate{{
 		Name: automationFilename(intent.AutomationID), RequireImported: true,
 	}}
-	seen := map[string]struct{}{candidates[0].Name: {}}
-	for _, target := range intent.LedgerTargets {
-		name := repositoryReviewLegacyStateFilename(target.Repository)
-		if _, exists := seen[name]; exists {
-			continue
-		}
-		seen[name] = struct{}{}
-		candidates = append(candidates,
-			repositoryReviewPurgeArchiveCandidate{Name: name, RequireImported: true},
-			repositoryReviewPurgeArchiveCandidate{
-				Name: strings.TrimSuffix(name, ".json") + ".summary.json",
-			},
-		)
-	}
-	return candidates
-}
-
-func repositoryReviewLegacyStateFilename(repository string) string {
-	return stableID("repo_", strings.TrimSpace(repository)) + ".json"
 }
 
 func (s Store) repositoryReviewPurgeArchiveRecords(
@@ -1242,6 +1237,9 @@ func removeRepositoryReviewRegularFile(path string) error {
 
 func (s Store) savePurgeIntent(intent repositoryReviewPurgeIntent) error {
 	if err := validateRepositoryReviewPurgeIntent(intent); err != nil {
+		return err
+	}
+	if err := validateCanonicalRepositoryReviewPurgeIntent(intent); err != nil {
 		return err
 	}
 	if err := repositoryReviewPurgeEnsureRoot(s.root); err != nil {
@@ -1417,13 +1415,11 @@ func (s Store) loadPurgeIntentPath(path string) (repositoryReviewPurgeIntent, bo
 	if err := validateRepositoryReviewPurgeIntent(intent); err != nil {
 		return repositoryReviewPurgeIntent{}, false, err
 	}
-	validPath := path == s.purgeAutomationIntentPath(intent.AutomationID)
-	if !validPath {
-		for _, repository := range repositoryReviewPurgeFenceRepositories(intent) {
-			if path == s.purgeRepositoryFencePath(repository) {
-				validPath = true
-				break
-			}
+	validPath := false
+	for _, candidatePath := range s.purgeIntentCleanupPaths(intent) {
+		if path == candidatePath {
+			validPath = true
+			break
 		}
 	}
 	if !validPath {
@@ -1462,6 +1458,17 @@ func validateRepositoryReviewPurgeIntent(intent repositoryReviewPurgeIntent) err
 	}
 	if !primaryFound {
 		return fmt.Errorf("%w: purge primary ledger target is missing", ErrInvalidAutomation)
+	}
+	return nil
+}
+
+func validateCanonicalRepositoryReviewPurgeIntent(intent repositoryReviewPurgeIntent) error {
+	if intent.Repository != CanonicalRepositoryIdentity(intent.ConfiguredRepository) ||
+		len(intent.LedgerTargets) > 1 ||
+		(len(intent.LedgerTargets) == 1 &&
+			(intent.LedgerTargets[0].Repository != intent.Repository ||
+				intent.LedgerTargets[0].Version != intent.ExpectedRepositoryVersion)) {
+		return fmt.Errorf("%w: invalid canonical purge ledger targets", ErrInvalidAutomation)
 	}
 	return nil
 }
@@ -1516,16 +1523,25 @@ func repositoryReviewPurgeFenceRepositories(intent repositoryReviewPurgeIntent) 
 			repositories = append(repositories, target.Repository)
 		}
 	}
-	for _, identity := range RepositoryLedgerIdentities(intent.ConfiguredRepository) {
-		if !containsExactString(repositories, identity) {
-			repositories = append(repositories, identity)
-		}
-	}
 	return repositories
 }
 
+func (s Store) purgeIntentCleanupPaths(intent repositoryReviewPurgeIntent) []string {
+	repositories := repositoryReviewPurgeFenceRepositories(intent)
+	configured := strings.TrimSpace(intent.ConfiguredRepository)
+	if configured != "" && !containsExactString(repositories, configured) {
+		repositories = append(repositories, configured)
+	}
+	paths := make([]string, 0, 1+len(repositories))
+	paths = append(paths, s.purgeAutomationIntentPath(intent.AutomationID))
+	for _, repository := range repositories {
+		paths = append(paths, s.purgeRepositoryFencePath(repository))
+	}
+	return paths
+}
+
 func (s Store) removePurgeIntent(intent repositoryReviewPurgeIntent) error {
-	paths := s.purgeIntentPaths(intent)
+	paths := s.purgeIntentCleanupPaths(intent)
 	for _, path := range paths {
 		current, found, err := s.loadPurgeIntentPath(path)
 		if err != nil {
@@ -1544,12 +1560,8 @@ func (s Store) removePurgeIntent(intent repositoryReviewPurgeIntent) error {
 }
 
 func (s Store) repositoryReviewPurgeConfigured(repository string) (bool, error) {
-	for _, identity := range RepositoryLedgerIdentities(repository) {
-		if _, found, err := s.loadPurgeFence(identity); err != nil || found {
-			return found, err
-		}
-	}
-	return false, nil
+	_, found, err := s.loadPurgeFence(CanonicalRepositoryIdentity(repository))
+	return found, err
 }
 
 func (s Store) purgeAutomationIntentPath(id string) string {

@@ -21,7 +21,8 @@ func TestRepositoryReviewAssignmentCheckpointsAreDurableAndMissingOnly(t *testin
 	catalog := repositoryReviewAssignmentCatalogForTest(t, profileHash)
 	campaignID := NewRepositoryReviewCampaignID()
 	if _, err := store.BeginCampaign(ctx, BeginCampaignRequest{
-		Repository: repository, CampaignID: campaignID, CommitSHA: commit,
+		DeduplicationSnapshot: repositoryReviewDeduplicationSnapshotForTest(),
+		Repository:            repository, CampaignID: campaignID, CommitSHA: commit,
 		ExpectedReviewVersion: 0,
 	}); err != nil {
 		t.Fatal(err)
@@ -143,8 +144,8 @@ func TestRepositoryReviewAssignmentCheckpointsAreDurableAndMissingOnly(t *testin
 		}
 	}
 	state, _, stateErr := store.Get(repository)
-	if stateErr != nil || len(state.Findings) != 1 || state.Findings[0].Title != "durable finding" {
-		t.Fatalf("durable checkpoint state = %#v, %v", state.Findings, stateErr)
+	if stateErr != nil || len(state.RawFindings) != 1 || state.RawFindings[0].Title != "durable finding" {
+		t.Fatalf("durable checkpoint state = %#v, %v", state.RawFindings, stateErr)
 	}
 }
 
@@ -158,7 +159,8 @@ func TestRepositoryReviewConcurrentAssignmentCheckpointsMergeAndSurviveInterrupt
 	catalog := repositoryReviewAssignmentCatalogForTest(t, profileHash)
 	campaignID := NewRepositoryReviewCampaignID()
 	if _, err := store.BeginCampaign(ctx, BeginCampaignRequest{
-		Repository: repository, CampaignID: campaignID, CommitSHA: commit,
+		DeduplicationSnapshot: repositoryReviewDeduplicationSnapshotForTest(),
+		Repository:            repository, CampaignID: campaignID, CommitSHA: commit,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +208,9 @@ func TestRepositoryReviewConcurrentAssignmentCheckpointsMergeAndSurviveInterrupt
 	}
 	interrupted, interruptErr := store.InterruptRepositoryReviewRun(ctx, repository, "run-concurrent")
 	if interruptErr != nil || interrupted.ActiveReviewRun != nil || len(interrupted.Runs) != 1 ||
-		!interrupted.Runs[0].Interrupted {
+		!interrupted.Runs[0].Interrupted || interrupted.Runs[0].TargetBranch != plan.TargetBranch ||
+		interrupted.Runs[0].AdvertisedDefaultBranch != plan.AdvertisedDefaultBranch ||
+		interrupted.Runs[0].TargetIsDefault != plan.TargetIsDefault {
 		t.Fatalf("interrupt = %#v, %v", interrupted.ActiveReviewRun, interruptErr)
 	}
 	firstPlan := plan.AssignmentPlans[0]
@@ -260,7 +264,8 @@ func TestRepositoryReviewConcurrentAssignmentCheckpointsMergeAndSurviveInterrupt
 	}
 	restartCampaignID := NewRepositoryReviewCampaignID()
 	if _, err := store.BeginCampaign(ctx, BeginCampaignRequest{
-		Repository: repository, CampaignID: restartCampaignID,
+		DeduplicationSnapshot: repositoryReviewDeduplicationSnapshotForTest(),
+		Repository:            repository, CampaignID: restartCampaignID,
 		ExpectedCampaignID: campaignID, CommitSHA: commit,
 		ExpectedReviewVersion: interrupted.ReviewVersion,
 	}); err != nil {
@@ -299,7 +304,8 @@ func TestRepositoryReviewAssignmentCampaignDoesNotRetryForcedUnsupportedFile(t *
 	catalog := repositoryReviewAssignmentCatalogForTest(t, profileHash)
 	campaignID := NewRepositoryReviewCampaignID()
 	if _, err := store.BeginCampaign(ctx, BeginCampaignRequest{
-		Repository: repository, CampaignID: campaignID, CommitSHA: commit,
+		DeduplicationSnapshot: repositoryReviewDeduplicationSnapshotForTest(),
+		Repository:            repository, CampaignID: campaignID, CommitSHA: commit,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +354,8 @@ func TestRepositoryReviewFinalizedCheckpointReplayUsesFrozenReviewableSubset(t *
 	catalog := repositoryReviewAssignmentCatalogForTest(t, profileHash)
 	campaignID := NewRepositoryReviewCampaignID()
 	if _, err := store.BeginCampaign(ctx, BeginCampaignRequest{
-		Repository: repository, CampaignID: campaignID, CommitSHA: commit,
+		DeduplicationSnapshot: repositoryReviewDeduplicationSnapshotForTest(),
+		Repository:            repository, CampaignID: campaignID, CommitSHA: commit,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +414,8 @@ func TestRepositoryReviewBeginRunRejectsRehashedCampaignScopeDrift(t *testing.T)
 	catalog := repositoryReviewAssignmentCatalogForTest(t, profileHash)
 	campaignID := NewRepositoryReviewCampaignID()
 	if _, err := store.BeginCampaign(ctx, BeginCampaignRequest{
-		Repository: repository, CampaignID: campaignID, CommitSHA: commit,
+		DeduplicationSnapshot: repositoryReviewDeduplicationSnapshotForTest(),
+		Repository:            repository, CampaignID: campaignID, CommitSHA: commit,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +445,8 @@ func TestInterruptAbandonedRepositoryReviewRunReleasesUnknownWork(t *testing.T) 
 	catalog := repositoryReviewAssignmentCatalogForTest(t, profileHash)
 	campaignID := NewRepositoryReviewCampaignID()
 	if _, err := store.BeginCampaign(ctx, BeginCampaignRequest{
-		Repository: repository, CampaignID: campaignID, CommitSHA: commit,
+		DeduplicationSnapshot: repositoryReviewDeduplicationSnapshotForTest(),
+		Repository:            repository, CampaignID: campaignID, CommitSHA: commit,
 	}); err != nil {
 		t.Fatal(err)
 	}

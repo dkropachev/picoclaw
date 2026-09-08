@@ -65,8 +65,5 @@ func normalizeRepositoryReviewDocumentedRoute(route string) string {
 		route = strings.ReplaceAll(route, replacement.from, replacement.to)
 	}
 	route = strings.ReplaceAll(route, "/repository-findings/{fid}", "/repository-findings/{rfid}")
-	if strings.HasSuffix(route, "/{repository_id}/{legacy_action...}") {
-		return "POST /{repository_id}/issue-drafts/{did}/publish"
-	}
 	return route
 }

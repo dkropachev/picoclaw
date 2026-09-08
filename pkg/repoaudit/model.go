@@ -2,7 +2,7 @@ package repoaudit
 
 import "time"
 
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 type FileRef struct {
 	Path      string `json:"path"`
@@ -139,22 +139,6 @@ type Observation struct {
 	RawDigest  string             `json:"raw_digest,omitempty"`
 }
 
-// RepositoryReviewEvidence is one assigned review child. Campaign-aware Record
-// requires every assigned child, including failures, so completion can be
-// derived from the full required-child denominator instead of caller-supplied
-// aggregate counts. A successful child carries its validated observation and
-// exact acknowledged subset; an unsuccessful child carries neither.
-type RepositoryReviewEvidence struct {
-	AssignmentID      string       `json:"assignment_id"`
-	FocusID           string       `json:"focus_id,omitempty"`
-	ReviewerIdentity  string       `json:"reviewer_identity,omitempty"`
-	ScopeFiles        []FileRef    `json:"scope_files"`
-	Required          bool         `json:"required"`
-	Successful        bool         `json:"successful"`
-	AcknowledgedFiles []FileRef    `json:"acknowledged_files,omitempty"`
-	Observation       *Observation `json:"observation,omitempty"`
-}
-
 type FindingContext struct {
 	ID            string    `json:"id"`
 	CampaignID    string    `json:"campaign_id,omitempty"`
@@ -175,9 +159,8 @@ type FindingContext struct {
 type FindingStatus string
 
 const (
-	FindingOpen      FindingStatus = "open"
-	FindingDismissed FindingStatus = "dismissed"
-	FindingPosted    FindingStatus = "posted"
+	FindingOpen   FindingStatus = "open"
+	FindingPosted FindingStatus = "posted"
 )
 
 type IssueDraftState string
@@ -197,7 +180,6 @@ const (
 	IssueDraftOriginAIGenerated IssueDraftOrigin = "ai_generated"
 	IssueDraftOriginLinked      IssueDraftOrigin = "linked"
 	IssueDraftOriginDiscovered  IssueDraftOrigin = "discovered"
-	IssueDraftOriginLegacy      IssueDraftOrigin = "legacy"
 )
 
 type IssueDraftInstructionsMode string
@@ -227,7 +209,6 @@ type IssueDraft struct {
 	AttemptGeneratorProfileID      string                     `json:"attempt_generator_profile_id,omitempty"`
 	AttemptGeneratorProfileVersion int64                      `json:"attempt_generator_profile_version,omitempty"`
 	GenerationError                string                     `json:"generation_error,omitempty"`
-	Canonical                      bool                       `json:"canonical"`
 	Title                          string                     `json:"title"`
 	Body                           string                     `json:"body"`
 	Labels                         []string                   `json:"labels,omitempty"`
@@ -241,45 +222,45 @@ type IssueDraft struct {
 }
 
 type Finding struct {
-	ID               string               `json:"id"`
-	CampaignID       string               `json:"campaign_id,omitempty"`
-	Fingerprint      string               `json:"fingerprint"`
-	Repository       string               `json:"repository"`
-	CommitSHA        string               `json:"commit_sha"`
-	File             FileRef              `json:"file"`
-	Line             *int                 `json:"line,omitempty"`
-	Severity         string               `json:"severity"`
-	Title            string               `json:"title"`
-	Symbol           string               `json:"symbol,omitempty"`
-	Message          string               `json:"message,omitempty"`
-	Evidence         string               `json:"evidence"`
-	Impact           string               `json:"impact"`
-	Validation       Validation           `json:"validation"`
-	MatchHints       MatchHints           `json:"match_hints,omitempty"`
-	FixEffort        FixEffort            `json:"fix_effort,omitempty"`
-	ContextIDs       []string             `json:"context_ids"`
-	Models           []string             `json:"models"`
-	ObservationCount int                  `json:"observation_count"`
-	Observations     []FindingObservation `json:"observations,omitempty"`
-	// DeduplicationPending marks a compatibility projection of one or more raw
-	// findings. It is never eligible for mapping, issue generation, or lifecycle
-	// mutation; only a promoted deduplicated finding clears this gate.
-	DeduplicationPending    bool                 `json:"deduplication_pending,omitempty"`
-	RawFindingIDs           []string             `json:"raw_finding_ids,omitempty"`
-	Status                  FindingStatus        `json:"status"`
-	IssueDraftID            string               `json:"issue_draft_id,omitempty"`
-	RepositoryFindingID     string               `json:"repository_finding_id,omitempty"`
-	RepositoryMatchState    RepositoryMatchState `json:"repository_match_state,omitempty"`
-	TargetBranch            string               `json:"target_branch,omitempty"`
-	AdvertisedDefaultBranch string               `json:"advertised_default_branch,omitempty"`
-	TargetIsDefault         bool                 `json:"target_is_default"`
-	DefaultBranchVerified   bool                 `json:"default_branch_verified,omitempty"`
-	PostResolutionVerified  bool                 `json:"post_resolution_verified,omitempty"`
-	PostResolutionFixCommit string               `json:"post_resolution_fix_commit,omitempty"`
-	PostResolutionFindingID string               `json:"post_resolution_finding_id,omitempty"`
-	Version                 int64                `json:"version"`
-	CreatedAt               time.Time            `json:"created_at"`
-	UpdatedAt               time.Time            `json:"updated_at"`
+	ID                      string                            `json:"id"`
+	CampaignID              string                            `json:"campaign_id,omitempty"`
+	AdmissionBucket         string                            `json:"admission_bucket,omitempty"`
+	CreationOrdinal         uint64                            `json:"creation_ordinal,omitempty"`
+	DiagnosisDigest         string                            `json:"diagnosis_digest,omitempty"`
+	Fingerprint             string                            `json:"fingerprint"`
+	Repository              string                            `json:"repository"`
+	CommitSHA               string                            `json:"commit_sha"`
+	File                    FileRef                           `json:"file"`
+	Line                    *int                              `json:"line,omitempty"`
+	Severity                string                            `json:"severity"`
+	Title                   string                            `json:"title"`
+	Symbol                  string                            `json:"symbol,omitempty"`
+	Message                 string                            `json:"message,omitempty"`
+	Evidence                string                            `json:"evidence"`
+	Impact                  string                            `json:"impact"`
+	Validation              Validation                        `json:"validation"`
+	MatchHints              MatchHints                        `json:"match_hints,omitempty"`
+	FixEffort               FixEffort                         `json:"fix_effort,omitempty"`
+	RawSourceIDs            []string                          `json:"raw_source_ids,omitempty"`
+	History                 []DeduplicatedFindingHistoryEntry `json:"history,omitempty"`
+	ContextIDs              []string                          `json:"context_ids"`
+	Models                  []string                          `json:"models"`
+	ObservationCount        int                               `json:"observation_count"`
+	Observations            []FindingObservation              `json:"observations,omitempty"`
+	Status                  FindingStatus                     `json:"status"`
+	IssueDraftID            string                            `json:"issue_draft_id,omitempty"`
+	RepositoryFindingID     string                            `json:"repository_finding_id,omitempty"`
+	RepositoryMatchState    RepositoryMatchState              `json:"repository_match_state,omitempty"`
+	TargetBranch            string                            `json:"target_branch,omitempty"`
+	AdvertisedDefaultBranch string                            `json:"advertised_default_branch,omitempty"`
+	TargetIsDefault         bool                              `json:"target_is_default"`
+	DefaultBranchVerified   bool                              `json:"default_branch_verified,omitempty"`
+	PostResolutionVerified  bool                              `json:"post_resolution_verified,omitempty"`
+	PostResolutionFixCommit string                            `json:"post_resolution_fix_commit,omitempty"`
+	PostResolutionFindingID string                            `json:"post_resolution_finding_id,omitempty"`
+	Version                 int64                             `json:"version"`
+	CreatedAt               time.Time                         `json:"created_at"`
+	UpdatedAt               time.Time                         `json:"updated_at"`
 }
 
 type FindingObservation struct {
@@ -449,7 +430,7 @@ type RepositoryMappingAdjudication struct {
 	Confidence         float64  `json:"confidence"`
 	MatchingAnchors    []string `json:"matching_anchors,omitempty"`
 	ConflictingAnchors []string `json:"conflicting_anchors,omitempty"`
-	ConflictFields     []string `json:"conflict_fields,omitempty"`
+	ConflictFields     []string `json:"conflict_fields"`
 	Explanation        string   `json:"explanation,omitempty"`
 }
 
@@ -485,14 +466,13 @@ type RepositoryValidationJob struct {
 
 type ReviewRun struct {
 	ID                      string               `json:"id"`
-	CampaignID              string               `json:"campaign_id,omitempty"`
+	CampaignID              string               `json:"campaign_id"`
 	PlanID                  string               `json:"plan_id"`
 	CommitSHA               string               `json:"commit_sha"`
 	InventoryHash           string               `json:"inventory_hash"`
 	ProfileHash             string               `json:"profile_hash,omitempty"`
 	ScopeDigest             string               `json:"scope_digest,omitempty"`
 	InspectedFiles          int                  `json:"inspected_files,omitempty"`
-	LegacyRecovered         bool                 `json:"legacy_recovered,omitempty"`
 	Interrupted             bool                 `json:"interrupted,omitempty"`
 	ReviewedFiles           int                  `json:"reviewed_files"`
 	UnreviewedFiles         int                  `json:"unreviewed_files"`
@@ -566,21 +546,25 @@ type RepositoryReviewAssignmentReservation struct {
 // review dispatch. A launcher restart interrupts it, preserving committed bits
 // while releasing only reservations without a durable checkpoint.
 type RepositoryReviewActiveRun struct {
-	ID            string                                           `json:"id"`
-	CampaignID    string                                           `json:"campaign_id"`
-	PlanID        string                                           `json:"plan_id"`
-	CommitSHA     string                                           `json:"commit_sha"`
-	InventoryHash string                                           `json:"inventory_hash"`
-	ProfileHash   string                                           `json:"profile_hash"`
-	Reservations  map[string]RepositoryReviewAssignmentReservation `json:"reservations"`
-	FindingIDs    []string                                         `json:"finding_ids,omitempty"`
-	StartedAt     time.Time                                        `json:"started_at"`
+	ID                      string                                           `json:"id"`
+	CampaignID              string                                           `json:"campaign_id"`
+	PlanID                  string                                           `json:"plan_id"`
+	CommitSHA               string                                           `json:"commit_sha"`
+	InventoryHash           string                                           `json:"inventory_hash"`
+	ProfileHash             string                                           `json:"profile_hash"`
+	TargetBranch            string                                           `json:"target_branch,omitempty"`
+	AdvertisedDefaultBranch string                                           `json:"advertised_default_branch,omitempty"`
+	TargetIsDefault         bool                                             `json:"target_is_default"`
+	Reservations            map[string]RepositoryReviewAssignmentReservation `json:"reservations"`
+	FindingIDs              []string                                         `json:"finding_ids,omitempty"`
+	StartedAt               time.Time                                        `json:"started_at"`
 }
 
 // RepositoryReviewCampaignCoverage is the compact, exact-path ledger for the
 // current controller-owned campaign. InventoryHash and ProfileHash are empty
 // only between trusted BeginCampaign authorization and the first matching
-// Plan or Record. A false Exact value means Paths are only a known lower bound.
+// authoritative assignment plan. A false Exact value means Paths are only a
+// known lower bound.
 type RepositoryReviewCampaignCoverage struct {
 	ID                    string                                          `json:"id"`
 	CommitSHA             string                                          `json:"commit_sha"`
@@ -591,7 +575,6 @@ type RepositoryReviewCampaignCoverage struct {
 	AssignmentCatalog     []RepositoryReviewAssignment                    `json:"assignment_catalog,omitempty"`
 	SelectedFiles         int                                             `json:"selected_files"`
 	Exact                 bool                                            `json:"exact"`
-	RecoveryDigest        string                                          `json:"recovery_digest,omitempty"`
 	DeduplicationSnapshot *RepositoryReviewDeduplicationSnapshot          `json:"deduplication_snapshot,omitempty"`
 	Paths                 map[string]RepositoryReviewCampaignPathCoverage `json:"paths"`
 }
@@ -607,9 +590,8 @@ type RepositoryState struct {
 	Unsupported              map[string]UnsupportedFile        `json:"unsupported,omitempty"`
 	ReviewAttempts           map[string]int                    `json:"review_attempts,omitempty"`
 	ReviewAttemptIdentities  map[string]string                 `json:"review_attempt_identities,omitempty"`
-	Findings                 []Finding                         `json:"findings"`
+	Findings                 []Finding                         `json:"deduplicated_findings"`
 	RawFindings              []RawReviewFinding                `json:"raw_findings"`
-	DeduplicatedFindings     []DeduplicatedReviewFinding       `json:"deduplicated_findings"`
 	DeduplicationJobs        []DeduplicationJob                `json:"deduplication_jobs"`
 	NextDeduplicationOrdinal uint64                            `json:"next_deduplication_ordinal"`
 	FindingsProcessing       FindingsProcessingCounters        `json:"findings_processing"`
@@ -626,7 +608,6 @@ type RepositoryState struct {
 	ActiveForceCampaignID    string                            `json:"active_force_campaign_id,omitempty"`
 	ActiveForceProfileHash   string                            `json:"active_force_profile_hash,omitempty"`
 	ActiveForceCommitSHA     string                            `json:"active_force_commit_sha,omitempty"`
-	HistoricalDeduplication  HistoricalDeduplicationReplay     `json:"historical_deduplication"`
 	UpdatedAt                time.Time                         `json:"updated_at"`
 	FindingCount             int                               `json:"finding_count"`
 	RepositoryFindingCount   int                               `json:"repository_finding_count"`
@@ -657,19 +638,9 @@ type RepositorySummary struct {
 func Summarize(state RepositoryState) RepositorySummary {
 	openFindings := 0
 	findingCount := len(state.Findings)
-	if len(state.RawFindings) > 0 || len(state.DeduplicationJobs) > 0 ||
-		len(state.DeduplicatedFindings) > 0 {
-		findingCount = len(state.DeduplicatedFindings)
-		for _, finding := range state.DeduplicatedFindings {
-			if finding.Status == FindingOpen {
-				openFindings++
-			}
-		}
-	} else {
-		for _, finding := range state.Findings {
-			if finding.Status == FindingOpen {
-				openFindings++
-			}
+	for _, finding := range state.Findings {
+		if finding.Status == FindingOpen {
+			openFindings++
 		}
 	}
 	return RepositorySummary{
@@ -684,31 +655,7 @@ func Summarize(state RepositoryState) RepositorySummary {
 	}
 }
 
-type IssueDraftRequest struct {
-	Repository      string   `json:"repository"`
-	FindingIDs      []string `json:"finding_ids"`
-	Title           string   `json:"title,omitempty"`
-	Body            string   `json:"body,omitempty"`
-	Labels          []string `json:"labels,omitempty"`
-	ExpectedVersion int64    `json:"expected_version"`
-}
-
-type RecordRequest struct {
-	Plan                    Plan                       `json:"plan"`
-	RunID                   string                     `json:"run_id"`
-	Observations            []Observation              `json:"observations"`
-	ReviewEvidence          []RepositoryReviewEvidence `json:"review_evidence,omitempty"`
-	InspectedFiles          []FileRef                  `json:"inspected_files,omitempty"`
-	CompletedFiles          []FileRef                  `json:"completed_files,omitempty"`
-	UnsupportedFiles        []UnsupportedFile          `json:"unsupported_files,omitempty"`
-	ExcludedFiles           int                        `json:"excluded_files,omitempty"`
-	TargetBranch            string                     `json:"target_branch,omitempty"`
-	AdvertisedDefaultBranch string                     `json:"advertised_default_branch,omitempty"`
-	TargetIsDefault         bool                       `json:"target_is_default"`
-	CompletedAt             time.Time                  `json:"completed_at,omitempty"`
-}
-
-type RecordResult struct {
+type FinalizeRepositoryReviewRunResult struct {
 	State              RepositoryState `json:"state"`
 	Run                ReviewRun       `json:"run"`
 	AcceptedFindingIDs []string        `json:"accepted_finding_ids"`

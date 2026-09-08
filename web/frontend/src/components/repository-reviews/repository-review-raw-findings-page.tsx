@@ -17,13 +17,9 @@ import {
 
 import {
   repositoryReviewFindingHealthNeedsPolling,
-  repositoryReviewHistoricalConsolidationIsActive,
   useRepositoryReviewFindingHealth,
 } from "./repository-review-finding-health"
-import {
-  RepositoryReviewFindingsProcessing,
-  RepositoryReviewHistoricalConsolidationNotice,
-} from "./repository-review-findings-processing"
+import { RepositoryReviewFindingsProcessing } from "./repository-review-findings-processing"
 import {
   type RepositoryReviewCollectionSearch,
   repositoryReviewRawFindingsDefaultQuery,
@@ -73,9 +69,6 @@ export function RepositoryReviewRawFindingsPage({
             page.findings_processing &&
             (page.findings_processing.pending > 0 ||
               page.findings_processing.processing > 0),
-          ) ||
-          repositoryReviewHistoricalConsolidationIsActive(
-            page.historical_deduplication,
           )
         )
       })
@@ -235,18 +228,9 @@ export function RepositoryReviewRawFindingsPage({
       onOpenItem={(finding) => onOpenRawFinding(finding.id)}
       beforeResults={
         firstPage ? (
-          <>
-            <RepositoryReviewFindingsProcessing
-              counters={firstPage.findings_processing}
-            />
-            <RepositoryReviewHistoricalConsolidationNotice
-              automationID={automationID}
-              consolidation={healthQuery.data?.historical_consolidation}
-              onRefresh={() =>
-                Promise.all([query.refetch(), healthQuery.refetch()])
-              }
-            />
-          </>
+          <RepositoryReviewFindingsProcessing
+            counters={firstPage.findings_processing}
+          />
         ) : undefined
       }
       emptyTitle={

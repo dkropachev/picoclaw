@@ -27,7 +27,6 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ThreadsSearchRouteImport } from './routes/threads.search'
 import { Route as ThreadsOpenRouteImport } from './routes/threads.open'
 import { Route as ThreadsThreadIdRouteImport } from './routes/threads.$threadId'
-import { Route as RepositoryReviewsResultsRouteImport } from './routes/repository-reviews_.results'
 import { Route as RepositoryReviewsRepositoriesRouteImport } from './routes/repository-reviews_.repositories'
 import { Route as RepositoryReviewsProfilesRouteImport } from './routes/repository-reviews_.profiles'
 import { Route as RepositoryReviewsIdRouteImport } from './routes/repository-reviews_.$id'
@@ -60,7 +59,6 @@ import { Route as RepositoryReviewsRepositoriesNewRouteImport } from './routes/r
 import { Route as RepositoryReviewsRepositoriesIdRouteImport } from './routes/repository-reviews_.repositories_.$id'
 import { Route as RepositoryReviewsProfilesNewRouteImport } from './routes/repository-reviews_.profiles_.new'
 import { Route as RepositoryReviewsProfilesProfileIDRouteImport } from './routes/repository-reviews_.profiles_.$profileID'
-import { Route as RepositoryReviewsIdReportRouteImport } from './routes/repository-reviews_.$id_.report'
 import { Route as RepositoryReviewsIdRawFindingsRouteImport } from './routes/repository-reviews_.$id_.raw-findings'
 import { Route as RepositoryReviewsIdIssuesRouteImport } from './routes/repository-reviews_.$id_.issues'
 import { Route as RepositoryReviewsIdFindingsProcessingRouteImport } from './routes/repository-reviews_.$id_.findings-processing'
@@ -118,7 +116,6 @@ import { Route as AgentAgentsIdActivityRouteImport } from './routes/agent/agents
 import { Route as AccountsRoutersIdEditRouteImport } from './routes/accounts_.routers_.$id_.edit'
 import { Route as RepositoryReviewsRepositoriesIdFindingsFindingIdRouteImport } from './routes/repository-reviews_.repositories_.$id_.findings_.$findingId'
 import { Route as RepositoryReviewsIdIssuesDraftIdEditRouteImport } from './routes/repository-reviews_.$id_.issues_.$draftId_.edit'
-import { Route as RepositoryReviewsIdFindingsFindingIdLinkIssueRouteImport } from './routes/repository-reviews_.$id_.findings_.$findingId_.link-issue'
 import { Route as AgentMcpServersNameEditRouteImport } from './routes/agent/mcp_.servers_.$name_.edit'
 import { Route as RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRouteImport } from './routes/repository-reviews_.repositories_.$id_.findings_.$findingId_.link-issue'
 
@@ -212,12 +209,6 @@ const ThreadsThreadIdRoute = ThreadsThreadIdRouteImport.update({
   path: '/$threadId',
   getParentRoute: () => ThreadsRoute,
 } as any)
-const RepositoryReviewsResultsRoute =
-  RepositoryReviewsResultsRouteImport.update({
-    id: '/repository-reviews_/results',
-    path: '/repository-reviews/results',
-    getParentRoute: () => rootRouteImport,
-  } as any)
 const RepositoryReviewsRepositoriesRoute =
   RepositoryReviewsRepositoriesRouteImport.update({
     id: '/repository-reviews_/repositories',
@@ -384,12 +375,6 @@ const RepositoryReviewsProfilesProfileIDRoute =
   RepositoryReviewsProfilesProfileIDRouteImport.update({
     id: '/repository-reviews_/profiles_/$profileID',
     path: '/repository-reviews/profiles/$profileID',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const RepositoryReviewsIdReportRoute =
-  RepositoryReviewsIdReportRouteImport.update({
-    id: '/repository-reviews_/$id_/report',
-    path: '/repository-reviews/$id/report',
     getParentRoute: () => rootRouteImport,
   } as any)
 const RepositoryReviewsIdRawFindingsRoute =
@@ -703,12 +688,6 @@ const RepositoryReviewsIdIssuesDraftIdEditRoute =
     path: '/repository-reviews/$id/issues/$draftId/edit',
     getParentRoute: () => rootRouteImport,
   } as any)
-const RepositoryReviewsIdFindingsFindingIdLinkIssueRoute =
-  RepositoryReviewsIdFindingsFindingIdLinkIssueRouteImport.update({
-    id: '/repository-reviews_/$id_/findings_/$findingId_/link-issue',
-    path: '/repository-reviews/$id/findings/$findingId/link-issue',
-    getParentRoute: () => rootRouteImport,
-  } as any)
 const AgentMcpServersNameEditRoute = AgentMcpServersNameEditRouteImport.update({
   id: '/mcp_/servers_/$name_/edit',
   path: '/mcp/servers/$name/edit',
@@ -764,7 +743,6 @@ export interface FileRoutesByFullPath {
   '/repository-reviews/$id': typeof RepositoryReviewsIdRoute
   '/repository-reviews/profiles': typeof RepositoryReviewsProfilesRoute
   '/repository-reviews/repositories': typeof RepositoryReviewsRepositoriesRoute
-  '/repository-reviews/results': typeof RepositoryReviewsResultsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
@@ -802,7 +780,6 @@ export interface FileRoutesByFullPath {
   '/repository-reviews/$id/findings-processing': typeof RepositoryReviewsIdFindingsProcessingRoute
   '/repository-reviews/$id/issues': typeof RepositoryReviewsIdIssuesRoute
   '/repository-reviews/$id/raw-findings': typeof RepositoryReviewsIdRawFindingsRoute
-  '/repository-reviews/$id/report': typeof RepositoryReviewsIdReportRoute
   '/repository-reviews/profiles/$profileID': typeof RepositoryReviewsProfilesProfileIDRoute
   '/repository-reviews/profiles/new': typeof RepositoryReviewsProfilesNewRoute
   '/repository-reviews/repositories/$id': typeof RepositoryReviewsRepositoriesIdRoute
@@ -830,7 +807,6 @@ export interface FileRoutesByFullPath {
   '/repository-reviews/repositories/$id/edit': typeof RepositoryReviewsRepositoriesIdEditRoute
   '/repository-reviews/repositories/$id/findings': typeof RepositoryReviewsRepositoriesIdFindingsRoute
   '/agent/mcp/servers/$name/edit': typeof AgentMcpServersNameEditRoute
-  '/repository-reviews/$id/findings/$findingId/link-issue': typeof RepositoryReviewsIdFindingsFindingIdLinkIssueRoute
   '/repository-reviews/$id/issues/$draftId/edit': typeof RepositoryReviewsIdIssuesDraftIdEditRoute
   '/repository-reviews/repositories/$id/findings/$findingId': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdRoute
   '/repository-reviews/repositories/$id/findings/$findingId/link-issue': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute
@@ -878,7 +854,6 @@ export interface FileRoutesByTo {
   '/repository-reviews/$id': typeof RepositoryReviewsIdRoute
   '/repository-reviews/profiles': typeof RepositoryReviewsProfilesRoute
   '/repository-reviews/repositories': typeof RepositoryReviewsRepositoriesRoute
-  '/repository-reviews/results': typeof RepositoryReviewsResultsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
@@ -916,7 +891,6 @@ export interface FileRoutesByTo {
   '/repository-reviews/$id/findings-processing': typeof RepositoryReviewsIdFindingsProcessingRoute
   '/repository-reviews/$id/issues': typeof RepositoryReviewsIdIssuesRoute
   '/repository-reviews/$id/raw-findings': typeof RepositoryReviewsIdRawFindingsRoute
-  '/repository-reviews/$id/report': typeof RepositoryReviewsIdReportRoute
   '/repository-reviews/profiles/$profileID': typeof RepositoryReviewsProfilesProfileIDRoute
   '/repository-reviews/profiles/new': typeof RepositoryReviewsProfilesNewRoute
   '/repository-reviews/repositories/$id': typeof RepositoryReviewsRepositoriesIdRoute
@@ -944,7 +918,6 @@ export interface FileRoutesByTo {
   '/repository-reviews/repositories/$id/edit': typeof RepositoryReviewsRepositoriesIdEditRoute
   '/repository-reviews/repositories/$id/findings': typeof RepositoryReviewsRepositoriesIdFindingsRoute
   '/agent/mcp/servers/$name/edit': typeof AgentMcpServersNameEditRoute
-  '/repository-reviews/$id/findings/$findingId/link-issue': typeof RepositoryReviewsIdFindingsFindingIdLinkIssueRoute
   '/repository-reviews/$id/issues/$draftId/edit': typeof RepositoryReviewsIdIssuesDraftIdEditRoute
   '/repository-reviews/repositories/$id/findings/$findingId': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdRoute
   '/repository-reviews/repositories/$id/findings/$findingId/link-issue': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute
@@ -993,7 +966,6 @@ export interface FileRoutesById {
   '/repository-reviews_/$id': typeof RepositoryReviewsIdRoute
   '/repository-reviews_/profiles': typeof RepositoryReviewsProfilesRoute
   '/repository-reviews_/repositories': typeof RepositoryReviewsRepositoriesRoute
-  '/repository-reviews_/results': typeof RepositoryReviewsResultsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
@@ -1031,7 +1003,6 @@ export interface FileRoutesById {
   '/repository-reviews_/$id_/findings-processing': typeof RepositoryReviewsIdFindingsProcessingRoute
   '/repository-reviews_/$id_/issues': typeof RepositoryReviewsIdIssuesRoute
   '/repository-reviews_/$id_/raw-findings': typeof RepositoryReviewsIdRawFindingsRoute
-  '/repository-reviews_/$id_/report': typeof RepositoryReviewsIdReportRoute
   '/repository-reviews_/profiles_/$profileID': typeof RepositoryReviewsProfilesProfileIDRoute
   '/repository-reviews_/profiles_/new': typeof RepositoryReviewsProfilesNewRoute
   '/repository-reviews_/repositories_/$id': typeof RepositoryReviewsRepositoriesIdRoute
@@ -1059,7 +1030,6 @@ export interface FileRoutesById {
   '/repository-reviews_/repositories_/$id_/edit': typeof RepositoryReviewsRepositoriesIdEditRoute
   '/repository-reviews_/repositories_/$id_/findings': typeof RepositoryReviewsRepositoriesIdFindingsRoute
   '/agent/mcp_/servers_/$name_/edit': typeof AgentMcpServersNameEditRoute
-  '/repository-reviews_/$id_/findings_/$findingId_/link-issue': typeof RepositoryReviewsIdFindingsFindingIdLinkIssueRoute
   '/repository-reviews_/$id_/issues_/$draftId_/edit': typeof RepositoryReviewsIdIssuesDraftIdEditRoute
   '/repository-reviews_/repositories_/$id_/findings_/$findingId': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdRoute
   '/repository-reviews_/repositories_/$id_/findings_/$findingId_/link-issue': typeof RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute
@@ -1109,7 +1079,6 @@ export interface FileRouteTypes {
     | '/repository-reviews/$id'
     | '/repository-reviews/profiles'
     | '/repository-reviews/repositories'
-    | '/repository-reviews/results'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
@@ -1147,7 +1116,6 @@ export interface FileRouteTypes {
     | '/repository-reviews/$id/findings-processing'
     | '/repository-reviews/$id/issues'
     | '/repository-reviews/$id/raw-findings'
-    | '/repository-reviews/$id/report'
     | '/repository-reviews/profiles/$profileID'
     | '/repository-reviews/profiles/new'
     | '/repository-reviews/repositories/$id'
@@ -1175,7 +1143,6 @@ export interface FileRouteTypes {
     | '/repository-reviews/repositories/$id/edit'
     | '/repository-reviews/repositories/$id/findings'
     | '/agent/mcp/servers/$name/edit'
-    | '/repository-reviews/$id/findings/$findingId/link-issue'
     | '/repository-reviews/$id/issues/$draftId/edit'
     | '/repository-reviews/repositories/$id/findings/$findingId'
     | '/repository-reviews/repositories/$id/findings/$findingId/link-issue'
@@ -1223,7 +1190,6 @@ export interface FileRouteTypes {
     | '/repository-reviews/$id'
     | '/repository-reviews/profiles'
     | '/repository-reviews/repositories'
-    | '/repository-reviews/results'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
@@ -1261,7 +1227,6 @@ export interface FileRouteTypes {
     | '/repository-reviews/$id/findings-processing'
     | '/repository-reviews/$id/issues'
     | '/repository-reviews/$id/raw-findings'
-    | '/repository-reviews/$id/report'
     | '/repository-reviews/profiles/$profileID'
     | '/repository-reviews/profiles/new'
     | '/repository-reviews/repositories/$id'
@@ -1289,7 +1254,6 @@ export interface FileRouteTypes {
     | '/repository-reviews/repositories/$id/edit'
     | '/repository-reviews/repositories/$id/findings'
     | '/agent/mcp/servers/$name/edit'
-    | '/repository-reviews/$id/findings/$findingId/link-issue'
     | '/repository-reviews/$id/issues/$draftId/edit'
     | '/repository-reviews/repositories/$id/findings/$findingId'
     | '/repository-reviews/repositories/$id/findings/$findingId/link-issue'
@@ -1337,7 +1301,6 @@ export interface FileRouteTypes {
     | '/repository-reviews_/$id'
     | '/repository-reviews_/profiles'
     | '/repository-reviews_/repositories'
-    | '/repository-reviews_/results'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
@@ -1375,7 +1338,6 @@ export interface FileRouteTypes {
     | '/repository-reviews_/$id_/findings-processing'
     | '/repository-reviews_/$id_/issues'
     | '/repository-reviews_/$id_/raw-findings'
-    | '/repository-reviews_/$id_/report'
     | '/repository-reviews_/profiles_/$profileID'
     | '/repository-reviews_/profiles_/new'
     | '/repository-reviews_/repositories_/$id'
@@ -1403,7 +1365,6 @@ export interface FileRouteTypes {
     | '/repository-reviews_/repositories_/$id_/edit'
     | '/repository-reviews_/repositories_/$id_/findings'
     | '/agent/mcp_/servers_/$name_/edit'
-    | '/repository-reviews_/$id_/findings_/$findingId_/link-issue'
     | '/repository-reviews_/$id_/issues_/$draftId_/edit'
     | '/repository-reviews_/repositories_/$id_/findings_/$findingId'
     | '/repository-reviews_/repositories_/$id_/findings_/$findingId_/link-issue'
@@ -1444,7 +1405,6 @@ export interface RootRouteChildren {
   RepositoryReviewsIdRoute: typeof RepositoryReviewsIdRoute
   RepositoryReviewsProfilesRoute: typeof RepositoryReviewsProfilesRoute
   RepositoryReviewsRepositoriesRoute: typeof RepositoryReviewsRepositoriesRoute
-  RepositoryReviewsResultsRoute: typeof RepositoryReviewsResultsRoute
   AccountsIdEditRoute: typeof AccountsIdEditRoute
   AccountsRoutersIdRoute: typeof AccountsRoutersIdRoute
   AccountsRoutersNewRoute: typeof AccountsRoutersNewRoute
@@ -1465,7 +1425,6 @@ export interface RootRouteChildren {
   RepositoryReviewsIdFindingsProcessingRoute: typeof RepositoryReviewsIdFindingsProcessingRoute
   RepositoryReviewsIdIssuesRoute: typeof RepositoryReviewsIdIssuesRoute
   RepositoryReviewsIdRawFindingsRoute: typeof RepositoryReviewsIdRawFindingsRoute
-  RepositoryReviewsIdReportRoute: typeof RepositoryReviewsIdReportRoute
   RepositoryReviewsProfilesProfileIDRoute: typeof RepositoryReviewsProfilesProfileIDRoute
   RepositoryReviewsProfilesNewRoute: typeof RepositoryReviewsProfilesNewRoute
   RepositoryReviewsRepositoriesIdRoute: typeof RepositoryReviewsRepositoriesIdRoute
@@ -1482,7 +1441,6 @@ export interface RootRouteChildren {
   RepositoryReviewsProfilesProfileIDEditRoute: typeof RepositoryReviewsProfilesProfileIDEditRoute
   RepositoryReviewsRepositoriesIdEditRoute: typeof RepositoryReviewsRepositoriesIdEditRoute
   RepositoryReviewsRepositoriesIdFindingsRoute: typeof RepositoryReviewsRepositoriesIdFindingsRoute
-  RepositoryReviewsIdFindingsFindingIdLinkIssueRoute: typeof RepositoryReviewsIdFindingsFindingIdLinkIssueRoute
   RepositoryReviewsIdIssuesDraftIdEditRoute: typeof RepositoryReviewsIdIssuesDraftIdEditRoute
   RepositoryReviewsRepositoriesIdFindingsFindingIdRoute: typeof RepositoryReviewsRepositoriesIdFindingsFindingIdRoute
   RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute: typeof RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute
@@ -1615,13 +1573,6 @@ declare module '@tanstack/react-router' {
       fullPath: '/threads/$threadId'
       preLoaderRoute: typeof ThreadsThreadIdRouteImport
       parentRoute: typeof ThreadsRoute
-    }
-    '/repository-reviews_/results': {
-      id: '/repository-reviews_/results'
-      path: '/repository-reviews/results'
-      fullPath: '/repository-reviews/results'
-      preLoaderRoute: typeof RepositoryReviewsResultsRouteImport
-      parentRoute: typeof rootRouteImport
     }
     '/repository-reviews_/repositories': {
       id: '/repository-reviews_/repositories'
@@ -1845,13 +1796,6 @@ declare module '@tanstack/react-router' {
       path: '/repository-reviews/profiles/$profileID'
       fullPath: '/repository-reviews/profiles/$profileID'
       preLoaderRoute: typeof RepositoryReviewsProfilesProfileIDRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/repository-reviews_/$id_/report': {
-      id: '/repository-reviews_/$id_/report'
-      path: '/repository-reviews/$id/report'
-      fullPath: '/repository-reviews/$id/report'
-      preLoaderRoute: typeof RepositoryReviewsIdReportRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/repository-reviews_/$id_/raw-findings': {
@@ -2253,13 +2197,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RepositoryReviewsIdIssuesDraftIdEditRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/repository-reviews_/$id_/findings_/$findingId_/link-issue': {
-      id: '/repository-reviews_/$id_/findings_/$findingId_/link-issue'
-      path: '/repository-reviews/$id/findings/$findingId/link-issue'
-      fullPath: '/repository-reviews/$id/findings/$findingId/link-issue'
-      preLoaderRoute: typeof RepositoryReviewsIdFindingsFindingIdLinkIssueRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/agent/mcp_/servers_/$name_/edit': {
       id: '/agent/mcp_/servers_/$name_/edit'
       path: '/mcp/servers/$name/edit'
@@ -2431,7 +2368,6 @@ const rootRouteChildren: RootRouteChildren = {
   RepositoryReviewsIdRoute: RepositoryReviewsIdRoute,
   RepositoryReviewsProfilesRoute: RepositoryReviewsProfilesRoute,
   RepositoryReviewsRepositoriesRoute: RepositoryReviewsRepositoriesRoute,
-  RepositoryReviewsResultsRoute: RepositoryReviewsResultsRoute,
   AccountsIdEditRoute: AccountsIdEditRoute,
   AccountsRoutersIdRoute: AccountsRoutersIdRoute,
   AccountsRoutersNewRoute: AccountsRoutersNewRoute,
@@ -2456,7 +2392,6 @@ const rootRouteChildren: RootRouteChildren = {
     RepositoryReviewsIdFindingsProcessingRoute,
   RepositoryReviewsIdIssuesRoute: RepositoryReviewsIdIssuesRoute,
   RepositoryReviewsIdRawFindingsRoute: RepositoryReviewsIdRawFindingsRoute,
-  RepositoryReviewsIdReportRoute: RepositoryReviewsIdReportRoute,
   RepositoryReviewsProfilesProfileIDRoute:
     RepositoryReviewsProfilesProfileIDRoute,
   RepositoryReviewsProfilesNewRoute: RepositoryReviewsProfilesNewRoute,
@@ -2481,8 +2416,6 @@ const rootRouteChildren: RootRouteChildren = {
     RepositoryReviewsRepositoriesIdEditRoute,
   RepositoryReviewsRepositoriesIdFindingsRoute:
     RepositoryReviewsRepositoriesIdFindingsRoute,
-  RepositoryReviewsIdFindingsFindingIdLinkIssueRoute:
-    RepositoryReviewsIdFindingsFindingIdLinkIssueRoute,
   RepositoryReviewsIdIssuesDraftIdEditRoute:
     RepositoryReviewsIdIssuesDraftIdEditRoute,
   RepositoryReviewsRepositoriesIdFindingsFindingIdRoute:

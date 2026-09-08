@@ -139,7 +139,7 @@ const repository = {
     reviewed_files: 0,
     remaining_files: 0,
     unsupported_files: 0,
-    findings: 0,
+    deduplicated_findings: 0,
     finding_aggregates: 0,
     unaggregated_findings: 0,
     assignment_progress: {

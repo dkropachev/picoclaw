@@ -69,75 +69,6 @@ func NewSQLiteStore(workspace string) Store {
 // Deprecated: use NewSQLiteStore.
 func NewStore(workspace string) Store { return NewSQLiteStore(workspace) }
 
-func (s Store) Plan(
-	ctx context.Context,
-	repository, commitSHA, inventoryHash string,
-	files []FileRef,
-	force bool,
-) (Plan, error) {
-	return s.PlanWithProfile(ctx, repository, commitSHA, inventoryHash, "repository-bug-finder-v1", files, force)
-}
-
-func (s Store) PlanWithProfile(
-	ctx context.Context,
-	repository, commitSHA, inventoryHash, profileHash string,
-	files []FileRef,
-	force bool,
-) (Plan, error) {
-	return s.PlanWithProfileLimit(
-		ctx, repository, commitSHA, inventoryHash, profileHash, files, force, maxReviewFiles,
-	)
-}
-
-func (s Store) PlanWithProfileLimit(
-	ctx context.Context,
-	repository, commitSHA, inventoryHash, profileHash string,
-	files []FileRef,
-	force bool,
-	maximumPending int,
-) (Plan, error) {
-	return s.PlanWithProfileLimitAuthoritative(
-		ctx, repository, commitSHA, inventoryHash, profileHash,
-		files, force, maximumPending, false,
-	)
-}
-
-func (s Store) PlanWithProfileLimitAuthoritative(
-	ctx context.Context,
-	repository, commitSHA, inventoryHash, profileHash string,
-	files []FileRef,
-	force bool,
-	maximumPending int,
-	authoritative bool,
-) (Plan, error) {
-	return s.planWithProfileLimitAuthoritative(
-		ctx, repository, commitSHA, inventoryHash, profileHash, "", 0, nil,
-		files, force, maximumPending, authoritative,
-	)
-}
-
-// PlanWithProfileLimitAuthoritativeForCampaign plans work only for a campaign
-// previously installed through BeginCampaign. It may bind that campaign's
-// remaining immutable scope metadata, but it cannot create or replace campaign
-// authority.
-func (s Store) PlanWithProfileLimitAuthoritativeForCampaign(
-	ctx context.Context,
-	repository, commitSHA, inventoryHash, profileHash, campaignID string,
-	requiredAssignments int,
-	files []FileRef,
-	force bool,
-	maximumPending int,
-	authoritative bool,
-) (Plan, error) {
-	if requiredAssignments < 1 || requiredAssignments > maxRepositoryReviewRequiredAssignments {
-		return Plan{}, ErrInvalidPlan
-	}
-	return s.planWithProfileLimitAuthoritative(
-		ctx, repository, commitSHA, inventoryHash, profileHash, campaignID, requiredAssignments, nil,
-		files, force, maximumPending, authoritative,
-	)
-}
-
 // PlanAssignmentsForCampaign selects distinct incomplete files and freezes one
 // missing-only scope for every assignment in catalog. The catalog is part of
 // campaign identity and cannot drift after its first successful binding.
@@ -150,6 +81,9 @@ func (s Store) PlanAssignmentsForCampaign(
 	maximumPending int,
 	authoritative bool,
 ) (Plan, error) {
+	if !ValidRepositoryReviewCampaignID(strings.TrimSpace(campaignID)) || !authoritative {
+		return Plan{}, ErrInvalidPlan
+	}
 	normalized, err := NormalizeRepositoryReviewAssignmentCatalog(catalog)
 	if err != nil {
 		return Plan{}, err
@@ -161,7 +95,6 @@ func (s Store) PlanAssignmentsForCampaign(
 		inventoryHash,
 		profileHash,
 		campaignID,
-		repositoryReviewRequiredAssignmentCount(normalized),
 		normalized,
 		files,
 		force,
@@ -173,7 +106,6 @@ func (s Store) PlanAssignmentsForCampaign(
 func (s Store) planWithProfileLimitAuthoritative(
 	ctx context.Context,
 	repository, commitSHA, inventoryHash, profileHash, campaignID string,
-	requiredAssignments int,
 	assignmentCatalog []RepositoryReviewAssignment,
 	files []FileRef,
 	force bool,
@@ -188,15 +120,16 @@ func (s Store) planWithProfileLimitAuthoritative(
 	inventoryHash = strings.TrimSpace(inventoryHash)
 	profileHash = strings.TrimSpace(profileHash)
 	campaignID = strings.TrimSpace(campaignID)
-	if campaignID != "" {
-		commitSHA = strings.ToLower(commitSHA)
-	}
+	commitSHA = strings.ToLower(commitSHA)
+	normalizedCatalog, catalogErr := NormalizeRepositoryReviewAssignmentCatalog(assignmentCatalog)
 	if !validBoundedText(repository, maxRepositoryIdentityBytes) ||
 		!validBoundedText(commitSHA, 256) || !validBoundedText(inventoryHash, 256) ||
-		!validBoundedText(profileHash, 256) ||
-		(campaignID != "" && (!ValidRepositoryReviewCampaignID(campaignID) || !authoritative)) {
+		!validBoundedText(profileHash, 256) || !ValidRepositoryReviewCampaignID(campaignID) ||
+		!authoritative || catalogErr != nil {
 		return Plan{}, fmt.Errorf("%w: repository, commit SHA, and inventory hash are required", ErrInvalidPlan)
 	}
+	assignmentCatalog = normalizedCatalog
+	requiredAssignments := repositoryReviewRequiredAssignmentCount(assignmentCatalog)
 	files, err := normalizeFiles(files)
 	if err != nil {
 		return Plan{}, err
@@ -217,23 +150,13 @@ func (s Store) planWithProfileLimitAuthoritative(
 		return Plan{}, err
 	}
 	now := s.clock()
-	campaignChanged := false
-	if campaignID != "" {
-		scopeDigest, _ := repositoryReviewCampaignScopeDigestForFiles(files)
-		if len(assignmentCatalog) > 0 {
-			campaignChanged, err = bindRepositoryReviewCampaignAssignmentCatalog(
-				&state, campaignID, commitSHA, inventoryHash, profileHash, scopeDigest,
-				assignmentCatalog, len(files),
-			)
-		} else {
-			campaignChanged, err = bindRepositoryReviewCampaignScope(
-				&state, campaignID, commitSHA, inventoryHash, profileHash, scopeDigest,
-				requiredAssignments, len(files),
-			)
-		}
-		if err != nil {
-			return Plan{}, err
-		}
+	scopeDigest, _ := repositoryReviewCampaignScopeDigestForFiles(files)
+	campaignChanged, err := bindRepositoryReviewCampaignAssignmentCatalog(
+		&state, campaignID, commitSHA, inventoryHash, profileHash, scopeDigest,
+		assignmentCatalog, len(files),
+	)
+	if err != nil {
+		return Plan{}, err
 	}
 	forceCampaignID := ""
 	if force {
@@ -253,8 +176,7 @@ func (s Store) planWithProfileLimitAuthoritative(
 	planUnsupported := make([]UnsupportedFile, 0)
 	previouslyReviewed := 0
 	for _, file := range files {
-		if campaignID != "" && len(assignmentCatalog) > 0 &&
-			state.CurrentCampaign.Paths[file.Path].Unsupported {
+		if state.CurrentCampaign.Paths[file.Path].Unsupported {
 			unsupported := state.Unsupported[file.Path]
 			unsupported.FileRef = file
 			unsupported.CommitSHA = commitSHA
@@ -275,29 +197,22 @@ func (s Store) planWithProfileLimitAuthoritative(
 			planUnsupported = append(planUnsupported, unsupported)
 			continue
 		}
-		previous, reviewed := state.Files[file.Path]
+		_, reviewed := state.Files[file.Path]
 		if reviewed {
 			previouslyReviewed++
 		}
-		matchesBase := reviewed && previous.BlobSHA == file.BlobSHA &&
-			previous.SizeBytes == file.SizeBytes && previous.Mode == file.Mode &&
-			previous.ProfileHash == profileHash
 		campaignComplete := false
-		if campaignID != "" && len(assignmentCatalog) > 0 {
-			if pathCoverage, exists := state.CurrentCampaign.Paths[file.Path]; exists &&
-				!pathCoverage.Unsupported {
-				projected, projectionErr := projectRepositoryReviewAssignmentCoverage(
-					pathCoverage, assignmentCatalog,
-				)
-				if projectionErr != nil {
-					return Plan{}, projectionErr
-				}
-				campaignComplete = projected.Completed
+		if pathCoverage, exists := state.CurrentCampaign.Paths[file.Path]; exists &&
+			!pathCoverage.Unsupported {
+			projected, projectionErr := projectRepositoryReviewAssignmentCoverage(
+				pathCoverage, assignmentCatalog,
+			)
+			if projectionErr != nil {
+				return Plan{}, projectionErr
 			}
+			campaignComplete = projected.Completed
 		}
-		if campaignID != "" && len(assignmentCatalog) > 0 && campaignComplete ||
-			(campaignID == "" || len(assignmentCatalog) == 0) &&
-				matchesBase && (!force || previous.ForceCampaignID == forceCampaignID) {
+		if campaignComplete {
 			unchanged = append(unchanged, file)
 			continue
 		}
@@ -326,87 +241,85 @@ func (s Store) planWithProfileLimitAuthoritative(
 		UnsupportedFiles:   planUnsupported,
 		PreviouslyReviewed: previouslyReviewed, CreatedAt: now,
 	}
-	if len(assignmentCatalog) > 0 {
-		plan.AssignmentPlans = make([]RepositoryReviewAssignmentPlan, 0, len(assignmentCatalog))
-		for _, assignment := range assignmentCatalog {
-			missing := make([]FileRef, 0, len(pending))
-			for _, file := range pending {
-				complete, assignmentErr := repositoryReviewAssignmentComplete(
-					state.CurrentCampaign.Paths[file.Path], assignmentCatalog, assignment.ID,
-				)
-				if assignmentErr != nil {
-					return Plan{}, assignmentErr
-				}
-				if !complete {
-					missing = append(missing, file)
-				}
+	plan.AssignmentPlans = make([]RepositoryReviewAssignmentPlan, 0, len(assignmentCatalog))
+	for _, assignment := range assignmentCatalog {
+		missing := make([]FileRef, 0, len(pending))
+		for _, file := range pending {
+			complete, assignmentErr := repositoryReviewAssignmentComplete(
+				state.CurrentCampaign.Paths[file.Path], assignmentCatalog, assignment.ID,
+			)
+			if assignmentErr != nil {
+				return Plan{}, assignmentErr
 			}
-			if len(missing) == 0 {
-				continue
+			if !complete {
+				missing = append(missing, file)
 			}
-			reviewerModel := assignment.Reviewer
-			if reviewerModel == "default" {
-				reviewerModel = ""
-			}
-			plan.AssignmentPlans = append(plan.AssignmentPlans, RepositoryReviewAssignmentPlan{
-				AssignmentID: assignment.ID,
-				FocusID:      assignment.FocusID,
-				Label:        assignment.FocusID,
-				Reviewer:     reviewerModel,
-				Optional:     !assignment.Required,
-				Files:        missing,
-			})
 		}
+		if len(missing) == 0 {
+			continue
+		}
+		reviewerModel := assignment.Reviewer
+		if reviewerModel == "default" {
+			reviewerModel = ""
+		}
+		plan.AssignmentPlans = append(plan.AssignmentPlans, RepositoryReviewAssignmentPlan{
+			AssignmentID: assignment.ID,
+			FocusID:      assignment.FocusID,
+			Label:        assignment.FocusID,
+			Reviewer:     reviewerModel,
+			Optional:     !assignment.Required,
+			Files:        missing,
+		})
 	}
-	if campaignID != "" {
-		for _, file := range unchanged {
-			changed, coverageErr := mergeRepositoryReviewCampaignPath(
-				state.CurrentCampaign, file.Path,
-				RepositoryReviewCampaignPathCoverage{Completed: true},
-			)
-			if coverageErr != nil {
-				return Plan{}, coverageErr
-			}
-			campaignChanged = campaignChanged || changed
+	for _, file := range unchanged {
+		changed, coverageErr := mergeRepositoryReviewCampaignPath(
+			state.CurrentCampaign, file.Path,
+			RepositoryReviewCampaignPathCoverage{Completed: true},
+		)
+		if coverageErr != nil {
+			return Plan{}, coverageErr
 		}
-		for _, unsupported := range planUnsupported {
-			changed, coverageErr := mergeRepositoryReviewCampaignPath(
-				state.CurrentCampaign, unsupported.Path,
-				RepositoryReviewCampaignPathCoverage{Unsupported: true},
-			)
-			if coverageErr != nil {
-				return Plan{}, coverageErr
-			}
-			campaignChanged = campaignChanged || changed
+		campaignChanged = campaignChanged || changed
+	}
+	for _, unsupported := range planUnsupported {
+		changed, coverageErr := mergeRepositoryReviewCampaignPath(
+			state.CurrentCampaign, unsupported.Path,
+			RepositoryReviewCampaignPathCoverage{Unsupported: true},
+		)
+		if coverageErr != nil {
+			return Plan{}, coverageErr
 		}
-		if campaignChanged {
-			state.Version++
-			state.ReviewVersion++
-			state.UpdatedAt = now
-			if err := s.save(&state); err != nil {
-				return Plan{}, err
-			}
-			plan.StateVersion = state.ReviewVersion
+		campaignChanged = campaignChanged || changed
+	}
+	if campaignChanged {
+		state.Version++
+		state.ReviewVersion++
+		state.UpdatedAt = now
+		if err := s.save(&state); err != nil {
+			return Plan{}, err
 		}
+		plan.StateVersion = state.ReviewVersion
 	}
 	plan.ID = planDigest(plan)
 	return plan, nil
 }
 
-// BindPlanBranch adds resolved branch provenance before a plan is dispatched.
-// The returned plan receives a new digest so Record can continue to verify the
-// entire immutable plan envelope.
+// BindPlanBranch adds canonical branch provenance before a plan is dispatched.
 func BindPlanBranch(
 	plan Plan,
 	targetBranch string,
 	advertisedDefaultBranch string,
 	targetIsDefault bool,
 ) (Plan, error) {
-	targetBranch = strings.TrimSpace(targetBranch)
-	advertisedDefaultBranch = strings.TrimSpace(advertisedDefaultBranch)
-	if (targetBranch != "" && !validBoundedText(targetBranch, maxRepositoryReviewBranchBytes)) ||
-		(advertisedDefaultBranch != "" &&
-			!validBoundedText(advertisedDefaultBranch, maxRepositoryReviewBranchBytes)) {
+	var err error
+	targetBranch, err = NormalizeRepositoryReviewBranch(targetBranch)
+	if err != nil {
+		return Plan{}, ErrInvalidPlan
+	}
+	advertisedDefaultBranch, err = NormalizeRepositoryReviewBranch(advertisedDefaultBranch)
+	if err != nil || (targetBranch == "") != (advertisedDefaultBranch == "") ||
+		targetBranch != "" && targetIsDefault != (targetBranch == advertisedDefaultBranch) ||
+		targetBranch == "" && !targetIsDefault {
 		return Plan{}, ErrInvalidPlan
 	}
 	plan.ID = ""
@@ -415,414 +328,6 @@ func BindPlanBranch(
 	plan.TargetIsDefault = targetIsDefault
 	plan.ID = planDigest(plan)
 	return plan, nil
-}
-
-func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult, error) {
-	if err := ctx.Err(); err != nil {
-		return RecordResult{}, err
-	}
-	request.RunID = strings.TrimSpace(request.RunID)
-	if request.RunID == "" || request.Plan.ID == "" || request.Plan.ID != planDigest(request.Plan) {
-		return RecordResult{}, ErrInvalidPlan
-	}
-	rawCampaignID := request.Plan.CampaignID
-	request.Plan.CampaignID = strings.TrimSpace(rawCampaignID)
-	if rawCampaignID != request.Plan.CampaignID || request.Plan.CampaignID != "" &&
-		!ValidRepositoryReviewCampaignID(request.Plan.CampaignID) {
-		return RecordResult{}, ErrInvalidPlan
-	}
-	if request.Plan.ForceCampaignID != "" &&
-		!validBoundedText(request.Plan.ForceCampaignID, 256) {
-		return RecordResult{}, ErrInvalidPlan
-	}
-	if !validBoundedText(request.RunID, 1024) || len(request.Observations) > maxReviewObservations {
-		return RecordResult{}, ErrInvalidPlan
-	}
-	if request.ExcludedFiles < 0 || request.ExcludedFiles > maxReviewFiles {
-		return RecordResult{}, ErrInvalidPlan
-	}
-	if err := normalizeRecordBranchProvenance(&request); err != nil {
-		return RecordResult{}, err
-	}
-	campaignSelectedFiles := 0
-	if request.Plan.CampaignID != "" {
-		selectedFiles, campaignErr := validateRepositoryReviewCampaignPlan(request.Plan)
-		if campaignErr != nil || request.InspectedFiles == nil {
-			return RecordResult{}, ErrInvalidPlan
-		}
-		campaignSelectedFiles = selectedFiles
-	}
-	files, err := normalizeFiles(request.Plan.PendingFiles)
-	if err != nil || len(files) != len(request.Plan.PendingFiles) {
-		return RecordResult{}, ErrInvalidPlan
-	}
-	deferred, err := normalizeFiles(request.Plan.DeferredFiles)
-	if err != nil || len(deferred) != len(request.Plan.DeferredFiles) {
-		return RecordResult{}, ErrInvalidPlan
-	}
-	paths := make(map[string]struct{}, len(files)+len(deferred))
-	for _, file := range append(append([]FileRef(nil), files...), deferred...) {
-		if _, duplicate := paths[file.Path]; duplicate {
-			return RecordResult{}, ErrInvalidPlan
-		}
-		paths[file.Path] = struct{}{}
-	}
-	request.Plan.PendingFiles = files
-	request.Plan.DeferredFiles = deferred
-	allowed := make(map[string]FileRef, len(files))
-	for _, file := range files {
-		allowed[file.Path] = file
-	}
-	var inspectedFiles, completedFiles []FileRef
-	campaignScopeDigest := ""
-	inspectedPaths := make(map[string]struct{})
-	if request.Plan.CampaignID != "" {
-		if request.ReviewEvidence == nil {
-			return RecordResult{}, fmt.Errorf("%w: campaign review evidence is required", ErrInvalidPlan)
-		}
-		campaignScopeDigest, _ = repositoryReviewCampaignScopeDigestForPlan(request.Plan)
-		unsupportedEvidencePaths := make(map[string]struct{}, len(request.UnsupportedFiles))
-		for _, unsupported := range request.UnsupportedFiles {
-			bound, ok := allowed[unsupported.Path]
-			if !ok || bound != unsupported.FileRef ||
-				!validBoundedText(strings.TrimSpace(unsupported.Reason), 256) ||
-				unsupported.Reason != strings.TrimSpace(unsupported.Reason) {
-				return RecordResult{}, ErrInvalidPlan
-			}
-			if _, duplicate := unsupportedEvidencePaths[unsupported.Path]; duplicate {
-				return RecordResult{}, ErrInvalidPlan
-			}
-			unsupportedEvidencePaths[unsupported.Path] = struct{}{}
-		}
-		derivedObservations, derivedInspected, derivedCompleted, evidenceErr := deriveRepositoryReviewCampaignEvidence(
-			request.ReviewEvidence, allowed, request.Plan.RequiredAssignments,
-			unsupportedEvidencePaths,
-		)
-		if evidenceErr != nil {
-			return RecordResult{}, evidenceErr
-		}
-		inspectedFiles, err = bindRepositoryReviewCampaignFiles(request.InspectedFiles, allowed)
-		if err != nil {
-			return RecordResult{}, fmt.Errorf("inspected review files: %w", err)
-		}
-		completedFiles, err = bindRepositoryReviewCampaignFiles(request.CompletedFiles, allowed)
-		if err != nil {
-			return RecordResult{}, fmt.Errorf("completed review files: %w", err)
-		}
-		if !reflect.DeepEqual(inspectedFiles, derivedInspected) ||
-			!reflect.DeepEqual(completedFiles, derivedCompleted) {
-			return RecordResult{}, fmt.Errorf(
-				"%w: campaign review projections do not match child evidence", ErrInvalidPlan,
-			)
-		}
-		request.Observations = derivedObservations
-		for _, file := range inspectedFiles {
-			inspectedPaths[file.Path] = struct{}{}
-		}
-		request.InspectedFiles = inspectedFiles
-		request.CompletedFiles = completedFiles
-	}
-	unlock, err := s.lock(request.Plan.Repository)
-	if err != nil {
-		return RecordResult{}, err
-	}
-	defer unlock()
-	state, err := s.load(request.Plan.Repository)
-	if err != nil {
-		return RecordResult{}, err
-	}
-	if previous, ok := replayedRun(state, request); ok {
-		return RecordResult{
-			State: state, Run: previous,
-			AcceptedFindingIDs: append([]string(nil), previous.FindingIDs...),
-		}, nil
-	}
-	if state.ReviewVersion != request.Plan.StateVersion {
-		return RecordResult{}, ErrConflict
-	}
-	if request.Plan.CampaignID != "" {
-		if _, bindErr := bindRepositoryReviewCampaignScope(
-			&state,
-			request.Plan.CampaignID,
-			strings.ToLower(strings.TrimSpace(request.Plan.CommitSHA)),
-			strings.TrimSpace(request.Plan.InventoryHash),
-			strings.TrimSpace(request.Plan.ProfileHash),
-			campaignScopeDigest,
-			request.Plan.RequiredAssignments,
-			campaignSelectedFiles,
-		); bindErr != nil {
-			return RecordResult{}, bindErr
-		}
-	}
-	completedAt := request.CompletedAt.UTC()
-	if completedAt.IsZero() {
-		completedAt = s.clock()
-	}
-	unsupportedFiles := make(map[string]UnsupportedFile, len(request.UnsupportedFiles))
-	for _, unsupported := range request.UnsupportedFiles {
-		bound, ok := allowed[unsupported.Path]
-		unsupported.Reason = strings.TrimSpace(unsupported.Reason)
-		if !ok || bound.BlobSHA != unsupported.BlobSHA || bound.SizeBytes != unsupported.SizeBytes ||
-			bound.Mode != unsupported.Mode || !validBoundedText(unsupported.Reason, 256) {
-			return RecordResult{}, ErrInvalidPlan
-		}
-		unsupported.FileRef = bound
-		if request.Plan.CampaignID != "" {
-			if _, inspected := inspectedPaths[unsupported.Path]; inspected ||
-				containsRepositoryReviewFile(completedFiles, unsupported.Path) {
-				return RecordResult{}, fmt.Errorf(
-					"%w: unsupported file %q overlaps reviewed evidence", ErrInvalidPlan, unsupported.Path,
-				)
-			}
-		}
-		unsupported.CommitSHA = request.Plan.CommitSHA
-		unsupported.ProfileHash = request.Plan.ProfileHash
-		unsupported.ForceCampaignID = request.Plan.ForceCampaignID
-		unsupported.UpdatedAt = completedAt
-		unsupportedFiles[unsupported.Path] = unsupported
-	}
-	contexts := make([]FindingContext, 0, len(request.Observations))
-	existingContexts := make(map[string]int, len(state.Contexts))
-	for index, contextRecord := range state.Contexts {
-		existingContexts[contextRecord.ID] = index
-	}
-	covered := make(map[string]FileRef, len(files))
-	var acceptedIDs []string
-	rejected := 0
-	models := make([]string, 0)
-	for observationIndex, observation := range request.Observations {
-		observation.Model = strings.TrimSpace(observation.Model)
-		observation.ModelAlias = strings.TrimSpace(observation.ModelAlias)
-		observation.Account = strings.TrimSpace(observation.Account)
-		missingExactProvenance := request.Plan.CampaignID != "" &&
-			(observation.ModelAlias == "" || observation.Account == "")
-		if !validFindingSourceProvenance(
-			observation.Model, observation.ModelAlias, observation.Account,
-		) || missingExactProvenance ||
-			len(observation.Findings) > maxFindingsPerObservation {
-			return RecordResult{}, fmt.Errorf("observation %d has invalid model provenance", observationIndex)
-		}
-		var scope []FileRef
-		var scopeErr error
-		if request.Plan.CampaignID != "" {
-			scope, scopeErr = bindRepositoryReviewCampaignFiles(observation.ScopeFiles, allowed)
-		} else {
-			scope, scopeErr = bindScopeFiles(observation.ScopeFiles, allowed)
-		}
-		if scopeErr != nil {
-			return RecordResult{}, fmt.Errorf("observation %d: %w", observationIndex, scopeErr)
-		}
-		contextRecord := FindingContext{
-			CampaignID: request.Plan.CampaignID,
-			Repository: request.Plan.Repository, CommitSHA: request.Plan.CommitSHA,
-			InventoryHash: request.Plan.InventoryHash, ProfileHash: request.Plan.ProfileHash,
-			RunID: request.RunID,
-			Model: observation.Model, ModelAlias: observation.ModelAlias, Account: observation.Account,
-			Reviewer: strings.TrimSpace(observation.Reviewer),
-			Files:    scope, RawDigest: strings.TrimSpace(observation.RawDigest), CreatedAt: completedAt,
-		}
-		contextRecord.ID = stableID("rctx_", contextBindingDigest(contextRecord))
-		contextUsed := false
-		if request.Plan.CampaignID == "" && request.CompletedFiles == nil {
-			for _, file := range scope {
-				covered[file.Path] = file
-			}
-		}
-		contributorModel := observation.Model
-		if observation.ModelAlias != "" {
-			contributorModel = observation.ModelAlias
-		}
-		models = appendUnique(models, contributorModel)
-		for findingIndex, candidate := range observation.Findings {
-			candidate = normalizeCandidate(candidate)
-			if candidate.Validation.Status != "confirmed" {
-				rejected++
-				continue
-			}
-			primary, ok := fileInScope(candidate.File, scope)
-			if !ok {
-				return RecordResult{}, fmt.Errorf(
-					"observation %d finding %d references a file outside its exact context",
-					observationIndex,
-					findingIndex,
-				)
-			}
-			if err := validateCandidate(candidate); err != nil {
-				rejected++
-				continue
-			}
-			deduplicatedID, persistErr := persistLegacyRecordFinding(
-				&state, request.Plan, request.RunID, observationIndex, findingIndex,
-				contextRecord, observation, primary, candidate, completedAt,
-			)
-			if persistErr != nil {
-				return RecordResult{}, persistErr
-			}
-			projectionIndex := findingIndexByID(state.Findings, deduplicatedID)
-			if projectionIndex < 0 {
-				return RecordResult{}, ErrConflict
-			}
-			finding := &state.Findings[projectionIndex]
-			finding.Models = []string{contributorModel}
-			finding.Observations = []FindingObservation{findingObservationFrom(
-				candidate, contextRecord.ID, observation.Model, observation.ModelAlias,
-				observation.Account, observation.Reviewer,
-			)}
-			acceptedIDs = appendUnique(acceptedIDs, deduplicatedID)
-			contextUsed = true
-			continue
-		}
-		if contextUsed {
-			if existingIndex, exists := existingContexts[contextRecord.ID]; exists {
-				if existingIndex < len(state.Contexts) {
-					state.Contexts[existingIndex] = contextRecord
-				} else {
-					contexts[existingIndex-len(state.Contexts)] = contextRecord
-				}
-				continue
-			}
-			existingContexts[contextRecord.ID] = len(state.Contexts) + len(contexts)
-			contexts = append(contexts, contextRecord)
-		}
-	}
-	if request.Plan.CampaignID != "" {
-		for _, file := range completedFiles {
-			covered[file.Path] = file
-		}
-	} else if request.CompletedFiles != nil {
-		completed, completedErr := bindScopeFiles(request.CompletedFiles, allowed)
-		if completedErr != nil && len(request.CompletedFiles) > 0 {
-			return RecordResult{}, fmt.Errorf("completed review files: %w", completedErr)
-		}
-		for _, file := range completed {
-			covered[file.Path] = file
-		}
-	}
-	state.Contexts = append(state.Contexts, contexts...)
-	pruneUnreferencedFindingContexts(&state)
-	reconcileFindingsProcessingCounters(&state)
-	if len(state.RawFindings) > 0 {
-		state.FindingsProcessing.UpdatedAt = completedAt
-	}
-	var unreviewedPaths []string
-	for _, file := range files {
-		if _, complete := covered[file.Path]; complete {
-			delete(state.ReviewAttempts, file.Path)
-			delete(state.ReviewAttemptIdentities, file.Path)
-			delete(state.Unsupported, file.Path)
-			continue
-		}
-		if unsupported, terminal := unsupportedFiles[file.Path]; terminal {
-			state.Unsupported[file.Path] = unsupported
-			delete(state.ReviewAttempts, file.Path)
-			delete(state.ReviewAttemptIdentities, file.Path)
-			continue
-		}
-		identity := reviewAttemptIdentity(file, request.Plan.ProfileHash)
-		if state.ReviewAttemptIdentities[file.Path] != identity {
-			state.ReviewAttempts[file.Path] = 0
-		}
-		state.ReviewAttemptIdentities[file.Path] = identity
-		state.ReviewAttempts[file.Path]++
-		unreviewedPaths = append(unreviewedPaths, file.Path)
-	}
-	for _, file := range covered {
-		state.Files[file.Path] = ReviewedFile{
-			FileRef: file, CommitSHA: request.Plan.CommitSHA,
-			ProfileHash: request.Plan.ProfileHash, ForceCampaignID: request.Plan.ForceCampaignID,
-			RunID: request.RunID, ReviewedAt: completedAt,
-		}
-	}
-	if request.Plan.CampaignID != "" {
-		for _, file := range request.Plan.UnchangedFiles {
-			if _, mergeErr := mergeRepositoryReviewCampaignPath(
-				state.CurrentCampaign, file.Path,
-				RepositoryReviewCampaignPathCoverage{Completed: true},
-			); mergeErr != nil {
-				return RecordResult{}, mergeErr
-			}
-		}
-		for _, unsupported := range request.Plan.UnsupportedFiles {
-			if _, mergeErr := mergeRepositoryReviewCampaignPath(
-				state.CurrentCampaign, unsupported.Path,
-				RepositoryReviewCampaignPathCoverage{Unsupported: true},
-			); mergeErr != nil {
-				return RecordResult{}, mergeErr
-			}
-		}
-		for _, file := range inspectedFiles {
-			if _, mergeErr := mergeRepositoryReviewCampaignPath(
-				state.CurrentCampaign, file.Path,
-				RepositoryReviewCampaignPathCoverage{Inspected: true},
-			); mergeErr != nil {
-				return RecordResult{}, mergeErr
-			}
-		}
-		for _, file := range completedFiles {
-			// Every completed file was already merged as inspected above, so the
-			// monotonic completion promotion cannot reclassify a terminal path.
-			_, _ = mergeRepositoryReviewCampaignPath(
-				state.CurrentCampaign, file.Path,
-				RepositoryReviewCampaignPathCoverage{Inspected: true, Completed: true},
-			)
-		}
-		for _, unsupported := range unsupportedFiles {
-			if _, mergeErr := mergeRepositoryReviewCampaignPath(
-				state.CurrentCampaign, unsupported.Path,
-				RepositoryReviewCampaignPathCoverage{Unsupported: true},
-			); mergeErr != nil {
-				return RecordResult{}, mergeErr
-			}
-		}
-	}
-	var unsupportedPaths []string
-	for pathValue := range unsupportedFiles {
-		unsupportedPaths = append(unsupportedPaths, pathValue)
-	}
-	sort.Strings(unsupportedPaths)
-	run := ReviewRun{
-		ID: request.RunID, CampaignID: request.Plan.CampaignID,
-		PlanID: request.Plan.ID, CommitSHA: request.Plan.CommitSHA,
-		InventoryHash: request.Plan.InventoryHash, ProfileHash: request.Plan.ProfileHash,
-		ScopeDigest: campaignScopeDigest, ReviewedFiles: len(covered),
-		InspectedFiles:   len(inspectedFiles),
-		UnreviewedFiles:  len(files) - len(covered) - len(unsupportedFiles),
-		UnsupportedCount: len(unsupportedFiles),
-		RemainingFiles:   len(request.Plan.DeferredFiles) + len(files) - len(covered) - len(unsupportedFiles),
-		UnreviewedPaths:  unreviewedPaths,
-		UnsupportedPaths: unsupportedPaths,
-		SkippedFiles:     len(request.Plan.UnchangedFiles), AcceptedFindings: len(acceptedIDs),
-		ExcludedFiles:    request.ExcludedFiles,
-		FindingIDs:       append([]string(nil), acceptedIDs...),
-		RejectedFindings: rejected, Models: models, CompletedAt: completedAt,
-		TargetBranch:            request.TargetBranch,
-		AdvertisedDefaultBranch: request.AdvertisedDefaultBranch,
-		TargetIsDefault:         request.TargetIsDefault,
-	}
-	state.Runs = append(state.Runs, run)
-	if len(state.Runs) > 1000 {
-		state.Runs = append([]ReviewRun(nil), state.Runs[len(state.Runs)-1000:]...)
-	}
-	pruneCheckpointMetadata(&state, request.Plan, files)
-	state.LastCommitSHA = request.Plan.CommitSHA
-	state.LastExcludedFiles = request.ExcludedFiles
-	ensureMappingJobsForFindings(&state, acceptedIDs, completedAt)
-	if request.Plan.ForceCampaignID != "" && run.RemainingFiles > 0 {
-		state.ActiveForceCampaignID = request.Plan.ForceCampaignID
-		state.ActiveForceProfileHash = request.Plan.ProfileHash
-		state.ActiveForceCommitSHA = request.Plan.CommitSHA
-	} else {
-		state.ActiveForceCampaignID = ""
-		state.ActiveForceProfileHash = ""
-		state.ActiveForceCommitSHA = ""
-	}
-	state.Version++
-	state.ReviewVersion++
-	state.UpdatedAt = completedAt
-	if err := s.save(&state); err != nil {
-		return RecordResult{}, err
-	}
-	return RecordResult{State: state, Run: run, AcceptedFindingIDs: acceptedIDs}, nil
 }
 
 // SnapshotMappingJobs freezes the assigned reviewer/profile/account into
@@ -858,9 +363,6 @@ func (s Store) SnapshotMappingJobs(
 	if err != nil {
 		return RepositoryState{}, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, err
-	}
 	now := s.clock()
 	changed := false
 	for index := range state.MappingJobs {
@@ -894,13 +396,12 @@ func (s Store) FinalizeNoopPlan(plan Plan, excludedFiles ...int) (RepositoryStat
 		len(plan.DeferredFiles) != 0 || !plan.Authoritative {
 		return RepositoryState{}, ErrInvalidPlan
 	}
-	campaignSelectedFiles := 0
-	if plan.CampaignID != "" {
-		var campaignErr error
-		campaignSelectedFiles, campaignErr = validateRepositoryReviewCampaignPlan(plan)
-		if campaignErr != nil {
-			return RepositoryState{}, campaignErr
-		}
+	if _, err := validateRepositoryReviewCampaignPlan(plan); err != nil {
+		return RepositoryState{}, err
+	}
+	campaignSelectedFiles, campaignErr := validateRepositoryReviewCampaignPlan(plan)
+	if campaignErr != nil {
+		return RepositoryState{}, campaignErr
 	}
 	unlock, err := s.lock(plan.Repository)
 	if err != nil {
@@ -914,38 +415,34 @@ func (s Store) FinalizeNoopPlan(plan Plan, excludedFiles ...int) (RepositoryStat
 	if state.ReviewVersion != plan.StateVersion {
 		return RepositoryState{}, ErrConflict
 	}
-	changed := false
-	if plan.CampaignID != "" {
-		scopeDigest, _ := repositoryReviewCampaignScopeDigestForPlan(plan)
-		bound, bindErr := bindRepositoryReviewCampaignScope(
-			&state, plan.CampaignID, plan.CommitSHA, plan.InventoryHash, plan.ProfileHash, scopeDigest,
-			plan.RequiredAssignments,
-			campaignSelectedFiles,
+	scopeDigest, _ := repositoryReviewCampaignScopeDigestForPlan(plan)
+	bound, bindErr := bindRepositoryReviewCampaignAssignmentCatalog(
+		&state, plan.CampaignID, plan.CommitSHA, plan.InventoryHash, plan.ProfileHash, scopeDigest,
+		plan.AssignmentCatalog, campaignSelectedFiles,
+	)
+	if bindErr != nil {
+		return RepositoryState{}, bindErr
+	}
+	changed := bound
+	for _, file := range plan.UnchangedFiles {
+		merged, mergeErr := mergeRepositoryReviewCampaignPath(
+			state.CurrentCampaign, file.Path,
+			RepositoryReviewCampaignPathCoverage{Completed: true},
 		)
-		if bindErr != nil {
-			return RepositoryState{}, bindErr
+		if mergeErr != nil {
+			return RepositoryState{}, mergeErr
 		}
-		changed = bound
-		for _, file := range plan.UnchangedFiles {
-			merged, mergeErr := mergeRepositoryReviewCampaignPath(
-				state.CurrentCampaign, file.Path,
-				RepositoryReviewCampaignPathCoverage{Completed: true},
-			)
-			if mergeErr != nil {
-				return RepositoryState{}, mergeErr
-			}
-			changed = changed || merged
+		changed = changed || merged
+	}
+	for _, unsupported := range plan.UnsupportedFiles {
+		merged, mergeErr := mergeRepositoryReviewCampaignPath(
+			state.CurrentCampaign, unsupported.Path,
+			RepositoryReviewCampaignPathCoverage{Unsupported: true},
+		)
+		if mergeErr != nil {
+			return RepositoryState{}, mergeErr
 		}
-		for _, unsupported := range plan.UnsupportedFiles {
-			merged, mergeErr := mergeRepositoryReviewCampaignPath(
-				state.CurrentCampaign, unsupported.Path,
-				RepositoryReviewCampaignPathCoverage{Unsupported: true},
-			)
-			if mergeErr != nil {
-				return RepositoryState{}, mergeErr
-			}
-			changed = changed || merged
-		}
+		changed = changed || merged
 	}
 	changed = pruneCheckpointMetadata(&state, plan, nil) || changed
 	excluded := 0
@@ -1109,135 +606,6 @@ func (s Store) listSummaries(maximum int) ([]RepositorySummary, error) {
 	return summaries, rows.Err()
 }
 
-func (s Store) SetFindingStatus(
-	repository string,
-	findingID string,
-	status FindingStatus,
-	expectedVersion int64,
-) (RepositoryState, error) {
-	if status != FindingOpen && status != FindingDismissed {
-		return RepositoryState{}, errors.New("invalid repository review finding status")
-	}
-	unlock, err := s.lock(repository)
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	defer unlock()
-	state, err := s.load(repository)
-	if err != nil {
-		return RepositoryState{}, err
-	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, err
-	}
-	index := -1
-	for candidate := range state.Findings {
-		if state.Findings[candidate].ID == strings.TrimSpace(findingID) {
-			index = candidate
-			break
-		}
-	}
-	if index < 0 {
-		return RepositoryState{}, os.ErrNotExist
-	}
-	if state.Findings[index].DeduplicationPending {
-		return RepositoryState{}, ErrConflict
-	}
-	if state.Findings[index].Status == status {
-		return state, nil
-	}
-	if state.Findings[index].Status == FindingPosted || state.Findings[index].IssueDraftID != "" {
-		return RepositoryState{}, ErrConflict
-	}
-	if expectedVersion < 1 || state.Version != expectedVersion {
-		return RepositoryState{}, ErrConflict
-	}
-	now := s.clock()
-	state.Findings[index].Status = status
-	state.Findings[index].Version++
-	state.Findings[index].UpdatedAt = now
-	state.Version++
-	state.UpdatedAt = now
-	if err := s.save(&state); err != nil {
-		return RepositoryState{}, err
-	}
-	return state, nil
-}
-
-func (s Store) PrepareIssue(request IssueDraftRequest) (RepositoryState, IssueDraft, error) {
-	request.Repository = strings.TrimSpace(request.Repository)
-	if len(request.FindingIDs) != 1 {
-		return RepositoryState{}, IssueDraft{}, errors.New(
-			"legacy repository review issue drafts require exactly one finding",
-		)
-	}
-	unlock, err := s.lock(request.Repository)
-	if err != nil {
-		return RepositoryState{}, IssueDraft{}, err
-	}
-	defer unlock()
-	state, err := s.load(request.Repository)
-	if err != nil {
-		return RepositoryState{}, IssueDraft{}, err
-	}
-	if historicalErr := HistoricalDeduplicationMutationAllowed(state); historicalErr != nil {
-		return RepositoryState{}, IssueDraft{}, historicalErr
-	}
-	findings, ids, err := selectedFindings(state.Findings, request.FindingIDs)
-	if err != nil {
-		return RepositoryState{}, IssueDraft{}, err
-	}
-	for _, finding := range findings {
-		if !repositoryFindingAllowsIssueActions(state, finding) {
-			return RepositoryState{}, IssueDraft{}, ErrConflict
-		}
-	}
-	title := strings.TrimSpace(request.Title)
-	if title == "" {
-		title = defaultIssueTitle(findings)
-	}
-	body := strings.TrimSpace(request.Body)
-	if body == "" {
-		body = defaultIssueBody(state, findings)
-	}
-	labels := normalizeLabels(request.Labels)
-	if len(labels) == 0 {
-		labels = []string{"bug"}
-	}
-	if !validBoundedText(title, 256) || !validBoundedText(body, maxIssueDraftBodyBytes) {
-		return RepositoryState{}, IssueDraft{}, errors.New("invalid repository review issue draft")
-	}
-	draftID := stableID(
-		"rid_", state.Repository, strings.Join(ids, "\x00"), title, body,
-		strings.Join(labels, "\x00"),
-	)
-	for _, existing := range state.IssueDrafts {
-		if existing.ID == draftID {
-			return state, existing, nil
-		}
-	}
-	if request.ExpectedVersion < 1 || state.Version != request.ExpectedVersion {
-		return RepositoryState{}, IssueDraft{}, ErrConflict
-	}
-	now := s.clock()
-	draft := IssueDraft{
-		ID:         draftID,
-		Repository: state.Repository, FindingIDs: ids, Title: title, Body: body,
-		Origin: IssueDraftOriginLegacy,
-		Labels: labels, State: IssueDraftEditing, Version: 1, CreatedAt: now, UpdatedAt: now,
-	}
-	state.IssueDrafts = append(state.IssueDrafts, draft)
-	state.Version++
-	state.UpdatedAt = now
-	if err := s.save(&state); err != nil {
-		return RepositoryState{}, IssueDraft{}, err
-	}
-	if index := issueDraftIndexByID(state.IssueDrafts, draft.ID); index >= 0 {
-		draft = state.IssueDrafts[index]
-	}
-	return state, draft, nil
-}
-
 func (s Store) UpdateIssueDraft(
 	repository, draftID, title, body string,
 	labels []string,
@@ -1252,9 +620,6 @@ func (s Store) UpdateIssueDraft(
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, IssueDraft{}, err
-	}
 	index := -1
 	for candidate := range state.IssueDrafts {
 		if state.IssueDrafts[candidate].ID == strings.TrimSpace(draftID) {
@@ -1266,7 +631,7 @@ func (s Store) UpdateIssueDraft(
 		return RepositoryState{}, IssueDraft{}, os.ErrNotExist
 	}
 	draft := &state.IssueDrafts[index]
-	if draft.State != IssueDraftEditing || !draft.Canonical {
+	if draft.State != IssueDraftEditing {
 		return RepositoryState{}, IssueDraft{}, ErrConflict
 	}
 	title, body = strings.TrimSpace(title), strings.TrimSpace(body)
@@ -1311,9 +676,6 @@ func (s Store) SetIssueDraftPublication(
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, err
 	}
-	if err := HistoricalDeduplicationMutationAllowed(state); err != nil {
-		return RepositoryState{}, IssueDraft{}, err
-	}
 	index := -1
 	for candidate := range state.IssueDrafts {
 		if state.IssueDrafts[candidate].ID == strings.TrimSpace(draftID) {
@@ -1325,9 +687,6 @@ func (s Store) SetIssueDraftPublication(
 		return RepositoryState{}, IssueDraft{}, os.ErrNotExist
 	}
 	draft := &state.IssueDrafts[index]
-	if !draft.Canonical {
-		return RepositoryState{}, IssueDraft{}, ErrConflict
-	}
 	if draft.State == IssueDraftPosted {
 		return state, *draft, nil
 	}
@@ -1396,7 +755,6 @@ func (s Store) ClaimIssueDraftPublication(
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, false, err
 	}
-	historicalMutationErr := HistoricalDeduplicationMutationAllowed(state)
 	index := -1
 	for candidate := range state.IssueDrafts {
 		if state.IssueDrafts[candidate].ID == strings.TrimSpace(draftID) {
@@ -1405,26 +763,17 @@ func (s Store) ClaimIssueDraftPublication(
 		}
 	}
 	if index < 0 {
-		if historicalMutationErr != nil {
-			return RepositoryState{}, IssueDraft{}, false, historicalMutationErr
-		}
 		return RepositoryState{}, IssueDraft{}, false, os.ErrNotExist
 	}
 	draft := &state.IssueDrafts[index]
 	eligibility := EvaluateIssuePublication(state, *draft)
 	if draft.State == IssueDraftPosted {
 		if !eligibility.AllowsPostedAcknowledgement() {
-			if eligibility.HasBlocker(IssuePublicationHistoricalMergeActive) {
-				return RepositoryState{}, IssueDraft{}, false, ErrHistoricalDeduplicationInProgress
-			}
 			return RepositoryState{}, IssueDraft{}, false, ErrConflict
 		}
 		return state, *draft, false, nil
 	}
 	if !eligibility.CanPublish {
-		if eligibility.HasBlocker(IssuePublicationHistoricalMergeActive) {
-			return RepositoryState{}, IssueDraft{}, false, ErrHistoricalDeduplicationInProgress
-		}
 		return RepositoryState{}, IssueDraft{}, false, ErrConflict
 	}
 	if draft.State == IssueDraftPublishing || draft.State == IssueDraftUnknown {
@@ -1512,7 +861,6 @@ func (s Store) loadIgnoringPurge(repository string) (RepositoryState, error) {
 		ReviewAttemptIdentities: make(map[string]string),
 		Findings:                []Finding{},
 		RawFindings:             []RawReviewFinding{},
-		DeduplicatedFindings:    []DeduplicatedReviewFinding{},
 		DeduplicationJobs:       []DeduplicationJob{},
 		Contexts:                []FindingContext{},
 		Runs:                    []ReviewRun{},
@@ -1521,6 +869,7 @@ func (s Store) loadIgnoringPurge(repository string) (RepositoryState, error) {
 		RepositoryFindings:      []RepositoryFinding{},
 		MappingJobs:             []RepositoryMappingJob{},
 		ValidationJobs:          []RepositoryValidationJob{},
+		CampaignHistory:         make(map[string]string),
 	}
 	database, err := s.openDatabase(context.Background())
 	if err != nil {
@@ -1556,9 +905,7 @@ func prepareRepositoryStateForPersistence(state *RepositoryState) error {
 	if state.FileAttributions == nil {
 		state.FileAttributions = []RepositoryReviewFileAttribution{}
 	}
-	backfillCanonicalIssueAssociations(state)
 	synchronizeRepositoryFindingIssues(state)
-	synchronizeDeduplicatedFindingProjections(state)
 	summary := Summarize(*state)
 	state.FindingCount = summary.FindingCount
 	state.RepositoryFindingCount = summary.RepositoryFindingCount
@@ -1667,186 +1014,6 @@ func validBlobSHA(value string) bool {
 	return true
 }
 
-func replayedRun(state RepositoryState, request RecordRequest) (ReviewRun, bool) {
-	for _, run := range state.Runs {
-		if run.ID != request.RunID {
-			continue
-		}
-		return run, run.PlanID == request.Plan.ID
-	}
-	return ReviewRun{}, false
-}
-
-func deriveRepositoryReviewCampaignEvidence(
-	evidence []RepositoryReviewEvidence,
-	allowed map[string]FileRef,
-	requiredAssignments int,
-	unsupportedPaths map[string]struct{},
-) ([]Observation, []FileRef, []FileRef, error) {
-	if requiredAssignments < 1 || requiredAssignments > maxRepositoryReviewRequiredAssignments ||
-		len(evidence) > maxReviewObservations {
-		return nil, nil, nil, ErrInvalidPlan
-	}
-	if len(evidence) == 0 {
-		for pathValue := range allowed {
-			if _, unsupported := unsupportedPaths[pathValue]; !unsupported {
-				return nil, nil, nil, ErrInvalidPlan
-			}
-		}
-	}
-	evidenceMetadataBytes := 0
-	addEvidenceFiles := func(files []FileRef) error {
-		for _, file := range files {
-			evidenceMetadataBytes += len(file.Path) + len(file.BlobSHA) +
-				len(file.Category) + len(file.Mode) + 32
-			if evidenceMetadataBytes > maxReviewFileMetadataBytes {
-				return fmt.Errorf("%w: campaign review evidence exceeds its size limit", ErrInvalidPlan)
-			}
-		}
-		return nil
-	}
-	observations := make([]Observation, 0, len(evidence))
-	fileRefs := make(map[string]FileRef)
-	requiredCoverage := make(map[string]int)
-	successfulRequiredCoverage := make(map[string]int)
-	inspectedPaths := make(map[string]struct{})
-	assignments := make(map[string]struct{}, len(evidence))
-	for index, child := range evidence {
-		if err := addEvidenceFiles(child.ScopeFiles); err != nil {
-			return nil, nil, nil, err
-		}
-		if err := addEvidenceFiles(child.AcknowledgedFiles); err != nil {
-			return nil, nil, nil, err
-		}
-		if child.Observation != nil {
-			if err := addEvidenceFiles(child.Observation.ScopeFiles); err != nil {
-				return nil, nil, nil, err
-			}
-		}
-		if !validBoundedText(child.AssignmentID, 256) ||
-			child.AssignmentID != strings.TrimSpace(child.AssignmentID) {
-			return nil, nil, nil, fmt.Errorf(
-				"%w: campaign review evidence %d has an invalid assignment ID",
-				ErrInvalidPlan, index,
-			)
-		}
-		if _, duplicate := assignments[child.AssignmentID]; duplicate {
-			return nil, nil, nil, fmt.Errorf(
-				"%w: duplicate campaign review assignment %q", ErrInvalidPlan, child.AssignmentID,
-			)
-		}
-		assignments[child.AssignmentID] = struct{}{}
-		scope, err := bindRepositoryReviewCampaignFiles(child.ScopeFiles, allowed)
-		if err != nil || len(scope) == 0 || !reflect.DeepEqual(scope, child.ScopeFiles) {
-			return nil, nil, nil, fmt.Errorf(
-				"campaign review evidence %d scope: %w", index, ErrInvalidPlan,
-			)
-		}
-		for _, file := range scope {
-			fileRefs[file.Path] = file
-			if child.Required {
-				requiredCoverage[file.Path]++
-			}
-		}
-		if !child.Successful {
-			if child.Observation != nil || len(child.AcknowledgedFiles) != 0 {
-				return nil, nil, nil, fmt.Errorf(
-					"%w: unsuccessful campaign evidence %d contains successful output",
-					ErrInvalidPlan, index,
-				)
-			}
-			continue
-		}
-		if child.Observation == nil ||
-			!validFindingSourceProvenance(
-				strings.TrimSpace(child.Observation.Model),
-				strings.TrimSpace(child.Observation.ModelAlias),
-				strings.TrimSpace(child.Observation.Account),
-			) ||
-			child.Observation.Model != strings.TrimSpace(child.Observation.Model) ||
-			child.Observation.ModelAlias != strings.TrimSpace(child.Observation.ModelAlias) ||
-			child.Observation.Account != strings.TrimSpace(child.Observation.Account) {
-			return nil, nil, nil, fmt.Errorf(
-				"%w: successful campaign evidence %d has no valid observation",
-				ErrInvalidPlan, index,
-			)
-		}
-		observationScope, err := bindRepositoryReviewCampaignFiles(
-			child.Observation.ScopeFiles, allowed,
-		)
-		if err != nil || !reflect.DeepEqual(observationScope, scope) {
-			return nil, nil, nil, fmt.Errorf(
-				"%w: campaign evidence %d observation scope does not match assignment",
-				ErrInvalidPlan, index,
-			)
-		}
-		acknowledged, err := bindRepositoryReviewCampaignFiles(
-			child.AcknowledgedFiles, allowed,
-		)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf(
-				"campaign evidence %d acknowledgements: %w", index, err,
-			)
-		}
-		scopePaths := make(map[string]struct{}, len(scope))
-		for _, file := range scope {
-			scopePaths[file.Path] = struct{}{}
-		}
-		for _, file := range acknowledged {
-			if _, assigned := scopePaths[file.Path]; !assigned {
-				return nil, nil, nil, fmt.Errorf(
-					"%w: campaign evidence %d acknowledged an unassigned file",
-					ErrInvalidPlan, index,
-				)
-			}
-			inspectedPaths[file.Path] = struct{}{}
-			if child.Required {
-				successfulRequiredCoverage[file.Path]++
-			}
-		}
-		acknowledgedPaths := make(map[string]struct{}, len(acknowledged))
-		for _, file := range acknowledged {
-			acknowledgedPaths[file.Path] = struct{}{}
-		}
-		for findingIndex, finding := range child.Observation.Findings {
-			findingPath := strings.TrimSpace(filepath.ToSlash(finding.File))
-			if _, acknowledged := acknowledgedPaths[findingPath]; !acknowledged {
-				return nil, nil, nil, fmt.Errorf(
-					"%w: campaign evidence %d finding %d has no child acknowledgement",
-					ErrInvalidPlan, index, findingIndex,
-				)
-			}
-		}
-		observation := *child.Observation
-		observation.ScopeFiles = observationScope
-		observations = append(observations, observation)
-	}
-	for pathValue := range allowed {
-		if _, unsupported := unsupportedPaths[pathValue]; unsupported {
-			continue
-		}
-		if requiredCoverage[pathValue] != requiredAssignments {
-			return nil, nil, nil, fmt.Errorf(
-				"%w: file %q has %d required assignments, want %d",
-				ErrInvalidPlan, pathValue, requiredCoverage[pathValue], requiredAssignments,
-			)
-		}
-	}
-	inspected := make([]FileRef, 0, len(inspectedPaths))
-	for pathValue := range inspectedPaths {
-		inspected = append(inspected, fileRefs[pathValue])
-	}
-	completed := make([]FileRef, 0)
-	for pathValue, total := range requiredCoverage {
-		if total > 0 && successfulRequiredCoverage[pathValue] == total {
-			completed = append(completed, fileRefs[pathValue])
-		}
-	}
-	sort.Slice(inspected, func(i, j int) bool { return inspected[i].Path < inspected[j].Path })
-	sort.Slice(completed, func(i, j int) bool { return completed[i].Path < completed[j].Path })
-	return observations, inspected, completed, nil
-}
-
 func validateRepositoryReviewCampaignPlan(plan Plan) (int, error) {
 	if !ValidRepositoryReviewCampaignID(plan.CampaignID) ||
 		!plan.Authoritative ||
@@ -1863,34 +1030,31 @@ func validateRepositoryReviewCampaignPlan(plan Plan) (int, error) {
 			(plan.ForceCampaignID != strings.TrimSpace(plan.ForceCampaignID) ||
 				!validBoundedText(plan.ForceCampaignID, 256))) ||
 		plan.RequiredAssignments < 1 || plan.RequiredAssignments > maxRepositoryReviewRequiredAssignments ||
+		len(plan.AssignmentCatalog) == 0 ||
 		plan.StateVersion < 0 || plan.PreviouslyReviewed < 0 || plan.PreviouslyReviewed > maxReviewFiles {
 		return 0, ErrInvalidPlan
 	}
-	if len(plan.AssignmentCatalog) > 0 {
-		catalog, err := NormalizeRepositoryReviewAssignmentCatalog(plan.AssignmentCatalog)
-		if err != nil || !repositoryReviewAssignmentCatalogEqual(catalog, plan.AssignmentCatalog) ||
-			catalog[0].ProfileHash != plan.ProfileHash ||
-			repositoryReviewRequiredAssignmentCount(catalog) != plan.RequiredAssignments {
-			return 0, ErrInvalidPlan
-		}
-		allowed := make(map[string]FileRef, len(plan.PendingFiles))
-		for _, file := range plan.PendingFiles {
-			allowed[file.Path] = file
-		}
-		plans, planErr := normalizeRepositoryReviewAssignmentPlans(
-			plan.AssignmentPlans, catalog, allowed,
-		)
-		if planErr != nil || len(plans) != len(plan.AssignmentPlans) ||
-			len(plans) > 0 && !reflect.DeepEqual(plans, plan.AssignmentPlans) {
-			return 0, ErrInvalidPlan
-		}
-	} else if len(plan.AssignmentPlans) != 0 {
+	catalog, err := NormalizeRepositoryReviewAssignmentCatalog(plan.AssignmentCatalog)
+	if err != nil || !repositoryReviewAssignmentCatalogEqual(catalog, plan.AssignmentCatalog) ||
+		catalog[0].ProfileHash != plan.ProfileHash ||
+		repositoryReviewRequiredAssignmentCount(catalog) != plan.RequiredAssignments {
+		return 0, ErrInvalidPlan
+	}
+	allowed := make(map[string]FileRef, len(plan.PendingFiles))
+	for _, file := range plan.PendingFiles {
+		allowed[file.Path] = file
+	}
+	plans, planErr := normalizeRepositoryReviewAssignmentPlans(
+		plan.AssignmentPlans, catalog, allowed,
+	)
+	if planErr != nil || len(plans) != len(plan.AssignmentPlans) ||
+		len(plans) > 0 && !reflect.DeepEqual(plans, plan.AssignmentPlans) {
 		return 0, ErrInvalidPlan
 	}
 	selected := make(map[string]struct{})
 	for _, group := range [][]FileRef{plan.PendingFiles, plan.DeferredFiles, plan.UnchangedFiles} {
-		canonical, err := canonicalRepositoryReviewCampaignFiles(group)
-		if err != nil || len(canonical) != len(group) {
+		canonical, groupErr := canonicalRepositoryReviewCampaignFiles(group)
+		if groupErr != nil || len(canonical) != len(group) {
 			return 0, ErrInvalidPlan
 		}
 		for _, file := range canonical {
@@ -1954,19 +1118,6 @@ func repositoryReviewCampaignScopeDigestForFiles(files []FileRef) (string, error
 	return stableID("sha256:", string(data)), nil
 }
 
-// CanonicalRepositoryReviewCampaignScope validates and sorts an exact campaign
-// manifest. It is exposed for trusted controller recovery code; callers still
-// need ReconcileCampaign's CAS boundary before the manifest becomes durable.
-func CanonicalRepositoryReviewCampaignScope(files []FileRef) ([]FileRef, error) {
-	return canonicalRepositoryReviewCampaignFiles(files)
-}
-
-// RepositoryReviewCampaignScopeDigest returns the digest ReconcileCampaign
-// binds to a canonical exact-file manifest.
-func RepositoryReviewCampaignScopeDigest(files []FileRef) (string, error) {
-	return repositoryReviewCampaignScopeDigestForFiles(files)
-}
-
 func canonicalRepositoryReviewCampaignFiles(files []FileRef) ([]FileRef, error) {
 	canonical, err := normalizeFiles(files)
 	if err != nil {
@@ -2008,21 +1159,6 @@ func containsRepositoryReviewFile(files []FileRef, pathValue string) bool {
 		}
 	}
 	return false
-}
-
-func bindScopeFiles(files []FileRef, allowed map[string]FileRef) ([]FileRef, error) {
-	normalized, err := normalizeFiles(files)
-	if err != nil || len(normalized) == 0 {
-		return nil, errors.New("exact finding context is empty or invalid")
-	}
-	for index, file := range normalized {
-		trusted, ok := allowed[file.Path]
-		if !ok || trusted.BlobSHA != file.BlobSHA || trusted.SizeBytes != file.SizeBytes {
-			return nil, fmt.Errorf("context file %q is outside the immutable review plan", file.Path)
-		}
-		normalized[index] = trusted
-	}
-	return normalized, nil
 }
 
 func fileInScope(path string, scope []FileRef) (FileRef, bool) {
@@ -2067,49 +1203,9 @@ func normalizeCandidate(candidate FindingCandidate) FindingCandidate {
 	return candidate
 }
 
-// NormalizeRepositoryReviewFindingCandidate returns the detached canonical
-// form persisted by Record. Recovery uses it before exact evidence comparison.
+// NormalizeRepositoryReviewFindingCandidate returns the detached canonical form.
 func NormalizeRepositoryReviewFindingCandidate(candidate FindingCandidate) FindingCandidate {
 	return normalizeCandidate(candidate)
-}
-
-// ValidateRepositoryReviewLegacyContextIdentity verifies the stable identity
-// originally assigned to an untagged legacy finding context.
-func ValidateRepositoryReviewLegacyContextIdentity(contextRecord FindingContext) bool {
-	contextRecord.CampaignID = ""
-	return contextRecord.ID != "" && contextRecord.ID == stableID(
-		"rctx_", contextBindingDigest(contextRecord),
-	)
-}
-
-// ValidateRepositoryReviewLegacyFindingIdentity verifies immutable finding
-// identity and first-observation fields with the exact Record algorithms.
-func ValidateRepositoryReviewLegacyFindingIdentity(
-	finding Finding,
-	origin FindingContext,
-	candidate FindingCandidate,
-) bool {
-	candidate = normalizeCandidate(candidate)
-	primary, inScope := fileInScope(candidate.File, origin.Files)
-	if !inScope {
-		return false
-	}
-	fingerprint := findingFingerprint(primary, candidate)
-	currentID := stableID(
-		"rfn_", finding.Repository, finding.CommitSHA, origin.RunID, fingerprint,
-	)
-	// Before immutable run occurrences were introduced, repository review
-	// findings coalesced across runs and their stable ID omitted commit/run
-	// identity. Recovery accepts only that exact predecessor formula.
-	legacyID := stableID("rfn_", finding.Repository, fingerprint)
-	return finding.Fingerprint == fingerprint &&
-		(finding.ID == currentID || finding.ID == legacyID) &&
-		finding.File == primary && reflect.DeepEqual(finding.Line, candidate.Line) &&
-		finding.Title == candidate.Title && finding.Symbol == candidate.Symbol &&
-		finding.Message == candidate.Message && finding.Evidence == candidate.Evidence &&
-		finding.Impact == candidate.Impact && reflect.DeepEqual(finding.Validation, candidate.Validation) &&
-		reflect.DeepEqual(finding.MatchHints, candidate.MatchHints) &&
-		reflect.DeepEqual(finding.FixEffort, candidate.FixEffort)
 }
 
 func normalizeFindingIdentityHints(values []string) []string {
@@ -2129,8 +1225,9 @@ func validateCandidate(candidate FindingCandidate) error {
 	default:
 		return errors.New("invalid severity")
 	}
-	if candidate.Title == "" || candidate.File == "" || candidate.Evidence == "" || candidate.Impact == "" ||
-		candidate.Validation.Summary == "" {
+	if candidate.Title == "" || candidate.Symbol == "" || candidate.File == "" || candidate.Message == "" ||
+		candidate.Evidence == "" || candidate.Impact == "" || candidate.Validation.Status != "confirmed" ||
+		candidate.Validation.Summary == "" || !findingCandidateHasEnrichment(candidate) {
 		return errors.New("finding is incomplete")
 	}
 	for _, value := range []string{
@@ -2158,29 +1255,18 @@ func validateCandidate(candidate FindingCandidate) error {
 	if candidate.Line != nil && *candidate.Line < 1 {
 		return errors.New("finding line must be positive")
 	}
-	if findingCandidateHasEnrichment(candidate) {
-		if err := validateMatchHints(candidate.MatchHints); err != nil {
-			return err
-		}
-		if err := validateFixEffort(candidate.FixEffort); err != nil {
-			return err
-		}
+	if err := validateMatchHints(candidate.MatchHints); err != nil {
+		return err
+	}
+	if err := validateFixEffort(candidate.FixEffort); err != nil {
+		return err
 	}
 	return nil
 }
 
-// ValidateGeneratedFindingCandidate applies the complete current finder
-// contract. Store.Record deliberately accepts candidates without enrichment so
-// legacy direct callers and persisted review occurrences remain readable; the
-// workflow's native model-output boundary calls this stricter validator.
+// ValidateGeneratedFindingCandidate normalizes and validates the current finder contract.
 func ValidateGeneratedFindingCandidate(candidate FindingCandidate) error {
 	candidate = normalizeCandidate(candidate)
-	if candidate.Symbol == "" || candidate.Message == "" || candidate.Validation.Status != "confirmed" {
-		return errors.New("generated finding is incomplete or unconfirmed")
-	}
-	if !findingCandidateHasEnrichment(candidate) {
-		return errors.New("generated finding is missing match hints and fix effort")
-	}
 	return validateCandidate(candidate)
 }
 
@@ -2282,58 +1368,6 @@ func findingFingerprint(file FileRef, candidate FindingCandidate) string {
 	return stableID("sha256:", values...)
 }
 
-func findingIndexByFingerprint(findings []Finding, fingerprint string) int {
-	for index := range findings {
-		if findings[index].Fingerprint == fingerprint {
-			return index
-		}
-	}
-	return -1
-}
-
-func semanticFindingIndex(findings []Finding, file FileRef, candidate FindingCandidate) int {
-	candidateTitle := findingTokens(candidate.Title)
-	candidateBody := findingTokens(candidate.Title + "\n" + candidate.Message + "\n" + candidate.Evidence)
-	for index, finding := range findings {
-		if finding.File.Path != file.Path || finding.File.BlobSHA != file.BlobSHA ||
-			!nearbyLines(finding.Line, candidate.Line) || candidate.Symbol == "" ||
-			normalizedText(finding.Symbol) != normalizedText(candidate.Symbol) {
-			continue
-		}
-		if findingCandidateHasEnrichment(candidate) && !matchHintsEmpty(finding.MatchHints) {
-			conflicts := append(
-				repositoryHardCausalConflicts(candidate.MatchHints, finding.MatchHints),
-				repositoryCausalFieldConflicts(candidate.MatchHints, finding.MatchHints)...,
-			)
-			if len(conflicts) > 0 {
-				continue
-			}
-			causalSimilarity := tokenDice(
-				findingTokens(repositoryCausalText(candidate.MatchHints)),
-				findingTokens(repositoryCausalText(finding.MatchHints)),
-			)
-			causalTitleSimilarity := tokenDice(findingTokens(finding.Title), candidateTitle)
-			anchorSimilarity := repositoryAnchorJaccard(
-				candidate.MatchHints.SourceAnchors, finding.MatchHints.SourceAnchors,
-			)
-			if causalSimilarity < 0.72 &&
-				!(causalTitleSimilarity >= 0.65 && causalSimilarity >= 0.50 &&
-					anchorSimilarity >= 0.50) {
-				continue
-			}
-		}
-		titleSimilarity := tokenDice(findingTokens(finding.Title), candidateTitle)
-		bodySimilarity := tokenDice(
-			findingTokens(finding.Title+"\n"+finding.Message+"\n"+finding.Evidence),
-			candidateBody,
-		)
-		if titleSimilarity >= 0.65 && bodySimilarity >= 0.35 || bodySimilarity >= 0.72 {
-			return index
-		}
-	}
-	return -1
-}
-
 func moreSevere(left, right string) string {
 	rank := map[string]int{"low": 1, "medium": 2, "high": 3, "critical": 4}
 	if rank[right] > rank[left] {
@@ -2344,15 +1378,8 @@ func moreSevere(left, right string) string {
 
 func findingObservationFrom(
 	candidate FindingCandidate,
-	contextID, model string,
-	provenance ...string,
+	contextID, model, modelAlias, account, reviewer string,
 ) FindingObservation {
-	var modelAlias, account, reviewer string
-	if len(provenance) >= 3 {
-		modelAlias, account, reviewer = provenance[0], provenance[1], provenance[2]
-	} else if len(provenance) > 0 {
-		reviewer = provenance[0]
-	}
 	return FindingObservation{
 		ContextID: contextID, Model: strings.TrimSpace(model),
 		ModelAlias: strings.TrimSpace(modelAlias), Account: strings.TrimSpace(account),
@@ -2362,31 +1389,6 @@ func findingObservationFrom(
 		Impact: candidate.Impact, Validation: candidate.Validation,
 		MatchHints: candidate.MatchHints, FixEffort: candidate.FixEffort,
 	}
-}
-
-func upsertFindingObservation(
-	observations []FindingObservation,
-	candidate FindingObservation,
-) ([]FindingObservation, bool) {
-	for index := range observations {
-		if observations[index].ContextID == candidate.ContextID {
-			observations[index] = candidate
-			return observations, false
-		}
-	}
-	if len(observations) >= 64 {
-		copy(observations, observations[len(observations)-63:])
-		observations = observations[:63]
-	}
-	return append(observations, candidate), true
-}
-
-func findingObservationContextIDs(observations []FindingObservation) []string {
-	contexts := make([]string, 0, len(observations))
-	for _, observation := range observations {
-		contexts = appendUnique(contexts, observation.ContextID)
-	}
-	return contexts
 }
 
 func pruneUnreferencedFindingContexts(state *RepositoryState) {
@@ -2411,17 +1413,6 @@ func pruneUnreferencedFindingContexts(state *RepositoryState) {
 		}
 	}
 	state.Contexts = contexts
-}
-
-func nearbyLines(left, right *int) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	delta := *left - *right
-	if delta < 0 {
-		delta = -delta
-	}
-	return delta <= 5
 }
 
 func findingTokens(value string) map[string]struct{} {
@@ -2510,7 +1501,7 @@ func validateState(state RepositoryState) error {
 		len(state.ReviewAttemptIdentities) > maxReviewFiles ||
 		len(state.Contexts) > 1_000_000 ||
 		len(state.Findings) > 100_000 || len(state.RawFindings) > 100_000 ||
-		len(state.DeduplicatedFindings) > 100_000 || len(state.DeduplicationJobs) > 100_000 ||
+		len(state.DeduplicationJobs) > 100_000 ||
 		len(state.Runs) > 100_000 || len(state.IssueDrafts) > 100_000 {
 		return errors.New("invalid repository review state")
 	}
@@ -2527,9 +1518,6 @@ func validateState(state RepositoryState) error {
 		return err
 	}
 	if err := validateDeduplicationState(state); err != nil {
-		return err
-	}
-	if err := validateHistoricalDeduplicationReplay(state); err != nil {
 		return err
 	}
 	if state.CurrentCampaign != nil &&
@@ -2570,29 +1558,31 @@ func validateState(state RepositoryState) error {
 		}
 	}
 	for _, finding := range state.Findings {
-		if len(finding.Observations) > 64 || len(finding.ContextIDs) > 64 ||
-			(finding.CampaignID != "" &&
-				(!ValidRepositoryReviewCampaignID(finding.CampaignID) ||
-					state.CampaignHistory[finding.CampaignID] != finding.CommitSHA)) {
+		if len(finding.Observations) > maxFindingContributorObservations ||
+			len(finding.ContextIDs) > maxFindingContributorObservations ||
+			!ValidRepositoryReviewCampaignID(finding.CampaignID) ||
+			state.CampaignHistory[finding.CampaignID] != finding.CommitSHA {
 			return errors.New("invalid repository review finding observations")
 		}
 	}
 	for _, contextRecord := range state.Contexts {
-		if contextRecord.CampaignID != "" &&
-			(!ValidRepositoryReviewCampaignID(contextRecord.CampaignID) ||
-				state.CampaignHistory[contextRecord.CampaignID] != contextRecord.CommitSHA ||
-				!validBoundedText(contextRecord.ProfileHash, 256)) {
+		if !ValidRepositoryReviewCampaignID(contextRecord.CampaignID) ||
+			state.CampaignHistory[contextRecord.CampaignID] != contextRecord.CommitSHA ||
+			!validBoundedText(contextRecord.ProfileHash, 256) ||
+			contextRecord.ID != stableID("rctx_", contextBindingDigest(contextRecord)) {
 			return errors.New("invalid repository review finding context campaign")
 		}
 	}
 	for _, run := range state.Runs {
 		if run.InspectedFiles < 0 || run.InspectedFiles > maxReviewFiles ||
-			run.LegacyRecovered && run.CampaignID == "" ||
-			(run.CampaignID != "" && (!ValidRepositoryReviewCampaignID(run.CampaignID) ||
-				state.CampaignHistory[run.CampaignID] != run.CommitSHA ||
-				!validBoundedText(run.ProfileHash, 256) ||
-				!validRepositoryReviewCampaignScopeDigest(run.ScopeDigest) ||
-				run.InspectedFiles > run.ReviewedFiles+run.UnreviewedFiles+run.UnsupportedCount)) {
+			!ValidRepositoryReviewCampaignID(run.CampaignID) ||
+			state.CampaignHistory[run.CampaignID] != run.CommitSHA ||
+			!validBoundedText(run.ProfileHash, 256) ||
+			!validRepositoryReviewCampaignScopeDigest(run.ScopeDigest) ||
+			!validRepositoryReviewBranchProvenance(
+				run.TargetBranch, run.AdvertisedDefaultBranch, run.TargetIsDefault,
+			) ||
+			run.InspectedFiles > run.ReviewedFiles+run.UnreviewedFiles+run.UnsupportedCount {
 			return errors.New("invalid repository review run campaign")
 		}
 		if len(run.CheckpointDigests) > maxRepositoryReviewRequiredAssignments {
@@ -2632,15 +1622,8 @@ func validBoundedText(value string, maximum int) bool {
 }
 
 func validFindingSourceProvenance(model, modelAlias, account string) bool {
-	if !validBoundedText(model, 256) {
-		return false
-	}
-	// Legacy observations predate exact alias/account capture. New provenance is
-	// atomic so a partial source identity can never be mistaken for exact data.
-	if modelAlias == "" && account == "" {
-		return true
-	}
-	return validBoundedText(modelAlias, 256) && validBoundedText(account, 256)
+	return validBoundedText(model, 256) && validBoundedText(modelAlias, 256) &&
+		validBoundedText(account, 256)
 }
 
 func RepositoryID(repository string) string {
@@ -2664,76 +1647,13 @@ func selectedFindings(all []Finding, requested []string) ([]Finding, []string, e
 			return nil, nil, errors.New("duplicate finding ID")
 		}
 		finding, ok := byID[id]
-		if !ok || finding.DeduplicationPending {
+		if !ok {
 			return nil, nil, os.ErrNotExist
 		}
 		seen[id] = struct{}{}
 		selected, ids = append(selected, finding), append(ids, id)
 	}
 	return selected, ids, nil
-}
-
-func defaultIssueTitle(findings []Finding) string {
-	if len(findings) == 1 {
-		return truncateUTF8Bytes(findings[0].Title, 256)
-	}
-	return fmt.Sprintf("Repository review: %d validated bugs", len(findings))
-}
-
-func truncateUTF8Bytes(value string, maximum int) string {
-	value = strings.TrimSpace(value)
-	if maximum < 1 || len(value) <= maximum {
-		return value
-	}
-	value = value[:maximum]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return strings.TrimSpace(value)
-}
-
-func defaultIssueBody(state RepositoryState, findings []Finding) string {
-	const maximumBodyBytes = maxIssueDraftBodyBytes
-	const issueFieldBytes = 8 << 10
-	var builder strings.Builder
-	fmt.Fprintf(
-		&builder,
-		"## Repository review findings\n\nRepository: `%s`\nLatest reviewed commit: `%s`\n\n",
-		state.Repository,
-		state.LastCommitSHA,
-	)
-	for _, finding := range findings {
-		section := strings.Builder{}
-		fmt.Fprintf(
-			&section,
-			"### [%s] %s\n\n",
-			strings.ToUpper(finding.Severity),
-			truncateUTF8Bytes(finding.Title, 256),
-		)
-		fmt.Fprintf(&section, "Finding ID: `%s`\n\nLocation: `%s", finding.ID, finding.File.Path)
-		if finding.Line != nil {
-			fmt.Fprintf(&section, ":%d", *finding.Line)
-		}
-		fmt.Fprintf(
-			&section,
-			"` (commit `%s`, blob `%s`)\n\n%s\n\nImpact: %s\n\nValidation: %s\n\n",
-			finding.CommitSHA,
-			finding.File.BlobSHA,
-			truncateUTF8Bytes(finding.Evidence, issueFieldBytes),
-			truncateUTF8Bytes(finding.Impact, issueFieldBytes),
-			truncateUTF8Bytes(finding.Validation.Summary, issueFieldBytes),
-		)
-		if builder.Len()+section.Len()+128 > maximumBodyBytes {
-			fmt.Fprintf(
-				&builder,
-				"\n%d additional selected findings are retained in draft finding_ids but omitted here to keep the issue body bounded.\n",
-				len(findings)-strings.Count(builder.String(), "Finding ID: `"),
-			)
-			break
-		}
-		builder.WriteString(section.String())
-	}
-	return strings.TrimSpace(builder.String())
 }
 
 func normalizeLabels(labels []string) []string {

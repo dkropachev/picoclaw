@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
 
@@ -26,7 +25,7 @@ var repositoryReviewRunFindingCollectionSchema = mustCollectionQuerySchema(
 		},
 		{
 			Name: "status", Type: collectionquery.TypeEnum, Sortable: true,
-			SuggestedValues: []string{"open", "dismissed", "posted"},
+			SuggestedValues: []string{"open", "posted"},
 		},
 		{
 			Name: "run_status", Type: collectionquery.TypeEnum, Sortable: true,
@@ -100,9 +99,8 @@ var repositoryReviewIssueCollectionSchema = mustCollectionQuerySchema(
 		},
 		{
 			Name: "origin", Type: collectionquery.TypeEnum, Sortable: true,
-			SuggestedValues: []string{"ai_generated", "linked", "discovered", "legacy"},
+			SuggestedValues: []string{"ai_generated", "linked", "discovered"},
 		},
-		{Name: "canonical", Type: collectionquery.TypeBoolean, Sortable: true},
 		{Name: "publishable", Type: collectionquery.TypeBoolean, Sortable: true},
 		{Name: "findings", Type: collectionquery.TypeNumber, Sortable: true},
 		{Name: "created", Type: collectionquery.TypeTimestamp, Sortable: true},
@@ -166,7 +164,6 @@ type repositoryReviewIssueCollectionSummary struct {
 	FindingCount    int                                 `json:"finding_count"`
 	Origin          repoaudit.IssueDraftOrigin          `json:"origin"`
 	GenerationID    string                              `json:"generation_id,omitempty"`
-	Canonical       bool                                `json:"canonical"`
 	Publishable     bool                                `json:"publishable"`
 	PublishBlockers []repoaudit.IssuePublicationBlocker `json:"publish_blockers"`
 	Title           string                              `json:"title"`
@@ -174,70 +171,6 @@ type repositoryReviewIssueCollectionSummary struct {
 	Version         int64                               `json:"version"`
 	CreatedAt       time.Time                           `json:"created_at"`
 	UpdatedAt       time.Time                           `json:"updated_at"`
-}
-
-func (h *Handler) handleListRepositoryReviewRunFindingsCollection(w http.ResponseWriter, r *http.Request) {
-	listRequest, ok := parseCollectionListRequest(w, r, repositoryReviewRunFindingCollectionSchema)
-	if !ok {
-		return
-	}
-	ledger, err := h.repositoryReviewAutomationLedger(r.Context(), r.PathValue("automation_id"))
-	if err != nil {
-		writeRepositoryReviewAutomationError(w, err)
-		return
-	}
-	findings := []repoaudit.Finding{}
-	if ledger.Found {
-		findings = repositoryReviewReportFindings(ledger.Automation, ledger.State, "current")
-	}
-	statusIndex := newRepositoryReviewRunFindingStatusIndex(ledger.State)
-	summaries := make([]repositoryReviewRunFindingSummary, 0, len(findings))
-	for _, finding := range findings {
-		if !strings.HasPrefix(finding.ID, "rfn_") {
-			continue
-		}
-		summaries = append(summaries, projectRepositoryReviewRunFindingSummary(finding, statusIndex.status(finding)))
-	}
-	contextID := repositoryReviewCollectionCursorContext("run-findings", ledger.Automation.ID, "current")
-	page, pageErr := collectionquery.Paginate(
-		summaries,
-		listRequest.Query,
-		listRequest.Cursor,
-		listRequest.Limit,
-		listRequest.Now,
-		repositoryReviewRunFindingPageOptions(contextID),
-	)
-	if pageErr != nil {
-		writeCollectionPageError(w, pageErr)
-		return
-	}
-	repositories, titles, paths, symbols, contributors := []string{}, []string{}, []string{}, []string{}, []string{}
-	for _, finding := range summaries {
-		repositories = append(repositories, finding.Repository)
-		titles = append(titles, finding.Title)
-		paths = append(paths, finding.Path)
-		symbols = append(symbols, finding.Symbol)
-		contributors = append(contributors, finding.Contributors...)
-	}
-	response := map[string]any{
-		"automation":      projectRepositoryReviewAutomation(ledger.Automation),
-		"findings":        page.Items,
-		"total":           page.Total,
-		"next_cursor":     page.NextCursor,
-		"canonical_query": listRequest.Query.Canonical(),
-		"query_schema": collectionSchemaWithSuggestions(
-			repositoryReviewRunFindingCollectionSchema,
-			map[collectionquery.Field][]string{
-				"repository": repositories, "title": titles, "path": paths,
-				"symbol": symbols, "contributors": contributors,
-			},
-		),
-		"capabilities": repositoryReviewGlobalCapabilities(ledger),
-	}
-	if ledger.Found {
-		response["repository"] = repoaudit.Summarize(ledger.State)
-	}
-	writeRepositoryReviewJSON(w, http.StatusOK, response)
 }
 
 func (h *Handler) handleListRepositoryReviewRepositoryFindingsCollection(w http.ResponseWriter, r *http.Request) {
@@ -356,23 +289,6 @@ func (h *Handler) handleListRepositoryReviewIssuesCollection(w http.ResponseWrit
 	writeRepositoryReviewJSON(w, http.StatusOK, response)
 }
 
-func projectRepositoryReviewRunFindingSummary(
-	finding repoaudit.Finding,
-	runStatus repositoryReviewRunFindingStatus,
-) repositoryReviewRunFindingSummary {
-	contributors := repositoryReviewFindingContributors(finding)
-	return repositoryReviewRunFindingSummary{
-		ID: finding.ID, Repository: finding.Repository,
-		Path: finding.File.Path, Line: finding.Line,
-		Severity: finding.Severity, Title: finding.Title, Symbol: finding.Symbol,
-		Status: finding.Status, RunFindingStatus: runStatus,
-		Association:         repositoryReviewRunFindingAssociation(runStatus),
-		RepositoryFindingID: finding.RepositoryFindingID,
-		Contributors:        contributors,
-		CreatedAt:           finding.CreatedAt, UpdatedAt: finding.UpdatedAt,
-	}
-}
-
 func projectRepositoryReviewRepositoryFindingCollectionSummary(
 	finding repoaudit.RepositoryFinding,
 ) repositoryReviewRepositoryFindingCollectionSummary {
@@ -405,16 +321,11 @@ func projectRepositoryReviewIssueCollectionSummary(
 	state repoaudit.RepositoryState,
 	draft repoaudit.IssueDraft,
 ) repositoryReviewIssueCollectionSummary {
-	origin := draft.Origin
-	if origin == "" {
-		origin = repoaudit.IssueDraftOriginLegacy
-	}
 	eligibility := repoaudit.EvaluateIssuePublication(state, draft)
 	return repositoryReviewIssueCollectionSummary{
 		ID: draft.ID, Repository: draft.Repository,
 		FindingCount: len(draft.FindingIDs),
-		Origin:       origin, GenerationID: draft.GenerationID,
-		Canonical:       draft.Canonical,
+		Origin:       draft.Origin, GenerationID: draft.GenerationID,
 		Publishable:     eligibility.CanPublish,
 		PublishBlockers: eligibility.PublishBlockers,
 		Title:           draft.Title, State: draft.State,
@@ -567,8 +478,6 @@ func repositoryReviewIssueCollectionField(
 		return collectionquery.EnumValue(string(issue.State)), true
 	case "origin":
 		return collectionquery.EnumValue(string(issue.Origin)), true
-	case "canonical":
-		return collectionquery.BooleanValue(issue.Canonical), true
 	case "publishable":
 		return collectionquery.BooleanValue(issue.Publishable), true
 	case "findings":
@@ -619,37 +528,6 @@ func repositoryReviewRunFindingAssociation(status repositoryReviewRunFindingStat
 	default:
 		return "unassociated"
 	}
-}
-
-func repositoryReviewFindingContributors(finding repoaudit.Finding) []string {
-	seen := make(map[string]struct{}, len(finding.Models)+len(finding.Observations))
-	contributors := make([]string, 0, len(seen))
-	appendContributor := func(value string) {
-		value = strings.TrimSpace(value)
-		key := strings.ToLower(value)
-		if value == "" {
-			return
-		}
-		if _, duplicate := seen[key]; duplicate {
-			return
-		}
-		seen[key] = struct{}{}
-		contributors = append(contributors, value)
-	}
-	for _, observation := range finding.Observations {
-		if strings.TrimSpace(observation.Reviewer) != "" {
-			appendContributor(observation.Reviewer)
-		} else {
-			appendContributor(observation.Model)
-		}
-	}
-	for _, model := range finding.Models {
-		appendContributor(model)
-	}
-	sort.SliceStable(contributors, func(i, j int) bool {
-		return strings.ToLower(contributors[i]) < strings.ToLower(contributors[j])
-	})
-	return contributors
 }
 
 func repositoryReviewCollectionCursorContext(parts ...string) string {

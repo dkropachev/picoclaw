@@ -102,7 +102,7 @@ func (c *repositoryReviewController) processRepositoryFindingMappings(
 			c.leasedStore, automations, state,
 		)
 		if !found {
-			automation = repositoryFallbackAutomation(c.leasedConfig, state)
+			continue
 		}
 		snapshot, err := repositoryMappingSnapshot(
 			ctx, c.leasedStore, c.leasedConfig, automation,
@@ -144,26 +144,6 @@ func (c *repositoryReviewController) processRepositoryFindingMappings(
 		}
 	}
 	return joined
-}
-
-func repositoryFallbackAutomation(
-	cfg *config.Config,
-	state repoaudit.RepositoryState,
-) repoaudit.RepositoryReviewAutomation {
-	automation := repoaudit.RepositoryReviewAutomation{
-		ID:                               "legacy_" + strings.TrimPrefix(state.ID, "rrp_"),
-		Repository:                       state.Repository,
-		DeduplicationSimilarityThreshold: repoaudit.DeduplicationDefaultThreshold,
-		DeduplicationCandidateLimit:      repoaudit.DeduplicationDefaultCandidateLimit,
-	}
-	if cfg != nil {
-		automation.AccountRef = cfg.Agents.Defaults.AccountRef
-		if model := strings.TrimSpace(cfg.Agents.Defaults.ModelName); model != "" {
-			automation.ReviewerModels = []string{model}
-			automation.IssueWriterModel = model
-		}
-	}
-	return automation
 }
 
 func repositoryMappingDefaultVerifier(
@@ -232,7 +212,7 @@ func repositoryMappingDefaultVerifier(
 		}
 		commit := strings.ToLower(strings.TrimSpace(finding.CommitSHA))
 		if !repositoryReviewValidCommitSHA(commit) {
-			return false, errors.New("legacy finding commit is not canonical")
+			return false, errors.New("finding commit is not canonical")
 		}
 		return repositoryReviewCommitIsAncestor(callCtx, workspace.Path, commit, "HEAD")
 	}
@@ -373,9 +353,7 @@ func repositoryAutomationForLedger(
 	state repoaudit.RepositoryState,
 ) (repoaudit.RepositoryReviewAutomation, bool) {
 	for _, automation := range automations {
-		resolved, found, err := store.ResolveRepositoryState(
-			automation.Repository, automation.RunIDs,
-		)
+		resolved, found, err := store.ResolveRepositoryState(automation.Repository)
 		if err == nil && found && resolved.ID == state.ID {
 			return automation, true
 		}
@@ -437,8 +415,7 @@ func runRepositoryMappingAdjudication(
 	); resolveErr != nil {
 		return repoaudit.RepositoryMappingAdjudication{}, resolveErr
 	}
-	request = repositoryMappingAdjudicationProjection(request)
-	payload, err := json.Marshal(request)
+	payload, err := repositoryMappingAdjudicationPayload(request)
 	if err != nil || len(payload) > 1<<20 {
 		return repoaudit.RepositoryMappingAdjudication{}, errors.New("mapping adjudication input exceeds its bound")
 	}
@@ -500,10 +477,9 @@ func runRepositoryMappingAdjudication(
 
 const repositoryMappingProjectionHistoryLimit = 16
 
-// repositoryMappingAdjudicationProjection keeps the private matcher input to
-// causal identity evidence. Review provenance, issue state, and unbounded
-// aggregate histories are neither useful for adjudication nor safe to leak
-// into a model request.
+// repositoryMappingAdjudicationProjection creates a detached, bounded matcher
+// input. repositoryMappingAdjudicationPayload removes the remaining private
+// provenance fields before the value enters a model request.
 func repositoryMappingAdjudicationProjection(
 	request repoaudit.RepositoryMappingAIRequest,
 ) repoaudit.RepositoryMappingAIRequest {
@@ -547,6 +523,31 @@ func repositoryMappingAdjudicationProjection(
 		)
 	}
 	return projected
+}
+
+func repositoryMappingAdjudicationPayload(
+	request repoaudit.RepositoryMappingAIRequest,
+) ([]byte, error) {
+	encoded, err := json.Marshal(repositoryMappingAdjudicationProjection(request))
+	if err != nil {
+		return nil, err
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		return nil, err
+	}
+	finding, ok := payload["finding"].(map[string]any)
+	if !ok {
+		return nil, errors.New("mapping adjudication finding projection is invalid")
+	}
+	for _, field := range []string{
+		"campaign_id", "admission_bucket", "creation_ordinal", "diagnosis_digest",
+		"raw_source_ids", "history", "context_ids", "models", "observation_count",
+		"observations", "issue_draft_id",
+	} {
+		delete(finding, field)
+	}
+	return json.Marshal(payload)
 }
 
 func repositoryMappingTailStrings(values []string, limit int) []string {
