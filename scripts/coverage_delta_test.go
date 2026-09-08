@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -404,7 +405,7 @@ func TestVerifiedInternalPackageRelocationLimitsFeatureImpactButKeepsPackageScop
 	writeCoverageDeltaTestFile(t, fixture.Root, "docs/features/fixture.md", "# Fixture\n\nUpdated.\n")
 	head := fixture.commitHead(t)
 
-	importOnly, err := verifiedInternalPackageRelocationImportChanges(
+	relocation, err := verifiedInternalPackageRelocationChanges(
 		fixture.Root,
 		fixture.Base,
 		head,
@@ -416,8 +417,12 @@ func TestVerifiedInternalPackageRelocationLimitsFeatureImpactButKeepsPackageScop
 		"pkg/consumer/consumer.go":      true,
 		"pkg/consumer/consumer_test.go": true,
 	}
-	if !reflect.DeepEqual(importOnly, wantImportOnly) {
-		t.Fatalf("verified relocation import-only files = %#v, want %#v", importOnly, wantImportOnly)
+	if !reflect.DeepEqual(relocation.ImportOnlyFiles, wantImportOnly) {
+		t.Fatalf(
+			"verified relocation import-only files = %#v, want %#v",
+			relocation.ImportOnlyFiles,
+			wantImportOnly,
+		)
 	}
 
 	movedSpec := featureSpecMetadata{
@@ -448,6 +453,15 @@ func TestVerifiedInternalPackageRelocationLimitsFeatureImpactButKeepsPackageScop
 	}
 	if plan.ImpactedFeature[consumerSpec.RelPath] {
 		t.Fatal("import-only consumer owner was impacted")
+	}
+	wantRelocatedFiles := map[string]string{
+		"pkg/store/store.go":            "internal/store/store.go",
+		"pkg/store/store_linux.go":      "internal/store/store_linux.go",
+		"pkg/store/store_test.go":       "internal/store/store_test.go",
+		"pkg/store/testdata/schema.sql": "internal/store/testdata/schema.sql",
+	}
+	if !reflect.DeepEqual(plan.RelocatedFiles, wantRelocatedFiles) {
+		t.Fatalf("relocated files = %#v, want %#v", plan.RelocatedFiles, wantRelocatedFiles)
 	}
 	for _, dir := range []string{"internal/store", "pkg/consumer"} {
 		if !slices.Contains(plan.CoverPackageDirs, dir) {
@@ -605,6 +619,14 @@ import "testing"
 func TestValue(t *testing.T) { t.Log("changed", Value()) }
 `)
 		},
+		"unrelated added Go file": func(t *testing.T, fixture internalRelocationFixture) {
+			fixture.moveCompletePackage(t)
+			fixture.rewriteConsumers(t)
+			writeCoverageDeltaTestFile(t, fixture.Root, "pkg/extra/extra.go", `package extra
+
+func Value() int { return 1 }
+`)
+		},
 		"unmoved package asset": func(t *testing.T, fixture internalRelocationFixture) {
 			for _, path := range []string{"store.go", "store_linux.go", "store_test.go"} {
 				fixture.moveFile(t, path)
@@ -625,7 +647,7 @@ func TestValue(t *testing.T) { t.Log("changed", Value()) }
 			fixture := newInternalRelocationFixture(t)
 			mutate(t, fixture)
 			head := fixture.commitHead(t)
-			got, err := verifiedInternalPackageRelocationImportChanges(
+			got, err := verifiedInternalPackageRelocationChanges(
 				fixture.Root,
 				fixture.Base,
 				head,
@@ -633,7 +655,7 @@ func TestValue(t *testing.T) { t.Log("changed", Value()) }
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(got) != 0 {
+			if len(got.ImportOnlyFiles) != 0 || len(got.RelocatedFiles) != 0 {
 				t.Fatalf("fail-closed relocation files = %#v, want none", got)
 			}
 			consumerSpec := featureSpecMetadata{
@@ -656,6 +678,44 @@ func TestValue(t *testing.T) { t.Log("changed", Value()) }
 				t.Fatal("fail-closed comparison did not restore consumer feature impact")
 			}
 		})
+	}
+}
+
+func TestVerifiedInternalPackageRelocationRequiresModuleIdentity(t *testing.T) {
+	t.Parallel()
+	fixture := newInternalRelocationFixture(t)
+	writeCoverageDeltaTestFile(t, fixture.Root, "go.mod", "go 1.25\n")
+	runCoverageDeltaTestGit(t, fixture.Root, "add", "go.mod")
+	runCoverageDeltaTestGit(t, fixture.Root, "commit", "--quiet", "--amend", "--no-edit")
+	fixture.Base = strings.TrimSpace(runCoverageDeltaTestGit(t, fixture.Root, "rev-parse", "HEAD"))
+	fixture.moveCompletePackage(t)
+	fixture.rewriteConsumers(t)
+	head := fixture.commitHead(t)
+
+	relocation, err := verifiedInternalPackageRelocationChanges(fixture.Root, fixture.Base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(relocation.ImportOnlyFiles) != 0 || len(relocation.RelocatedFiles) != 0 {
+		t.Fatalf("module-less relocation classified as verified: %#v", relocation)
+	}
+
+	missing := newInternalRelocationFixture(t)
+	if err := os.Remove(filepath.Join(missing.Root, "go.mod")); err != nil {
+		t.Fatal(err)
+	}
+	runCoverageDeltaTestGit(t, missing.Root, "add", "--all")
+	runCoverageDeltaTestGit(t, missing.Root, "commit", "--quiet", "--amend", "--no-edit")
+	missing.Base = strings.TrimSpace(runCoverageDeltaTestGit(t, missing.Root, "rev-parse", "HEAD"))
+	missing.moveCompletePackage(t)
+	missing.rewriteConsumers(t)
+	missingHead := missing.commitHead(t)
+	if _, err := verifiedInternalPackageRelocationChanges(
+		missing.Root,
+		missing.Base,
+		missingHead,
+	); err == nil {
+		t.Fatal("relocation classifier accepted a repository without go.mod")
 	}
 }
 
@@ -861,7 +921,7 @@ func TestModulePathFromGoModIsStrict(t *testing.T) {
 func TestCoverageRelocationGitHelpersReportInvalidRepositoryState(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	if _, err := verifiedInternalPackageRelocationImportChanges(root, "base", "head"); err == nil {
+	if _, err := verifiedInternalPackageRelocationChanges(root, "base", "head"); err == nil {
 		t.Fatal("relocation classifier accepted a non-repository")
 	}
 	if _, err := coverageComparisonBase(root, "base", "head"); err == nil {
@@ -869,6 +929,9 @@ func TestCoverageRelocationGitHelpersReportInvalidRepositoryState(t *testing.T) 
 	}
 	if _, err := gitFileAtRef(root, "missing", "go.mod"); err == nil {
 		t.Fatal("git file reader accepted a non-repository")
+	}
+	if _, _, err := gitFilePairAtRefs(root, "base", "head", "consumer.go"); err == nil {
+		t.Fatal("paired Git file reader accepted a non-repository")
 	}
 	if _, err := trackedPackageFiles(root, "missing", "pkg/store"); err == nil {
 		t.Fatal("package tree reader accepted a non-repository")
@@ -883,6 +946,23 @@ func TestCoverageRelocationGitHelpersReportInvalidRepositoryState(t *testing.T) 
 	}
 
 	fixture := newInternalRelocationFixture(t)
+	if _, _, err := gitFilePairAtRefs(
+		fixture.Root,
+		fixture.Base,
+		"missing-head",
+		"pkg/consumer/consumer.go",
+	); err == nil {
+		t.Fatal("paired Git file reader accepted a missing head ref")
+	}
+	baseSource, headSource, err := gitFilePairAtRefs(
+		fixture.Root,
+		fixture.Base,
+		fixture.Base,
+		"pkg/consumer/consumer.go",
+	)
+	if err != nil || !bytes.Equal(baseSource, headSource) {
+		t.Fatalf("paired Git file reader = equal %v, error %v", bytes.Equal(baseSource, headSource), err)
+	}
 	if _, err := verifyInternalPackageRelocation(
 		fixture.Root,
 		fixture.Base,
@@ -1182,6 +1262,284 @@ func TestCompareCoverageAllowsExactNewScopeFromEmptyBase(t *testing.T) {
 	head.Files["internal/new/feature.go"] = coverageSummary{CoveredStatements: 94, TotalStatements: 100}
 	if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); len(failures) != 2 {
 		t.Fatalf("below empty-base threshold failures = %#v, want global and feature failures", failures)
+	}
+}
+
+func relocationComparisonProfile(
+	movedPath string,
+	movedCovered, consumerCovered bool,
+) coverageProfile {
+	profile := emptyCoverageProfile()
+	addCoverageBlock(profile, coverageBlock{
+		File: movedPath, Range: "3.20,3.28", StartLine: 3, StartCol: 20,
+		EndLine: 3, EndCol: 28, Statements: 2, Covered: movedCovered,
+	})
+	addCoverageBlock(profile, coverageBlock{
+		File: "pkg/consumer/consumer.go", Range: "8.2,8.24", StartLine: 8, StartCol: 2,
+		EndLine: 8, EndCol: 24, Statements: 3, Covered: consumerCovered,
+	})
+	return summarizeCoverageBlocks(profile)
+}
+
+func TestCompareCoverageWaivesOnlyGlobalNoiseForVerifiedRelocation(t *testing.T) {
+	t.Parallel()
+	const source = "pkg/store/store.go"
+	const destination = "internal/store/store.go"
+	spec := featureSpecMetadata{
+		RelPath: "docs/features/store.md",
+		Ownerships: []featureOwnership{
+			{Kind: "CODE", Pattern: "pkg/store/**"},
+			{Kind: "CODE", Pattern: "internal/store/**"},
+		},
+	}
+	plan := coveragePlan{
+		ImpactedFeature: map[string]bool{spec.RelPath: true},
+		RelocatedFiles:  map[string]string{source: destination},
+	}
+	base := relocationComparisonProfile(source, true, true)
+	head := relocationComparisonProfile(destination, true, false)
+	wantBase := relocationComparisonProfile(source, true, true)
+	wantHead := relocationComparisonProfile(destination, true, false)
+
+	if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); len(failures) != 0 {
+		t.Fatalf("covered-bit-only relocation failures = %#v", failures)
+	}
+	if !reflect.DeepEqual(base, wantBase) || !reflect.DeepEqual(head, wantHead) {
+		t.Fatal("relocation comparison mutated a coverage profile")
+	}
+
+	head = relocationComparisonProfile(destination, false, true)
+	want := []string{
+		"docs/features/store.md Go coverage regressed: uncovered statement debt 0 -> 2 and coverage 100.00% (2/2) -> 0.00% (0/2)",
+	}
+	if got := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); !reflect.DeepEqual(got, want) {
+		t.Fatalf("moved-owner failures = %#v, want %#v", got, want)
+	}
+}
+
+func TestCompareCoverageRelocationWaiverRequiresNoChangedExecutableStatements(t *testing.T) {
+	t.Parallel()
+	const source = "pkg/store/store.go"
+	const destination = "internal/store/store.go"
+	base := relocationComparisonProfile(source, true, true)
+	head := relocationComparisonProfile(destination, true, false)
+	plan := coveragePlan{
+		RelocatedFiles: map[string]string{source: destination},
+		ChangedLines: map[string]map[int]bool{
+			destination: {3: true},
+		},
+	}
+	want := []string{
+		"scoped Go coverage regressed: uncovered statement debt 0 -> 3 and coverage 100.00% (5/5) -> 40.00% (2/5)",
+	}
+	if got := compareCoverage(nil, plan, base, head); !reflect.DeepEqual(got, want) {
+		t.Fatalf("covered changed-block failures = %#v, want %#v", got, want)
+	}
+
+	plan.ChangedLines = map[string]map[int]bool{
+		"pkg/consumer/consumer.go": {8: true},
+	}
+	want = append(want, "changed production Go coverage is below 90%: 0.00% (0/3)")
+	if got := compareCoverage(nil, plan, base, head); !reflect.DeepEqual(got, want) {
+		t.Fatalf("uncovered changed-block failures = %#v, want %#v", got, want)
+	}
+}
+
+func TestRelocationCoverageStructureFailsClosed(t *testing.T) {
+	t.Parallel()
+	const source = "pkg/store/store.go"
+	const destination = "internal/store/store.go"
+	baseProfile := func() coverageProfile {
+		return relocationComparisonProfile(source, true, true)
+	}
+	headProfile := func() coverageProfile {
+		return relocationComparisonProfile(destination, false, false)
+	}
+
+	tests := map[string]struct {
+		base        func() coverageProfile
+		head        func() coverageProfile
+		relocations map[string]string
+	}{
+		"missing block": {
+			base: baseProfile,
+			head: func() coverageProfile {
+				profile := headProfile()
+				delete(profile.Blocks, "pkg/consumer/consumer.go")
+				return summarizeCoverageBlocks(profile)
+			},
+			relocations: map[string]string{source: destination},
+		},
+		"extra block": {
+			base: baseProfile,
+			head: func() coverageProfile {
+				profile := headProfile()
+				addCoverageBlock(profile, coverageBlock{
+					File: "pkg/consumer/consumer.go", Range: "12.2,12.12",
+					StartLine: 12, StartCol: 2, EndLine: 12, EndCol: 12,
+					Statements: 1,
+				})
+				return summarizeCoverageBlocks(profile)
+			},
+			relocations: map[string]string{source: destination},
+		},
+		"range": {
+			base: baseProfile,
+			head: func() coverageProfile {
+				profile := headProfile()
+				block := profile.Blocks[destination]["3.20,3.28"]
+				delete(profile.Blocks[destination], "3.20,3.28")
+				block.Range = "3.20,3.29"
+				block.EndCol = 29
+				profile.Blocks[destination][block.Range] = block
+				return summarizeCoverageBlocks(profile)
+			},
+			relocations: map[string]string{source: destination},
+		},
+		"columns": {
+			base: baseProfile,
+			head: func() coverageProfile {
+				profile := headProfile()
+				block := profile.Blocks[destination]["3.20,3.28"]
+				block.StartCol = 19
+				profile.Blocks[destination][block.Range] = block
+				return profile
+			},
+			relocations: map[string]string{source: destination},
+		},
+		"block map identity": {
+			base: baseProfile,
+			head: func() coverageProfile {
+				profile := headProfile()
+				block := profile.Blocks[destination]["3.20,3.28"]
+				block.File = "internal/store/other.go"
+				profile.Blocks[destination][block.Range] = block
+				return profile
+			},
+			relocations: map[string]string{source: destination},
+		},
+		"statements": {
+			base: baseProfile,
+			head: func() coverageProfile {
+				profile := headProfile()
+				block := profile.Blocks[destination]["3.20,3.28"]
+				block.Statements++
+				profile.Blocks[destination][block.Range] = block
+				return summarizeCoverageBlocks(profile)
+			},
+			relocations: map[string]string{source: destination},
+		},
+		"file": {
+			base: baseProfile,
+			head: func() coverageProfile {
+				profile := headProfile()
+				blocks := profile.Blocks[destination]
+				delete(profile.Blocks, destination)
+				block := blocks["3.20,3.28"]
+				block.File = "internal/store/other.go"
+				profile.Blocks[block.File] = map[string]coverageBlock{block.Range: block}
+				return summarizeCoverageBlocks(profile)
+			},
+			relocations: map[string]string{source: destination},
+		},
+		"destination represented in base": {
+			base: func() coverageProfile {
+				profile := baseProfile()
+				profile.Blocks[destination] = map[string]coverageBlock{}
+				return profile
+			},
+			head:        headProfile,
+			relocations: map[string]string{source: destination},
+		},
+		"base statement total mismatch": {
+			base: func() coverageProfile {
+				profile := baseProfile()
+				profile.Global.TotalStatements++
+				return profile
+			},
+			head:        headProfile,
+			relocations: map[string]string{source: destination},
+		},
+		"non-injective map": {
+			base: baseProfile,
+			head: headProfile,
+			relocations: map[string]string{
+				source:               destination,
+				"pkg/other/other.go": destination,
+			},
+		},
+		"destination is source": {
+			base: baseProfile,
+			head: headProfile,
+			relocations: map[string]string{
+				source:      destination,
+				destination: "internal/store/final.go",
+			},
+		},
+		"same path": {
+			base:        baseProfile,
+			head:        headProfile,
+			relocations: map[string]string{source: source},
+		},
+		"empty path": {
+			base:        baseProfile,
+			head:        headProfile,
+			relocations: map[string]string{"": destination},
+		},
+		"empty map": {
+			base:        baseProfile,
+			head:        headProfile,
+			relocations: map[string]string{},
+		},
+	}
+
+	for name, test := range tests {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			base := test.base()
+			head := test.head()
+			if err := relocationCoverageStructureMatches(base, head, test.relocations); err == nil {
+				t.Fatal("mismatched relocation coverage structure was accepted")
+			}
+			if len(test.relocations) == 0 {
+				return
+			}
+			plan := coveragePlan{RelocatedFiles: test.relocations}
+			failures := compareCoverage(nil, plan, base, head)
+			if !slices.ContainsFunc(failures, func(failure string) bool {
+				return strings.HasPrefix(
+					failure,
+					"verified internal package relocation coverage structure mismatch:",
+				)
+			}) {
+				t.Fatalf("compareCoverage failures = %#v, want explicit structure mismatch", failures)
+			}
+		})
+	}
+}
+
+func TestCompareCoverageRelocationDoesNotBypassNewScopeThreshold(t *testing.T) {
+	t.Parallel()
+	base := emptyCoverageProfile()
+	head := emptyCoverageProfile()
+	addCoverageBlock(head, coverageBlock{
+		File: "internal/store/store.go", Range: "3.20,3.28",
+		StartLine: 3, StartCol: 20, EndLine: 3, EndCol: 28, Statements: 100,
+		Covered: false,
+	})
+	head = summarizeCoverageBlocks(head)
+	plan := coveragePlan{
+		RelocatedFiles: map[string]string{
+			"pkg/store/store.go": "internal/store/store.go",
+		},
+	}
+	failures := compareCoverage(nil, plan, base, head)
+	if !slices.Contains(
+		failures,
+		"scoped new Go coverage is below 95%: 0.00% (0/100)",
+	) {
+		t.Fatalf("new-scope relocation failures = %#v, want 95%% threshold failure", failures)
 	}
 }
 
