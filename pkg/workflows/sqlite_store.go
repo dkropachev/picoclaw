@@ -162,6 +162,24 @@ func (pool *workflowDatabasePool) release() {
 	})
 }
 
+func (pool *workflowDatabasePool) closeIdle() error {
+	if pool == nil {
+		return nil
+	}
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if pool.users != 0 || pool.db == nil {
+		return nil
+	}
+	if pool.timer != nil {
+		pool.timer.Stop()
+		pool.timer = nil
+	}
+	db := pool.db
+	pool.db = nil
+	return db.Close()
+}
+
 func (s *FileRunStore) borrowDatabase(ctx context.Context) (*sql.DB, error) {
 	s.poolOnce.Do(func() {
 		if s.database == nil {
@@ -181,9 +199,13 @@ func (s *FileRunStore) releaseDatabase() {
 // retain a store for their process lifetime; tests and short-lived embedders
 // may close it explicitly.
 func (s *FileRunStore) Close() error {
-	// Database pools are shared by every store for one workspace and close
-	// automatically after the last active operation becomes idle.
-	return nil
+	if s == nil || s.database == nil {
+		return nil
+	}
+	// Pools are shared by every store for one workspace. Close an idle pool
+	// immediately; an active peer retains it and the normal last-user timer
+	// closes it after that operation releases the pool.
+	return s.database.closeIdle()
 }
 
 func withWorkflowDB[T any](

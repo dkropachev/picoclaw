@@ -191,6 +191,49 @@ func TestSQLiteRunStoreConcurrentEventsAndAtomicCancellation(t *testing.T) {
 	}
 }
 
+func TestSQLiteRunStoreCloseDrainsIdleSharedPoolAndAllowsReopen(t *testing.T) {
+	workspace := privateWorkflowTestWorkspace(t)
+	store := NewFileRunStore(workspace)
+	run := &Run{
+		ID: "wr_close_idle", WorkflowRef: "workflows/test.yml", Status: RunStatusRunning,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := store.CreateRun(t.Context(), run); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store.database.mu.Lock()
+	db, timer, users := store.database.db, store.database.timer, store.database.users
+	store.database.mu.Unlock()
+	if db != nil || timer != nil || users != 0 {
+		t.Fatalf("closed workflow pool = db %p, timer %p, users %d", db, timer, users)
+	}
+	if _, err := store.GetRun(t.Context(), run.ID); err != nil {
+		t.Fatalf("reopen after Close() error = %v", err)
+	}
+	activeDB, err := store.borrowDatabase(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := activeDB.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("active peer after Close() = version %d, %v", version, err)
+	}
+	store.releaseDatabase()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var nilStore *FileRunStore
+	if err := nilStore.Close(); err != nil {
+		t.Fatalf("nil Close() error = %v", err)
+	}
+}
+
 //nolint:govet // Test assertions intentionally scope independent errors.
 func TestWorkflowSQLiteLegacyMigrationArchivesAndReopensIdempotently(t *testing.T) {
 	workspace := privateWorkflowTestWorkspace(t)
