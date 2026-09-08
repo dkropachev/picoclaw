@@ -64,7 +64,7 @@ func TestCoverageUnixEndpointLifecycle(t *testing.T) {
 }
 
 func TestCoverageUnixCleanupExistingSocketSuccess(t *testing.T) {
-	endpoint := filepath.Join(t.TempDir(), "broker.sock")
+	endpoint := filepath.Join(shortCoverageUnixTempDir(t), "broker.sock")
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: endpoint, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)

@@ -6,13 +6,230 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+func TestChangedGoLinesHandlesOddPathsC100AndFeedsChangedCoverage(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Win32 filenames cannot contain the odd-path fixture characters")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+
+	root := t.TempDir()
+	runCoverageDeltaTestGit(t, root, "init", "--quiet")
+	runCoverageDeltaTestGit(t, root, "config", "user.email", "coverage-delta@example.invalid")
+	runCoverageDeltaTestGit(t, root, "config", "user.name", "Coverage Delta Test")
+	runCoverageDeltaTestGit(t, root, "config", "commit.gpgSign", "false")
+	hooks := filepath.Join(root, "disabled-hooks")
+	if err := os.Mkdir(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runCoverageDeltaTestGit(t, root, "config", "core.hooksPath", hooks)
+
+	newlineFile := "pkg/odd/line\nbreak.go"
+	quotedOldFile := `pkg/odd/quote"name.go`
+	quotedNewFile := `pkg/odd/renamed"name.go`
+	addedFile := "pkg/odd/added.go"
+	copySourceFile := "pkg/odd/copy-source.go"
+	copyDestinationFile := "pkg/odd/copy-destination.go"
+	deletedFile := "pkg/odd/deleted.go"
+	const addedSource = `package odd
+
+var AddedValues = []string{
+	"unique-alpha-value",
+	"unique-bravo-value",
+	"unique-charlie-value",
+	"unique-delta-value",
+	"unique-echo-value",
+	"unique-foxtrot-value",
+}
+`
+	const copySourceBase = `package odd
+
+var CopyValues = []string{
+	"copy-alpha-value",
+	"copy-bravo-value",
+	"copy-charlie-value",
+	"copy-delta-value",
+	"copy-echo-value",
+	"copy-foxtrot-value",
+}
+`
+	const copySourceHead = `package odd
+
+var CopyValues = []string{
+	"copy-alpha-value",
+	"copy-bravo-value-modified",
+	"copy-charlie-value",
+	"copy-delta-value",
+	"copy-echo-value",
+	"copy-foxtrot-value",
+}
+`
+	for path, source := range map[string]string{
+		newlineFile:    "package odd\n\nfunc Newline() int {\n\treturn 1\n}\n",
+		quotedOldFile:  "package odd\n\nfunc Quoted() int {\n\treturn 1\n}\n",
+		copySourceFile: copySourceBase,
+		deletedFile:    "package odd\n\nfunc Deleted() int {\n\treturn 1\n}\n",
+	} {
+		writeCoverageDeltaTestFile(t, root, path, source)
+	}
+	runCoverageDeltaTestGit(t, root, "add", "--all")
+	runCoverageDeltaTestGit(t, root, "commit", "--quiet", "-m", "base")
+	base := strings.TrimSpace(runCoverageDeltaTestGit(t, root, "rev-parse", "HEAD"))
+
+	writeCoverageDeltaTestFile(
+		t,
+		root,
+		newlineFile,
+		"package odd\n\nfunc Newline() int {\n\treturn 2\n}\n",
+	)
+	if err := os.Rename(filepath.Join(root, quotedOldFile), filepath.Join(root, quotedNewFile)); err != nil {
+		t.Fatal(err)
+	}
+	writeCoverageDeltaTestFile(
+		t,
+		root,
+		quotedNewFile,
+		"package odd\n\nfunc Quoted() int {\n\treturn 2\n}\n",
+	)
+	writeCoverageDeltaTestFile(
+		t,
+		root,
+		addedFile,
+		addedSource,
+	)
+	writeCoverageDeltaTestFile(t, root, copySourceFile, copySourceHead)
+	writeCoverageDeltaTestFile(t, root, copyDestinationFile, copySourceBase)
+	if err := os.Remove(filepath.Join(root, deletedFile)); err != nil {
+		t.Fatal(err)
+	}
+	runCoverageDeltaTestGit(t, root, "add", "--all")
+	runCoverageDeltaTestGit(t, root, "commit", "--quiet", "-m", "head")
+	head := strings.TrimSpace(runCoverageDeltaTestGit(t, root, "rev-parse", "HEAD"))
+	statusOutput := runCoverageDeltaTestGit(
+		t,
+		root,
+		"diff",
+		"--name-status",
+		"-z",
+		"--find-renames",
+		"--find-copies",
+		"--diff-filter=ACMRTD",
+		base+"..."+head,
+	)
+	wantCopyRecord := "C100\x00" + copySourceFile + "\x00" + copyDestinationFile + "\x00"
+	if !strings.Contains(statusOutput, wantCopyRecord) {
+		t.Fatalf("name-status output did not contain %q: %q", wantCopyRecord, statusOutput)
+	}
+	records, err := changedFileStatusRecords(root, base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundCopy := false
+	for _, record := range records {
+		if record.Kind != 'C' || record.Paths[len(record.Paths)-1] != copyDestinationFile {
+			continue
+		}
+		foundCopy = true
+		if want := []string{copySourceFile, copyDestinationFile}; !reflect.DeepEqual(record.Paths, want) {
+			t.Fatalf("copy record paths = %#v, want %#v", record.Paths, want)
+		}
+	}
+	if !foundCopy {
+		t.Fatalf("changed file records did not contain C100 destination %q: %#v", copyDestinationFile, records)
+	}
+
+	changed, err := changedGoLines(root, base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{newlineFile, quotedNewFile} {
+		if want := map[int]bool{4: true}; !reflect.DeepEqual(changed[file], want) {
+			t.Errorf("changed lines for %q = %#v, want %#v", file, changed[file], want)
+		}
+	}
+	wantAdded := make(map[int]bool)
+	for line := 1; line <= strings.Count(addedSource, "\n"); line++ {
+		wantAdded[line] = true
+	}
+	if !reflect.DeepEqual(changed[addedFile], wantAdded) {
+		t.Errorf("added-file changed lines = %#v, want %#v", changed[addedFile], wantAdded)
+	}
+	wantCopy := make(map[int]bool)
+	for line := 1; line <= strings.Count(copySourceBase, "\n"); line++ {
+		wantCopy[line] = true
+	}
+	if !reflect.DeepEqual(changed[copyDestinationFile], wantCopy) {
+		t.Errorf("copied-file changed lines = %#v, want %#v", changed[copyDestinationFile], wantCopy)
+	}
+	for _, file := range []string{quotedOldFile, deletedFile} {
+		if len(changed[file]) != 0 {
+			t.Errorf("deleted-side changed lines for %q = %#v, want none", file, changed[file])
+		}
+	}
+
+	profile := coverageProfile{Blocks: map[string]map[string]coverageBlock{
+		newlineFile: {
+			"4.2,4.10": {
+				File: newlineFile, Range: "4.2,4.10", StartLine: 4, StartCol: 2,
+				EndLine: 4, EndCol: 10, Statements: 2, Covered: true,
+			},
+		},
+		quotedNewFile: {
+			"4.2,4.10": {
+				File: quotedNewFile, Range: "4.2,4.10", StartLine: 4, StartCol: 2,
+				EndLine: 4, EndCol: 10, Statements: 1,
+			},
+		},
+		addedFile: {
+			"4.2,4.10": {
+				File: addedFile, Range: "4.2,4.10", StartLine: 4, StartCol: 2,
+				EndLine: 4, EndCol: 10, Statements: 1, Covered: true,
+			},
+		},
+		copyDestinationFile: {
+			"4.2,4.10": {
+				File: copyDestinationFile, Range: "4.2,4.10", StartLine: 4, StartCol: 2,
+				EndLine: 4, EndCol: 10, Statements: 2, Covered: true,
+			},
+		},
+	}}
+	if got := changedCodeCoverage(changed, profile); got != (coverageSummary{5, 6}) {
+		t.Fatalf("odd-path changed-code coverage = %+v, want 5/6", got)
+	}
+}
+
+func writeCoverageDeltaTestFile(t *testing.T, root, relative, contents string) {
+	t.Helper()
+	path := filepath.Join(root, relative)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runCoverageDeltaTestGit(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
 
 func TestCoverageNestedBenchmarkSkipPatternIsExact(t *testing.T) {
 	t.Parallel()
@@ -211,12 +428,12 @@ func TestCompareCoverageAllowsExactNewScopeFromEmptyBase(t *testing.T) {
 }
 
 func TestInternalProductionAndCoverageBlockColumnBoundaries(t *testing.T) {
-	file := "internal/sqliteprovider/provider.go"
+	file := "internal/example/provider.go"
 	if !isCoverageRelevantGoFile(file) || !isProductionCodePath(file) {
 		t.Fatal("internal production Go was excluded from coverage policy")
 	}
-	if !isCoverageRelevantGoFile("internal/sqliteprovider/provider_test.go") ||
-		isProductionCodePath("internal/sqliteprovider/provider_test.go") {
+	if !isCoverageRelevantGoFile("internal/example/provider_test.go") ||
+		isProductionCodePath("internal/example/provider_test.go") {
 		t.Fatal("internal Go test coverage relevance/production classification is invalid")
 	}
 	profile := coverageProfile{Blocks: map[string]map[string]coverageBlock{
@@ -234,6 +451,272 @@ func TestInternalProductionAndCoverageBlockColumnBoundaries(t *testing.T) {
 	changed := map[string]map[int]bool{file: {11: true}}
 	if got := changedCodeCoverage(changed, profile); got != (coverageSummary{0, 1}) {
 		t.Fatalf("line-start block boundary coverage = %+v, want only uncovered 11.1 block", got)
+	}
+}
+
+func TestExecutableCoverageScriptsAreRelevantProductionScope(t *testing.T) {
+	for _, path := range []string{
+		"scripts/coverage_delta.go",
+		"scripts/feature_delta_guard.go",
+		"scripts/featuretools_lib.go",
+	} {
+		if !isCoverageRelevantChange(path) || !isCoverageRelevantGoFile(path) ||
+			!isProductionCodePath(path) {
+			t.Fatalf("executable script %q was excluded from Go coverage scope", path)
+		}
+	}
+	if !isCoverageRelevantGoFile("scripts/coverage_delta_test.go") ||
+		isProductionCodePath("scripts/coverage_delta_test.go") {
+		t.Fatal("script test coverage relevance/production classification is invalid")
+	}
+	for _, path := range []string{
+		"scripts/testdata/fixture.go",
+		"scripts/run-integration-tests.sh",
+	} {
+		if isCoverageRelevantGoFile(path) || isProductionCodePath(path) {
+			t.Fatalf("non-production coverage script %q was included", path)
+		}
+	}
+
+	const file = "scripts/coverage_delta.go"
+	profile := coverageProfile{Blocks: map[string]map[string]coverageBlock{
+		file: {
+			"10.1,10.20": {
+				File: file, Range: "10.1,10.20", StartLine: 10, StartCol: 1,
+				EndLine: 10, EndCol: 20, Statements: 1, Covered: true,
+			},
+		},
+	}}
+	changed := map[string]map[int]bool{file: {10: true}}
+	if got := changedCodeCoverage(changed, profile); got != (coverageSummary{1, 1}) {
+		t.Fatalf("script changed-code coverage = %+v, want 1/1", got)
+	}
+	if !coveragePlanIncludesDirectory([]string{"pkg/example", "scripts"}, "scripts") ||
+		coveragePlanIncludesDirectory([]string{"pkg/example"}, "scripts") {
+		t.Fatal("script coverage plan directory detection is invalid")
+	}
+}
+
+func TestParseCoverageBlockPreservesWindowsDrivePrefix(t *testing.T) {
+	block, err := parseCoverageBlock(
+		`C:\checkout`,
+		"example.com/module",
+		`C:\checkout\scripts\coverage_delta.go:12.3,14.5 7 1`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block.StartLine != 12 || block.StartCol != 3 || block.EndLine != 14 ||
+		block.EndCol != 5 || block.Statements != 7 || !block.Covered {
+		t.Fatalf("Windows-drive coverage block = %#v", block)
+	}
+	file := strings.ReplaceAll(block.File, `\`, "/")
+	if !strings.HasSuffix(file, "scripts/coverage_delta.go") {
+		t.Fatalf("Windows-drive coverage file = %q", block.File)
+	}
+}
+
+func TestRunScriptCoverageCollectsRealProfilesAcrossRefFileDifferences(t *testing.T) {
+	root := t.TempDir()
+	writeScriptCoverageFixture(t, root, "go.mod", "module example.com/scriptcoverage\n\ngo 1.24\n")
+	writeScriptCoverageFixture(t, root, "scripts/coverage_delta.go", `//go:build featuretools
+
+package main
+
+func main() {}
+
+func coveredScriptValue() int { return sharedScriptValue() }
+`)
+	writeScriptCoverageFixture(t, root, "scripts/featuretools_lib.go", `//go:build featuretools
+
+package main
+
+func sharedScriptValue() int { return 42 }
+`)
+
+	baseProfile, err := runScriptCoverage(
+		root,
+		"base",
+		"base-ref",
+		"goolm,stdjson",
+		filepath.Join(root, "base-profile"),
+		os.Environ(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTool := baseProfile.Files["scripts/coverage_delta.go"]
+	baseShared := baseProfile.Files["scripts/featuretools_lib.go"]
+	if baseTool.TotalStatements == 0 || baseShared.TotalStatements == 0 ||
+		baseTool.CoveredStatements != 0 || baseShared.CoveredStatements != 0 {
+		t.Fatalf("base explicit-file profile = tool %+v shared %+v", baseTool, baseShared)
+	}
+
+	writeScriptCoverageFixture(t, root, "scripts/coverage_delta_test.go", `//go:build featuretools
+
+package main
+
+import "testing"
+
+func TestCoveredScriptValue(t *testing.T) {
+	if coveredScriptValue() != 42 {
+		t.Fatal("wrong value")
+	}
+}
+`)
+	headProfile, err := runScriptCoverage(
+		root,
+		"head",
+		"head-ref",
+		"featuretools,goolm",
+		filepath.Join(root, "head-profile"),
+		os.Environ(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headTool := headProfile.Files["scripts/coverage_delta.go"]
+	headShared := headProfile.Files["scripts/featuretools_lib.go"]
+	if headTool.CoveredStatements == 0 || headShared.CoveredStatements == 0 ||
+		len(headProfile.Blocks["scripts/coverage_delta.go"]) == 0 ||
+		len(headProfile.Blocks["scripts/featuretools_lib.go"]) == 0 {
+		t.Fatalf("head explicit-file profile = tool %+v shared %+v blocks %#v", headTool, headShared, headProfile.Blocks)
+	}
+	if headTool.CoveredStatements <= baseTool.CoveredStatements ||
+		headShared.CoveredStatements <= baseShared.CoveredStatements {
+		t.Fatalf("head tests did not add real block coverage: base=%+v/%+v head=%+v/%+v", baseTool, baseShared, headTool, headShared)
+	}
+}
+
+func TestScriptCoverageGroupsAndFailuresAreFailClosed(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	if groups, err := scriptCoverageGroups(missing); err != nil || len(groups) != 0 {
+		t.Fatalf("missing scripts groups = %#v, %v", groups, err)
+	}
+	if profile, err := runScriptCoverage(
+		missing, "head", "head-ref", "", filepath.Join(missing, "profiles"), os.Environ(),
+	); err != nil || profile.Global.TotalStatements != 0 {
+		t.Fatalf("missing scripts profile = %#v, %v", profile, err)
+	}
+
+	notDirectory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(notDirectory, "scripts"), []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runScriptCoverage(
+		notDirectory,
+		"head",
+		"head-ref",
+		"",
+		filepath.Join(notDirectory, "profiles"),
+		os.Environ(),
+	); err == nil || !strings.Contains(err.Error(), "script coverage for head") {
+		t.Fatalf("non-directory scripts error = %v", err)
+	}
+
+	missingModule := t.TempDir()
+	writeScriptCoverageFixture(
+		t,
+		missingModule,
+		"scripts/coverage_delta.go",
+		"//go:build featuretools\n\npackage main\nfunc main() {}\n",
+	)
+	if _, err := runScriptCoverage(
+		missingModule,
+		"head",
+		"head-ref",
+		"",
+		filepath.Join(missingModule, "profiles"),
+		os.Environ(),
+	); err == nil || !strings.Contains(err.Error(), "read go.mod") {
+		t.Fatalf("missing script coverage module error = %v", err)
+	}
+
+	root := t.TempDir()
+	writeScriptCoverageFixture(t, root, "go.mod", "module example.com/scriptcoveragefailure\n\ngo 1.24\n")
+	writeScriptCoverageFixture(t, root, "scripts/featuretools_lib.go", "//go:build featuretools\n\npackage main\n")
+	groups, err := scriptCoverageGroups(root)
+	if err != nil || !reflect.DeepEqual(groups, []scriptCoverageGroup{{
+		Name: "featuretools_lib", Files: []string{"scripts/featuretools_lib.go"},
+	}}) {
+		t.Fatalf("shared-only groups = %#v, %v", groups, err)
+	}
+	unsafeRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(unsafeRoot, "scripts", "featuretools_lib.go"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scriptCoverageGroups(unsafeRoot); err == nil ||
+		!strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("unsafe shared coverage file error = %v", err)
+	}
+	if _, err := scriptCoverageFileAvailable(
+		root,
+		"scripts/"+strings.Repeat("x", 5000)+".go",
+	); err == nil {
+		t.Fatal("overlong script coverage path was accepted")
+	}
+
+	writeScriptCoverageFixture(t, root, "scripts/coverage_delta.go", "not valid Go")
+	blockedProfile := filepath.Join(root, "profile-file")
+	if err := os.WriteFile(blockedProfile, []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runScriptCoverage(
+		root, "head", "head-ref", "", blockedProfile, os.Environ(),
+	); err == nil || !strings.Contains(err.Error(), "create script coverage directory") {
+		t.Fatalf("blocked profile directory error = %v", err)
+	}
+	if _, err := runScriptCoverage(
+		root, "base", "base-ref", "", filepath.Join(root, "profiles"), os.Environ(),
+	); err == nil || !strings.Contains(err.Error(), "script coverage for base group coverage_delta") {
+		t.Fatalf("invalid explicit-file source error = %v", err)
+	}
+
+	if got := scriptCoverageBuildTags(""); got != "featuretools" {
+		t.Fatalf("empty script coverage tags = %q", got)
+	}
+	if got := scriptCoverageBuildTags(" goolm,stdjson, "); got != "featuretools,goolm,stdjson" {
+		t.Fatalf("merged script coverage tags = %q", got)
+	}
+	if got := scriptCoverageBuildTags("goolm featuretools"); got != "goolm featuretools" {
+		t.Fatalf("existing script coverage tags = %q", got)
+	}
+	if got := scriptCoverageTestFiles("future_tool.go"); !reflect.DeepEqual(
+		got,
+		[]string{"scripts/future_tool_test.go"},
+	) {
+		t.Fatalf("future tool test mapping = %#v", got)
+	}
+	if got := scriptCoverageTestFiles("feature_delta_guard.go"); !reflect.DeepEqual(
+		got,
+		[]string{"scripts/featuretools_lib_test.go"},
+	) {
+		t.Fatalf("feature delta test mapping = %#v", got)
+	}
+
+	unsafeTestRoot := t.TempDir()
+	writeScriptCoverageFixture(t, unsafeTestRoot, "scripts/featuretools_lib.go", "package main\n")
+	writeScriptCoverageFixture(t, unsafeTestRoot, "scripts/coverage_delta.go", "package main\n")
+	if err := os.MkdirAll(
+		filepath.Join(unsafeTestRoot, "scripts", "coverage_delta_test.go"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scriptCoverageGroups(unsafeTestRoot); err == nil ||
+		!strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("unsafe script test coverage file error = %v", err)
+	}
+}
+
+func writeScriptCoverageFixture(t *testing.T, root, relative, contents string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

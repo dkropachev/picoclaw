@@ -8,17 +8,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var (
-	windowsOpenGenerationMetadata = windows.CreateFile
-	windowsGenerationInformation  = windows.GetFileInformationByHandle
-)
-
 func generationHasSingleLink(path string, expected os.FileInfo) bool {
 	pathPointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return false
 	}
-	handle, err := windowsOpenGenerationMetadata(
+	handle, err := windows.CreateFile(
 		pathPointer,
 		windows.FILE_READ_ATTRIBUTES,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
@@ -41,7 +36,7 @@ func generationHasSingleLink(path string, expected os.FileInfo) bool {
 		return false
 	}
 	var information windows.ByHandleFileInformation
-	if err := windowsGenerationInformation(handle, &information); err != nil {
+	if err := windows.GetFileInformationByHandle(handle, &information); err != nil {
 		return false
 	}
 	if information.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {

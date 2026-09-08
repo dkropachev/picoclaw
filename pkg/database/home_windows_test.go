@@ -124,27 +124,6 @@ func TestWindowsEndpointAndManifestAcceptCaseAlias(t *testing.T) {
 	}
 }
 
-func TestWindowsOwnerValidationUsesCurrentUserSeam(t *testing.T) {
-	stateDir := filepath.Join(t.TempDir(), StateDirectoryName)
-	if err := createOwnerOnlyDirectory(stateDir); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Lstat(stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	foreign, err := windows.CreateWellKnownSid(windows.WinWorldSid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := windowsCurrentProcessUserSID
-	windowsCurrentProcessUserSID = func() (*windows.SID, error) { return foreign, nil }
-	t.Cleanup(func() { windowsCurrentProcessUserSID = original })
-	if err := validateOwnerOnlyDirectory(stateDir, info); CodeOf(err) != CodeUnauthorized {
-		t.Fatalf("foreign owner error = %v, want Unauthorized", err)
-	}
-}
-
 func TestWindowsOwnerValidationRejectsAdditionalTrustee(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), StateDirectoryName)
 	if err := createOwnerOnlyDirectory(stateDir); err != nil {

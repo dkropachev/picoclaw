@@ -11,7 +11,7 @@ func replaceStagedGeneration(stage, target string) (bool, error) {
 	if err := os.Rename(stage, target); err != nil {
 		return false, err
 	}
-	if err := stagedCutoverDirectorySync(filepath.Dir(target)); err != nil {
+	if err := syncStagedMigrationDirectory(filepath.Dir(target)); err != nil {
 		return true, err
 	}
 	return true, nil

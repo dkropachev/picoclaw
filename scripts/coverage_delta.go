@@ -64,6 +64,11 @@ type coveragePlan struct {
 	GlobalRelevant    bool
 }
 
+type scriptCoverageGroup struct {
+	Name  string
+	Files []string
+}
+
 const (
 	newFeatureMinimumCoveragePercent   = 95
 	changedCodeMinimumCoveragePercent  = 90
@@ -253,6 +258,7 @@ func isCoverageRelevantGoFile(path string) bool {
 	if strings.HasPrefix(path, "cmd/") ||
 		strings.HasPrefix(path, "internal/") ||
 		strings.HasPrefix(path, "pkg/") ||
+		strings.HasPrefix(path, "scripts/") ||
 		strings.HasPrefix(path, "web/backend/") ||
 		strings.HasPrefix(path, "integration/") {
 		return true
@@ -437,23 +443,42 @@ func coverageForRef(
 	if len(testImports) == 0 {
 		testImports = coverImports
 	}
-	if len(testImports) == 0 {
+	collectScripts := coveragePlanIncludesDirectory(plan.CoverPackageDirs, "scripts")
+	if len(testImports) == 0 && !collectScripts {
 		return emptyCoverageProfile(), nil
 	}
 
-	profilePath := filepath.Join(tmpDir, label+".cover.out")
-	profile, err := runGoCoverage(
-		worktree,
-		label,
-		ref,
-		tags,
-		profilePath,
-		coverImports,
-		testImports,
-		coverageFallbackHomeEnvironment(environment),
-	)
-	if err != nil {
-		return coverageProfile{}, err
+	unitEnvironment := coverageFallbackHomeEnvironment(environment)
+	profile := emptyCoverageProfile()
+	if len(testImports) > 0 {
+		profilePath := filepath.Join(tmpDir, label+".cover.out")
+		profile, err = runGoCoverage(
+			worktree,
+			label,
+			ref,
+			tags,
+			profilePath,
+			coverImports,
+			testImports,
+			unitEnvironment,
+		)
+		if err != nil {
+			return coverageProfile{}, err
+		}
+	}
+	if collectScripts {
+		scriptProfile, scriptErr := runScriptCoverage(
+			worktree,
+			label,
+			ref,
+			tags,
+			filepath.Join(tmpDir, label+"-script-coverage"),
+			unitEnvironment,
+		)
+		if scriptErr != nil {
+			return coverageProfile{}, scriptErr
+		}
+		profile = mergeCoverageProfiles(profile, scriptProfile)
 	}
 	if err = writeCoverageConfig(coverageHome); err != nil {
 		return coverageProfile{}, fmt.Errorf("write %s coverage config: %w", label, err)
@@ -488,6 +513,16 @@ func coverageForRef(
 	}
 
 	return profile, nil
+}
+
+func coveragePlanIncludesDirectory(dirs []string, wanted string) bool {
+	wanted = normalizeRepoPath(wanted)
+	for _, dir := range dirs {
+		if normalizeRepoPath(dir) == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 // coverageIntegrationSuitesForRef resolves a head-derived integration plan
@@ -623,6 +658,202 @@ func runCoverageCommandWithBaselineRetry(
 	}
 	out, err = run()
 	return out, err, true
+}
+
+// runScriptCoverage collects top-level Go script programs one at a time. The
+// scripts directory intentionally contains several package-main entrypoints,
+// so package-pattern coverage would either omit featuretools-tagged sources or
+// fail with duplicate main declarations. Explicit files match the supported
+// Makefile test invocations while keeping each program in its own test binary.
+func runScriptCoverage(
+	worktree, label, ref, tags, profileDir string,
+	environment []string,
+) (coverageProfile, error) {
+	groups, err := scriptCoverageGroups(worktree)
+	if err != nil {
+		return coverageProfile{}, fmt.Errorf(
+			"script coverage for %s (%s): %w",
+			label,
+			ref,
+			err,
+		)
+	}
+	if len(groups) == 0 {
+		return emptyCoverageProfile(), nil
+	}
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		return coverageProfile{}, fmt.Errorf(
+			"create script coverage directory for %s (%s): %w",
+			label,
+			ref,
+			err,
+		)
+	}
+	module, err := modulePath(worktree)
+	if err != nil {
+		return coverageProfile{}, err
+	}
+
+	profile := emptyCoverageProfile()
+	for _, group := range groups {
+		profilePath := filepath.Join(profileDir, group.Name+".cover.out")
+		args := []string{
+			"test",
+			"-buildvcs=false",
+			"-tags",
+			scriptCoverageBuildTags(tags),
+			"-covermode=atomic",
+			"-coverprofile",
+			profilePath,
+		}
+		for _, file := range group.Files {
+			args = append(args, "./"+filepath.ToSlash(file))
+		}
+		run := func() ([]byte, error) {
+			cmd := exec.Command("go", args...)
+			cmd.Dir = worktree
+			cmd.Env = append([]string(nil), environment...)
+			return cmd.CombinedOutput()
+		}
+		out, runErr, retried := runCoverageCommandWithBaselineRetry(label, run)
+		if retried {
+			fmt.Fprintf(
+				os.Stderr,
+				"coverage delta: retried %s script group %s (%s) after baseline coverage failure\n",
+				label,
+				group.Name,
+				ref,
+			)
+		}
+		if runErr != nil {
+			return coverageProfile{}, fmt.Errorf(
+				"script coverage for %s group %s (%s): %w\n%s",
+				label,
+				group.Name,
+				ref,
+				runErr,
+				trimCommandOutput(out),
+			)
+		}
+		next, parseErr := parseCoverageProfile(worktree, module, profilePath)
+		if parseErr != nil {
+			return coverageProfile{}, fmt.Errorf(
+				"parse %s script coverage group %s: %w",
+				label,
+				group.Name,
+				parseErr,
+			)
+		}
+		profile = mergeCoverageProfiles(profile, next)
+	}
+	return profile, nil
+}
+
+func scriptCoverageBuildTags(tags string) string {
+	tags = strings.Trim(strings.TrimSpace(tags), ",")
+	if tags == "" {
+		return "featuretools"
+	}
+	for _, tag := range strings.FieldsFunc(tags, func(character rune) bool {
+		return character == ',' || character == ' ' || character == '\t'
+	}) {
+		if tag == "featuretools" {
+			return tags
+		}
+	}
+	return "featuretools," + tags
+}
+
+// scriptCoverageGroups creates one group per production Go file directly under
+// scripts. Shared featuretools helpers are included in every group, but never
+// become a second main entrypoint. The two special test mappings are the exact
+// explicit-file commands used by make test-featuretools; future programs pick
+// up a same-basename test automatically.
+func scriptCoverageGroups(worktree string) ([]scriptCoverageGroup, error) {
+	scriptsDir := filepath.Join(worktree, "scripts")
+	entries, err := os.ReadDir(scriptsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	shared := "scripts/featuretools_lib.go"
+	sharedAvailable, err := scriptCoverageFileAvailable(worktree, shared)
+	if err != nil {
+		return nil, err
+	}
+
+	var groups []scriptCoverageGroup
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") ||
+			strings.HasSuffix(name, "_test.go") || name == filepath.Base(shared) {
+			continue
+		}
+		anchor := filepath.ToSlash(filepath.Join("scripts", name))
+		available, inspectErr := scriptCoverageFileAvailable(worktree, anchor)
+		if inspectErr != nil {
+			return nil, inspectErr
+		}
+		if !available {
+			continue
+		}
+		files := []string{anchor}
+		if sharedAvailable {
+			files = append(files, shared)
+		}
+		for _, testFile := range scriptCoverageTestFiles(name) {
+			available, inspectErr = scriptCoverageFileAvailable(worktree, testFile)
+			if inspectErr != nil {
+				return nil, inspectErr
+			}
+			if available {
+				files = append(files, testFile)
+			}
+		}
+		groups = append(groups, scriptCoverageGroup{
+			Name:  strings.TrimSuffix(name, ".go"),
+			Files: files,
+		})
+	}
+	if len(groups) == 0 && sharedAvailable {
+		groups = append(groups, scriptCoverageGroup{
+			Name: "featuretools_lib", Files: []string{shared},
+		})
+	}
+	return groups, nil
+}
+
+func scriptCoverageTestFiles(program string) []string {
+	switch program {
+	case "coverage_delta.go":
+		return []string{"scripts/coverage_delta_test.go"}
+	case "feature_delta_guard.go":
+		return []string{"scripts/featuretools_lib_test.go"}
+	default:
+		return []string{
+			filepath.ToSlash(filepath.Join(
+				"scripts",
+				strings.TrimSuffix(program, ".go")+"_test.go",
+			)),
+		}
+	}
+}
+
+func scriptCoverageFileAvailable(worktree, relative string) (bool, error) {
+	path := filepath.Join(worktree, filepath.FromSlash(relative))
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect script coverage file %s: %w", relative, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("script coverage file %s is not a regular file", relative)
+	}
+	return true, nil
 }
 
 func runIntegrationCoverage(
@@ -1097,7 +1328,9 @@ func parseCoverageProfile(root, modulePath, profilePath string) (coverageProfile
 }
 
 func parseCoverageBlock(root, modulePath, line string) (coverageBlock, error) {
-	colon := strings.IndexByte(line, ':')
+	// Explicit-file coverage profiles use absolute source paths. Split at the
+	// final colon so a Windows drive prefix remains part of the filename.
+	colon := strings.LastIndexByte(line, ':')
 	if colon < 0 {
 		return coverageBlock{}, fmt.Errorf("invalid coverage line %q", line)
 	}
@@ -1372,47 +1605,97 @@ func changedCodeStatus(summary coverageSummary) string {
 }
 
 func changedGoLines(root, base, head string) (map[string]map[int]bool, error) {
-	out, err := gitOutput(root, "diff", "--unified=0", "--no-ext-diff", base+"..."+head, "--", "*.go")
+	changed, err := changedFileStatusRecords(root, base, head)
 	if err != nil {
-		return nil, fmt.Errorf("git diff changed lines %s...%s: %w", base, head, err)
+		return nil, err
 	}
+	mergeBaseOutput, err := gitOutput(root, "merge-base", base, head)
+	if err != nil {
+		return nil, fmt.Errorf("git merge-base changed lines %s...%s: %w", base, head, err)
+	}
+	mergeBase := strings.TrimSpace(mergeBaseOutput)
+	if mergeBase == "" {
+		return nil, fmt.Errorf("git merge-base changed lines %s...%s returned no commit", base, head)
+	}
+
 	result := make(map[string]map[int]bool)
-	var currentFile string
+	for _, change := range changed {
+		destination := change.Paths[len(change.Paths)-1]
+		if change.Kind == 'D' || !strings.HasSuffix(destination, ".go") {
+			continue
+		}
+		var out string
+		var diffErr error
+		if change.Kind == 'A' || change.Kind == 'C' {
+			out, diffErr = gitOutput(
+				root,
+				"--literal-pathspecs",
+				"diff",
+				"--unified=0",
+				"--no-ext-diff",
+				mergeBase,
+				head,
+				"--",
+				destination,
+			)
+		} else {
+			out, diffErr = gitOutput(
+				root,
+				"diff",
+				"--unified=0",
+				"--no-ext-diff",
+				mergeBase+":"+change.Paths[0],
+				head+":"+destination,
+			)
+		}
+		if diffErr != nil {
+			return nil, fmt.Errorf(
+				"git diff changed lines for %q %s...%s: %w",
+				destination,
+				base,
+				head,
+				diffErr,
+			)
+		}
+		lines, parseErr := parseAddedDiffLines(out)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse changed lines for %q: %w", destination, parseErr)
+		}
+		if len(lines) != 0 {
+			result[destination] = lines
+		}
+	}
+	return result, nil
+}
+
+func parseAddedDiffLines(out string) (map[int]bool, error) {
+	lines := make(map[int]bool)
+	inHunk := false
 	newLine := 0
 	for _, raw := range strings.Split(out, "\n") {
 		line := strings.TrimRight(raw, "\r")
-		if strings.HasPrefix(line, "+++ b/") {
-			currentFile = normalizeRepoPath(strings.TrimPrefix(line, "+++ b/"))
-			continue
-		}
-		if strings.HasPrefix(line, "+++ /dev/null") {
-			currentFile = ""
-			continue
-		}
 		if strings.HasPrefix(line, "@@ ") {
 			start, err := parseDiffNewStart(line)
 			if err != nil {
 				return nil, err
 			}
 			newLine = start
+			inHunk = true
 			continue
 		}
-		if currentFile == "" || strings.HasPrefix(line, "diff --git ") || strings.HasPrefix(line, "--- ") {
+		if !inHunk {
 			continue
 		}
 		switch {
 		case strings.HasPrefix(line, "+"):
-			if result[currentFile] == nil {
-				result[currentFile] = make(map[int]bool)
-			}
-			result[currentFile][newLine] = true
+			lines[newLine] = true
 			newLine++
 		case strings.HasPrefix(line, "-"):
-		default:
+		case strings.HasPrefix(line, " "):
 			newLine++
 		}
 	}
-	return result, nil
+	return lines, nil
 }
 
 func parseDiffNewStart(hunk string) (int, error) {

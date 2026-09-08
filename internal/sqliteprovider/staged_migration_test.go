@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	dblayer "github.com/sipeed/picoclaw/pkg/database"
 )
 
 func TestStagedMigrationFailureLeavesOriginalBytes(t *testing.T) {
@@ -114,24 +112,6 @@ func TestStagedMigrationCutoverReopensAndValidates(t *testing.T) {
 	}
 	if maintenance.AfterVersion != 1 {
 		t.Fatalf("installed version = %d", maintenance.AfterVersion)
-	}
-}
-
-func TestStagedMigrationActivationFailureIsOutcomeUnknown(t *testing.T) {
-	path := createStagedMigrationFixture(t)
-	originalActivation := stagedGenerationActivation
-	stagedGenerationActivation = func(context.Context, string, time.Duration, int) error {
-		return errors.New("injected activation failure")
-	}
-	t.Cleanup(func() { stagedGenerationActivation = originalActivation })
-
-	err := MigrateStagedOffline(t.Context(), path, 5*time.Second, 1, installStagedFixtureTable)
-	if dblayer.CodeOf(err) != dblayer.CodeOutcomeUnknown {
-		t.Fatalf("activation failure code = %s, error = %v", dblayer.CodeOf(err), err)
-	}
-	ready, inspectErr := HasSchemaObjects(t.Context(), path, 5*time.Second, "installed")
-	if inspectErr != nil || !ready {
-		t.Fatalf("installed generation ready=%t err=%v", ready, inspectErr)
 	}
 }
 

@@ -4,13 +4,63 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	launcherapi "github.com/sipeed/picoclaw/web/backend/api"
 )
+
+func runBackfillForTest(
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	backfill backfillFileAttributionsFunc,
+) error {
+	if stdout == nil || stderr == nil || backfill == nil {
+		return errors.New("command output and backfill operation are required")
+	}
+	command, err := parseBackfillCommand(args, stderr)
+	if err != nil {
+		return err
+	}
+	return executeBackfillCommand(command, stdout, backfill)
+}
+
+func TestRunValidatesArgumentsBeforeDatabasePreparation(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "must-not-be-created")
+	t.Setenv("PICOCLAW_HOME", home)
+	t.Setenv("PICOCLAW_EXECUTABLE", filepath.Join(home, "missing-picoclaw"))
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+		help bool
+	}{
+		{name: "unknown flag", args: []string{"--unknown"}, want: "flag"},
+		{name: "missing identity", want: "--workspace and --automation are required"},
+		{name: "help", args: []string{"--help"}, help: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := run(test.args, io.Discard, io.Discard)
+			if test.help {
+				if !errors.Is(err, flag.ErrHelp) {
+					t.Fatalf("help error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validation error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	if _, err := os.Lstat(home); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("argument validation prepared database home: %v", err)
+	}
+}
 
 func TestRunDryAndApply(t *testing.T) {
 	report := launcherapi.RepositoryReviewFileAttributionBackfillReport{
@@ -36,7 +86,7 @@ func TestRunDryAndApply(t *testing.T) {
 		return result, nil
 	}
 	var stdout, stderr bytes.Buffer
-	if err := run(
+	if err := runBackfillForTest(
 		[]string{"--workspace", " /workspace ", "--automation", " rra_test "},
 		&stdout, &stderr, backfill,
 	); err != nil || len(calls) != 1 || calls[0].Apply ||
@@ -58,7 +108,7 @@ func TestRunDryAndApply(t *testing.T) {
 		"--expect-projected-completed-assignments=0", "--expect-projected-pending-assignments=0",
 		"--expect-projected-inspected-files=0", "--expect-projected-completed-files=0",
 	}
-	if err := run(args, &stdout, &stderr, backfill); err != nil || len(calls) != 2 ||
+	if err := runBackfillForTest(args, &stdout, &stderr, backfill); err != nil || len(calls) != 2 ||
 		calls[0].Apply || !calls[1].Apply || calls[1].ExpectedDigest != report.Digest ||
 		!strings.Contains(stdout.String(), `"applied": true`) {
 		t.Fatalf("apply calls=%#v stdout=%q err=%v", calls, stdout.String(), err)
@@ -128,7 +178,7 @@ func TestRunErrors(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := run(test.args, test.stdout, test.stderr, test.backfill)
+			err := runBackfillForTest(test.args, test.stdout, test.stderr, test.backfill)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error=%v want %q", err, test.want)
 			}
@@ -154,7 +204,7 @@ func TestRunApplyFailuresAndEncoding(t *testing.T) {
 		"--expect-projected-completed-files=0",
 	}
 	t.Run("missing expectation", func(t *testing.T) {
-		err := run(
+		err := runBackfillForTest(
 			args[:len(args)-1],
 			io.Discard,
 			io.Discard,
@@ -169,7 +219,7 @@ func TestRunApplyFailuresAndEncoding(t *testing.T) {
 	t.Run("changed initial count", func(t *testing.T) {
 		changed := base
 		changed.UniqueFiles = 2
-		err := run(
+		err := runBackfillForTest(
 			args,
 			io.Discard,
 			io.Discard,
@@ -183,7 +233,7 @@ func TestRunApplyFailuresAndEncoding(t *testing.T) {
 	})
 	t.Run("apply failure", func(t *testing.T) {
 		calls := 0
-		err := run(
+		err := runBackfillForTest(
 			args,
 			io.Discard,
 			io.Discard,
@@ -201,7 +251,7 @@ func TestRunApplyFailuresAndEncoding(t *testing.T) {
 	})
 	t.Run("changed applied count", func(t *testing.T) {
 		calls := 0
-		err := run(
+		err := runBackfillForTest(
 			args,
 			io.Discard,
 			io.Discard,
@@ -219,7 +269,7 @@ func TestRunApplyFailuresAndEncoding(t *testing.T) {
 		}
 	})
 	t.Run("encode failure", func(t *testing.T) {
-		err := run(
+		err := runBackfillForTest(
 			[]string{"--workspace=w", "--automation=a"},
 			failingWriter{},
 			io.Discard,
@@ -286,40 +336,11 @@ func TestCompareExpectedCountsAllFields(t *testing.T) {
 	}
 }
 
-func TestMainAndFatalWrappers(t *testing.T) {
-	originalArgs, originalStdout, originalStderr := os.Args, os.Stdout, os.Stderr
-	originalBackfill, originalPrepare, originalExit := backfillFileAttributions, prepareBackfillRuntime, exitProcess
+func TestFatalWrapper(t *testing.T) {
+	originalStderr, originalExit := os.Stderr, exitProcess
 	t.Cleanup(func() {
-		os.Args, os.Stdout, os.Stderr = originalArgs, originalStdout, originalStderr
-		backfillFileAttributions, exitProcess = originalBackfill, originalExit
-		prepareBackfillRuntime = originalPrepare
+		os.Stderr, exitProcess = originalStderr, originalExit
 	})
-	stdout, err := os.CreateTemp(t.TempDir(), "stdout")
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Args = []string{"repository-review-attribution-backfill", "--workspace=w", "--automation=a"}
-	os.Stdout = stdout
-	backfillFileAttributions = func(
-		context.Context,
-		string,
-		string,
-		launcherapi.RepositoryReviewFileAttributionBackfillOptions,
-	) (launcherapi.RepositoryReviewFileAttributionBackfillReport, error) {
-		return launcherapi.RepositoryReviewFileAttributionBackfillReport{Digest: "sha256:main"}, nil
-	}
-	prepareBackfillRuntime = func(context.Context, string) (func(), error) {
-		return func() {}, nil
-	}
-	main()
-	if closeErr := stdout.Close(); closeErr != nil {
-		t.Fatal(closeErr)
-	}
-	encoded, err := os.ReadFile(stdout.Name())
-	if err != nil || !strings.Contains(string(encoded), "sha256:main") {
-		t.Fatalf("stdout=%q err=%v", encoded, err)
-	}
-
 	stderr, err := os.CreateTemp(t.TempDir(), "stderr")
 	if err != nil {
 		t.Fatal(err)
@@ -327,26 +348,12 @@ func TestMainAndFatalWrappers(t *testing.T) {
 	os.Stderr = stderr
 	exitCode := 0
 	exitProcess = func(code int) { exitCode = code }
-	backfillFileAttributions = func(
-		context.Context,
-		string,
-		string,
-		launcherapi.RepositoryReviewFileAttributionBackfillOptions,
-	) (launcherapi.RepositoryReviewFileAttributionBackfillReport, error) {
-		return launcherapi.RepositoryReviewFileAttributionBackfillReport{}, errors.New("main failed")
-	}
-	main()
-	if exitCode != 1 {
-		t.Fatalf("main failure exit=%d", exitCode)
-	}
-	exitCode = 0
 	fatal(errors.New("fatal test"))
 	if closeErr := stderr.Close(); closeErr != nil {
 		t.Fatal(closeErr)
 	}
-	encoded, err = os.ReadFile(stderr.Name())
-	if err != nil || exitCode != 1 || !strings.Contains(string(encoded), "main failed") ||
-		!strings.Contains(string(encoded), "fatal test") {
+	encoded, err := os.ReadFile(stderr.Name())
+	if err != nil || exitCode != 1 || !strings.Contains(string(encoded), "fatal test") {
 		t.Fatalf("stderr=%q exit=%d err=%v", encoded, exitCode, err)
 	}
 }

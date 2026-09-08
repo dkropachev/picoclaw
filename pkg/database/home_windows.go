@@ -12,12 +12,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var (
-	windowsCurrentProcessUserSID = currentWindowsProcessUserSID
-	windowsNamedSecurityInfo     = windows.GetNamedSecurityInfo
-	windowsHandleSecurityInfo    = windows.GetSecurityInfo
-)
-
 func sameCanonicalPath(first, second string) bool {
 	return strings.EqualFold(filepath.Clean(first), filepath.Clean(second))
 }
@@ -26,7 +20,7 @@ func validateOwnerOnlyDirectory(path string, info os.FileInfo) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return NewError(CodeIntegrity, "database state boundary is not a real directory")
 	}
-	descriptor, err := windowsNamedSecurityInfo(
+	descriptor, err := windows.GetNamedSecurityInfo(
 		path,
 		windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
@@ -41,7 +35,7 @@ func validateOwnerOnlyFile(path string, info os.FileInfo, _ os.FileMode) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return NewError(CodeIntegrity, "database broker file is not regular")
 	}
-	descriptor, err := windowsNamedSecurityInfo(
+	descriptor, err := windows.GetNamedSecurityInfo(
 		path,
 		windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
@@ -56,7 +50,7 @@ func validateWindowsOwnerOnlyHandle(file *os.File) error {
 	if file == nil {
 		return NewError(CodeIntegrity, "database broker file handle is unavailable")
 	}
-	descriptor, err := windowsHandleSecurityInfo(
+	descriptor, err := windows.GetSecurityInfo(
 		windows.Handle(file.Fd()),
 		windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
@@ -71,7 +65,7 @@ func validateWindowsOwnerOnlyDescriptor(descriptor *windows.SECURITY_DESCRIPTOR,
 	if descriptor == nil || !descriptor.IsValid() {
 		return NewError(CodeIntegrity, "database Windows security descriptor is invalid")
 	}
-	current, err := windowsCurrentProcessUserSID()
+	current, err := currentWindowsProcessUserSID()
 	if err != nil {
 		return fmt.Errorf("resolve database Windows owner: %w", err)
 	}

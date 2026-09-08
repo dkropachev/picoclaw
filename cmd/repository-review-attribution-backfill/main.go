@@ -36,10 +36,16 @@ type expectedCounts struct {
 	projectedCompletedFiles       int
 }
 
+type backfillCommand struct {
+	workspace      string
+	automationID   string
+	apply          bool
+	expectedDigest string
+	expected       expectedCounts
+}
+
 func main() {
-	if err := runWithPreparation(
-		os.Args[1:], os.Stdout, os.Stderr, backfillFileAttributions, prepareBackfillRuntime,
-	); err != nil {
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fatal(err)
 	}
 }
@@ -53,7 +59,6 @@ type backfillFileAttributionsFunc func(
 
 var (
 	backfillFileAttributions backfillFileAttributionsFunc = launcherapi.BackfillRepositoryReviewFileAttributions
-	prepareBackfillRuntime   prepareBackfillFunc          = prepareBackfillDatabase
 	exitProcess                                           = os.Exit
 )
 
@@ -61,131 +66,144 @@ func run(
 	args []string,
 	stdout io.Writer,
 	stderr io.Writer,
-	backfill backfillFileAttributionsFunc,
 ) error {
-	return runWithPreparation(args, stdout, stderr, backfill, nil)
-}
-
-type prepareBackfillFunc func(context.Context, string) (func(), error)
-
-func runWithPreparation(
-	args []string,
-	stdout io.Writer,
-	stderr io.Writer,
-	backfill backfillFileAttributionsFunc,
-	prepare prepareBackfillFunc,
-) error {
-	if stdout == nil || stderr == nil || backfill == nil {
+	if stdout == nil || stderr == nil || backfillFileAttributions == nil {
 		return errors.New("command output and backfill operation are required")
 	}
+	command, err := parseBackfillCommand(args, stderr)
+	if err != nil {
+		return err
+	}
+	cleanup, err := prepareBackfillDatabase(context.Background())
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	return executeBackfillCommand(command, stdout, backfillFileAttributions)
+}
+
+func parseBackfillCommand(args []string, stderr io.Writer) (backfillCommand, error) {
+	if stderr == nil {
+		return backfillCommand{}, errors.New("command error output is required")
+	}
+	command := backfillCommand{}
 	flags := flag.NewFlagSet("repository-review-attribution-backfill", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	workspace := flags.String("workspace", "", "PicoClaw workspace containing repository review state")
-	automationID := flags.String("automation", "", "repository review automation ID")
-	apply := flags.Bool(
+	flags.StringVar(&command.workspace, "workspace", "", "PicoClaw workspace containing repository review state")
+	flags.StringVar(&command.automationID, "automation", "", "repository review automation ID")
+	flags.BoolVar(
+		&command.apply,
 		"apply", false,
 		"commit prepared attribution records and eligible recovered-campaign credits",
 	)
-	expectedDigest := flags.String("expect-digest", "", "exact sha256 digest printed by a prior dry run")
-	expected := expectedCounts{}
-	flags.IntVar(&expected.configuredRuns, "expect-configured-runs", -1, "expected configured workflow runs")
-	flags.IntVar(&expected.recoveredRuns, "expect-recovered-runs", -1, "expected retained ledger runs")
-	flags.IntVar(&expected.nonLedgerRuns, "expect-non-ledger-runs", -1, "expected allowed pre-review runs")
-	flags.IntVar(&expected.childAttempts, "expect-child-attempts", -1, "expected managed child attempts")
-	flags.IntVar(&expected.successfulChildren, "expect-successful-children", -1, "expected successful children")
-	flags.IntVar(&expected.failedChildren, "expect-failed-children", -1, "expected failed children")
-	flags.IntVar(&expected.attributionRecords, "expect-attribution-records", -1, "expected grouped attribution records")
-	flags.IntVar(&expected.acknowledgements, "expect-acknowledgements", -1, "expected acknowledged file occurrences")
-	flags.IntVar(&expected.uniqueFiles, "expect-unique-files", -1, "expected unique files")
+	flags.StringVar(
+		&command.expectedDigest,
+		"expect-digest",
+		"",
+		"exact sha256 digest printed by a prior dry run",
+	)
+	flags.IntVar(&command.expected.configuredRuns, "expect-configured-runs", -1, "expected configured workflow runs")
+	flags.IntVar(&command.expected.recoveredRuns, "expect-recovered-runs", -1, "expected retained ledger runs")
+	flags.IntVar(&command.expected.nonLedgerRuns, "expect-non-ledger-runs", -1, "expected allowed pre-review runs")
+	flags.IntVar(&command.expected.childAttempts, "expect-child-attempts", -1, "expected managed child attempts")
+	flags.IntVar(&command.expected.successfulChildren, "expect-successful-children", -1, "expected successful children")
+	flags.IntVar(&command.expected.failedChildren, "expect-failed-children", -1, "expected failed children")
+	flags.IntVar(&command.expected.attributionRecords, "expect-attribution-records", -1, "expected grouped attribution records")
+	flags.IntVar(&command.expected.acknowledgements, "expect-acknowledgements", -1, "expected acknowledged file occurrences")
+	flags.IntVar(&command.expected.uniqueFiles, "expect-unique-files", -1, "expected unique files")
 	flags.IntVar(
-		&expected.uniqueFileAssignments,
+		&command.expected.uniqueFileAssignments,
 		"expect-file-assignments",
 		-1,
 		"expected unique file/focus assignments",
 	)
 	flags.IntVar(
-		&expected.campaignAssignmentCredits,
+		&command.expected.campaignAssignmentCredits,
 		"expect-campaign-assignment-credits",
 		-1,
 		"expected exact legacy credits mapped into the current campaign",
 	)
 	flags.IntVar(
-		&expected.campaignAttributedFiles,
+		&command.expected.campaignAttributedFiles,
 		"expect-campaign-attributed-files",
 		-1,
 		"expected exact files carrying legacy attribution credit",
 	)
 	flags.IntVar(
-		&expected.projectedCompletedAssignments,
+		&command.expected.projectedCompletedAssignments,
 		"expect-projected-completed-assignments",
 		-1,
 		"expected total completed assignments after repair",
 	)
 	flags.IntVar(
-		&expected.projectedPendingAssignments,
+		&command.expected.projectedPendingAssignments,
 		"expect-projected-pending-assignments",
 		-1,
 		"expected total pending assignments after repair",
 	)
 	flags.IntVar(
-		&expected.projectedInspectedFiles,
+		&command.expected.projectedInspectedFiles,
 		"expect-projected-inspected-files",
 		-1,
 		"expected total inspected files after repair",
 	)
 	flags.IntVar(
-		&expected.projectedCompletedFiles,
+		&command.expected.projectedCompletedFiles,
 		"expect-projected-completed-files",
 		-1,
 		"expected total fully reviewed files after repair",
 	)
 	if err := flags.Parse(args); err != nil {
-		return err
+		return backfillCommand{}, err
 	}
 
-	*workspace = strings.TrimSpace(*workspace)
-	*automationID = strings.TrimSpace(*automationID)
-	*expectedDigest = strings.TrimSpace(*expectedDigest)
-	if *workspace == "" || *automationID == "" {
-		return errors.New("--workspace and --automation are required")
+	command.workspace = strings.TrimSpace(command.workspace)
+	command.automationID = strings.TrimSpace(command.automationID)
+	command.expectedDigest = strings.TrimSpace(command.expectedDigest)
+	if command.workspace == "" || command.automationID == "" {
+		return backfillCommand{}, errors.New("--workspace and --automation are required")
 	}
-	if prepare != nil {
-		cleanup, prepareErr := prepare(context.Background(), *workspace)
-		if prepareErr != nil {
-			return prepareErr
-		}
-		if cleanup != nil {
-			defer cleanup()
-		}
+	return command, nil
+}
+
+func executeBackfillCommand(
+	command backfillCommand,
+	stdout io.Writer,
+	backfill backfillFileAttributionsFunc,
+) error {
+	if stdout == nil || backfill == nil {
+		return errors.New("command output and backfill operation are required")
 	}
 	report, err := backfill(
 		context.Background(),
-		*workspace,
-		*automationID,
+		command.workspace,
+		command.automationID,
 		launcherapi.RepositoryReviewFileAttributionBackfillOptions{},
 	)
 	if err != nil {
 		return err
 	}
-	if *apply {
-		if *expectedDigest == "" {
+	if command.apply {
+		if command.expectedDigest == "" {
 			return errors.New("--apply requires --expect-digest from a prior dry run")
 		}
-		if compareErr := compareExpectedCounts(report, expected); compareErr != nil {
+		if compareErr := compareExpectedCounts(report, command.expected); compareErr != nil {
 			return compareErr
 		}
 		report, err = backfill(
 			context.Background(),
-			*workspace,
-			*automationID,
+			command.workspace,
+			command.automationID,
 			launcherapi.RepositoryReviewFileAttributionBackfillOptions{
-				Apply: true, ExpectedDigest: *expectedDigest,
+				Apply: true, ExpectedDigest: command.expectedDigest,
 			},
 		)
 		if err != nil {
 			return err
 		}
-		if compareErr := compareExpectedCounts(report, expected); compareErr != nil {
+		if compareErr := compareExpectedCounts(report, command.expected); compareErr != nil {
 			return compareErr
 		}
 	}
@@ -197,7 +215,7 @@ func runWithPreparation(
 	return nil
 }
 
-func prepareBackfillDatabase(ctx context.Context, _ string) (func(), error) {
+func prepareBackfillDatabase(ctx context.Context) (func(), error) {
 	home, err := database.PrepareHome(config.GetHome())
 	if err != nil {
 		return nil, err

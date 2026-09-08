@@ -22,11 +22,6 @@ import (
 // after the staged database is closed, versioned, and integrity checked.
 type StagedMigration func(context.Context, string) error
 
-var (
-	stagedCutoverDirectorySync = syncStagedMigrationDirectory
-	stagedGenerationActivation = activateInstalledGeneration
-)
-
 // MigrateStagedOffline atomically installs a fully validated staged generation.
 // The caller must already hold PicoClaw's exclusive migration fence and must
 // have completed the mandatory outer backup. SQLite, rather than filesystem
@@ -107,7 +102,7 @@ func MigrateStagedOffline(
 		}
 		return fmt.Errorf("install staged SQLite generation: %w", cutoverErr)
 	}
-	if err := stagedGenerationActivation(ctx, absolute, busyTimeout, expectedVersion); err != nil {
+	if err := activateInstalledGeneration(ctx, absolute, busyTimeout, expectedVersion); err != nil {
 		return dblayer.NewError(
 			dblayer.CodeOutcomeUnknown,
 			"installed database generation could not be revalidated",
