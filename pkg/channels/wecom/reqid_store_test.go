@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 func TestReqIDStorePersistsRoutes(t *testing.T) {

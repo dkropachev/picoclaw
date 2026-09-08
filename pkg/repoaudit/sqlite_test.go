@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 )
 
 //nolint:govet // Boundary tests intentionally keep setup and assertion errors in local scopes.
