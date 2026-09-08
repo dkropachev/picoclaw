@@ -62,6 +62,46 @@ func Project(options Options) (*Catalog, error) {
 	return build(options, false)
 }
 
+// Revalidate strictly resolves one immutable projected inventory without
+// consulting its original mutable configuration snapshot.
+func Revalidate(projected *Catalog) (*Catalog, error) {
+	if projected == nil || projected.home == "" || len(projected.specs) == 0 {
+		return nil, errors.New("database catalog projection is unavailable")
+	}
+	home, err := database.CanonicalHome(projected.home)
+	if err != nil || !sameCatalogResolvedPath(home, projected.home) {
+		return nil, errors.Join(errors.New("database catalog home changed"), err)
+	}
+	specs := projected.All()
+	for index := range specs {
+		path, pathErr := canonicalStorePath(specs[index].Path)
+		if pathErr != nil {
+			return nil, fmt.Errorf("database catalog store %s: %w", specs[index].ID, pathErr)
+		}
+		specs[index].Path = path
+		for legacyIndex := range specs[index].LegacyRoots {
+			legacy, legacyErr := canonicalLegacyPath(specs[index].LegacyRoots[legacyIndex])
+			if legacyErr != nil {
+				return nil, fmt.Errorf(
+					"database catalog store %s legacy input: %w",
+					specs[index].ID,
+					legacyErr,
+				)
+			}
+			specs[index].LegacyRoots[legacyIndex] = legacy
+		}
+	}
+	if err := validateSpecsMode(specs, true); err != nil {
+		return nil, err
+	}
+	sort.Slice(specs, func(i, j int) bool { return specs[i].ID < specs[j].ID })
+	byID := make(map[database.StoreID]int, len(specs))
+	for index := range specs {
+		byID[specs[index].ID] = index
+	}
+	return &Catalog{home: home, specs: specs, byID: byID}, nil
+}
+
 func build(options Options, inspectGenerations bool) (*Catalog, error) {
 	if options.Config == nil {
 		return nil, errors.New("database catalog config is required")

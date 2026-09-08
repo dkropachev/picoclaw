@@ -92,6 +92,68 @@ func TestBuildRejectsFreshMainToSidecarCollision(t *testing.T) {
 	}
 }
 
+func TestRevalidateUsesDetachedProjectedInventory(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "workspace")
+	cfg := &config.Config{Agents: config.AgentsConfig{
+		Defaults: config.AgentDefaults{Workspace: workspace},
+	}}
+	projected, err := Project(catalogTestOptions(t, home, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := projected.All()
+	cfg.Agents.Defaults.Workspace = filepath.Join(home, "mutated")
+	revalidated, err := Revalidate(projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := revalidated.All()
+	if len(got) != len(want) {
+		t.Fatalf("revalidated count = %d, want %d", len(got), len(want))
+	}
+	for index := range want {
+		if got[index].ID != want[index].ID || got[index].Path != want[index].Path {
+			t.Fatalf("revalidated[%d] = %#v, want %#v", index, got[index], want[index])
+		}
+	}
+	got[0].Path = "changed"
+	if fresh := revalidated.All(); fresh[0].Path == "changed" {
+		t.Fatal("Revalidate returned mutable catalog storage")
+	}
+}
+
+func TestRevalidateRejectsPhysicalDrift(t *testing.T) {
+	home := t.TempDir()
+	projected, err := Project(catalogTestOptions(t, home, &config.Config{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, ok := projected.Lookup("global/auth")
+	if !ok {
+		t.Fatal("projected auth store is absent")
+	}
+	if err := os.Mkdir(auth.Path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if revalidated, err := Revalidate(projected); err == nil || revalidated != nil {
+		t.Fatalf("Revalidate unsafe generation = %#v, %v", revalidated, err)
+	}
+	if err := os.Remove(auth.Path); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(home, "target.json")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(home, "auth.json")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if revalidated, err := Revalidate(projected); err == nil || revalidated != nil {
+		t.Fatalf("Revalidate symlinked legacy = %#v, %v", revalidated, err)
+	}
+}
+
 func TestBuildCataloguesDynamicRuntimeDomainsPerConfiguredWorkspace(t *testing.T) {
 	home := t.TempDir()
 	primary := filepath.Join(home, "workspace")
