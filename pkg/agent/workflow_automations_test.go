@@ -567,9 +567,18 @@ jobs:
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	go func() { _ = al.Run(runCtx) }()
 	defer func() {
+		// A terminal run event is durable before the detached executor goroutine
+		// releases its retained runtime lease. Stop root admission, join Run, then
+		// drain that retained lease before TempDir cleanup can race its final
+		// SQLite read.
 		cancelRun()
 		al.Stop()
-		_ = al.WaitStopped(context.Background())
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := al.WaitStopped(cleanupCtx); err != nil {
+			t.Errorf("WaitStopped() error = %v", err)
+		}
+		cleanupCancel()
+		waitForAgentTurnUXRuntimeIdle(t, al)
 		al.Close()
 		waitForWorkflowAutomationSQLiteIdle(t, workspaceA)
 	}()
