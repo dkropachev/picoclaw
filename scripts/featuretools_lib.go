@@ -49,8 +49,9 @@ type frontendOwnershipRule struct {
 }
 
 type changedFileStatus struct {
-	Kind  byte
-	Paths []string
+	Status string
+	Kind   byte
+	Paths  []string
 }
 
 func repoRoot() (string, error) {
@@ -195,7 +196,11 @@ func parseChangedFileStatusRecords(out string) ([]changedFileStatus, error) {
 			return nil, fmt.Errorf("change status %q is missing path data", status)
 		}
 
-		record := changedFileStatus{Kind: status[0], Paths: make([]string, 0, pathCount)}
+		record := changedFileStatus{
+			Status: status,
+			Kind:   status[0],
+			Paths:  make([]string, 0, pathCount),
+		}
 		for _, rawPath := range fields[index : index+pathCount] {
 			path := normalizeRepoPath(rawPath)
 			if path == "" {
