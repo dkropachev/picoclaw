@@ -19,12 +19,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
-const supervisorImmediateExitEnvironment = "PICOCLAW_DATABASE_TEST_IMMEDIATE_PROCESS_EXIT"
-
 func TestMain(m *testing.M) {
-	if os.Getenv(supervisorImmediateExitEnvironment) == "1" {
-		os.Exit(0)
-	}
 	previousUmask := unix.Umask(0o022)
 	exitCode := m.Run()
 	unix.Umask(previousUmask)
@@ -39,13 +34,11 @@ func TestStartSupervisorProcessUsesPathAndCleansFailedBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Run("use current executable when none is configured", func(t *testing.T) {
+	t.Run("reject current test executable when none is configured", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv(supervisorImmediateExitEnvironment, "1")
-		if err := startSupervisorProcess(EnsureOptions{}, home); err != nil {
-			t.Fatal(err)
+		if err := startSupervisorProcess(EnsureOptions{}, home); CodeOf(err) != CodeInvalid {
+			t.Fatalf("current test executable error = %v", err)
 		}
-		removeTestBootstrapFiles(t, home)
 	})
 
 	t.Run("resolve executable from PATH", func(t *testing.T) {

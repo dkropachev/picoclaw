@@ -110,6 +110,9 @@ func startSupervisorProcess(options EnsureOptions, home string) error {
 	if err != nil || !info.Mode().IsRegular() {
 		return NewError(CodeUnavailable, "database supervisor executable is unavailable")
 	}
+	if currentTestExecutable(executable) {
+		return NewError(CodeInvalid, "database supervisor executable cannot be the current test binary")
+	}
 	bootstrap, err := randomHex(tokenBytes)
 	if err != nil {
 		return NewError(CodeInternal, "database supervisor bootstrap failed")

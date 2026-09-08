@@ -1,6 +1,7 @@
 package database
 
 import (
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,4 +24,20 @@ func SuspendProviderTestAuthority() func() {
 	return func() {
 		once.Do(func() { providerTestAuthoritySuppression.Add(-1) })
 	}
+}
+
+func currentTestExecutable(path string) bool {
+	if !testing.Testing() {
+		return false
+	}
+	currentPath, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	current, err := os.Stat(currentPath)
+	if err != nil {
+		return false
+	}
+	candidate, err := os.Stat(path)
+	return err == nil && os.SameFile(current, candidate)
 }
