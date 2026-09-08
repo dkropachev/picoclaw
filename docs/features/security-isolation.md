@@ -342,6 +342,12 @@ trigger only the application branch that explicitly handles it. A successful
 review publication does not
 authorize branch push, issue creation, acknowledgement, or merge.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics used by security-owned stores now live in `internal/sqlitestore`.
+Security Isolation still owns credential and authentication domain schemas,
+migrations, legacy compatibility mapping, and the permission and trust
+boundaries applied around those stores.
+
 ## Failure And Edge Cases
 
 Fail closed on identity mismatch, stale config/runtime/workspace/head

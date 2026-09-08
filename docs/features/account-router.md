@@ -146,6 +146,11 @@ owns the authenticated browser/API surface that creates and edits router entries
 on the Accounts page. Security isolation continues to own secure string
 semantics; router entries intentionally do not store API keys.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics now live in `internal/sqlitestore`. Account Router still owns the
+`account-router.db` domain schema, migrations, legacy compatibility mapping,
+and router-specific version fences and transactional behavior.
+
 ## Failure And Edge Cases
 
 - Missing `router`, disabled router config, empty entry, missing blocks, unknown

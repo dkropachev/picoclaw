@@ -16,9 +16,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/sipeed/picoclaw/pkg/prworkspace"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 const (

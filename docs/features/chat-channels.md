@@ -226,6 +226,11 @@ AgentLoop generation. Repository Reviews owns that protected runtime route and
 its durable effects; it adds no channel adapter, inbound message, typing state,
 or outbound chat delivery behavior.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics used by channel stores now live in `internal/sqlitestore`. Chat
+Channels still owns each channel's domain schema, migrations, legacy
+compatibility mapping, codecs, and delivery-specific state transitions.
+
 ## Failure And Edge Cases
 
 - Disabled channels do not start or register routes.

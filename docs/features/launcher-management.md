@@ -413,6 +413,12 @@ shutdown cancels that controller before dependent runtime state disappears.
 The launcher proxy admits only the dedicated protected gateway publication
 path, while sidebar navigation and model/account metadata reads remain inert.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics used by launcher-facing stores now live in `internal/sqlitestore`.
+Launcher Management still owns its authentication and catalog domain schemas,
+migrations, legacy compatibility mappings, and management-specific version
+fences and mutations.
+
 ## Failure And Edge Cases
 
 Except for bounded launcher health/readiness and setup/login assets,

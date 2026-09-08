@@ -959,6 +959,11 @@ actions gain no ambient session. Private action workflows may compose only
 capabilities admitted by the private gate boundary. Generic workflow HTTP, SSE,
 graph, cancel, retry, and task routes hide PR-private runs and relationships.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics now live in `internal/sqlitestore`. Workflows still owns the
+`workflows.db` domain schemas, migrations, legacy compatibility mappings,
+trusted payload encoding, and workflow-specific transactional semantics.
+
 ## Failure And Edge Cases
 
 - Unsafe local refs fail before parsing or execution.

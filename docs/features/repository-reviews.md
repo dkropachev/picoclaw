@@ -907,6 +907,11 @@ reference synchronized with the server.
   review supplies bounded server-derived queries, exact provenance, association
   state, and explicit confirmation to those features.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics now live in `internal/sqlitestore`. Repository Reviews still owns its
+ledger domain schema, migrations, legacy compatibility mapping, version fences,
+and review-specific atomic mutations.
+
 ## Failure And Edge Cases
 
 - Duplicate normalized repository assignments, missing or assigned profiles,

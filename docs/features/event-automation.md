@@ -579,6 +579,12 @@ The `reviews` package is only a narrow GitHub provider/submission adapter and
 `prworkspace/localci` is only a reusable local validation engine. Neither is
 a separate product, route, store, identity, worker, or UI.
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics used by event, local-CI cache, and candidate-checkpoint stores now
+live in `internal/sqlitestore`. Event Automation still owns their domain
+schemas, migrations, legacy compatibility mappings, and lifecycle-specific
+fences and atomic transitions.
+
 ## Failure And Edge Cases
 
 Mixed intake variants, malformed provider identities, stale aggregate,

@@ -155,6 +155,11 @@ candidate authority remain unchanged and owned by this feature.
 
 | HTTP/UI | `/api/model-evaluations*`; `/model-evaluations`, `/new`, `/{id}`, `/{id}/edit`, `/{id}/languages`, `/{id}/corpus`, `/{id}/report` | Typed query/cursor summaries, direct detail, version-fenced draft-only explicit-ID bulk delete, and dedicated lifecycle/detail sections. | `FR-REPOEVAL-010`, `FR-REPOEVAL-013` |
 
+Shared SQLite opening, hardening, transaction, import-ledger, and archive
+mechanics now live in `internal/sqlitestore`. Repository Model Evaluations still
+owns its evaluation domain schema, migrations, legacy compatibility mapping,
+version fences, and lifecycle-specific atomic mutations.
+
 ## Algorithms And Ordering
 
 1. Normalize repository/ref/profile identity and candidate aliases. Resolve the

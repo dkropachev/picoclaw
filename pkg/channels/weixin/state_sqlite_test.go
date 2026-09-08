@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/sqlitestore"
 )
 
 //nolint:govet // Narrow test assertions intentionally use independent error scopes.
