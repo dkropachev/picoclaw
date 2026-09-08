@@ -485,6 +485,10 @@ state until it explicitly hands rendered YAML to the existing draft lifecycle.
    load valid exact snapshots, retain the schedule snapshot or pass the
    runtime-event match snapshot directly, publish `workflow.triggered`, and
    start runs with the same executor configuration used by chat triggers.
+   Shutdown stops new runtime admission, joins the automation controllers, and
+   drains retained executor leases before closing an idle shared workflow
+   database pool. An active peer keeps the pool until its operation releases
+   it; a later operation reopens the same durable database normally.
 6. Execute jobs in dependency order; job-level reusable calls create child runs,
    copy any trusted origin and its unchanged family-root identity, and expose
    child outputs through `needs.<job>.outputs`.

@@ -567,11 +567,22 @@ jobs:
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	go func() { _ = al.Run(runCtx) }()
 	defer func() {
+		// A terminal run event is durable before the detached executor goroutine
+		// releases its retained runtime lease. Stop root admission, join Run, then
+		// drain that retained lease before TempDir cleanup can race its final
+		// SQLite read.
 		cancelRun()
 		al.Stop()
-		_ = al.WaitStopped(context.Background())
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := al.WaitStopped(cleanupCtx); err != nil {
+			t.Errorf("WaitStopped() error = %v", err)
+		}
+		cleanupCancel()
+		waitForAgentTurnUXRuntimeIdle(t, al)
 		al.Close()
-		waitForWorkflowAutomationSQLiteIdle(t, workspaceA)
+		if err := workflows.NewFileRunStore(workspaceA).Close(); err != nil {
+			t.Errorf("close workflow store: %v", err)
+		}
 	}()
 	waitForWorkflowRuntimeEventSubscribers(t, al, 1)
 
@@ -757,24 +768,4 @@ func waitForWorkflowRunCompletion(t *testing.T, workspace string) *workflows.Run
 	}
 	t.Fatal("timed out waiting for workflow run completion")
 	return nil
-}
-
-func waitForWorkflowAutomationSQLiteIdle(t *testing.T, workspace string) {
-	t.Helper()
-	database := filepath.Join(workspace, "state", "workflows.db")
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		idle := true
-		for _, companion := range []string{database + "-wal", database + "-shm"} {
-			if _, err := os.Stat(companion); err == nil || !os.IsNotExist(err) {
-				idle = false
-				break
-			}
-		}
-		if idle {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("workflow SQLite pool did not become idle")
 }
