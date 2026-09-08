@@ -1345,6 +1345,43 @@ func TestCompareCoverageRelocationWaiverRequiresNoChangedExecutableStatements(t 
 	}
 }
 
+func TestRelocationCoverageStructureAcceptsCompilerZeroStatementBlocks(t *testing.T) {
+	t.Parallel()
+	const source = "pkg/store/store.go"
+	const destination = "internal/store/store.go"
+	profile := func(path string, covered bool) coverageProfile {
+		result := emptyCoverageProfile()
+		addCoverageBlock(result, coverageBlock{
+			File: path, Range: "519.19,519.19", StartLine: 519, StartCol: 19,
+			EndLine: 519, EndCol: 19, Statements: 0, Covered: covered,
+		})
+		return summarizeCoverageBlocks(result)
+	}
+	base := profile(source, true)
+	head := profile(destination, false)
+	relocations := map[string]string{source: destination}
+	if err := relocationCoverageStructureMatches(base, head, relocations); err != nil {
+		t.Fatalf("zero-statement relocation block mismatch: %v", err)
+	}
+	if failures := compareCoverage(
+		nil,
+		coveragePlan{RelocatedFiles: relocations},
+		base,
+		head,
+	); len(failures) != 0 {
+		t.Fatalf("zero-statement relocation failures = %#v", failures)
+	}
+
+	invalid := profile(source, false)
+	block := invalid.Blocks[source]["519.19,519.19"]
+	block.Statements = -1
+	invalid.Blocks[source][block.Range] = block
+	invalid.Global.TotalStatements = -1
+	if err := relocationCoverageStructureMatches(invalid, head, relocations); err == nil {
+		t.Fatal("negative-statement relocation block was accepted")
+	}
+}
+
 func TestRelocationCoverageStructureFailsClosed(t *testing.T) {
 	t.Parallel()
 	const source = "pkg/store/store.go"

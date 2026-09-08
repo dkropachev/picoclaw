@@ -1949,7 +1949,7 @@ func coverageStructure(
 			}
 			startLine, startCol, endLine, endCol, rangeErr := coverageRange(block.Range)
 			if rangeErr != nil || block.StartLine != startLine || block.StartCol != startCol ||
-				block.EndLine != endLine || block.EndCol != endCol || block.Statements < 1 {
+				block.EndLine != endLine || block.EndCol != endCol || block.Statements < 0 {
 				return nil, fmt.Errorf("block metadata is invalid at %s:%s", file, rangeKey)
 			}
 			identity := coverageBlockIdentity{File: normalizedFile, Range: block.Range}
