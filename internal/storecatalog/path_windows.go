@@ -11,7 +11,9 @@ import (
 func validateCatalogPlatformPath(path string) error {
 	cleaned := filepath.Clean(path)
 	volume := filepath.VolumeName(cleaned)
-	if strings.HasPrefix(volume, `\\?\`) || strings.HasPrefix(volume, `\\.\`) {
+	normalized := strings.ReplaceAll(cleaned, "/", `\`)
+	if strings.HasPrefix(volume, `\\?\`) || strings.HasPrefix(volume, `\\.\`) ||
+		strings.HasPrefix(normalized, `\??\`) {
 		return errors.New("path uses an ambiguous Windows device namespace")
 	}
 	remainder := strings.TrimPrefix(cleaned, volume)

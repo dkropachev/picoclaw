@@ -14,6 +14,7 @@ func TestWindowsCatalogPathValidationRejectsAliases(t *testing.T) {
 		`C:\runtime\LPT³`,
 		`\\?\C:\runtime\auth.db`,
 		`\\.\C:\runtime\auth.db`,
+		`\??\C:\runtime\auth.db`,
 	} {
 		if err := validateCatalogPlatformPath(path); err == nil {
 			t.Fatalf("ambiguous Windows path %q was accepted", path)
