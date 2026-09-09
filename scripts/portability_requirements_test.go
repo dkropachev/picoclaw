@@ -102,6 +102,18 @@ func TestPRRunsBuildAllBeforeMerge(t *testing.T) {
 	}
 }
 
+func TestPRCancelsSupersededRuns(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/pr.yml")
+	for _, snippet := range []string{
+		"concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
+		"  cancel-in-progress: true",
+	} {
+		if !strings.Contains(workflow, snippet) {
+			t.Errorf("PR workflow is missing superseded-run cancellation setting %q", snippet)
+		}
+	}
+}
+
 func TestPRGoTestsBoundPackageParallelism(t *testing.T) {
 	workflow := readRepoFile(t, ".github/workflows/pr.yml")
 	if !strings.Contains(
