@@ -449,43 +449,99 @@ func TestCronService_PersistenceIntegrity(t *testing.T) {
 }
 
 func TestCronService_ConcurrentAccess(t *testing.T) {
-	cs, path := setupService(t, nil)
-	defer os.Remove(path)
+	testCronServiceConcurrentAccess(t, 10)
+}
 
-	cs.Start()
-	defer cs.Stop()
+func TestCronService_ConcurrentAccessStress(t *testing.T) {
+	if os.Getenv("PICOCLAW_CRON_CONCURRENCY_STRESS") != "1" {
+		t.Skip("set PICOCLAW_CRON_CONCURRENCY_STRESS=1 to run the original stress volume")
+	}
+	testCronServiceConcurrentAccess(t, 50)
+}
 
-	var wg sync.WaitGroup
-	workers := 10
-	iterations := 50
+func testCronServiceConcurrentAccess(t *testing.T, iterations int) {
+	t.Helper()
+	cs, _ := setupService(t, nil)
+	if err := cs.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := cs.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
 
+	at := time.Now().Add(time.Hour).UnixMilli()
+	seed, err := cs.AddJob("seed", CronSchedule{Kind: "at", AtMS: &at}, "", "", "")
+	if err != nil {
+		t.Fatalf("AddJob(seed) error = %v", err)
+	}
+
+	var ready, wg sync.WaitGroup
+	const workers = 10
+	start := make(chan struct{})
+	errorsSeen := make(chan error, workers*iterations*2)
+	ready.Add(workers * 2)
 	wg.Add(workers * 2)
 
 	// add jobs concurrently
 	for i := range workers {
 		go func(id int) {
 			defer wg.Done()
+			ready.Done()
+			<-start
 			for j := range iterations {
 				at := time.Now().Add(time.Hour).UnixMilli()
-				cs.AddJob(fmt.Sprintf("Job-%d-%d", id, j), CronSchedule{Kind: "at", AtMS: &at}, "", "", "")
-				time.Sleep(100 * time.Microsecond)
+				if _, addErr := cs.AddJob(
+					fmt.Sprintf("Job-%d-%d", id, j),
+					CronSchedule{Kind: "at", AtMS: &at},
+					"",
+					"",
+					"",
+				); addErr != nil {
+					errorsSeen <- fmt.Errorf("worker %d iteration %d AddJob: %w", id, j, addErr)
+					return
+				}
 			}
 		}(i)
 	}
 
 	// read and update jobs concurrently
-	for range workers {
-		go func() {
+	for i := range workers {
+		go func(id int) {
 			defer wg.Done()
+			ready.Done()
+			<-start
 			for j := range iterations {
 				jobs := cs.ListJobs(true)
-				if len(jobs) > 0 {
-					cs.EnableJob(jobs[0].ID, j%2 == 0)
+				if len(jobs) == 0 {
+					errorsSeen <- fmt.Errorf("worker %d iteration %d listed no jobs", id, j)
+					return
 				}
-				time.Sleep(100 * time.Microsecond)
+				if updated := cs.EnableJob(seed.ID, j%2 == 0); updated == nil {
+					errorsSeen <- fmt.Errorf("worker %d iteration %d failed to update seed job", id, j)
+					return
+				}
 			}
-		}()
+		}(i)
 	}
 
+	ready.Wait()
+	close(start)
 	wg.Wait()
+	close(errorsSeen)
+	for workerErr := range errorsSeen {
+		t.Error(workerErr)
+	}
+	if t.Failed() {
+		return
+	}
+	jobs := cs.ListJobs(true)
+	if got, want := len(jobs), 1+workers*iterations; got != want {
+		t.Fatalf("job count = %d, want %d", got, want)
+	}
+	updatedSeed, ok := cs.GetJob(seed.ID)
+	if !ok || updatedSeed.Enabled {
+		t.Fatalf("seed job after concurrent updates = %#v, found=%t; want disabled", updatedSeed, ok)
+	}
 }
