@@ -27,6 +27,7 @@ jobs:
     name: Classify changes
     runs-on: ubuntu-latest
     outputs:
+      go_cache_epoch: ${{ steps.go-cache-key.outputs.epoch }}
       lint: ${{ steps.changes.outputs.lint }}
       frontend: ${{ steps.changes.outputs.frontend }}
       frontend_ui: ${{ steps.changes.outputs.frontend_ui }}
@@ -36,6 +37,10 @@ jobs:
       coverage: ${{ steps.changes.outputs.coverage }}
       integration: ${{ steps.changes.outputs.integration }}
     steps:
+      - name: Compute Go cache generation
+        id: go-cache-key
+        run: echo "epoch=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -85,12 +90,10 @@ jobs:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-${{ needs.classify.outputs.go_cache_epoch }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-${{ hashFiles('go.mod', 'go.sum') }}
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-
 
       - name: Run go generate
         run: go generate ./...
@@ -137,12 +140,10 @@ jobs:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-${{ needs.classify.outputs.go_cache_epoch }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-${{ hashFiles('go.mod', 'go.sum') }}
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -287,12 +288,10 @@ jobs:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-${{ needs.classify.outputs.go_cache_epoch }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-${{ hashFiles('go.mod', 'go.sum') }}
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
@@ -328,12 +327,10 @@ jobs:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-${{ needs.classify.outputs.go_cache_epoch }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-${{ hashFiles('go.mod', 'go.sum') }}
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-
 
       - name: Run go generate
         if: matrix.shard == 'remaining'
@@ -366,12 +363,10 @@ jobs:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-cross-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-cross-${{ hashFiles('go.mod', 'go.sum') }}-${{ needs.classify.outputs.go_cache_epoch }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-go-v3-cross-${{ hashFiles('go.mod', 'go.sum') }}-
             ${{ runner.os }}-${{ runner.arch }}-go-v3-cross-
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
 
       - name: Cross-compile core binaries
         run: make build-all
@@ -400,12 +395,10 @@ jobs:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-${{ needs.classify.outputs.go_cache_epoch }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-${{ hashFiles('go.mod', 'go.sum') }}
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-
 
       - name: Fetch base ref
         run: git fetch origin "${BASE_REF_NAME}:refs/remotes/origin/${BASE_REF_NAME}"
