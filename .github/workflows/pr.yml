@@ -285,10 +285,14 @@ jobs:
         run: govulncheck -C . -format text ./...
 
   test:
-    name: Tests
+    name: Tests (${{ matrix.shard }})
     needs: classify
     if: ${{ needs.classify.outputs.test != 'false' }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [slow, remaining]
     env:
       GOCACHE: ${{ github.workspace }}/.cache/go-build
       GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
@@ -306,6 +310,7 @@ jobs:
           cache: false
 
       - name: Cache Go dependencies and builds
+        if: matrix.shard == 'remaining'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
@@ -315,11 +320,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
 
+      - name: Restore Go dependencies and builds
+        if: matrix.shard == 'slow'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
+
       - name: Run go generate
+        if: matrix.shard == 'remaining'
         run: go generate ./...
 
-      - name: Run go test
-        run: go run ./scripts/hermetic-go-test -- go test -p 4 -tags goolm,stdjson ./... -timeout 20m
+      - name: Run Go test shard
+        run: go run ./scripts/hermetic-go-test -- bash ./scripts/run-go-test-shard.sh "${{ matrix.shard }}"
 
   cross_compile:
     name: Cross-compile core binaries
