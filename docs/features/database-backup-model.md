@@ -20,7 +20,8 @@ filesystem mutation and is not wired into runtime orchestration.
   aggregate budgets before aggregate JSON allocation. Catalog-defined legacy
   directory containment remains valid.
 - Windows grammar rejects namespaces, devices, ADS, reserved/trailing
-  components, control characters, and short-name aliases.
+  components, Win32-trimmed device stems, control characters, and short-name
+  aliases before any filesystem syscall.
 - Darwin and Windows path identity conservatively folds case so backup
   collision checks match the catalog/provider identity boundaries.
 - Prepared legacy wrapper entries and archive path expansion share explicit

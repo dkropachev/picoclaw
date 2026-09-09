@@ -68,6 +68,9 @@ func validWindowsBackupComponent(component string) bool {
 	if dot := strings.IndexByte(stem, '.'); dot >= 0 {
 		stem = stem[:dot]
 	}
+	// Win32 device-name recognition ignores ASCII spaces immediately before
+	// the extension separator (for example, "CON .txt").
+	stem = strings.TrimRight(stem, " ")
 	stem = strings.ToUpper(stem)
 	if stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" ||
 		stem == "CLOCK$" || stem == "CONIN$" || stem == "CONOUT$" {

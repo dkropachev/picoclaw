@@ -7,6 +7,7 @@ import "testing"
 func TestWindowsSafeRelativePathsApplyPlatformGrammar(t *testing.T) {
 	for _, path := range []string{
 		`safe\file:stream`, `safe\PROGRA~1\file`, "safe\\nul\x00file", `\rooted`, `/rooted`,
+		`safe\CON .txt`, `safe\COM1 .db`,
 	} {
 		if safeBackupRelative(path) {
 			t.Errorf("unsafe relative path accepted: %q", path)

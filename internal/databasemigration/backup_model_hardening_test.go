@@ -316,6 +316,7 @@ func TestBackupModelWindowsPathGrammar(t *testing.T) {
 	}
 	for _, component := range []string{
 		"", ".", "..", "CON", "nul.txt", "CLOCK$", "CONIN$", "COM1", "LPT9.log", "COM¹.txt",
+		"CON .txt", "NUL  .json", "COM1 .db", "LPT9   .log",
 		"name.", "name ", "file:stream", "PROGRA~1", "DATA~12.json", "control\x01",
 		"nul\x00name", string([]byte{'b', 'a', 'd', 0xff}),
 		strings.Repeat("x", backupMaxComponent+1),
