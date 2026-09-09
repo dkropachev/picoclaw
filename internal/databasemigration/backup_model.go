@@ -252,11 +252,22 @@ func backupStoreDirectory(storeID string) string {
 }
 
 func legacySourceRelative(root, source string) (string, bool, error) {
+	return legacySourceRelativeWithKey(root, source, backupPathKey)
+}
+
+func legacySourceRelativeWithKey(
+	root string,
+	source string,
+	pathKey func(string) string,
+) (string, bool, error) {
 	if !validBackupAbsolutePath(root) || !validBackupAbsolutePath(source) {
 		return "", false, errors.New("legacy backup source path is invalid")
 	}
+	if pathKey == nil {
+		return "", false, errors.New("legacy backup source path key is unavailable")
+	}
 	cleanRoot, cleanSource := filepath.Clean(root), filepath.Clean(source)
-	rootKey, sourceKey := backupPathKey(cleanRoot), backupPathKey(cleanSource)
+	rootKey, sourceKey := pathKey(cleanRoot), pathKey(cleanSource)
 	if sourceKey == rootKey {
 		return ".", true, nil
 	}
@@ -267,7 +278,14 @@ func legacySourceRelative(root, source string) (string, bool, error) {
 	if !strings.HasPrefix(sourceKey, rootPrefix) {
 		return "", false, nil
 	}
-	relative, _ := filepath.Rel(cleanRoot, cleanSource)
+	relative, err := filepath.Rel(cleanRoot, cleanSource)
+	if err != nil || filepath.IsAbs(relative) || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(os.PathSeparator)) ||
+		pathKey(filepath.Join(cleanRoot, relative)) != sourceKey {
+		return "", false, errors.Join(
+			errors.New("legacy backup source relative path is invalid"), err,
+		)
+	}
 	return relative, true, nil
 }
 

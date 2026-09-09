@@ -162,16 +162,15 @@ func TestBackupManifestValidationRejectsOverlappingSourceNamespaces(t *testing.T
 			m.Stores[1].LegacyRoots = []string{m.Stores[0].LegacyRoots[0]}
 			m.Stores[1].LegacyRootKinds = []string{"missing"}
 		}},
-		{name: "global legacy root containment", mutate: func(m *BackupManifest) {
-			m.Stores[1].LegacyRoots = []string{filepath.Join(m.Stores[0].LegacyRoots[0], "nested")}
-			m.Stores[1].LegacyRootKinds = []string{"missing"}
+		{name: "legacy root equals unselected catalog generation", mutate: func(m *BackupManifest) {
+			m.CatalogGenerations = append(m.CatalogGenerations, m.Stores[0].LegacyRoots[0])
+			sortManifestCatalog(m)
 		}},
-		{name: "generation inside legacy root", mutate: func(m *BackupManifest) {
-			m.Stores[1].LegacyRoots = []string{filepath.Dir(m.Stores[0].Path)}
-			m.Stores[1].LegacyRootKinds = []string{"directory"}
-		}},
-		{name: "generation namespace containment", mutate: func(m *BackupManifest) {
-			m.Stores[1].Path = filepath.Join(m.Stores[0].Path, "nested.db")
+		{name: "unselected generation namespace containment", mutate: func(m *BackupManifest) {
+			m.CatalogGenerations = append(
+				m.CatalogGenerations, filepath.Join(m.Stores[0].Path, "nested.db"),
+			)
+			sortManifestCatalog(m)
 		}},
 	}
 	for _, test := range tests {
@@ -181,11 +180,45 @@ func TestBackupManifestValidationRejectsOverlappingSourceNamespaces(t *testing.T
 			manifest.CatalogGenerations = append([]string(nil), valid.CatalogGenerations...)
 			test.mutate(&manifest)
 			if err := validateBackupManifest(manifest); err == nil ||
-				!strings.Contains(err.Error(), "source namespaces overlap") {
+				!strings.Contains(err.Error(), "namespaces overlap") {
 				t.Fatalf("overlapping source namespaces error = %v", err)
 			}
 		})
 	}
+}
+
+func TestBackupManifestValidationAllowsCanonicalLegacyContainment(t *testing.T) {
+	t.Run("checkpoint generation inside legacy directory", func(t *testing.T) {
+		manifest := validGenerationManifestFixture(t, "database")
+		checkpointRoot := filepath.Join(filepath.Dir(manifest.Stores[0].Path), "active")
+		storePath := filepath.Join(checkpointRoot, "checkpoints.db")
+		manifest.Stores[0].Path = storePath
+		manifest.Stores[0].LegacyRoots = []string{checkpointRoot}
+		manifest.Stores[0].LegacyRootKinds = []string{"directory"}
+		manifest.Files[0].Source = storePath
+		manifest.CatalogGenerations = generationPaths(storePath)
+		sortManifestCatalog(&manifest)
+		if err := validateBackupManifest(manifest); err != nil {
+			t.Fatalf("canonical checkpoint containment: %v", err)
+		}
+	})
+
+	t.Run("ancestor legacy directories", func(t *testing.T) {
+		manifest := validGenerationManifestFixture(t)
+		root := filepath.Dir(manifest.Stores[0].Path)
+		manifest.Stores[0].LegacyRoots = []string{filepath.Join(root, "legacy")}
+		manifest.Stores[0].LegacyRootKinds = []string{"directory"}
+		appendEmptyManifestStore(
+			&manifest,
+			"global/models",
+			filepath.Join(root, "models.db"),
+			[]string{filepath.Join(root, "legacy", "nested")},
+			[]string{"directory"},
+		)
+		if err := validateBackupManifest(manifest); err != nil {
+			t.Fatalf("canonical legacy containment: %v", err)
+		}
+	})
 }
 
 func TestBackupManifestValidationRejectsGenerationIncoherence(t *testing.T) {
@@ -327,6 +360,10 @@ func appendEmptyManifestStore(
 		StoreID: storeID, Path: path, LegacyRoots: legacyRoots, LegacyRootKinds: legacyRootKinds,
 	})
 	manifest.CatalogGenerations = append(manifest.CatalogGenerations, generationPaths(path)...)
+	sortManifestCatalog(manifest)
+}
+
+func sortManifestCatalog(manifest *BackupManifest) {
 	sort.Slice(manifest.CatalogGenerations, func(i, j int) bool {
 		left, right := backupPathKey(manifest.CatalogGenerations[i]),
 			backupPathKey(manifest.CatalogGenerations[j])

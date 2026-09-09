@@ -14,10 +14,11 @@ filesystem mutation and is not wired into runtime orchestration.
 
 - Manifest version 2 binds stores, canonical generation paths, ordered legacy
   roots/kinds, source identities/modes, archive paths, byte sizes, and SHA-256.
-- Validation is canonical, rejects containment across all legacy/generation
-  source namespaces, requires a source-path/source-identity bijection, and
-  applies raw-string and encoded aggregate budgets before aggregate JSON
-  allocation.
+- Validation is canonical, rejects exact collisions across all legacy roots and
+  catalog generations, rejects generation-to-generation containment, requires
+  a source-path/source-identity bijection, and applies raw-string and encoded
+  aggregate budgets before aggregate JSON allocation. Catalog-defined legacy
+  directory containment remains valid.
 - Windows grammar rejects namespaces, devices, ADS, reserved/trailing
   components, control characters, and short-name aliases.
 - Darwin and Windows path identity conservatively folds case so backup
@@ -65,7 +66,8 @@ Owns: TEST internal/databasemigration/path_darwin_test.go *
 Validate fixed scalar fields and bounded counts, reserve encoded metadata
 incrementally, build store/provenance maps, verify canonical file ordering and
 SQLite role coherence, account archive/prepared path expansion, then validate
-the exact sorted catalog-generation namespace.
+the exact sorted catalog-generation namespace with typed legacy/generation
+collision rules.
 
 ## Cross-Feature Behavior
 

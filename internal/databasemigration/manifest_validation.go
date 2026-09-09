@@ -55,7 +55,7 @@ func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) e
 	stores := make(map[database.StoreID]BackupStoreManifest, len(manifest.Stores))
 	metadataBudget := newBackupBudget()
 	metadataBudget.maxManifest = manifestLimit
-	sourceScopes := make([]string, 0, len(manifest.Stores)*4)
+	legacyScopes := make(map[string]struct{})
 	legacyRootTotal := 0
 	previousStoreID := ""
 	for index, record := range manifest.Stores {
@@ -77,29 +77,21 @@ func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) e
 		if err := metadataBudget.reserveManifestStore(record); err != nil {
 			return err
 		}
-		rootKeys := make(map[string]struct{}, len(record.LegacyRoots))
 		for rootIndex, root := range record.LegacyRoots {
 			if !validBackupAbsolutePath(root) {
 				return errors.New("database backup manifest legacy root is invalid")
 			}
 			key := backupPathKey(root)
-			if _, duplicate := rootKeys[key]; duplicate {
-				return errors.New("database backup manifest legacy root is duplicated")
+			if _, duplicate := legacyScopes[key]; duplicate {
+				return errors.New("database backup manifest source namespaces overlap")
 			}
-			rootKeys[key] = struct{}{}
-			sourceScopes = append(sourceScopes, root)
+			legacyScopes[key] = struct{}{}
 			if !validBackupLegacyRootKind(record.LegacyRootKinds[rootIndex]) {
 				return errors.New("database backup manifest legacy root kind is invalid")
 			}
 		}
-		for _, path := range generationPaths(record.Path) {
-			sourceScopes = append(sourceScopes, path)
-		}
 		// Strict ascending order above already excludes duplicate StoreIDs.
 		stores[id] = record
-	}
-	if backupSourceScopesOverlap(sourceScopes) {
-		return errors.New("database backup manifest source namespaces overlap")
 	}
 	preparedEntries := legacyRootTotal * 2
 
@@ -269,6 +261,7 @@ func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) e
 	}
 
 	catalogPaths := make(map[string]struct{}, len(manifest.CatalogGenerations))
+	catalogScopes := make([]string, 0, len(manifest.CatalogGenerations))
 	previousCatalogKey := ""
 	previousCatalogPath := ""
 	for index, path := range manifest.CatalogGenerations {
@@ -287,6 +280,15 @@ func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) e
 			return errors.New("database backup manifest catalog generation is duplicated")
 		}
 		catalogPaths[key] = struct{}{}
+		catalogScopes = append(catalogScopes, path)
+	}
+	for key := range legacyScopes {
+		if _, collision := catalogPaths[key]; collision {
+			return errors.New("database backup manifest source namespaces overlap")
+		}
+	}
+	if backupGenerationScopesOverlap(catalogScopes) {
+		return errors.New("database backup manifest generation namespaces overlap")
 	}
 	for _, store := range manifest.Stores {
 		for _, path := range generationPaths(store.Path) {
@@ -298,10 +300,11 @@ func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) e
 	return nil
 }
 
-// backupSourceScopesOverlap detects both exact collisions and containment.
+// backupGenerationScopesOverlap detects generation containment. Exact
+// collisions are rejected while constructing the catalog-generation map.
 // Appending a separator makes every ancestor sort immediately before its
 // descendant range without an O(n^2) comparison across bounded inventories.
-func backupSourceScopesOverlap(paths []string) bool {
+func backupGenerationScopesOverlap(paths []string) bool {
 	keys := make([]string, len(paths))
 	separator := string(os.PathSeparator)
 	for index, path := range paths {

@@ -155,6 +155,17 @@ func TestBackupModelPathGrammarAndDerivations(t *testing.T) {
 	if _, _, err := legacySourceRelative("relative", base); err == nil {
 		t.Fatal("relative legacy root was accepted")
 	}
+	caseFold := func(path string) string { return strings.ToLower(filepath.Clean(path)) }
+	caseRoot := filepath.Join(root, "CaseRoot")
+	caseSource := filepath.Join(root, "caseroot", "nested", "file")
+	if relative, inside, err := legacySourceRelativeWithKey(
+		caseRoot, caseSource, caseFold,
+	); err == nil || inside || relative != "" {
+		t.Fatalf("case-fold escape derived as %q, %t, %v", relative, inside, err)
+	}
+	if _, _, err := legacySourceRelativeWithKey(base, base, nil); err == nil {
+		t.Fatal("nil legacy path-key function was accepted")
+	}
 	volumeRoot := filepath.VolumeName(root) + string(os.PathSeparator)
 	if relative, inside, err := legacySourceRelative(
 		volumeRoot, filepath.Join(volumeRoot, "nested", "file"),
