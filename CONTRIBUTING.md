@@ -96,7 +96,11 @@ make lint  # Full linter run
 make lint-docs  # Check common documentation layout and naming conventions
 ```
 
-All CI checks must pass before a PR can be merged. Run `make check` locally before pushing to catch issues early, including the common docs consistency checks from `make lint-docs`.
+All selected CI checks and the aggregate `PR Required` check must pass before a
+PR can be merged. CI selects checks from changed paths; workflow, classifier,
+Docker, configuration, and unknown-path changes run the full suite. Run
+`make check` locally before pushing to catch issues early, including the common
+docs consistency checks from `make lint-docs`.
 
 ---
 
