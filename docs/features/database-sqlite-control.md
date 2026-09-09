@@ -32,16 +32,18 @@ to IPC, or change any application persistence path.
   signed 32-bit range; a combined integrity check runs physical integrity
   before referential integrity; only unique indexes created explicitly by
   `CREATE INDEX` belong to the exact index set; and these helpers provide no
-  transaction, migration-fence, connection, or ownership guarantee.
+  transaction, migration-fence, connection, or ownership guarantee. Diagnostic
+  SQL failures preserve cancellation and busy/locked classification; proven
+  corruption and operational failure use distinct redacted sentinels.
 
 ## Requirements
 
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
 | `FR-DATABASE-SQLITE-CONTROL-001` | MUST | Trusted internal code supplies an explicit non-nil context and caller-owned query or execution boundary to read or set the `main` schema `user_version`. | `SchemaVersion` returns a value from `0` through `MaxInt32`; `SetSchemaVersion` emits only the decimal representation of a value in that range. | Reading changes nothing. Setting changes only the caller's current SQLite connection or transaction according to SQLite semantics. The helper does not begin, commit, or roll back a transaction. | A nil context, nil boundary, negative value, value above `MaxInt32`, unavailable value, or query/execute failure returns an error. No helper claims that the caller holds a migration fence or transaction. | Schema control must be centralized without letting a primitive imply lifecycle authority it cannot enforce. |
-| `FR-DATABASE-SQLITE-CONTROL-002` | MUST | Trusted internal code requests physical integrity, referential integrity, or both through an explicit context and caller-owned query boundary. | Physical integrity accepts only the exact successful result from a bounded one-result `main` integrity check. Referential integrity succeeds only when the `main` foreign-key check yields no row. `CheckIntegrity` runs the physical check first and the referential check only after it succeeds. | Diagnostics do not repair, configure, or mutate the database. Every opened row iterator is closed. | A nil context or boundary, unexpected integrity result, returned foreign-key row, row iteration error, or SQL failure returns an error. Reported corruption and foreign-key violations use generic messages and never include SQLite diagnostic content, table names, row values, or caller data. | Diagnostics must fail closed without turning provider details or stored values into application-visible output. |
+| `FR-DATABASE-SQLITE-CONTROL-002` | MUST | Trusted internal code requests physical integrity, referential integrity, or both through an explicit context and caller-owned query boundary. | Physical integrity accepts only the exact successful result from a bounded one-result `main` integrity check. Referential integrity succeeds only when the `main` foreign-key check yields no row. `CheckIntegrity` runs the physical check first and the referential check only after it succeeds. Cancellation and SQLite busy/locked errors retain their typed meaning; SQLite `CORRUPT`/`NOTADB` and explicit diagnostic failures are integrity failures; every other diagnostic query/row-close error becomes one redacted operational-unavailable sentinel. | Diagnostics do not repair, configure, or mutate the database. Every opened row iterator is closed. | A nil context or boundary, unexpected integrity result, returned foreign-key row, row iteration error, or SQL failure returns an error. Reported corruption, operational failure, and foreign-key violations use generic messages and never include SQLite diagnostic content, table names, row values, or caller data. | Diagnostics must fail closed without turning provider details or stored values into application-visible output or treating transient I/O as corruption. |
 | `FR-DATABASE-SQLITE-CONTROL-003` | MUST | Trusted internal code supplies one `main` schema table and an expected list of manually created unique-index names. | The named table must exist exactly once. Validation succeeds only when every expected unique index exists exactly once with SQLite origin `c` and no other origin-`c` unique index exists for that table. Primary-key and automatic indexes, including indexes created for table-level unique constraints, are outside this set. | Validation mutates neither schema nor caller-owned table/index inputs. | A nil context or boundary; empty, padded, invalid-UTF-8, NUL-bearing, or over-1,024-byte table/name; more than 256 expected indexes; a duplicate expected name; a missing table/index; an unexpected manual unique index; or catalog-query failure returns an error. An empty expected list requires zero manual unique indexes. | Domain schema adapters need an exact provider catalog check without confusing SQLite-maintained indexes with explicitly declared schema objects. |
-| `FR-DATABASE-SQLITE-CONTROL-004` | MUST | Repository code attempts to consume or extend this foundation. | Exact-file architecture guards permit active provider imports only from `internal/sqlitestore/open.go` and `internal/sqlitestore/schema.go`, while reserving exact future readiness and backup/migration implementation filenames; only the provider core binds or opens the driver. | The allowlist changes no runtime composition; compatibility callers retain their existing direct-store behavior and reserved files are absent. | Any additional provider importer or unreviewed driver/open use fails architecture tests until separately specified. | Compatibility reuse and future dormant slices must not make the provider an application-accessible second owner. |
+| `FR-DATABASE-SQLITE-CONTROL-004` | MUST | Repository code attempts to consume or extend this foundation. | Exact-file architecture guards permit active provider imports from `internal/sqlitestore/open.go` and `internal/sqlitestore/schema.go`, admit `internal/databasereadiness/readiness.go` when present, and reserve exact future backup/migration implementation filenames; only the provider core binds or opens the driver. | The allowlist changes no runtime composition; absent reserved files grant no capability, and present consumers remain governed by separate feature contracts. | Any additional provider importer or unreviewed driver/open use fails architecture tests until separately specified. | Compatibility reuse and future dormant slices must not make the provider an application-accessible second owner. |
 
 ## Data And State Model
 
@@ -78,7 +80,8 @@ Owns: TEST internal/sqliteprovider/import_guard_test.go TestSQLiteProviderProduc
    first and append only its base-10 digits to the fixed control statement.
 3. For combined diagnostics, run the bounded `main` physical integrity check
    first. Only its exact success result admits the `main` foreign-key check;
-   any returned row represents a violation.
+   any returned row represents a violation. Redact non-contention operational
+   query failures separately from proven corruption or malformed results.
 4. For unique-index validation, reject excessive, duplicate, or invalid inputs,
    require the exact `main` table, require each named origin-`c` unique index
    exactly once, then compare the total origin-`c` unique-index count with the
@@ -91,7 +94,7 @@ Owns: TEST internal/sqliteprovider/import_guard_test.go TestSQLiteProviderProduc
 `FR-SQLITE` remains the active subsystem-owned SQLite storage behavior and now
 consumes these helpers through `internal/sqlitestore`. The provider catalog
 remains separate and dormant. `FR-DATABASE` and IPC stay provider-neutral.
-Later readiness, migration, and owner-composition features must explicitly
+Readiness, migration, and owner-composition features must explicitly
 connect and constrain this foundation before use.
 
 ## Failure And Edge Cases

@@ -15,6 +15,7 @@ var (
 	errIntegrityCheck         = errors.New("SQLite provider integrity check failed")
 	errForeignKeyCheck        = errors.New("SQLite provider foreign-key check failed")
 	errForeignKeyViolation    = errors.New("SQLite provider reported a foreign-key violation")
+	errControlUnavailable     = errors.New("SQLite provider control query is unavailable")
 )
 
 type controlQueryer interface {
@@ -110,7 +111,16 @@ func CheckForeignKeys(ctx context.Context, queryer controlQueryer) (returnErr er
 }
 
 func controlDiagnosticError(ctx context.Context, cause, fallback error) error {
-	return controlDiagnosticErrorWithClassifier(ctx, cause, fallback, IsBusyOrLocked)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if IsBusyOrLocked(cause) {
+		return cause
+	}
+	if isSQLiteIntegrityFailure(cause) {
+		return fallback
+	}
+	return errControlUnavailable
 }
 
 func controlDiagnosticErrorWithClassifier(

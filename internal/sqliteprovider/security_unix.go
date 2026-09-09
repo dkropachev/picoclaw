@@ -22,7 +22,7 @@ func validateProviderAncestors(path string) error {
 		info, statErr := os.Lstat(ancestor)
 		if statErr == nil {
 			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-				return errors.New("SQLite provider ancestor is unsafe")
+				return errors.Join(errProviderUnsafeBoundary, errors.New("SQLite provider ancestor is unsafe"))
 			}
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return statErr
@@ -70,11 +70,14 @@ func secureUnixProviderHandle(
 	if err != nil || expected == nil || !os.SameFile(expected, opened) ||
 		expected.Mode()&os.ModeSymlink != 0 || directory != opened.IsDir() ||
 		!directory && !opened.Mode().IsRegular() {
-		return errors.New("SQLite provider security boundary is unsafe")
+		return errors.Join(errProviderUnsafeBoundary, errors.New("SQLite provider security boundary is unsafe"))
 	}
 	stat, ok := opened.Sys().(*syscall.Stat_t)
 	if !ok || stat == nil || stat.Uid != effectiveUID {
-		return errors.New("SQLite provider security boundary is owned by another user")
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider security boundary is owned by another user"),
+		)
 	}
 	mode := os.FileMode(0o600)
 	if directory {
@@ -89,6 +92,7 @@ func secureUnixProviderHandle(
 		!os.SameFile(opened, secured) || !os.SameFile(secured, current) ||
 		current.Mode()&os.ModeSymlink != 0 || secured.Mode().Perm() != mode {
 		return errors.Join(
+			errProviderUnsafeBoundary,
 			errors.New("SQLite provider security boundary changed while securing"),
 			statErr,
 			lstatErr,

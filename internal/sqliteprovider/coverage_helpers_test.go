@@ -156,7 +156,7 @@ func (rows *providerScriptRows) Next(destination []driver.Value) error {
 }
 
 func openProviderScript(t *testing.T, steps ...providerScriptStep) *sql.DB {
-	return openConfiguredProviderScript(t, nil, steps...)
+	return openConfiguredProviderScriptWithCloseError(t, nil, nil, steps...)
 }
 
 func openConfiguredProviderScript(
@@ -164,11 +164,22 @@ func openConfiguredProviderScript(
 	pingErr error,
 	steps ...providerScriptStep,
 ) *sql.DB {
+	return openConfiguredProviderScriptWithCloseError(t, pingErr, nil, steps...)
+}
+
+func openConfiguredProviderScriptWithCloseError(
+	t *testing.T,
+	pingErr error,
+	closeErr error,
+	steps ...providerScriptStep,
+) *sql.DB {
 	t.Helper()
 	providerScriptRegister.Do(func() { sql.Register(providerScriptDriverName, providerScriptDriver{}) })
 	name := "script-" + time.Now().Format("150405.000000000") + "-" +
 		string(rune(providerScriptID.Add(1)))
-	script := &providerScript{steps: append([]providerScriptStep(nil), steps...), pingErr: pingErr}
+	script := &providerScript{
+		steps: append([]providerScriptStep(nil), steps...), pingErr: pingErr, closeErr: closeErr,
+	}
 	providerScripts.Store(name, script)
 	t.Cleanup(func() { providerScripts.Delete(name) })
 	database, err := sql.Open(providerScriptDriverName, name)
