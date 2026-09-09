@@ -108,7 +108,11 @@ func removeBackupTreeRelative(
 		return err
 	}
 	if exact != nil {
-		defer func() { returnErr = errors.Join(returnErr, exact.Close()) }()
+		defer func() {
+			if exact != nil {
+				returnErr = errors.Join(returnErr, exact.Close())
+			}
+		}()
 	}
 	if ops.afterQuarantine != nil {
 		if err := ops.afterQuarantine(parent, quarantine); err != nil {
@@ -132,7 +136,7 @@ func removeBackupTreeRelative(
 		return err
 	}
 	return removeQuarantinedBackupLeaf(
-		parent, leaf, quarantine, opened, exact, expected,
+		parent, leaf, quarantine, opened, &exact, expected,
 		fileidentity.ObjectTypeDirectory, label, ops,
 	)
 }
@@ -226,7 +230,11 @@ func removeBackupFileRelative(
 		return err
 	}
 	if exact != nil {
-		defer func() { returnErr = errors.Join(returnErr, exact.Close()) }()
+		defer func() {
+			if exact != nil {
+				returnErr = errors.Join(returnErr, exact.Close())
+			}
+		}()
 	}
 	if ops.afterQuarantine != nil {
 		if err := ops.afterQuarantine(root, quarantine); err != nil {
@@ -234,7 +242,7 @@ func removeBackupFileRelative(
 		}
 	}
 	return removeQuarantinedBackupLeaf(
-		root, leaf, quarantine, file, exact, expected,
+		root, leaf, quarantine, file, &exact, expected,
 		fileidentity.ObjectTypeRegular, label, ops,
 	)
 }
@@ -307,12 +315,15 @@ func removeQuarantinedBackupLeaf(
 	source string,
 	quarantine string,
 	opened *os.File,
-	exact *os.File,
+	exact **os.File,
 	expected fileidentity.Identity,
 	expectedType fileidentity.ObjectType,
 	label string,
 	ops backupRemovalOps,
 ) error {
+	if exact == nil {
+		return errors.New("database backup removal exact-handle state is invalid")
+	}
 	if err := validateBackupRemovalRelativeBinding(
 		root, quarantine, opened, expected, expectedType,
 	); err != nil {
@@ -335,9 +346,16 @@ func removeQuarantinedBackupLeaf(
 		return errors.Join(errors.New("database backup removal source name changed"), err)
 	}
 	if err := ops.remove(
-		root, quarantine, exact, expectedType == fileidentity.ObjectTypeDirectory,
+		root, quarantine, *exact, expectedType == fileidentity.ObjectTypeDirectory,
 	); err != nil {
 		return err
+	}
+	if *exact != nil {
+		closeErr := (*exact).Close()
+		*exact = nil
+		if closeErr != nil {
+			return closeErr
+		}
 	}
 	if err := requireMissingBackupRemovalRootLeaf(root, quarantine); err != nil {
 		return errors.Join(errors.New("database backup removal quarantine remains"), err)
@@ -402,14 +420,26 @@ func validateBackupRemovalRelativeBinding(
 		return err
 	}
 	boundIdentity, boundType, boundErr := fileidentity.Opened(bound)
+	var boundMetadataErr, openedMetadataErr error
+	if expectedType == fileidentity.ObjectTypeRegular {
+		boundInfo, statErr := bound.Stat()
+		openedInfo, openedStatErr := opened.Stat()
+		boundMetadataErr = errors.Join(
+			statErr, validateBackupPlatformFile(boundInfo, bound, 0o600),
+		)
+		openedMetadataErr = errors.Join(
+			openedStatErr, validateBackupPlatformFile(openedInfo, opened, 0o600),
+		)
+	}
 	boundCloseErr := bound.Close()
 	openedIdentity, openedType, openedErr := fileidentity.Opened(opened)
-	if boundErr != nil || boundCloseErr != nil || openedErr != nil ||
+	if boundErr != nil || boundMetadataErr != nil || boundCloseErr != nil ||
+		openedErr != nil || openedMetadataErr != nil ||
 		boundType != expectedType || openedType != expectedType ||
 		boundIdentity != expected || openedIdentity != expected {
 		return errors.Join(
 			errors.New("database backup removal leaf binding changed"),
-			boundErr, boundCloseErr, openedErr,
+			boundErr, boundMetadataErr, boundCloseErr, openedErr, openedMetadataErr,
 		)
 	}
 	return nil

@@ -2,6 +2,7 @@ package databasemigration
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,23 @@ func TestPinnedBackupTreeRemovalRequiresOriginalIdentity(t *testing.T) {
 	matches, globErr := filepath.Glob(filepath.Join(parent, ".database-backup-remove-*"))
 	if globErr != nil || len(matches) != 0 {
 		t.Fatalf("successful removal tombstones = %q, %v", matches, globErr)
+	}
+}
+
+func TestPinnedBackupTreeRemovalReopensMutatedDirectoryBatches(t *testing.T) {
+	parent := migrationHome(t)
+	tree := filepath.Join(parent, "tree")
+	if err := os.Mkdir(tree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for index := range 257 {
+		writeMigrationFile(t, filepath.Join(tree, fmt.Sprintf("entry-%03d", index)), []byte("x"))
+	}
+	if err := removePinnedBackupTree(tree); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(tree); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("multi-batch tree remains: %v", err)
 	}
 }
 

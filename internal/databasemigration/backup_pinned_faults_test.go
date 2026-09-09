@@ -67,6 +67,20 @@ func TestPinnedBackupFileRemovalPreservesUnsafeTargets(t *testing.T) {
 	if payload, err := os.ReadFile(path); err != nil || string(payload) != "control" {
 		t.Fatalf("rejected symlink target payload = %q, %v", payload, err)
 	}
+
+	hardlink := filepath.Join(realParent, "hardlink")
+	if err := os.Link(path, hardlink); err != nil {
+		t.Skipf("create hard link: %v", err)
+	}
+	if err := removePinnedBackupFile(path, expected); err == nil ||
+		!strings.Contains(err.Error(), "hard-link") && !strings.Contains(err.Error(), "linked") {
+		t.Fatalf("external-hardlink file removal = %v", err)
+	}
+	for _, candidate := range []string{path, hardlink} {
+		if payload, err := os.ReadFile(candidate); err != nil || string(payload) != "control" {
+			t.Fatalf("hardlink rejection changed %q = %q, %v", candidate, payload, err)
+		}
+	}
 }
 
 func TestPinnedBackupFileRemovalKeepsFileWhenQuarantineCannotBeReserved(t *testing.T) {
@@ -149,7 +163,8 @@ func TestPinnedBackupTreeContentsRejectsUnsafeInventories(t *testing.T) {
 			t.Skipf("create hard link: %v", linkErr)
 		}
 		removalErr := removePinnedBackupTree(fixture.path)
-		if removalErr == nil || !strings.Contains(removalErr.Error(), "physically alias") {
+		if removalErr == nil ||
+			!strings.Contains(removalErr.Error(), "hard-link") && !strings.Contains(removalErr.Error(), "linked") {
 			t.Fatalf("hard-linked tree removal = %v", removalErr)
 		}
 		assertPinnedRemovalPayload(t, fixture.path)

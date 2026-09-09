@@ -386,10 +386,20 @@ func validatePinnedBackupTreeInventory(
 				return openErr
 			}
 			identity, objectType, identityErr := fileidentity.Opened(file)
+			var metadataErr error
+			if objectType == fileidentity.ObjectTypeRegular {
+				info, statErr := file.Stat()
+				metadataErr = errors.Join(
+					statErr, validateBackupPlatformFile(info, file, 0o600),
+				)
+			}
 			closeErr := file.Close()
-			if identityErr != nil || closeErr != nil || objectType == 0 || info.IsDir() !=
+			if identityErr != nil || metadataErr != nil || closeErr != nil || objectType == 0 || info.IsDir() !=
 				(objectType == fileidentity.ObjectTypeDirectory) {
-				return errors.Join(errors.New("database backup removal child is unsafe"), identityErr, closeErr)
+				return errors.Join(
+					errors.New("database backup removal child is unsafe"),
+					identityErr, metadataErr, closeErr,
+				)
 			}
 			if previous, duplicate := identities[identity]; duplicate {
 				return fmt.Errorf(
@@ -511,17 +521,19 @@ func removePinnedBackupTreeContentsBound(
 	identities map[fileidentity.Identity]string,
 	entries *int,
 	ops backupRemovalOps,
-) (returnErr error) {
+) error {
 	if err := validatePinnedBackupRemovalRoot(rootPath, root, expectedRoot); err != nil {
 		return err
 	}
-	directory, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	defer func() { returnErr = errors.Join(returnErr, directory.Close()) }()
 	for {
+		directory, err := root.Open(".")
+		if err != nil {
+			return err
+		}
 		batch, readErr := directory.ReadDir(128)
+		if closeErr := directory.Close(); readErr != nil && !errors.Is(readErr, io.EOF) || closeErr != nil {
+			return errors.Join(readErr, closeErr)
+		}
 		for _, entry := range batch {
 			*entries++
 			if *entries > backupMaxEntries || !validBackupPathComponent(entry.Name()) {
@@ -570,18 +582,29 @@ func removePinnedBackupTreeContentsBound(
 			}
 			delete(identities, identity)
 		}
-		if errors.Is(readErr, io.EOF) {
-			// A retry can observe no entries after a prior unlink succeeded but
-			// its directory sync failed. Re-sync before reporting completion.
+		if len(batch) == 0 && errors.Is(readErr, io.EOF) {
+			if backupRemovalPlanHasDescendant(identities, rootPath) {
+				return errors.New("database backup removal captured inventory remains")
+			}
 			return ops.sync(root, rootPath)
-		}
-		if readErr != nil {
-			return readErr
 		}
 		if len(batch) == 0 {
 			return errors.New("database backup removal directory read made no progress")
 		}
 	}
+}
+
+func backupRemovalPlanHasDescendant(
+	identities map[fileidentity.Identity]string,
+	rootPath string,
+) bool {
+	prefix := rootPath + string(filepath.Separator)
+	for _, path := range identities {
+		if len(path) > len(prefix) && path[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
 }
 
 func validatePinnedBackupRemovalRoot(

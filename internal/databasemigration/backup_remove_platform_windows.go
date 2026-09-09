@@ -62,6 +62,9 @@ func renameBackupRemovalRootNoReplace(
 		handle, &status, &buffer[0], uint32(len(buffer)), windows.FileRenameInformation,
 	); err != nil {
 		_ = windows.CloseHandle(handle)
+		if status, ok := err.(windows.NTStatus); ok {
+			err = status.Errno()
+		}
 		return nil, err
 	}
 	return os.NewFile(uintptr(handle), target), nil
