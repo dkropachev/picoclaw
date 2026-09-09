@@ -161,6 +161,84 @@ func TestPRGoTestsBoundPackageParallelism(t *testing.T) {
 	}
 }
 
+func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
+	const cacheAction = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+	const sharedPaths = "path: |\n            .cache/go-build\n            .cache/go-mod"
+	const consumerKey = "key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}"
+	prWorkflow := readRepoFile(t, ".github/workflows/pr.yml")
+	if got := strings.Count(prWorkflow, "uses: actions/cache/restore@"+cacheAction); got != 6 {
+		t.Errorf("PR workflow shared Go cache restore count = %d, want 6", got)
+	}
+	if got := strings.Count(prWorkflow, sharedPaths); got != 6 {
+		t.Errorf("PR workflow shared Go cache path count = %d, want 6", got)
+	}
+	if got := strings.Count(prWorkflow, consumerKey+"\n          restore-keys: |"); got != 6 {
+		t.Errorf("PR workflow shared Go cache key count = %d, want 6", got)
+	}
+	dependencyPrefix := "${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-"
+	orderedFallback := dependencyPrefix + "\n            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-"
+	if got := strings.Count(prWorkflow, orderedFallback); got != 6 {
+		t.Errorf("PR workflow dependency-first Go cache fallback count = %d, want 6", got)
+	}
+	if strings.Contains(prWorkflow, "uses: actions/cache/save@") {
+		t.Error("PR workflow must not save the shared Go cache")
+	}
+	hasV2JobKey := strings.Contains(prWorkflow, "go-v2-${{ github.job }}")
+	hasV3JobKey := strings.Contains(prWorkflow, "go-v3-${{ github.job }}")
+	if hasV2JobKey || hasV3JobKey {
+		t.Error("PR workflow still uses job-specific Go cache keys")
+	}
+	if got, want := strings.Count(prWorkflow, "go-version-file: go.mod"), strings.Count(
+		prWorkflow,
+		"go-version-file: go.mod\n          cache: false",
+	); got != want {
+		t.Errorf("PR setup-go steps with cache disabled = %d, want %d", want, got)
+	}
+
+	buildWorkflow := readRepoFile(t, ".github/workflows/build.yml")
+	buildJob := targetBlock(t, buildWorkflow, "  build:\n", "  launcher:\n")
+	for _, snippet := range []string{
+		"group: go-cache-${{ github.ref }}\n      cancel-in-progress: false",
+		`echo "epoch=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"`,
+		"id: go-cache\n        uses: actions/cache/restore@" + cacheAction,
+		"github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
+		"key: ${{ steps.go-cache.outputs.cache-primary-key }}",
+	} {
+		if !strings.Contains(buildJob, snippet) {
+			t.Errorf("main build workflow is missing shared-cache setting %q", snippet)
+		}
+	}
+	if got := strings.Count(buildJob, "uses: actions/cache/save@"+cacheAction); got != 1 {
+		t.Errorf("main build shared Go cache save count = %d, want 1", got)
+	}
+	if got := strings.Count(buildJob, "uses: actions/cache/restore@"+cacheAction); got != 1 {
+		t.Errorf("main cache owner restore count = %d, want 1", got)
+	}
+	if got := strings.Count(buildJob, sharedPaths); got != 2 {
+		t.Errorf("main cache owner shared path count = %d, want 2", got)
+	}
+	producerKey := consumerKey + "-${{ steps.go-cache-key.outputs.epoch }}"
+	if !strings.Contains(buildJob, producerKey) {
+		t.Errorf("main cache owner is missing daily producer key %q", producerKey)
+	}
+
+	workflowPaths, err := filepath.Glob(filepath.Join(repoRootForTest(t), ".github", "workflows", "*.yml"))
+	if err != nil {
+		t.Fatalf("list workflows: %v", err)
+	}
+	saveOwners := 0
+	for _, path := range workflowPaths {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("read workflow %s: %v", path, readErr)
+		}
+		saveOwners += strings.Count(string(data), "uses: actions/cache/save@"+cacheAction)
+	}
+	if saveOwners != 1 {
+		t.Errorf("repository shared cache save owners = %d, want 1", saveOwners)
+	}
+}
+
 func TestLauncherBuildIncludesFrontendAndBackendPackaging(t *testing.T) {
 	rootMakefile := readRepoFile(t, "Makefile")
 	rootLauncher := targetBlock(t, rootMakefile, "## build-launcher:", "build-launcher-frontend:")

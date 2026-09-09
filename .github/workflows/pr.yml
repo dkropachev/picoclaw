@@ -19,6 +19,8 @@ concurrency:
 
 env:
   BASE_REF_NAME: ${{ github.base_ref || inputs.base_ref || github.event.repository.default_branch }}
+  GOCACHE: ${{ github.workspace }}/.cache/go-build
+  GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
 
 jobs:
   classify:
@@ -64,9 +66,6 @@ jobs:
     needs: classify
     if: ${{ needs.classify.outputs.lint != 'false' }}
     runs-on: ubuntu-latest
-    env:
-      GOCACHE: ${{ github.workspace }}/.cache/go-build
-      GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -80,15 +79,18 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Cache Go dependencies and builds
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Restore shared Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
 
       - name: Run go generate
         run: go generate ./...
@@ -116,9 +118,6 @@ jobs:
     needs: classify
     if: ${{ needs.classify.outputs.frontend != 'false' }}
     runs-on: ubuntu-latest
-    env:
-      GOCACHE: ${{ github.workspace }}/.cache/go-build
-      GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -132,15 +131,18 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Cache Go dependencies and builds
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Restore shared Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -277,6 +279,20 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Restore shared Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
@@ -293,9 +309,6 @@ jobs:
       fail-fast: false
       matrix:
         shard: [slow, workspace, remaining]
-    env:
-      GOCACHE: ${{ github.workspace }}/.cache/go-build
-      GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -309,27 +322,18 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Cache Go dependencies and builds
-        if: matrix.shard == 'remaining'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
-
-      - name: Restore Go dependencies and builds
-        if: matrix.shard != 'remaining'
+      - name: Restore shared Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
 
       - name: Run go generate
         if: matrix.shard == 'remaining'
@@ -343,9 +347,6 @@ jobs:
     needs: classify
     if: ${{ needs.classify.outputs.cross_compile != 'false' }}
     runs-on: ubuntu-latest
-    env:
-      GOCACHE: ${{ github.workspace }}/.cache/go-build
-      GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -359,15 +360,18 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Cache Go dependencies and builds
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Restore shared Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
 
       - name: Cross-compile core binaries
         run: make build-all
@@ -377,9 +381,6 @@ jobs:
     needs: classify
     if: ${{ needs.classify.outputs.coverage != 'false' }}
     runs-on: ubuntu-latest
-    env:
-      GOCACHE: ${{ github.workspace }}/.cache/go-build
-      GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -393,15 +394,18 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Cache Go dependencies and builds
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Restore shared Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
 
       - name: Fetch base ref
         run: git fetch origin "${BASE_REF_NAME}:refs/remotes/origin/${BASE_REF_NAME}"
