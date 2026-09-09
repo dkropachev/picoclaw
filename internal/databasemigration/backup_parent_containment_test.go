@@ -126,6 +126,174 @@ func TestBackupParentProspectiveDefaultAllowsNormalHomeSiblings(t *testing.T) {
 	}
 }
 
+func TestBackupParentProspectiveProjectionUsesAncestorIdentity(t *testing.T) {
+	base := t.TempDir()
+	anchorIdentity := parentTreeIdentity(t, base)
+	alias := filepath.Join(base, "alias-view")
+	physical := filepath.Join(base, "physical-view")
+	parent := filepath.Join(alias, "backups")
+	lookupCalls := make(map[string]int)
+	lookup := func(path string) (fileidentity.Identity, fileidentity.ObjectType, bool, error) {
+		path = filepath.Clean(path)
+		lookupCalls[path]++
+		if path == physical {
+			return anchorIdentity, fileidentity.ObjectTypeDirectory, true, nil
+		}
+		return fileidentity.Identity{}, 0, false, nil
+	}
+
+	state, err := newBackupParentProjectionState(
+		t.Context(), alias, parent, anchorIdentity, lookup,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasedGeneration := filepath.Join(physical, "backups", "store.db")
+	if err := validateProspectiveBackupParentOutsideSource(aliasedGeneration, state); err == nil ||
+		!strings.Contains(err.Error(), "aliases a catalog source") {
+		t.Fatalf("projected generation overlap = %v", err)
+	}
+
+	state, err = newBackupParentProjectionState(
+		t.Context(), alias, parent, anchorIdentity, lookup,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, generation := range generationPaths(filepath.Join(physical, "store.db")) {
+		if err := validateProspectiveBackupParentOutsideSource(generation, state); err != nil {
+			t.Fatalf("normal projected sibling %q = %v", generation, err)
+		}
+	}
+	if err := validateProspectiveBackupParentOutsideSource(
+		filepath.Join(physical, "backups2", "store.db"), state,
+	); err != nil {
+		t.Fatalf("component-prefix sibling = %v", err)
+	}
+	if lookupCalls[physical] != 2 {
+		t.Fatalf("physical ancestor lookups = %d, want one per projection state", lookupCalls[physical])
+	}
+}
+
+func TestBackupParentProspectiveProjectionChecksEarlierSources(t *testing.T) {
+	base := t.TempDir()
+	identity := parentTreeIdentity(t, base)
+	alias := filepath.Join(base, "alias")
+	physical := filepath.Join(base, "physical")
+	parent := filepath.Join(alias, "backups")
+	lateAnchor := filepath.Join(physical, "generation")
+	state, err := newBackupParentProjectionState(
+		t.Context(), alias, parent, identity,
+		func(path string) (fileidentity.Identity, fileidentity.ObjectType, bool, error) {
+			if filepath.Clean(path) == lateAnchor {
+				return identity, fileidentity.ObjectTypeDirectory, true, nil
+			}
+			return fileidentity.Identity{}, 0, false, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProspectiveBackupParentOutsideSource(lateAnchor, state); err != nil {
+		t.Fatalf("source before projected mapping = %v", err)
+	}
+	if err := validateProspectiveBackupParentOutsideSource(
+		filepath.Join(lateAnchor, "store.db"), state,
+	); err == nil || !strings.Contains(err.Error(), "aliases a catalog source") {
+		t.Fatalf("late projection against earlier source = %v", err)
+	}
+}
+
+func TestBackupParentProspectiveProjectionIsBoundedAndCancelable(t *testing.T) {
+	base := t.TempDir()
+	identity := parentTreeIdentity(t, base)
+	parent := filepath.Join(base, "backups")
+	state, err := newBackupParentProjectionState(
+		t.Context(), base, parent, identity,
+		func(string) (fileidentity.Identity, fileidentity.ObjectType, bool, error) {
+			return fileidentity.Identity{}, 0, false, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.steps = backupMaxEntries
+	if err := validateProspectiveBackupParentOutsideSource(
+		filepath.Join(base, "store.db"), state,
+	); err == nil || !strings.Contains(err.Error(), "projection limit") {
+		t.Fatalf("prospective projection bound = %v", err)
+	}
+	state, err = newBackupParentProjectionState(
+		t.Context(), base, parent, identity,
+		func(string) (fileidentity.Identity, fileidentity.ObjectType, bool, error) {
+			return fileidentity.Identity{}, 0, false, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.sourceChecks = backupMaxParentProjectionSources
+	if err := validateProspectiveBackupParentOutsideSource(
+		filepath.Join(base, "store.db"), state,
+	); err == nil || !strings.Contains(err.Error(), "source limit") {
+		t.Fatalf("prospective projection source bound = %v", err)
+	}
+	state.sourceChecks = 0
+	state.comparisons = backupMaxParentProjectionSources
+	if err := compareProspectiveBackupProjection(
+		filepath.Join(base, "backups"), filepath.Join(base, "store.db"), state,
+	); err == nil || !strings.Contains(err.Error(), "comparison limit") {
+		t.Fatalf("prospective projection comparison bound = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	state, err = newBackupParentProjectionState(
+		ctx, base, parent, identity,
+		func(string) (fileidentity.Identity, fileidentity.ObjectType, bool, error) {
+			cancel()
+			return fileidentity.Identity{}, 0, false, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProspectiveBackupParentOutsideSource(
+		filepath.Join(base, "store.db"), state,
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("prospective projection cancellation = %v", err)
+	}
+}
+
+func TestBackupParentProspectiveProjectionRejectsObservationDrift(t *testing.T) {
+	base := t.TempDir()
+	identity := parentTreeIdentity(t, base)
+	parent := filepath.Join(base, "backups")
+	changed := false
+	firstAncestor := filepath.Dir(filepath.Join(base, "nested", "store.db"))
+	state, err := newBackupParentProjectionState(
+		t.Context(), base, parent, identity,
+		func(path string) (fileidentity.Identity, fileidentity.ObjectType, bool, error) {
+			if changed && filepath.Clean(path) == firstAncestor {
+				return identity, fileidentity.ObjectTypeDirectory, true, nil
+			}
+			return fileidentity.Identity{}, 0, false, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProspectiveBackupParentOutsideSource(
+		filepath.Join(base, "nested", "store.db"), state,
+	); err != nil {
+		t.Fatal(err)
+	}
+	changed = true
+	if err := validateBackupParentProjectionStable(state); err == nil ||
+		!strings.Contains(err.Error(), "changed during validation") {
+		t.Fatalf("prospective projection observation drift = %v", err)
+	}
+}
+
 func TestNearestBackupParentAncestorDetectsNewIntermediate(t *testing.T) {
 	base := t.TempDir()
 	intermediate := filepath.Join(base, "intermediate")
@@ -148,11 +316,14 @@ func TestExclusiveBackupParentCreationOwnsOnlySuccessfulCreate(t *testing.T) {
 	base := t.TempDir()
 	created := filepath.Join(base, "created")
 	owned, err := exclusivelyCreateMissingBackupParent(created, true)
-	if err != nil || !owned {
-		t.Fatalf("exclusive parent create = %t, %v", owned, err)
+	if err != nil || !owned.Valid() {
+		t.Fatalf("exclusive parent create = %#v, %v", owned, err)
 	}
 	if info, err := os.Lstat(created); err != nil || !info.IsDir() {
 		t.Fatalf("created parent = %#v, %v", info, err)
+	}
+	if current := parentTreeIdentity(t, created); current != owned {
+		t.Fatalf("created parent identity = %#v, want captured %#v", current, owned)
 	}
 
 	concurrent := filepath.Join(base, "concurrent")
@@ -160,16 +331,164 @@ func TestExclusiveBackupParentCreationOwnsOnlySuccessfulCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	owned, err = exclusivelyCreateMissingBackupParent(concurrent, true)
-	if err != nil || owned {
-		t.Fatalf("lost exclusive-create race = %t, %v", owned, err)
+	if err != nil || owned.Valid() {
+		t.Fatalf("lost exclusive-create race = %#v, %v", owned, err)
 	}
 	if info, err := os.Lstat(concurrent); err != nil || !info.IsDir() {
 		t.Fatalf("concurrent parent changed = %#v, %v", info, err)
 	}
 	owned, err = exclusivelyCreateMissingBackupParent(concurrent, false)
-	if err != nil || owned {
-		t.Fatalf("known existing parent ownership = %t, %v", owned, err)
+	if err != nil || owned.Valid() {
+		t.Fatalf("known existing parent ownership = %#v, %v", owned, err)
 	}
+}
+
+func TestExclusiveBackupParentCreationOrdersDurability(t *testing.T) {
+	base := t.TempDir()
+	path := filepath.Join(base, "created")
+	ops := defaultBackupParentCreationOps()
+	ops.random = func() (string, error) { return ".database-backup-parent-test", nil }
+	secure := ops.secure
+	syncChild := ops.syncChild
+	publish := ops.publish
+	syncParent := ops.sync
+	stage := 0
+	ops.secure = func(file *os.File, identity fileidentity.Identity) error {
+		if err := secure(file, identity); err != nil {
+			return err
+		}
+		stage = 1
+		return nil
+	}
+	ops.syncChild = func(file *os.File, identity fileidentity.Identity) error {
+		if stage != 1 {
+			return errors.New("temporary parent synced before privacy validation")
+		}
+		if err := syncChild(file, identity); err != nil {
+			return err
+		}
+		stage = 2
+		return nil
+	}
+	ops.publish = func(root *os.Root, source, target string, opened *os.File) (*os.File, error) {
+		if stage != 2 {
+			return nil, errors.New("temporary parent published before directory sync")
+		}
+		exact, err := publish(root, source, target, opened)
+		if err == nil {
+			stage = 3
+		}
+		return exact, err
+	}
+	ops.sync = func(root *os.Root) error {
+		if stage != 3 {
+			return errors.New("parent synced before no-replace publication")
+		}
+		stage = 4
+		return syncParent(root)
+	}
+	identity, err := exclusivelyCreateMissingBackupParentWithOps(path, true, ops)
+	if err != nil || !identity.Valid() || stage != 4 {
+		t.Fatalf("durable parent publication = %#v, stage %d, %v", identity, stage, err)
+	}
+}
+
+func TestExclusiveBackupParentCreationCleansCapturedFailures(t *testing.T) {
+	canary := errors.New("parent creation canary")
+	for _, test := range []struct {
+		name   string
+		mutate func(*backupParentCreationOps)
+	}{
+		{name: "secure", mutate: func(ops *backupParentCreationOps) {
+			ops.secure = func(*os.File, fileidentity.Identity) error { return canary }
+		}},
+		{name: "child sync", mutate: func(ops *backupParentCreationOps) {
+			ops.syncChild = func(*os.File, fileidentity.Identity) error { return canary }
+		}},
+		{name: "publication after rename", mutate: func(ops *backupParentCreationOps) {
+			publish := ops.publish
+			ops.publish = func(root *os.Root, source, target string, opened *os.File) (*os.File, error) {
+				exact, err := publish(root, source, target, opened)
+				if err != nil {
+					return exact, err
+				}
+				return exact, canary
+			}
+		}},
+		{name: "parent sync", mutate: func(ops *backupParentCreationOps) {
+			ops.sync = func(*os.Root) error { return canary }
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			path := filepath.Join(base, "created")
+			temporary := filepath.Join(base, ".database-backup-parent-test")
+			ops := defaultBackupParentCreationOps()
+			ops.random = func() (string, error) { return filepath.Base(temporary), nil }
+			test.mutate(&ops)
+			identity, err := exclusivelyCreateMissingBackupParentWithOps(path, true, ops)
+			if !errors.Is(err, canary) || identity.Valid() {
+				t.Fatalf("failed parent publication = %#v, %v", identity, err)
+			}
+			for _, candidate := range []string{temporary, path} {
+				if _, err := os.Lstat(candidate); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("captured failure left %q: %v", candidate, err)
+				}
+			}
+		})
+	}
+}
+
+func TestExclusiveBackupParentCreationLeavesUnownedNames(t *testing.T) {
+	t.Run("lost publication race", func(t *testing.T) {
+		base := t.TempDir()
+		path := filepath.Join(base, "created")
+		temporary := filepath.Join(base, ".database-backup-parent-test")
+		ops := defaultBackupParentCreationOps()
+		ops.random = func() (string, error) { return filepath.Base(temporary), nil }
+		publish := ops.publish
+		ops.publish = func(root *os.Root, source, target string, opened *os.File) (*os.File, error) {
+			if err := root.Mkdir(target, 0o700); err != nil {
+				return nil, err
+			}
+			if err := root.WriteFile(filepath.Join(target, "foreign"), []byte("retain"), 0o600); err != nil {
+				return nil, err
+			}
+			return publish(root, source, target, opened)
+		}
+		identity, err := exclusivelyCreateMissingBackupParentWithOps(path, true, ops)
+		if err != nil || identity.Valid() {
+			t.Fatalf("lost parent publication race = %#v, %v", identity, err)
+		}
+		if payload, err := os.ReadFile(filepath.Join(path, "foreign")); err != nil || string(payload) != "retain" {
+			t.Fatalf("unowned winner changed = %q, %v", payload, err)
+		}
+		if _, err := os.Lstat(temporary); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("captured temporary parent remains: %v", err)
+		}
+	})
+
+	t.Run("identity capture failure", func(t *testing.T) {
+		base := t.TempDir()
+		path := filepath.Join(base, "created")
+		temporary := filepath.Join(base, ".database-backup-parent-test")
+		canary := errors.New("identity canary")
+		ops := defaultBackupParentCreationOps()
+		ops.random = func() (string, error) { return filepath.Base(temporary), nil }
+		ops.opened = func(*os.File) (fileidentity.Identity, fileidentity.ObjectType, error) {
+			return fileidentity.Identity{}, 0, canary
+		}
+		identity, err := exclusivelyCreateMissingBackupParentWithOps(path, true, ops)
+		if !errors.Is(err, canary) || identity.Valid() {
+			t.Fatalf("uncaptured parent creation = %#v, %v", identity, err)
+		}
+		if info, err := os.Lstat(temporary); err != nil || !info.IsDir() {
+			t.Fatalf("uncaptured temporary parent was removed = %#v, %v", info, err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("uncaptured final parent appeared: %v", err)
+		}
+	})
 }
 
 func TestConfiguredBackupParentClassificationPreservesCase(t *testing.T) {

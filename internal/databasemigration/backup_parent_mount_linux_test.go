@@ -82,6 +82,41 @@ func TestBackupParentProspectiveBindAliasDoesNotCreateSourceDirectory(t *testing
 	}
 }
 
+func TestBackupParentProspectiveBindAliasRejectsGenerationProjection(t *testing.T) {
+	physical := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Mkdir(alias, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mount(physical, alias, "", unix.MS_BIND, ""); err != nil {
+		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.ENOSYS) {
+			t.Skipf("bind mounts unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := unix.Unmount(alias, 0); err != nil &&
+			!errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOENT) {
+			t.Errorf("unmount prospective-generation bind: %v", err)
+		}
+	})
+	parent := filepath.Join(alias, "backups")
+	spec := storecatalog.Spec{
+		ID: "global/test", Path: filepath.Join(physical, "backups", "store.db"),
+	}
+	selected, err := validateBackupParentWithContext(
+		t.Context(), parent, physical, []storecatalog.Spec{spec},
+	)
+	if selected != "" || err == nil || !strings.Contains(err.Error(), "physically overlaps") {
+		t.Fatalf("prospective generation bind alias = %q, %v", selected, err)
+	}
+	for _, path := range []string{parent, filepath.Join(physical, "backups")} {
+		if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("prospective generation rejection created %q: %v", path, statErr)
+		}
+	}
+}
+
 func TestBackupLegacyContainmentChildBindingRejectsReplacement(t *testing.T) {
 	parent := t.TempDir()
 	leaf := "legacy"

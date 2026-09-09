@@ -16,6 +16,8 @@ PicoClaw provides dormant, bounded backup filesystem primitives that copy, rehas
 - Windows uses private DACLs and 128-bit IDs; Unix files are private and single-link.
 - Parent selection performs caller-cancelable, aggregate-bounded physical
   containment scans from retained directory handles before exclusive creation.
+  A prospective parent projects its missing suffix through identity-matched
+  catalog ancestors, so bind/null-mount aliases are rejected before `mkdir`.
 - Cleanup preflights the whole tree without crossing a mount boundary, quarantines each leaf relative to a retained parent, revalidates identity and mount binding, then uses retained Unix directory handles or exact write-through Windows handles.
 - `backup.go` bridges private-directory creation; `backup_io.go` stays provider-free.
 
@@ -26,7 +28,7 @@ PicoClaw provides dormant, bounded backup filesystem primitives that copy, rehas
 | `FR-DATABASE-BACKUP-FOUNDATION-001` | MUST | A caller creates or inspects a private backup directory/object. | Path, opened handle, object type, privacy metadata, and full identity agree. | May create and durably sync private directories/files. | Symlink/reparse, device, public DACL/mode, hard link, read-only, replacement, or unsupported platform fails closed. | Lexical paths alone cannot prove the object used. |
 | `FR-DATABASE-BACKUP-FOUNDATION-002` | MUST | A bounded current-user source is copied to a private destination. | Output bytes, returned source identity, size, and digest match a stable source; reopened output retains the captured identity. | Exclusively creates, chmods/secures, fsyncs, and parent-syncs output. | Cancellation, foreign ownership, hard-link drift, short/no-progress IO, source/output transition, close/sync failure, or post-copy mismatch cleans only owned output and returns error. | Archive records must validate independently and name exact bytes. |
 | `FR-DATABASE-BACKUP-FOUNDATION-003` | MUST | Under caller-held exclusive mutation authority, cleanup receives one expected file/tree identity. | Only captured identities on the original mounted filesystem are quarantined and removed relative to retained handles. | Full preflight, no-replace rename, bounded child unlink, top-level unlink, and retained-parent sync; Windows renames/disposes exact handles. | Identity/type/parent/mount drift, alias, unsafe child, entry bound, or observed inventory change preserves evidence and never recursively traverses a substitute or mounted tree. | Cleanup must not delete a replacement tree or externally mounted content. |
-| `FR-DATABASE-BACKUP-FOUNDATION-004` | MUST | Trusted orchestration supplies a canonical home, catalog paths, and optional backup parent. | The selected private parent is lexically and physically outside every generation and legacy input, bound to one identity, and safe to create. | A missing default parent is created exclusively; an owned empty parent may be identity-bound quarantined and rolled back. | Cancellation, symlink/reparse, ancestor or mount-view alias, path/identity drift, lost exclusive-create race, nonempty rollback, or traversal bound fails closed without removing unowned content. | Backup evidence must never capture itself or mutate a source namespace through an alias. |
+| `FR-DATABASE-BACKUP-FOUNDATION-004` | MUST | Trusted orchestration supplies a canonical home, catalog paths, and optional backup parent. | The selected private parent is lexically and physically outside every generation and legacy input, bound to one identity, and safe to create. A missing parent is represented by the suffix below its nearest existing identity; that suffix is projected through identity-matched generation/legacy ancestors before creation. | A missing default parent is first created as an owner-private cryptorandom sibling, identity-captured from its handle, synced, and published to the final name with retained-parent no-replace semantics. Only that returned identity authorizes empty-parent rollback. | Cancellation, symlink/reparse, ancestor or mount-view alias, path/identity drift, lost exclusive-create race, nonempty rollback, or traversal bound fails closed. Failure cleanup considers only the captured temporary/final identity and never removes an unowned name. | Backup evidence must never capture itself, mutate a source namespace through an alias, or derive rollback ownership from a post-create pathname lookup. |
 
 ## Data And State Model
 
@@ -80,6 +82,9 @@ Owns: TEST internal/databasemigration/backup_source_owner_*_test.go *
 Validate ancestors; secure destination; copy bounded bytes; recheck, sync, reopen, and rehash output.
 Cleanup mount-checks each root and child before opening a recursive root, preflights inventory, no-replace renames each leaf through a retained parent, proves source absence and quarantine identity, then removes only that quarantine.
 Rollback of a newly created archive parent uses the same identity-bound quarantine but only an atomic empty-directory removal; it never traverses descendants.
+Parent creation secures and syncs a cryptorandom temporary sibling, captures
+its opened identity, no-replace-renames it relative to the retained parent,
+revalidates that captured identity at the final name, and syncs the parent.
 Unix syncs retained directory descriptors; Windows marks exact handles for durable logical deletion before later physical reclamation.
 
 ## Cross-Feature Behavior
@@ -89,8 +94,14 @@ sealed inputs. D5 owns claims, quiescence, and cutover.
 
 ## Failure And Edge Cases
 
-Unsupported identity, metadata, or atomic publication fails closed. D5 must exclude concurrent writers. Detected drift fails closed; same-user processes
-ignoring that authority boundary remain outside this primitive's threat model.
+Unsupported identity, metadata, or atomic publication fails closed. D5 must
+exclude concurrent writers. Detected drift fails closed. No syscall sequence
+can protect against another same-UID process that already has equivalent
+write/search authority and deliberately observes, moves, or replaces the
+cryptorandom sibling between operations; such processes must honor the same
+exclusive-authority protocol. Ambiguous failure can therefore leave a captured
+empty residual, but cleanup never substitutes an identity learned from a
+temporary or final pathname and never removes an unknown replacement.
 
 ## Acceptance Evidence
 

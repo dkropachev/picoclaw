@@ -52,8 +52,8 @@ func TestBackupParentValidationCoverage(t *testing.T) {
 		})
 	}
 
-	if owned, err := exclusivelyCreateMissingBackupParent("bad\x00parent", true); err == nil || owned {
-		t.Fatalf("invalid exclusive creation = %t, %v", owned, err)
+	if owned, err := exclusivelyCreateMissingBackupParent("bad\x00parent", true); err == nil || owned.Valid() {
+		t.Fatalf("invalid exclusive creation = %#v, %v", owned, err)
 	}
 }
 
