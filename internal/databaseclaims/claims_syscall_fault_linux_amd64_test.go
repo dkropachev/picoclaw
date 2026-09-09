@@ -111,7 +111,28 @@ type claimSyscallFaultState struct {
 	afterFchmod bool
 	injected    bool
 	currentCall uint64
+	currentFD   uint64
+	lockFD      uint64
+	lockFDKnown bool
+	openingLock bool
 	hierarchy   int
+}
+
+func (state *claimSyscallFaultState) observeEntry(registers *unix.PtraceRegs) {
+	state.currentCall = registers.Orig_rax
+	state.currentFD = registers.Rdi
+	const lockOpenFlags = unix.O_CREAT | unix.O_RDWR | unix.O_NOFOLLOW
+	state.openingLock = state.scenario == "lock-fstat" &&
+		state.currentCall == unix.SYS_OPENAT && int64(registers.Rdi) != int64(unix.AT_FDCWD) &&
+		int(registers.Rdx)&lockOpenFlags == lockOpenFlags && registers.R10&0o777 == 0o600
+}
+
+func (state *claimSyscallFaultState) observeExit(result int64) {
+	if state.openingLock && result >= 0 {
+		state.lockFD = uint64(result)
+		state.lockFDKnown = true
+	}
+	state.openingLock = false
 }
 
 func (state *claimSyscallFaultState) shouldInject(call uint64) (bool, unix.Errno) {
@@ -169,7 +190,8 @@ func (state *claimSyscallFaultState) shouldInject(call uint64) (bool, unix.Errno
 			}
 		}
 	case "lock-fstat":
-		if call == unix.SYS_FSTAT && state.statCalls == 2*state.hierarchy+2 {
+		if call == unix.SYS_FSTAT && state.lockFDKnown && state.currentFD == state.lockFD &&
+			!state.injected {
 			return true, unix.EIO
 		}
 	case "lock-root-open":
@@ -238,6 +260,36 @@ func TestClaimSyscallFaultValidRootOpenUsesCompletedInspectionPhase(t *testing.T
 	state.shouldInject(unix.SYS_CLOSE)
 	if inject, errno := state.shouldInject(unix.SYS_OPENAT); !inject || errno != unix.EIO {
 		t.Fatalf("valid-root reopen fault = %t, %v", inject, errno)
+	}
+}
+
+func TestClaimSyscallFaultLockFstatUsesCapturedDescriptor(t *testing.T) {
+	state := claimSyscallFaultState{scenario: "lock-fstat"}
+	runtimeDirectory := int64(unix.AT_FDCWD)
+	runtimeOpen := unix.PtraceRegs{
+		Orig_rax: unix.SYS_OPENAT, Rdi: uint64(runtimeDirectory),
+		Rdx: unix.O_CREAT | unix.O_RDWR | unix.O_NOFOLLOW, R10: 0o600,
+	}
+	state.observeEntry(&runtimeOpen)
+	state.observeExit(41)
+	if state.lockFDKnown {
+		t.Fatal("runtime openat was captured as the claim lock")
+	}
+	lockOpen := runtimeOpen
+	lockOpen.Rdi = 7
+	state.observeEntry(&lockOpen)
+	state.observeExit(42)
+	state.currentFD = 41
+	if inject, _ := state.shouldInject(unix.SYS_FSTAT); inject {
+		t.Fatal("unrelated descriptor fstat was faulted")
+	}
+	state.currentFD = 42
+	if inject, errno := state.shouldInject(unix.SYS_FSTAT); !inject || errno != unix.EIO {
+		t.Fatalf("claim lock descriptor fault = %t, %v", inject, errno)
+	}
+	state.injected = true
+	if inject, _ := state.shouldInject(unix.SYS_FSTAT); inject {
+		t.Fatal("claim lock descriptor was faulted twice")
 	}
 }
 
@@ -365,7 +417,7 @@ func runClaimSyscallFault(t *testing.T, scenario string) {
 			t.Fatal(err)
 		}
 		if entering {
-			state.currentCall = registers.Orig_rax
+			state.observeEntry(&registers)
 			inject, errno := state.shouldInject(state.currentCall)
 			if inject {
 				registers.Orig_rax = ^uint64(0)
@@ -378,6 +430,7 @@ func runClaimSyscallFault(t *testing.T, scenario string) {
 				injectedErrno = 0
 			}
 		} else {
+			state.observeExit(int64(registers.Rax))
 			if injectedErrno != 0 {
 				registers.Rax = uint64(-int64(injectedErrno))
 				if err := unix.PtraceSetRegs(pid, &registers); err != nil {
