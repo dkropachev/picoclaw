@@ -451,7 +451,7 @@ func removePinnedBackupTreeContents(
 		return err
 	}
 	return removePinnedBackupTreeContentsBound(
-		rootPath, root, expectedRoot, identities, entries, defaultBackupRemovalOps(),
+		rootPath, root, expectedRoot, validated, entries, defaultBackupRemovalOps(),
 	)
 }
 
@@ -491,7 +491,7 @@ func removePinnedBackupTreeContentsWithSync(
 	ops.sync = func(root *os.Root, label string) error {
 		return errors.Join(syncBackupRemovalRoot(root), syncDir(label))
 	}
-	return removePinnedBackupTreeContentsBound(rootPath, root, expectedRoot, identities, entries, ops)
+	return removePinnedBackupTreeContentsBound(rootPath, root, expectedRoot, validated, entries, ops)
 }
 
 func cloneBackupRemovalIdentities(
@@ -541,12 +541,12 @@ func removePinnedBackupTreeContentsBound(
 				(objectType == fileidentity.ObjectTypeDirectory) {
 				return errors.Join(identityErr, file.Close())
 			}
-			if previous, duplicate := identities[identity]; duplicate {
-				return errors.Join(fmt.Errorf(
-					"database backup removal paths %q and %q physically alias", previous, childPath,
-				), file.Close())
+			if plannedPath, captured := identities[identity]; !captured || plannedPath != childPath {
+				return errors.Join(
+					errors.New("database backup removal child was not captured by preflight"),
+					file.Close(),
+				)
 			}
-			identities[identity] = childPath
 			var removeErr error
 			switch objectType {
 			case fileidentity.ObjectTypeDirectory:
@@ -568,6 +568,7 @@ func removePinnedBackupTreeContentsBound(
 			if closeErr := file.Close(); removeErr != nil || closeErr != nil {
 				return errors.Join(removeErr, closeErr)
 			}
+			delete(identities, identity)
 		}
 		if errors.Is(readErr, io.EOF) {
 			// A retry can observe no entries after a prior unlink succeeded but

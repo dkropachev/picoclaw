@@ -86,9 +86,8 @@ func removeBackupTreeDurableWithOps(
 	); err != nil {
 		return err
 	}
-	identities := map[fileidentity.Identity]string{expected: path}
 	entries := 0
-	return removeBackupTreeRelative(path, root, leaf, child, opened, expected, identities, &entries, ops)
+	return removeBackupTreeRelative(path, root, leaf, child, opened, expected, validated, &entries, ops)
 }
 
 func removeBackupTreeRelative(
@@ -124,6 +123,9 @@ func removeBackupTreeRelative(
 	if err := requireMissingBackupRemovalRootLeaf(parent, leaf); err != nil {
 		return errors.Join(errors.New("database backup removal source name changed"), err)
 	}
+	if err := validateBackupRemovalInventoryPlan(label, child, expected, identities); err != nil {
+		return err
+	}
 	if err := removePinnedBackupTreeContentsBound(
 		label, child, expected, identities, entries, ops,
 	); err != nil {
@@ -133,6 +135,34 @@ func removeBackupTreeRelative(
 		parent, leaf, quarantine, opened, exact, expected,
 		fileidentity.ObjectTypeDirectory, label, ops,
 	)
+}
+
+func validateBackupRemovalInventoryPlan(
+	rootPath string,
+	root *os.Root,
+	expectedRoot fileidentity.Identity,
+	planned map[fileidentity.Identity]string,
+) error {
+	observed := map[fileidentity.Identity]string{expectedRoot: rootPath}
+	entries := 0
+	if err := validatePinnedBackupTreeInventory(
+		rootPath, root, expectedRoot, observed, &entries,
+	); err != nil {
+		return err
+	}
+	for identity, path := range observed {
+		if planned[identity] != path {
+			return errors.New("database backup removal inventory changed")
+		}
+	}
+	prefix := rootPath + string(filepath.Separator)
+	for identity, path := range planned {
+		if (path == rootPath || len(path) > len(prefix) && path[:len(prefix)] == prefix) &&
+			observed[identity] != path {
+			return errors.New("database backup removal inventory changed")
+		}
+	}
+	return nil
 }
 
 func removeBackupFileDurable(

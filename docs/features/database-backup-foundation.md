@@ -34,7 +34,7 @@ and remove only captured identities. No runtime path calls these primitives.
 | --- | --- | --- | --- | --- | --- | --- |
 | `FR-DATABASE-BACKUP-FOUNDATION-001` | MUST | A caller creates or inspects a private backup directory/object. | Path, opened handle, object type, privacy metadata, and full identity agree. | May create and durably sync private directories/files. | Symlink/reparse, device, public DACL/mode, hard link, read-only, replacement, or unsupported platform fails closed. | Lexical paths alone cannot prove the object used. |
 | `FR-DATABASE-BACKUP-FOUNDATION-002` | MUST | A bounded source is copied to a private destination. | Output bytes, returned source identity, size, and digest match a stable source; reopened output retains the captured identity. | Exclusively creates, chmods/secures, fsyncs, and parent-syncs output. | Cancellation, short/no-progress IO, source/output transition, close/sync failure, or post-copy mismatch cleans only owned output and returns error. | Archive records must validate independently and name exact bytes. |
-| `FR-DATABASE-BACKUP-FOUNDATION-003` | MUST | Cleanup receives one expected file/tree identity. | Only that identity is quarantined and removed through retained handles. | No-replace rename, bounded child unlink, top-level unlink, and Unix parent sync; Windows quarantine uses write-through rename and later tombstone removal is housekeeping. | Identity/type/parent drift, alias, unsafe child, entry bound, or unlink failure preserves evidence and never recursively traverses a substitute. | Cleanup must not delete a replacement tree. |
+| `FR-DATABASE-BACKUP-FOUNDATION-003` | MUST | Under caller-held exclusive mutation authority, cleanup receives one expected file/tree identity. | Only captured identities are quarantined and removed relative to retained handles. | Full preflight, no-replace rename, bounded child unlink, top-level unlink, and retained-parent sync; Windows renames/disposes exact handles. | Identity/type/parent drift, alias, unsafe child, entry bound, or observed inventory change preserves evidence and never recursively traverses a substitute. | Cleanup must not delete a replacement tree. |
 
 ## Data And State Model
 
@@ -92,9 +92,10 @@ D5 alone owns claims, quiescence, and cutover.
 ## Failure And Edge Cases
 
 Platforms lacking required identity, private metadata, or atomic publication
-fail closed. Arbitrary same-user interference is outside this primitive's
-authority; retained-handle traversal still prevents recursive deletion of a
-substituted tree.
+fail closed. The caller must exclude concurrent writers to the private removal
+root; D5 owns that claim/quiescence contract. Detected drift still fails closed,
+but an arbitrary same-user process that ignores the authority boundary is
+outside this filesystem primitive's threat model.
 
 ## Acceptance Evidence
 

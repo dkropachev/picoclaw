@@ -439,6 +439,36 @@ func TestBackupRemovalNeverRecursesIntoLateTreeSubstitute(t *testing.T) {
 	assertPinnedRemovalPayload(t, matches[0])
 }
 
+func TestBackupRemovalRejectsEntryAddedAfterPreflight(t *testing.T) {
+	parent := migrationHome(t)
+	tree := filepath.Join(parent, "tree")
+	writeBackupRemovalTree(t, tree)
+	expected := backupRemovalDirectoryIdentity(t, tree)
+	root, child := openBackupRemovalTree(t, parent, "tree")
+	ops := defaultBackupRemovalOps()
+	added := false
+	ops.afterQuarantine = func(*os.Root, string) error {
+		if added {
+			return nil
+		}
+		added = true
+		return child.WriteFile("late", []byte("late"), 0o600)
+	}
+	if err := removeBackupTreeDurableWithOps(
+		tree, root, "tree", child, expected, ops,
+	); err == nil || !strings.Contains(err.Error(), "inventory changed") {
+		t.Fatalf("late inventory addition = %v", err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(parent, ".database-backup-remove-*"))
+	if len(matches) != 1 {
+		t.Fatalf("retained quarantine = %q", matches)
+	}
+	assertPinnedRemovalPayload(t, matches[0])
+	if got, err := os.ReadFile(filepath.Join(matches[0], "late")); err != nil || string(got) != "late" {
+		t.Fatalf("late entry changed = %q, %v", got, err)
+	}
+}
+
 func TestBackupRemovalUsesRetainedParentAfterPathReplacement(t *testing.T) {
 	base := migrationHome(t)
 	parent := filepath.Join(base, "parent")
