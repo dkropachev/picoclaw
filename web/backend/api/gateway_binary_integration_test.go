@@ -72,12 +72,7 @@ func builtAPITestCoreBinary(t *testing.T) string {
 			"./cmd/picoclaw",
 		)
 		command.Dir = repositoryRoot
-		command.Env = replaceAPITestEnvironment(os.Environ(), map[string]string{
-			"CGO_ENABLED": "0",
-			"GOCACHE":     filepath.Join(repositoryRoot, ".cache", "go-build"),
-			"GOMODCACHE":  filepath.Join(repositoryRoot, ".cache", "go-mod"),
-			"GOTOOLCHAIN": "auto",
-		})
+		command.Env = apiTestCoreBuildEnvironment(os.Environ(), repositoryRoot)
 		output, buildErr := command.CombinedOutput()
 		apiTestCoreBinary.output = string(output)
 		if buildErr != nil {
@@ -88,6 +83,60 @@ func builtAPITestCoreBinary(t *testing.T) string {
 		t.Fatalf("%v\n%s", apiTestCoreBinary.err, apiTestCoreBinary.output)
 	}
 	return apiTestCoreBinary.path
+}
+
+func apiTestCoreBuildEnvironment(base []string, repositoryRoot string) []string {
+	overrides := map[string]string{
+		"CGO_ENABLED": "0",
+		"GOTOOLCHAIN": "auto",
+	}
+	for name, fallback := range map[string]string{
+		"GOCACHE":    filepath.Join(repositoryRoot, ".cache", "go-build"),
+		"GOMODCACHE": filepath.Join(repositoryRoot, ".cache", "go-mod"),
+	} {
+		if strings.TrimSpace(apiTestEnvironmentValue(base, name)) == "" {
+			overrides[name] = fallback
+		}
+	}
+	return replaceAPITestEnvironment(base, overrides)
+}
+
+func apiTestEnvironmentValue(environment []string, wanted string) string {
+	for _, entry := range environment {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok && name == wanted {
+			return value
+		}
+	}
+	return ""
+}
+
+func TestAPITestCoreBuildEnvironmentPreservesSharedCaches(t *testing.T) {
+	root := t.TempDir()
+	sharedBuild := filepath.Join(t.TempDir(), "build")
+	sharedModules := filepath.Join(t.TempDir(), "modules")
+	environment := apiTestCoreBuildEnvironment([]string{
+		"GOCACHE=" + sharedBuild,
+		"GOMODCACHE=" + sharedModules,
+		"GOTOOLCHAIN=local",
+	}, root)
+	if got := apiTestEnvironmentValue(environment, "GOCACHE"); got != sharedBuild {
+		t.Fatalf("GOCACHE = %q, want shared %q", got, sharedBuild)
+	}
+	if got := apiTestEnvironmentValue(environment, "GOMODCACHE"); got != sharedModules {
+		t.Fatalf("GOMODCACHE = %q, want shared %q", got, sharedModules)
+	}
+	if got := apiTestEnvironmentValue(environment, "GOTOOLCHAIN"); got != "auto" {
+		t.Fatalf("GOTOOLCHAIN = %q, want auto", got)
+	}
+
+	fallbackEnvironment := apiTestCoreBuildEnvironment(nil, root)
+	if got := apiTestEnvironmentValue(fallbackEnvironment, "GOCACHE"); got != filepath.Join(root, ".cache", "go-build") {
+		t.Fatalf("fallback GOCACHE = %q", got)
+	}
+	if got := apiTestEnvironmentValue(fallbackEnvironment, "GOMODCACHE"); got != filepath.Join(root, ".cache", "go-mod") {
+		t.Fatalf("fallback GOMODCACHE = %q", got)
+	}
 }
 
 func findAPITestRepositoryRoot() (string, error) {

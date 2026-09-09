@@ -104,6 +104,11 @@ esac
 	if err != nil {
 		t.Fatalf("ReadFile(logPath) error = %v", err)
 	}
+	assertLoggedComposeProject(t, string(logData), "picoclaw-int-"+suiteName)
+	defaultDownArgs := findLoggedDockerInvocation(t, string(logData), "down")
+	if containsArg(defaultDownArgs, "--rmi") {
+		t.Fatalf("default integration cleanup unexpectedly removes images:\n%v", defaultDownArgs)
+	}
 
 	runArgs := findLoggedDockerInvocation(t, string(logData), "run")
 	if strings.Contains(strings.Join(runArgs, "\n"), "\nsh\n-c\n") {
@@ -138,7 +143,9 @@ func TestRunIntegrationTestsScriptInjectsCoverageForGoTest(t *testing.T) {
 	suiteName := filepath.Base(suiteDir)
 	err = os.WriteFile(
 		filepath.Join(suiteDir, "suite.env"),
-		[]byte("TEST_COMMAND='go test ./pkg/mcp -run TestIntegration -v'\n"),
+		[]byte("TEST_COMMAND='go test ./pkg/mcp -run TestIntegration -v'\n"+
+			"INTEGRATION_COMPOSE_PROJECT_NAMESPACE=manifest-override\n"+
+			"INTEGRATION_GOMAXPROCS=99\n"),
 		0o644,
 	)
 	if err != nil {
@@ -201,6 +208,8 @@ esac
 		"DOCKER_LOG="+logPath,
 		"INTEGRATION_COVERPKG=github.com/sipeed/picoclaw/pkg/mcp",
 		"INTEGRATION_COVERPROFILE_DIR=/workspace/.coverage/runner-test",
+		"INTEGRATION_COMPOSE_PROJECT_NAMESPACE=pc-test-base",
+		"INTEGRATION_GOMAXPROCS=2",
 	)
 
 	output, err := cmd.CombinedOutput()
@@ -212,11 +221,19 @@ esac
 	if err != nil {
 		t.Fatalf("ReadFile(logPath) error = %v", err)
 	}
+	assertLoggedComposeProject(t, string(logData), "picoclaw-int-pc-test-base-"+suiteName)
+	namespacedDownArgs := findLoggedDockerInvocation(t, string(logData), "down")
+	for _, wanted := range []string{"--rmi", "local"} {
+		if !containsArg(namespacedDownArgs, wanted) {
+			t.Errorf("namespaced cleanup is missing %q:\n%v", wanted, namespacedDownArgs)
+		}
+	}
 	runArgs := findLoggedDockerInvocation(t, string(logData), "run")
 	joinedArgs := strings.Join(runArgs, "\n")
 	for _, want := range []string{
 		"INTEGRATION_COVERPKG=github.com/sipeed/picoclaw/pkg/mcp",
 		"INTEGRATION_COVERPROFILE=/workspace/.coverage/runner-test/" + suiteName + ".cover.out",
+		"GOMAXPROCS=2",
 		"-coverprofile=\"$INTEGRATION_COVERPROFILE\"",
 		"go test ./pkg/mcp -run TestIntegration -v",
 	} {
@@ -226,6 +243,31 @@ esac
 	}
 	if _, err := os.Stat(filepath.Join(repoRoot, ".coverage", "runner-test")); err != nil {
 		t.Fatalf("coverage dir was not created: %v", err)
+	}
+}
+
+func assertLoggedComposeProject(t *testing.T, logData, wanted string) {
+	t.Helper()
+	invocations := 0
+	for _, block := range strings.Split(logData, "---\n") {
+		args := strings.Split(strings.TrimSpace(block), "\n")
+		if len(args) == 1 && args[0] == "" {
+			continue
+		}
+		invocations++
+		found := false
+		for index := 0; index+1 < len(args); index++ {
+			if args[index] == "-p" && args[index+1] == wanted {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Docker invocation does not use project %q:\n%v", wanted, args)
+		}
+	}
+	if invocations == 0 {
+		t.Fatal("no Docker invocations logged")
 	}
 }
 

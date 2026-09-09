@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -67,6 +68,20 @@ type goCachePaths struct {
 	Modules string `json:"GOMODCACHE"`
 }
 
+type preparedCoverageRef struct {
+	label       string
+	ref         string
+	worktree    string
+	profileRoot string
+	home        string
+	environment []string
+}
+
+type coverageRefResult struct {
+	profile coverageProfile
+	err     error
+}
+
 type coveragePlan struct {
 	CoverPackageDirs  []string
 	TestPackageDirs   []string
@@ -88,6 +103,7 @@ const (
 	coverageNestedBenchmarkSkipPattern = `^Test(GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath|WorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig)$`
 	coverageGoTestCount                = 1
 	coverageGoTestParallelism          = 1
+	coverageGoMaxProcs                 = 2
 )
 
 type listedPackage struct {
@@ -140,7 +156,11 @@ func main() {
 	}
 }
 
-func runCoverageDelta(root, base, head, tags string, forcedPackages []string, includeIntegration bool) error {
+func runCoverageDelta(
+	root, base, head, tags string,
+	forcedPackages []string,
+	includeIntegration bool,
+) (resultErr error) {
 	specs, err := loadFeatureSpecs(root)
 	if err != nil {
 		return err
@@ -160,13 +180,48 @@ func runCoverageDelta(root, base, head, tags string, forcedPackages []string, in
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() {
+		resultErr = errors.Join(resultErr, removeCoverageTemporaryRoot(tmpDir))
+	}()
 
-	baseProfile, err := coverageForRef(root, tmpDir, "base", base, tags, plan, includeIntegration)
+	ambientEnvironment := os.Environ()
+	goCaches, err := resolveGoCachePaths(root, ambientEnvironment)
 	if err != nil {
 		return err
 	}
-	headProfile, err := coverageForRef(root, tmpDir, "head", head, tags, plan, includeIntegration)
+
+	refs := make([]preparedCoverageRef, 0, 2)
+	for _, candidate := range []struct {
+		label string
+		ref   string
+	}{
+		{label: "base", ref: base},
+		{label: "head", ref: head},
+	} {
+		prepared, prepareErr := prepareCoverageRef(
+			root,
+			tmpDir,
+			candidate.label,
+			candidate.ref,
+			ambientEnvironment,
+			goCaches,
+		)
+		if prepareErr != nil {
+			return errors.Join(prepareErr, cleanupCoverageRefs(root, refs))
+		}
+		refs = append(refs, prepared)
+	}
+
+	baseProfile, headProfile, err := runCoveragePair(
+		refs[0],
+		refs[1],
+		func(prepared preparedCoverageRef) (coverageProfile, error) {
+			return coverageForPreparedRef(prepared, tags, plan, includeIntegration)
+		},
+		func(prepared preparedCoverageRef) error {
+			return cleanupCoverageRef(root, prepared)
+		},
+	)
 	if err != nil {
 		return err
 	}
@@ -801,37 +856,137 @@ func allGoFiles(root string) []string {
 	return files
 }
 
-func coverageForRef(
-	root, tmpDir, label, ref, tags string,
-	plan coveragePlan,
-	includeIntegration bool,
-) (coverageProfile, error) {
+func prepareCoverageRef(
+	root, tmpDir, label, ref string,
+	ambientEnvironment []string,
+	goCaches goCachePaths,
+) (preparedCoverageRef, error) {
 	sha, err := resolveGitRef(root, ref)
 	if err != nil {
-		return coverageProfile{}, err
+		return preparedCoverageRef{}, err
 	}
 	worktree := filepath.Join(tmpDir, label)
 	if err := gitRun(root, "worktree", "add", "--detach", "--force", worktree, sha); err != nil {
-		return coverageProfile{}, fmt.Errorf("create %s worktree for %s: %w", label, ref, err)
+		return preparedCoverageRef{}, fmt.Errorf("create %s worktree for %s: %w", label, ref, err)
 	}
-	defer func() {
-		_ = gitRun(root, "worktree", "remove", "--force", worktree)
-	}()
 
 	coverageHome := filepath.Join(tmpDir, label+"-picoclaw-home")
-	goCaches, err := resolveGoCachePaths(root, os.Environ())
-	if err != nil {
-		return coverageProfile{}, err
+	return preparedCoverageRef{
+		label:       label,
+		ref:         ref,
+		worktree:    worktree,
+		profileRoot: tmpDir,
+		home:        coverageHome,
+		environment: coverageEnvironment(ambientEnvironment, coverageHome, goCaches),
+	}, nil
+}
+
+func cleanupCoverageRefs(root string, refs []preparedCoverageRef) error {
+	cleanupErrors := make([]error, 0, len(refs))
+	for _, prepared := range refs {
+		cleanupErrors = append(cleanupErrors, cleanupCoverageRef(root, prepared))
 	}
-	environment := coverageEnvironment(os.Environ(), coverageHome, goCaches)
-	if err = prepareCoverageStorage(coverageHome); err != nil {
-		return coverageProfile{}, fmt.Errorf("create %s coverage home: %w", label, err)
+	return errors.Join(cleanupErrors...)
+}
+
+func cleanupCoverageRef(root string, prepared preparedCoverageRef) error {
+	permissionErr := makeCoverageWorktreeRemovable(prepared.worktree)
+	if permissionErr != nil {
+		permissionErr = fmt.Errorf(
+			"prepare %s worktree cleanup for %s: %w",
+			prepared.label,
+			prepared.ref,
+			permissionErr,
+		)
+	}
+	removeErr := gitRun(root, "worktree", "remove", "--force", prepared.worktree)
+	if removeErr != nil {
+		removeErr = fmt.Errorf("remove %s worktree for %s: %w", prepared.label, prepared.ref, removeErr)
+	}
+	return errors.Join(permissionErr, removeErr)
+}
+
+func makeCoverageWorktreeRemovable(root string) error {
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		return os.Chmod(path, info.Mode().Perm()|0o700)
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func removeCoverageTemporaryRoot(root string) error {
+	permissionErr := makeCoverageWorktreeRemovable(root)
+	removeErr := os.RemoveAll(root)
+	return errors.Join(permissionErr, removeErr)
+}
+
+func runCoveragePair(
+	base, head preparedCoverageRef,
+	collect func(preparedCoverageRef) (coverageProfile, error),
+	cleanup func(preparedCoverageRef) error,
+) (coverageProfile, coverageProfile, error) {
+	refs := [...]preparedCoverageRef{base, head}
+	results := [len(refs)]coverageRefResult{}
+	var wait sync.WaitGroup
+	wait.Add(len(refs))
+	for index, prepared := range refs {
+		go func() {
+			defer wait.Done()
+			results[index].profile, results[index].err = collect(prepared)
+		}()
+	}
+	wait.Wait()
+
+	// Git worktree administration is deliberately serial. More importantly,
+	// neither worktree can disappear while the peer collector still has live
+	// processes or profiles below it.
+	cleanupErrors := make([]error, 0, len(refs))
+	for _, prepared := range refs {
+		cleanupErrors = append(cleanupErrors, cleanup(prepared))
 	}
 
+	// Indexed results preserve base-before-head diagnostics even when head
+	// happens to fail first. Join keeps both failures visible without cancelling
+	// the peer collector before it can finish and release its resources.
+	return results[0].profile, results[1].profile, errors.Join(
+		results[0].err,
+		results[1].err,
+		errors.Join(cleanupErrors...),
+	)
+}
+
+func coverageForPreparedRef(
+	prepared preparedCoverageRef,
+	tags string,
+	plan coveragePlan,
+	includeIntegration bool,
+) (coverageProfile, error) {
+	label := prepared.label
+	ref := prepared.ref
+	worktree := prepared.worktree
+	tmpDir := prepared.profileRoot
+	coverageHome := prepared.home
+	environment := prepared.environment
+
+	if err := prepareCoverageStorage(coverageHome); err != nil {
+		return coverageProfile{}, fmt.Errorf("create %s coverage home: %w", label, err)
+	}
 	if err := runGoGenerate(worktree, label, ref, environment); err != nil {
 		return coverageProfile{}, err
 	}
-	if err = buildCoverageTestBinary(worktree, label, ref, tags, environment); err != nil {
+	if err := buildCoverageTestBinary(worktree, label, ref, tags, environment); err != nil {
 		return coverageProfile{}, err
 	}
 
@@ -1276,6 +1431,8 @@ func runIntegrationCoverage(
 	cmd.Env = append(append([]string(nil), environment...),
 		"INTEGRATION_COVERPKG="+strings.Join(coverImports, ","),
 		"INTEGRATION_COVERPROFILE_DIR=/workspace/.coverage/integration-"+label,
+		"INTEGRATION_COMPOSE_PROJECT_NAMESPACE="+filepath.Base(filepath.Dir(worktree))+"-"+label,
+		"INTEGRATION_GOMAXPROCS="+strconv.Itoa(coverageGoMaxProcs),
 	)
 	if tags != "" {
 		cmd.Env = append(cmd.Env, "GOFLAGS=-tags="+tags+",integration")
@@ -1428,7 +1585,8 @@ func coverageEnvironment(base []string, home string, caches goCachePaths) []stri
 			upper == "HOMEDRIVE" || upper == "HOMEPATH" ||
 			strings.EqualFold(name, "GOCACHE") ||
 			strings.EqualFold(name, "GOMODCACHE") ||
-			strings.EqualFold(name, "GOTOOLCHAIN")) {
+			strings.EqualFold(name, "GOTOOLCHAIN") ||
+			strings.EqualFold(name, "GOMAXPROCS")) {
 			continue
 		}
 		environment = append(environment, entry)
@@ -1466,6 +1624,7 @@ func coverageEnvironment(base []string, home string, caches goCachePaths) []stri
 		"GOCACHE="+caches.Build,
 		"GOMODCACHE="+caches.Modules,
 		"GOTOOLCHAIN=auto",
+		"GOMAXPROCS="+strconv.Itoa(coverageGoMaxProcs),
 	)
 	if runtime.GOOS == "windows" {
 		volume := filepath.VolumeName(home)
