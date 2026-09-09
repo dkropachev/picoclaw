@@ -139,11 +139,25 @@ func TestPRScopesValidationBehindStableRequiredCheck(t *testing.T) {
 
 func TestPRGoTestsBoundPackageParallelism(t *testing.T) {
 	workflow := readRepoFile(t, ".github/workflows/pr.yml")
-	if !strings.Contains(
-		workflow,
-		"go run ./scripts/hermetic-go-test -- go test -p 4 -tags goolm,stdjson ./...",
-	) {
-		t.Fatal("PR workflow does not bound repository-wide Go test package parallelism")
+	testJob := targetBlock(t, workflow, "  test:\n", "  cross_compile:\n")
+	for _, snippet := range []string{
+		"name: Tests (${{ matrix.shard }})",
+		"fail-fast: false",
+		"shard: [slow, workspace, remaining]",
+		"if: matrix.shard == 'remaining'",
+		"uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+		`go run ./scripts/hermetic-go-test -- bash ./scripts/run-go-test-shard.sh "${{ matrix.shard }}"`,
+	} {
+		if !strings.Contains(testJob, snippet) {
+			t.Errorf("PR workflow is missing Go test sharding setting %q", snippet)
+		}
+	}
+	if strings.Count(testJob, "run: go generate ./...") != 1 {
+		t.Fatal("PR test matrix must run Go generation exactly once")
+	}
+	helper := readRepoFile(t, "scripts/run-go-test-shard.sh")
+	if !strings.Contains(helper, `exec go test -p 4 -tags goolm,stdjson -timeout 20m "${selected[@]}"`) {
+		t.Fatal("PR Go test shard helper does not bound package parallelism")
 	}
 }
 
