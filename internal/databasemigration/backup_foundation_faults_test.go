@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/internal/fileidentity"
 )
@@ -50,7 +52,11 @@ func TestBackupFoundationHashAndReadPrivacyFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			digest, size, hashErr := hashBackupFile(nil, path, info, info.Size())
+			identity, err := backupExistingIdentity(path, fileidentity.ObjectTypeRegular)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest, size, hashErr := hashBackupFile(nil, path, info, identity, info.Size())
 			if digest != "" || size != 0 || hashErr == nil {
 				t.Fatalf("unsafe hash = %q, %d, %v", digest, size, hashErr)
 			}
@@ -68,8 +74,45 @@ func TestBackupFoundationHashAndReadPrivacyFailures(t *testing.T) {
 	if payload, err := readPrivateBackupFile(missing, 64); payload != nil || err == nil {
 		t.Fatalf("missing control read = %q, %v", payload, err)
 	}
-	if digest, size, err := hashBackupFile(nil, missing, nil, 0); digest != "" || size != 0 || err == nil {
+	if digest, size, err := hashBackupFile(
+		nil, missing, nil, fileidentity.Identity{}, 0,
+	); digest != "" || size != 0 || err == nil {
 		t.Fatalf("missing hash = %q, %d, %v", digest, size, err)
+	}
+}
+
+func TestBackupFoundationHashBindsExpectedPhysicalFile(t *testing.T) {
+	root := migrationHome(t)
+	first := filepath.Join(root, "first")
+	second := filepath.Join(root, "second")
+	writeMigrationFile(t, first, []byte("payload"))
+	writeMigrationFile(t, second, []byte("payload"))
+	stamp := time.Unix(1_700_000_000, 0)
+	for _, path := range []string{first, second} {
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstInfo, err := os.Lstat(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInfo, err := os.Lstat(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstInfo.Size() != secondInfo.Size() || firstInfo.Mode() != secondInfo.Mode() ||
+		!firstInfo.ModTime().Equal(secondInfo.ModTime()) || os.SameFile(firstInfo, secondInfo) {
+		t.Fatal("physical-file fixture metadata is not collision-equivalent")
+	}
+	firstIdentity, err := backupExistingIdentity(first, fileidentity.ObjectTypeRegular)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest, size, err := hashBackupFile(
+		t.Context(), second, firstInfo, firstIdentity, firstInfo.Size(),
+	); digest != "" || size != 0 || err == nil {
+		t.Fatalf("different physical file matched expected metadata: %q, %d, %v", digest, size, err)
 	}
 }
 
@@ -103,6 +146,17 @@ func TestBackupFoundationFilesystemPermissionFailures(t *testing.T) {
 
 func TestBackupFoundationPrivateDirectoryOperationFaults(t *testing.T) {
 	canary := errors.New("private directory operation canary")
+	t.Run("relative path before operations", func(t *testing.T) {
+		ops := defaultEnsureBackupDirectoryOps()
+		called := false
+		ops.validate = func(string) error {
+			called = true
+			return nil
+		}
+		if err := ensurePrivateBackupDirectoryWithOps("relative", ops); err == nil || called {
+			t.Fatalf("relative private directory reached operations: called=%t err=%v", called, err)
+		}
+	})
 	for _, test := range []struct {
 		name   string
 		mutate func(*ensureBackupDirectoryOps)
@@ -185,6 +239,51 @@ func TestBackupFoundationCopyRejectsOutputHandleIdentityFailure(t *testing.T) {
 		t.Fatalf("output-identity copy = %#v, calls=%d, %v", record, openedCalls, err)
 	}
 	_ = os.Remove(filepath.Join(archive, "payload"))
+}
+
+func TestBackupFoundationCopyRejectsDestinationReplacementDuringRehash(t *testing.T) {
+	root := migrationHome(t)
+	source := filepath.Join(root, "source")
+	writeMigrationFile(t, source, []byte("payload"))
+	archive := filepath.Join(root, "archive")
+	if err := ensurePrivateBackupDirectory(archive); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(archive, "payload")
+	displaced := filepath.Join(archive, "displaced")
+	ops := defaultBackupCopyOps()
+	copyBytes := ops.copy
+	ops.copy = func(
+		_ context.Context,
+		writer io.Writer,
+		digest hash.Hash,
+		reader io.Reader,
+		limit int64,
+	) (int64, error) {
+		return copyBytes(context.Background(), writer, digest, reader, limit)
+	}
+	duringRehash := &actionAfterMigrationErrChecks{
+		Context: context.Background(),
+		action: func() {
+			if err := os.Rename(destination, displaced); err != nil {
+				t.Fatal(err)
+			}
+			writeMigrationFile(t, destination, []byte("forged!"))
+		},
+	}
+	record, err := copyBackupFileWithOps(
+		duringRehash, archive, "global/auth", "legacy", source,
+		"payload", newBackupBudget(), ops,
+	)
+	if err == nil || record.StoreID != "" || !duringRehash.done {
+		t.Fatalf("rehash replacement copy = %#v, action=%t, %v", record, duringRehash.done, err)
+	}
+	if payload, readErr := os.ReadFile(destination); readErr != nil || string(payload) != "forged!" {
+		t.Fatalf("replacement destination was removed: %q, %v", payload, readErr)
+	}
+	if payload, readErr := os.ReadFile(displaced); readErr != nil || string(payload) != "payload" {
+		t.Fatalf("displaced owned output changed: %q, %v", payload, readErr)
+	}
 }
 
 func TestBackupFoundationCopyRejectsSourceIdentityFailure(t *testing.T) {
@@ -450,6 +549,11 @@ func TestBackupFoundationDurableRemovalRejectsMismatchedObjects(t *testing.T) {
 		filePath, parentRoot, "file", nil, fileIdentity,
 	); err == nil {
 		t.Fatal("durable file removal accepted a nil handle")
+	}
+	if err := removeBackupFileDurableWithSync(
+		filePath, parentRoot, "missing", file, fileIdentity, func(string) error { return nil },
+	); err == nil {
+		t.Fatal("durable file removal accepted a mismatched parent leaf")
 	}
 	if err := os.Rename(filePath, filePath+".original"); err != nil {
 		t.Fatal(err)

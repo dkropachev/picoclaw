@@ -267,7 +267,7 @@ func removePinnedBackupFile(path string, expected fileidentity.Identity) (return
 		return identityErr
 	}
 	if !exists {
-		return nil
+		return fileutil.SyncDirectory(filepath.Dir(path))
 	}
 	if currentType != fileidentity.ObjectTypeRegular || currentIdentity != expected {
 		return errors.New("database backup file removal target changed")
@@ -303,6 +303,9 @@ func removePinnedBackupFile(path string, expected fileidentity.Identity) (return
 	}
 	if publishErr := publishBackupDirectory(path, tombstone); publishErr != nil {
 		return publishErr
+	}
+	if syncErr := fileutil.SyncDirectory(parentPath); syncErr != nil {
+		return syncErr
 	}
 	if missingErr := requireMissingBackupRemovalPath(path, fileidentity.ExistingWithType); missingErr != nil {
 		return missingErr
@@ -345,6 +348,7 @@ type backupTreeRemovalOps struct {
 	opened     func(*os.File) (fileidentity.Identity, fileidentity.ObjectType, error)
 	reserve    func(string) (string, error)
 	rename     func(string, string) error
+	syncDir    func(string) error
 	removeTree func(string, *os.Root, string, *os.Root, fileidentity.Identity) error
 }
 
@@ -354,6 +358,7 @@ func defaultBackupTreeRemovalOps() backupTreeRemovalOps {
 		opened:   fileidentity.Opened,
 		reserve:  reserveBackupTreeRemovalPath,
 		rename:   publishBackupDirectory,
+		syncDir:  fileutil.SyncDirectory,
 		removeTree: func(
 			path string,
 			root *os.Root,
@@ -386,7 +391,7 @@ func removePinnedBackupTree(path string) error {
 		return err
 	}
 	if !exists {
-		return nil
+		return fileutil.SyncDirectory(filepath.Dir(path))
 	}
 	if objectType != fileidentity.ObjectTypeDirectory {
 		return errors.New("database backup removal target is not a directory")
@@ -411,12 +416,12 @@ func removePinnedBackupTreeWithOps(
 		return errors.New("database backup removal path is invalid")
 	}
 	if !expected.Valid() || ops.identity == nil || ops.opened == nil || ops.reserve == nil ||
-		ops.rename == nil || ops.removeTree == nil {
+		ops.rename == nil || ops.syncDir == nil || ops.removeTree == nil {
 		return errors.New("database backup removal identity or operations are invalid")
 	}
 	before, beforeType, exists, identityErr := ops.identity(path)
 	if errors.Is(identityErr, os.ErrNotExist) || identityErr == nil && !exists {
-		return nil
+		return ops.syncDir(filepath.Dir(path))
 	}
 	if identityErr != nil || beforeType != fileidentity.ObjectTypeDirectory || before != expected {
 		return errors.Join(errors.New("database backup removal target identity changed"), identityErr)
@@ -488,6 +493,9 @@ func removePinnedBackupTreeWithOps(
 	renameErr := ops.rename(path, tombstone)
 	if renameErr != nil {
 		return renameErr
+	}
+	if syncErr := ops.syncDir(parentPath); syncErr != nil {
+		return syncErr
 	}
 
 	// From this point forward, every error deliberately leaves the quarantined
@@ -584,8 +592,23 @@ func removePinnedBackupTreeContents(
 	identities map[fileidentity.Identity]string,
 	entries *int,
 ) (returnErr error) {
+	return removePinnedBackupTreeContentsWithSync(
+		rootPath, root, identities, entries, fileutil.SyncDirectory,
+	)
+}
+
+func removePinnedBackupTreeContentsWithSync(
+	rootPath string,
+	root *os.Root,
+	identities map[fileidentity.Identity]string,
+	entries *int,
+	syncDir func(string) error,
+) (returnErr error) {
 	if !validBackupAbsolutePath(rootPath) || root == nil || identities == nil || entries == nil {
 		return errors.New("database backup tree-content removal input is invalid")
+	}
+	if syncDir == nil {
+		return errors.New("database backup removal directory sync is unavailable")
 	}
 	directory, err := root.Open(".")
 	if err != nil {
@@ -628,8 +651,8 @@ func removePinnedBackupTreeContents(
 						openErr,
 					)
 				}
-				removeErr := removePinnedBackupTreeContents(
-					childPath, childRoot, identities, entries,
+				removeErr := removePinnedBackupTreeContentsWithSync(
+					childPath, childRoot, identities, entries, syncDir,
 				)
 				if removeErr == nil {
 					removeErr = matchBackupRemovalIdentity(
@@ -677,9 +700,14 @@ func removePinnedBackupTreeContents(
 					errors.New("database backup removal child name remains"), missingErr,
 				)
 			}
+			if syncErr := syncDir(rootPath); syncErr != nil {
+				return syncErr
+			}
 		}
 		if errors.Is(readErr, io.EOF) {
-			return nil
+			// A retry can observe no entries after a prior unlink succeeded but
+			// its directory sync failed. Re-sync before reporting completion.
+			return syncDir(rootPath)
 		}
 		if readErr != nil {
 			return readErr

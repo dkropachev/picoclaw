@@ -16,6 +16,7 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/fileidentity"
 	"github.com/sipeed/picoclaw/pkg/database"
 )
 
@@ -364,29 +365,55 @@ func TestBackupControlReadAndHashBoundaries(t *testing.T) {
 		}
 	}
 
-	info, err := os.Lstat(path)
-	if err != nil {
-		t.Fatal(err)
+	info, statErr := os.Lstat(path)
+	if statErr != nil {
+		t.Fatal(statErr)
 	}
-	digest, size, err := hashBackupFile(t.Context(), path, info, 7)
-	if err != nil || size != 7 || digest == "" {
-		t.Fatalf("hashBackupFile(valid) = %q, %d, %v", digest, size, err)
+	identity, identityErr := backupExistingIdentity(path, fileidentity.ObjectTypeRegular)
+	if identityErr != nil {
+		t.Fatal(identityErr)
 	}
-	if digest, size, err := hashBackupFile(nil, path, info, 7); err != nil || size != 7 || digest == "" {
+	digest, size, hashErr := hashBackupFile(t.Context(), path, info, identity, 7)
+	if hashErr != nil || size != 7 || digest == "" {
+		t.Fatalf("hashBackupFile(valid) = %q, %d, %v", digest, size, hashErr)
+	}
+	if digest, size, err := hashBackupFile(nil, path, info, identity, 7); err != nil || size != 7 || digest == "" {
 		t.Fatalf("hashBackupFile(nil context) = %q, %d, %v", digest, size, err)
 	}
-	if digest, size, err := hashBackupFile(t.Context(), filepath.Join(root, "missing"), info, 7); digest != "" || size != 0 || err == nil {
+	if digest, size, err := hashBackupFile(
+		t.Context(), filepath.Join(root, "missing"), info, identity, 7,
+	); digest != "" || size != 0 || err == nil {
 		t.Fatalf("hashBackupFile(missing) = %q, %d, %v", digest, size, err)
 	}
-	if digest, size, err := hashBackupFile(t.Context(), path, nil, 7); digest != "" || size != 0 || err == nil {
+	if digest, size, err := hashBackupFile(
+		t.Context(), path, nil, identity, 7,
+	); digest != "" || size != 0 || err == nil {
+		t.Fatalf("hashBackupFile(nil metadata) = %q, %d, %v", digest, size, err)
+	}
+	if digest, size, err := hashBackupFile(
+		t.Context(), path, info, fileidentity.Identity{}, 7,
+	); digest != "" || size != 0 || err == nil {
 		t.Fatalf("hashBackupFile(nil identity) = %q, %d, %v", digest, size, err)
 	}
 	other := filepath.Join(root, "other")
 	writeMigrationFile(t, other, []byte("control"))
-	if digest, size, err := hashBackupFile(t.Context(), path, mustMigrationInfo(t, other), 7); digest != "" || size != 0 || err == nil {
+	otherIdentity, identityErr := backupExistingIdentity(other, fileidentity.ObjectTypeRegular)
+	if identityErr != nil {
+		t.Fatal(identityErr)
+	}
+	if digest, size, err := hashBackupFile(
+		t.Context(), path, mustMigrationInfo(t, other), otherIdentity, 7,
+	); digest != "" || size != 0 || err == nil {
 		t.Fatalf("hashBackupFile(wrong identity) = %q, %d, %v", digest, size, err)
 	}
-	if digest, size, err := hashBackupFile(t.Context(), path, info, 1); digest != "" || size != 0 || err == nil {
+	if digest, size, err := hashBackupFile(
+		t.Context(), path, info, otherIdentity, 7,
+	); digest != "" || size != 0 || err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("hashBackupFile(wrong full identity) = %q, %d, %v", digest, size, err)
+	}
+	if digest, size, err := hashBackupFile(
+		t.Context(), path, info, identity, 1,
+	); digest != "" || size != 0 || err == nil {
 		t.Fatalf("hashBackupFile(limit) = %q, %d, %v", digest, size, err)
 	}
 	if runtime.GOOS != "windows" {
@@ -394,7 +421,9 @@ func TestBackupControlReadAndHashBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 		permissive := mustMigrationInfo(t, path)
-		if digest, size, err := hashBackupFile(t.Context(), path, permissive, 7); digest != "" || size != 0 || err == nil {
+		if digest, size, err := hashBackupFile(
+			t.Context(), path, permissive, identity, 7,
+		); digest != "" || size != 0 || err == nil {
 			t.Fatalf("hashBackupFile(non-private) = %q, %d, %v", digest, size, err)
 		}
 		if err := os.Chmod(path, 0o600); err != nil {
@@ -413,7 +442,7 @@ func TestBackupControlReadAndHashBoundaries(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if digest, size, err := hashBackupFile(canceled, path, info, 7); digest != "" || size != 0 ||
+	if digest, size, err := hashBackupFile(canceled, path, info, identity, 7); digest != "" || size != 0 ||
 		!errors.Is(err, context.Canceled) {
 		t.Fatalf("hashBackupFile(canceled) = %q, %d, %v", digest, size, err)
 	}
@@ -426,7 +455,9 @@ func TestBackupControlReadAndHashBoundaries(t *testing.T) {
 			}
 		},
 	}
-	if digest, _, err := hashBackupFile(changing, path, before, 7); digest != "" || err == nil {
+	if digest, _, err := hashBackupFile(
+		changing, path, before, identity, 7,
+	); digest != "" || err == nil {
 		t.Fatalf("hashBackupFile(changing) = %q, %v", digest, err)
 	}
 }

@@ -22,24 +22,31 @@ func hashBackupFile(
 	ctx context.Context,
 	path string,
 	expected os.FileInfo,
+	expectedIdentity fileidentity.Identity,
 	maxBytes int64,
 ) (result string, size int64, returnErr error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if expected == nil || !expectedIdentity.Valid() {
+		return "", 0, errors.New("database backup expected file identity is invalid")
 	}
 	file, opened, err := openPinnedBackupPath(path, false)
 	if err != nil {
 		return "", 0, err
 	}
 	defer func() { returnErr = errors.Join(returnErr, file.Close()) }()
-	if expected == nil || opened == nil || !opened.Mode().IsRegular() ||
+	if opened == nil || !os.SameFile(expected, opened) ||
+		!opened.Mode().IsRegular() ||
 		opened.Mode()&os.ModeSymlink != 0 || expected.Size() != opened.Size() ||
 		expected.Mode() != opened.Mode() || !expected.ModTime().Equal(opened.ModTime()) {
 		return "", 0, errors.Join(errors.New("database backup file changed while opening"), err)
 	}
 	identity, identityErr := backupOpenedIdentity(file, fileidentity.ObjectTypeRegular)
-	if identityErr != nil {
-		return "", 0, identityErr
+	if identityErr != nil || identity != expectedIdentity {
+		return "", 0, errors.Join(
+			errors.New("database backup file identity changed while opening"), identityErr,
+		)
 	}
 	if err := fileutil.ValidatePrivateFile(path, opened); err != nil {
 		return "", 0, fmt.Errorf("revalidate database backup file: %w", err)
@@ -411,6 +418,7 @@ type backupCopyOps struct {
 	close      func(*os.File) error
 	remove     func(string, fileidentity.Identity) error
 	secure     func(string) error
+	validate   func(string, os.FileInfo) error
 	syncDir    func(string) error
 	rel        func(string, string) (string, error)
 }
@@ -432,6 +440,7 @@ func defaultBackupCopyOps() backupCopyOps {
 		close:      func(file *os.File) error { return file.Close() },
 		remove:     removePinnedBackupFile,
 		secure:     secureAndValidateBackupFile,
+		validate:   fileutil.ValidatePrivateFile,
 		syncDir:    fileutil.SyncDirectory,
 		rel:        filepath.Rel,
 	}
@@ -583,15 +592,41 @@ func copyBackupFileWithOps(
 	copiedIdentity, copiedType, copiedExists, identityErr := ops.identity(destination)
 	copiedOpenedIdentity, copiedOpenedType, openedIdentityErr := ops.opened(copiedFile)
 	verifiedDigest, digestErr := hashPreparedGenerationMember(ctx, copiedFile, written)
+	afterHashOpened, afterHashStatErr := ops.stat(copiedFile)
+	afterHashOpenedIdentity, afterHashOpenedType, afterHashOpenedIdentityErr := ops.opened(copiedFile)
+	afterHashPathIdentityBefore, afterHashPathTypeBefore, afterHashPathExistsBefore,
+		afterHashPathIdentityErrBefore := ops.identity(destination)
+	afterHashPath, afterHashPathStatErr := ops.lstat(destination)
+	afterHashPathIdentity, afterHashPathType, afterHashPathExists,
+		afterHashPathIdentityErr := ops.identity(destination)
+	afterHashMetadataErr := validateBackupPlatformFile(afterHashOpened, copiedFile, 0o600)
+	afterHashPrivateErr := ops.validate(destination, afterHashPath)
 	closeErr := copiedFile.Close()
 	if metadataErr != nil || identityErr != nil || openedIdentityErr != nil || digestErr != nil ||
+		afterHashStatErr != nil || afterHashOpenedIdentityErr != nil ||
+		afterHashPathIdentityErrBefore != nil || afterHashPathStatErr != nil ||
+		afterHashPathIdentityErr != nil || afterHashMetadataErr != nil || afterHashPrivateErr != nil ||
 		!copiedExists || copiedType != fileidentity.ObjectTypeRegular ||
 		copiedOpenedType != fileidentity.ObjectTypeRegular || copiedIdentity != outputIdentity ||
 		copiedOpenedIdentity != outputIdentity || copiedIdentity == sourceIdentity ||
-		copiedInfo.Size() != written || verifiedDigest != expectedDigest || closeErr != nil {
+		!afterHashPathExistsBefore || afterHashPathTypeBefore != fileidentity.ObjectTypeRegular ||
+		afterHashPathIdentityBefore != outputIdentity || !afterHashPathExists ||
+		afterHashPathType != fileidentity.ObjectTypeRegular || afterHashPathIdentity != outputIdentity ||
+		afterHashOpened == nil || afterHashOpenedType != fileidentity.ObjectTypeRegular ||
+		afterHashOpenedIdentity != outputIdentity || afterHashPath == nil ||
+		!afterHashPath.Mode().IsRegular() || afterHashPath.Mode()&os.ModeSymlink != 0 ||
+		copiedInfo.Size() != written || afterHashOpened.Size() != written ||
+		afterHashPath.Size() != written || copiedInfo.Mode() != afterHashOpened.Mode() ||
+		copiedInfo.Mode() != afterHashPath.Mode() ||
+		!copiedInfo.ModTime().Equal(afterHashOpened.ModTime()) ||
+		!copiedInfo.ModTime().Equal(afterHashPath.ModTime()) ||
+		verifiedDigest != expectedDigest || closeErr != nil {
 		return empty, errors.Join(
 			errors.New("database backup copy physical identity is unsafe"),
-			metadataErr, identityErr, openedIdentityErr, digestErr, closeErr,
+			metadataErr, identityErr, openedIdentityErr, digestErr,
+			afterHashStatErr, afterHashOpenedIdentityErr, afterHashPathIdentityErrBefore,
+			afterHashPathStatErr, afterHashPathIdentityErr, afterHashMetadataErr,
+			afterHashPrivateErr, closeErr,
 		)
 	}
 	if err := ops.syncDir(filepath.Dir(destination)); err != nil {

@@ -37,6 +37,9 @@ func defaultEnsureBackupDirectoryOps() ensureBackupDirectoryOps {
 }
 
 func ensurePrivateBackupDirectoryWithOps(path string, ops ensureBackupDirectoryOps) error {
+	if !validBackupAbsolutePath(path) {
+		return errors.New("database backup directory path is invalid")
+	}
 	if err := ops.validate(path); err != nil {
 		return err
 	}

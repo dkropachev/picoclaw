@@ -16,10 +16,16 @@ and remove only captured identities. No runtime path calls these primitives.
 - Descendant access is relative to pinned parent/root handles.
 - Source and output identities are verified before/after copy; the closed
   output is reopened, metadata-validated, and rehashed before retention.
+- Hash verification binds both prior metadata and the caller's full-width
+  `fileidentity.Identity` to the current path/opened handle.
 - Windows owner-only DACLs, no reparse/device/readonly state, and full 128-bit
   file IDs are authoritative; Unix files must be private and single-link.
-- Cleanup atomically quarantines the expected identity, recursively empties
-  only through retained directory handles, then unlinks nonrecursively.
+- Cleanup atomically quarantines the expected identity and makes original-name
+  removal durable (directory sync on Unix, write-through rename on Windows),
+  then recursively empties only through retained directory handles. Unix
+  syncs child/top-level unlinks and a missing-path retry re-syncs its parent;
+  Windows tombstone removal is post-quarantine housekeeping because its
+  `SyncDirectory` contract is intentionally a no-op.
 - `backup.go` is the preapproved bridge to the provider's cross-platform
   private-directory creation primitive; `backup_io.go` stays provider-free.
 
@@ -29,7 +35,7 @@ and remove only captured identities. No runtime path calls these primitives.
 | --- | --- | --- | --- | --- | --- | --- |
 | `FR-DATABASE-BACKUP-FOUNDATION-001` | MUST | A caller creates or inspects a private backup directory/object. | Path, opened handle, object type, privacy metadata, and full identity agree. | May create and durably sync private directories/files. | Symlink/reparse, device, public DACL/mode, hard link, read-only, replacement, or unsupported platform fails closed. | Lexical paths alone cannot prove the object used. |
 | `FR-DATABASE-BACKUP-FOUNDATION-002` | MUST | A bounded source is copied to a private destination. | Output bytes, returned source identity, size, and digest match a stable source; reopened output retains the captured identity. | Exclusively creates, chmods/secures, fsyncs, and parent-syncs output. | Cancellation, short/no-progress IO, source/output transition, close/sync failure, or post-copy mismatch cleans only owned output and returns error. | Archive records must validate independently and name exact bytes. |
-| `FR-DATABASE-BACKUP-FOUNDATION-003` | MUST | Cleanup receives one expected file/tree identity. | Only that identity is quarantined and removed through retained handles. | No-replace rename, bounded child unlink, top-level unlink, parent sync. | Identity/type/parent drift, alias, unsafe child, entry bound, or unlink failure preserves evidence and never recursively traverses a substitute. | Cleanup must not delete a replacement tree. |
+| `FR-DATABASE-BACKUP-FOUNDATION-003` | MUST | Cleanup receives one expected file/tree identity. | Only that identity is quarantined and removed through retained handles. | No-replace rename, bounded child unlink, top-level unlink, and Unix parent sync; Windows quarantine uses write-through rename and later tombstone removal is housekeeping. | Identity/type/parent drift, alias, unsafe child, entry bound, or unlink failure preserves evidence and never recursively traverses a substitute. | Cleanup must not delete a replacement tree. |
 
 ## Data And State Model
 
@@ -70,8 +76,12 @@ Owns: TEST internal/databasemigration/backup_remove_identity_test.go *
 Validate ancestors; create/secure private destination; capture source/output
 identities; stream bounded bytes; recheck source; sync/close output; reopen and
 validate its metadata/identity/digest; sync parent. Cleanup no-replace renames
-to quarantine, retains a root, recursively handles children relative to that
-root, rechecks identity, and nonrecursively removes the emptied entry.
+to quarantine, syncs the parent, retains a root, recursively handles children
+relative to that root, rechecks identity, nonrecursively removes the emptied
+entry, and on Unix syncs each affected directory before reporting success. On
+Windows, the no-replace quarantine move is write-through; directory sync is a
+documented no-op and subsequent tombstone deletion does not define logical
+removal durability.
 
 ## Cross-Feature Behavior
 
