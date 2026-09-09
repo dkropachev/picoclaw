@@ -79,18 +79,18 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Restore shared Go cache
+      - name: Restore host Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-${{ hashFiles('go.mod', 'go.sum') }}
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-
 
       - name: Run go generate
         run: go generate ./...
@@ -131,18 +131,18 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Restore shared Go cache
+      - name: Restore host Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-${{ hashFiles('go.mod', 'go.sum') }}
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -281,18 +281,18 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Restore shared Go cache
+      - name: Restore host Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-${{ hashFiles('go.mod', 'go.sum') }}
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
@@ -322,18 +322,18 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Restore shared Go cache
+      - name: Restore host Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-${{ hashFiles('go.mod', 'go.sum') }}
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-
 
       - name: Run go generate
         if: matrix.shard == 'remaining'
@@ -360,16 +360,16 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Restore shared Go cache
+      - name: Restore cross-platform Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-cross-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-cross-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-cross-
             ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
             ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
 
@@ -394,18 +394,18 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Restore shared Go cache
+      - name: Restore host Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-${{ hashFiles('go.mod', 'go.sum') }}-
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-shared-
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-${{ hashFiles('go.mod', 'go.sum') }}
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-
 
       - name: Fetch base ref
         run: git fetch origin "${BASE_REF_NAME}:refs/remotes/origin/${BASE_REF_NAME}"
