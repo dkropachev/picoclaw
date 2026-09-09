@@ -37,6 +37,9 @@ run_suite() {
   local suite_name
   suite_name="$(basename "$suite_dir")"
   local manifest="$suite_dir/suite.env"
+  local -r project_namespace="${INTEGRATION_COMPOSE_PROJECT_NAMESPACE:-}"
+  local -r integration_gomaxprocs="${INTEGRATION_GOMAXPROCS:-2}"
+  local project_identity="${project_namespace:+${project_namespace}-}${suite_name}"
 
   if [[ ! -f "$manifest" ]]; then
     echo "suite $suite_name is missing manifest: $manifest" >&2
@@ -44,7 +47,7 @@ run_suite() {
   fi
 
   local compose_args=()
-  compose_args+=(--project-directory "$ROOT_DIR" -p "picoclaw-int-$(sanitize_project_name "$suite_name")")
+  compose_args+=(--project-directory "$ROOT_DIR" -p "picoclaw-int-$(sanitize_project_name "$project_identity")")
   compose_args+=(-f "$BASE_COMPOSE")
 
   local compose_files=()
@@ -69,7 +72,11 @@ run_suite() {
     runner_service="${RUNNER_SERVICE:-integration-runner}"
 
     cleanup() {
-      docker compose "${compose_args[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+      local cleanup_args=(down -v --remove-orphans)
+      if [[ -n "$project_namespace" ]]; then
+        cleanup_args+=(--rmi local)
+      fi
+      docker compose "${compose_args[@]}" "${cleanup_args[@]}" >/dev/null 2>&1 || true
     }
     trap cleanup EXIT
 
@@ -104,6 +111,7 @@ run_suite() {
       mkdir -p "$host_cover_dir"
       run_env+=(-e "INTEGRATION_COVERPKG=${INTEGRATION_COVERPKG:-}")
       run_env+=(-e "INTEGRATION_COVERPROFILE=$cover_profile")
+      run_env+=(-e "GOMAXPROCS=$integration_gomaxprocs")
       run_command='go() {
   if [[ "$1" == "test" ]]; then
     shift

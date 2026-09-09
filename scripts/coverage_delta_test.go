@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -1044,6 +1045,362 @@ func TestCoverageGoTestParallelismIsBounded(t *testing.T) {
 	}
 	if coverageGoTestParallelism != 1 {
 		t.Fatalf("coverage Go test parallelism = %d, want 1", coverageGoTestParallelism)
+	}
+	if coverageGoMaxProcs != 2 {
+		t.Fatalf("coverage Go max procs = %d, want 2", coverageGoMaxProcs)
+	}
+}
+
+func TestRunCoveragePairUsesBarrierAndCleansAfterBothCollectors(t *testing.T) {
+	base := preparedCoverageRef{label: "base", ref: "base-ref"}
+	head := preparedCoverageRef{label: "head", ref: "head-ref"}
+	started := make(chan string, 2)
+	completed := make(chan string, 2)
+	release := make(chan struct{})
+	type pairResult struct {
+		base coverageProfile
+		head coverageProfile
+		err  error
+	}
+	returned := make(chan pairResult, 1)
+	cleanupBeforeJoin := make(chan string, 2)
+	var cleanupOrder []string
+	go func() {
+		baseProfile, headProfile, err := runCoveragePair(
+			base,
+			head,
+			func(prepared preparedCoverageRef) (coverageProfile, error) {
+				started <- prepared.label
+				<-release
+				completed <- prepared.label
+				covered := 1
+				if prepared.label == "head" {
+					covered = 2
+				}
+				return coverageProfile{Global: coverageSummary{
+					CoveredStatements: covered,
+					TotalStatements:   2,
+				}}, nil
+			},
+			func(prepared preparedCoverageRef) error {
+				if len(completed) != 2 {
+					cleanupBeforeJoin <- prepared.label
+				}
+				cleanupOrder = append(cleanupOrder, prepared.label)
+				return nil
+			},
+		)
+		returned <- pairResult{base: baseProfile, head: headProfile, err: err}
+	}()
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	seen := make(map[string]bool)
+	for len(seen) < 2 {
+		select {
+		case label := <-started:
+			seen[label] = true
+		case <-timer.C:
+			close(release)
+			<-returned
+			t.Fatalf("collectors did not reach barrier concurrently; started = %#v", seen)
+		}
+	}
+	select {
+	case result := <-returned:
+		close(release)
+		t.Fatalf("runCoveragePair returned before barrier release: %+v", result)
+	default:
+	}
+	close(release)
+
+	var result pairResult
+	select {
+	case result = <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runCoveragePair did not return after barrier release")
+	}
+	if result.err != nil {
+		t.Fatalf("runCoveragePair() error = %v", result.err)
+	}
+	if result.base.Global.CoveredStatements != 1 || result.head.Global.CoveredStatements != 2 {
+		t.Fatalf(
+			"runCoveragePair() profiles = (%+v, %+v), want ordered base/head profiles",
+			result.base.Global,
+			result.head.Global,
+		)
+	}
+	select {
+	case label := <-cleanupBeforeJoin:
+		t.Fatalf("cleanup for %s ran before both collectors completed", label)
+	default:
+	}
+	if want := []string{"base", "head"}; !reflect.DeepEqual(cleanupOrder, want) {
+		t.Fatalf("cleanup order = %#v, want %#v", cleanupOrder, want)
+	}
+}
+
+func TestRunCoveragePairJoinsErrorsInBaseBeforeHeadOrder(t *testing.T) {
+	baseErr := errors.New("base failure")
+	headErr := errors.New("head failure")
+	baseStarted := make(chan struct{})
+	headFinished := make(chan struct{})
+	releaseBase := make(chan struct{})
+	result := make(chan error, 1)
+	cleanupStarted := make(chan string, 2)
+	go func() {
+		_, _, err := runCoveragePair(
+			preparedCoverageRef{label: "base"},
+			preparedCoverageRef{label: "head"},
+			func(prepared preparedCoverageRef) (coverageProfile, error) {
+				if prepared.label == "base" {
+					close(baseStarted)
+					<-releaseBase
+					return coverageProfile{}, baseErr
+				}
+				close(headFinished)
+				return coverageProfile{}, headErr
+			},
+			func(prepared preparedCoverageRef) error {
+				cleanupStarted <- prepared.label
+				return nil
+			},
+		)
+		result <- err
+	}()
+
+	for name, signal := range map[string]<-chan struct{}{
+		"base start":  baseStarted,
+		"head finish": headFinished,
+	} {
+		select {
+		case <-signal:
+		case <-time.After(5 * time.Second):
+			close(releaseBase)
+			<-result
+			t.Fatalf("timed out waiting for %s", name)
+		}
+	}
+	select {
+	case err := <-result:
+		close(releaseBase)
+		t.Fatalf("runCoveragePair returned before blocked base collector joined: %v", err)
+	default:
+	}
+	select {
+	case label := <-cleanupStarted:
+		close(releaseBase)
+		<-result
+		t.Fatalf("cleanup for %s started before blocked base collector joined", label)
+	default:
+	}
+	close(releaseBase)
+
+	var err error
+	select {
+	case err = <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runCoveragePair did not join blocked base collector")
+	}
+	if !errors.Is(err, baseErr) || !errors.Is(err, headErr) {
+		t.Fatalf("runCoveragePair() error = %v, want both base and head errors", err)
+	}
+	if got, want := err.Error(), "base failure\nhead failure"; got != want {
+		t.Fatalf("runCoveragePair() error = %q, want deterministic %q", got, want)
+	}
+	var cleanupOrder []string
+	for range 2 {
+		cleanupOrder = append(cleanupOrder, <-cleanupStarted)
+	}
+	if want := []string{"base", "head"}; !reflect.DeepEqual(cleanupOrder, want) {
+		t.Fatalf("error cleanup order = %#v, want %#v", cleanupOrder, want)
+	}
+}
+
+func TestRunCoverageDeltaCollectsTinyRefsAndCleansWorktrees(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+	root := t.TempDir()
+	runCoverageDeltaTestGit(t, root, "init", "--quiet")
+	runCoverageDeltaTestGit(t, root, "config", "user.email", "coverage-pair@example.invalid")
+	runCoverageDeltaTestGit(t, root, "config", "user.name", "Coverage Pair Test")
+	runCoverageDeltaTestGit(t, root, "config", "commit.gpgSign", "false")
+	runCoverageDeltaTestGit(t, root, "config", "core.hooksPath", t.TempDir())
+
+	for path, contents := range map[string]string{
+		"go.mod":               "module example.com/coveragepair\n\ngo 1.25\n",
+		"cmd/picoclaw/main.go": "package main\n\nfunc main() {}\n",
+		"pkg/sample/sample.go": "package sample\n\nfunc Value() int { return 1 }\n",
+		"pkg/sample/sample_test.go": `package sample
+
+import "testing"
+
+func TestValue(t *testing.T) {
+	if Value() != 1 {
+		t.Fatal("unexpected value")
+	}
+}
+`,
+		"docs/features/sample.md": "# Sample\n\nFR-SAMPLE\n\nOwns: CODE pkg/sample/**\nOwns: TEST pkg/sample/*\n",
+	} {
+		writeCoverageDeltaTestFile(t, root, path, contents)
+	}
+	runCoverageDeltaTestGit(t, root, "add", "--all")
+	runCoverageDeltaTestGit(t, root, "commit", "--quiet", "-m", "base")
+	base := strings.TrimSpace(runCoverageDeltaTestGit(t, root, "rev-parse", "HEAD"))
+
+	writeCoverageDeltaTestFile(t, root, "pkg/sample/sample.go", "package sample\n\nfunc Value() int { return 2 }\n")
+	writeCoverageDeltaTestFile(t, root, "pkg/sample/sample_test.go", `package sample
+
+import "testing"
+
+func TestValue(t *testing.T) {
+	if Value() != 2 {
+		t.Fatal("unexpected value")
+	}
+}
+`)
+	runCoverageDeltaTestGit(t, root, "add", "--all")
+	runCoverageDeltaTestGit(t, root, "commit", "--quiet", "-m", "head")
+	head := strings.TrimSpace(runCoverageDeltaTestGit(t, root, "rev-parse", "HEAD"))
+
+	if err := runCoverageDelta(root, base, head, "", nil, false); err != nil {
+		t.Fatalf("runCoverageDelta() error = %v", err)
+	}
+	worktrees := runCoverageDeltaTestGit(t, root, "worktree", "list", "--porcelain")
+	if got := strings.Count(worktrees, "worktree "); got != 1 {
+		t.Fatalf("worktree count after coverage = %d, want 1\n%s", got, worktrees)
+	}
+}
+
+func TestRunCoveragePairReportsCleanupErrors(t *testing.T) {
+	baseCleanupErr := errors.New("base cleanup failure")
+	headCleanupErr := errors.New("head cleanup failure")
+	_, _, err := runCoveragePair(
+		preparedCoverageRef{label: "base"},
+		preparedCoverageRef{label: "head"},
+		func(preparedCoverageRef) (coverageProfile, error) {
+			return emptyCoverageProfile(), nil
+		},
+		func(prepared preparedCoverageRef) error {
+			if prepared.label == "base" {
+				return baseCleanupErr
+			}
+			return headCleanupErr
+		},
+	)
+	if !errors.Is(err, baseCleanupErr) || !errors.Is(err, headCleanupErr) {
+		t.Fatalf("runCoveragePair() cleanup error = %v, want both cleanup errors", err)
+	}
+	if got, want := err.Error(), "base cleanup failure\nhead cleanup failure"; got != want {
+		t.Fatalf("runCoveragePair() cleanup error = %q, want %q", got, want)
+	}
+}
+
+func TestCoverageWorktreeCleanupHandlesReadOnlyModuleDirectories(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+	root := t.TempDir()
+	runCoverageDeltaTestGit(t, root, "init", "--quiet")
+	runCoverageDeltaTestGit(t, root, "config", "user.email", "coverage-cleanup@example.invalid")
+	runCoverageDeltaTestGit(t, root, "config", "user.name", "Coverage Cleanup Test")
+	writeCoverageDeltaTestFile(t, root, "go.mod", "module example.com/cleanup\n\ngo 1.25\n")
+	runCoverageDeltaTestGit(t, root, "add", "--all")
+	runCoverageDeltaTestGit(t, root, "commit", "--quiet", "-m", "base")
+	ref := strings.TrimSpace(runCoverageDeltaTestGit(t, root, "rev-parse", "HEAD"))
+	temporaryRoot := t.TempDir()
+	prepared, err := prepareCoverageRef(
+		root,
+		temporaryRoot,
+		"base",
+		ref,
+		os.Environ(),
+		goCachePaths{Build: t.TempDir(), Modules: t.TempDir()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readOnly := filepath.Join(prepared.worktree, ".cache", "go-mod", "example@v1.0.0")
+	if err := os.MkdirAll(readOnly, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCoverageDeltaTestFile(t, readOnly, "module.go", "package module\n")
+	if err := os.Chmod(readOnly, 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cleanupCoverageRefs(root, []preparedCoverageRef{prepared}); err != nil {
+		t.Fatalf("cleanupCoverageRefs() error = %v", err)
+	}
+	if _, err := os.Stat(prepared.worktree); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleaned worktree stat error = %v, want not exist", err)
+	}
+	if err := makeCoverageWorktreeRemovable(filepath.Join(temporaryRoot, "missing")); err != nil {
+		t.Fatalf("makeCoverageWorktreeRemovable(missing) error = %v", err)
+	}
+	if _, err := prepareCoverageRef(
+		root,
+		temporaryRoot,
+		"missing",
+		"missing-ref",
+		os.Environ(),
+		goCachePaths{Build: t.TempDir(), Modules: t.TempDir()},
+	); err == nil {
+		t.Fatal("prepareCoverageRef accepted missing ref")
+	}
+}
+
+func TestRunIntegrationCoveragePassesParallelRefIsolation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a Bash script")
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not available")
+	}
+	parent := t.TempDir()
+	worktree := filepath.Join(parent, "head")
+	for path, contents := range map[string]string{
+		"go.mod": "module example.com/integrationcoverage\n\ngo 1.25\n",
+		"pkg/sample/sample.go": `package sample
+
+func Value() int { return 1 }
+`,
+		"scripts/run-integration-tests.sh": `#!/usr/bin/env bash
+set -euo pipefail
+[[ "${INTEGRATION_COMPOSE_PROJECT_NAMESPACE}" == "${EXPECTED_NAMESPACE}" ]]
+[[ "${INTEGRATION_GOMAXPROCS}" == "2" ]]
+[[ "${GOFLAGS}" == "-tags=goolm,stdjson,integration" ]]
+[[ "$#" == 1 && "$1" == "sample-suite" ]]
+mkdir -p .coverage/integration-head
+printf '%s\n' \
+  'mode: atomic' \
+  'example.com/integrationcoverage/pkg/sample/sample.go:3.18,3.28 1 1' \
+  >.coverage/integration-head/sample.cover.out
+`,
+	} {
+		writeCoverageDeltaTestFile(t, worktree, path, contents)
+	}
+	if err := os.Chmod(filepath.Join(worktree, "scripts", "run-integration-tests.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	expectedNamespace := filepath.Base(parent) + "-head"
+	profile, err := runIntegrationCoverage(
+		worktree,
+		"head",
+		"head-ref",
+		"goolm,stdjson",
+		[]string{"example.com/integrationcoverage/pkg/sample"},
+		[]string{"sample-suite"},
+		append(os.Environ(), "EXPECTED_NAMESPACE="+expectedNamespace),
+	)
+	if err != nil {
+		t.Fatalf("runIntegrationCoverage() error = %v", err)
+	}
+	if profile.Global != (coverageSummary{CoveredStatements: 1, TotalStatements: 1}) {
+		t.Fatalf("integration profile global = %+v, want 1/1", profile.Global)
 	}
 }
 
@@ -2116,6 +2473,7 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 		"GOCACHE=/shared/build-cache",
 		"GOMODCACHE=/shared/module-cache",
 		"GOTOOLCHAIN=local",
+		"GOMAXPROCS=64",
 		"AWS_ACCESS_KEY_ID=operator-access-key",
 		"AWS_SECRET_ACCESS_KEY=operator-secret-key",
 		"AWS_PROFILE=operator-profile",
@@ -2173,6 +2531,7 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 	assertEnvironmentValue(t, baseEnvironment, "GOCACHE", "/cache/build")
 	assertEnvironmentValue(t, baseEnvironment, "GOMODCACHE", "/cache/modules")
 	assertEnvironmentValue(t, baseEnvironment, "GOTOOLCHAIN", "auto")
+	assertEnvironmentValue(t, baseEnvironment, "GOMAXPROCS", "2")
 	assertEnvironmentValue(t, baseEnvironment, "AWS_EC2_METADATA_DISABLED", "true")
 	assertEnvironmentValue(t, baseEnvironment, "GIT_TERMINAL_PROMPT", "0")
 	assertEnvironmentValue(t, baseEnvironment, "GCM_INTERACTIVE", "never")
