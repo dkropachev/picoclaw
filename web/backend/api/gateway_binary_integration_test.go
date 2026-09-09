@@ -131,10 +131,12 @@ func TestAPITestCoreBuildEnvironmentPreservesSharedCaches(t *testing.T) {
 	}
 
 	fallbackEnvironment := apiTestCoreBuildEnvironment(nil, root)
-	if got := apiTestEnvironmentValue(fallbackEnvironment, "GOCACHE"); got != filepath.Join(root, ".cache", "go-build") {
+	fallbackBuildCache := filepath.Join(root, ".cache", "go-build")
+	if got := apiTestEnvironmentValue(fallbackEnvironment, "GOCACHE"); got != fallbackBuildCache {
 		t.Fatalf("fallback GOCACHE = %q", got)
 	}
-	if got := apiTestEnvironmentValue(fallbackEnvironment, "GOMODCACHE"); got != filepath.Join(root, ".cache", "go-mod") {
+	fallbackModuleCache := filepath.Join(root, ".cache", "go-mod")
+	if got := apiTestEnvironmentValue(fallbackEnvironment, "GOMODCACHE"); got != fallbackModuleCache {
 		t.Fatalf("fallback GOMODCACHE = %q", got)
 	}
 }
