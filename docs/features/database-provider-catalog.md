@@ -218,9 +218,10 @@ remains the active subsystem-owned persistence behavior until later provider,
 readiness, migration, supervisor, and domain-adapter features explicitly
 replace it.
 
-The dormant backup filesystem foundation imports physical catalog records only
-in `backup_parent.go` to prove that a backup namespace is separated from every
-generation and legacy input; it does not snapshot or open a store.
+The dormant backup implementation imports physical catalog records in
+`backup_parent.go` to prove that its namespace is separated from every input
+and in `backup_archive.go` to select and revalidate canonical archive inputs.
+Neither path is wired into runtime migration or opens a live store.
 
 ## Failure And Edge Cases
 
