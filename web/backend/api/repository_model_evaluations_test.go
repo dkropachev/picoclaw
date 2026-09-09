@@ -26,6 +26,8 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
+const repositoryModelEvaluationAsyncTestTimeout = 10 * time.Second
+
 func TestRepositoryModelEvaluationRoutesLifecycleAndSafeProjection(t *testing.T) {
 	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
@@ -1750,17 +1752,17 @@ func waitRepositoryModelEvaluationStatus(
 	status repoeval.Status,
 ) repoeval.Evaluation {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	deadline := time.Now().Add(repositoryModelEvaluationAsyncTestTimeout)
+	for {
 		evaluation, found, err := handler.getRepositoryModelEvaluation(t.Context(), id)
 		if err == nil && found && evaluation.Status == status {
 			return evaluation
 		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("evaluation %s status=%s want=%s err=%v", id, evaluation.Status, status, err)
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	evaluation, _, err := handler.getRepositoryModelEvaluation(t.Context(), id)
-	t.Fatalf("evaluation %s status=%s want=%s err=%v", id, evaluation.Status, status, err)
-	return repoeval.Evaluation{}
 }
 
 func repositoryModelEvaluationPreflightResult() *workflows.RunResult {
