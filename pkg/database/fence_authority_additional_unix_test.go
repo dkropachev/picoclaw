@@ -56,6 +56,44 @@ func TestUnixFenceAndGuardRejectLockPermissionDrift(t *testing.T) {
 	}
 }
 
+func TestUnixCheckedFenceGuardDetectsBoundaryDriftWhileHeld(t *testing.T) {
+	home := t.TempDir()
+	fence, err := AcquireOnlineFence(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check, release, err := fence.GuardChecked(home)
+	if err != nil {
+		_ = fence.Close()
+		t.Fatal(err)
+	}
+	state := filepath.Join(home, StateDirectoryName)
+	if err := os.Chmod(state, 0o755); err != nil {
+		release()
+		_ = fence.Close()
+		t.Fatal(err)
+	}
+	if check() {
+		release()
+		_ = fence.Close()
+		t.Fatal("checked guard accepted drifted state-directory permissions")
+	}
+	if err := os.Chmod(state, 0o700); err != nil {
+		release()
+		_ = fence.Close()
+		t.Fatal(err)
+	}
+	if !check() {
+		release()
+		_ = fence.Close()
+		t.Fatal("checked guard did not recover before release")
+	}
+	release()
+	if err := fence.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUnixMigrationContextExpiresOnPhysicalLockReplacement(t *testing.T) {
 	home := t.TempDir()
 	target := filepath.Join(home, "stage.db")

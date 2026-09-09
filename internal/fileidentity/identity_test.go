@@ -95,3 +95,67 @@ func TestWindowsFileIdentityUsesTheComplete128BitValue(t *testing.T) {
 		t.Fatalf("zero Windows file ID = %#v, %v", identity, err)
 	}
 }
+
+func TestIdentityBoundTypesAndOpenedHandles(t *testing.T) {
+	root := t.TempDir()
+	regular := filepath.Join(root, "regular")
+	if err := os.WriteFile(regular, []byte("identity"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pathIdentity, objectType, exists, err := ExistingWithType(regular)
+	if err != nil || !exists || !pathIdentity.Valid() || objectType != ObjectTypeRegular {
+		t.Fatalf("ExistingWithType(regular) = %#v, %v, %t, %v", pathIdentity, objectType, exists, err)
+	}
+	file, err := os.Open(regular)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	openedIdentity, openedType, err := Opened(file)
+	if err != nil || openedIdentity != pathIdentity || openedType != ObjectTypeRegular {
+		t.Fatalf("Opened(regular) = %#v, %v, %v", openedIdentity, openedType, err)
+	}
+	if err := os.Rename(regular, regular+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	retainedIdentity, retainedType, err := Opened(file)
+	if err != nil || retainedIdentity != pathIdentity || retainedType != ObjectTypeRegular {
+		t.Fatalf("Opened(retained) = %#v, %v, %v", retainedIdentity, retainedType, err)
+	}
+
+	directoryIdentity, directoryType, exists, err := ExistingWithType(root)
+	if err != nil || !exists || !directoryIdentity.Valid() || directoryType != ObjectTypeDirectory {
+		t.Fatalf("ExistingWithType(directory) = %#v, %v, %t, %v", directoryIdentity, directoryType, exists, err)
+	}
+	directory, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directoryOpenedIdentity, directoryOpenedType, err := Opened(directory)
+	if closeErr := directory.Close(); err != nil || closeErr != nil ||
+		directoryOpenedIdentity != directoryIdentity || directoryOpenedType != ObjectTypeDirectory {
+		t.Fatalf(
+			"Opened(directory) = %#v, %v, %v; close=%v",
+			directoryOpenedIdentity, directoryOpenedType, err, closeErr,
+		)
+	}
+	closed, err := os.Open(regular + ".moved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if identity, objectType, err := Opened(closed); identity.Valid() || objectType != 0 || err == nil {
+		t.Fatalf("Opened(closed) = %#v, %v, %v", identity, objectType, err)
+	}
+	missing := filepath.Join(root, "missing")
+	if identity, objectType, exists, err := ExistingWithType(missing); identity.Valid() ||
+		objectType != 0 || exists || err != nil {
+		t.Fatalf("ExistingWithType(missing) = %#v, %v, %t, %v", identity, objectType, exists, err)
+	}
+	if identity, objectType, err := Opened(nil); identity.Valid() || objectType != 0 ||
+		!errors.Is(err, ErrInvalidPath) {
+		t.Fatalf("Opened(nil) = %#v, %v, %v", identity, objectType, err)
+	}
+}

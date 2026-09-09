@@ -26,66 +26,97 @@ type windowsHandleIdentity struct {
 // Existing returns a stable volume/128-bit file identity for an existing
 // regular file or directory. Reparse points are always rejected.
 func Existing(path string) (identity Identity, exists bool, err error) {
+	identity, _, exists, err = ExistingWithType(path)
+	return identity, exists, err
+}
+
+// ExistingWithType returns a stable full-width identity and the type checked
+// against the same identity-bearing Windows handles.
+func ExistingWithType(path string) (identity Identity, objectType ObjectType, exists bool, err error) {
 	if !validPath(path) {
-		return Identity{}, false, ErrInvalidPath
+		return Identity{}, 0, false, ErrInvalidPath
 	}
 	osPath, syscallPath, err := windowsIdentityPaths(path)
 	if err != nil {
-		return Identity{}, false, err
+		return Identity{}, 0, false, err
 	}
 	info, err := os.Lstat(osPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return Identity{}, false, nil
+		return Identity{}, 0, false, nil
 	}
 	if err != nil {
-		return Identity{}, false, fmt.Errorf("inspect physical file identity: %w", err)
+		return Identity{}, 0, false, fmt.Errorf("inspect physical file identity: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() && !info.IsDir() {
-		return Identity{}, false, ErrUnsafeType
+		return Identity{}, 0, false, ErrUnsafeType
 	}
 	firstHandle, firstExists, err := openWindowsIdentityHandle(syscallPath)
 	if !firstExists {
-		return Identity{}, false, err
+		return Identity{}, 0, false, err
 	}
 	if err != nil {
-		return Identity{}, false, err
+		return Identity{}, 0, false, err
 	}
 	defer windows.CloseHandle(firstHandle)
 	first, err := inspectWindowsIdentityHandle(firstHandle)
 	if err != nil {
-		return Identity{}, false, err
+		return Identity{}, 0, false, err
 	}
 	if !windowsIdentityTypeMatches(info, first.attributes) {
-		return Identity{}, false, ErrUnsafeType
+		return Identity{}, 0, false, ErrUnsafeType
 	}
 
 	after, err := os.Lstat(osPath)
 	if err != nil {
-		return Identity{}, false, fmt.Errorf("reinspect physical file identity: %w", err)
+		return Identity{}, 0, false, fmt.Errorf("reinspect physical file identity: %w", err)
 	}
 	if after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() && !after.IsDir() {
-		return Identity{}, false, fmt.Errorf("%w: object changed during inspection", ErrUnsafeType)
+		return Identity{}, 0, false, fmt.Errorf("%w: object changed during inspection", ErrUnsafeType)
 	}
 	secondHandle, secondExists, err := openWindowsIdentityHandle(syscallPath)
 	if err != nil {
-		return Identity{}, false, err
+		return Identity{}, 0, false, err
 	}
 	if !secondExists {
-		return Identity{}, false, fmt.Errorf("%w: object changed during inspection", ErrUnsafeType)
+		return Identity{}, 0, false, fmt.Errorf("%w: object changed during inspection", ErrUnsafeType)
 	}
 	defer windows.CloseHandle(secondHandle)
 	second, err := inspectWindowsIdentityHandle(secondHandle)
 	if err != nil {
-		return Identity{}, false, err
+		return Identity{}, 0, false, err
 	}
 	if !windowsIdentityTypeMatches(after, second.attributes) {
-		return Identity{}, false, fmt.Errorf("%w: object changed during inspection", ErrUnsafeType)
+		return Identity{}, 0, false, fmt.Errorf("%w: object changed during inspection", ErrUnsafeType)
 	}
 	stable, err := stableWindowsFileIdentity(first.identity, second.identity)
 	if err != nil {
-		return Identity{}, false, err
+		return Identity{}, 0, false, err
 	}
-	return stable, true, nil
+	objectType = ObjectTypeRegular
+	if after.IsDir() {
+		objectType = ObjectTypeDirectory
+	}
+	return stable, objectType, true, nil
+}
+
+// Opened resolves a full-width identity and type from an already-open handle.
+func Opened(file *os.File) (Identity, ObjectType, error) {
+	if file == nil {
+		return Identity{}, 0, ErrInvalidPath
+	}
+	inspected, err := inspectWindowsIdentityHandle(windows.Handle(file.Fd()))
+	if err != nil {
+		return Identity{}, 0, err
+	}
+	identity, err := stableWindowsFileIdentity(inspected.identity, inspected.identity)
+	if err != nil {
+		return Identity{}, 0, err
+	}
+	objectType := ObjectTypeRegular
+	if inspected.attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		objectType = ObjectTypeDirectory
+	}
+	return identity, objectType, nil
 }
 
 func openWindowsIdentityHandle(path string) (windows.Handle, bool, error) {
