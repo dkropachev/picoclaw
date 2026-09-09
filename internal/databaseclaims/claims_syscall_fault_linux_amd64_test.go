@@ -103,19 +103,22 @@ func runClaimSyscallFaultChild(scenario, root string) int {
 }
 
 type claimSyscallFaultState struct {
-	scenario    string
-	statCalls   int
-	openCalls   int
-	closeCalls  int
-	afterMkdir  bool
-	afterFchmod bool
-	injected    bool
-	currentCall uint64
-	currentFD   uint64
-	lockFD      uint64
-	lockFDKnown bool
-	openingLock bool
-	hierarchy   int
+	scenario       string
+	statCalls      int
+	openCalls      int
+	closeCalls     int
+	afterMkdir     bool
+	afterFchmod    bool
+	injected       bool
+	currentCall    uint64
+	currentFD      uint64
+	lockFD         uint64
+	lockFDKnown    bool
+	openingLock    bool
+	createdFD      uint64
+	createdKnown   bool
+	openingCreated bool
+	hierarchy      int
 }
 
 func (state *claimSyscallFaultState) observeEntry(registers *unix.PtraceRegs) {
@@ -125,6 +128,12 @@ func (state *claimSyscallFaultState) observeEntry(registers *unix.PtraceRegs) {
 	state.openingLock = state.scenario == "lock-fstat" &&
 		state.currentCall == unix.SYS_OPENAT && int64(registers.Rdi) != int64(unix.AT_FDCWD) &&
 		int(registers.Rdx)&lockOpenFlags == lockOpenFlags && registers.R10&0o777 == 0o600
+	flags := int(registers.Rdx)
+	state.openingCreated = (state.scenario == "root-created-open" ||
+		state.scenario == "root-created-fstat") && state.afterMkdir &&
+		state.currentCall == unix.SYS_OPENAT && int64(registers.Rdi) >= 0 &&
+		flags&(unix.O_DIRECTORY|unix.O_NOFOLLOW) == unix.O_DIRECTORY|unix.O_NOFOLLOW &&
+		flags&unix.O_ACCMODE == unix.O_RDONLY && flags&unix.O_CREAT == 0
 }
 
 func (state *claimSyscallFaultState) observeExit(result int64) {
@@ -132,7 +141,12 @@ func (state *claimSyscallFaultState) observeExit(result int64) {
 		state.lockFD = uint64(result)
 		state.lockFDKnown = true
 	}
+	if state.openingCreated && result >= 0 {
+		state.createdFD = uint64(result)
+		state.createdKnown = true
+	}
 	state.openingLock = false
+	state.openingCreated = false
 }
 
 func (state *claimSyscallFaultState) shouldInject(call uint64) (bool, unix.Errno) {
@@ -175,11 +189,12 @@ func (state *claimSyscallFaultState) shouldInject(call uint64) (bool, unix.Errno
 			return true, unix.EIO
 		}
 	case "root-created-open":
-		if state.afterMkdir && call == unix.SYS_OPENAT && !state.injected {
+		if state.openingCreated && !state.injected {
 			return true, unix.EIO
 		}
 	case "root-created-fstat":
-		if state.afterMkdir && call == unix.SYS_FSTAT && !state.injected {
+		if call == unix.SYS_FSTAT && state.createdKnown && state.currentFD == state.createdFD &&
+			!state.injected {
 			return true, unix.EIO
 		}
 	case "boundary-canonicalization":
@@ -290,6 +305,46 @@ func TestClaimSyscallFaultLockFstatUsesCapturedDescriptor(t *testing.T) {
 	state.injected = true
 	if inject, _ := state.shouldInject(unix.SYS_FSTAT); inject {
 		t.Fatal("claim lock descriptor was faulted twice")
+	}
+}
+
+func TestClaimSyscallFaultCreatedDirectoryUsesCapturedDescriptor(t *testing.T) {
+	runtimeDirectory := int64(unix.AT_FDCWD)
+	runtimeOpen := unix.PtraceRegs{
+		Orig_rax: unix.SYS_OPENAT, Rdi: uint64(runtimeDirectory),
+		Rdx: unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW,
+	}
+	state := claimSyscallFaultState{scenario: "root-created-fstat", afterMkdir: true}
+	state.observeEntry(&runtimeOpen)
+	state.observeExit(41)
+	if state.createdKnown {
+		t.Fatal("runtime directory openat was captured as the created claim root")
+	}
+	createdOpen := runtimeOpen
+	createdOpen.Rdi = 7
+	state.observeEntry(&createdOpen)
+	state.observeExit(42)
+	state.currentFD = 41
+	if inject, _ := state.shouldInject(unix.SYS_FSTAT); inject {
+		t.Fatal("unrelated descriptor fstat was faulted")
+	}
+	state.currentFD = 42
+	if inject, errno := state.shouldInject(unix.SYS_FSTAT); !inject || errno != unix.EIO {
+		t.Fatalf("created claim root descriptor fault = %t, %v", inject, errno)
+	}
+	state.injected = true
+	if inject, _ := state.shouldInject(unix.SYS_FSTAT); inject {
+		t.Fatal("created claim root descriptor was faulted twice")
+	}
+
+	openState := claimSyscallFaultState{scenario: "root-created-open", afterMkdir: true}
+	openState.observeEntry(&runtimeOpen)
+	if inject, _ := openState.shouldInject(unix.SYS_OPENAT); inject {
+		t.Fatal("runtime directory openat was faulted")
+	}
+	openState.observeEntry(&createdOpen)
+	if inject, errno := openState.shouldInject(unix.SYS_OPENAT); !inject || errno != unix.EIO {
+		t.Fatalf("created claim root open fault = %t, %v", inject, errno)
 	}
 }
 

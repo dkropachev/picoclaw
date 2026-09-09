@@ -79,13 +79,40 @@ func runProviderSyscallFaultChild(scenario, root string) int {
 }
 
 type providerSyscallFaultState struct {
-	scenario    string
-	fstatCalls  int
-	statCalls   int
-	fsyncCalls  int
-	afterMkdir  bool
-	injected    bool
-	currentCall uint64
+	scenario       string
+	fstatCalls     int
+	statCalls      int
+	afterMkdir     bool
+	injected       bool
+	currentCall    uint64
+	currentFD      uint64
+	parentFD       uint64
+	createdFD      uint64
+	createdKnown   bool
+	openingCreated bool
+}
+
+func (state *providerSyscallFaultState) observeEntry(registers *unix.PtraceRegs) {
+	state.currentCall = registers.Orig_rax
+	state.currentFD = registers.Rdi
+	createdScenario := state.scenario == "created-component-fstat" ||
+		state.scenario == "created-component-fchmod" ||
+		state.scenario == "created-parent-fsync" ||
+		state.scenario == "created-component-fsync"
+	flags := int(registers.Rdx)
+	state.openingCreated = createdScenario && state.afterMkdir &&
+		state.currentCall == unix.SYS_OPENAT && int64(registers.Rdi) >= 0 &&
+		flags&(unix.O_DIRECTORY|unix.O_NOFOLLOW) == unix.O_DIRECTORY|unix.O_NOFOLLOW &&
+		flags&unix.O_ACCMODE == unix.O_RDONLY && flags&unix.O_CREAT == 0
+}
+
+func (state *providerSyscallFaultState) observeExit(result int64) {
+	if state.openingCreated && result >= 0 {
+		state.parentFD = state.currentFD
+		state.createdFD = uint64(result)
+		state.createdKnown = true
+	}
+	state.openingCreated = false
 }
 
 func (state *providerSyscallFaultState) shouldInject(call uint64) (bool, unix.Errno) {
@@ -111,26 +138,70 @@ func (state *providerSyscallFaultState) shouldInject(call uint64) (bool, unix.Er
 			}
 		}
 	case "created-component-fstat":
-		if state.afterMkdir && call == unix.SYS_FSTAT && !state.injected {
+		if call == unix.SYS_FSTAT && state.createdKnown && state.currentFD == state.createdFD &&
+			!state.injected {
 			return true, unix.EIO
 		}
 	case "created-component-fchmod":
-		if state.afterMkdir && call == unix.SYS_FCHMOD && !state.injected {
+		if call == unix.SYS_FCHMOD && state.createdKnown && state.currentFD == state.createdFD &&
+			!state.injected {
 			return true, unix.EIO
 		}
 	case "created-parent-fsync":
-		if state.afterMkdir && call == unix.SYS_FSYNC && !state.injected {
+		if call == unix.SYS_FSYNC && state.createdKnown && state.currentFD == state.parentFD &&
+			!state.injected {
 			return true, unix.EIO
 		}
 	case "created-component-fsync":
-		if state.afterMkdir && call == unix.SYS_FSYNC {
-			state.fsyncCalls++
-			if state.fsyncCalls == 2 {
-				return true, unix.EIO
-			}
+		if call == unix.SYS_FSYNC && state.createdKnown && state.currentFD == state.createdFD &&
+			!state.injected {
+			return true, unix.EIO
 		}
 	}
 	return false, 0
+}
+
+func TestProviderCreatedComponentFaultsUseCapturedDescriptors(t *testing.T) {
+	runtimeDirectory := int64(unix.AT_FDCWD)
+	runtimeOpen := unix.PtraceRegs{
+		Orig_rax: unix.SYS_OPENAT, Rdi: uint64(runtimeDirectory),
+		Rdx: unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW,
+	}
+	createdOpen := runtimeOpen
+	createdOpen.Rdi = 7
+	for _, test := range []struct {
+		scenario string
+		call     uint64
+		fd       uint64
+	}{
+		{scenario: "created-component-fstat", call: unix.SYS_FSTAT, fd: 42},
+		{scenario: "created-component-fchmod", call: unix.SYS_FCHMOD, fd: 42},
+		{scenario: "created-parent-fsync", call: unix.SYS_FSYNC, fd: 7},
+		{scenario: "created-component-fsync", call: unix.SYS_FSYNC, fd: 42},
+	} {
+		t.Run(test.scenario, func(t *testing.T) {
+			state := providerSyscallFaultState{scenario: test.scenario, afterMkdir: true}
+			state.observeEntry(&runtimeOpen)
+			state.observeExit(41)
+			if state.createdKnown {
+				t.Fatal("runtime directory openat was captured as the provider component")
+			}
+			state.observeEntry(&createdOpen)
+			state.observeExit(42)
+			state.currentFD = 41
+			if inject, _ := state.shouldInject(test.call); inject {
+				t.Fatal("unrelated descriptor syscall was faulted")
+			}
+			state.currentFD = test.fd
+			if inject, errno := state.shouldInject(test.call); !inject || errno != unix.EIO {
+				t.Fatalf("created provider descriptor fault = %t, %v", inject, errno)
+			}
+			state.injected = true
+			if inject, _ := state.shouldInject(test.call); inject {
+				t.Fatal("created provider descriptor was faulted twice")
+			}
+		})
+	}
 }
 
 func TestCoverageProviderSyscallFailureBranches(t *testing.T) {
@@ -242,7 +313,7 @@ func runProviderSyscallFault(t *testing.T, scenario string) {
 			t.Fatal(err)
 		}
 		if entering {
-			state.currentCall = registers.Orig_rax
+			state.observeEntry(&registers)
 			inject, errno := state.shouldInject(state.currentCall)
 			if inject {
 				registers.Orig_rax = ^uint64(0)
@@ -255,6 +326,7 @@ func runProviderSyscallFault(t *testing.T, scenario string) {
 				injectedErrno = 0
 			}
 		} else {
+			state.observeExit(int64(registers.Rax))
 			if injectedErrno != 0 {
 				registers.Rax = uint64(-int64(injectedErrno))
 				if err := unix.PtraceSetRegs(pid, &registers); err != nil {
