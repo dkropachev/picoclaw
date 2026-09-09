@@ -28,15 +28,49 @@ func TestCIChangedPathsClassification(t *testing.T) {
 		{name: "empty diff"},
 		{name: "ordinary docs", fields: []string{"M", "docs/README.md"}},
 		{name: "feature spec", fields: []string{"M", "docs/features/storage.md"}, enabled: []string{"lint"}},
-		{name: "deleted feature spec", fields: []string{"D", "docs/features/storage.md"}, enabled: []string{"lint", "frontend"}},
-		{name: "repository review API contract", fields: []string{"M", "docs/reference/repository-reviews-api.md"}, enabled: []string{"test"}},
-		{name: "frontend", fields: []string{"M", "web/frontend/src/app.tsx"}, enabled: []string{"lint", "frontend", "frontend_ui"}},
-		{name: "Go", fields: []string{"M", "pkg/agent/agent.go"}, enabled: []string{"lint", "vuln_check", "test", "cross_compile", "coverage", "integration"}},
-		{name: "integration Go", fields: []string{"M", "integration/fixtures/server/main.go"}, enabled: []string{"lint", "vuln_check", "test", "cross_compile", "coverage", "integration"}},
-		{name: "launcher backend", fields: []string{"M", "web/backend/api/server.go"}, enabled: []string{"lint", "frontend", "vuln_check", "test", "cross_compile", "coverage", "integration"}},
-		{name: "integration manifest", fields: []string{"M", "integration/suites/storage-json/suite.env"}, enabled: []string{"lint", "test", "integration"}},
+		{
+			name:    "deleted feature spec",
+			fields:  []string{"D", "docs/features/storage.md"},
+			enabled: []string{"lint", "frontend"},
+		},
+		{
+			name:    "repository review API contract",
+			fields:  []string{"M", "docs/reference/repository-reviews-api.md"},
+			enabled: []string{"test"},
+		},
+		{
+			name:    "frontend",
+			fields:  []string{"M", "web/frontend/src/app.tsx"},
+			enabled: []string{"lint", "frontend", "frontend_ui"},
+		},
+		{
+			name:    "Go",
+			fields:  []string{"M", "pkg/agent/agent.go"},
+			enabled: []string{"lint", "vuln_check", "test", "cross_compile", "coverage", "integration"},
+		},
+		{
+			name:    "integration Go",
+			fields:  []string{"M", "integration/fixtures/server/main.go"},
+			enabled: []string{"lint", "vuln_check", "test", "cross_compile", "coverage", "integration"},
+		},
+		{
+			name:   "launcher backend",
+			fields: []string{"M", "web/backend/api/server.go"},
+			enabled: []string{
+				"lint", "frontend", "vuln_check", "test", "cross_compile", "coverage", "integration",
+			},
+		},
+		{
+			name:    "integration manifest",
+			fields:  []string{"M", "integration/suites/storage-json/suite.env"},
+			enabled: []string{"lint", "test", "integration"},
+		},
 		{name: "Docker", fields: []string{"M", "docker/Dockerfile"}, enabled: ciOutputNames},
-		{name: "embedded workspace", fields: []string{"M", "workspace/AGENTS.md"}, enabled: []string{"test", "cross_compile"}},
+		{
+			name:    "embedded workspace",
+			fields:  []string{"M", "workspace/AGENTS.md"},
+			enabled: []string{"test", "cross_compile"},
+		},
 		{name: "golangci", fields: []string{"M", ".golangci.yml"}, enabled: []string{"lint"}},
 		{name: "goreleaser", fields: []string{"M", ".goreleaser.yaml"}, enabled: []string{"test", "cross_compile"}},
 		{name: "unknown", fields: []string{"A", "src/lib.rs"}, enabled: ciOutputNames},
@@ -124,7 +158,11 @@ func runCIChangedPaths(t *testing.T, input []byte, forceAll bool) map[string]str
 }
 
 func encodeNULFields(fields ...string) []byte {
-	var result []byte
+	size := len(fields)
+	for _, field := range fields {
+		size += len(field)
+	}
+	result := make([]byte, 0, size)
 	for _, field := range fields {
 		result = append(result, field...)
 		result = append(result, 0)

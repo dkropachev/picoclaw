@@ -121,7 +121,15 @@ func TestPRScopesValidationBehindStableRequiredCheck(t *testing.T) {
 		"git diff --name-status -z --find-renames --find-copies",
 		"if: ${{ needs.classify.outputs.frontend_ui != 'false' }}",
 		"required:\n    name: PR Required\n    if: ${{ always() }}",
-		"- classify\n      - lint\n      - frontend\n      - frontend_ui\n      - vuln_check\n      - test\n      - cross_compile\n      - coverage\n      - integration",
+		`- classify
+      - lint
+      - frontend
+      - frontend_ui
+      - vuln_check
+      - test
+      - cross_compile
+      - coverage
+      - integration`,
 	} {
 		if !strings.Contains(workflow, snippet) {
 			t.Errorf("PR workflow is missing scoped-validation setting %q", snippet)
