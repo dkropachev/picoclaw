@@ -392,6 +392,17 @@ func TestCopyBackupFileAdditionalFaultAndCleanupBoundaries(t *testing.T) {
 				return original(file)
 			}
 		}},
+		{name: "final source stat", mutate: func(_ *testing.T, ops *backupCopyOps, _ *backupBudget, _, _ string) {
+			original := ops.stat
+			calls := 0
+			ops.stat = func(file *os.File) (os.FileInfo, error) {
+				calls++
+				if calls == 3 {
+					return nil, canary
+				}
+				return original(file)
+			}
+		}},
 		{name: "input close", mutate: func(t *testing.T, ops *backupCopyOps, _ *backupBudget, _, _ string) {
 			originalOpen := ops.openInput
 			var input *os.File

@@ -37,5 +37,19 @@ func validateBackupSourceFile(info os.FileInfo, file *os.File) error {
 		details.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DEVICE) != 0 {
 		return errors.New("database backup Windows source is linked or reparsed")
 	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return errors.Join(errors.New("database backup Windows source owner is unavailable"), err)
+	}
+	descriptor, err := windows.GetSecurityInfo(
+		windows.Handle(file.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil || !owner.Equals(user.User.Sid) {
+		return errors.Join(errors.New("database backup Windows source has another owner"), err)
+	}
 	return nil
 }

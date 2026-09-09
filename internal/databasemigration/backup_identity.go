@@ -34,16 +34,21 @@ func pinPrivateBackupDirectory(path string) (fileidentity.Identity, error) {
 			"validate private database backup directory: %w", validateErr,
 		)
 	}
-	file, err := os.Open(path)
+	root, err := openExactBackupRoot(path)
 	if err != nil {
 		return fileidentity.Identity{}, err
+	}
+	file, err := root.Open(".")
+	if err != nil {
+		return fileidentity.Identity{}, errors.Join(err, root.Close())
 	}
 	identity, identityErr := backupPathMatchesOpened(
 		path, file, fileidentity.ObjectTypeDirectory,
 	)
 	closeErr := file.Close()
-	if identityErr != nil || closeErr != nil {
-		return fileidentity.Identity{}, errors.Join(identityErr, closeErr)
+	rootCloseErr := root.Close()
+	if identityErr != nil || closeErr != nil || rootCloseErr != nil {
+		return fileidentity.Identity{}, errors.Join(identityErr, closeErr, rootCloseErr)
 	}
 	return identity, nil
 }

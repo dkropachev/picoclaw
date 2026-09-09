@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"os"
@@ -420,6 +421,27 @@ func TestBackupFoundationCopyUsesBackgroundForNilContext(t *testing.T) {
 	}
 }
 
+func TestBackupFoundationLegacyTraversalRejectsPhysicalBackupNamespace(t *testing.T) {
+	root := filepath.Join(migrationHome(t), "legacy")
+	nested := filepath.Join(root, "nested")
+	writeMigrationFile(t, filepath.Join(nested, "payload"), []byte("retain"))
+	for _, forbidden := range []string{root, nested} {
+		identity, objectType, exists, err := fileidentity.ExistingWithType(forbidden)
+		if err != nil || !exists || objectType != fileidentity.ObjectTypeDirectory {
+			t.Fatalf("forbidden identity = %#v, %v", identity, err)
+		}
+		visited := false
+		err = walkLegacyInputsWithPhysicalExclusions(
+			t.Context(), root, filepath.Join(t.TempDir(), "archive"), nil,
+			map[fileidentity.Identity]struct{}{identity: {}}, newBackupBudget(),
+			func(string) error { visited = true; return nil },
+		)
+		if err == nil || visited || !strings.Contains(err.Error(), "physically contains") {
+			t.Fatalf("physical exclusion %q = visited:%t error:%v", forbidden, visited, err)
+		}
+	}
+}
+
 func TestBackupFoundationPrivateReaderFaultSeams(t *testing.T) {
 	root := migrationHome(t)
 	path := filepath.Join(root, "control")
@@ -606,6 +628,39 @@ func TestBackupFoundationAdditionalDirectoryAndReaderTransitions(t *testing.T) {
 			t.Fatalf("opened metadata transition = %v", err)
 		}
 	})
+	for _, test := range []struct {
+		name   string
+		mutate func(*backupReadOps)
+	}{
+		{"final private metadata", func(ops *backupReadOps) {
+			validate, calls := ops.validatePrivateFile, 0
+			ops.validatePrivateFile = func(path string, info os.FileInfo) error {
+				calls++
+				if calls == 3 {
+					return canary
+				}
+				return validate(path, info)
+			}
+		}},
+		{"final platform metadata", func(ops *backupReadOps) {
+			validate, calls := ops.validatePlatformFile, 0
+			ops.validatePlatformFile = func(info os.FileInfo, file *os.File, mode uint32) error {
+				calls++
+				if calls == 2 {
+					return canary
+				}
+				return validate(info, file, mode)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ops := defaultBackupReadOps()
+			test.mutate(&ops)
+			if _, _, _, err := readPinnedPrivateBackupFileWithOps(path, 64, false, ops); !errors.Is(err, canary) {
+				t.Fatalf("final metadata transition = %v", err)
+			}
+		})
+	}
 	t.Run("post-read size", func(t *testing.T) {
 		ops := defaultBackupReadOps()
 		ops.readAll = func(io.Reader) ([]byte, error) {
@@ -637,23 +692,43 @@ func TestBackupFoundationRemainingFaultSeams(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Run("source metadata", func(t *testing.T) {
-		ops := defaultBackupCopyOps()
-		stat := ops.stat
-		calls := 0
-		ops.stat = func(file *os.File) (os.FileInfo, error) {
-			calls++
-			info, err := stat(file)
-			if calls == 1 && err == nil {
-				return foundationNoSysInfo{FileInfo: info}, nil
+	for _, call := range []int{1, 3} {
+		t.Run(fmt.Sprintf("source metadata stat %d", call), func(t *testing.T) {
+			ops := defaultBackupCopyOps()
+			stat, calls := ops.stat, 0
+			ops.stat = func(file *os.File) (os.FileInfo, error) {
+				calls++
+				info, err := stat(file)
+				if calls == call && err == nil {
+					return foundationNoSysInfo{FileInfo: info}, nil
+				}
+				return info, err
 			}
-			return info, err
+			if record, err := copyBackupFileWithOps(
+				t.Context(), archive, "global/auth", "legacy", source,
+				fmt.Sprintf("metadata-%d", call), newBackupBudget(), ops,
+			); record.StoreID != "" || err == nil {
+				t.Fatalf("source metadata copy = %#v, %v", record, err)
+			}
+		})
+	}
+
+	t.Run("final source opened identity", func(t *testing.T) {
+		ops := defaultBackupCopyOps()
+		opened, calls := ops.opened, 0
+		canary := errors.New("final source opened identity")
+		ops.opened = func(file *os.File) (fileidentity.Identity, fileidentity.ObjectType, error) {
+			calls++
+			if calls == 3 {
+				return fileidentity.Identity{}, fileidentity.ObjectTypeRegular, canary
+			}
+			return opened(file)
 		}
 		if record, err := copyBackupFileWithOps(
 			t.Context(), archive, "global/auth", "legacy", source,
-			"metadata", newBackupBudget(), ops,
-		); record.StoreID != "" || err == nil {
-			t.Fatalf("source metadata copy = %#v, %v", record, err)
+			"source-opened-identity", newBackupBudget(), ops,
+		); record.StoreID != "" || !errors.Is(err, canary) {
+			t.Fatalf("final source opened identity copy = %#v, %v", record, err)
 		}
 	})
 

@@ -164,7 +164,7 @@ func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) e
 			return errors.New("database backup manifest source identity is invalid")
 		}
 		if previous, present := sourceIdentities[record.SourceIdentity]; present &&
-			backupPathKey(previous) != backupPathKey(record.Source) {
+			!sameBackupPhysicalPath(previous, record.Source) {
 			return errors.New("database backup manifest sources contain a physical alias")
 		}
 		sourceIdentities[record.SourceIdentity] = record.Source
@@ -298,6 +298,10 @@ func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) e
 		}
 	}
 	return nil
+}
+
+func sameBackupPhysicalPath(left, right string) bool {
+	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 // backupGenerationScopesOverlap detects generation containment. Exact
