@@ -193,7 +193,12 @@ func (state *claimSyscallFaultState) shouldInject(call uint64) (bool, unix.Errno
 			return true, unix.EIO
 		}
 	case "valid-root-open":
-		if call == unix.SYS_OPENAT && state.openCalls == 2 {
+		// Target the root reopen after inspectUnixClaimRoot has completed,
+		// rather than assuming it is the process's second observed openat.
+		// Ptrace can observe restarted or runtime open calls differently across
+		// hosted-runner kernels, while the completed fstat+close phase is stable.
+		if call == unix.SYS_OPENAT && state.statCalls >= 1 && state.closeCalls >= 1 &&
+			!state.injected {
 			return true, unix.EIO
 		}
 	case "valid-root-close":
@@ -222,6 +227,18 @@ func (state *claimSyscallFaultState) shouldInject(call uint64) (bool, unix.Errno
 		}
 	}
 	return false, 0
+}
+
+func TestClaimSyscallFaultValidRootOpenUsesCompletedInspectionPhase(t *testing.T) {
+	state := claimSyscallFaultState{scenario: "valid-root-open"}
+	if inject, _ := state.shouldInject(unix.SYS_OPENAT); inject {
+		t.Fatal("valid-root reopen fault injected before root inspection")
+	}
+	state.shouldInject(unix.SYS_FSTAT)
+	state.shouldInject(unix.SYS_CLOSE)
+	if inject, errno := state.shouldInject(unix.SYS_OPENAT); !inject || errno != unix.EIO {
+		t.Fatalf("valid-root reopen fault = %t, %v", inject, errno)
+	}
 }
 
 func TestCoverageClaimSyscallFailureBranches(t *testing.T) {
