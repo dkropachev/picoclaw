@@ -367,10 +367,7 @@ func TestFoundationHardeningInventoryRejectsPreflightAndRemovalDrift(t *testing.
 
 	t.Run("bound symlink", func(t *testing.T) {
 		rootPath, root, rootIdentity := foundationHardeningRemovalRoot(t)
-		if err := root.WriteFile("target", []byte("retain"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink("target", filepath.Join(rootPath, "link")); err != nil {
+		if err := os.Symlink("missing", filepath.Join(rootPath, "link")); err != nil {
 			t.Skipf("create symlink: %v", err)
 		}
 		if err := removePinnedBackupTreeContentsBound(

@@ -444,6 +444,9 @@ func TestBackupParentLegacyScanRaceCoverage(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			legacy := t.TempDir()
+			if err := os.Chmod(legacy, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			child := filepath.Join(legacy, "member")
 			writeMigrationFile(t, child, []byte("member"))
 			t.Cleanup(func() { _ = os.Chmod(legacy, 0o700) })
