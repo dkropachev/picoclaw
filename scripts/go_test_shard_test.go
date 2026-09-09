@@ -23,6 +23,14 @@ func TestGoTestShardsPartitionAllPackages(t *testing.T) {
 		"./...",
 	))
 	slow := outputLines(runGoTestShardCommand(t, root, "bash", "./scripts/run-go-test-shard.sh", "--list", "slow"))
+	workspace := outputLines(runGoTestShardCommand(
+		t,
+		root,
+		"bash",
+		"./scripts/run-go-test-shard.sh",
+		"--list",
+		"workspace",
+	))
 	remaining := outputLines(runGoTestShardCommand(
 		t,
 		root,
@@ -32,8 +40,8 @@ func TestGoTestShardsPartitionAllPackages(t *testing.T) {
 		"remaining",
 	))
 
-	if len(slow) == 0 || len(remaining) == 0 {
-		t.Fatalf("empty shard: slow=%d remaining=%d", len(slow), len(remaining))
+	if len(slow) == 0 || len(workspace) == 0 || len(remaining) == 0 {
+		t.Fatalf("empty shard: slow=%d workspace=%d remaining=%d", len(slow), len(workspace), len(remaining))
 	}
 	wantSlow := []string{
 		modulePath + "/pkg/agent",
@@ -44,8 +52,18 @@ func TestGoTestShardsPartitionAllPackages(t *testing.T) {
 			t.Errorf("slow shard does not contain %s", packagePath)
 		}
 	}
+	wantWorkspace := []string{
+		modulePath + "/pkg/gitworkspace",
+		modulePath + "/pkg/repoaudit",
+		modulePath + "/pkg/tools",
+	}
+	for _, packagePath := range wantWorkspace {
+		if !containsString(workspace, packagePath) {
+			t.Errorf("workspace shard does not contain %s", packagePath)
+		}
+	}
 
-	combined := append(append([]string(nil), slow...), remaining...)
+	combined := append(append(append([]string(nil), slow...), workspace...), remaining...)
 	sort.Strings(all)
 	sort.Strings(combined)
 	if !reflect.DeepEqual(combined, all) {
@@ -63,7 +81,7 @@ func TestGoTestShardRejectsInvalidArguments(t *testing.T) {
 	for _, arguments := range [][]string{
 		nil,
 		{"unknown"},
-		{"slow", "remaining"},
+		{"slow", "workspace"},
 		{"--list"},
 	} {
 		command := exec.Command("bash", append([]string{"./scripts/run-go-test-shard.sh"}, arguments...)...)

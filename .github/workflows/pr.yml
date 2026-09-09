@@ -292,7 +292,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [slow, remaining]
+        shard: [slow, workspace, remaining]
     env:
       GOCACHE: ${{ github.workspace }}/.cache/go-build
       GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
@@ -321,7 +321,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
 
       - name: Restore Go dependencies and builds
-        if: matrix.shard == 'slow'
+        if: matrix.shard != 'remaining'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
