@@ -9,9 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/sipeed/picoclaw/internal/fileidentity"
 	"github.com/sipeed/picoclaw/internal/storecatalog"
-	"golang.org/x/sys/unix"
 )
 
 func TestBackupParentContainmentRejectsBindAlias(t *testing.T) {

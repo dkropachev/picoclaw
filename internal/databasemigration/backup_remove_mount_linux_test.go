@@ -1,5 +1,6 @@
 //go:build linux
 
+//nolint:govet // Fault-path assertions intentionally use narrow error scopes.
 package databasemigration
 
 import (

@@ -1,5 +1,6 @@
 //go:build linux
 
+//nolint:govet // Fault-path assertions intentionally use narrow error scopes.
 package databasemigration
 
 import (
@@ -10,7 +11,10 @@ import (
 )
 
 func TestParseLinuxExactBackupMountID(t *testing.T) {
-	if got, err := parseLinuxExactBackupMountID([]byte("pos:\t0\nflags:\t0100000\nmnt_id:\t4217\n")); err != nil || got != 4217 {
+	if got, err := parseLinuxExactBackupMountID(
+		[]byte("pos:\t0\nflags:\t0100000\nmnt_id:\t4217\n"),
+	); err != nil ||
+		got != 4217 {
 		t.Fatalf("parsed mount ID = %d, %v", got, err)
 	}
 	for _, payload := range [][]byte{

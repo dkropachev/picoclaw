@@ -1,3 +1,4 @@
+//nolint:govet // Identity checks intentionally keep fault errors in narrow scopes.
 package databasemigration
 
 import (
@@ -483,8 +484,10 @@ func validateBackupParentPhysicalAliasesBoundContext(
 				statErr,
 			)
 		}
-		afterAnchor, afterResolved, afterIdentity, afterErr :=
-			nearestExistingBackupDirectoryIdentityContext(ctx, parent)
+		afterAnchor, afterResolved, afterIdentity, afterErr := nearestExistingBackupDirectoryIdentityContext(
+			ctx,
+			parent,
+		)
 		if afterErr != nil || filepath.Clean(afterAnchor) != filepath.Clean(anchorPath) ||
 			afterIdentity != parentIdentity || filepath.Clean(afterResolved) != filepath.Clean(parentResolved) {
 			return errors.Join(

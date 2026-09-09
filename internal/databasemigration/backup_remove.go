@@ -78,8 +78,8 @@ func removePinnedEmptyBackupDirectoryIdentity(
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, child.Close()) }()
-	if err := requireEmptyBackupRemovalRoot(path, child, expected); err != nil {
-		return err
+	if emptyErr := requireEmptyBackupRemovalRoot(path, child, expected); emptyErr != nil {
+		return emptyErr
 	}
 	ops := defaultBackupRemovalOps()
 	quarantine, exact, err := quarantineBackupRemovalLeaf(

@@ -1,5 +1,6 @@
 //go:build linux
 
+//nolint:govet // Fault-path assertions intentionally use narrow error scopes.
 package databasemigration
 
 import (
@@ -10,9 +11,10 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/sipeed/picoclaw/internal/fileidentity"
 	"github.com/sipeed/picoclaw/internal/storecatalog"
-	"golang.org/x/sys/unix"
 )
 
 func TestBackupParentCreationInjectedFaultCoverage(t *testing.T) {
@@ -28,12 +30,20 @@ func TestBackupParentCreationInjectedFaultCoverage(t *testing.T) {
 		{name: "random", want: canary.Error(), mutate: func(ops *backupParentCreationOps) {
 			ops.random = func() (string, error) { return "", canary }
 		}},
-		{name: "invalid temporary leaf", want: "temporary parent name is invalid", mutate: func(ops *backupParentCreationOps) {
-			ops.random = func() (string, error) { return "created", nil }
-		}},
-		{name: "name exhaustion", want: "temporary parent name is unavailable", mutate: func(ops *backupParentCreationOps) {
-			ops.mkdir = func(*os.Root, string, os.FileMode) error { return os.ErrExist }
-		}},
+		{
+			name: "invalid temporary leaf",
+			want: "temporary parent name is invalid",
+			mutate: func(ops *backupParentCreationOps) {
+				ops.random = func() (string, error) { return "created", nil }
+			},
+		},
+		{
+			name: "name exhaustion",
+			want: "temporary parent name is unavailable",
+			mutate: func(ops *backupParentCreationOps) {
+				ops.mkdir = func(*os.Root, string, os.FileMode) error { return os.ErrExist }
+			},
+		},
 		{name: "mkdir", want: canary.Error(), mutate: func(ops *backupParentCreationOps) {
 			ops.mkdir = func(*os.Root, string, os.FileMode) error { return canary }
 		}},
@@ -86,9 +96,13 @@ func TestBackupParentCreationInjectedFaultCoverage(t *testing.T) {
 				return root.Open(target)
 			}
 		}},
-		{name: "missing temporary proof", want: "temporary parent name remains", mutate: func(ops *backupParentCreationOps) {
-			ops.missing = func(*os.Root, string) error { return canary }
-		}},
+		{
+			name: "missing temporary proof",
+			want: "temporary parent name remains",
+			mutate: func(ops *backupParentCreationOps) {
+				ops.missing = func(*os.Root, string) error { return canary }
+			},
+		},
 		{name: "published binding", want: "bind published", mutate: func(ops *backupParentCreationOps) {
 			publish := ops.publish
 			ops.publish = func(root *os.Root, source, target string, opened *os.File) (*os.File, error) {
@@ -288,7 +302,10 @@ func TestBackupParentProjectionFaultCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state.suffix = strings.TrimSuffix(strings.Repeat(strings.Repeat("x", 255)+string(os.PathSeparator), 64), string(os.PathSeparator))
+	state.suffix = strings.TrimSuffix(
+		strings.Repeat(strings.Repeat("x", 255)+string(os.PathSeparator), 64),
+		string(os.PathSeparator),
+	)
 	if err := validateProspectiveBackupParentOutsideSource(source, state); err == nil ||
 		!strings.Contains(err.Error(), "projected path is invalid") {
 		t.Fatalf("oversized projected path = %v", err)
@@ -335,7 +352,10 @@ func TestBackupParentCatalogBoundCoverage(t *testing.T) {
 	}
 
 	base := t.TempDir()
-	spec := storecatalog.Spec{Path: filepath.Join(base, "store", "store.db"), LegacyRoots: []string{filepath.Join(base, "legacy")}}
+	spec := storecatalog.Spec{
+		Path:        filepath.Join(base, "store", "store.db"),
+		LegacyRoots: []string{filepath.Join(base, "legacy")},
+	}
 	for _, allowed := range []int{2, 6} {
 		if _, err := validateBackupParentWithContext(
 			&cancelAfterMigrationErrChecks{Context: t.Context(), allowed: allowed},

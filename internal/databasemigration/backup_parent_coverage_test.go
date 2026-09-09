@@ -28,14 +28,20 @@ func TestBackupParentValidationCoverage(t *testing.T) {
 		{name: "nil context uses default", value: "", home: home},
 		{name: "invalid home", ctx: t.Context(), value: "", home: "relative", want: "home is invalid"},
 		{name: "unclean configured value", ctx: t.Context(), value: " " + home, home: home, want: "directory is invalid"},
-		{name: "generation overlap", ctx: t.Context(), value: store, home: home,
-			specs: []storecatalog.Spec{{ID: "global/tree", Path: store}}, want: "overlaps a database generation"},
-		{name: "legacy overlap", ctx: t.Context(), value: legacy, home: home,
+		{
+			name: "generation overlap", ctx: t.Context(), value: store, home: home,
+			specs: []storecatalog.Spec{{ID: "global/tree", Path: store}}, want: "overlaps a database generation",
+		},
+		{
+			name: "legacy overlap", ctx: t.Context(), value: legacy, home: home,
 			specs: []storecatalog.Spec{{ID: "global/tree", Path: store, LegacyRoots: []string{legacy}}},
-			want:  "overlaps a legacy input"},
-		{name: "canceled catalog iteration", ctx: &cancelAfterMigrationErrChecks{Context: t.Context(), allowed: 1},
+			want:  "overlaps a legacy input",
+		},
+		{
+			name: "canceled catalog iteration", ctx: &cancelAfterMigrationErrChecks{Context: t.Context(), allowed: 1},
 			value: filepath.Join(home, "archive"), home: home,
-			specs: []storecatalog.Spec{{ID: "global/tree", Path: store}}, want: context.Canceled.Error()},
+			specs: []storecatalog.Spec{{ID: "global/tree", Path: store}}, want: context.Canceled.Error(),
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := validateBackupParentWithContext(test.ctx, test.value, test.home, test.specs)
@@ -286,12 +292,16 @@ func TestBackupParentAncestorAndLegacyRootCoverage(t *testing.T) {
 	}{
 		{name: "missing identity", path: base, state: &backupParentAncestorState{seen: map[string]struct{}{}}, want: "state is invalid"},
 		{name: "missing state", path: base, id: identity, want: "state is invalid"},
-		{name: "canceled", path: base, id: identity,
+		{
+			name: "canceled", path: base, id: identity,
 			state: &backupParentAncestorState{ctx: canceledParentTreeContext(), seen: map[string]struct{}{}},
-			want:  context.Canceled.Error()},
-		{name: "invalid ancestor path", path: filepath.Join(base, "bad\x00parent", "child"), id: identity,
+			want:  context.Canceled.Error(),
+		},
+		{
+			name: "invalid ancestor path", path: filepath.Join(base, "bad\x00parent", "child"), id: identity,
 			state: &backupParentAncestorState{ctx: t.Context(), seen: map[string]struct{}{}},
-			want:  "inspect catalog source ancestor"},
+			want:  "inspect catalog source ancestor",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			parentTreeRequireError(t,
@@ -308,8 +318,10 @@ func TestBackupParentAncestorAndLegacyRootCoverage(t *testing.T) {
 	}{
 		{name: "missing parent identity", ctx: t.Context(), want: "identity is unavailable"},
 		{name: "canceled roots", ctx: canceledParentTreeContext(), id: identity, roots: []string{base}, want: context.Canceled.Error()},
-		{name: "invalid root", ctx: t.Context(), id: identity,
-			roots: []string{filepath.Join(base, "bad\x00legacy")}, want: "inspect legacy root"},
+		{
+			name: "invalid root", ctx: t.Context(), id: identity,
+			roots: []string{filepath.Join(base, "bad\x00legacy")}, want: "inspect legacy root",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			parentTreeRequireError(t,
@@ -418,8 +430,10 @@ func TestBackupParentLegacyScanRaceCoverage(t *testing.T) {
 				}
 			}}
 		}, want: "inspect legacy containment child"},
-		{name: "regular entry exceeds bound", entries: backupMaxEntries - 1,
-			ctx: func(t *testing.T, _ string) context.Context { return t.Context() }, want: "entry limit"},
+		{
+			name: "regular entry exceeds bound", entries: backupMaxEntries - 1,
+			ctx: func(t *testing.T, _ string) context.Context { return t.Context() }, want: "entry limit",
+		},
 		{name: "root metadata changes", ctx: func(t *testing.T, child string) context.Context {
 			return &actionAfterMigrationErrChecks{Context: t.Context(), allowed: 1, action: func() {
 				if err := os.Chmod(filepath.Dir(child), 0o755); err != nil {

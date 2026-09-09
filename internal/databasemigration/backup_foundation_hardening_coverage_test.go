@@ -1,5 +1,6 @@
 //go:build linux
 
+//nolint:govet // Fault-path assertions intentionally use narrow error scopes.
 package databasemigration
 
 import (
@@ -11,8 +12,9 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/sipeed/picoclaw/internal/fileidentity"
 	"golang.org/x/sys/unix"
+
+	"github.com/sipeed/picoclaw/internal/fileidentity"
 )
 
 func TestFoundationHardeningMountFailureCleanup(t *testing.T) {
@@ -31,9 +33,13 @@ func TestFoundationHardeningMountFailureCleanup(t *testing.T) {
 		if err := root.Close(); err != nil {
 			t.Fatal(err)
 		}
-		file, err := openExactBackupChildByMountIdentity(root, "child", func(*os.File) (exactBackupMountIdentity, error) {
-			return identity, nil
-		})
+		file, err := openExactBackupChildByMountIdentity(
+			root,
+			"child",
+			func(*os.File) (exactBackupMountIdentity, error) {
+				return identity, nil
+			},
+		)
 		if file != nil || err == nil {
 			t.Fatalf("closed-root mount open = %#v, %v", file, err)
 		}
@@ -54,13 +60,17 @@ func TestFoundationHardeningMountFailureCleanup(t *testing.T) {
 			}
 			defer root.Close()
 			calls := 0
-			file, err := openExactBackupChildByMountIdentity(root, "child", func(*os.File) (exactBackupMountIdentity, error) {
-				calls++
-				if calls == test.failCall {
-					return exactBackupMountIdentity{}, canary
-				}
-				return identity, nil
-			})
+			file, err := openExactBackupChildByMountIdentity(
+				root,
+				"child",
+				func(*os.File) (exactBackupMountIdentity, error) {
+					calls++
+					if calls == test.failCall {
+						return exactBackupMountIdentity{}, canary
+					}
+					return identity, nil
+				},
+			)
 			if file != nil || !errors.Is(err, canary) || calls != test.wantCalls {
 				t.Fatalf("faulted mount open = %#v, calls=%d, %v", file, calls, err)
 			}
@@ -75,17 +85,21 @@ func TestFoundationHardeningMountFailureCleanup(t *testing.T) {
 		defer root.Close()
 		calls := 0
 		var child *os.File
-		file, err := openExactBackupChildByMountIdentity(root, "child", func(opened *os.File) (exactBackupMountIdentity, error) {
-			calls++
-			if calls == 1 {
-				if err := opened.Close(); err != nil {
-					t.Fatal(err)
+		file, err := openExactBackupChildByMountIdentity(
+			root,
+			"child",
+			func(opened *os.File) (exactBackupMountIdentity, error) {
+				calls++
+				if calls == 1 {
+					if err := opened.Close(); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					child = opened
 				}
-			} else {
-				child = opened
-			}
-			return identity, nil
-		})
+				return identity, nil
+			},
+		)
 		if file != nil || err == nil || child == nil {
 			t.Fatalf("root-close failure = %#v, child=%#v, %v", file, child, err)
 		}
