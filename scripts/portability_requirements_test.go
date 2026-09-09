@@ -286,7 +286,7 @@ func TestProtectedMainPushAvoidsDuplicatePRChecks(t *testing.T) {
 		{name: "integration", start: "  integration:\n", end: "  build:\n"},
 		{name: "frontend", start: "  frontend_tests:\n", end: ""},
 	} {
-		block := workflow
+		var block string
 		if job.end == "" {
 			start := strings.Index(workflow, job.start)
 			if start < 0 {
