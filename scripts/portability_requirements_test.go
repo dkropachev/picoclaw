@@ -166,7 +166,16 @@ func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
 	const sharedPaths = "path: |\n            .cache/go-build\n            .cache/go-mod"
 	const keyBase = "${{ runner.os }}-${{ runner.arch }}-go-v3-"
 	const dependencyHash = "${{ hashFiles('go.mod', 'go.sum') }}"
+	const consumerEpoch = "${{ needs.classify.outputs.go_cache_epoch }}"
 	prWorkflow := readRepoFile(t, ".github/workflows/pr.yml")
+	for _, snippet := range []string{
+		"go_cache_epoch: ${{ steps.go-cache-key.outputs.epoch }}",
+		`echo "epoch=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"`,
+	} {
+		if !strings.Contains(prWorkflow, snippet) {
+			t.Errorf("PR workflow is missing Go cache generation setting %q", snippet)
+		}
+	}
 	if got := strings.Count(prWorkflow, "uses: actions/cache/restore@"+cacheAction); got != 6 {
 		t.Errorf("PR workflow shared Go cache restore count = %d, want 6", got)
 	}
@@ -180,7 +189,7 @@ func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
 		{name: "host", want: 5},
 		{name: "cross", want: 1},
 	} {
-		consumerKey := "key: " + keyBase + cache.name + "-" + dependencyHash
+		consumerKey := "key: " + keyBase + cache.name + "-" + dependencyHash + "-" + consumerEpoch
 		if got := strings.Count(prWorkflow, consumerKey+"\n          restore-keys: |"); got != cache.want {
 			t.Errorf("PR workflow %s Go cache key count = %d, want %d", cache.name, got, cache.want)
 		}
@@ -198,6 +207,9 @@ func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
 	}
 	if strings.Contains(prWorkflow, "uses: actions/cache/save@") {
 		t.Error("PR workflow must not save the shared Go cache")
+	}
+	if strings.Contains(prWorkflow, "go-v2-") {
+		t.Error("PR workflow still has a legacy v2 Go cache fallback")
 	}
 	hasV2JobKey := strings.Contains(prWorkflow, "go-v2-${{ github.job }}")
 	hasV3JobKey := strings.Contains(prWorkflow, "go-v3-${{ github.job }}")
