@@ -592,6 +592,86 @@ func TestUnixBackupCreationAndCopyPermissionFailures(t *testing.T) {
 	}
 }
 
+func TestBackupFoundationAdditionalPinnedAndTraversalFaults(t *testing.T) {
+	t.Run("default read seek", func(t *testing.T) {
+		path := filepath.Join(migrationHome(t), "control")
+		writeMigrationFile(t, path, []byte("control"))
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		if offset, err := defaultBackupReadOps().seek(file, 0, io.SeekEnd); err != nil || offset != 7 {
+			t.Fatalf("default backup seek = %d, %v", offset, err)
+		}
+	})
+
+	t.Run("private directory open permission", func(t *testing.T) {
+		path := filepath.Join(migrationHome(t), "execute-only")
+		if err := os.Mkdir(path, 0o100); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(path, 0o700) })
+		probe, probeErr := os.Open(path)
+		if probeErr == nil {
+			_ = probe.Close()
+			t.Skip("process can open an execute-only directory")
+		}
+		if identity, err := pinPrivateBackupDirectory(path); err == nil || identity.Valid() {
+			t.Fatalf("execute-only private directory pin = %#v, %v", identity, err)
+		}
+	})
+
+	t.Run("missing walk root", func(t *testing.T) {
+		root := migrationHome(t)
+		missing := filepath.Join(root, "missing")
+		if err := walkLegacyDirectory(
+			t.Context(), missing, ".", filepath.Join(root, "backup"), nil,
+			newBackupBudget(), func(string) error { return nil },
+		); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("missing legacy walk root = %v", err)
+		}
+	})
+
+	t.Run("unresolvable working directory", func(t *testing.T) {
+		original, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		removed := filepath.Join(t.TempDir(), "removed-cwd")
+		if err := os.Mkdir(removed, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(removed); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := os.Chdir(original); err != nil {
+				t.Errorf("restore working directory: %v", err)
+			}
+		})
+		if err := os.Remove(removed); err != nil {
+			t.Skipf("platform cannot unlink the working directory: %v", err)
+		}
+		if err := validateBackupAncestors("relative"); err == nil {
+			t.Fatal("relative ancestor validation resolved a removed working directory")
+		}
+	})
+
+	t.Run("invalid UTF-8 member", func(t *testing.T) {
+		root := migrationHome(t)
+		tree := filepath.Join(root, "legacy")
+		invalidName := string([]byte{'b', 'a', 'd', 0xff})
+		writeMigrationFile(t, filepath.Join(tree, invalidName), []byte("payload"))
+		if err := walkLegacyInputs(
+			t.Context(), tree, filepath.Join(root, "backup"), nil,
+			newBackupBudget(), func(string) error { return nil },
+		); err == nil || !strings.Contains(err.Error(), "invalid path component") {
+			t.Fatalf("invalid UTF-8 legacy member = %v", err)
+		}
+	})
+}
+
 func TestUnixExistingSymlinkBackupAncestorIsRejected(t *testing.T) {
 	base := t.TempDir()
 	realDirectory := filepath.Join(base, "real")

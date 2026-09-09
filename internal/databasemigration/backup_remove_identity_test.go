@@ -289,6 +289,132 @@ func TestBackupRemovalRejectsMissingSyncOperation(t *testing.T) {
 	}
 }
 
+func TestBackupRemovalRejectsMismatchedPinnedNames(t *testing.T) {
+	t.Run("file hard-link name", func(t *testing.T) {
+		parent := migrationHome(t)
+		path := filepath.Join(parent, "original")
+		alias := filepath.Join(parent, "alias")
+		writeMigrationFile(t, path, []byte("payload"))
+		if err := os.Link(path, alias); err != nil {
+			t.Skipf("hard links unavailable: %v", err)
+		}
+		expected, err := backupExistingIdentity(path, fileidentity.ObjectTypeRegular)
+		if err != nil {
+			t.Fatal(err)
+		}
+		root, err := os.OpenRoot(parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer root.Close()
+		file, err := root.Open("original")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		if err := removeBackupFileDurableWithSync(
+			path, root, "alias", file, expected, func(string) error { return nil },
+		); err == nil || !strings.Contains(err.Error(), "not absent") {
+			t.Fatalf("mismatched file removal name = %v", err)
+		}
+		if payload, err := os.ReadFile(path); err != nil || string(payload) != "payload" {
+			t.Fatalf("mismatched file removal changed original = %q, %v", payload, err)
+		}
+	})
+
+	t.Run("directory name", func(t *testing.T) {
+		parent := migrationHome(t)
+		path := filepath.Join(parent, "original")
+		decoy := filepath.Join(parent, "decoy")
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(decoy, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		expected := backupRemovalDirectoryIdentity(t, path)
+		root, err := os.OpenRoot(parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer root.Close()
+		child, err := root.OpenRoot("original")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer child.Close()
+		if err := removeBackupTreeDurableWithSync(
+			path, root, "decoy", child, expected, func(string) error { return nil },
+		); err == nil || !strings.Contains(err.Error(), "not absent") {
+			t.Fatalf("mismatched tree removal name = %v", err)
+		}
+		if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+			t.Fatalf("mismatched tree removal changed original = %#v, %v", info, err)
+		}
+	})
+}
+
+func TestBackupRemovalContentsRejectMismatchedPinnedRoot(t *testing.T) {
+	newRoots := func(t *testing.T) (string, string, *os.Root, fileidentity.Identity) {
+		t.Helper()
+		base := migrationHome(t)
+		declared := filepath.Join(base, "declared")
+		opened := filepath.Join(base, "opened")
+		if err := os.Mkdir(declared, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(opened, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		root, err := os.OpenRoot(opened)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = root.Close() })
+		return declared, opened, root, backupRemovalDirectoryIdentity(t, declared)
+	}
+
+	t.Run("different child identity", func(t *testing.T) {
+		declared, opened, root, declaredIdentity := newRoots(t)
+		writeMigrationFile(t, filepath.Join(declared, "payload"), []byte("declared"))
+		writeMigrationFile(t, filepath.Join(opened, "payload"), []byte("opened"))
+		entries := 0
+		err := removePinnedBackupTreeContentsWithSync(
+			declared, root,
+			map[fileidentity.Identity]string{declaredIdentity: declared}, &entries,
+			func(string) error { return nil },
+		)
+		if err == nil || !strings.Contains(err.Error(), "identity changed") {
+			t.Fatalf("mismatched pinned-root child = %v", err)
+		}
+	})
+
+	t.Run("hard-link child name", func(t *testing.T) {
+		declared, opened, root, declaredIdentity := newRoots(t)
+		declaredFile := filepath.Join(declared, "payload")
+		openedFile := filepath.Join(opened, "payload")
+		writeMigrationFile(t, declaredFile, []byte("payload"))
+		if err := os.Link(declaredFile, openedFile); err != nil {
+			t.Skipf("hard links unavailable: %v", err)
+		}
+		entries := 0
+		err := removePinnedBackupTreeContentsWithSync(
+			declared, root,
+			map[fileidentity.Identity]string{declaredIdentity: declared}, &entries,
+			func(string) error { return nil },
+		)
+		if err == nil || !strings.Contains(err.Error(), "child name remains") {
+			t.Fatalf("mismatched pinned-root hard link = %v", err)
+		}
+		if payload, err := os.ReadFile(declaredFile); err != nil || string(payload) != "payload" {
+			t.Fatalf("declared hard-link source changed = %q, %v", payload, err)
+		}
+		if _, err := os.Lstat(openedFile); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("opened hard-link name remains: %v", err)
+		}
+	})
+}
+
 func TestPinnedBackupTreeRemovalLeavesSubstitutedTombstone(t *testing.T) {
 	parent := t.TempDir()
 	tree := filepath.Join(parent, "tree")
