@@ -46,6 +46,7 @@ type Lease struct {
 	assignments       map[string]string
 	pinAssignments    map[string]string
 	replacementPins   map[database.StoreID]*replacementPin
+	approvedMains     map[database.StoreID]fileidentity.Identity
 	fence             *database.Fence
 	closed            atomic.Bool
 	poisoned          atomic.Bool
@@ -399,8 +400,16 @@ func acquireCatalogWithOps(
 	lease.replacementPins = make(map[database.StoreID]*replacementPin)
 	lease.stores = finalCatalog.All()
 	lease.byID = make(map[database.StoreID]int, len(lease.stores))
+	lease.approvedMains = make(map[database.StoreID]fileidentity.Identity, len(lease.stores))
 	for index := range lease.stores {
-		lease.byID[lease.stores[index].ID] = index
+		id := lease.stores[index].ID
+		lease.byID[id] = index
+		lease.approvedMains[id] = fileidentity.Identity{}
+	}
+	for _, observation := range finalObservation {
+		if observation.Role == memberMain {
+			lease.approvedMains[observation.StoreID] = observation.Identity
+		}
 	}
 	return lease, nil
 }
@@ -469,6 +478,7 @@ func (lease *Lease) Close() error {
 		}
 		lease.resources = nil
 		lease.claims = nil
+		lease.approvedMains = nil
 	})
 	return result
 }
@@ -604,6 +614,486 @@ func (lease *Lease) GuardStoresRefreshing() (
 	return stores, reconcile, releaseAll, nil
 }
 
+// MigrationRefreshingGuard holds one migration fence and the lease's
+// exclusive mutex continuously across an offline filesystem operation. Its
+// methods are the only reentrant-safe way to reconcile or authorize a staged
+// main replacement while that ownership boundary is held.
+type MigrationRefreshingGuard struct {
+	state *migrationRefreshingGuardState
+}
+
+type migrationRefreshingGuardState struct {
+	mu           sync.Mutex
+	lease        *Lease
+	stores       []storecatalog.Spec
+	ops          claimRefreshOps
+	releaseFence func()
+	pinned       map[database.StoreID]struct{}
+	expectedMain map[database.StoreID]fileidentity.Identity
+	active       bool
+	releaseErr   error
+}
+
+// GuardStoresMigrating acquires a migration-only refreshing guard and returns
+// only after the complete catalog has been reconciled under the same live
+// fence. Release must be called exactly once and its error must be observed.
+func (lease *Lease) GuardStoresMigrating() (*MigrationRefreshingGuard, error) {
+	if lease == nil {
+		return nil, database.NewError(
+			database.CodeUnavailable,
+			"physical database lease is unavailable",
+		)
+	}
+	lease.mu.Lock()
+	if !lease.authorized() || lease.root == "" || lease.catalog == nil ||
+		lease.acquireClaim == nil || len(lease.replacementPins) != 0 ||
+		!approvedMainBaselineValid(lease.stores, lease.approvedMains) {
+		lease.poisoned.Store(true)
+		lease.mu.Unlock()
+		return nil, database.NewError(
+			database.CodeIntegrity,
+			"physical database lease lost authority",
+		)
+	}
+	guardedFence, releaseFence, guardErr := lease.fence.GuardMigrationChecked(lease.home)
+	if guardErr != nil {
+		lease.poisoned.Store(true)
+		lease.mu.Unlock()
+		return nil, guardErr
+	}
+	ops := defaultClaimRefreshOps()
+	ops.acquire = lease.acquireClaim
+	ops.guardedAuthority = guardedFence
+	expectedMain := make(map[database.StoreID]fileidentity.Identity, len(lease.approvedMains))
+	for id, identity := range lease.approvedMains {
+		expectedMain[id] = identity
+	}
+	state := &migrationRefreshingGuardState{
+		lease: lease, ops: ops, releaseFence: releaseFence,
+		pinned: make(map[database.StoreID]struct{}), expectedMain: expectedMain,
+		active: true,
+	}
+	fail := func(err error) (*MigrationRefreshingGuard, error) {
+		releaseFence()
+		lease.mu.Unlock()
+		return nil, err
+	}
+	// Validate the lease's approved main baseline before ordinary refresh can
+	// adopt newly materialized catalog members. The second validation below
+	// closes the observation/refresh window while the same lease and fence
+	// remain continuously held.
+	if err := state.validateExpectedMainsLocked(); err != nil {
+		return fail(err)
+	}
+	if refreshErr := lease.refreshLockedWithOps("", ops); refreshErr != nil {
+		return fail(refreshErr)
+	}
+	if err := state.validateFinalMigrationObservationsLocked(); err != nil {
+		return fail(err)
+	}
+	stores := make([]storecatalog.Spec, len(lease.stores))
+	for index := range lease.stores {
+		stores[index] = cloneSpec(lease.stores[index])
+	}
+	state.stores = stores
+	return &MigrationRefreshingGuard{state: state}, nil
+}
+
+// Stores returns a detached, complete catalog only while the migration guard
+// retains the exact lease and fence authority.
+func (guard *MigrationRefreshingGuard) Stores() ([]storecatalog.Spec, error) {
+	if guard == nil || guard.state == nil {
+		return nil, database.NewError(
+			database.CodeUnavailable,
+			"physical database migration guard is unavailable",
+		)
+	}
+	state := guard.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.checkLocked(); err != nil {
+		return nil, err
+	}
+	stores := make([]storecatalog.Spec, len(state.stores))
+	for index := range state.stores {
+		stores[index] = cloneSpec(state.stores[index])
+	}
+	return stores, nil
+}
+
+// Check revalidates the retained fence and every held claim/pin without
+// releasing the exclusive migration boundary.
+func (guard *MigrationRefreshingGuard) Check() error {
+	if guard == nil || guard.state == nil {
+		return database.NewError(
+			database.CodeUnavailable,
+			"physical database migration guard is unavailable",
+		)
+	}
+	state := guard.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.checkLocked()
+}
+
+// Reconcile claims non-main members materialized by the preceding provider or
+// filesystem operation. Every missing-main appearance or existing-main change
+// is rejected; those transitions require PinReplacement followed by
+// ReconcileReplacement.
+func (guard *MigrationRefreshingGuard) Reconcile() error {
+	if guard == nil || guard.state == nil {
+		return database.NewError(
+			database.CodeUnavailable,
+			"physical database migration guard is unavailable",
+		)
+	}
+	state := guard.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.checkLocked(); err != nil {
+		return err
+	}
+	if err := state.validateExpectedMainsLocked(); err != nil {
+		return err
+	}
+	if err := state.lease.refreshLockedWithOps("", state.ops); err != nil {
+		return err
+	}
+	return state.validateFinalMigrationObservationsLocked()
+}
+
+// PinReplacement binds one exact staged main identity to its canonical
+// StoreID without attempting to reacquire the already-held lease mutex.
+func (guard *MigrationRefreshingGuard) PinReplacement(
+	id database.StoreID,
+	path string,
+) error {
+	if guard == nil || guard.state == nil || !id.Valid() || path == "" {
+		return database.NewError(
+			database.CodeInvalid,
+			"physical database migration replacement pin is invalid",
+		)
+	}
+	state := guard.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.checkLocked(); err != nil {
+		return err
+	}
+	if err := state.validateExpectedMainsLocked(); err != nil {
+		return err
+	}
+	index, claimed := state.lease.byID[id]
+	if !claimed {
+		return database.NewError(database.CodeInvalid, "replacement store is not claimed")
+	}
+	if err := state.lease.pinReplacementLocked(id, path, index, state.ops); err != nil {
+		return err
+	}
+	state.pinned[id] = struct{}{}
+	return state.validateFinalMigrationObservationsLocked()
+}
+
+// ReconcileReplacement proves that the active main now names the exact pinned
+// staged identity, promotes that assignment, and consumes its retained pin.
+func (guard *MigrationRefreshingGuard) ReconcileReplacement(id database.StoreID) error {
+	if guard == nil || guard.state == nil || !id.Valid() {
+		return database.NewError(
+			database.CodeInvalid,
+			"physical database migration replacement is invalid",
+		)
+	}
+	state := guard.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.checkLocked(); err != nil {
+		return err
+	}
+	if _, claimed := state.lease.byID[id]; !claimed {
+		return database.NewError(database.CodeInvalid, "replacement store is not claimed")
+	}
+	if _, pinned := state.pinned[id]; !pinned {
+		return state.lease.poison(database.NewError(
+			database.CodeIntegrity,
+			"physical database migration replacement was not pinned",
+		))
+	}
+	pin := state.lease.replacementPins[id]
+	if pin == nil || !pin.identity.Valid() {
+		return state.lease.poison(database.NewError(
+			database.CodeIntegrity,
+			"physical database migration replacement pin is unavailable",
+		))
+	}
+	replacementIdentity := pin.identity
+	if err := state.lease.refreshLockedWithOps(id, state.ops); err != nil {
+		return err
+	}
+	state.expectedMain[id] = replacementIdentity
+	delete(state.pinned, id)
+	return state.validateFinalMigrationObservationsLocked()
+}
+
+// Release performs one final ordinary reconciliation, retires every unused
+// stage pin, then releases the migration fence and lease mutex. It is
+// idempotent so deferred cleanup can safely join an earlier explicit result.
+func (guard *MigrationRefreshingGuard) Release() error {
+	if guard == nil || guard.state == nil {
+		return nil
+	}
+	state := guard.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.active {
+		return state.releaseErr
+	}
+	lease := state.lease
+	if checkErr := state.checkLocked(); checkErr != nil {
+		state.releaseErr = errors.Join(state.releaseErr, checkErr)
+	} else if stateErr := state.validateExpectedMainsLocked(); stateErr != nil {
+		state.releaseErr = errors.Join(state.releaseErr, stateErr)
+	} else {
+		state.releaseErr = errors.Join(
+			state.releaseErr,
+			lease.refreshLockedWithOps("", state.ops),
+		)
+		if state.releaseErr == nil {
+			state.releaseErr = state.validateFinalMigrationObservationsLocked()
+		}
+	}
+	state.releaseErr = errors.Join(
+		state.releaseErr,
+		lease.retireReplacementPinsLocked(state.pinned),
+	)
+	clear(state.pinned)
+	finalCheckErr := state.checkLocked()
+	state.releaseErr = errors.Join(state.releaseErr, finalCheckErr)
+	if finalCheckErr == nil {
+		state.releaseErr = errors.Join(
+			state.releaseErr,
+			state.validateFinalMigrationObservationsLocked(),
+		)
+	}
+	state.active = false
+	state.releaseFence()
+	lease.mu.Unlock()
+	state.releaseFence = nil
+	state.lease = nil
+	state.stores = nil
+	state.expectedMain = nil
+	return state.releaseErr
+}
+
+func (state *migrationRefreshingGuardState) checkLocked() error {
+	if state == nil || !state.active || state.lease == nil {
+		return database.NewError(
+			database.CodeIntegrity,
+			"physical database migration guard lost authority",
+		)
+	}
+	lease := state.lease
+	if state.ops.guardedAuthority == nil || !state.ops.guardedAuthority() {
+		lease.poisoned.Store(true)
+		return database.NewError(
+			database.CodeIntegrity,
+			"physical database migration guard lost authority",
+		)
+	}
+	if lease.closed.Load() || lease.poisoned.Load() ||
+		!claimHandlesValid(lease.claims) || !lease.replacementPinsValid() {
+		lease.poisoned.Store(true)
+		return database.NewError(
+			database.CodeIntegrity,
+			"physical database migration guard lost authority",
+		)
+	}
+	return nil
+}
+
+func (state *migrationRefreshingGuardState) validateExpectedMainsLocked() error {
+	return state.validateMigrationObservationsLocked(false)
+}
+
+func (state *migrationRefreshingGuardState) validateFinalMigrationObservationsLocked() error {
+	return state.validateMigrationObservationsLocked(true)
+}
+
+func (state *migrationRefreshingGuardState) validateMigrationObservationsLocked(
+	requireClaimed bool,
+) error {
+	if state == nil || state.lease == nil ||
+		len(state.expectedMain) != len(state.lease.stores) ||
+		!approvedMainBaselineValid(state.lease.stores, state.lease.approvedMains) ||
+		state.ops.revalidate == nil || state.ops.observe == nil {
+		if state != nil && state.lease != nil {
+			state.lease.poisoned.Store(true)
+		}
+		return database.NewError(
+			database.CodeIntegrity,
+			"physical database migration main-state guard is invalid",
+		)
+	}
+	for id, expected := range state.expectedMain {
+		approved, ok := state.lease.approvedMains[id]
+		if !ok || approved != expected {
+			return state.lease.poison(database.NewError(
+				database.CodeIntegrity,
+				"database migration approved main baseline changed unexpectedly",
+			))
+		}
+	}
+	strict, err := state.ops.revalidate(state.lease.catalog)
+	if err != nil || !catalogsEqual(state.lease.catalog, strict) {
+		return state.lease.poison(errors.Join(
+			database.NewError(
+				database.CodeIntegrity,
+				"database catalog changed while validating migration state",
+			),
+			err,
+		))
+	}
+	observed, err := state.ops.observe(strict)
+	if err != nil {
+		return state.lease.poison(err)
+	}
+	current := make(map[database.StoreID]fileidentity.Identity, len(state.expectedMain))
+	for _, observation := range observed {
+		if observation.Role != memberMain {
+			continue
+		}
+		if _, duplicate := current[observation.StoreID]; duplicate {
+			return state.lease.poison(database.NewError(
+				database.CodeIntegrity,
+				"database migration observed duplicate main assignments",
+			))
+		}
+		current[observation.StoreID] = observation.Identity
+	}
+	for id, expected := range state.expectedMain {
+		if current[id] != expected {
+			return state.lease.poison(database.NewError(
+				database.CodeIntegrity,
+				"database main generation changed outside a reconciled migration replacement",
+			))
+		}
+	}
+	if len(current) != countValidMigrationMainIdentities(state.expectedMain) {
+		return state.lease.poison(database.NewError(
+			database.CodeIntegrity,
+			"database migration observed an unknown main assignment",
+		))
+	}
+	if requireClaimed &&
+		(!observationsEqual(state.lease.observations, observed) ||
+			!allObservationClaimsHeld(
+				state.lease.identities, state.lease.lexicalIdentities, observed,
+			)) {
+		return state.lease.poison(database.NewError(
+			database.CodeIntegrity,
+			"database migration observed an unclaimed physical assignment",
+		))
+	}
+	return state.checkLocked()
+}
+
+func countValidMigrationMainIdentities(values map[database.StoreID]fileidentity.Identity) int {
+	count := 0
+	for _, identity := range values {
+		if identity.Valid() {
+			count++
+		}
+	}
+	return count
+}
+
+func approvedMainBaselineValid(
+	stores []storecatalog.Spec,
+	baseline map[database.StoreID]fileidentity.Identity,
+) bool {
+	if len(baseline) != len(stores) {
+		return false
+	}
+	for _, store := range stores {
+		if _, ok := baseline[store.ID]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (lease *Lease) retireReplacementPinsLocked(
+	ids map[database.StoreID]struct{},
+) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	owned := make(map[*replacementPin][]database.StoreID, len(ids))
+	var result error
+	for id := range ids {
+		pin := lease.replacementPins[id]
+		if pin == nil {
+			lease.poisoned.Store(true)
+			result = errors.Join(result, database.NewError(
+				database.CodeIntegrity,
+				"physical database migration replacement pin ledger is invalid",
+			))
+			continue
+		}
+		owned[pin] = append(owned[pin], id)
+	}
+	retire := func(pin *replacementPin) {
+		pinIDs := owned[pin]
+		if len(pinIDs) == 0 {
+			return
+		}
+		for _, id := range pinIDs {
+			if lease.replacementPins[id] != pin {
+				lease.poisoned.Store(true)
+				result = errors.Join(result, database.NewError(
+					database.CodeIntegrity,
+					"physical database migration replacement pin ownership changed",
+				))
+				continue
+			}
+			delete(lease.replacementPins, id)
+		}
+		closeErr := pin.close()
+		lease.removePinResource(pin)
+		if closeErr != nil {
+			lease.poisoned.Store(true)
+			result = errors.Join(
+				result,
+				fmt.Errorf("retire physical database replacement pin: %w", closeErr),
+			)
+		}
+		delete(owned, pin)
+	}
+	for index := len(lease.resources) - 1; index >= 0; index-- {
+		pin, ok := lease.resources[index].(*replacementPin)
+		if !ok {
+			continue
+		}
+		retire(pin)
+	}
+	if len(owned) != 0 {
+		lease.poisoned.Store(true)
+		result = errors.Join(result, database.NewError(
+			database.CodeIntegrity,
+			"physical database migration replacement resource ledger is invalid",
+		))
+		remaining := make([]database.StoreID, 0, len(owned))
+		for _, pinIDs := range owned {
+			sort.Slice(pinIDs, func(left, right int) bool { return pinIDs[left] < pinIDs[right] })
+			remaining = append(remaining, pinIDs[0])
+		}
+		sort.Slice(remaining, func(left, right int) bool { return remaining[left] > remaining[right] })
+		for _, id := range remaining {
+			retire(lease.replacementPins[id])
+		}
+	}
+	return result
+}
+
 // Refresh monotonically claims physical identities materialized after the
 // lexical catalog was acquired. Replacing an existing main poisons the lease.
 func (lease *Lease) Refresh() error {
@@ -653,6 +1143,23 @@ func (lease *Lease) PinReplacement(id database.StoreID, path string) (resultErr 
 	refreshOps := defaultClaimRefreshOps()
 	refreshOps.acquire = lease.acquireClaim
 	refreshOps.guardedAuthority = guardedFence
+	return lease.pinReplacementLocked(id, path, index, refreshOps)
+}
+
+func (lease *Lease) pinReplacementLocked(
+	id database.StoreID,
+	path string,
+	index int,
+	refreshOps claimRefreshOps,
+) (resultErr error) {
+	if lease == nil || !id.Valid() || path == "" || index < 0 || index >= len(lease.stores) ||
+		lease.stores[index].ID != id || refreshOps.acquire == nil ||
+		refreshOps.guardedAuthority == nil {
+		return database.NewError(
+			database.CodeIntegrity,
+			"physical database replacement guard is invalid",
+		)
+	}
 	// Reconcile before inspecting the stage so a newly materialized catalog
 	// object cannot evade the alias set captured at acquisition.
 	if err := lease.refreshLockedWithOps("", refreshOps); err != nil {
@@ -767,7 +1274,7 @@ func (lease *Lease) PinReplacement(id database.StoreID, path string) (resultErr 
 		)
 	}
 	if !lease.replacementPinsValid() ||
-		!handle.matches(stagedIdentity) || !guardedFence() {
+		!handle.matches(stagedIdentity) || !refreshOps.guardedAuthority() {
 		lease.poisoned.Store(true)
 		return database.NewError(
 			database.CodeIntegrity,
@@ -786,7 +1293,7 @@ func (lease *Lease) PinReplacement(id database.StoreID, path string) (resultErr 
 			return fmt.Errorf("replace physical database stage pin: %w", closeErr)
 		}
 	}
-	if !guardedFence() {
+	if !refreshOps.guardedAuthority() {
 		lease.poisoned.Store(true)
 		return database.NewError(database.CodeIntegrity, "storage migration fence changed while pinning replacement")
 	}
@@ -794,7 +1301,7 @@ func (lease *Lease) PinReplacement(id database.StoreID, path string) (resultErr 
 	pin.identity = stagedIdentity
 	pin.claimIdentity = claimIdentity
 	lease.replacementPins[id] = pin
-	if !lease.replacementPinsValid() || !guardedFence() {
+	if !lease.replacementPinsValid() || !refreshOps.guardedAuthority() {
 		delete(lease.replacementPins, id)
 		lease.poisoned.Store(true)
 		return database.NewError(database.CodeIntegrity, "physical database pin authority changed before publication")
@@ -900,6 +1407,19 @@ func (lease *Lease) refreshLockedWithOps(replacement database.StoreID, ops claim
 	if err := lease.validateObservationTransition(verified, replacement); err != nil {
 		return lease.poison(err)
 	}
+	var replacementMain fileidentity.Identity
+	if !replacement.IsZero() {
+		main, exists := findObservation(verified, replacement, memberMain)
+		_, baselineExists := lease.approvedMains[replacement]
+		if !exists || !main.Identity.Valid() || !baselineExists ||
+			!approvedMainBaselineValid(lease.stores, lease.approvedMains) {
+			return lease.poison(database.NewError(
+				database.CodeIntegrity,
+				"database replacement main baseline is unavailable",
+			))
+		}
+		replacementMain = main.Identity
+	}
 	if !allObservationClaimsHeld(lease.identities, lease.lexicalIdentities, verified) ||
 		!claimHandlesValid(lease.claims) || !lease.replacementPinsValid() ||
 		!ops.guardedAuthority() {
@@ -924,6 +1444,7 @@ func (lease *Lease) refreshLockedWithOps(replacement database.StoreID, ops claim
 				return lease.poison(fmt.Errorf("release physical database replacement pin: %w", closeErr))
 			}
 		}
+		lease.approvedMains[replacement] = replacementMain
 	}
 	return nil
 }
