@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -121,6 +123,152 @@ func TestBackupParentProspectiveRaceCoverage(t *testing.T) {
 			LegacyRoots: []string{filepath.Join(base, "bad\x00legacy")},
 		}},
 	), "inspect a legacy input")
+}
+
+func TestBackupParentRemainingValidationCoverage(t *testing.T) {
+	t.Run("relative path from removed working directory", func(t *testing.T) {
+		original, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := t.TempDir()
+		removed := filepath.Join(base, "removed")
+		if err := os.Mkdir(removed, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(removed); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(removed); err != nil {
+			_ = os.Chdir(original)
+			t.Fatal(err)
+		}
+		_, validationErr := validateBackupParentWithContext(t.Context(), "relative", base, nil)
+		_, _, _, identityErr := existingBackupDirectoryIdentity(".")
+		if err := os.Chdir(original); err != nil {
+			t.Fatal(err)
+		}
+		if validationErr == nil {
+			t.Fatal("relative parent from a removed working directory was accepted")
+		}
+		if identityErr == nil {
+			t.Fatal("removed working-directory identity succeeded")
+		}
+	})
+
+	t.Run("overlong absolute parent", func(t *testing.T) {
+		component := strings.Repeat("x", 200)
+		parent := string(os.PathSeparator) + strings.Repeat(component+string(os.PathSeparator), 25) + "archive"
+		if len(parent) <= 4096 || len(parent) > backupMaxPathBytes {
+			t.Fatalf("test path length = %d", len(parent))
+		}
+		parentTreeRequireError(t,
+			func() error {
+				_, err := validateBackupParentWithContext(t.Context(), parent, string(os.PathSeparator), nil)
+				return err
+			}(),
+			"inspect database backup directory before creation",
+		)
+	})
+
+	t.Run("prospective physical containment reaches wrapper", func(t *testing.T) {
+		base := t.TempDir()
+		legacy := filepath.Join(base, "legacy")
+		storeDirectory := filepath.Join(base, "store")
+		for _, directory := range []string{legacy, storeDirectory} {
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		alias := filepath.Join(base, "legacy-alias")
+		if err := os.Symlink(legacy, alias); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		parent := filepath.Join(alias, "archive")
+		_, err := validateBackupParentWithContext(t.Context(), parent, base, []storecatalog.Spec{{
+			ID: "global/tree", Path: filepath.Join(storeDirectory, "store.db"),
+			LegacyRoots: []string{legacy},
+		}})
+		parentTreeRequireError(t, err, "physically contains")
+	})
+
+	t.Run("physical alias helper inputs", func(t *testing.T) {
+		parentTreeRequireError(t,
+			validateBackupParentPhysicalAliasesBoundContext(t.Context(), "bad\x00parent", fileidentity.Identity{}, nil),
+			"inspect database backup directory identity")
+
+		base := t.TempDir()
+		parent := filepath.Join(base, "parent")
+		source := filepath.Join(base, "source")
+		for _, directory := range []string{parent, source} {
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		alias := filepath.Join(base, "parent-alias")
+		if err := os.Symlink(parent, alias); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		parentTreeRequireError(t, validateBackupParentPhysicalAliasesBoundContext(
+			t.Context(), parent, fileidentity.Identity{}, []storecatalog.Spec{{
+				ID: "global/tree", Path: filepath.Join(alias, "store.db"),
+			}},
+		), "physically aliases")
+
+		generationAlias := filepath.Join(base, "generation-link")
+		if err := os.Symlink(parent, generationAlias); err != nil {
+			t.Fatal(err)
+		}
+		parentTreeRequireError(t, validateBackupParentPhysicalAliasesBoundContext(
+			t.Context(), parent, fileidentity.Identity{}, []storecatalog.Spec{{
+				ID: "global/tree", Path: generationAlias,
+			}},
+		), "physically aliases")
+	})
+
+	t.Run("duplicate and canceled catalog work", func(t *testing.T) {
+		base := t.TempDir()
+		parent := filepath.Join(base, "parent")
+		source := filepath.Join(base, "source")
+		for _, directory := range []string{parent, source} {
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		missing := filepath.Join(base, "missing-legacy")
+		spec := storecatalog.Spec{
+			ID: "global/tree", Path: filepath.Join(source, "store.db"),
+			LegacyRoots: []string{missing, missing},
+		}
+		if err := validateBackupParentPhysicalAliasesBoundContext(
+			t.Context(), parent, fileidentity.Identity{}, []storecatalog.Spec{spec},
+		); err != nil {
+			t.Fatalf("duplicate catalog work = %v", err)
+		}
+		parentTreeRequireError(t, validateBackupParentPhysicalAliasesBoundContext(
+			&cancelAfterMigrationErrChecks{Context: t.Context(), allowed: 1},
+			parent, fileidentity.Identity{}, []storecatalog.Spec{spec},
+		), context.Canceled.Error())
+	})
+
+	t.Run("existing parent changes before final check", func(t *testing.T) {
+		base := t.TempDir()
+		parent := filepath.Join(base, "parent")
+		source := filepath.Join(base, "source")
+		for _, directory := range []string{parent, source} {
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ctx := &actionAfterMigrationErrChecks{Context: t.Context(), allowed: 9, action: func() {
+			parentTreeReplaceDirectory(t, parent)
+		}}
+		parentTreeRequireError(t, validateBackupParentPhysicalAliasesBoundContext(
+			ctx, parent, fileidentity.Identity{}, []storecatalog.Spec{{
+				ID: "global/tree", Path: filepath.Join(source, "store.db"),
+			}},
+		), "binding changed during containment validation")
+	})
 }
 
 func TestBackupParentAncestorAndLegacyRootCoverage(t *testing.T) {
@@ -419,6 +567,178 @@ func TestBackupParentLegacyBindingCoverage(t *testing.T) {
 		filesystemRoot, root, otherIdentity,
 	), "root binding changed")
 }
+
+func TestBackupParentRemainingLegacyScanCoverage(t *testing.T) {
+	t.Run("unsafe legacy roots are skipped", func(t *testing.T) {
+		base := t.TempDir()
+		regular := filepath.Join(base, "regular")
+		writeMigrationFile(t, regular, []byte("regular"))
+		alias := filepath.Join(base, "alias")
+		if err := os.Symlink(regular, alias); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if err := validateBackupParentOutsideLegacyTrees(
+			t.Context(), parentTreeIdentity(t, base), []string{regular, alias},
+		); err != nil {
+			t.Fatalf("skip unsafe legacy roots: %v", err)
+		}
+	})
+
+	t.Run("legacy root cannot be opened", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Unix directory-mode assertion")
+		}
+		base := t.TempDir()
+		legacy := filepath.Join(base, "legacy")
+		if err := os.Mkdir(legacy, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(legacy, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(legacy, 0o700) })
+		parentTreeRequireError(t, scanBackupLegacyDirectoriesForParent(
+			legacy, 0, &backupParentLegacyScan{forbidden: parentTreeIdentity(t, base)},
+		), "open legacy containment root")
+	})
+
+	t.Run("direct scan cancellation and invalid entry", func(t *testing.T) {
+		legacy := t.TempDir()
+		root := parentTreeRoot(t, legacy)
+		before, err := os.Lstat(legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity := parentTreeIdentity(t, legacy)
+		parentTreeRequireError(t, scanBackupLegacyDirectoryRoot(
+			legacy, 0,
+			&backupParentLegacyScan{ctx: canceledParentTreeContext(), forbidden: parentTreeIdentity(t, t.TempDir())},
+			root, identity, before,
+		), context.Canceled.Error())
+
+		invalid := string([]byte{'b', 'a', 'd', 0xff})
+		writeMigrationFile(t, filepath.Join(legacy, invalid), []byte("invalid"))
+		root = parentTreeRoot(t, legacy)
+		before, err = os.Lstat(legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parentTreeRequireError(t, scanBackupLegacyDirectoryRoot(
+			legacy, 0,
+			&backupParentLegacyScan{ctx: t.Context(), forbidden: parentTreeIdentity(t, t.TempDir())},
+			root, identity, before,
+		), "path is invalid")
+	})
+
+	for _, test := range []struct {
+		name string
+		mode os.FileMode
+		want string
+	}{
+		{name: "child open denied", mode: 0, want: "open legacy containment child"},
+		{name: "child root traversal denied", mode: 0o400, want: "permission denied"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				t.Skip("Unix directory-mode assertion")
+			}
+			legacy := t.TempDir()
+			child := filepath.Join(legacy, "child")
+			if err := os.Mkdir(child, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(child, test.mode); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(child, 0o700) })
+			root := parentTreeRoot(t, legacy)
+			before, err := os.Lstat(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parentTreeRequireError(t, scanBackupLegacyDirectoryRoot(
+				legacy, 0,
+				&backupParentLegacyScan{ctx: t.Context(), forbidden: parentTreeIdentity(t, t.TempDir())},
+				root, parentTreeIdentity(t, legacy), before,
+			), test.want)
+		})
+	}
+
+	t.Run("directory read descriptor is closed", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("uses Linux descriptor discovery")
+		}
+		legacy := t.TempDir()
+		writeMigrationFile(t, filepath.Join(legacy, "member"), []byte("member"))
+		root := parentTreeRoot(t, legacy)
+		beforeDescriptors := parentTreeDescriptorsForPath(t, legacy)
+		before, err := os.Lstat(legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := &actionAfterMigrationErrChecks{Context: t.Context(), allowed: 1, action: func() {
+			parentTreeCloseNewDescriptor(t, legacy, beforeDescriptors)
+		}}
+		if err := scanBackupLegacyDirectoryRoot(
+			legacy, 0,
+			&backupParentLegacyScan{ctx: ctx, forbidden: parentTreeIdentity(t, t.TempDir())},
+			root, parentTreeIdentity(t, legacy), before,
+		); err == nil {
+			t.Fatal("scan with closed directory descriptor succeeded")
+		}
+	})
+
+	t.Run("closed filesystem root binding", func(t *testing.T) {
+		path := string(os.PathSeparator)
+		root, err := os.OpenRoot(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := root.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateBackupLegacyContainmentRootPath(
+			path, root, parentTreeIdentity(t, path),
+		); err == nil {
+			t.Fatal("closed filesystem-root binding succeeded")
+		}
+	})
+
+	t.Run("existing regular and deleted directory descriptor", func(t *testing.T) {
+		base := t.TempDir()
+		regular := filepath.Join(base, "regular")
+		writeMigrationFile(t, regular, []byte("regular"))
+		if resolved, identity, exists, err := existingBackupDirectoryIdentity(regular); err != nil ||
+			resolved != "" || identity.Valid() || exists {
+			t.Fatalf("regular directory identity = %q, %#v, %t, %v", resolved, identity, exists, err)
+		}
+
+		if runtime.GOOS != "linux" {
+			t.Skip("uses proc descriptor paths")
+		}
+		deleted := filepath.Join(base, "deleted")
+		if err := os.Mkdir(deleted, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		file, err := os.Open(deleted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		if err := os.Remove(deleted); err != nil {
+			t.Fatal(err)
+		}
+		if err := func() error {
+			_, _, _, err := existingBackupDirectoryIdentity(
+				filepath.Join("/proc/self/fd", strconv.FormatUint(uint64(file.Fd()), 10)),
+			)
+			return err
+		}(); err == nil {
+			t.Fatal("deleted descriptor directory identity succeeded")
+		}
+	})
+}
+
 func canceledParentTreeContext() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -452,6 +772,44 @@ func parentTreeReplaceDirectory(t *testing.T, path string) {
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func parentTreeDescriptorsForPath(t *testing.T, path string) map[int]struct{} {
+	t.Helper()
+	result := make(map[int]struct{})
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		descriptor, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
+		if err == nil && target == path {
+			result[descriptor] = struct{}{}
+		}
+	}
+	return result
+}
+
+func parentTreeCloseNewDescriptor(t *testing.T, path string, before map[int]struct{}) {
+	t.Helper()
+	for descriptor := range parentTreeDescriptorsForPath(t, path) {
+		if _, present := before[descriptor]; present {
+			continue
+		}
+		file := os.NewFile(uintptr(descriptor), "legacy containment directory")
+		if file == nil {
+			t.Fatalf("descriptor %d could not be wrapped", descriptor)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	t.Fatal("new legacy containment descriptor was not found")
 }
 
 func parentTreeRequireError(t *testing.T, err error, want string) {

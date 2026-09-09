@@ -63,6 +63,7 @@ Owns: TEST internal/databasemigration/backup_empty_parent_rollback_test.go *
 Owns: TEST internal/databasemigration/backup_parent_containment_test.go *
 Owns: TEST internal/databasemigration/backup_parent_mount_*_test.go *
 Owns: TEST internal/databasemigration/backup_parent_coverage_test.go *
+Owns: TEST internal/databasemigration/backup_foundation_hardening_coverage_test.go *
 Owns: TEST internal/databasemigration/backup_source_owner_*_test.go *
 
 ## Auxiliary Interfaces
