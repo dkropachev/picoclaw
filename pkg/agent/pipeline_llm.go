@@ -568,7 +568,7 @@ func (p *Pipeline) CallLLM(
 					logger.SafeBool(logger.FieldRetryable, true),
 				),
 			)
-			if sleepErr := sleepWithContext(turnCtx, backoff); sleepErr != nil {
+			if sleepErr := p.retryWait(turnCtx, backoff); sleepErr != nil {
 				if ts.hardAbortRequested() {
 					_ = ts.requestHardAbort()
 					return ControlBreak, nil

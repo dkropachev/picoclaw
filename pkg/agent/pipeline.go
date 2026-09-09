@@ -3,6 +3,9 @@
 package agent
 
 import (
+	"context"
+	"time"
+
 	"github.com/sipeed/picoclaw/pkg/agent/interfaces"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
@@ -22,6 +25,7 @@ type Pipeline struct {
 	MediaStore     media.MediaStore
 	Steering       any // TODO: *Steering
 	al             *AgentLoop
+	retryWait      func(context.Context, time.Duration) error
 }
 
 // NewPipeline creates a Pipeline from an AgentLoop instance.
@@ -36,5 +40,6 @@ func NewPipeline(al *AgentLoop) *Pipeline {
 		MediaStore:     al.mediaStore,
 		Steering:       al.steering,
 		al:             al,
+		retryWait:      sleepWithContext,
 	}
 }

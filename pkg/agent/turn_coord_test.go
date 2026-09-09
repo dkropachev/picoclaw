@@ -952,12 +952,32 @@ func TestPipeline_CallLLM_UsesNativeSearchWithoutClientWebSearchTool(t *testing.
 	}
 }
 
+func recordPipelineRetryDelays(pipeline *Pipeline) *[]time.Duration {
+	delays := make([]time.Duration, 0, 3)
+	pipeline.retryWait = func(ctx context.Context, delay time.Duration) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		delays = append(delays, delay)
+		return nil
+	}
+	return &delays
+}
+
+func requirePipelineRetryDelays(t *testing.T, got *[]time.Duration, want ...time.Duration) {
+	t.Helper()
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("retry delays = %v, want %v", *got, want)
+	}
+}
+
 func TestPipeline_CallLLM_TimeoutRetry(t *testing.T) {
 	errorPrv := &errorProvider{errType: "timeout"}
 	al, agent, cleanup := newTurnCoordTestLoop(t, errorPrv)
 	defer cleanup()
 
 	pipeline := NewPipeline(al)
+	retryDelays := recordPipelineRetryDelays(pipeline)
 	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
 		turnID:  "turn-1",
 		context: newTurnContext(nil, nil, nil),
@@ -972,6 +992,40 @@ func TestPipeline_CallLLM_TimeoutRetry(t *testing.T) {
 	_, err = pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
 	if err == nil {
 		t.Error("expected error after retries")
+	}
+	requirePipelineRetryDelays(t, retryDelays, 2*time.Second, 4*time.Second)
+}
+
+func TestPipeline_CallLLM_RetryWaitFailureStopsRetries(t *testing.T) {
+	provider := &countingErrorProvider{errType: "timeout"}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+
+	pipeline := NewPipeline(al)
+	waitErr := errors.New("retry wait interrupted")
+	var gotDelay time.Duration
+	pipeline.retryWait = func(_ context.Context, delay time.Duration) error {
+		gotDelay = delay
+		return waitErr
+	}
+	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
+		turnID:  "turn-1",
+		context: newTurnContext(nil, nil, nil),
+	})
+	exec, err := pipeline.SetupTurn(context.Background(), ts)
+	if err != nil {
+		t.Fatalf("SetupTurn failed: %v", err)
+	}
+
+	_, err = pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
+	if !errors.Is(err, waitErr) {
+		t.Fatalf("CallLLM error = %v, want retry wait error", err)
+	}
+	if gotDelay != 2*time.Second {
+		t.Fatalf("retry delay = %v, want 2s", gotDelay)
+	}
+	if provider.callCount != 1 {
+		t.Fatalf("provider calls = %d, want 1", provider.callCount)
 	}
 }
 
@@ -1003,6 +1057,7 @@ func TestPipeline_CallLLM_HTTP5xxRetry(t *testing.T) {
 	}
 
 	pipeline := NewPipeline(al)
+	retryDelays := recordPipelineRetryDelays(pipeline)
 	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
 		turnID:  "turn-1",
 		context: newTurnContext(nil, nil, nil),
@@ -1026,6 +1081,7 @@ func TestPipeline_CallLLM_HTTP5xxRetry(t *testing.T) {
 	if provider.callCount != 2 {
 		t.Fatalf("callCount = %d, want 2", provider.callCount)
 	}
+	requirePipelineRetryDelays(t, retryDelays, time.Second)
 }
 
 func TestPipeline_CallLLM_SafetyFilterRetry(t *testing.T) {
@@ -1055,6 +1111,7 @@ func TestPipeline_CallLLM_SafetyFilterRetry(t *testing.T) {
 		t.Fatal("expected default agent")
 	}
 	pipeline := NewPipeline(al)
+	retryDelays := recordPipelineRetryDelays(pipeline)
 	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
 		turnID:  "turn-1",
 		context: newTurnContext(nil, nil, nil),
@@ -1074,6 +1131,7 @@ func TestPipeline_CallLLM_SafetyFilterRetry(t *testing.T) {
 	if provider.callCount != 2 {
 		t.Fatalf("callCount = %d, want 2", provider.callCount)
 	}
+	requirePipelineRetryDelays(t, retryDelays, time.Second)
 }
 
 func TestPipeline_CallLLM_ResponseSafetyFinishReasonRetry(t *testing.T) {
@@ -1090,6 +1148,7 @@ func TestPipeline_CallLLM_ResponseSafetyFinishReasonRetry(t *testing.T) {
 	defer al.Close()
 	agent := al.registry.GetDefaultAgent()
 	pipeline := NewPipeline(al)
+	retryDelays := recordPipelineRetryDelays(pipeline)
 	ts := newTurnState(agent, makeTestProcessOpts("response-safety"), turnEventScope{
 		turnID: "turn-response-safety", context: newTurnContext(nil, nil, nil),
 	})
@@ -1108,6 +1167,7 @@ func TestPipeline_CallLLM_ResponseSafetyFinishReasonRetry(t *testing.T) {
 			err,
 		)
 	}
+	requirePipelineRetryDelays(t, retryDelays, time.Second)
 }
 
 func TestSideQuestion_ResponseSafetyFinishReasonRetriesOnce(t *testing.T) {
@@ -1172,6 +1232,7 @@ func TestPipeline_CallLLM_NetworkErrorRetry(t *testing.T) {
 			defer cleanup()
 
 			pipeline := NewPipeline(al)
+			retryDelays := recordPipelineRetryDelays(pipeline)
 			ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
 				turnID:  "turn-1",
 				context: newTurnContext(nil, nil, nil),
@@ -1186,6 +1247,7 @@ func TestPipeline_CallLLM_NetworkErrorRetry(t *testing.T) {
 			if err == nil {
 				t.Error("expected error after network error retries")
 			}
+			requirePipelineRetryDelays(t, retryDelays, 2*time.Second, 4*time.Second)
 		})
 	}
 }
@@ -1216,6 +1278,7 @@ func TestPipeline_CallLLM_RetryConfigRespected(t *testing.T) {
 	}
 
 	pipeline := NewPipeline(al)
+	retryDelays := recordPipelineRetryDelays(pipeline)
 	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
 		turnID:  "turn-1",
 		context: newTurnContext(nil, nil, nil),
@@ -1226,18 +1289,12 @@ func TestPipeline_CallLLM_RetryConfigRespected(t *testing.T) {
 		t.Fatalf("SetupTurn failed: %v", err)
 	}
 
-	start := time.Now()
 	_, err = pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
-	elapsed := time.Since(start)
 
 	if err == nil {
 		t.Error("expected error after retries")
 	}
-
-	expectedMinTime := 3 * time.Second
-	if elapsed < expectedMinTime {
-		t.Errorf("expected at least %v of backoff, got %v", expectedMinTime, elapsed)
-	}
+	requirePipelineRetryDelays(t, retryDelays, time.Second, 2*time.Second, 3*time.Second)
 }
 
 func TestPipeline_CallLLM_RetryCountLimit(t *testing.T) {
@@ -1266,6 +1323,7 @@ func TestPipeline_CallLLM_RetryCountLimit(t *testing.T) {
 	}
 
 	pipeline := NewPipeline(al)
+	retryDelays := recordPipelineRetryDelays(pipeline)
 	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
 		turnID:  "turn-1",
 		context: newTurnContext(nil, nil, nil),
@@ -1284,6 +1342,7 @@ func TestPipeline_CallLLM_RetryCountLimit(t *testing.T) {
 	if counterPrv.callCount != 3 {
 		t.Errorf("expected exactly 3 calls (1 initial + 2 retries), got %d", counterPrv.callCount)
 	}
+	requirePipelineRetryDelays(t, retryDelays, 2*time.Second, 4*time.Second)
 }
 
 type countingErrorProvider struct {
