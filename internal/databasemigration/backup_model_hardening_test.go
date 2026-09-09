@@ -86,10 +86,17 @@ func TestBackupModelBudgetsRejectAmplification(t *testing.T) {
 	if err := preparedBudget.reservePreparedLegacyPath(filepath.Join("nested", "file")); err != nil {
 		t.Fatal(err)
 	}
+	invalidUTF8 := string([]byte{'b', 'a', 'd', 0xff})
+	overlong := strings.Repeat("x", backupMaxComponent+1)
+	tooDeep := "leaf"
+	for range backupMaxDepth {
+		tooDeep = filepath.Join("nested", tooDeep)
+	}
 	for _, value := range []string{
-		"", "dirty" + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "path", t.TempDir(),
+		"", "..", "dirty" + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "path",
+		t.TempDir(), "nul\x00path", invalidUTF8, overlong, tooDeep,
 	} {
-		if err := preparedBudget.reservePreparedLegacyPath(value); err == nil {
+		if err := newBackupBudget().reservePreparedLegacyPath(value); err == nil {
 			t.Errorf("prepared-path budget accepted %q", value)
 		}
 	}
@@ -148,6 +155,12 @@ func TestBackupModelPathGrammarAndDerivations(t *testing.T) {
 	if _, _, err := legacySourceRelative("relative", base); err == nil {
 		t.Fatal("relative legacy root was accepted")
 	}
+	volumeRoot := filepath.VolumeName(root) + string(os.PathSeparator)
+	if relative, inside, err := legacySourceRelative(
+		volumeRoot, filepath.Join(volumeRoot, "nested", "file"),
+	); err != nil || !inside || relative != filepath.Join("nested", "file") {
+		t.Fatalf("volume-root relative path = %q, %t, %v", relative, inside, err)
+	}
 
 	invalidUTF8 := string([]byte{'b', 'a', 'd', 0xff})
 	overlong := strings.Repeat("x", backupMaxComponent+1)
@@ -167,6 +180,14 @@ func TestBackupModelPathGrammarAndDerivations(t *testing.T) {
 	if path, err := backupFilePath(root, validRelative); err != nil ||
 		path != filepath.Join(root, validRelative) {
 		t.Fatalf("valid backup path = %q, %v", path, err)
+	}
+	for _, unsafeRoot := range []string{
+		"relative", root + "\x00",
+		root + string(os.PathSeparator) + "dirty" + string(os.PathSeparator) + "..",
+	} {
+		if path, err := backupFilePath(unsafeRoot, validRelative); path != "" || err == nil {
+			t.Errorf("unsafe backup root %q produced %q, %v", unsafeRoot, path, err)
+		}
 	}
 	for _, value := range []string{"", ".", "..", t.TempDir(), "dirty/../path", deep} {
 		if safeBackupRelative(value) {
@@ -242,6 +263,11 @@ func TestBackupModelManifestMarshalBounds(t *testing.T) {
 	if payload, err := marshalBackupManifestLimit(manifest, 1); payload != nil || err == nil {
 		t.Fatalf("small manifest limit = %q, %v", payload, err)
 	}
+	if payload, err := marshalBackupManifestLimit(
+		manifest, backupMaxManifestSize+1,
+	); payload != nil || err == nil {
+		t.Fatalf("oversized manifest limit = %q, %v", payload, err)
+	}
 	invalid := manifest
 	invalid.Version++
 	if payload, err := marshalBackupManifest(invalid); payload != nil || err == nil {
@@ -253,6 +279,9 @@ func TestBackupModelManifestMarshalBounds(t *testing.T) {
 	}
 	if err := validateBackupManifestLimit(manifest, 0); err == nil {
 		t.Fatal("zero metadata limit was accepted")
+	}
+	if err := validateBackupManifestLimit(manifest, backupMaxManifestSize+1); err == nil {
+		t.Fatal("oversized metadata limit was accepted")
 	}
 }
 
@@ -269,9 +298,16 @@ func TestBackupModelWindowsPathGrammar(t *testing.T) {
 			t.Errorf("unsafe absolute Windows path accepted: %q", path)
 		}
 	}
+	for _, path := range []string{`C:relative`, `\rooted`, `/rooted`, `\\server\share`} {
+		if validWindowsBackupPathString(path, false) {
+			t.Errorf("unsafe relative Windows path accepted: %q", path)
+		}
+	}
 	for _, component := range []string{
-		"CON", "nul.txt", "CLOCK$", "CONIN$", "COM1", "LPT9.log", "COM¹.txt",
+		"", ".", "..", "CON", "nul.txt", "CLOCK$", "CONIN$", "COM1", "LPT9.log", "COM¹.txt",
 		"name.", "name ", "file:stream", "PROGRA~1", "DATA~12.json", "control\x01",
+		"nul\x00name", string([]byte{'b', 'a', 'd', 0xff}),
+		strings.Repeat("x", backupMaxComponent+1),
 	} {
 		if validWindowsBackupComponent(component) {
 			t.Errorf("unsafe Windows component accepted: %q", component)
@@ -289,6 +325,8 @@ func TestBackupModelWindowsPathGrammar(t *testing.T) {
 		`C:\safe\file:stream\store.db`,
 		`C:\safe\PROGRA~1\store.db`,
 		`\\server\share\safe\name.\store.db`,
+		`\\` + strings.Repeat("s", backupMaxComponent+1) + `\share\store.db`,
+		`\\server\` + strings.Repeat("s", backupMaxComponent+1) + `\store.db`,
 	} {
 		if validWindowsBackupPathComponents(path, true) {
 			t.Errorf("unsafe nested Windows component accepted: %q", path)

@@ -21,7 +21,7 @@ func validateBackupManifest(manifest BackupManifest) error {
 }
 
 func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) error {
-	if manifestLimit <= 0 {
+	if manifestLimit <= 0 || manifestLimit > backupMaxManifestSize {
 		return errors.New("database backup manifest metadata limit is invalid")
 	}
 	if manifest.Version != backupManifestVersion {
@@ -55,7 +55,7 @@ func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) e
 	stores := make(map[database.StoreID]BackupStoreManifest, len(manifest.Stores))
 	metadataBudget := newBackupBudget()
 	metadataBudget.maxManifest = manifestLimit
-	storeGenerationOwners := make(map[string]database.StoreID, len(manifest.Stores)*4)
+	sourceScopes := make([]string, 0, len(manifest.Stores)*4)
 	legacyRootTotal := 0
 	previousStoreID := ""
 	for index, record := range manifest.Stores {
@@ -87,25 +87,26 @@ func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) e
 				return errors.New("database backup manifest legacy root is duplicated")
 			}
 			rootKeys[key] = struct{}{}
+			sourceScopes = append(sourceScopes, root)
 			if !validBackupLegacyRootKind(record.LegacyRootKinds[rootIndex]) {
 				return errors.New("database backup manifest legacy root kind is invalid")
 			}
 		}
 		for _, path := range generationPaths(record.Path) {
-			key := backupPathKey(path)
-			if owner, duplicate := storeGenerationOwners[key]; duplicate && owner != id {
-				return errors.New("database backup manifest store generations overlap")
-			}
-			storeGenerationOwners[key] = id
+			sourceScopes = append(sourceScopes, path)
 		}
 		// Strict ascending order above already excludes duplicate StoreIDs.
 		stores[id] = record
+	}
+	if backupSourceScopesOverlap(sourceScopes) {
+		return errors.New("database backup manifest source namespaces overlap")
 	}
 	preparedEntries := legacyRootTotal * 2
 
 	backupPaths := make(map[string]struct{}, len(manifest.Files))
 	records := make(map[string]struct{}, len(manifest.Files))
 	sourceIdentities := make(map[string]string, len(manifest.Files))
+	sourcePaths := make(map[string]string, len(manifest.Files))
 	generationRoles := make(map[string]struct{}, len(manifest.Files))
 	generationStates := make(map[database.StoreID]backupManifestGenerationState, len(manifest.Stores))
 	legacyRecordCounts := make(map[database.StoreID][]int, len(manifest.Stores))
@@ -175,6 +176,11 @@ func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) e
 			return errors.New("database backup manifest sources contain a physical alias")
 		}
 		sourceIdentities[record.SourceIdentity] = record.Source
+		sourceKey := backupPathKey(record.Source)
+		if previous, present := sourcePaths[sourceKey]; present && previous != record.SourceIdentity {
+			return errors.New("database backup manifest source identity is inconsistent")
+		}
+		sourcePaths[sourceKey] = record.SourceIdentity
 		if !validBackupDigest(record.SHA256) {
 			return errors.New("database backup manifest file hash is invalid")
 		}
@@ -290,6 +296,28 @@ func validateBackupManifestLimit(manifest BackupManifest, manifestLimit int64) e
 		}
 	}
 	return nil
+}
+
+// backupSourceScopesOverlap detects both exact collisions and containment.
+// Appending a separator makes every ancestor sort immediately before its
+// descendant range without an O(n^2) comparison across bounded inventories.
+func backupSourceScopesOverlap(paths []string) bool {
+	keys := make([]string, len(paths))
+	separator := string(os.PathSeparator)
+	for index, path := range paths {
+		key := backupPathKey(path)
+		if !strings.HasSuffix(key, separator) {
+			key += separator
+		}
+		keys[index] = key
+	}
+	sort.Strings(keys)
+	for index := 1; index < len(keys); index++ {
+		if strings.HasPrefix(keys[index], keys[index-1]) {
+			return true
+		}
+	}
+	return false
 }
 
 type backupManifestGenerationState struct {

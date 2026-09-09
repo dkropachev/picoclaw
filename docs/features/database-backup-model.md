@@ -14,10 +14,14 @@ filesystem mutation and is not wired into runtime orchestration.
 
 - Manifest version 2 binds stores, canonical generation paths, ordered legacy
   roots/kinds, source identities/modes, archive paths, byte sizes, and SHA-256.
-- Validation is canonical and applies raw-string and encoded aggregate budgets
-  before aggregate JSON allocation.
+- Validation is canonical, rejects containment across all legacy/generation
+  source namespaces, requires a source-path/source-identity bijection, and
+  applies raw-string and encoded aggregate budgets before aggregate JSON
+  allocation.
 - Windows grammar rejects namespaces, devices, ADS, reserved/trailing
   components, control characters, and short-name aliases.
+- Darwin and Windows path identity conservatively folds case so backup
+  collision checks match the catalog/provider identity boundaries.
 - Prepared legacy wrapper entries and archive path expansion share explicit
   bounded counters.
 
@@ -30,10 +34,13 @@ filesystem mutation and is not wired into runtime orchestration.
 
 ## Data And State Model
 
-`BackupManifest`, `BackupStoreManifest`, and `BackupFileManifest` are immutable
-evidence types. Shared `backupBudget` limits files, source bytes, tree/archive
-entries, prepared wrappers, and encoded metadata. Generation roles have fixed
-canonical order and SQLite coherence rules.
+`BackupManifest`, `BackupStoreManifest`, and `BackupFileManifest` are mutable Go
+construction carriers. Validation establishes point-in-time validity only;
+trusted consumers must retain the value without mutation or bind its validated
+serialized bytes into sealed evidence before use. Shared `backupBudget` limits
+files, source bytes, tree/archive entries, prepared wrappers, and encoded
+metadata. Generation roles have fixed canonical order and SQLite coherence
+rules.
 
 ## Surface Ownership
 
@@ -42,6 +49,7 @@ Owns: CODE internal/databasemigration/backup_destination.go
 Owns: CODE internal/databasemigration/backup_path_*.go
 Owns: CODE internal/databasemigration/manifest_validation.go
 Owns: TEST internal/databasemigration/backup_model_hardening_test.go *
+Owns: TEST internal/databasemigration/backup_path_windows_test.go *
 Owns: TEST internal/databasemigration/manifest_validation_test.go *
 Owns: TEST internal/databasemigration/path_darwin_test.go *
 

@@ -87,6 +87,11 @@ func TestBackupManifestValidationRejectsMalformedMetadata(t *testing.T) {
 		},
 		{name: "source identity empty", mutate: func(m *BackupManifest) { m.Files[0].SourceIdentity = "" }},
 		{name: "source identity UTF-8", mutate: func(m *BackupManifest) { m.Files[0].SourceIdentity = invalidUTF8 }},
+		{name: "source identity conflicts for one path", mutate: func(m *BackupManifest) {
+			duplicate := m.Files[0]
+			duplicate.SourceIdentity += "-other"
+			m.Files = append(m.Files, duplicate)
+		}},
 		{name: "hash short", mutate: func(m *BackupManifest) { m.Files[0].SHA256 = "00" }},
 		{name: "hash uppercase", mutate: func(m *BackupManifest) { m.Files[0].SHA256 = strings.Repeat("A", 64) }},
 		{name: "hash alphabet", mutate: func(m *BackupManifest) { m.Files[0].SHA256 = strings.Repeat("g", 64) }},
@@ -134,6 +139,50 @@ func TestBackupManifestValidationRejectsMalformedMetadata(t *testing.T) {
 			}
 			if payload, err := marshalBackupManifest(manifest); payload != nil || err == nil {
 				t.Fatalf("invalid manifest marshaled: %q, %v", payload, err)
+			}
+		})
+	}
+}
+
+func TestBackupManifestValidationRejectsOverlappingSourceNamespaces(t *testing.T) {
+	valid := validManifestValidationFixture(t)
+	root := filepath.Dir(valid.Stores[0].Path)
+	appendEmptyManifestStore(
+		&valid, "global/models", filepath.Join(root, "models.db"), nil, nil,
+	)
+	if err := validateBackupManifest(valid); err != nil {
+		t.Fatalf("disjoint source namespaces: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*BackupManifest)
+	}{
+		{name: "global legacy root duplicate", mutate: func(m *BackupManifest) {
+			m.Stores[1].LegacyRoots = []string{m.Stores[0].LegacyRoots[0]}
+			m.Stores[1].LegacyRootKinds = []string{"missing"}
+		}},
+		{name: "global legacy root containment", mutate: func(m *BackupManifest) {
+			m.Stores[1].LegacyRoots = []string{filepath.Join(m.Stores[0].LegacyRoots[0], "nested")}
+			m.Stores[1].LegacyRootKinds = []string{"missing"}
+		}},
+		{name: "generation inside legacy root", mutate: func(m *BackupManifest) {
+			m.Stores[1].LegacyRoots = []string{filepath.Dir(m.Stores[0].Path)}
+			m.Stores[1].LegacyRootKinds = []string{"directory"}
+		}},
+		{name: "generation namespace containment", mutate: func(m *BackupManifest) {
+			m.Stores[1].Path = filepath.Join(m.Stores[0].Path, "nested.db")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := valid
+			manifest.Stores = append([]BackupStoreManifest(nil), valid.Stores...)
+			manifest.CatalogGenerations = append([]string(nil), valid.CatalogGenerations...)
+			test.mutate(&manifest)
+			if err := validateBackupManifest(manifest); err == nil ||
+				!strings.Contains(err.Error(), "source namespaces overlap") {
+				t.Fatalf("overlapping source namespaces error = %v", err)
 			}
 		})
 	}
@@ -259,4 +308,31 @@ func validGenerationManifestFixture(t *testing.T, roles ...string) BackupManifes
 	sortBackupManifestFiles(manifest.Files)
 	manifest.Stores[0].Exists = len(roles) > 0 && roles[0] == "database"
 	return manifest
+}
+
+func appendEmptyManifestStore(
+	manifest *BackupManifest,
+	storeID string,
+	path string,
+	legacyRoots []string,
+	legacyRootKinds []string,
+) {
+	if legacyRoots == nil {
+		legacyRoots = []string{}
+	}
+	if legacyRootKinds == nil {
+		legacyRootKinds = []string{}
+	}
+	manifest.Stores = append(manifest.Stores, BackupStoreManifest{
+		StoreID: storeID, Path: path, LegacyRoots: legacyRoots, LegacyRootKinds: legacyRootKinds,
+	})
+	manifest.CatalogGenerations = append(manifest.CatalogGenerations, generationPaths(path)...)
+	sort.Slice(manifest.CatalogGenerations, func(i, j int) bool {
+		left, right := backupPathKey(manifest.CatalogGenerations[i]),
+			backupPathKey(manifest.CatalogGenerations[j])
+		if left != right {
+			return left < right
+		}
+		return manifest.CatalogGenerations[i] < manifest.CatalogGenerations[j]
+	})
 }

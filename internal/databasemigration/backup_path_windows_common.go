@@ -1,6 +1,9 @@
 package databasemigration
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 func validWindowsBackupPathString(path string, absolute bool) bool {
 	lower := strings.ToLower(path)
@@ -12,7 +15,8 @@ func validWindowsBackupPathString(path string, absolute bool) bool {
 		(path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':'
 	unc := strings.HasPrefix(path, `\\`)
 	if !absolute {
-		return !drive && !unc
+		rooted := strings.HasPrefix(path, `\`) || strings.HasPrefix(path, "/")
+		return !drive && !rooted
 	}
 	if drive {
 		return len(path) >= 3 && (path[2] == '\\' || path[2] == '/')
@@ -48,7 +52,10 @@ func validWindowsBackupPathComponents(path string, absolute bool) bool {
 }
 
 func validWindowsBackupComponent(component string) bool {
-	if strings.HasSuffix(component, ".") || strings.HasSuffix(component, " ") ||
+	if component == "" || component == "." || component == ".." ||
+		len(component) > backupMaxComponent || !utf8.ValidString(component) ||
+		strings.ContainsRune(component, 0) || strings.HasSuffix(component, ".") ||
+		strings.HasSuffix(component, " ") ||
 		strings.ContainsAny(component, `<>:"/\|?*`) || windowsShortNameComponent(component) {
 		return false
 	}

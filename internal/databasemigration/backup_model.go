@@ -200,14 +200,17 @@ func (b *backupBudget) reservePreparedLegacyRoots(count int) error {
 }
 
 func (b *backupBudget) reservePreparedLegacyPath(relative string) error {
-	if b == nil || relative == "" || relative != filepath.Clean(relative) || filepath.IsAbs(relative) {
+	if b == nil || relative == "" {
 		return errors.New("database backup prepared legacy path is invalid")
 	}
 	if relative == "." {
 		return nil
 	}
+	if !safeBackupRelative(relative) {
+		return errors.New("database backup prepared legacy path is invalid")
+	}
 	depth := backupPathDepth(relative)
-	if depth > b.maxEntries-b.preparedEntries {
+	if depth > b.maxDepth || depth > b.maxEntries-b.preparedEntries {
 		return errors.New("database backup prepared legacy entry budget is exceeded")
 	}
 	b.preparedEntries += depth
@@ -257,7 +260,11 @@ func legacySourceRelative(root, source string) (string, bool, error) {
 	if sourceKey == rootKey {
 		return ".", true, nil
 	}
-	if !strings.HasPrefix(sourceKey, rootKey+string(os.PathSeparator)) {
+	rootPrefix := rootKey
+	if !strings.HasSuffix(rootPrefix, string(os.PathSeparator)) {
+		rootPrefix += string(os.PathSeparator)
+	}
+	if !strings.HasPrefix(sourceKey, rootPrefix) {
 		return "", false, nil
 	}
 	relative, _ := filepath.Rel(cleanRoot, cleanSource)
@@ -265,7 +272,7 @@ func legacySourceRelative(root, source string) (string, bool, error) {
 }
 
 func backupFilePath(root, relativeValue string) (string, error) {
-	if !validBackupManifestRelative(relativeValue) {
+	if !validBackupAbsolutePath(root) || !validBackupManifestRelative(relativeValue) {
 		return "", errors.New("database backup manifest path is invalid")
 	}
 	relative := filepath.Clean(filepath.FromSlash(relativeValue))
@@ -277,7 +284,8 @@ func safeBackupRelative(relative string) bool {
 		!strings.ContainsRune(relative, 0) && relative == filepath.Clean(relative) &&
 		!filepath.IsAbs(relative) && relative != ".." &&
 		!strings.HasPrefix(relative, ".."+string(os.PathSeparator)) &&
-		backupPathDepth(relative) <= backupMaxArchiveDepth && validBackupPathComponents(relative)
+		backupPathDepth(relative) <= backupMaxArchiveDepth &&
+		validBackupPlatformPath(relative, false) && validBackupPathComponents(relative)
 }
 
 func backupPathDepth(path string) int {
@@ -358,7 +366,7 @@ func validBackupPathComponent(component string) bool {
 
 func backupPathKey(path string) string {
 	path = filepath.Clean(path)
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		return strings.ToLower(path)
 	}
 	return path
