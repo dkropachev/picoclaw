@@ -421,7 +421,7 @@ jobs:
         run: bash ./scripts/run-integration-tests.sh
 
   required:
-    name: PR Required
+    name: ${{ github.event_name == 'pull_request' && 'PR Required' || 'Manual Validation' }}
     if: ${{ always() }}
     needs:
       - classify

@@ -120,7 +120,8 @@ func TestPRScopesValidationBehindStableRequiredCheck(t *testing.T) {
 		"classify:\n    name: Classify changes",
 		"git diff --name-status -z --find-renames --find-copies",
 		"if: ${{ needs.classify.outputs.frontend_ui != 'false' }}",
-		"required:\n    name: PR Required\n    if: ${{ always() }}",
+		"required:\n    name: ${{ github.event_name == 'pull_request' && 'PR Required' || 'Manual Validation' }}\n" +
+			"    if: ${{ always() }}",
 		`- classify
       - lint
       - frontend
@@ -273,6 +274,56 @@ func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
 	}
 	if saveOwners != 2 {
 		t.Errorf("repository shared cache save owners = %d, want 2", saveOwners)
+	}
+}
+
+func TestProtectedMainPushAvoidsDuplicatePRChecks(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/build.yml")
+	for _, job := range []struct {
+		name       string
+		start, end string
+	}{
+		{name: "integration", start: "  integration:\n", end: "  build:\n"},
+		{name: "frontend", start: "  frontend_tests:\n", end: ""},
+	} {
+		block := workflow
+		if job.end == "" {
+			start := strings.Index(workflow, job.start)
+			if start < 0 {
+				t.Fatalf("main build workflow is missing %s job", job.name)
+			}
+			block = workflow[start:]
+		} else {
+			block = targetBlock(t, workflow, job.start, job.end)
+		}
+		if !strings.Contains(block, "if: ${{ github.event_name == 'workflow_dispatch' }}") {
+			t.Errorf("main %s fallback must run only on manual dispatch", job.name)
+		}
+	}
+}
+
+func TestManualValidationCannotPublishProtectedPRContext(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/pr.yml")
+	if !strings.Contains(
+		workflow,
+		"name: ${{ github.event_name == 'pull_request' && 'PR Required' || 'Manual Validation' }}",
+	) {
+		t.Fatal("manual PR workflow dispatch can publish the protected PR Required context")
+	}
+}
+
+func TestNightlyReleaseRunsWeeklyAndOnDemand(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/nightly.yml")
+	for _, snippet := range []string{
+		"schedule:\n    - cron: '0 0 * * 1'",
+		"  workflow_dispatch:",
+	} {
+		if !strings.Contains(workflow, snippet) {
+			t.Errorf("nightly workflow is missing cadence setting %q", snippet)
+		}
+	}
+	if strings.Contains(workflow, "cron: '0 0 * * *'") {
+		t.Error("nightly workflow still publishes every day")
 	}
 }
 
