@@ -100,7 +100,10 @@ func TestInspectBoundsDatabaseAndPostRetainPhases(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	deadline := 5 * time.Millisecond
+	// The timeout starts before filesystem validation and opening. Leave enough
+	// headroom for a loaded hosted runner to reach the injected database phase;
+	// the injected operation itself still blocks until this exact deadline.
+	deadline := time.Second
 
 	t.Run("database inspection", func(t *testing.T) {
 		candidate := openProviderScript(t)
@@ -119,7 +122,7 @@ func TestInspectBoundsDatabaseAndPostRetainPhases(t *testing.T) {
 		started := time.Now()
 		inspection, err := inspectWithOps(t.Context(), path, deadline, ops)
 		if inspection.Exists || !errors.Is(err, context.DeadlineExceeded) ||
-			time.Since(started) > time.Second {
+			time.Since(started) > 2*time.Second {
 			t.Fatalf("bounded inspection = %#v, %v after %s", inspection, err, time.Since(started))
 		}
 		if err := candidate.Ping(); err == nil {
