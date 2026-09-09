@@ -44,97 +44,32 @@ func TestPinnedBackupTreeRemovalRequiresOriginalIdentity(t *testing.T) {
 	}
 }
 
-func TestPinnedBackupTreeRemovalQuarantinesBeforeDeleting(t *testing.T) {
-	parent := t.TempDir()
-	tree := filepath.Join(parent, "tree")
-	writeBackupRemovalTree(t, tree)
-	expected := backupRemovalDirectoryIdentity(t, tree)
-	tombstone := filepath.Join(parent, ".database-backup-remove-test")
-
-	ops := defaultBackupTreeRemovalOps()
-	ops.reserve = func(string) (string, error) { return tombstone, nil }
-	ops.rename = os.Rename
-	var removedPath string
-	ops.removeTree = func(
-		path string,
-		root *os.Root,
-		leaf string,
-		child *os.Root,
-		expected fileidentity.Identity,
-	) error {
-		removedPath = path
-		if path != tombstone || leaf != filepath.Base(tombstone) {
-			return errors.New("recursive deletion did not target tombstone")
-		}
-		return removeBackupTreeDurable(path, root, leaf, child, expected)
-	}
-	if err := removePinnedBackupTreeWithOps(tree, expected, ops); err != nil {
-		t.Fatal(err)
-	}
-	if removedPath != tombstone {
-		t.Fatalf("recursive deletion target = %q, want %q", removedPath, tombstone)
-	}
-	if _, err := os.Lstat(tree); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("original removal name remains: %v", err)
-	}
-	if _, err := os.Lstat(tombstone); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("verified tombstone remains: %v", err)
-	}
-}
-
 func TestPinnedBackupTreeRemovalRequiresDurableQuarantine(t *testing.T) {
 	parent := migrationHome(t)
 	tree := filepath.Join(parent, "tree")
 	writeBackupRemovalTree(t, tree)
 	expected := backupRemovalDirectoryIdentity(t, tree)
-	tombstone := filepath.Join(parent, ".database-backup-remove-test")
 	canary := errors.New("quarantine sync canary")
-
-	ops := defaultBackupTreeRemovalOps()
-	ops.reserve = func(string) (string, error) { return tombstone, nil }
-	ops.rename = os.Rename
-	syncCalls := 0
-	ops.syncDir = func(path string) error {
-		syncCalls++
-		if path != parent {
-			t.Fatalf("quarantine sync path = %q, want %q", path, parent)
-		}
-		return canary
-	}
-	removeCalled := false
-	ops.removeTree = func(string, *os.Root, string, *os.Root, fileidentity.Identity) error {
-		removeCalled = true
-		return nil
-	}
-	if err := removePinnedBackupTreeWithOps(tree, expected, ops); !errors.Is(err, canary) {
-		t.Fatalf("quarantine sync fault = %v", err)
-	}
-	if syncCalls != 1 || removeCalled {
-		t.Fatalf("quarantine sync ordering: calls=%d remove=%t", syncCalls, removeCalled)
-	}
-	if backupRemovalDirectoryIdentity(t, tombstone) != expected {
-		t.Fatal("sync failure changed quarantined identity")
-	}
-}
-
-func TestPinnedBackupTreeRemovalMissingRetryResyncsParent(t *testing.T) {
-	parent := migrationHome(t)
-	existing := filepath.Join(parent, "existing")
-	if err := os.Mkdir(existing, 0o700); err != nil {
+	root, err := os.OpenRoot(parent)
+	if err != nil {
 		t.Fatal(err)
 	}
-	expected := backupRemovalDirectoryIdentity(t, existing)
-	missing := filepath.Join(parent, "missing")
-	canary := errors.New("missing retry sync canary")
-	ops := defaultBackupTreeRemovalOps()
-	ops.syncDir = func(path string) error {
-		if path != parent {
-			t.Fatalf("missing retry sync path = %q, want %q", path, parent)
-		}
-		return canary
+	defer root.Close()
+	child, err := root.OpenRoot("tree")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := removePinnedBackupTreeWithOps(missing, expected, ops); !errors.Is(err, canary) {
-		t.Fatalf("missing retry sync fault = %v", err)
+	defer child.Close()
+	ops := defaultBackupRemovalOps()
+	ops.sync = func(*os.Root, string) error { return canary }
+	if err := removeBackupTreeDurableWithOps(
+		tree, root, "tree", child, expected, ops,
+	); !errors.Is(err, canary) {
+		t.Fatalf("quarantine sync fault = %v", err)
+	}
+	tombstones, err := filepath.Glob(filepath.Join(parent, ".database-backup-remove-*"))
+	if err != nil || len(tombstones) != 1 || backupRemovalDirectoryIdentity(t, tombstones[0]) != expected {
+		t.Fatal("sync failure changed quarantined identity")
 	}
 }
 
@@ -186,7 +121,7 @@ func TestBackupRemovalUnlinksRequireDirectorySync(t *testing.T) {
 				return nil
 			},
 		)
-		if closeErr := root.Close(); err != nil || closeErr != nil || syncCalls != 1 {
+		if closeErr := root.Close(); err != nil || closeErr != nil || syncCalls < 1 {
 			t.Fatalf("empty retry sync = calls=%d err=%v close=%v", syncCalls, err, closeErr)
 		}
 	})
@@ -314,11 +249,14 @@ func TestBackupRemovalRejectsMismatchedPinnedNames(t *testing.T) {
 		defer file.Close()
 		if err := removeBackupFileDurableWithSync(
 			path, root, "alias", file, expected, func(string) error { return nil },
-		); err == nil || !strings.Contains(err.Error(), "not absent") {
+		); err == nil || !strings.Contains(err.Error(), "binding") {
 			t.Fatalf("mismatched file removal name = %v", err)
 		}
 		if payload, err := os.ReadFile(path); err != nil || string(payload) != "payload" {
 			t.Fatalf("mismatched file removal changed original = %q, %v", payload, err)
+		}
+		if payload, err := os.ReadFile(alias); err != nil || string(payload) != "payload" {
+			t.Fatalf("mismatched file removal changed alias = %q, %v", payload, err)
 		}
 	})
 
@@ -345,11 +283,14 @@ func TestBackupRemovalRejectsMismatchedPinnedNames(t *testing.T) {
 		defer child.Close()
 		if err := removeBackupTreeDurableWithSync(
 			path, root, "decoy", child, expected, func(string) error { return nil },
-		); err == nil || !strings.Contains(err.Error(), "not absent") {
+		); err == nil || !strings.Contains(err.Error(), "binding") {
 			t.Fatalf("mismatched tree removal name = %v", err)
 		}
 		if info, err := os.Lstat(path); err != nil || !info.IsDir() {
 			t.Fatalf("mismatched tree removal changed original = %#v, %v", info, err)
+		}
+		if info, err := os.Lstat(decoy); err != nil || !info.IsDir() {
+			t.Fatalf("mismatched tree removal changed decoy = %#v, %v", info, err)
 		}
 	})
 }
@@ -384,8 +325,16 @@ func TestBackupRemovalContentsRejectMismatchedPinnedRoot(t *testing.T) {
 			map[fileidentity.Identity]string{declaredIdentity: declared}, &entries,
 			func(string) error { return nil },
 		)
-		if err == nil || !strings.Contains(err.Error(), "identity changed") {
+		if err == nil || !strings.Contains(err.Error(), "root identity") {
 			t.Fatalf("mismatched pinned-root child = %v", err)
+		}
+		for path, want := range map[string]string{
+			filepath.Join(declared, "payload"): "declared",
+			filepath.Join(opened, "payload"):   "opened",
+		} {
+			if payload, readErr := os.ReadFile(path); readErr != nil || string(payload) != want {
+				t.Fatalf("mismatched root changed %q = %q, %v", path, payload, readErr)
+			}
 		}
 	})
 
@@ -403,175 +352,144 @@ func TestBackupRemovalContentsRejectMismatchedPinnedRoot(t *testing.T) {
 			map[fileidentity.Identity]string{declaredIdentity: declared}, &entries,
 			func(string) error { return nil },
 		)
-		if err == nil || !strings.Contains(err.Error(), "child name remains") {
+		if err == nil || !strings.Contains(err.Error(), "root identity") {
 			t.Fatalf("mismatched pinned-root hard link = %v", err)
 		}
 		if payload, err := os.ReadFile(declaredFile); err != nil || string(payload) != "payload" {
 			t.Fatalf("declared hard-link source changed = %q, %v", payload, err)
 		}
-		if _, err := os.Lstat(openedFile); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("opened hard-link name remains: %v", err)
+		if payload, err := os.ReadFile(openedFile); err != nil || string(payload) != "payload" {
+			t.Fatalf("mismatched root changed opened hard link = %q, %v", payload, err)
 		}
 	})
 }
 
-func TestPinnedBackupTreeRemovalLeavesSubstitutedTombstone(t *testing.T) {
-	parent := t.TempDir()
-	tree := filepath.Join(parent, "tree")
-	writeBackupRemovalTree(t, tree)
-	expected := backupRemovalDirectoryIdentity(t, tree)
-	tombstone := filepath.Join(parent, ".database-backup-remove-test")
-	quarantinedOriginal := filepath.Join(parent, "quarantined-original")
-	substitute := filepath.Join(parent, "substitute")
-	writeBackupRemovalTree(t, substitute)
-
-	ops := defaultBackupTreeRemovalOps()
-	ops.reserve = func(string) (string, error) { return tombstone, nil }
-	ops.rename = func(source, target string) error {
-		if err := os.Rename(source, target); err != nil {
-			return err
-		}
-		if err := os.Rename(target, quarantinedOriginal); err != nil {
-			return err
-		}
-		return os.Rename(substitute, target)
-	}
-	removeCalled := false
-	ops.removeTree = func(string, *os.Root, string, *os.Root, fileidentity.Identity) error {
-		removeCalled = true
-		return nil
-	}
-	err := removePinnedBackupTreeWithOps(tree, expected, ops)
-	if err == nil || !strings.Contains(err.Error(), "tombstone identity changed") {
-		t.Fatalf("substituted tombstone removal = %v", err)
-	}
-	if removeCalled {
-		t.Fatal("substituted tombstone reached recursive deletion")
-	}
-	if backupRemovalDirectoryIdentity(t, quarantinedOriginal) != expected {
-		t.Fatal("original quarantine identity changed")
-	}
-	if _, err := os.Lstat(filepath.Join(tombstone, "nested", "payload")); err != nil {
-		t.Fatalf("substituted tombstone was removed: %v", err)
-	}
-}
-
-func TestPinnedBackupTreeRemovalLeavesTombstoneOnHandleMismatch(t *testing.T) {
-	parent := t.TempDir()
-	tree := filepath.Join(parent, "tree")
-	writeBackupRemovalTree(t, tree)
-	expected := backupRemovalDirectoryIdentity(t, tree)
-	tombstone := filepath.Join(parent, ".database-backup-remove-test")
-	other := filepath.Join(parent, "other")
-	if err := os.Mkdir(other, 0o700); err != nil {
+func TestBackupRemovalNeverDeletesLateFileSubstitute(t *testing.T) {
+	parent := migrationHome(t)
+	path := filepath.Join(parent, "expected")
+	writeMigrationFile(t, path, []byte("expected"))
+	writeMigrationFile(t, filepath.Join(parent, "substitute"), []byte("substitute"))
+	expected, err := backupExistingIdentity(path, fileidentity.ObjectTypeRegular)
+	if err != nil {
 		t.Fatal(err)
 	}
-	wrong := backupRemovalDirectoryIdentity(t, other)
-
-	ops := defaultBackupTreeRemovalOps()
-	ops.reserve = func(string) (string, error) { return tombstone, nil }
-	ops.rename = os.Rename
-	opened := ops.opened
-	openedCalls := 0
-	ops.opened = func(file *os.File) (fileidentity.Identity, fileidentity.ObjectType, error) {
-		openedCalls++
-		identity, objectType, err := opened(file)
-		if openedCalls == 3 && err == nil {
-			return wrong, objectType, nil
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	file, err := root.Open("expected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	ops := defaultBackupRemovalOps()
+	ops.beforeRemove = func(root *os.Root, quarantine string) error {
+		return errors.Join(
+			root.Rename(quarantine, "retained-expected"),
+			root.Rename("substitute", quarantine),
+		)
+	}
+	if err := removeBackupFileDurableWithOps(
+		path, root, "expected", file, expected, ops,
+	); err == nil || !strings.Contains(err.Error(), "binding") {
+		t.Fatalf("late file substitution = %v", err)
+	}
+	for leaf, want := range map[string]string{
+		"retained-expected": "expected",
+		"substitute":        "substitute",
+	} {
+		if leaf == "substitute" {
+			matches, _ := filepath.Glob(filepath.Join(parent, ".database-backup-remove-*"))
+			if len(matches) != 1 {
+				t.Fatalf("substitute quarantine = %q", matches)
+			}
+			leaf = filepath.Base(matches[0])
 		}
-		return identity, objectType, err
-	}
-	removeCalled := false
-	ops.removeTree = func(string, *os.Root, string, *os.Root, fileidentity.Identity) error {
-		removeCalled = true
-		return nil
-	}
-	err := removePinnedBackupTreeWithOps(tree, expected, ops)
-	if err == nil || !strings.Contains(err.Error(), "tombstone handle identity changed") {
-		t.Fatalf("mismatched tombstone handle removal = %v", err)
-	}
-	if removeCalled {
-		t.Fatal("mismatched tombstone handle reached recursive deletion")
-	}
-	if backupRemovalDirectoryIdentity(t, tombstone) != expected {
-		t.Fatal("mismatched-handle quarantine identity changed")
+		if got, err := root.ReadFile(leaf); err != nil || string(got) != want {
+			t.Fatalf("retained %s = %q, %v", want, got, err)
+		}
 	}
 }
 
-func TestPinnedBackupTreeRemovalLeavesQuarantineWhenSourceNameReappears(t *testing.T) {
-	parent := t.TempDir()
+func TestBackupRemovalNeverRecursesIntoLateTreeSubstitute(t *testing.T) {
+	parent := migrationHome(t)
+	tree := filepath.Join(parent, "tree")
+	writeBackupRemovalTree(t, tree)
+	writeBackupRemovalTree(t, filepath.Join(parent, "substitute"))
+	expected := backupRemovalDirectoryIdentity(t, tree)
+	root, child := openBackupRemovalTree(t, parent, "tree")
+	ops := defaultBackupRemovalOps()
+	ops.afterQuarantine = func(root *os.Root, quarantine string) error {
+		return errors.Join(
+			root.Rename(quarantine, "retained-expected"),
+			root.Rename("substitute", quarantine),
+		)
+	}
+	if err := removeBackupTreeDurableWithOps(
+		tree, root, "tree", child, expected, ops,
+	); err == nil || !strings.Contains(err.Error(), "binding") {
+		t.Fatalf("late tree substitution = %v", err)
+	}
+	assertPinnedRemovalPayload(t, filepath.Join(parent, "retained-expected"))
+	matches, _ := filepath.Glob(filepath.Join(parent, ".database-backup-remove-*"))
+	if len(matches) != 1 {
+		t.Fatalf("substitute quarantine = %q", matches)
+	}
+	assertPinnedRemovalPayload(t, matches[0])
+}
+
+func TestBackupRemovalUsesRetainedParentAfterPathReplacement(t *testing.T) {
+	base := migrationHome(t)
+	parent := filepath.Join(base, "parent")
+	moved := filepath.Join(base, "moved")
 	tree := filepath.Join(parent, "tree")
 	writeBackupRemovalTree(t, tree)
 	expected := backupRemovalDirectoryIdentity(t, tree)
-	tombstone := filepath.Join(parent, ".database-backup-remove-test")
-
-	ops := defaultBackupTreeRemovalOps()
-	ops.reserve = func(string) (string, error) { return tombstone, nil }
-	ops.rename = func(source, target string) error {
-		if err := os.Rename(source, target); err != nil {
+	root, child := openBackupRemovalTree(t, parent, "tree")
+	ops := defaultBackupRemovalOps()
+	replaced := false
+	ops.beforeRename = func(*os.Root, string) error {
+		if replaced {
+			return nil
+		}
+		replaced = true
+		if err := os.Rename(parent, moved); err != nil {
 			return err
 		}
-		return os.Mkdir(source, 0o700)
+		return writeBackupRemovalTreeError(filepath.Join(parent, "tree"))
 	}
-	removeCalled := false
-	ops.removeTree = func(string, *os.Root, string, *os.Root, fileidentity.Identity) error {
-		removeCalled = true
-		return nil
+	if err := removeBackupTreeDurableWithOps(
+		tree, root, "tree", child, expected, ops,
+	); err != nil {
+		t.Fatal(err)
 	}
-	err := removePinnedBackupTreeWithOps(tree, expected, ops)
-	if err == nil || !strings.Contains(err.Error(), "source name remained") {
-		t.Fatalf("reappeared source-name removal = %v", err)
-	}
-	if removeCalled {
-		t.Fatal("reappeared source name reached recursive deletion")
-	}
-	if backupRemovalDirectoryIdentity(t, tombstone) != expected {
-		t.Fatal("source-name race changed quarantine identity")
-	}
-	if _, err := os.Lstat(tree); err != nil {
-		t.Fatalf("replacement source name is absent: %v", err)
+	assertPinnedRemovalPayload(t, filepath.Join(parent, "tree"))
+	if _, err := os.Lstat(filepath.Join(moved, "tree")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retained-parent target remains: %v", err)
 	}
 }
 
-func TestPinnedBackupTreeRemovalNeverRecursesIntoLateSubstitute(t *testing.T) {
-	parent := t.TempDir()
-	tree := filepath.Join(parent, "tree")
-	writeBackupRemovalTree(t, tree)
-	expected := backupRemovalDirectoryIdentity(t, tree)
-	tombstone := filepath.Join(parent, ".database-backup-remove-test")
-	quarantinedOriginal := filepath.Join(parent, "quarantined-original")
-	substitute := filepath.Join(parent, "substitute")
-	writeBackupRemovalTree(t, substitute)
+func openBackupRemovalTree(t *testing.T, parent, leaf string) (*os.Root, *os.Root) {
+	t.Helper()
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := root.OpenRoot(leaf)
+	if err != nil {
+		_ = root.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = child.Close(); _ = root.Close() })
+	return root, child
+}
 
-	ops := defaultBackupTreeRemovalOps()
-	ops.reserve = func(string) (string, error) { return tombstone, nil }
-	ops.rename = os.Rename
-	removeTree := ops.removeTree
-	ops.removeTree = func(
-		path string,
-		root *os.Root,
-		leaf string,
-		retained *os.Root,
-		identity fileidentity.Identity,
-	) error {
-		if err := os.Rename(tombstone, quarantinedOriginal); err != nil {
-			return err
-		}
-		if err := os.Rename(substitute, tombstone); err != nil {
-			return err
-		}
-		return removeTree(path, root, leaf, retained, identity)
+func writeBackupRemovalTreeError(path string) error {
+	if err := os.MkdirAll(filepath.Join(path, "nested"), 0o700); err != nil {
+		return err
 	}
-	err := removePinnedBackupTreeWithOps(tree, expected, ops)
-	if err == nil {
-		t.Fatalf("late tombstone substitution = %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(tombstone, "nested", "payload")); err != nil {
-		t.Fatalf("late substitute was recursively altered: %v", err)
-	}
-	if _, err := os.Lstat(quarantinedOriginal); err != nil {
-		t.Fatalf("original quarantine disappeared: %v", err)
-	}
+	return os.WriteFile(filepath.Join(path, "nested", "payload"), []byte("payload"), 0o600)
 }
 
 func backupRemovalDirectoryIdentity(t *testing.T, path string) fileidentity.Identity {

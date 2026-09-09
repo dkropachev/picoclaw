@@ -561,7 +561,7 @@ func TestBackupFoundationDurableRemovalRejectsMismatchedObjects(t *testing.T) {
 	writeMigrationFile(t, filePath, []byte("replacement"))
 	if err := removeBackupFileDurable(
 		filePath, parentRoot, "file", file, fileIdentity,
-	); err == nil || !strings.Contains(err.Error(), "identity") {
+	); err == nil || !strings.Contains(err.Error(), "binding") {
 		t.Fatalf("durable file replacement removal = %v", err)
 	}
 	if _, err := os.Lstat(filePath); err != nil {

@@ -110,294 +110,12 @@ func TestPinnedBackupOpenRejectsUnreadableRegularFile(t *testing.T) {
 	}
 }
 
-func TestReserveBackupRemovalPathRejectsMissingParent(t *testing.T) {
-	parent := filepath.Join(t.TempDir(), "missing")
-	if path, err := reserveBackupTreeRemovalPath(parent); path != "" || err == nil {
-		t.Fatalf("missing-parent reservation = %q, %v", path, err)
-	}
-}
-
-type pinnedRemovalFaultCase struct {
-	name            string
-	want            string
-	configure       func(*testing.T, pinnedRemovalFixture, *backupTreeRemovalOps, error)
-	wantRemoveCalls int
-	afterQuarantine bool
-	tombstoneGone   bool
-}
-
 type pinnedRemovalFixture struct {
 	base      string
 	parent    string
 	path      string
 	tombstone string
 	expected  fileidentity.Identity
-}
-
-func TestPinnedBackupTreeRemovalRejectsInvalidOperations(t *testing.T) {
-	fixture := newPinnedRemovalFixture(t)
-	pathErr := removePinnedBackupTreeWithOps("relative", fixture.expected, defaultBackupTreeRemovalOps())
-	if pathErr == nil || !strings.Contains(pathErr.Error(), "path is invalid") {
-		t.Fatalf("relative removal = %v", pathErr)
-	}
-	removalErr := removePinnedBackupTreeWithOps(
-		fixture.path, fixture.expected, backupTreeRemovalOps{},
-	)
-	if removalErr == nil || !strings.Contains(removalErr.Error(), "operations are invalid") {
-		t.Fatalf("invalid-operation removal = %v", removalErr)
-	}
-	assertPinnedRemovalPayload(t, fixture.path)
-}
-
-func TestPinnedBackupTreeRemovalRejectsDisappearedParent(t *testing.T) {
-	fixture := newPinnedRemovalFixture(t)
-	operations := defaultBackupTreeRemovalOps()
-	lookup := operations.identity
-	movedParent := filepath.Join(fixture.base, "moved-parent")
-	firstLookup := true
-	operations.identity = func(
-		candidate string,
-	) (fileidentity.Identity, fileidentity.ObjectType, bool, error) {
-		identity, objectType, exists, lookupErr := lookup(candidate)
-		if candidate == fixture.path && firstLookup {
-			firstLookup = false
-			if renameErr := os.Rename(fixture.parent, movedParent); renameErr != nil {
-				return fileidentity.Identity{}, 0, false, renameErr
-			}
-		}
-		return identity, objectType, exists, lookupErr
-	}
-
-	removalErr := removePinnedBackupTreeWithOps(fixture.path, fixture.expected, operations)
-	if removalErr == nil {
-		t.Fatal("removal accepted a parent that disappeared after identity lookup")
-	}
-	assertPinnedRemovalPayload(t, filepath.Join(movedParent, "tree"))
-}
-
-func TestPinnedBackupTreeRemovalPreQuarantineFaults(t *testing.T) {
-	canary := errors.New("injected pinned-removal fault")
-	tests := []pinnedRemovalFaultCase{
-		{
-			name: "parent handle identity",
-			want: canary.Error(),
-			configure: func(
-				_ *testing.T, _ pinnedRemovalFixture, operations *backupTreeRemovalOps, fault error,
-			) {
-				failPinnedOpenedLookup(operations, 1, fault)
-			},
-		},
-		{
-			name: "parent path identity",
-			want: "parent identity changed",
-			configure: func(
-				_ *testing.T, fixture pinnedRemovalFixture,
-				operations *backupTreeRemovalOps, fault error,
-			) {
-				failPinnedPathLookup(operations, fixture.parent, 1, fault)
-			},
-		},
-		{
-			name: "source handle identity",
-			want: "target handle identity changed",
-			configure: func(
-				_ *testing.T, _ pinnedRemovalFixture, operations *backupTreeRemovalOps, fault error,
-			) {
-				failPinnedOpenedLookup(operations, 2, fault)
-			},
-		},
-		{
-			name: "source handle mismatch",
-			want: "target handle identity changed",
-			configure: func(
-				subtest *testing.T, fixture pinnedRemovalFixture,
-				operations *backupTreeRemovalOps, _ error,
-			) {
-				other := filepath.Join(fixture.parent, "other")
-				if mkdirErr := os.Mkdir(other, 0o700); mkdirErr != nil {
-					subtest.Fatal(mkdirErr)
-				}
-				wrong := pinnedFaultIdentity(subtest, other, fileidentity.ObjectTypeDirectory)
-				replacePinnedOpenedLookup(operations, 2, wrong)
-			},
-		},
-		{
-			name: "reservation",
-			want: canary.Error(),
-			configure: func(
-				_ *testing.T, _ pinnedRemovalFixture, operations *backupTreeRemovalOps, fault error,
-			) {
-				operations.reserve = func(string) (string, error) { return "", fault }
-			},
-		},
-		{
-			name: "invalid tombstone",
-			want: "tombstone path is invalid",
-			configure: func(
-				_ *testing.T, _ pinnedRemovalFixture, operations *backupTreeRemovalOps, _ error,
-			) {
-				operations.reserve = func(string) (string, error) { return "relative", nil }
-			},
-		},
-		{
-			name: "occupied tombstone",
-			want: "tombstone is not vacant",
-			configure: func(
-				subtest *testing.T, fixture pinnedRemovalFixture,
-				operations *backupTreeRemovalOps, _ error,
-			) {
-				if mkdirErr := os.Mkdir(fixture.tombstone, 0o700); mkdirErr != nil {
-					subtest.Fatal(mkdirErr)
-				}
-				operations.reserve = func(string) (string, error) {
-					return fixture.tombstone, nil
-				}
-			},
-		},
-		{
-			name: "tombstone vacancy lookup",
-			want: "tombstone is not vacant",
-			configure: func(
-				_ *testing.T, fixture pinnedRemovalFixture,
-				operations *backupTreeRemovalOps, fault error,
-			) {
-				operations.reserve = func(string) (string, error) {
-					return fixture.tombstone, nil
-				}
-				failPinnedPathLookup(operations, fixture.tombstone, 1, fault)
-			},
-		},
-		{
-			name: "second parent identity",
-			want: "parent identity changed",
-			configure: func(
-				_ *testing.T, fixture pinnedRemovalFixture,
-				operations *backupTreeRemovalOps, fault error,
-			) {
-				operations.reserve = func(string) (string, error) {
-					return fixture.tombstone, nil
-				}
-				failPinnedPathLookup(operations, fixture.parent, 2, fault)
-			},
-		},
-		{
-			name: "second target identity",
-			want: "target identity changed",
-			configure: func(
-				_ *testing.T, fixture pinnedRemovalFixture,
-				operations *backupTreeRemovalOps, fault error,
-			) {
-				operations.reserve = func(string) (string, error) {
-					return fixture.tombstone, nil
-				}
-				failPinnedPathLookup(operations, fixture.path, 2, fault)
-			},
-		},
-		{
-			name: "rename",
-			want: canary.Error(),
-			configure: func(
-				_ *testing.T, fixture pinnedRemovalFixture,
-				operations *backupTreeRemovalOps, fault error,
-			) {
-				operations.reserve = func(string) (string, error) {
-					return fixture.tombstone, nil
-				}
-				operations.rename = func(string, string) error { return fault }
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			runPinnedRemovalFaultCase(t, test, canary)
-		})
-	}
-}
-
-func TestPinnedBackupTreeRemovalPostQuarantineFaults(t *testing.T) {
-	canary := errors.New("injected pinned-removal fault")
-	tests := []pinnedRemovalFaultCase{
-		{
-			name:            "second tombstone identity",
-			want:            "tombstone identity changed",
-			afterQuarantine: true,
-			configure: func(
-				_ *testing.T, fixture pinnedRemovalFixture,
-				operations *backupTreeRemovalOps, fault error,
-			) {
-				failPinnedPathLookup(operations, fixture.tombstone, 3, fault)
-			},
-		},
-		{
-			name:            "third parent identity",
-			want:            "parent identity changed",
-			afterQuarantine: true,
-			configure: func(
-				_ *testing.T, fixture pinnedRemovalFixture,
-				operations *backupTreeRemovalOps, fault error,
-			) {
-				failPinnedPathLookup(operations, fixture.parent, 3, fault)
-			},
-		},
-		{
-			name:            "second missing-source proof",
-			want:            "source name changed",
-			afterQuarantine: true,
-			configure: func(
-				_ *testing.T, fixture pinnedRemovalFixture,
-				operations *backupTreeRemovalOps, _ error,
-			) {
-				claimPinnedPathExists(operations, fixture.path, 4, fixture.expected)
-			},
-		},
-		{
-			name:            "retained-handle deletion",
-			want:            canary.Error(),
-			wantRemoveCalls: 1,
-			afterQuarantine: true,
-			configure: func(
-				_ *testing.T, _ pinnedRemovalFixture, operations *backupTreeRemovalOps, fault error,
-			) {
-				operations.removeTree = func(
-					string, *os.Root, string, *os.Root, fileidentity.Identity,
-				) error {
-					return fault
-				}
-			},
-		},
-		{
-			name:            "tombstone remains",
-			want:            "tombstone remains",
-			wantRemoveCalls: 1,
-			afterQuarantine: true,
-			configure: func(
-				_ *testing.T, _ pinnedRemovalFixture, operations *backupTreeRemovalOps, _ error,
-			) {
-				operations.removeTree = func(
-					string, *os.Root, string, *os.Root, fileidentity.Identity,
-				) error {
-					return nil
-				}
-			},
-		},
-		{
-			name:            "final missing-source proof",
-			want:            "source name changed",
-			wantRemoveCalls: 1,
-			tombstoneGone:   true,
-			configure: func(
-				_ *testing.T, fixture pinnedRemovalFixture,
-				operations *backupTreeRemovalOps, _ error,
-			) {
-				claimPinnedPathExists(operations, fixture.path, 5, fixture.expected)
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			runPinnedRemovalFaultCase(t, test, canary)
-		})
-	}
 }
 
 func TestPinnedBackupTreeContentsRejectsUnsafeInventories(t *testing.T) {
@@ -434,7 +152,10 @@ func TestPinnedBackupTreeContentsRejectsUnsafeInventories(t *testing.T) {
 		if removalErr == nil || !strings.Contains(removalErr.Error(), "physically alias") {
 			t.Fatalf("hard-linked tree removal = %v", removalErr)
 		}
-		assertPinnedRemovalQuarantine(t, fixture.parent)
+		assertPinnedRemovalPayload(t, fixture.path)
+		if _, err := os.Lstat(alias); err != nil {
+			t.Fatalf("hard-link alias changed: %v", err)
+		}
 	})
 
 	t.Run("unsafe child", func(t *testing.T) {
@@ -444,10 +165,10 @@ func TestPinnedBackupTreeContentsRejectsUnsafeInventories(t *testing.T) {
 			t.Skipf("create symlink: %v", linkErr)
 		}
 		removalErr := removePinnedBackupTree(fixture.path)
-		if removalErr == nil || !strings.Contains(removalErr.Error(), "identity is unavailable") {
+		if removalErr == nil || !strings.Contains(removalErr.Error(), "unsafe") {
 			t.Fatalf("symlinked tree removal = %v", removalErr)
 		}
-		assertPinnedRemovalQuarantine(t, fixture.parent)
+		assertPinnedRemovalPayload(t, fixture.path)
 	})
 }
 
@@ -506,18 +227,10 @@ func TestPinnedBackupTreeContentsHandleAndPermissionFaults(t *testing.T) {
 		if removalErr == nil {
 			t.Fatal("tree removal opened an unreadable child")
 		}
-		tombstones, globErr := filepath.Glob(
-			filepath.Join(fixture.parent, ".database-backup-remove-*"),
-		)
-		if globErr != nil || len(tombstones) != 1 {
-			t.Fatalf("unreadable-child tombstones = %q, %v", tombstones, globErr)
-		}
-		if chmodErr := os.Chmod(
-			filepath.Join(tombstones[0], "nested", "payload"), 0o600,
-		); chmodErr != nil {
+		if chmodErr := os.Chmod(payload, 0o600); chmodErr != nil {
 			t.Fatal(chmodErr)
 		}
-		assertPinnedRemovalQuarantine(t, fixture.parent)
+		assertPinnedRemovalPayload(t, fixture.path)
 	})
 
 	t.Run("unremovable child", func(t *testing.T) {
@@ -644,49 +357,6 @@ func TestPinnedBackupFileRemovalRejectsUnsafeIdentityLookup(t *testing.T) {
 	}
 }
 
-func runPinnedRemovalFaultCase(
-	t *testing.T,
-	test pinnedRemovalFaultCase,
-	canary error,
-) {
-	t.Helper()
-	fixture := newPinnedRemovalFixture(t)
-	operations := defaultBackupTreeRemovalOps()
-	operations.reserve = func(string) (string, error) { return fixture.tombstone, nil }
-	test.configure(t, fixture, &operations, canary)
-	removeOperation := operations.removeTree
-	removeCalls := 0
-	operations.removeTree = func(
-		path string,
-		parent *os.Root,
-		leaf string,
-		child *os.Root,
-		expected fileidentity.Identity,
-	) error {
-		removeCalls++
-		return removeOperation(path, parent, leaf, child, expected)
-	}
-
-	removalErr := removePinnedBackupTreeWithOps(fixture.path, fixture.expected, operations)
-	if removalErr == nil || !strings.Contains(removalErr.Error(), test.want) {
-		t.Fatalf("faulted removal = %v, want %q", removalErr, test.want)
-	}
-	if removeCalls != test.wantRemoveCalls {
-		t.Fatalf("retained-handle deletion calls = %d, want %d", removeCalls, test.wantRemoveCalls)
-	}
-	if test.tombstoneGone {
-		if _, statErr := os.Lstat(fixture.tombstone); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("deleted tombstone remains: %v", statErr)
-		}
-		return
-	}
-	if test.afterQuarantine {
-		assertPinnedRemovalPayload(t, fixture.tombstone)
-		return
-	}
-	assertPinnedRemovalPayload(t, fixture.path)
-}
-
 func newPinnedRemovalFixture(t *testing.T) pinnedRemovalFixture {
 	t.Helper()
 	base := t.TempDir()
@@ -774,94 +444,10 @@ func pinnedFaultCanCreate(parent string) bool {
 	return true
 }
 
-func failPinnedPathLookup(
-	operations *backupTreeRemovalOps,
-	target string,
-	occurrence int,
-	fault error,
-) {
-	lookup := operations.identity
-	calls := 0
-	operations.identity = func(
-		candidate string,
-	) (fileidentity.Identity, fileidentity.ObjectType, bool, error) {
-		if candidate == target {
-			calls++
-			if calls == occurrence {
-				return fileidentity.Identity{}, 0, false, fault
-			}
-		}
-		return lookup(candidate)
-	}
-}
-
-func failPinnedOpenedLookup(operations *backupTreeRemovalOps, occurrence int, fault error) {
-	lookup := operations.opened
-	calls := 0
-	operations.opened = func(
-		file *os.File,
-	) (fileidentity.Identity, fileidentity.ObjectType, error) {
-		calls++
-		if calls == occurrence {
-			return fileidentity.Identity{}, 0, fault
-		}
-		return lookup(file)
-	}
-}
-
-func replacePinnedOpenedLookup(
-	operations *backupTreeRemovalOps,
-	occurrence int,
-	replacement fileidentity.Identity,
-) {
-	lookup := operations.opened
-	calls := 0
-	operations.opened = func(
-		file *os.File,
-	) (fileidentity.Identity, fileidentity.ObjectType, error) {
-		calls++
-		identity, objectType, lookupErr := lookup(file)
-		if calls == occurrence && lookupErr == nil {
-			return replacement, objectType, nil
-		}
-		return identity, objectType, lookupErr
-	}
-}
-
-func claimPinnedPathExists(
-	operations *backupTreeRemovalOps,
-	target string,
-	occurrence int,
-	identity fileidentity.Identity,
-) {
-	lookup := operations.identity
-	calls := 0
-	operations.identity = func(
-		candidate string,
-	) (fileidentity.Identity, fileidentity.ObjectType, bool, error) {
-		if candidate == target {
-			calls++
-			if calls == occurrence {
-				return identity, fileidentity.ObjectTypeDirectory, true, nil
-			}
-		}
-		return lookup(candidate)
-	}
-}
-
 func assertPinnedRemovalPayload(t *testing.T, root string) {
 	t.Helper()
 	payload, readErr := os.ReadFile(filepath.Join(root, "nested", "payload"))
 	if readErr != nil || string(payload) != "payload" {
 		t.Fatalf("retained removal payload = %q, %v", payload, readErr)
 	}
-}
-
-func assertPinnedRemovalQuarantine(t *testing.T, parent string) {
-	t.Helper()
-	tombstones, globErr := filepath.Glob(filepath.Join(parent, ".database-backup-remove-*"))
-	if globErr != nil || len(tombstones) != 1 {
-		t.Fatalf("retained removal tombstones = %q, %v", tombstones, globErr)
-	}
-	assertPinnedRemovalPayload(t, tombstones[0])
 }

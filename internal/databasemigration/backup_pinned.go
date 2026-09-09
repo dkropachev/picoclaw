@@ -272,114 +272,17 @@ func removePinnedBackupFile(path string, expected fileidentity.Identity) (return
 	if currentType != fileidentity.ObjectTypeRegular || currentIdentity != expected {
 		return errors.New("database backup file removal target changed")
 	}
-	root, _, err := openPinnedBackupParent(path)
+	root, leaf, err := openPinnedBackupParent(path)
 	if err != nil {
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, root.Close()) }()
-	parentPath := filepath.Dir(path)
-	parentFile, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	parentIdentity, parentType, openedErr := fileidentity.Opened(parentFile)
-	closeErr := parentFile.Close()
-	if openedErr != nil || closeErr != nil || parentType != fileidentity.ObjectTypeDirectory {
-		return errors.Join(errors.New("database backup file removal parent is unsafe"), openedErr, closeErr)
-	}
-	tombstone, err := reserveBackupTreeRemovalPath(parentPath)
-	if err != nil {
-		return err
-	}
-	if matchErr := matchBackupRemovalIdentity(
-		parentPath, parentIdentity, fileidentity.ObjectTypeDirectory, fileidentity.ExistingWithType,
-	); matchErr != nil {
-		return matchErr
-	}
-	if matchErr := matchBackupRemovalIdentity(
-		path, expected, fileidentity.ObjectTypeRegular, fileidentity.ExistingWithType,
-	); matchErr != nil {
-		return matchErr
-	}
-	if publishErr := publishBackupDirectory(path, tombstone); publishErr != nil {
-		return publishErr
-	}
-	if syncErr := fileutil.SyncDirectory(parentPath); syncErr != nil {
-		return syncErr
-	}
-	if missingErr := requireMissingBackupRemovalPath(path, fileidentity.ExistingWithType); missingErr != nil {
-		return missingErr
-	}
-	if matchErr := matchBackupRemovalIdentity(
-		tombstone, expected, fileidentity.ObjectTypeRegular, fileidentity.ExistingWithType,
-	); matchErr != nil {
-		return errors.Join(errors.New("database backup file tombstone identity changed"), matchErr)
-	}
-	tombstoneLeaf := filepath.Base(tombstone)
-	file, _, err := openPinnedBackupPath(tombstone, false)
+	file, err := openPinnedBackupChild(root, leaf)
 	if err != nil {
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, file.Close()) }()
-	openedIdentity, openedType, openedErr := fileidentity.Opened(file)
-	if openedErr != nil || openedType != fileidentity.ObjectTypeRegular ||
-		openedIdentity != expected {
-		return errors.Join(
-			errors.New("database backup file tombstone handle identity changed"),
-			openedErr,
-		)
-	}
-	if err := matchBackupRemovalIdentity(
-		tombstone, expected, fileidentity.ObjectTypeRegular, fileidentity.ExistingWithType,
-	); err != nil {
-		return errors.Join(errors.New("database backup file tombstone identity changed"), err)
-	}
-	if err := removeBackupFileDurable(tombstone, root, tombstoneLeaf, file, expected); err != nil {
-		return err
-	}
-	if err := requireMissingBackupRemovalPath(tombstone, fileidentity.ExistingWithType); err != nil {
-		return err
-	}
-	return requireMissingBackupRemovalPath(path, fileidentity.ExistingWithType)
-}
-
-type backupTreeRemovalOps struct {
-	identity   func(string) (fileidentity.Identity, fileidentity.ObjectType, bool, error)
-	opened     func(*os.File) (fileidentity.Identity, fileidentity.ObjectType, error)
-	reserve    func(string) (string, error)
-	rename     func(string, string) error
-	syncDir    func(string) error
-	removeTree func(string, *os.Root, string, *os.Root, fileidentity.Identity) error
-}
-
-func defaultBackupTreeRemovalOps() backupTreeRemovalOps {
-	return backupTreeRemovalOps{
-		identity: fileidentity.ExistingWithType,
-		opened:   fileidentity.Opened,
-		reserve:  reserveBackupTreeRemovalPath,
-		rename:   publishBackupDirectory,
-		syncDir:  fileutil.SyncDirectory,
-		removeTree: func(
-			path string,
-			root *os.Root,
-			leaf string,
-			child *os.Root,
-			expected fileidentity.Identity,
-		) error {
-			return removeBackupTreeDurable(path, root, leaf, child, expected)
-		},
-	}
-}
-
-func reserveBackupTreeRemovalPath(parent string) (string, error) {
-	tombstone, err := os.MkdirTemp(parent, ".database-backup-remove-")
-	if err != nil {
-		return "", err
-	}
-	if err := os.Remove(tombstone); err != nil {
-		return "", err
-	}
-	return tombstone, nil
+	return removeBackupFileDurable(path, root, leaf, file, expected)
 }
 
 func removePinnedBackupTree(path string) error {
@@ -399,169 +302,34 @@ func removePinnedBackupTree(path string) error {
 	return removePinnedBackupTreeIdentity(path, identity)
 }
 
-// removePinnedBackupTreeIdentity removes only the directory generation named by
-// expected. The original name is first atomically quarantined to a unique
-// sibling; recursive deletion is permitted only after both the tombstone name
-// and an opened tombstone handle resolve to the expected directory identity.
-func removePinnedBackupTreeIdentity(path string, expected fileidentity.Identity) error {
-	return removePinnedBackupTreeWithOps(path, expected, defaultBackupTreeRemovalOps())
-}
-
-func removePinnedBackupTreeWithOps(
+func removePinnedBackupTreeIdentity(
 	path string,
 	expected fileidentity.Identity,
-	ops backupTreeRemovalOps,
 ) (returnErr error) {
-	if !validBackupAbsolutePath(path) {
-		return errors.New("database backup removal path is invalid")
+	if !validBackupAbsolutePath(path) || !expected.Valid() {
+		return errors.New("database backup removal identity is invalid")
 	}
-	if !expected.Valid() || ops.identity == nil || ops.opened == nil || ops.reserve == nil ||
-		ops.rename == nil || ops.syncDir == nil || ops.removeTree == nil {
-		return errors.New("database backup removal identity or operations are invalid")
+	current, objectType, exists, err := fileidentity.ExistingWithType(path)
+	if err != nil {
+		return err
 	}
-	before, beforeType, exists, identityErr := ops.identity(path)
-	if errors.Is(identityErr, os.ErrNotExist) || identityErr == nil && !exists {
-		return ops.syncDir(filepath.Dir(path))
+	if !exists {
+		return fileutil.SyncDirectory(filepath.Dir(path))
 	}
-	if identityErr != nil || beforeType != fileidentity.ObjectTypeDirectory || before != expected {
-		return errors.Join(errors.New("database backup removal target identity changed"), identityErr)
+	if objectType != fileidentity.ObjectTypeDirectory || current != expected {
+		return errors.New("database backup removal target identity changed")
 	}
-	root, leaf, openErr := openPinnedBackupParent(path)
-	if openErr != nil {
-		return openErr
+	root, leaf, err := openPinnedBackupParent(path)
+	if err != nil {
+		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, root.Close()) }()
-	parentPath := filepath.Dir(path)
-	parentFile, parentOpenErr := root.Open(".")
-	if parentOpenErr != nil {
-		return parentOpenErr
+	child, err := root.OpenRoot(leaf)
+	if err != nil {
+		return err
 	}
-	parentIdentity, parentType, openedErr := ops.opened(parentFile)
-	closeErr := parentFile.Close()
-	if openedErr != nil || closeErr != nil || parentType != fileidentity.ObjectTypeDirectory {
-		return errors.Join(
-			errors.New("database backup removal parent handle is unsafe"), openedErr, closeErr,
-		)
-	}
-	parentMatchErr := matchBackupRemovalIdentity(
-		parentPath, parentIdentity, fileidentity.ObjectTypeDirectory, ops.identity,
-	)
-	if parentMatchErr != nil {
-		return errors.Join(errors.New("database backup removal parent identity changed"), parentMatchErr)
-	}
-	sourceRoot, openedIdentity, openedType, sourceOpenErr := openedBackupRemovalDirectory(
-		root, leaf, ops.opened,
-	)
-	if sourceOpenErr != nil || openedType != fileidentity.ObjectTypeDirectory ||
-		openedIdentity != expected {
-		if sourceRoot != nil {
-			sourceOpenErr = errors.Join(sourceOpenErr, sourceRoot.Close())
-		}
-		return errors.Join(
-			errors.New("database backup removal target handle identity changed"),
-			sourceOpenErr,
-		)
-	}
-	if closeErr := sourceRoot.Close(); closeErr != nil {
-		return closeErr
-	}
-
-	tombstone, reserveErr := ops.reserve(parentPath)
-	if reserveErr != nil {
-		return reserveErr
-	}
-	tombstone = filepath.Clean(tombstone)
-	if !validBackupAbsolutePath(tombstone) || filepath.Clean(filepath.Dir(tombstone)) != parentPath ||
-		!validBackupPathComponent(filepath.Base(tombstone)) {
-		return errors.New("database backup removal tombstone path is invalid")
-	}
-	if _, _, tombstoneExists, identityErr := ops.identity(tombstone); identityErr != nil || tombstoneExists {
-		return errors.Join(errors.New("database backup removal tombstone is not vacant"), identityErr)
-	}
-	parentMatchErr = matchBackupRemovalIdentity(
-		parentPath, parentIdentity, fileidentity.ObjectTypeDirectory, ops.identity,
-	)
-	if parentMatchErr != nil {
-		return errors.Join(errors.New("database backup removal parent identity changed"), parentMatchErr)
-	}
-	targetMatchErr := matchBackupRemovalIdentity(
-		path, expected, fileidentity.ObjectTypeDirectory, ops.identity,
-	)
-	if targetMatchErr != nil {
-		return errors.Join(errors.New("database backup removal target identity changed"), targetMatchErr)
-	}
-	renameErr := ops.rename(path, tombstone)
-	if renameErr != nil {
-		return renameErr
-	}
-	if syncErr := ops.syncDir(parentPath); syncErr != nil {
-		return syncErr
-	}
-
-	// From this point forward, every error deliberately leaves the quarantined
-	// tree in place. Moving it back could replace a new occupant of the original
-	// name, while recursively deleting it without proof could delete a substitute.
-	sourceMissingErr := requireMissingBackupRemovalPath(path, ops.identity)
-	if sourceMissingErr != nil {
-		return errors.Join(
-			errors.New("database backup removal source name remained after quarantine"),
-			sourceMissingErr,
-		)
-	}
-	tombstoneMatchErr := matchBackupRemovalIdentity(
-		tombstone, expected, fileidentity.ObjectTypeDirectory, ops.identity,
-	)
-	if tombstoneMatchErr != nil {
-		return errors.Join(
-			errors.New("database backup removal tombstone identity changed"), tombstoneMatchErr,
-		)
-	}
-	tombstoneLeaf := filepath.Base(tombstone)
-	tombstoneRoot, openedIdentity, openedType, tombstoneOpenErr := openedBackupRemovalDirectory(
-		root, tombstoneLeaf, ops.opened,
-	)
-	if tombstoneOpenErr != nil || openedType != fileidentity.ObjectTypeDirectory ||
-		openedIdentity != expected {
-		if tombstoneRoot != nil {
-			tombstoneOpenErr = errors.Join(tombstoneOpenErr, tombstoneRoot.Close())
-		}
-		return errors.Join(
-			errors.New("database backup removal tombstone handle identity changed"),
-			tombstoneOpenErr,
-		)
-	}
-	defer func() { returnErr = errors.Join(returnErr, tombstoneRoot.Close()) }()
-	tombstoneMatchErr = matchBackupRemovalIdentity(
-		tombstone, expected, fileidentity.ObjectTypeDirectory, ops.identity,
-	)
-	if tombstoneMatchErr != nil {
-		return errors.Join(
-			errors.New("database backup removal tombstone identity changed"), tombstoneMatchErr,
-		)
-	}
-	parentMatchErr = matchBackupRemovalIdentity(
-		parentPath, parentIdentity, fileidentity.ObjectTypeDirectory, ops.identity,
-	)
-	if parentMatchErr != nil {
-		return errors.Join(errors.New("database backup removal parent identity changed"), parentMatchErr)
-	}
-	sourceMissingErr = requireMissingBackupRemovalPath(path, ops.identity)
-	if sourceMissingErr != nil {
-		return errors.Join(errors.New("database backup removal source name changed"), sourceMissingErr)
-	}
-	removeErr := ops.removeTree(tombstone, root, tombstoneLeaf, tombstoneRoot, expected)
-	if removeErr != nil {
-		return removeErr
-	}
-	tombstoneMissingErr := requireMissingBackupRemovalPath(tombstone, ops.identity)
-	if tombstoneMissingErr != nil {
-		return errors.Join(errors.New("database backup removal tombstone remains"), tombstoneMissingErr)
-	}
-	sourceMissingErr = requireMissingBackupRemovalPath(path, ops.identity)
-	if sourceMissingErr != nil {
-		return errors.Join(errors.New("database backup removal source name changed"), sourceMissingErr)
-	}
-	return nil
+	defer func() { returnErr = errors.Join(returnErr, child.Close()) }()
+	return removeBackupTreeDurable(path, root, leaf, child, expected)
 }
 
 func openedBackupRemovalDirectory(
@@ -586,14 +354,104 @@ func openedBackupRemovalDirectory(
 	return directory, identity, objectType, nil
 }
 
+func validatePinnedBackupTreeInventory(
+	rootPath string,
+	root *os.Root,
+	expectedRoot fileidentity.Identity,
+	identities map[fileidentity.Identity]string,
+	entries *int,
+) (returnErr error) {
+	if err := validatePinnedBackupRemovalRoot(rootPath, root, expectedRoot); err != nil {
+		return err
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, directory.Close()) }()
+	for {
+		batch, readErr := directory.ReadDir(128)
+		for _, entry := range batch {
+			*entries++
+			if *entries > backupMaxEntries || !validBackupPathComponent(entry.Name()) {
+				return errors.New("database backup removal tree entry limit is exceeded")
+			}
+			childPath := filepath.Join(rootPath, entry.Name())
+			info, statErr := root.Lstat(entry.Name())
+			if statErr != nil || info == nil || info.Mode()&os.ModeSymlink != 0 {
+				return errors.Join(errors.New("database backup removal child is unsafe"), statErr)
+			}
+			file, openErr := openPinnedBackupChild(root, entry.Name())
+			if openErr != nil {
+				return openErr
+			}
+			identity, objectType, identityErr := fileidentity.Opened(file)
+			closeErr := file.Close()
+			if identityErr != nil || closeErr != nil || objectType == 0 || info.IsDir() !=
+				(objectType == fileidentity.ObjectTypeDirectory) {
+				return errors.Join(errors.New("database backup removal child is unsafe"), identityErr, closeErr)
+			}
+			if previous, duplicate := identities[identity]; duplicate {
+				return fmt.Errorf(
+					"database backup removal paths %q and %q physically alias", previous, childPath,
+				)
+			}
+			identities[identity] = childPath
+			if objectType == fileidentity.ObjectTypeDirectory {
+				child, err := root.OpenRoot(entry.Name())
+				if err != nil {
+					return err
+				}
+				err = validatePinnedBackupTreeInventory(
+					childPath, child, identity, identities, entries,
+				)
+				if closeErr := child.Close(); err != nil || closeErr != nil {
+					return errors.Join(err, closeErr)
+				}
+			} else if objectType != fileidentity.ObjectTypeRegular {
+				return errors.New("database backup removal tree contains an unsafe object")
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+		if len(batch) == 0 {
+			return errors.New("database backup removal directory read made no progress")
+		}
+	}
+}
+
 func removePinnedBackupTreeContents(
 	rootPath string,
 	root *os.Root,
 	identities map[fileidentity.Identity]string,
 	entries *int,
 ) (returnErr error) {
-	return removePinnedBackupTreeContentsWithSync(
-		rootPath, root, identities, entries, fileutil.SyncDirectory,
+	if !validBackupAbsolutePath(rootPath) || root == nil || identities == nil || entries == nil {
+		return errors.New("database backup tree-content removal input is invalid")
+	}
+	expectedRoot, err := openedPinnedBackupRemovalRootIdentity(rootPath, root)
+	registeredPath, registered := identities[expectedRoot]
+	if err != nil || !registered || registeredPath != rootPath {
+		return errors.Join(errors.New("database backup removal root identity is not registered"), err)
+	}
+	if err := matchBackupRemovalIdentity(
+		rootPath, expectedRoot, fileidentity.ObjectTypeDirectory, fileidentity.ExistingWithType,
+	); err != nil {
+		return errors.Join(errors.New("database backup removal root path changed"), err)
+	}
+	validated := cloneBackupRemovalIdentities(identities)
+	validatedEntries := *entries
+	if err := validatePinnedBackupTreeInventory(
+		rootPath, root, expectedRoot, validated, &validatedEntries,
+	); err != nil {
+		return err
+	}
+	return removePinnedBackupTreeContentsBound(
+		rootPath, root, expectedRoot, identities, entries, defaultBackupRemovalOps(),
 	)
 }
 
@@ -610,6 +468,53 @@ func removePinnedBackupTreeContentsWithSync(
 	if syncDir == nil {
 		return errors.New("database backup removal directory sync is unavailable")
 	}
+	expectedRoot, rootErr := openedPinnedBackupRemovalRootIdentity(rootPath, root)
+	registeredPath, registered := identities[expectedRoot]
+	if rootErr != nil || !registered || registeredPath != rootPath {
+		return errors.Join(
+			errors.New("database backup removal root identity is not registered"), rootErr,
+		)
+	}
+	if err := matchBackupRemovalIdentity(
+		rootPath, expectedRoot, fileidentity.ObjectTypeDirectory, fileidentity.ExistingWithType,
+	); err != nil {
+		return errors.Join(errors.New("database backup removal root path changed"), err)
+	}
+	validated := cloneBackupRemovalIdentities(identities)
+	validatedEntries := *entries
+	if err := validatePinnedBackupTreeInventory(
+		rootPath, root, expectedRoot, validated, &validatedEntries,
+	); err != nil {
+		return err
+	}
+	ops := defaultBackupRemovalOps()
+	ops.sync = func(root *os.Root, label string) error {
+		return errors.Join(syncBackupRemovalRoot(root), syncDir(label))
+	}
+	return removePinnedBackupTreeContentsBound(rootPath, root, expectedRoot, identities, entries, ops)
+}
+
+func cloneBackupRemovalIdentities(
+	identities map[fileidentity.Identity]string,
+) map[fileidentity.Identity]string {
+	clone := make(map[fileidentity.Identity]string, len(identities))
+	for identity, path := range identities {
+		clone[identity] = path
+	}
+	return clone
+}
+
+func removePinnedBackupTreeContentsBound(
+	rootPath string,
+	root *os.Root,
+	expectedRoot fileidentity.Identity,
+	identities map[fileidentity.Identity]string,
+	entries *int,
+	ops backupRemovalOps,
+) (returnErr error) {
+	if err := validatePinnedBackupRemovalRoot(rootPath, root, expectedRoot); err != nil {
+		return err
+	}
 	directory, err := root.Open(".")
 	if err != nil {
 		return err
@@ -623,91 +528,51 @@ func removePinnedBackupTreeContentsWithSync(
 				return errors.New("database backup removal tree entry limit is exceeded")
 			}
 			childPath := filepath.Join(rootPath, entry.Name())
-			identity, objectType, exists, identityErr := fileidentity.ExistingWithType(childPath)
-			if identityErr != nil || !exists {
-				return errors.Join(
-					errors.New("database backup removal child identity is unavailable"), identityErr,
-				)
+			info, statErr := root.Lstat(entry.Name())
+			if statErr != nil || info == nil || info.Mode()&os.ModeSymlink != 0 {
+				return errors.Join(errors.New("database backup removal child is unsafe"), statErr)
+			}
+			file, openErr := openPinnedBackupChild(root, entry.Name())
+			if openErr != nil {
+				return openErr
+			}
+			identity, objectType, identityErr := fileidentity.Opened(file)
+			if identityErr != nil || objectType == 0 || info.IsDir() !=
+				(objectType == fileidentity.ObjectTypeDirectory) {
+				return errors.Join(identityErr, file.Close())
 			}
 			if previous, duplicate := identities[identity]; duplicate {
-				return fmt.Errorf(
-					"database backup removal paths %q and %q physically alias",
-					previous, childPath,
-				)
+				return errors.Join(fmt.Errorf(
+					"database backup removal paths %q and %q physically alias", previous, childPath,
+				), file.Close())
 			}
 			identities[identity] = childPath
+			var removeErr error
 			switch objectType {
 			case fileidentity.ObjectTypeDirectory:
-				childRoot, openedIdentity, openedType, openErr := openedBackupRemovalDirectory(
-					root, entry.Name(), fileidentity.Opened,
-				)
-				if openErr != nil || openedType != fileidentity.ObjectTypeDirectory ||
-					openedIdentity != identity {
-					if childRoot != nil {
-						openErr = errors.Join(openErr, childRoot.Close())
-					}
-					return errors.Join(
-						errors.New("database backup removal child directory changed while opening"),
-						openErr,
+				childRoot, err := root.OpenRoot(entry.Name())
+				if err != nil {
+					removeErr = err
+				} else {
+					removeErr = removeBackupTreeRelative(
+						childPath, root, entry.Name(), childRoot, file, identity,
+						identities, entries, ops,
 					)
-				}
-				removeErr := removePinnedBackupTreeContentsWithSync(
-					childPath, childRoot, identities, entries, syncDir,
-				)
-				if removeErr == nil {
-					removeErr = matchBackupRemovalIdentity(
-						childPath, identity, fileidentity.ObjectTypeDirectory,
-						fileidentity.ExistingWithType,
-					)
-				}
-				if removeErr == nil {
-					removeErr = root.Remove(entry.Name())
-				}
-				removeErr = errors.Join(removeErr, childRoot.Close())
-				if removeErr != nil {
-					return removeErr
+					removeErr = errors.Join(removeErr, childRoot.Close())
 				}
 			case fileidentity.ObjectTypeRegular:
-				file, openErr := openPinnedBackupChild(root, entry.Name())
-				if openErr != nil {
-					return openErr
-				}
-				openedIdentity, openedType, openedErr := fileidentity.Opened(file)
-				if openedErr == nil && (openedType != fileidentity.ObjectTypeRegular ||
-					openedIdentity != identity) {
-					openedErr = errors.New("database backup removal child file identity changed")
-				}
-				if openedErr == nil {
-					openedErr = matchBackupRemovalIdentity(
-						childPath, identity, fileidentity.ObjectTypeRegular,
-						fileidentity.ExistingWithType,
-					)
-				}
-				if openedErr == nil {
-					openedErr = root.Remove(entry.Name())
-				}
-				openedErr = errors.Join(openedErr, file.Close())
-				if openedErr != nil {
-					return openedErr
-				}
+				removeErr = removeBackupFileRelative(childPath, root, entry.Name(), file, identity, ops)
 			default:
-				return errors.New("database backup removal tree contains an unsafe object")
+				removeErr = errors.New("database backup removal tree contains an unsafe object")
 			}
-			if missingErr := requireMissingBackupRemovalPath(
-				childPath, fileidentity.ExistingWithType,
-			); missingErr != nil {
-				return errors.Join(
-					errors.New("database backup removal child name remains"), missingErr,
-				)
-			}
-			if syncErr := syncDir(rootPath); syncErr != nil {
-				return syncErr
+			if closeErr := file.Close(); removeErr != nil || closeErr != nil {
+				return errors.Join(removeErr, closeErr)
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
 			// A retry can observe no entries after a prior unlink succeeded but
 			// its directory sync failed. Re-sync before reporting completion.
-			return syncDir(rootPath)
+			return ops.sync(root, rootPath)
 		}
 		if readErr != nil {
 			return readErr
@@ -716,6 +581,43 @@ func removePinnedBackupTreeContentsWithSync(
 			return errors.New("database backup removal directory read made no progress")
 		}
 	}
+}
+
+func validatePinnedBackupRemovalRoot(
+	rootPath string,
+	root *os.Root,
+	expected fileidentity.Identity,
+) error {
+	if root == nil || !expected.Valid() {
+		return errors.New("database backup removal root identity is not registered")
+	}
+	openedIdentity, err := openedPinnedBackupRemovalRootIdentity(rootPath, root)
+	if err != nil || openedIdentity != expected {
+		return errors.Join(errors.New("database backup removal root binding changed"), err)
+	}
+	return nil
+}
+
+func openedPinnedBackupRemovalRootIdentity(
+	rootPath string,
+	root *os.Root,
+) (fileidentity.Identity, error) {
+	if !validBackupAbsolutePath(rootPath) || root == nil {
+		return fileidentity.Identity{}, errors.New("database backup removal root is unavailable")
+	}
+	rootFile, err := root.Open(".")
+	if err != nil {
+		return fileidentity.Identity{}, err
+	}
+	openedIdentity, openedType, openedErr := fileidentity.Opened(rootFile)
+	closeErr := rootFile.Close()
+	if openedErr != nil || closeErr != nil || openedType != fileidentity.ObjectTypeDirectory {
+		return fileidentity.Identity{}, errors.Join(
+			errors.New("database backup removal root binding changed"),
+			openedErr, closeErr,
+		)
+	}
+	return openedIdentity, nil
 }
 
 func matchBackupRemovalIdentity(
@@ -727,17 +629,6 @@ func matchBackupRemovalIdentity(
 	identity, objectType, exists, err := lookup(path)
 	if err != nil || !exists || objectType != expectedType || identity != expected {
 		return errors.Join(errors.New("database backup removal identity does not match"), err)
-	}
-	return nil
-}
-
-func requireMissingBackupRemovalPath(
-	path string,
-	lookup func(string) (fileidentity.Identity, fileidentity.ObjectType, bool, error),
-) error {
-	_, _, exists, err := lookup(path)
-	if err != nil || exists {
-		return errors.Join(errors.New("database backup removal path is not absent"), err)
 	}
 	return nil
 }

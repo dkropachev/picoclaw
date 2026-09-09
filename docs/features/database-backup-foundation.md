@@ -20,12 +20,11 @@ and remove only captured identities. No runtime path calls these primitives.
   `fileidentity.Identity` to the current path/opened handle.
 - Windows owner-only DACLs, no reparse/device/readonly state, and full 128-bit
   file IDs are authoritative; Unix files must be private and single-link.
-- Cleanup atomically quarantines the expected identity and makes original-name
-  removal durable (directory sync on Unix, write-through rename on Windows),
-  then recursively empties only through retained directory handles. Unix
-  syncs child/top-level unlinks and a missing-path retry re-syncs its parent;
-  Windows tombstone removal is post-quarantine housekeeping because its
-  `SyncDirectory` contract is intentionally a no-op.
+- Cleanup preflights the complete bounded tree before mutation. It atomically
+  quarantines every expected leaf relative to a retained parent handle and
+  revalidates the new name against the already-open identity before traversal
+  or deletion. Unix syncs the retained directory handle; Windows renames and
+  disposes the exact reopened object handle with write-through semantics.
 - `backup.go` is the preapproved bridge to the provider's cross-platform
   private-directory creation primitive; `backup_io.go` stays provider-free.
 
@@ -55,6 +54,7 @@ Owns: CODE internal/databasemigration/backup_metadata_*.go
 Owns: CODE internal/databasemigration/backup_open_*.go
 Owns: CODE internal/databasemigration/backup_publish_*.go
 Owns: CODE internal/databasemigration/backup_remove.go
+Owns: CODE internal/databasemigration/backup_remove_platform_*.go
 Owns: CODE internal/databasemigration/backup_foundation_dormant.go
 Owns: TEST internal/databasemigration/backup_foundation_faults_test.go *
 Owns: TEST internal/databasemigration/backup_foundation_coverage_test.go *
@@ -75,13 +75,13 @@ Owns: TEST internal/databasemigration/backup_remove_identity_test.go *
 
 Validate ancestors; create/secure private destination; capture source/output
 identities; stream bounded bytes; recheck source; sync/close output; reopen and
-validate its metadata/identity/digest; sync parent. Cleanup no-replace renames
-to quarantine, syncs the parent, retains a root, recursively handles children
-relative to that root, rechecks identity, nonrecursively removes the emptied
-entry, and on Unix syncs each affected directory before reporting success. On
-Windows, the no-replace quarantine move is write-through; directory sync is a
-documented no-op and subsequent tombstone deletion does not define logical
-removal durability.
+validate its metadata/identity/digest; sync parent. Cleanup first validates the
+whole bounded inventory without mutation. Each leaf is then no-replace renamed
+to an unpredictable sibling through a retained parent, the source absence and
+quarantine identity are proved, and only that quarantine is traversed or
+removed. Unix syncs retained directory descriptors. Windows renames and marks
+the exact identity handle for deletion; later physical reclamation is
+housekeeping after durable logical removal.
 
 ## Cross-Feature Behavior
 
