@@ -94,8 +94,8 @@ func validateBackupParentCatalogBounds(ctx context.Context, specs []storecatalog
 		return 0, errors.New("database backup parent generation catalog limit exceeded")
 	}
 	legacyRoots := 0
-	for index, spec := range specs {
-		if ctx != nil && index > 0 && index%256 == 0 {
+	for _, spec := range specs {
+		if ctx != nil {
 			if err := ctx.Err(); err != nil {
 				return 0, err
 			}
@@ -418,6 +418,9 @@ func validateBackupParentPhysicalAliasesBoundContext(
 	ancestors := &backupParentAncestorState{ctx: ctx, seen: make(map[string]struct{})}
 	legacyRoots := make([]string, 0, legacyRootCount)
 	check := func(path, kind string, projectProspective bool) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		cleaned := filepath.Clean(path)
 		if prospective && projectProspective {
 			if err := validateProspectiveBackupParentOutsideSource(cleaned, projection); err != nil {
@@ -449,24 +452,15 @@ func validateBackupParentPhysicalAliasesBoundContext(
 	}
 
 	for _, spec := range specs {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		if err := check(filepath.Dir(spec.Path), "a database generation directory", false); err != nil {
 			return err
 		}
 		for _, generation := range generationPaths(spec.Path) {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
 			if err := check(generation, "a database generation directory", true); err != nil {
 				return err
 			}
 		}
 		for _, legacyRoot := range spec.LegacyRoots {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
 			if err := check(legacyRoot, "a legacy input directory", true); err != nil {
 				return err
 			}
@@ -709,10 +703,8 @@ func nearestExistingBackupDirectoryIdentityContext(
 	}
 	current := filepath.Clean(path)
 	for steps := 0; steps <= backupMaxEntries; steps++ {
-		if steps > 0 && steps%256 == 0 {
-			if err := ctx.Err(); err != nil {
-				return "", "", fileidentity.Identity{}, err
-			}
+		if err := ctx.Err(); err != nil {
+			return "", "", fileidentity.Identity{}, err
 		}
 		resolved, identity, exists, inspectErr := existingBackupDirectoryIdentity(current)
 		if inspectErr != nil {

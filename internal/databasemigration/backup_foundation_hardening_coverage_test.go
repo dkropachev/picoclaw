@@ -148,6 +148,44 @@ func TestFoundationHardeningMountRootAndLinuxDescriptorFailures(t *testing.T) {
 	}
 }
 
+func TestFoundationHardeningRemainingSafeBoundaries(t *testing.T) {
+	filesystem, err := os.OpenRoot(string(os.PathSeparator))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer filesystem.Close()
+	file, err := openExactBackupChild(filesystem, filepath.Join("proc", "self"))
+	if file != nil {
+		_ = file.Close()
+	}
+	if !errors.Is(err, errExactBackupMountBoundary) {
+		t.Fatalf("proc mount transition = %#v, %v", file, err)
+	}
+
+	root := t.TempDir()
+	if !backupRemovalPlanHasDescendant(
+		map[fileidentity.Identity]string{{}: filepath.Join(root, "child")}, root,
+	) {
+		t.Fatal("captured descendant was not detected")
+	}
+	realParent := t.TempDir()
+	tree := filepath.Join(realParent, "tree")
+	if err := os.Mkdir(tree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identity := foundationHardeningIdentity(t, tree, fileidentity.ObjectTypeDirectory)
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realParent, alias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := removePinnedBackupTreeIdentity(filepath.Join(alias, "tree"), identity); err == nil {
+		t.Fatal("removal through a symlinked ancestor succeeded")
+	}
+	if info, err := os.Lstat(tree); err != nil || !info.IsDir() {
+		t.Fatalf("rejected removal changed tree = %#v, %v", info, err)
+	}
+}
+
 func TestFoundationHardeningEmptyRollbackPreconditions(t *testing.T) {
 	base := t.TempDir()
 	reference := filepath.Join(base, "reference")

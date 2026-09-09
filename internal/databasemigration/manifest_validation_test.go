@@ -28,6 +28,25 @@ func TestBackupManifestValidationAcceptsCanonicalInventories(t *testing.T) {
 	}
 }
 
+func TestBackupManifestValidationAcceptsNestedLegacyMember(t *testing.T) {
+	manifest := validManifestValidationFixture(t)
+	root := filepath.Join(filepath.Dir(manifest.Stores[0].Path), "legacy")
+	source := filepath.Join(root, "nested", "state.json")
+	manifest.Stores[0].LegacyRoots[0] = root
+	manifest.Stores[0].LegacyRootKinds[0] = "directory"
+	manifest.Files[0].Source = source
+	destination, err := legacyBackupDestination(
+		backupStoreDirectory(manifest.Files[0].StoreID), 0, root, source,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Files[0].Backup = filepath.ToSlash(destination)
+	if err := validateBackupManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBackupPhysicalPathComparisonPreservesCase(t *testing.T) {
 	root := t.TempDir()
 	upper := filepath.Join(root, "Store.db")

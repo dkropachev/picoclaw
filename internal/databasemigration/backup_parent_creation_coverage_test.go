@@ -22,6 +22,9 @@ func TestBackupParentCreationInjectedFaultCoverage(t *testing.T) {
 		want   string
 		mutate func(*backupParentCreationOps)
 	}{
+		{name: "initial container", want: "creation container", mutate: func(ops *backupParentCreationOps) {
+			ops.container = func(*os.Root) error { return canary }
+		}},
 		{name: "random", want: canary.Error(), mutate: func(ops *backupParentCreationOps) {
 			ops.random = func() (string, error) { return "", canary }
 		}},
@@ -131,6 +134,53 @@ func TestBackupParentCreationInjectedFaultCoverage(t *testing.T) {
 	owned, err := exclusivelyCreateMissingBackupParent(filepath.Join(t.TempDir(), "missing", "created"), true)
 	if err == nil || owned.Valid() {
 		t.Fatalf("missing creation parent = %#v, %v", owned, err)
+	}
+}
+
+func TestBackupParentRemainingContextCoverage(t *testing.T) {
+	base := t.TempDir()
+	parent := filepath.Join(base, "parent")
+	source := filepath.Join(base, "source")
+	for _, path := range []string{parent, source} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spec := storecatalog.Spec{
+		ID: "global/context", Path: filepath.Join(source, "store.db"),
+		LegacyRoots: []string{filepath.Join(base, "legacy")},
+	}
+	if _, err := validateBackupParentWithContext(
+		&cancelAfterMigrationErrChecks{Context: t.Context(), allowed: 7},
+		parent, base, []storecatalog.Spec{spec},
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("legacy lexical cancellation = %v", err)
+	}
+	if err := validateBackupParentPhysicalAliasesBoundContext(
+		&cancelAfterMigrationErrChecks{Context: t.Context(), allowed: 2},
+		parent, fileidentity.Identity{}, []storecatalog.Spec{spec},
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("physical-check cancellation = %v", err)
+	}
+	if err := validateBackupParentPhysicalAliasesBoundContext(
+		&cancelAfterMigrationErrChecks{Context: t.Context(), allowed: 2},
+		filepath.Join(base, "missing"), fileidentity.Identity{}, []storecatalog.Spec{spec},
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("prospective-ancestor cancellation = %v", err)
+	}
+	if err := validateBackupParentPhysicalAliasesBoundContext(
+		t.Context(), filepath.Join(base, "missing"), fileidentity.Identity{},
+		[]storecatalog.Spec{{ID: "global/invalid", Path: "relative"}},
+	); err == nil || !strings.Contains(err.Error(), "physically overlaps") {
+		t.Fatalf("invalid projected source = %v", err)
+	}
+	if _, _, _, err := nearestExistingBackupDirectoryIdentityContext(nil, base); err != nil {
+		t.Fatalf("nil-context nearest ancestor = %v", err)
+	}
+	if _, _, _, err := nearestExistingBackupDirectoryIdentityContext(
+		canceledParentTreeContext(), base,
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled nearest ancestor = %v", err)
 	}
 }
 

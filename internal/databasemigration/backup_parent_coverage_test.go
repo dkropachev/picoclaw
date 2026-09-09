@@ -59,10 +59,11 @@ func TestBackupParentValidationCoverage(t *testing.T) {
 
 func TestBackupParentProspectiveRaceCoverage(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		parent func(string) string
-		action func(*testing.T, string)
-		want   string
+		name    string
+		parent  func(string) string
+		action  func(*testing.T, string)
+		allowed int
+		want    string
 	}{
 		{
 			name:   "parent appears",
@@ -72,7 +73,8 @@ func TestBackupParentProspectiveRaceCoverage(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			want: "appeared during prospective containment validation",
+			allowed: 3,
+			want:    "appeared during prospective containment validation",
 		},
 		{
 			name:   "nearest ancestor changes",
@@ -82,14 +84,15 @@ func TestBackupParentProspectiveRaceCoverage(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			want: "ancestor changed during containment validation",
+			allowed: 4,
+			want:    "ancestor changed during containment validation",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			base := t.TempDir()
 			parent := test.parent(base)
 			ctx := &actionAfterMigrationErrChecks{
-				Context: t.Context(), allowed: 2, action: func() { test.action(t, parent) },
+				Context: t.Context(), allowed: test.allowed, action: func() { test.action(t, parent) },
 			}
 			spec := storecatalog.Spec{
 				ID: "global/tree", Path: filepath.Join(base, "store", "store.db"),
