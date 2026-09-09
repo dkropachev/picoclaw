@@ -373,3 +373,45 @@ func sortManifestCatalog(manifest *BackupManifest) {
 		return manifest.CatalogGenerations[i] < manifest.CatalogGenerations[j]
 	})
 }
+
+func TestBackupManifestValidationRejectsDuplicateFileIndexes(t *testing.T) {
+	t.Run("unsorted files", func(t *testing.T) {
+		manifest := validGenerationManifestFixture(t, "database", "wal")
+		manifest.Files[0], manifest.Files[1] = manifest.Files[1], manifest.Files[0]
+		if err := validateBackupManifest(manifest); err == nil || !strings.Contains(err.Error(), "ordered") {
+			t.Fatalf("unsorted files = %v", err)
+		}
+	})
+	t.Run("backup path", func(t *testing.T) {
+		manifest := validManifestValidationFixture(t)
+		manifest.Stores[0].LegacyRootKinds[0] = "directory"
+		manifest.Files = append(manifest.Files, manifest.Files[0])
+		sortBackupManifestFiles(manifest.Files)
+		if err := validateBackupManifest(manifest); err == nil {
+			t.Fatalf("duplicate backup path = %v", err)
+		}
+	})
+	t.Run("record key", func(t *testing.T) {
+		manifest := validManifestValidationFixture(t)
+		manifest.Stores[0].LegacyRootKinds[0] = "directory"
+		duplicate := manifest.Files[0]
+		duplicate.Backup += "-duplicate"
+		manifest.Files = append(manifest.Files, duplicate)
+		sortBackupManifestFiles(manifest.Files)
+		if err := validateBackupManifest(manifest); err == nil {
+			t.Fatalf("duplicate record key = %v", err)
+		}
+	})
+	t.Run("generation role", func(t *testing.T) {
+		manifest := validGenerationManifestFixture(t, "database")
+		duplicate := manifest.Files[0]
+		duplicate.Source += "-other"
+		duplicate.SourceIdentity += "-other"
+		duplicate.Backup += "-other"
+		manifest.Files = append(manifest.Files, duplicate)
+		sortBackupManifestFiles(manifest.Files)
+		if err := validateBackupManifest(manifest); err == nil {
+			t.Fatalf("duplicate generation role = %v", err)
+		}
+	})
+}

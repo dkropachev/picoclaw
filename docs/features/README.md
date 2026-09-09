@@ -46,6 +46,7 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Database SQLite inspection             | [database-sqlite-inspection.md](database-sqlite-inspection.md)     |
 | Database readiness foundation          | [database-readiness.md](database-readiness.md)                     |
 | Database backup model                  | [database-backup-model.md](database-backup-model.md)               |
+| Database backup foundation             | [database-backup-foundation.md](database-backup-foundation.md)     |
 | SQLite runtime storage                 | [sqlite-storage.md](sqlite-storage.md)                             |
 | Workflows and reusable automation      | [workflows.md](workflows.md)                                       |
 | Git workspaces and checkout retention  | [git-workspaces.md](git-workspaces.md)                             |
