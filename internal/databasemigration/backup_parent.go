@@ -239,31 +239,34 @@ func exclusivelyCreateMissingBackupParentWithOps(
 		// Without a handle identity the temporary name is not cleanup authority.
 		return fileidentity.Identity{}, fmt.Errorf("open temporary database backup parent: %w", err)
 	}
-	identity, objectType, identityErr := ops.opened(opened)
-	if identityErr != nil || !identity.Valid() || objectType != fileidentity.ObjectTypeDirectory {
+	candidate, objectType, identityErr := ops.opened(opened)
+	if identityErr != nil || !candidate.Valid() || objectType != fileidentity.ObjectTypeDirectory {
 		return fileidentity.Identity{}, errors.Join(
 			errors.New("temporary database backup parent identity is unavailable"), identityErr,
 		)
 	}
-	captured = identity
-	if err := ops.container(root); err != nil {
-		return fileidentity.Identity{}, fmt.Errorf(
-			"revalidate database backup parent creation container: %w", err,
-		)
-	}
 	temporaryPath := filepath.Join(parentPath, temporaryLeaf)
 	if err := ops.validate(
-		root, temporaryLeaf, opened, captured, fileidentity.ObjectTypeDirectory,
+		root, temporaryLeaf, opened, candidate, fileidentity.ObjectTypeDirectory,
 	); err != nil {
 		return fileidentity.Identity{}, fmt.Errorf("bind temporary database backup parent: %w", err)
 	}
 	if err := validateBackupRemovalBinding(
-		temporaryPath, root, temporaryLeaf, opened, captured, fileidentity.ObjectTypeDirectory,
+		temporaryPath, root, temporaryLeaf, opened, candidate, fileidentity.ObjectTypeDirectory,
 	); err != nil {
 		return fileidentity.Identity{}, fmt.Errorf("fence temporary database backup parent: %w", err)
 	}
-	if err := ops.secure(opened, captured); err != nil {
+	if err := ops.secure(opened, candidate); err != nil {
 		return fileidentity.Identity{}, fmt.Errorf("secure temporary database backup parent: %w", err)
+	}
+	// Only the identity that passed exact-handle ownership and privacy
+	// hardening is cleanup authority. Earlier failures leave inert evidence
+	// rather than risking removal of a replacement we did not create.
+	captured = candidate
+	if err := ops.container(root); err != nil {
+		return fileidentity.Identity{}, fmt.Errorf(
+			"revalidate database backup parent creation container: %w", err,
+		)
 	}
 	if err := validateBackupRemovalBinding(
 		temporaryPath, root, temporaryLeaf, opened, captured, fileidentity.ObjectTypeDirectory,

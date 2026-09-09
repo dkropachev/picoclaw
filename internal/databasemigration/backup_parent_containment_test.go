@@ -409,9 +409,6 @@ func TestExclusiveBackupParentCreationCleansCapturedFailures(t *testing.T) {
 				return container(root)
 			}
 		}},
-		{name: "secure", mutate: func(ops *backupParentCreationOps) {
-			ops.secure = func(*os.File, fileidentity.Identity) error { return canary }
-		}},
 		{name: "child sync", mutate: func(ops *backupParentCreationOps) {
 			ops.syncChild = func(*os.File, fileidentity.Identity) error { return canary }
 		}},
@@ -488,27 +485,39 @@ func TestExclusiveBackupParentCreationLeavesUnownedNames(t *testing.T) {
 		}
 	})
 
-	t.Run("identity capture failure", func(t *testing.T) {
-		base := t.TempDir()
-		path := filepath.Join(base, "created")
-		temporary := filepath.Join(base, ".database-backup-parent-test")
-		canary := errors.New("identity canary")
-		ops := defaultBackupParentCreationOps()
-		ops.random = func() (string, error) { return filepath.Base(temporary), nil }
-		ops.opened = func(*os.File) (fileidentity.Identity, fileidentity.ObjectType, error) {
-			return fileidentity.Identity{}, 0, canary
-		}
-		identity, err := exclusivelyCreateMissingBackupParentWithOps(path, true, ops)
-		if !errors.Is(err, canary) || identity.Valid() {
-			t.Fatalf("uncaptured parent creation = %#v, %v", identity, err)
-		}
-		if info, err := os.Lstat(temporary); err != nil || !info.IsDir() {
-			t.Fatalf("uncaptured temporary parent was removed = %#v, %v", info, err)
-		}
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("uncaptured final parent appeared: %v", err)
-		}
-	})
+	for _, test := range []struct {
+		name   string
+		mutate func(*backupParentCreationOps, error)
+	}{
+		{"identity capture failure", func(ops *backupParentCreationOps, canary error) {
+			ops.opened = func(*os.File) (fileidentity.Identity, fileidentity.ObjectType, error) {
+				return fileidentity.Identity{}, 0, canary
+			}
+		}},
+		{"security proof failure", func(ops *backupParentCreationOps, canary error) {
+			ops.secure = func(*os.File, fileidentity.Identity) error { return canary }
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			path := filepath.Join(base, "created")
+			temporary := filepath.Join(base, ".database-backup-parent-test")
+			canary := errors.New("capture canary")
+			ops := defaultBackupParentCreationOps()
+			ops.random = func() (string, error) { return filepath.Base(temporary), nil }
+			test.mutate(&ops, canary)
+			identity, err := exclusivelyCreateMissingBackupParentWithOps(path, true, ops)
+			if !errors.Is(err, canary) || identity.Valid() {
+				t.Fatalf("uncaptured parent creation = %#v, %v", identity, err)
+			}
+			if info, err := os.Lstat(temporary); err != nil || !info.IsDir() {
+				t.Fatalf("uncaptured temporary parent was removed = %#v, %v", info, err)
+			}
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("uncaptured final parent appeared: %v", err)
+			}
+		})
+	}
 }
 
 func TestConfiguredBackupParentClassificationPreservesCase(t *testing.T) {
