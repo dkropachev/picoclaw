@@ -121,7 +121,7 @@ func openPinnedBackupParent(path string) (*os.Root, string, error) {
 			errors.New("database backup child parent identity is unavailable"), err,
 		)
 	}
-	root, err := os.OpenRoot(parentPath)
+	root, err := openExactBackupRoot(parentPath)
 	if err != nil {
 		return nil, "", err
 	}
@@ -324,7 +324,16 @@ func removePinnedBackupTreeIdentity(
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, root.Close()) }()
-	child, err := root.OpenRoot(leaf)
+	exact, err := openExactBackupChild(root, leaf)
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, exact.Close()) }()
+	exactIdentity, exactType, exactErr := fileidentity.Opened(exact)
+	if exactErr != nil || exactType != fileidentity.ObjectTypeDirectory || exactIdentity != expected {
+		return errors.Join(errors.New("database backup removal target changed while opening"), exactErr)
+	}
+	child, err := openExactBackupRemovalRoot(root, leaf, exact)
 	if err != nil {
 		return err
 	}
@@ -359,7 +368,7 @@ func validatePinnedBackupTreeInventory(
 			if statErr != nil || info == nil || info.Mode()&os.ModeSymlink != 0 {
 				return errors.Join(errors.New("database backup removal child is unsafe"), statErr)
 			}
-			file, openErr := openPinnedBackupChild(root, entry.Name())
+			file, openErr := openExactBackupChild(root, entry.Name())
 			if openErr != nil {
 				return openErr
 			}
@@ -371,24 +380,31 @@ func validatePinnedBackupTreeInventory(
 					statErr, validateBackupPlatformFile(openedInfo, file, 0o600),
 				)
 			}
-			closeErr := file.Close()
-			if identityErr != nil || metadataErr != nil || closeErr != nil || objectType == 0 || info.IsDir() !=
+			if identityErr != nil || metadataErr != nil || objectType == 0 || info.IsDir() !=
 				(objectType == fileidentity.ObjectTypeDirectory) {
 				return errors.Join(
 					errors.New("database backup removal child is unsafe"),
-					identityErr, metadataErr, closeErr,
+					identityErr, metadataErr, file.Close(),
 				)
 			}
 			if previous, duplicate := identities[identity]; duplicate {
-				return fmt.Errorf(
-					"database backup removal paths %q and %q physically alias", previous, childPath,
+				return errors.Join(
+					fmt.Errorf(
+						"database backup removal paths %q and %q physically alias",
+						previous, childPath,
+					),
+					file.Close(),
 				)
 			}
 			identities[identity] = childPath
 			if objectType == fileidentity.ObjectTypeDirectory {
-				child, err := root.OpenRoot(entry.Name())
+				child, err := openExactBackupRemovalRoot(root, entry.Name(), file)
+				fileCloseErr := file.Close()
 				if err != nil {
-					return err
+					return errors.Join(err, fileCloseErr)
+				}
+				if fileCloseErr != nil {
+					return errors.Join(fileCloseErr, child.Close())
 				}
 				err = validatePinnedBackupTreeInventory(
 					childPath, child, identity, identities, entries,
@@ -397,7 +413,10 @@ func validatePinnedBackupTreeInventory(
 					return errors.Join(err, closeErr)
 				}
 			} else if objectType != fileidentity.ObjectTypeRegular {
+				_ = file.Close()
 				return errors.New("database backup removal tree contains an unsafe object")
+			} else if closeErr := file.Close(); closeErr != nil {
+				return closeErr
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
@@ -522,7 +541,7 @@ func removePinnedBackupTreeContentsBound(
 			if statErr != nil || info == nil || info.Mode()&os.ModeSymlink != 0 {
 				return errors.Join(errors.New("database backup removal child is unsafe"), statErr)
 			}
-			file, openErr := openPinnedBackupChild(root, entry.Name())
+			file, openErr := openExactBackupChild(root, entry.Name())
 			if openErr != nil {
 				return openErr
 			}
@@ -543,7 +562,7 @@ func removePinnedBackupTreeContentsBound(
 			var removeErr error
 			switch objectType {
 			case fileidentity.ObjectTypeDirectory:
-				childRoot, err := root.OpenRoot(entry.Name())
+				childRoot, err := openExactBackupRemovalRoot(root, entry.Name(), file)
 				if err != nil {
 					removeErr = err
 				} else {

@@ -28,6 +28,17 @@ func TestBackupManifestValidationAcceptsCanonicalInventories(t *testing.T) {
 	}
 }
 
+func TestBackupPhysicalPathComparisonPreservesCase(t *testing.T) {
+	root := t.TempDir()
+	upper := filepath.Join(root, "Store.db")
+	if sameBackupPhysicalPath(upper, filepath.Join(root, "store.db")) {
+		t.Fatal("case-distinct physical paths were treated as one name")
+	}
+	if !sameBackupPhysicalPath(filepath.Join(root, ".", "Store.db"), upper) {
+		t.Fatal("equivalent cleaned physical paths differed")
+	}
+}
+
 func TestBackupManifestValidationRejectsMalformedMetadata(t *testing.T) {
 	invalidUTF8 := string([]byte{'b', 'a', 'd', 0xff})
 	tests := []struct {

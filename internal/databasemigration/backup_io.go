@@ -174,13 +174,19 @@ func readPinnedPrivateBackupFileWithOps(
 	afterInfo, statErr := ops.stat(file)
 	afterIdentity, identityErr := ops.openedIdentity(file, fileidentity.ObjectTypeRegular)
 	pathIdentity, pathType, pathExists, pathErr := ops.existingWithType(path)
+	var finalPrivateErr, finalPlatformErr error
+	if afterInfo != nil {
+		finalPrivateErr = ops.validatePrivateFile(path, afterInfo)
+		finalPlatformErr = ops.validatePlatformFile(afterInfo, file, 0o600)
+	}
 	if statErr != nil || identityErr != nil || pathErr != nil || !pathExists ||
 		pathType != fileidentity.ObjectTypeRegular || afterIdentity != identity ||
 		pathIdentity != identity || afterInfo == nil || opened.Size() != afterInfo.Size() ||
-		opened.Mode() != afterInfo.Mode() || !opened.ModTime().Equal(afterInfo.ModTime()) {
+		opened.Mode() != afterInfo.Mode() || !opened.ModTime().Equal(afterInfo.ModTime()) ||
+		finalPrivateErr != nil || finalPlatformErr != nil {
 		return nil, fileidentity.Identity{}, false, errors.Join(
 			errors.New("database backup private file changed while reading"),
-			statErr, identityErr, pathErr,
+			statErr, identityErr, pathErr, finalPrivateErr, finalPlatformErr,
 		)
 	}
 	return payload, identity, true, nil
@@ -232,6 +238,20 @@ func walkLegacyInputs(
 	budget *backupBudget,
 	visit func(string) error,
 ) error {
+	return walkLegacyInputsWithPhysicalExclusions(
+		ctx, root, backupRoot, excluded, nil, budget, visit,
+	)
+}
+
+func walkLegacyInputsWithPhysicalExclusions(
+	ctx context.Context,
+	root string,
+	backupRoot string,
+	excluded map[string]struct{},
+	physicalExcluded map[fileidentity.Identity]struct{},
+	budget *backupBudget,
+	visit func(string) error,
+) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -260,9 +280,9 @@ func walkLegacyInputs(
 	if !info.IsDir() {
 		return errors.New("legacy input is not a regular file or directory")
 	}
-	return walkLegacyDirectory(
+	return walkLegacyDirectoryWithPhysicalExclusions(
 		ctx, filepath.Clean(root), ".", filepath.Clean(backupRoot),
-		excluded, budget, visit,
+		excluded, physicalExcluded, budget, visit,
 	)
 }
 
@@ -272,6 +292,21 @@ func walkLegacyDirectory(
 	relative,
 	backupRoot string,
 	excluded map[string]struct{},
+	budget *backupBudget,
+	visit func(string) error,
+) (returnErr error) {
+	return walkLegacyDirectoryWithPhysicalExclusions(
+		ctx, path, relative, backupRoot, excluded, nil, budget, visit,
+	)
+}
+
+func walkLegacyDirectoryWithPhysicalExclusions(
+	ctx context.Context,
+	path,
+	relative,
+	backupRoot string,
+	excluded map[string]struct{},
+	physicalExcluded map[fileidentity.Identity]struct{},
 	budget *backupBudget,
 	visit func(string) error,
 ) (returnErr error) {
@@ -291,6 +326,9 @@ func walkLegacyDirectory(
 	beforeIdentity, beforeType, exists, identityErr := fileidentity.ExistingWithType(path)
 	if identityErr != nil || !exists || beforeType != fileidentity.ObjectTypeDirectory {
 		return errors.Join(errors.New("legacy input directory identity is unsafe"), identityErr)
+	}
+	if _, skip := physicalExcluded[beforeIdentity]; skip {
+		return errors.New("legacy input physically contains the database backup namespace")
 	}
 	directory, opened, err := openPinnedBackupPath(path, true)
 	if err != nil {
@@ -345,8 +383,9 @@ func walkLegacyDirectory(
 					}
 					continue
 				}
-				if err := walkLegacyDirectory(
-					ctx, child, childRelative, backupRoot, excluded, budget, visit,
+				if err := walkLegacyDirectoryWithPhysicalExclusions(
+					ctx, child, childRelative, backupRoot, excluded,
+					physicalExcluded, budget, visit,
 				); err != nil {
 					return err
 				}
@@ -559,10 +598,20 @@ func copyBackupFileWithOps(
 	}
 	after, err := ops.lstat(source)
 	afterIdentity, afterType, exists, identityErr := ops.identity(source)
-	if err != nil || identityErr != nil || !exists || afterType != fileidentity.ObjectTypeRegular ||
+	afterOpened, afterOpenedErr := ops.stat(input)
+	afterOpenedIdentity, afterOpenedType, afterOpenedIdentityErr := ops.opened(input)
+	afterSourceErr := validateBackupSourceFile(afterOpened, input)
+	if err != nil || after == nil || identityErr != nil || !exists || afterType != fileidentity.ObjectTypeRegular ||
 		afterIdentity != sourceIdentity || before.Size() != after.Size() ||
-		before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) || written != before.Size() {
-		return empty, errors.Join(errors.New("source changed while copying"), err, identityErr)
+		before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) ||
+		afterOpenedErr != nil || afterOpenedIdentityErr != nil || afterOpened == nil ||
+		afterOpenedType != fileidentity.ObjectTypeRegular || afterOpenedIdentity != sourceIdentity ||
+		before.Size() != afterOpened.Size() || before.Mode() != afterOpened.Mode() ||
+		!before.ModTime().Equal(afterOpened.ModTime()) || written != before.Size() || afterSourceErr != nil {
+		return empty, errors.Join(
+			errors.New("source changed while copying"), err, identityErr,
+			afterOpenedErr, afterOpenedIdentityErr, afterSourceErr,
+		)
 	}
 	if err := ops.close(input); err != nil {
 		inputClosed = true

@@ -218,6 +218,10 @@ remains the active subsystem-owned persistence behavior until later provider,
 readiness, migration, supervisor, and domain-adapter features explicitly
 replace it.
 
+The dormant backup filesystem foundation imports physical catalog records only
+in `backup_parent.go` to prove that a backup namespace is separated from every
+generation and legacy input; it does not snapshot or open a store.
+
 ## Failure And Edge Cases
 
 - A valid catalog may describe missing generation and legacy leaves; inventory

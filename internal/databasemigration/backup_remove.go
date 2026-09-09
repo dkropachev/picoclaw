@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -43,6 +44,112 @@ func removeBackupTreeDurable(
 	return removeBackupTreeDurableWithOps(
 		path, root, leaf, child, expected, defaultBackupRemovalOps(),
 	)
+}
+
+// removePinnedEmptyBackupDirectoryIdentity rolls back a directory created by
+// this backup attempt. It never traverses or removes descendants: nonempty
+// state fails before quarantine, and the final directory removal is an atomic
+// empty-directory operation.
+func removePinnedEmptyBackupDirectoryIdentity(
+	path string,
+	expected fileidentity.Identity,
+) (returnErr error) {
+	if !validBackupAbsolutePath(path) || !expected.Valid() {
+		return errors.New("database backup empty-directory rollback identity is invalid")
+	}
+	root, leaf, err := openPinnedBackupParent(path)
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, root.Close()) }()
+	opened, err := openExactBackupChild(root, leaf)
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, opened.Close()) }()
+	identity, objectType, identityErr := fileidentity.Opened(opened)
+	if identityErr != nil || identity != expected || objectType != fileidentity.ObjectTypeDirectory {
+		return errors.Join(
+			errors.New("database backup empty-directory rollback target changed"), identityErr,
+		)
+	}
+	child, err := openExactBackupRemovalRoot(root, leaf, opened)
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, child.Close()) }()
+	if err := requireEmptyBackupRemovalRoot(path, child, expected); err != nil {
+		return err
+	}
+	ops := defaultBackupRemovalOps()
+	quarantine, exact, err := quarantineBackupRemovalLeaf(
+		root, leaf, opened, expected, fileidentity.ObjectTypeDirectory, path, ops,
+	)
+	if err != nil {
+		return err
+	}
+	if exact != nil {
+		defer func() {
+			if exact != nil {
+				returnErr = errors.Join(returnErr, exact.Close())
+			}
+		}()
+	}
+	if err := validateBackupRemovalRelativeBinding(
+		root, quarantine, opened, expected, fileidentity.ObjectTypeDirectory,
+	); err != nil {
+		return err
+	}
+	if err := requireMissingBackupRemovalRootLeaf(root, leaf); err != nil {
+		return errors.Join(errors.New("database backup rollback source name changed"), err)
+	}
+	if err := requireEmptyBackupRemovalRoot(path, child, expected); err != nil {
+		return err
+	}
+	if err := ops.remove(root, quarantine, exact, true); err != nil {
+		return err
+	}
+	if exact != nil {
+		closeErr := exact.Close()
+		exact = nil
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	if err := requireMissingBackupRemovalRootLeaf(root, quarantine); err != nil {
+		return errors.Join(errors.New("database backup rollback quarantine remains"), err)
+	}
+	return ops.sync(root, filepath.Dir(path))
+}
+
+func requireEmptyBackupRemovalRoot(
+	path string,
+	root *os.Root,
+	expected fileidentity.Identity,
+) (returnErr error) {
+	if err := validatePinnedBackupRemovalRoot(path, root, expected); err != nil {
+		return err
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, directory.Close()) }()
+	entries, readErr := directory.ReadDir(1)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return readErr
+	}
+	if len(entries) != 0 || !errors.Is(readErr, io.EOF) {
+		return errors.New("database backup rollback directory is not empty")
+	}
+	identity, objectType, identityErr := fileidentity.Opened(directory)
+	if identityErr != nil || identity != expected || objectType != fileidentity.ObjectTypeDirectory {
+		return errors.Join(
+			errors.New("database backup rollback directory changed while checking emptiness"),
+			identityErr,
+		)
+	}
+	return nil
 }
 
 func removeBackupTreeDurableWithSync(
@@ -421,11 +528,12 @@ func validateBackupRemovalRelativeBinding(
 	if root == nil || opened == nil || !expected.Valid() || !validBackupPathComponent(leaf) {
 		return errors.New("database backup removal binding is invalid")
 	}
-	bound, err := openPinnedBackupChild(root, leaf)
+	bound, err := openExactBackupChild(root, leaf)
 	if err != nil {
 		return err
 	}
 	boundIdentity, boundType, boundErr := fileidentity.Opened(bound)
+	mountErr := validateExactBackupOpenedMount(opened, bound)
 	var boundMetadataErr, openedMetadataErr error
 	if expectedType == fileidentity.ObjectTypeRegular {
 		boundInfo, statErr := bound.Stat()
@@ -439,16 +547,73 @@ func validateBackupRemovalRelativeBinding(
 	}
 	boundCloseErr := bound.Close()
 	openedIdentity, openedType, openedErr := fileidentity.Opened(opened)
-	if boundErr != nil || boundMetadataErr != nil || boundCloseErr != nil ||
+	if boundErr != nil || mountErr != nil || boundMetadataErr != nil || boundCloseErr != nil ||
 		openedErr != nil || openedMetadataErr != nil ||
 		boundType != expectedType || openedType != expectedType ||
 		boundIdentity != expected || openedIdentity != expected {
 		return errors.Join(
 			errors.New("database backup removal leaf binding changed"),
-			boundErr, boundMetadataErr, boundCloseErr, openedErr, openedMetadataErr,
+			boundErr, mountErr, boundMetadataErr, boundCloseErr, openedErr, openedMetadataErr,
 		)
 	}
 	return nil
+}
+
+// openExactBackupRemovalRoot opens a directory Root only after the leaf has
+// passed platform mount-boundary checks, then proves both handles name the
+// same object on the same mounted filesystem instance.
+func openExactBackupRemovalRoot(
+	parent *os.Root,
+	leaf string,
+	opened *os.File,
+) (*os.Root, error) {
+	return openBackupRootFromPinnedChild(parent, leaf, opened)
+}
+
+// openBackupRootFromPinnedChild converts a nonblocking pinned directory file
+// into a recursive Root without trusting a second pathname resolution.
+func openBackupRootFromPinnedChild(
+	parent *os.Root,
+	leaf string,
+	opened *os.File,
+) (result *os.Root, returnErr error) {
+	if parent == nil || opened == nil || !validBackupPathComponent(leaf) {
+		return nil, errors.New("database backup removal child root input is invalid")
+	}
+	openedIdentity, openedType, openedErr := fileidentity.Opened(opened)
+	if openedErr != nil || openedType != fileidentity.ObjectTypeDirectory {
+		return nil, errors.Join(
+			errors.New("database backup removal child root is not a directory"), openedErr,
+		)
+	}
+	// Making leaf an intermediate component routes its open through os.Root's
+	// O_DIRECTORY path on Unix. A concurrent directory-to-FIFO/device swap
+	// therefore fails without blocking before the terminal immutable dot opens.
+	child, err := parent.OpenRoot(leaf + string(os.PathSeparator) + ".")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if returnErr != nil {
+			returnErr = errors.Join(returnErr, child.Close())
+			result = nil
+		}
+	}()
+	childFile, err := child.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	childIdentity, childType, childErr := fileidentity.Opened(childFile)
+	mountErr := validateExactBackupOpenedMount(opened, childFile)
+	closeErr := childFile.Close()
+	if childErr != nil || mountErr != nil || closeErr != nil ||
+		childType != fileidentity.ObjectTypeDirectory || childIdentity != openedIdentity {
+		return nil, errors.Join(
+			errors.New("database backup removal child root changed while opening"),
+			childErr, mountErr, closeErr,
+		)
+	}
+	return child, nil
 }
 
 func validateBackupRemovalTreeBinding(

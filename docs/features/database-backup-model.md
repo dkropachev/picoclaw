@@ -22,8 +22,9 @@ filesystem mutation and is not wired into runtime orchestration.
 - Windows grammar rejects namespaces, devices, ADS, reserved/trailing
   components, Win32-trimmed device stems, control characters, and short-name
   aliases before any filesystem syscall.
-- Darwin and Windows path identity conservatively folds case so backup
-  collision checks match the catalog/provider identity boundaries.
+- Darwin and Windows namespace collision keys conservatively fold case, while
+  physical-identity ownership compares exact cleaned paths so distinct names
+  cannot hide an alias on a case-sensitive volume.
 - Prepared legacy wrapper entries and archive path expansion share explicit
   bounded counters.
 

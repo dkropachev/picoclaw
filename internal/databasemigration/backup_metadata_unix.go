@@ -24,8 +24,8 @@ func validateBackupSourceFile(info os.FileInfo, _ *os.File) error {
 		return errors.New("database backup source metadata is invalid")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat == nil || stat.Nlink != 1 {
-		return errors.New("database backup source has an unsafe hard-link count")
+	if !ok || stat == nil || stat.Nlink != 1 || stat.Uid != uint32(os.Geteuid()) {
+		return errors.New("database backup source has unsafe ownership or hard-link count")
 	}
 	return nil
 }
