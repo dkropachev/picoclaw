@@ -10,6 +10,8 @@ import (
 	"github.com/sipeed/picoclaw/internal/fileidentity"
 )
 
+func validateBackupParentCreationContainer(*os.Root) error { return nil }
+
 func secureBackupParentCreatedDirectoryHandle(
 	file *os.File,
 	expected fileidentity.Identity,

@@ -399,6 +399,16 @@ func TestExclusiveBackupParentCreationCleansCapturedFailures(t *testing.T) {
 		name   string
 		mutate func(*backupParentCreationOps)
 	}{
+		{name: "container after capture", mutate: func(ops *backupParentCreationOps) {
+			container, calls := ops.container, 0
+			ops.container = func(root *os.Root) error {
+				calls++
+				if calls == 2 {
+					return canary
+				}
+				return container(root)
+			}
+		}},
 		{name: "secure", mutate: func(ops *backupParentCreationOps) {
 			ops.secure = func(*os.File, fileidentity.Identity) error { return canary }
 		}},
@@ -417,6 +427,16 @@ func TestExclusiveBackupParentCreationCleansCapturedFailures(t *testing.T) {
 		}},
 		{name: "parent sync", mutate: func(ops *backupParentCreationOps) {
 			ops.sync = func(*os.Root) error { return canary }
+		}},
+		{name: "container after publication", mutate: func(ops *backupParentCreationOps) {
+			container, calls := ops.container, 0
+			ops.container = func(root *os.Root) error {
+				calls++
+				if calls == 3 {
+					return canary
+				}
+				return container(root)
+			}
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

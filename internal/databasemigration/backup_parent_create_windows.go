@@ -17,7 +17,7 @@ func secureBackupParentCreatedDirectoryHandle(
 	file *os.File,
 	expected fileidentity.Identity,
 ) (returnErr error) {
-	if err := validateBackupParentCreatedDirectoryIdentity(file, expected); err != nil {
+	if err := validateBackupParentCreatedDirectoryDACL(file, expected, false); err != nil {
 		return err
 	}
 	result, _, callErr := backupRemovalReOpenFile.Call(
@@ -75,6 +75,24 @@ func secureBackupParentCreatedDirectoryHandle(
 	return validateBackupParentCreatedDirectoryIdentity(file, expected)
 }
 
+func validateBackupParentCreationContainer(root *os.Root) (returnErr error) {
+	if root == nil {
+		return errors.New("database backup parent creation container is unavailable")
+	}
+	file, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, file.Close()) }()
+	identity, objectType, err := fileidentity.Opened(file)
+	if err != nil || objectType != fileidentity.ObjectTypeDirectory {
+		return errors.Join(
+			errors.New("database backup parent creation container is unsafe"), err,
+		)
+	}
+	return validateBackupParentCreatedDirectoryDACL(file, identity, true)
+}
+
 func validateBackupParentCreatedDirectoryIdentity(
 	file *os.File,
 	expected fileidentity.Identity,
@@ -95,6 +113,14 @@ func validateBackupParentCreatedDirectoryHandle(
 	file *os.File,
 	expected fileidentity.Identity,
 ) error {
+	return validateBackupParentCreatedDirectoryDACL(file, expected, true)
+}
+
+func validateBackupParentCreatedDirectoryDACL(
+	file *os.File,
+	expected fileidentity.Identity,
+	requireProtected bool,
+) error {
 	if err := validateBackupParentCreatedDirectoryIdentity(file, expected); err != nil {
 		return err
 	}
@@ -114,7 +140,7 @@ func validateBackupParentCreatedDirectoryHandle(
 		return errors.Join(errors.New("created database backup parent has another owner"), err)
 	}
 	control, _, err := descriptor.Control()
-	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
+	if err != nil || requireProtected && control&windows.SE_DACL_PROTECTED == 0 {
 		return errors.Join(errors.New("created database backup parent DACL is not protected"), err)
 	}
 	acl, _, err := descriptor.DACL()
@@ -127,6 +153,9 @@ func validateBackupParentCreatedDirectoryHandle(
 	}
 	if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
 		ace.Mask&windows.GENERIC_ALL == 0 ||
+		ace.Header.AceFlags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE) !=
+			windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE ||
+		ace.Header.AceFlags&(windows.INHERIT_ONLY_ACE|windows.NO_PROPAGATE_INHERIT_ACE) != 0 ||
 		!(*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(user.User.Sid) {
 		return fmt.Errorf("created database backup parent DACL grants another principal")
 	}

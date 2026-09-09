@@ -117,6 +117,7 @@ type backupParentCreationOps struct {
 	mkdir     func(*os.Root, string, os.FileMode) error
 	open      func(*os.Root, string) (*os.File, error)
 	opened    func(*os.File) (fileidentity.Identity, fileidentity.ObjectType, error)
+	container func(*os.Root) error
 	validate  func(*os.Root, string, *os.File, fileidentity.Identity, fileidentity.ObjectType) error
 	secure    func(*os.File, fileidentity.Identity) error
 	syncChild func(*os.File, fileidentity.Identity) error
@@ -133,6 +134,7 @@ func defaultBackupParentCreationOps() backupParentCreationOps {
 			return root.Mkdir(leaf, mode)
 		},
 		open: openExactBackupChild, opened: fileidentity.Opened,
+		container: validateBackupParentCreationContainer,
 		validate:  validateBackupRemovalRelativeBinding,
 		secure:    secureBackupParentCreatedDirectoryHandle,
 		syncChild: syncBackupParentCreatedDirectoryHandle,
@@ -161,7 +163,8 @@ func exclusivelyCreateMissingBackupParentWithOps(
 		return fileidentity.Identity{}, nil
 	}
 	if !validBackupAbsolutePath(path) || ops.random == nil || ops.mkdir == nil ||
-		ops.open == nil || ops.opened == nil || ops.validate == nil || ops.publish == nil ||
+		ops.open == nil || ops.opened == nil || ops.container == nil || ops.validate == nil ||
+		ops.publish == nil ||
 		ops.secure == nil || ops.syncChild == nil || ops.missing == nil || ops.sync == nil ||
 		ops.cleanup == nil {
 		return fileidentity.Identity{}, errors.New("database backup parent creation input is invalid")
@@ -169,6 +172,11 @@ func exclusivelyCreateMissingBackupParentWithOps(
 	root, finalLeaf, err := openPinnedBackupParent(path)
 	if err != nil {
 		return fileidentity.Identity{}, err
+	}
+	if err := ops.container(root); err != nil {
+		return fileidentity.Identity{}, errors.Join(
+			errors.New("validate database backup parent creation container"), err, root.Close(),
+		)
 	}
 	parentPath := filepath.Dir(path)
 	var (
@@ -238,6 +246,11 @@ func exclusivelyCreateMissingBackupParentWithOps(
 		)
 	}
 	captured = identity
+	if err := ops.container(root); err != nil {
+		return fileidentity.Identity{}, fmt.Errorf(
+			"revalidate database backup parent creation container: %w", err,
+		)
+	}
 	temporaryPath := filepath.Join(parentPath, temporaryLeaf)
 	if err := ops.validate(
 		root, temporaryLeaf, opened, captured, fileidentity.ObjectTypeDirectory,
@@ -306,6 +319,11 @@ func exclusivelyCreateMissingBackupParentWithOps(
 		path, root, finalLeaf, opened, captured, fileidentity.ObjectTypeDirectory,
 	); err != nil {
 		return fileidentity.Identity{}, fmt.Errorf("revalidate published database backup parent: %w", err)
+	}
+	if err := ops.container(root); err != nil {
+		return fileidentity.Identity{}, fmt.Errorf(
+			"revalidate published database backup parent container: %w", err,
+		)
 	}
 	keep = true
 	return captured, nil
