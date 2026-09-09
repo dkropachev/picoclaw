@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+env:
+  GOCACHE: ${{ github.workspace }}/.cache/go-build
+  GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
+
 jobs:
   integration:
     name: Integration Tests
@@ -23,6 +27,9 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    concurrency:
+      group: go-cache-cross-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -35,15 +42,21 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Cache Go dependencies and builds
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Compute cross-platform Go cache generation
+        id: go-cache-key
+        run: echo "epoch=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cross-platform Go cache
+        id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-cross-${{ hashFiles('go.mod', 'go.sum') }}-${{ steps.go-cache-key.outputs.epoch }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-cross-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-build-${{ hashFiles('go.mod', 'go.sum') }}
 
       - name: Feature requirements lint
         run: make lint-features
@@ -51,9 +64,24 @@ jobs:
       - name: Build core binaries
         run: make build-all
 
+      - name: Save cross-platform Go cache
+        if: >-
+          success() &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
   launcher:
     name: Build launcher
     runs-on: ubuntu-latest
+    concurrency:
+      group: go-cache-host-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -66,15 +94,21 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Cache Go dependencies and builds
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Compute host Go cache generation
+        id: go-cache-key
+        run: echo "epoch=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore host Go cache
+        id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-${{ steps.go-cache-key.outputs.epoch }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-launcher-${{ hashFiles('go.mod', 'go.sum') }}
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -99,6 +133,18 @@ jobs:
 
       - name: Build launcher
         run: make build-launcher
+
+      - name: Save host Go cache
+        if: >-
+          success() &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
   frontend_tests:
     name: Frontend unit tests (${{ matrix.shard }}/2)

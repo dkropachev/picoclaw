@@ -161,6 +161,109 @@ func TestPRGoTestsBoundPackageParallelism(t *testing.T) {
 	}
 }
 
+func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
+	const cacheAction = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+	const sharedPaths = "path: |\n            .cache/go-build\n            .cache/go-mod"
+	const keyBase = "${{ runner.os }}-${{ runner.arch }}-go-v3-"
+	const dependencyHash = "${{ hashFiles('go.mod', 'go.sum') }}"
+	prWorkflow := readRepoFile(t, ".github/workflows/pr.yml")
+	if got := strings.Count(prWorkflow, "uses: actions/cache/restore@"+cacheAction); got != 6 {
+		t.Errorf("PR workflow shared Go cache restore count = %d, want 6", got)
+	}
+	if got := strings.Count(prWorkflow, sharedPaths); got != 6 {
+		t.Errorf("PR workflow shared Go cache path count = %d, want 6", got)
+	}
+	for _, cache := range []struct {
+		name string
+		want int
+	}{
+		{name: "host", want: 5},
+		{name: "cross", want: 1},
+	} {
+		consumerKey := "key: " + keyBase + cache.name + "-" + dependencyHash
+		if got := strings.Count(prWorkflow, consumerKey+"\n          restore-keys: |"); got != cache.want {
+			t.Errorf("PR workflow %s Go cache key count = %d, want %d", cache.name, got, cache.want)
+		}
+		dependencyPrefix := keyBase + cache.name + "-" + dependencyHash + "-"
+		broadPrefix := keyBase + cache.name + "-"
+		orderedFallback := dependencyPrefix + "\n            " + broadPrefix
+		if got := strings.Count(prWorkflow, orderedFallback); got != cache.want {
+			t.Errorf(
+				"PR workflow dependency-first %s Go cache fallback count = %d, want %d",
+				cache.name,
+				got,
+				cache.want,
+			)
+		}
+	}
+	if strings.Contains(prWorkflow, "uses: actions/cache/save@") {
+		t.Error("PR workflow must not save the shared Go cache")
+	}
+	hasV2JobKey := strings.Contains(prWorkflow, "go-v2-${{ github.job }}")
+	hasV3JobKey := strings.Contains(prWorkflow, "go-v3-${{ github.job }}")
+	if hasV2JobKey || hasV3JobKey {
+		t.Error("PR workflow still uses job-specific Go cache keys")
+	}
+	if got, want := strings.Count(prWorkflow, "go-version-file: go.mod"), strings.Count(
+		prWorkflow,
+		"go-version-file: go.mod\n          cache: false",
+	); got != want {
+		t.Errorf("PR setup-go steps with cache disabled = %d, want %d", want, got)
+	}
+
+	buildWorkflow := readRepoFile(t, ".github/workflows/build.yml")
+	cacheOwners := []struct {
+		name  string
+		block string
+	}{
+		{name: "cross", block: targetBlock(t, buildWorkflow, "  build:\n", "  launcher:\n")},
+		{name: "host", block: targetBlock(t, buildWorkflow, "  launcher:\n", "  frontend_tests:\n")},
+	}
+	for _, owner := range cacheOwners {
+		for _, snippet := range []string{
+			"group: go-cache-" + owner.name + "-${{ github.ref }}\n      cancel-in-progress: false",
+			`echo "epoch=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"`,
+			"id: go-cache\n        uses: actions/cache/restore@" + cacheAction,
+			"github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
+			"key: ${{ steps.go-cache.outputs.cache-primary-key }}",
+		} {
+			if !strings.Contains(owner.block, snippet) {
+				t.Errorf("main %s cache owner is missing setting %q", owner.name, snippet)
+			}
+		}
+		if got := strings.Count(owner.block, "uses: actions/cache/save@"+cacheAction); got != 1 {
+			t.Errorf("main %s cache save count = %d, want 1", owner.name, got)
+		}
+		if got := strings.Count(owner.block, "uses: actions/cache/restore@"+cacheAction); got != 1 {
+			t.Errorf("main %s cache restore count = %d, want 1", owner.name, got)
+		}
+		if got := strings.Count(owner.block, sharedPaths); got != 2 {
+			t.Errorf("main %s cache shared path count = %d, want 2", owner.name, got)
+		}
+		producerKey := "key: " + keyBase + owner.name + "-" + dependencyHash +
+			"-${{ steps.go-cache-key.outputs.epoch }}"
+		if !strings.Contains(owner.block, producerKey) {
+			t.Errorf("main %s cache owner is missing daily key %q", owner.name, producerKey)
+		}
+	}
+
+	workflowPaths, err := filepath.Glob(filepath.Join(repoRootForTest(t), ".github", "workflows", "*.yml"))
+	if err != nil {
+		t.Fatalf("list workflows: %v", err)
+	}
+	saveOwners := 0
+	for _, path := range workflowPaths {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("read workflow %s: %v", path, readErr)
+		}
+		saveOwners += strings.Count(string(data), "uses: actions/cache/save@"+cacheAction)
+	}
+	if saveOwners != 2 {
+		t.Errorf("repository shared cache save owners = %d, want 2", saveOwners)
+	}
+}
+
 func TestLauncherBuildIncludesFrontendAndBackendPackaging(t *testing.T) {
 	rootMakefile := readRepoFile(t, "Makefile")
 	rootLauncher := targetBlock(t, rootMakefile, "## build-launcher:", "build-launcher-frontend:")
