@@ -21,8 +21,48 @@ env:
   BASE_REF_NAME: ${{ github.base_ref || inputs.base_ref || github.event.repository.default_branch }}
 
 jobs:
+  classify:
+    name: Classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      lint: ${{ steps.changes.outputs.lint }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+      frontend_ui: ${{ steps.changes.outputs.frontend_ui }}
+      vuln_check: ${{ steps.changes.outputs.vuln_check }}
+      test: ${{ steps.changes.outputs.test }}
+      cross_compile: ${{ steps.changes.outputs.cross_compile }}
+      coverage: ${{ steps.changes.outputs.coverage }}
+      integration: ${{ steps.changes.outputs.integration }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify changed paths
+        id: changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
+            classification="$(bash ./scripts/ci-changed-paths.sh --force-all)"
+          else
+            classification="$(
+              git diff --name-status -z --find-renames --find-copies \
+                "${BASE_SHA}...${HEAD_SHA}" | \
+                bash ./scripts/ci-changed-paths.sh
+            )"
+          fi
+          printf '%s\n' "${classification}" | tee -a "${GITHUB_OUTPUT}"
+
   lint:
     name: Linter
+    needs: classify
+    if: ${{ needs.classify.outputs.lint != 'false' }}
     runs-on: ubuntu-latest
     env:
       GOCACHE: ${{ github.workspace }}/.cache/go-build
@@ -73,6 +113,8 @@ jobs:
 
   frontend:
     name: Frontend
+    needs: classify
+    if: ${{ needs.classify.outputs.frontend != 'false' }}
     runs-on: ubuntu-latest
     env:
       GOCACHE: ${{ github.workspace }}/.cache/go-build
@@ -141,6 +183,8 @@ jobs:
 
   frontend_ui:
     name: Frontend UI (${{ matrix.label }})
+    needs: classify
+    if: ${{ needs.classify.outputs.frontend_ui != 'false' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -218,6 +262,8 @@ jobs:
 
   vuln_check:
     name: Security Check
+    needs: classify
+    if: ${{ needs.classify.outputs.vuln_check != 'false' }}
     runs-on: ubuntu-latest
     env:
       GOFLAGS: -tags=goolm,stdjson
@@ -240,6 +286,8 @@ jobs:
 
   test:
     name: Tests
+    needs: classify
+    if: ${{ needs.classify.outputs.test != 'false' }}
     runs-on: ubuntu-latest
     env:
       GOCACHE: ${{ github.workspace }}/.cache/go-build
@@ -275,6 +323,8 @@ jobs:
 
   cross_compile:
     name: Cross-compile core binaries
+    needs: classify
+    if: ${{ needs.classify.outputs.cross_compile != 'false' }}
     runs-on: ubuntu-latest
     env:
       GOCACHE: ${{ github.workspace }}/.cache/go-build
@@ -307,6 +357,8 @@ jobs:
 
   coverage:
     name: Coverage Delta
+    needs: classify
+    if: ${{ needs.classify.outputs.coverage != 'false' }}
     runs-on: ubuntu-latest
     env:
       GOCACHE: ${{ github.workspace }}/.cache/go-build
@@ -342,6 +394,8 @@ jobs:
 
   integration:
     name: Integration Tests
+    needs: classify
+    if: ${{ needs.classify.outputs.integration != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -351,3 +405,78 @@ jobs:
 
       - name: Run Docker-backed integration suites
         run: bash ./scripts/run-integration-tests.sh
+
+  required:
+    name: PR Required
+    if: ${{ always() }}
+    needs:
+      - classify
+      - lint
+      - frontend
+      - frontend_ui
+      - vuln_check
+      - test
+      - cross_compile
+      - coverage
+      - integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify selected checks
+        shell: bash
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          LINT_REQUIRED: ${{ needs.classify.outputs.lint }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          FRONTEND_REQUIRED: ${{ needs.classify.outputs.frontend }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          FRONTEND_UI_REQUIRED: ${{ needs.classify.outputs.frontend_ui }}
+          FRONTEND_UI_RESULT: ${{ needs.frontend_ui.result }}
+          VULN_CHECK_REQUIRED: ${{ needs.classify.outputs.vuln_check }}
+          VULN_CHECK_RESULT: ${{ needs.vuln_check.result }}
+          TEST_REQUIRED: ${{ needs.classify.outputs.test }}
+          TEST_RESULT: ${{ needs.test.result }}
+          CROSS_COMPILE_REQUIRED: ${{ needs.classify.outputs.cross_compile }}
+          CROSS_COMPILE_RESULT: ${{ needs.cross_compile.result }}
+          COVERAGE_REQUIRED: ${{ needs.classify.outputs.coverage }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
+          INTEGRATION_REQUIRED: ${{ needs.classify.outputs.integration }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+        run: |
+          set -euo pipefail
+          if [[ "${CLASSIFY_RESULT}" != "success" ]]; then
+            echo "Change classifier did not succeed: ${CLASSIFY_RESULT}" >&2
+            exit 1
+          fi
+
+          check_result() {
+            local name="$1"
+            local required="$2"
+            local result="$3"
+            case "${required}" in
+              true)
+                if [[ "${result}" != "success" ]]; then
+                  echo "${name} was required but finished as ${result}" >&2
+                  return 1
+                fi
+                ;;
+              false)
+                if [[ "${result}" != "skipped" ]]; then
+                  echo "${name} was not required but finished as ${result}" >&2
+                  return 1
+                fi
+                ;;
+              *)
+                echo "${name} has invalid classifier output: ${required}" >&2
+                return 1
+                ;;
+            esac
+          }
+
+          check_result lint "${LINT_REQUIRED}" "${LINT_RESULT}"
+          check_result frontend "${FRONTEND_REQUIRED}" "${FRONTEND_RESULT}"
+          check_result frontend_ui "${FRONTEND_UI_REQUIRED}" "${FRONTEND_UI_RESULT}"
+          check_result vuln_check "${VULN_CHECK_REQUIRED}" "${VULN_CHECK_RESULT}"
+          check_result test "${TEST_REQUIRED}" "${TEST_RESULT}"
+          check_result cross_compile "${CROSS_COMPILE_REQUIRED}" "${CROSS_COMPILE_RESULT}"
+          check_result coverage "${COVERAGE_REQUIRED}" "${COVERAGE_RESULT}"
+          check_result integration "${INTEGRATION_REQUIRED}" "${INTEGRATION_RESULT}"

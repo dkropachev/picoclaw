@@ -114,6 +114,29 @@ func TestPRCancelsSupersededRuns(t *testing.T) {
 	}
 }
 
+func TestPRScopesValidationBehindStableRequiredCheck(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/pr.yml")
+	for _, snippet := range []string{
+		"classify:\n    name: Classify changes",
+		"git diff --name-status -z --find-renames --find-copies",
+		"if: ${{ needs.classify.outputs.frontend_ui != 'false' }}",
+		"required:\n    name: PR Required\n    if: ${{ always() }}",
+		`- classify
+      - lint
+      - frontend
+      - frontend_ui
+      - vuln_check
+      - test
+      - cross_compile
+      - coverage
+      - integration`,
+	} {
+		if !strings.Contains(workflow, snippet) {
+			t.Errorf("PR workflow is missing scoped-validation setting %q", snippet)
+		}
+	}
+}
+
 func TestPRGoTestsBoundPackageParallelism(t *testing.T) {
 	workflow := readRepoFile(t, ".github/workflows/pr.yml")
 	if !strings.Contains(
