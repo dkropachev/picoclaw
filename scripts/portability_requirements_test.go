@@ -105,7 +105,7 @@ func TestPRRunsBuildAllBeforeMerge(t *testing.T) {
 func TestPRCancelsSupersededRuns(t *testing.T) {
 	workflow := readRepoFile(t, ".github/workflows/pr.yml")
 	for _, snippet := range []string{
-		"concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+		"concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
 		"  cancel-in-progress: true",
 	} {
 		if !strings.Contains(workflow, snippet) {
