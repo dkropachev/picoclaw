@@ -188,24 +188,6 @@ func TestPinnedBackupTreeContentsRejectsUnsafeInventories(t *testing.T) {
 }
 
 func TestPinnedBackupTreeContentsHandleAndPermissionFaults(t *testing.T) {
-	t.Run("missing opened child", func(t *testing.T) {
-		parent := t.TempDir()
-		root, openErr := os.OpenRoot(parent)
-		if openErr != nil {
-			t.Fatal(openErr)
-		}
-		defer func() { _ = root.Close() }()
-		child, _, _, childErr := openedBackupRemovalDirectory(
-			root, "missing", fileidentity.Opened,
-		)
-		if child != nil {
-			_ = child.Close()
-		}
-		if childErr == nil {
-			t.Fatal("missing removal child opened")
-		}
-	})
-
 	t.Run("closed root", func(t *testing.T) {
 		fixture := newPinnedRemovalFixture(t)
 		root, openErr := os.OpenRoot(fixture.path)

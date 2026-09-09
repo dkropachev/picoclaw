@@ -276,9 +276,15 @@ func quarantineBackupRemovalLeaf(
 		}
 		exact, err := ops.rename(root, leaf, quarantine, opened)
 		if errors.Is(err, os.ErrExist) {
+			if exact != nil {
+				return "", nil, errors.Join(err, exact.Close())
+			}
 			continue
 		}
 		if err != nil {
+			if exact != nil {
+				err = errors.Join(err, exact.Close())
+			}
 			return "", nil, err
 		}
 		if err := ops.sync(root, filepath.Dir(label)); err != nil {

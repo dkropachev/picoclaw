@@ -6,27 +6,16 @@
 
 ## Behavior Summary
 
-PicoClaw provides dormant filesystem primitives for private, bounded backup
-evidence. They create private directories, copy and rehash bytes, prove full
-path/handle identity and metadata, publish without replacement, and quarantine
-and remove only captured identities. No runtime path calls these primitives.
+PicoClaw provides dormant, bounded backup filesystem primitives that copy, rehash, identity-bind, publish, and remove only captured private evidence.
 
 ## Reconstruction Notes
 
 - Descendant access is relative to pinned parent/root handles.
-- Source and output identities are verified before/after copy; the closed
-  output is reopened, metadata-validated, and rehashed before retention.
-- Hash verification binds both prior metadata and the caller's full-width
-  `fileidentity.Identity` to the current path/opened handle.
-- Windows owner-only DACLs, no reparse/device/readonly state, and full 128-bit
-  file IDs are authoritative; Unix files must be private and single-link.
-- Cleanup preflights the complete bounded tree before mutation. It atomically
-  quarantines every expected leaf relative to a retained parent handle and
-  revalidates the new name against the already-open identity before traversal
-  or deletion. Unix syncs the retained directory handle; Windows renames and
-  disposes the exact reopened object handle with write-through semantics.
-- `backup.go` is the preapproved bridge to the provider's cross-platform
-  private-directory creation primitive; `backup_io.go` stays provider-free.
+- Copy verifies source/output identity before and after IO, then reopens and rehashes output.
+- Hash verification binds prior metadata and full identity to the current path/handle.
+- Windows uses private DACLs and 128-bit IDs; Unix files are private and single-link.
+- Cleanup preflights the whole tree, quarantines each leaf relative to a retained parent, revalidates identity, then uses retained Unix directory handles or exact write-through Windows handles.
+- `backup.go` bridges private-directory creation; `backup_io.go` stays provider-free.
 
 ## Requirements
 
@@ -38,10 +27,7 @@ and remove only captured identities. No runtime path calls these primitives.
 
 ## Data And State Model
 
-Opaque comparable `fileidentity.Identity` values bind paths to opened regular
-files/directories. Copy operations return complete `BackupFileManifest`
-records, including source identity. Tree removal is limited to
-`backupMaxEntries`; uncertain cleanup leaves a uniquely named quarantine.
+Opaque `fileidentity.Identity` values bind paths to opened objects. Copies return complete manifests; bounded, uncertain cleanup stays quarantined.
 
 ## Surface Ownership
 
@@ -62,6 +48,7 @@ Owns: TEST internal/databasemigration/backup_io_coverage_test.go *
 Owns: TEST internal/databasemigration/backup_validation_hardening_test.go *
 Owns: TEST internal/databasemigration/backup_pinned_faults_test.go *
 Owns: TEST internal/databasemigration/backup_remove_identity_test.go *
+Owns: TEST internal/databasemigration/backup_remove_coverage_test.go *
 
 ## Auxiliary Interfaces
 
@@ -73,29 +60,19 @@ Owns: TEST internal/databasemigration/backup_remove_identity_test.go *
 
 ## Algorithms And Ordering
 
-Validate ancestors; create/secure private destination; capture source/output
-identities; stream bounded bytes; recheck source; sync/close output; reopen and
-validate its metadata/identity/digest; sync parent. Cleanup first validates the
-whole bounded inventory without mutation. Each leaf is then no-replace renamed
-to an unpredictable sibling through a retained parent, the source absence and
-quarantine identity are proved, and only that quarantine is traversed or
-removed. Unix syncs retained directory descriptors. Windows renames and marks
-the exact identity handle for deletion; later physical reclamation is
-housekeeping after durable logical removal.
+Validate ancestors; secure destination; copy bounded bytes; recheck, sync, reopen, and rehash output.
+Cleanup preflights inventory, no-replace renames each leaf through a retained parent, proves source absence and quarantine identity, then removes only that quarantine.
+Unix syncs retained directory descriptors; Windows marks exact handles for durable logical deletion before later physical reclamation.
 
 ## Cross-Feature Behavior
 
-D4a1 supplies the validated model and limits. D4b composes these filesystem
-operations into committed archives and status. D4c reconstructs sealed inputs.
-D5 alone owns claims, quiescence, and cutover.
+D4a1 supplies the model. D4b composes archives and status; D4c reconstructs
+sealed inputs. D5 owns claims, quiescence, and cutover.
 
 ## Failure And Edge Cases
 
-Platforms lacking required identity, private metadata, or atomic publication
-fail closed. The caller must exclude concurrent writers to the private removal
-root; D5 owns that claim/quiescence contract. Detected drift still fails closed,
-but an arbitrary same-user process that ignores the authority boundary is
-outside this filesystem primitive's threat model.
+Unsupported identity, metadata, or atomic publication fails closed. D5 must exclude concurrent writers. Detected drift fails closed; same-user processes
+ignoring that authority boundary remain outside this primitive's threat model.
 
 ## Acceptance Evidence
 
@@ -106,6 +83,4 @@ outside this filesystem primitive's threat model.
 
 ## Implementation Anchors
 
-- [backup.go](../../internal/databasemigration/backup.go)
-- [backup_io.go](../../internal/databasemigration/backup_io.go)
-- [backup_pinned.go](../../internal/databasemigration/backup_pinned.go)
+[backup.go](../../internal/databasemigration/backup.go), [backup_io.go](../../internal/databasemigration/backup_io.go), and [backup_pinned.go](../../internal/databasemigration/backup_pinned.go).

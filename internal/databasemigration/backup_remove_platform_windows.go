@@ -29,7 +29,7 @@ func renameBackupRemovalRootNoReplace(
 	_ string,
 	target string,
 	opened *os.File,
-) (*os.File, error) {
+) (_ *os.File, returnErr error) {
 	if opened == nil {
 		return nil, errors.New("database backup removal source handle is unavailable")
 	}
@@ -37,7 +37,7 @@ func renameBackupRemovalRootNoReplace(
 	if err != nil {
 		return nil, err
 	}
-	defer parent.Close()
+	defer func() { returnErr = errors.Join(returnErr, parent.Close()) }()
 	handle, err := reopenBackupRemovalHandle(windows.Handle(opened.Fd()))
 	if err != nil {
 		return nil, err

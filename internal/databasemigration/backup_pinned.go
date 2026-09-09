@@ -332,28 +332,6 @@ func removePinnedBackupTreeIdentity(
 	return removeBackupTreeDurable(path, root, leaf, child, expected)
 }
 
-func openedBackupRemovalDirectory(
-	parent *os.Root,
-	leaf string,
-	lookup func(*os.File) (fileidentity.Identity, fileidentity.ObjectType, error),
-) (*os.Root, fileidentity.Identity, fileidentity.ObjectType, error) {
-	directory, err := parent.OpenRoot(leaf)
-	if err != nil {
-		return nil, fileidentity.Identity{}, 0, err
-	}
-	file, err := directory.Open(".")
-	if err != nil {
-		return nil, fileidentity.Identity{}, 0, errors.Join(err, directory.Close())
-	}
-	identity, objectType, identityErr := lookup(file)
-	if closeErr := file.Close(); identityErr != nil || closeErr != nil {
-		return nil, fileidentity.Identity{}, 0, errors.Join(
-			identityErr, closeErr, directory.Close(),
-		)
-	}
-	return directory, identity, objectType, nil
-}
-
 func validatePinnedBackupTreeInventory(
 	rootPath string,
 	root *os.Root,
@@ -388,9 +366,9 @@ func validatePinnedBackupTreeInventory(
 			identity, objectType, identityErr := fileidentity.Opened(file)
 			var metadataErr error
 			if objectType == fileidentity.ObjectTypeRegular {
-				info, statErr := file.Stat()
+				openedInfo, statErr := file.Stat()
 				metadataErr = errors.Join(
-					statErr, validateBackupPlatformFile(info, file, 0o600),
+					statErr, validateBackupPlatformFile(openedInfo, file, 0o600),
 				)
 			}
 			closeErr := file.Close()
@@ -551,7 +529,10 @@ func removePinnedBackupTreeContentsBound(
 			identity, objectType, identityErr := fileidentity.Opened(file)
 			if identityErr != nil || objectType == 0 || info.IsDir() !=
 				(objectType == fileidentity.ObjectTypeDirectory) {
-				return errors.Join(identityErr, file.Close())
+				return errors.Join(
+					errors.New("database backup removal child changed while opening"),
+					identityErr, file.Close(),
+				)
 			}
 			if plannedPath, captured := identities[identity]; !captured || plannedPath != childPath {
 				return errors.Join(

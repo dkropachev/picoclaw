@@ -12,4 +12,5 @@ var (
 	_ = createPinnedBackupDirectory
 	_ = writePrivateBackupFileExclusive
 	_ = defaultBackupControlWriteOps
+	_ = publishBackupDirectory
 )
