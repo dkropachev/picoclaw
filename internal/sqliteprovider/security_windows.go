@@ -21,7 +21,10 @@ func validateProviderPathSyntax(path string) error {
 	normalized := strings.ReplaceAll(absolute, "/", `\`)
 	if strings.HasPrefix(volume, `\\?\`) || strings.HasPrefix(volume, `\\.\`) ||
 		strings.HasPrefix(normalized, `\??\`) {
-		return errors.New("SQLite provider path uses a Windows device namespace")
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider path uses a Windows device namespace"),
+		)
 	}
 	remainder := strings.TrimPrefix(absolute, volume)
 	for _, component := range strings.FieldsFunc(remainder, func(character rune) bool {
@@ -29,7 +32,10 @@ func validateProviderPathSyntax(path string) error {
 	}) {
 		if component != strings.TrimRight(component, " .") || strings.ContainsRune(component, ':') ||
 			providerWindowsShortNameLike(component) || providerWindowsReservedName(component) {
-			return errors.New("SQLite provider path contains an ambiguous Windows component")
+			return errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider path contains an ambiguous Windows component"),
+			)
 		}
 	}
 	return nil
@@ -75,11 +81,17 @@ func validateProviderAncestors(path string) error {
 		info, statErr := os.Lstat(ancestor)
 		if statErr == nil {
 			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-				return errors.New("SQLite provider ancestor is unsafe")
+				return errors.Join(errProviderUnsafeBoundary, errors.New("SQLite provider ancestor is unsafe"))
 			}
 			attributes, attrErr := windows.GetFileAttributes(windows.StringToUTF16Ptr(ancestor))
-			if attrErr != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-				return errors.New("SQLite provider ancestor is a reparse point")
+			if attrErr != nil {
+				return attrErr
+			}
+			if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+				return errors.Join(
+					errProviderUnsafeBoundary,
+					errors.New("SQLite provider ancestor is a reparse point"),
+				)
 			}
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return statErr
@@ -101,7 +113,7 @@ func secureWindowsProviderPath(path string, directory bool) error {
 	}
 	if expected.Mode()&os.ModeSymlink != 0 || directory != expected.IsDir() ||
 		!directory && !expected.Mode().IsRegular() {
-		return errors.New("SQLite provider security boundary is unsafe")
+		return errors.Join(errProviderUnsafeBoundary, errors.New("SQLite provider security boundary is unsafe"))
 	}
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -134,7 +146,15 @@ func secureWindowsProviderPath(path string, directory bool) error {
 	if statErr != nil || lstatErr != nil || opened == nil || currentPath == nil ||
 		!os.SameFile(expected, opened) || !os.SameFile(opened, currentPath) ||
 		opened.IsDir() != directory || opened.Mode()&os.ModeSymlink != 0 {
-		return errors.Join(errors.New("SQLite provider Windows path changed while opening"), statErr, lstatErr)
+		if statErr != nil || lstatErr != nil {
+			return errors.Join(
+				errors.New("inspect SQLite provider Windows path while opening"), statErr, lstatErr,
+			)
+		}
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider Windows path changed while opening"),
+		)
 	}
 	var attributes providerWindowsFileAttributeTagInfo
 	if err := windows.GetFileInformationByHandleEx(
@@ -142,8 +162,14 @@ func secureWindowsProviderPath(path string, directory bool) error {
 		windows.FileAttributeTagInfo,
 		(*byte)(unsafe.Pointer(&attributes)),
 		uint32(unsafe.Sizeof(attributes)),
-	); err != nil || attributes.fileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return errors.Join(errors.New("SQLite provider security boundary is a reparse point"), err)
+	); err != nil {
+		return err
+	}
+	if attributes.fileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider security boundary is a reparse point"),
+		)
 	}
 	current, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || current == nil || current.User.Sid == nil || !current.User.Sid.IsValid() {
@@ -158,8 +184,14 @@ func secureWindowsProviderPath(path string, directory bool) error {
 		return err
 	}
 	owner, _, err := existing.Owner()
-	if err != nil || owner == nil || !owner.Equals(current.User.Sid) {
-		return errors.New("SQLite provider security boundary is owned by another user")
+	if err != nil {
+		return err
+	}
+	if owner == nil || !owner.Equals(current.User.Sid) {
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider security boundary is owned by another user"),
+		)
 	}
 	inheritanceFlags := ""
 	if directory {
@@ -198,7 +230,15 @@ func secureWindowsProviderPath(path string, directory bool) error {
 	currentPath, lstatErr = os.Lstat(path)
 	if statErr != nil || lstatErr != nil || secured == nil || currentPath == nil ||
 		!os.SameFile(opened, secured) || !os.SameFile(secured, currentPath) {
-		return errors.Join(errors.New("SQLite provider Windows path changed while securing"), statErr, lstatErr)
+		if statErr != nil || lstatErr != nil {
+			return errors.Join(
+				errors.New("inspect SQLite provider Windows path while securing"), statErr, lstatErr,
+			)
+		}
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider Windows path changed while securing"),
+		)
 	}
 	return nil
 }
@@ -214,33 +254,62 @@ func validateWindowsProviderHandle(
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil || descriptor == nil || !descriptor.IsValid() {
-		return errors.Join(errors.New("SQLite provider Windows security descriptor is invalid"), err)
+		if err != nil {
+			return err
+		}
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider Windows security descriptor is invalid"),
+		)
 	}
 	owner, _, err := descriptor.Owner()
-	if err != nil || owner == nil || !owner.Equals(current) {
-		return errors.Join(errors.New("SQLite provider Windows owner is invalid"), err)
+	if err != nil {
+		return err
+	}
+	if owner == nil || !owner.Equals(current) {
+		return errors.Join(errProviderUnsafeBoundary, errors.New("SQLite provider Windows owner is invalid"))
 	}
 	control, _, err := descriptor.Control()
-	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
-		return errors.Join(errors.New("SQLite provider Windows DACL is not protected"), err)
+	if err != nil {
+		return err
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider Windows DACL is not protected"),
+		)
 	}
 	dacl, _, err := descriptor.DACL()
-	if err != nil || dacl == nil || dacl.AceCount != 1 {
-		return errors.Join(errors.New("SQLite provider Windows DACL is not owner-only"), err)
+	if err != nil {
+		return err
+	}
+	if dacl == nil || dacl.AceCount != 1 {
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider Windows DACL is not owner-only"),
+		)
 	}
 	var ace *windows.ACCESS_ALLOWED_ACE
 	const fileAllAccess = windows.ACCESS_MASK(
 		windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff,
 	)
-	if err := windows.GetAce(dacl, 0, &ace); err != nil || ace == nil ||
-		ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+	if err := windows.GetAce(dacl, 0, &ace); err != nil {
+		return err
+	}
+	if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
 		ace.Mask&windows.GENERIC_ALL == 0 && ace.Mask&fileAllAccess != fileAllAccess ||
 		!(*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(current) {
-		return errors.Join(errors.New("SQLite provider Windows DACL entry is invalid"), err)
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider Windows DACL entry is invalid"),
+		)
 	}
 	if directory && ace.Header.AceFlags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE) !=
 		(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE) {
-		return errors.New("SQLite provider Windows directory DACL does not protect children")
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider Windows directory DACL does not protect children"),
+		)
 	}
 	return nil
 }

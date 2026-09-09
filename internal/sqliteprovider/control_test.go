@@ -206,7 +206,7 @@ func TestForeignKeyCheckPropagatesDeferredRowsCloseFailureSafely(t *testing.T) {
 		hasNextResultSet: true,
 	})
 	err := CheckForeignKeys(t.Context(), database)
-	if !errors.Is(err, errForeignKeyCheck) {
+	if !errors.Is(err, errControlUnavailable) {
 		t.Fatalf("CheckForeignKeys close error = %v", err)
 	}
 	if errors.Is(err, closeErr) || strings.Contains(err.Error(), closeErr.Error()) {

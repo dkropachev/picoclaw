@@ -30,22 +30,29 @@ the active authority.
   first connection, harden the complete generation, and recheck its identity.
 - Non-obvious constraints: memory DSNs are unique; file DSNs cannot recreate a
   vanished main; WAL/SHM identities are transient under cooperating SQLite
-  processes; rollback-journal replacement is not an allowed open transition.
+  processes; rollback-journal replacement is not an allowed open transition;
+  absolute process-local path keys conservatively fold case on Windows and
+  Darwin, matching catalog reservation keys.
 
 ## Requirements
 
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
-| `FR-DATABASE-SQLITE-PROVIDER-001` | MUST | Trusted infrastructure supplies a memory name or validated filesystem path and bounded busy timeout. | The provider constructs the only shipped-driver DSN, forces one connection open, and returns a pool only after the main generation remains the same exact file. Memory uses a unique shared cache; file DSNs use existing-file mode. | A missing file-backed endpoint may be created durably and privately. | Blank, padded, invalid-UTF-8, NUL-bearing, overlong, URI-shaped, ambiguous Windows device, symlink/reparse, irregular, hardlinked, foreign-owned, or replaced inputs fail without fallback. | Physical addressing and driver binding must have one internal owner. |
-| `FR-DATABASE-SQLITE-PROVIDER-002` | MUST | The provider prepares a directory, main file, or complete generation. | Unix traverses components with descriptor-relative no-follow operations and accepts only protected creation ancestry; Windows rejects reparses, retains the parent handle, and validates a current-user protected DACL. Main and sidecars are single-link owner-private regular files. | Missing components and main files are private at creation, synced, and revalidated; existing owned members may be hardened. | Unsafe ancestry, type, owner, link count, mode/DACL, identity drift, orphan SHM, or mixed WAL and rollback journal fails closed. | SQLite must never follow an attacker-controlled generation member. |
-| `FR-DATABASE-SQLITE-PROVIDER-003` | MUST | Trusted code configures a live, memory, or caller-isolated offline pool. | Live file stores select WAL; offline pools select exclusive locking and DELETE journal; all modes verify foreign keys, bounded busy timeout, and `synchronous=FULL`. Busy/locked classification preserves only SQLite primary codes 5 and 6. | Configuration changes only provider connection state and SQLite journal metadata. | Nil/canceled context, nil pool, invalid timeout, unexpected selected mode, or provider failure returns an error. | Durability and concurrency settings must be explicit and verified. |
-| `FR-DATABASE-SQLITE-PROVIDER-004` | MUST | Repository code adds a driver open, direct provider import, or platform implementation. | The exact-file guard permits compatibility open/schema, reserves future readiness and backup/migration implementation filenames, and reserves shipped-driver use by future maintenance/staged-copy files; only `provider.go` calls `database/sql.Open`. Unsupported secure platforms fail closed. | Reserved absent files grant no runtime capability. | Any unreviewed importer, driver binding, or open call fails tests. | Provider evolution must remain auditable without activating a second application owner. |
+| `FR-DATABASE-SQLITE-PROVIDER-001` | MUST | Trusted infrastructure supplies a memory name or validated filesystem path and bounded busy timeout. | The provider constructs the only shipped-driver DSN, forces one connection open, and returns a pool only after the main generation remains the same exact file. Memory uses a unique shared cache; file DSNs use existing-file mode. Process-local keys capture an absolute clean path once and conservatively fold case on Windows and Darwin. | A missing file-backed endpoint may be created durably and privately. | Blank, padded, invalid-UTF-8, NUL-bearing, overlong, URI-shaped, ambiguous Windows device, symlink/reparse, irregular, hardlinked, foreign-owned, or replaced inputs fail without fallback. Distinct case-only files on a case-sensitive Darwin volume may contend on one key and fail by availability. | Physical addressing and driver binding must not split a commonly case-insensitive namespace into two process-local authorities; a conservative collision is safer than dual ownership. |
+| `FR-DATABASE-SQLITE-PROVIDER-002` | MUST | The provider prepares a directory, main file, or complete generation. | Unix traverses components with descriptor-relative no-follow operations and accepts only protected creation ancestry; Windows rejects reparses, retains the parent handle, and validates a current-user protected DACL. Main and sidecars are single-link owner-private regular files. Proven semantic violations—unsafe ancestry/type/owner/link count, DACL shape, reparse, identity drift, or incoherent sidecars—carry the provider's private unsafe-boundary classification; ordinary filesystem and platform API failures remain unclassified infrastructure errors. | Missing components and main files are private at creation, synced, and revalidated; existing owned members may be hardened. | Unsafe ancestry, type, owner, link count, mode/DACL, identity drift, orphan SHM, or mixed WAL and rollback journal fails closed; callers can distinguish proven integrity violations from transient I/O without parsing text. | SQLite must never follow an attacker-controlled generation member, while temporary metadata failure must not be mislabeled as corruption. |
+| `FR-DATABASE-SQLITE-PROVIDER-003` | MUST | Trusted code configures a live, memory, or caller-isolated offline pool. | Live file stores select WAL; offline pools select exclusive locking and DELETE journal; all modes verify foreign keys, bounded busy timeout, and `synchronous=FULL`. SQLite primary-code classification preserves only 5/6 as busy/locked and 11/26 as proven corruption/not-a-database; other result codes remain operational failures. | Configuration changes only provider connection state and SQLite journal metadata. | Nil/canceled context, nil pool, invalid timeout, unexpected selected mode, or provider failure returns an error. | Durability and concurrency settings must be explicit and verified without conflating transient I/O and corruption. |
+| `FR-DATABASE-SQLITE-PROVIDER-004` | MUST | Repository code adds a driver open, direct provider import, or platform implementation. | The exact-file guard permits compatibility open/schema, admits the exact readiness implementation when present, reserves future backup/migration filenames and shipped-driver use by future maintenance/staged-copy files; only `provider.go` calls `database/sql.Open`. Unsupported secure platforms fail closed. | Absent reserved files grant no capability; present importers remain governed by separate feature contracts. | Any unreviewed importer, driver binding, or open call fails tests. | Provider evolution must remain auditable without activating a second application owner. |
 
 ## Data And State Model
 
-The provider retains only a short process-local same-path open mutex. Returned
-pools belong to callers. Physical paths, DSNs, driver errors, and generation
-identities are never projected into the database protocol or configuration.
+The provider retains only a short process-local absolute-path open mutex. Its
+key is case-folded on Windows and Darwin and otherwise case-preserving; stable
+physical identity checks remain authoritative for existing generation members
+and aliases. On a case-sensitive Darwin volume a case-only pair may share a
+conservative serialization key, reducing availability without granting dual
+authority. Returned pools belong to callers. Physical paths, DSNs, driver
+errors, and generation identities are never projected into the database
+protocol or configuration.
 
 ## Surface Ownership
 
@@ -53,6 +60,7 @@ Owns: CODE internal/sqliteprovider/provider*.go
 Owns: CODE internal/sqliteprovider/security_*.go
 Owns: CODE internal/sqliteprovider/linkcount_*.go
 Owns: TEST internal/sqliteprovider/provider_core_test.go *
+Owns: TEST internal/sqliteprovider/provider_identity_test.go *
 Owns: TEST internal/sqliteprovider/provider_dirs_unix_test.go *
 Owns: TEST internal/sqliteprovider/provider_syscall_fault_linux_amd64_test.go *
 Owns: TEST internal/sqliteprovider/coverage_helpers_test.go *
@@ -78,6 +86,7 @@ Owns: TEST internal/sqliteprovider/security_*_test.go *
 1. Validate path syntax and timeout before filesystem or provider access.
 2. Traverse to the creation boundary with platform handles that reject links
    and reparses; privately create and sync missing directories and the main.
+   Tag proven unsafe semantic outcomes without tagging raw filesystem/API I/O.
 3. Capture main and complete-generation identities, build an existing-file DSN,
    eagerly ping, harden all present members, and recheck the main.
 4. Accept only coherent SQLite-managed WAL/SHM transitions around a stable main;
@@ -88,9 +97,9 @@ Owns: TEST internal/sqliteprovider/security_*_test.go *
 ## Cross-Feature Behavior
 
 `FR-DATABASE-SQLITE-CONTROL` supplies provider-neutral schema and integrity
-queries used by this core. `FR-SQLITE` remains the active compatibility store
-and does not consume the new provider yet. Later reviewed changes add exact
-internal consumers, readiness, and migration.
+queries used by this core. Inspection extends this provider package without
+activating an application route. Readiness and migration may consume it only
+through exact separately specified files.
 
 ## Failure And Edge Cases
 
@@ -106,7 +115,7 @@ internal consumers, readiness, and migration.
 
 | Requirement IDs | Evidence |
 | --- | --- |
-| `FR-DATABASE-SQLITE-PROVIDER-001`, `FR-DATABASE-SQLITE-PROVIDER-003` | [internal/sqliteprovider/provider_core_test.go](../../internal/sqliteprovider/provider_core_test.go), [internal/sqliteprovider/coverage_open_security_test.go](../../internal/sqliteprovider/coverage_open_security_test.go) |
+| `FR-DATABASE-SQLITE-PROVIDER-001`, `FR-DATABASE-SQLITE-PROVIDER-003` | [internal/sqliteprovider/provider_core_test.go](../../internal/sqliteprovider/provider_core_test.go), [internal/sqliteprovider/provider_identity_test.go](../../internal/sqliteprovider/provider_identity_test.go), [internal/sqliteprovider/coverage_open_security_test.go](../../internal/sqliteprovider/coverage_open_security_test.go) |
 | `FR-DATABASE-SQLITE-PROVIDER-002` | [internal/sqliteprovider/provider_dirs_unix_test.go](../../internal/sqliteprovider/provider_dirs_unix_test.go), [internal/sqliteprovider/linkcount_unix_test.go](../../internal/sqliteprovider/linkcount_unix_test.go), [internal/sqliteprovider/security_windows_test.go](../../internal/sqliteprovider/security_windows_test.go) |
 | `FR-DATABASE-SQLITE-PROVIDER-004` | [internal/sqliteprovider/import_guard_test.go](../../internal/sqliteprovider/import_guard_test.go) |
 

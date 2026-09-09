@@ -426,7 +426,10 @@ func ensurePrivateDirectory(path string, filesystem providerFilesystem) error {
 		return err
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("SQLite provider directory must be a real directory")
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider directory must be a real directory"),
+		)
 	}
 	if err := filesystem.secureDirectory(path); err != nil {
 		return err
@@ -466,7 +469,10 @@ func validateGenerationMembersWithFilesystem(
 		info, err := filesystem.lstat(member)
 		if errors.Is(err, os.ErrNotExist) {
 			if requireDatabase && index == 0 {
-				return errors.New("SQLite provider store disappeared")
+				return errors.Join(
+					errProviderUnsafeBoundary,
+					errors.New("SQLite provider store disappeared"),
+				)
 			}
 			continue
 		}
@@ -476,21 +482,38 @@ func validateGenerationMembersWithFilesystem(
 		if optional {
 			main, mainErr := filesystem.lstat(path)
 			if errors.Is(mainErr, os.ErrNotExist) {
-				return errors.New("SQLite provider sidecar exists without its database")
+				return errors.Join(
+					errProviderUnsafeBoundary,
+					errors.New("SQLite provider sidecar exists without its database"),
+				)
 			}
-			if mainErr != nil || main == nil || !main.Mode().IsRegular() ||
-				main.Mode()&os.ModeSymlink != 0 {
-				return errors.Join(errors.New("SQLite provider database identity is unsafe"), mainErr)
+			if mainErr != nil {
+				return mainErr
+			}
+			if main == nil || !main.Mode().IsRegular() || main.Mode()&os.ModeSymlink != 0 {
+				return errors.Join(
+					errProviderUnsafeBoundary,
+					errors.New("SQLite provider database identity is unsafe"),
+				)
 			}
 		}
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("SQLite provider generation member is not a regular file")
+			return errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider generation member is not a regular file"),
+			)
 		}
 		if !filesystem.singleLink(member, info) {
-			return errors.New("SQLite provider generation member has a hardlink alias")
+			return errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider generation member has a hardlink alias"),
+			)
 		}
 		if !filesystem.owned(member, info) {
-			return errors.New("SQLite provider generation member is owned by another user")
+			return errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider generation member is owned by another user"),
+			)
 		}
 		if err := filesystem.secureFile(member); err != nil {
 			if optional && errors.Is(err, os.ErrNotExist) {
@@ -504,11 +527,14 @@ func validateGenerationMembersWithFilesystem(
 		if optional && errors.Is(currentErr, os.ErrNotExist) {
 			continue
 		}
-		if currentErr != nil || current == nil || !current.Mode().IsRegular() ||
+		if currentErr != nil {
+			return fmt.Errorf("reinspect SQLite provider generation: %w", currentErr)
+		}
+		if current == nil || !current.Mode().IsRegular() ||
 			current.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, current) {
 			return errors.Join(
+				errProviderUnsafeBoundary,
 				errors.New("SQLite provider generation member changed while securing"),
-				currentErr,
 			)
 		}
 	}
@@ -522,13 +548,22 @@ func validateGenerationCoherence(path string, filesystem providerFilesystem) err
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if err != nil || info == nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.Join(errors.New("SQLite provider sidecar coherence is unavailable"), err)
+		if err != nil {
+			return fmt.Errorf("inspect SQLite provider sidecar coherence: %w", err)
+		}
+		if info == nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider sidecar coherence is unsafe"),
+			)
 		}
 		present[index] = true
 	}
 	if present[0] && present[2] || present[1] && !present[0] {
-		return errors.New("SQLite provider generation has incoherent sidecars")
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider generation has incoherent sidecars"),
+		)
 	}
 	return nil
 }
@@ -603,14 +638,27 @@ func FileURLPath(slashPath, slashVolume string) string {
 // IsBusyOrLocked reports the two SQLite primary result codes for which a
 // bounded read-side retry is safe.
 func IsBusyOrLocked(err error) bool {
-	var sqliteErr *moderncsqlite.Error
-	if !errors.As(err, &sqliteErr) {
+	code, ok := sqlitePrimaryResultCode(err)
+	return ok && (code == 5 || code == 6)
+}
+
+func isSQLiteIntegrityFailure(err error) bool {
+	code, ok := sqlitePrimaryResultCode(err)
+	if !ok {
 		return false
 	}
-	switch sqliteErr.Code() & 0xff {
-	case 5, 6: // SQLITE_BUSY, SQLITE_LOCKED
+	switch code {
+	case 11, 26: // SQLITE_CORRUPT, SQLITE_NOTADB
 		return true
 	default:
 		return false
 	}
+}
+
+func sqlitePrimaryResultCode(err error) (int, bool) {
+	var sqliteErr *moderncsqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return 0, false
+	}
+	return sqliteErr.Code() & 0xff, true
 }

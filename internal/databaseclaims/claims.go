@@ -527,6 +527,83 @@ func (lease *Lease) GuardStores() ([]storecatalog.Spec, func(), error) {
 	return stores, release, nil
 }
 
+// GuardStoresRefreshing exclusively holds the lease and fence across a short
+// filesystem operation. It refreshes physical identities before returning the
+// detached catalog; reconcile must be called before release to claim members
+// materialized by that operation and to reject replacement of existing ones.
+// The returned functions are non-reentrant and release must be called exactly
+// once when err is nil.
+func (lease *Lease) GuardStoresRefreshing() (
+	stores []storecatalog.Spec,
+	reconcile func() error,
+	release func(),
+	err error,
+) {
+	if lease == nil {
+		return nil, nil, nil, database.NewError(
+			database.CodeUnavailable,
+			"physical database lease is unavailable",
+		)
+	}
+	lease.mu.Lock()
+	if !lease.authorized() || lease.root == "" || lease.catalog == nil {
+		lease.mu.Unlock()
+		return nil, nil, nil, database.NewError(
+			database.CodeIntegrity,
+			"physical database lease lost authority",
+		)
+	}
+	guardedFence, releaseFence, guardErr := lease.fence.GuardChecked(lease.home)
+	if guardErr != nil {
+		lease.poisoned.Store(true)
+		lease.mu.Unlock()
+		return nil, nil, nil, errors.Join(database.NewError(
+			database.CodeIntegrity,
+			"physical database lease lost fence authority",
+		), guardErr)
+	}
+	var callbackMu sync.Mutex
+	active := true
+	releaseAll := func() {
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		if !active {
+			return
+		}
+		active = false
+		releaseFence()
+		lease.mu.Unlock()
+	}
+	ops := defaultClaimRefreshOps()
+	if lease.acquireClaim != nil {
+		ops.acquire = lease.acquireClaim
+	}
+	ops.guardedAuthority = guardedFence
+	if refreshErr := lease.refreshLockedWithOps("", ops); refreshErr != nil {
+		releaseAll()
+		return nil, nil, nil, refreshErr
+	}
+	stores = make([]storecatalog.Spec, len(lease.stores))
+	for index := range lease.stores {
+		stores[index] = cloneSpec(lease.stores[index])
+	}
+	reconcile = func() error {
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		if !active || lease.closed.Load() || lease.poisoned.Load() ||
+			!claimHandlesValid(lease.claims) || !lease.replacementPinsValid() ||
+			!guardedFence() {
+			lease.poisoned.Store(true)
+			return database.NewError(
+				database.CodeIntegrity,
+				"physical database refreshing guard is unavailable",
+			)
+		}
+		return lease.refreshLockedWithOps("", ops)
+	}
+	return stores, reconcile, releaseAll, nil
+}
+
 // Refresh monotonically claims physical identities materialized after the
 // lexical catalog was acquired. Replacing an existing main poisons the lease.
 func (lease *Lease) Refresh() error {

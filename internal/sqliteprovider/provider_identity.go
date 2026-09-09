@@ -8,15 +8,21 @@ import (
 	"strings"
 )
 
+var errProviderUnsafeBoundary = errors.New("SQLite provider filesystem boundary is unsafe")
+
 func inspectedPoolKey(path string) (string, error) {
 	absolute, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
 		return "", err
 	}
-	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
-		absolute = strings.ToLower(absolute)
+	return inspectedPoolKeyForPlatform(absolute, runtime.GOOS), nil
+}
+
+func inspectedPoolKeyForPlatform(absolute, goos string) string {
+	if goos == "windows" || goos == "darwin" {
+		return strings.ToLower(absolute)
 	}
-	return absolute, nil
+	return absolute
 }
 
 func inspectedGenerationIdentity(path string, main os.FileInfo) ([4]os.FileInfo, error) {
