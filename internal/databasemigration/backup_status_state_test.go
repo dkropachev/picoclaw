@@ -116,9 +116,11 @@ func TestMigrationStatusRejectsStaleIdentityAndConcurrentTerminalWriters(t *test
 	if payloadErr != nil {
 		t.Fatal(payloadErr)
 	}
-	if removeErr := os.Remove(path); removeErr != nil {
-		t.Fatal(removeErr)
+	retained := path + ".retained"
+	if renameErr := os.Rename(path, retained); renameErr != nil {
+		t.Fatal(renameErr)
 	}
+	t.Cleanup(func() { _ = os.Remove(retained) })
 	if writeErr := os.WriteFile(path, payload, 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
