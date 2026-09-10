@@ -32,39 +32,7 @@ func callWithDeniedLinuxSyscalls(
 	result := make(chan linuxSyscallFaultResult, 1)
 	go func() {
 		runtime.LockOSThread()
-		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
-			result <- linuxSyscallFaultResult{setupErr: err}
-			return
-		}
-		filters := []unix.SockFilter{{
-			Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS,
-			K:    0, // seccomp_data.nr
-		}}
-		for _, number := range syscalls {
-			filters = append(filters,
-				unix.SockFilter{
-					Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K,
-					Jf:   1,
-					K:    number,
-				},
-				unix.SockFilter{
-					Code: unix.BPF_RET | unix.BPF_K,
-					K:    unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM),
-				},
-			)
-		}
-		filters = append(filters, unix.SockFilter{
-			Code: unix.BPF_RET | unix.BPF_K,
-			K:    unix.SECCOMP_RET_ALLOW,
-		})
-		program := unix.SockFprog{Len: uint16(len(filters)), Filter: &filters[0]}
-		if err := unix.Prctl(
-			unix.PR_SET_SECCOMP,
-			unix.SECCOMP_MODE_FILTER,
-			uintptr(unsafe.Pointer(&program)),
-			0,
-			0,
-		); err != nil {
+		if err := installDeniedLinuxSyscalls(syscalls); err != nil {
 			result <- linuxSyscallFaultResult{setupErr: err}
 			return
 		}
@@ -75,6 +43,58 @@ func callWithDeniedLinuxSyscalls(
 		t.Fatalf("install syscall fault filter: %v", got.setupErr)
 	}
 	return got.callErr
+}
+
+func callWithLateDeniedLinuxSyscalls(
+	t *testing.T,
+	syscalls []uint32,
+	call func(func() error) error,
+) error {
+	t.Helper()
+	result := make(chan linuxSyscallFaultResult, 1)
+	go func() {
+		runtime.LockOSThread()
+		result <- linuxSyscallFaultResult{callErr: call(func() error {
+			return installDeniedLinuxSyscalls(syscalls)
+		})}
+	}()
+	got := <-result
+	return got.callErr
+}
+
+func installDeniedLinuxSyscalls(syscalls []uint32) error {
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return err
+	}
+	filters := []unix.SockFilter{{
+		Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS,
+		K:    0, // seccomp_data.nr
+	}}
+	for _, number := range syscalls {
+		filters = append(filters,
+			unix.SockFilter{
+				Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K,
+				Jf:   1,
+				K:    number,
+			},
+			unix.SockFilter{
+				Code: unix.BPF_RET | unix.BPF_K,
+				K:    unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM),
+			},
+		)
+	}
+	filters = append(filters, unix.SockFilter{
+		Code: unix.BPF_RET | unix.BPF_K,
+		K:    unix.SECCOMP_RET_ALLOW,
+	})
+	program := unix.SockFprog{Len: uint16(len(filters)), Filter: &filters[0]}
+	return unix.Prctl(
+		unix.PR_SET_SECCOMP,
+		unix.SECCOMP_MODE_FILTER,
+		uintptr(unsafe.Pointer(&program)),
+		0,
+		0,
+	)
 }
 
 func TestLinuxFileSecurityHelpersCleanUpAfterKernelFailures(t *testing.T) {
@@ -201,6 +221,43 @@ func TestLinuxManifestOperationsPropagateKernelFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLinuxManifestDirectorySyncFailureRollsBackServerStartup(t *testing.T) {
+	home := t.TempDir()
+	var server *Server
+	err := callWithLateDeniedLinuxSyscalls(
+		t,
+		[]uint32{unix.SYS_FSYNC},
+		func(deny func() error) error {
+			var startErr error
+			server, startErr = StartServer(context.Background(), ServerOptions{
+				Home:         home,
+				StartupGuard: deny,
+			})
+			return startErr
+		},
+	)
+	if server != nil || err == nil ||
+		!strings.Contains(err.Error(), "sync database broker manifest directory") ||
+		!strings.Contains(err.Error(), "sync rolled-back database broker manifest directory") {
+		t.Fatalf("server after manifest directory-sync failure = %#v, %v", server, err)
+	}
+	if _, manifestErr := ReadManifest(home); CodeOf(manifestErr) != CodeUnavailable {
+		t.Fatalf("directory-sync failure left discovery published: %v", manifestErr)
+	}
+	fence, fenceErr := AcquireMigrationFence(home)
+	if fenceErr != nil {
+		t.Fatalf("directory-sync failure retained online fence: %v", fenceErr)
+	}
+	if closeErr := fence.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	replacement, replacementErr := StartServer(context.Background(), ServerOptions{Home: home})
+	if replacementErr != nil {
+		t.Fatalf("directory-sync failure retained startup ownership: %v", replacementErr)
+	}
+	closeServer(t, replacement)
 }
 
 func TestUnixMissingHomeBelowIntermediateSymlinkIsRejected(t *testing.T) {

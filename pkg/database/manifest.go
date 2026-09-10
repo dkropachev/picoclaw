@@ -94,6 +94,15 @@ func validateManifest(manifest Manifest, stateDir string) error {
 }
 
 func writeManifest(stateDir string, manifest Manifest) error {
+	return writeManifestGuarded(stateDir, manifest, nil, nil)
+}
+
+func writeManifestGuarded(
+	stateDir string,
+	manifest Manifest,
+	startupGuard func() error,
+	beforePublish func() error,
+) error {
 	if err := validateManifest(manifest, stateDir); err != nil {
 		return err
 	}
@@ -133,12 +142,34 @@ func writeManifest(stateDir string, manifest Manifest) error {
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close database broker manifest: %w", err)
 	}
+	if startupGuard != nil {
+		if err := callStartupGuard(startupGuard); err != nil {
+			return err
+		}
+	}
+	if beforePublish != nil {
+		if err := beforePublish(); err != nil {
+			return err
+		}
+	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("publish database broker manifest: %w", err)
 	}
 	cleanup = false
-	if err := syncDirectory(stateDir); err != nil {
-		return fmt.Errorf("sync database broker manifest directory: %w", err)
+	if syncErr := syncDirectory(stateDir); syncErr != nil {
+		removeErr := os.Remove(path)
+		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			removeErr = fmt.Errorf("roll back database broker manifest publication: %w", removeErr)
+		}
+		resyncErr := syncDirectory(stateDir)
+		if resyncErr != nil {
+			resyncErr = fmt.Errorf("sync rolled-back database broker manifest directory: %w", resyncErr)
+		}
+		return errors.Join(
+			fmt.Errorf("sync database broker manifest directory: %w", syncErr),
+			removeErr,
+			resyncErr,
+		)
 	}
 	return nil
 }

@@ -23,6 +23,11 @@ type ServerOptions struct {
 	RequiredStores     []StoreID
 	StatusProvider     StatusProvider
 	Handler            Handler
+	// StartupGuard runs exactly once after private manifest-candidate preparation
+	// but before endpoint retirement, listener creation, or discovery publication.
+	// A failure aborts startup and releases every acquired fence without changing
+	// the preexisting endpoint or manifest.
+	StartupGuard func() error
 	// OnShutdownRequested runs after the authenticated response is written and
 	// while the online storage fence is still held. It must not call Server.Close.
 	OnShutdownRequested func()
@@ -112,9 +117,6 @@ func StartServer(parent context.Context, options ServerOptions) (*Server, error)
 	}()
 
 	endpoint := endpointForStateDirectory(stateDir)
-	if err := prepareEndpoint(endpoint); err != nil {
-		return nil, err
-	}
 	token, err := randomHex(tokenBytes)
 	if err != nil {
 		return nil, err
@@ -123,14 +125,14 @@ func StartServer(parent context.Context, options ServerOptions) (*Server, error)
 	if err != nil {
 		return nil, err
 	}
-	listener, err := listenLocal(endpoint)
-	if err != nil {
-		return nil, err
-	}
+	var listener net.Listener
+	endpointPrepared := false
 	cleanupListener := true
 	defer func() {
-		if cleanupListener {
-			_ = listener.Close()
+		if cleanupListener && endpointPrepared {
+			if listener != nil {
+				_ = listener.Close()
+			}
 			_ = cleanupEndpoint(endpoint)
 		}
 	}()
@@ -139,7 +141,20 @@ func StartServer(parent context.Context, options ServerOptions) (*Server, error)
 		PID: os.Getpid(), Protocol: ProtocolVersion, Token: token,
 		Endpoint: endpoint, Epoch: epoch,
 	}
-	if err := writeManifest(stateDir, manifest); err != nil {
+	beforePublish := func() error {
+		if err := prepareEndpoint(endpoint); err != nil {
+			return err
+		}
+		endpointPrepared = true
+		listener, err = listenLocal(endpoint)
+		return err
+	}
+	if err := writeManifestGuarded(
+		stateDir,
+		manifest,
+		options.StartupGuard,
+		beforePublish,
+	); err != nil {
 		return nil, err
 	}
 	now := options.Now
@@ -172,6 +187,18 @@ func StartServer(parent context.Context, options ServerOptions) (*Server, error)
 		}
 	}()
 	return server, nil
+}
+
+func callStartupGuard(guard func() error) (returnErr error) {
+	if guard == nil {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			returnErr = NewError(CodeInternal, "database broker startup guard failed")
+		}
+	}()
+	return guard()
 }
 
 // Manifest returns a detached copy of this server's discovery authority.
