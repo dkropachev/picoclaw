@@ -4,6 +4,7 @@
 package databaseclaims
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -623,15 +624,18 @@ type MigrationRefreshingGuard struct {
 }
 
 type migrationRefreshingGuardState struct {
-	mu           sync.Mutex
-	lease        *Lease
-	stores       []storecatalog.Spec
-	ops          claimRefreshOps
-	releaseFence func()
-	pinned       map[database.StoreID]struct{}
-	expectedMain map[database.StoreID]fileidentity.Identity
-	active       bool
-	releaseErr   error
+	mu            sync.Mutex
+	lease         *Lease
+	stores        []storecatalog.Spec
+	ops           claimRefreshOps
+	releaseFence  func()
+	pinned        map[database.StoreID]struct{}
+	expectedMain  map[database.StoreID]fileidentity.Identity
+	active        bool
+	releaseErr    error
+	providerChild *providerLeaseChild
+	releasing     bool
+	releaseDone   chan struct{}
 }
 
 // GuardStoresMigrating acquires a migration-only refreshing guard and returns
@@ -671,7 +675,7 @@ func (lease *Lease) GuardStoresMigrating() (*MigrationRefreshingGuard, error) {
 	state := &migrationRefreshingGuardState{
 		lease: lease, ops: ops, releaseFence: releaseFence,
 		pinned: make(map[database.StoreID]struct{}), expectedMain: expectedMain,
-		active: true,
+		active: true, releaseDone: make(chan struct{}),
 	}
 	fail := func(err error) (*MigrationRefreshingGuard, error) {
 		releaseFence()
@@ -794,6 +798,40 @@ func (guard *MigrationRefreshingGuard) PinReplacement(
 	return state.validateFinalMigrationObservationsLocked()
 }
 
+// DiscardReplacement retires an exact unused replacement pin before its
+// provider-owned stage is removed. A target with no published pin is an
+// idempotent no-op; physical claims and assignment history remain monotonic.
+func (guard *MigrationRefreshingGuard) DiscardReplacement(id database.StoreID) error {
+	if guard == nil || guard.state == nil || !id.Valid() {
+		return database.NewError(
+			database.CodeInvalid,
+			"physical database migration replacement discard is invalid",
+		)
+	}
+	state := guard.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.checkLocked(); err != nil {
+		return err
+	}
+	if err := state.validateExpectedMainsLocked(); err != nil {
+		return err
+	}
+	if _, claimed := state.lease.byID[id]; !claimed {
+		return database.NewError(database.CodeInvalid, "replacement store is not claimed")
+	}
+	if _, pinned := state.pinned[id]; !pinned {
+		return nil
+	}
+	if err := state.lease.retireReplacementPinsLocked(
+		map[database.StoreID]struct{}{id: {}},
+	); err != nil {
+		return err
+	}
+	delete(state.pinned, id)
+	return state.validateFinalMigrationObservationsLocked()
+}
+
 // ReconcileReplacement proves that the active main now names the exact pinned
 // staged identity, promotes that assignment, and consumes its retained pin.
 func (guard *MigrationRefreshingGuard) ReconcileReplacement(id database.StoreID) error {
@@ -834,19 +872,43 @@ func (guard *MigrationRefreshingGuard) ReconcileReplacement(id database.StoreID)
 	return state.validateFinalMigrationObservationsLocked()
 }
 
-// Release performs one final ordinary reconciliation, retires every unused
-// stage pin, then releases the migration fence and lease mutex. It is
-// idempotent so deferred cleanup can safely join an earlier explicit result.
+// Release first revokes and drains its registered provider child without
+// dropping the migration fence or lease mutex, then performs one final ordinary
+// reconciliation, retires every unused stage pin, and releases ownership. It
+// is idempotent so deferred cleanup can safely join an earlier explicit result.
 func (guard *MigrationRefreshingGuard) Release() error {
 	if guard == nil || guard.state == nil {
 		return nil
 	}
 	state := guard.state
 	state.mu.Lock()
-	defer state.mu.Unlock()
 	if !state.active {
-		return state.releaseErr
+		result := state.releaseErr
+		state.mu.Unlock()
+		return result
 	}
+	if state.releasing {
+		done := state.releaseDone
+		state.mu.Unlock()
+		<-done
+		state.mu.Lock()
+		result := state.releaseErr
+		state.mu.Unlock()
+		return result
+	}
+	state.releasing = true
+	child := state.providerChild
+	state.mu.Unlock()
+
+	var childDrainErr error
+	if child != nil {
+		childDrainErr = child.drain(context.Background(), errProviderGuardReleased)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.releasing = false
+	state.releaseErr = errors.Join(state.releaseErr, childDrainErr)
 	lease := state.lease
 	if checkErr := state.checkLocked(); checkErr != nil {
 		state.releaseErr = errors.Join(state.releaseErr, checkErr)
@@ -881,6 +943,7 @@ func (guard *MigrationRefreshingGuard) Release() error {
 	state.lease = nil
 	state.stores = nil
 	state.expectedMain = nil
+	close(state.releaseDone)
 	return state.releaseErr
 }
 
@@ -889,6 +952,12 @@ func (state *migrationRefreshingGuardState) checkLocked() error {
 		return database.NewError(
 			database.CodeIntegrity,
 			"physical database migration guard lost authority",
+		)
+	}
+	if state.releasing {
+		return database.NewError(
+			database.CodeUnavailable,
+			"physical database migration guard is releasing",
 		)
 	}
 	lease := state.lease
