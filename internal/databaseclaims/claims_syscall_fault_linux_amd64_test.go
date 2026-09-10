@@ -3,7 +3,9 @@
 package databaseclaims
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +20,9 @@ import (
 const (
 	claimFaultScenarioEnvironment = "PICOCLAW_CLAIM_FAULT_SCENARIO"
 	claimFaultRootEnvironment     = "PICOCLAW_CLAIM_FAULT_ROOT"
+	claimFaultMarkerTag           = uintptr(0x50434c41574d4152)
+	claimFaultMarkerBegin         = uintptr(1)
+	claimFaultMarkerEnd           = uintptr(2)
 )
 
 // TestMain provides fault children a stable main-thread trace point. Normal
@@ -45,6 +50,7 @@ func writeClaimChildCoverage() {
 }
 
 func runClaimSyscallFaultChild(scenario, root string) int {
+	runtime.LockOSThread()
 	if root == "" || unix.Gettid() != os.Getpid() {
 		return 3
 	}
@@ -68,10 +74,11 @@ func runClaimSyscallFaultChild(scenario, root string) int {
 	if err := unix.Kill(os.Getpid(), unix.SIGSTOP); err != nil {
 		return 5
 	}
+	claimSyscallFaultMarker(claimFaultMarkerBegin)
 
 	var err error
 	switch scenario {
-	case "root-missing-ancestors", "root-created-open", "root-created-fstat":
+	case "root-created-open", "root-created-fstat":
 		err = createClaimRootNoFollow(filepath.Join(root, "new"))
 	case "root-open", "root-initial-fstat", "root-revalidation-open", "root-close":
 		err = createClaimRootNoFollow(root)
@@ -79,8 +86,6 @@ func runClaimSyscallFaultChild(scenario, root string) int {
 		err = createClaimRootNoFollow(filepath.Join(root, "new"))
 	case "boundary-missing-ancestors":
 		err = validateClaimCreationBoundary(filepath.Join(root, "new"))
-	case "boundary-canonicalization":
-		err = validateClaimCreationBoundary(root)
 	case "lock-fstat", "lock-flock", "lock-reinspection", "lock-root-open",
 		"lock-second-inspection", "lock-root-close":
 		_, err = acquireClaim(root, strings.Repeat("a", 64))
@@ -88,55 +93,174 @@ func runClaimSyscallFaultChild(scenario, root string) int {
 		_, err = acquireClaimForTesting(root, strings.Repeat("b", 64))
 	case "valid-root-open", "valid-root-close", "valid-root-descriptor":
 		if validationClaim.valid() {
-			return 10
+			err = nil
+		} else {
+			err = errors.New("faulted validation failed closed")
 		}
-		err = errors.New("faulted validation failed closed")
 	case "test-root-chmod", "test-root-prepare-fstat", "test-root-reinspect":
 		_, err = PrepareRootForTesting(root)
 	default:
 		return 6
 	}
+	claimSyscallFaultMarker(claimFaultMarkerEnd)
 	if err == nil {
 		return 7
 	}
 	return 0
 }
 
-type claimSyscallFaultState struct {
-	scenario       string
-	statCalls      int
-	openCalls      int
-	closeCalls     int
-	afterMkdir     bool
-	afterFchmod    bool
-	injected       bool
-	currentCall    uint64
-	currentFD      uint64
-	lockFD         uint64
-	lockFDKnown    bool
-	openingLock    bool
-	createdFD      uint64
-	createdKnown   bool
-	openingCreated bool
-	hierarchy      int
+func claimSyscallFaultMarker(phase uintptr) {
+	result, secondary, errno := unix.RawSyscall6(
+		unix.SYS_GETPID, claimFaultMarkerTag, phase, 0, 0, 0, 0,
+	)
+	_ = result
+	_ = secondary
+	_ = errno
 }
 
-func (state *claimSyscallFaultState) observeEntry(registers *unix.PtraceRegs) {
+type claimSyscallFaultState struct {
+	scenario   string
+	root       string
+	targetPath string
+	lockName   string
+
+	scoped       bool
+	targetActive bool
+	injected     bool
+
+	pathStatCalls int
+	slashOpens    int
+	rootOpens     int
+	afterFchmod   bool
+	afterFlock    bool
+
+	currentCall uint64
+	currentFD   uint64
+	currentPath string
+	currentArg  uint64
+	currentFlag uint64
+
+	openingDirectory     bool
+	currentDirectoryPath string
+	currentSlashOpen     int
+	currentRootOpen      int
+	openingLock          bool
+	openingCreated       bool
+	openingMissingTarget bool
+	creatingTarget       bool
+
+	directories map[uint64]string
+
+	firstSlashFD       uint64
+	firstSlashKnown    bool
+	firstRootFD        uint64
+	firstRootKnown     bool
+	secondRootFD       uint64
+	secondRootKnown    bool
+	firstRootStat      bool
+	firstRootClosed    bool
+	missingParentFD    uint64
+	missingParentKnown bool
+	createdFD          uint64
+	createdKnown       bool
+	createdParent      uint64
+	lockFD             uint64
+	lockFDKnown        bool
+}
+
+func newClaimSyscallFaultState(scenario, root string, scoped bool) claimSyscallFaultState {
+	state := claimSyscallFaultState{
+		scenario: scenario,
+		root:     filepath.Clean(root),
+		scoped:   scoped,
+	}
+	switch scenario {
+	case "root-parent-fstat", "root-mkdir", "root-created-open", "root-created-fstat",
+		"boundary-missing-ancestors":
+		state.targetPath = filepath.Join(state.root, "new")
+	}
+	switch {
+	case strings.HasPrefix(scenario, "lock-"):
+		state.lockName = strings.Repeat("a", 64) + ".lock"
+	case strings.HasPrefix(scenario, "test-lock-"):
+		state.lockName = strings.Repeat("b", 64) + ".lock"
+	case strings.HasPrefix(scenario, "valid-"):
+		state.lockName = strings.Repeat("e", 64) + ".lock"
+	}
+	return state
+}
+
+func (state *claimSyscallFaultState) observeEntry(registers *unix.PtraceRegs, path string) {
 	state.currentCall = registers.Orig_rax
 	state.currentFD = registers.Rdi
+	state.currentPath = path
+	state.currentArg = registers.Rsi
+	state.currentFlag = registers.R10
+	state.resetEntryClassification()
+	if state.currentCall == unix.SYS_GETPID && registers.Rdi == uint64(claimFaultMarkerTag) {
+		state.targetActive = registers.Rsi == uint64(claimFaultMarkerBegin)
+		return
+	}
+	if state.scoped && !state.targetActive {
+		return
+	}
+	state.openingDirectory = claimFaultDirectoryOpen(registers)
+	if state.openingDirectory {
+		state.currentDirectoryPath = state.resolvePath(registers.Rdi, path)
+		if state.currentDirectoryPath == string(os.PathSeparator) {
+			state.slashOpens++
+			state.currentSlashOpen = state.slashOpens
+		}
+		if claimFaultAtCWD(registers.Rdi) && state.currentDirectoryPath == state.root {
+			state.rootOpens++
+			state.currentRootOpen = state.rootOpens
+		}
+	}
 	const lockOpenFlags = unix.O_CREAT | unix.O_RDWR | unix.O_NOFOLLOW
-	state.openingLock = state.scenario == "lock-fstat" &&
-		state.currentCall == unix.SYS_OPENAT && int64(registers.Rdi) != int64(unix.AT_FDCWD) &&
-		int(registers.Rdx)&lockOpenFlags == lockOpenFlags && registers.R10&0o777 == 0o600
-	flags := int(registers.Rdx)
-	state.openingCreated = (state.scenario == "root-created-open" ||
-		state.scenario == "root-created-fstat") && state.afterMkdir &&
-		state.currentCall == unix.SYS_OPENAT && int64(registers.Rdi) >= 0 &&
-		flags&(unix.O_DIRECTORY|unix.O_NOFOLLOW) == unix.O_DIRECTORY|unix.O_NOFOLLOW &&
-		flags&unix.O_ACCMODE == unix.O_RDONLY && flags&unix.O_CREAT == 0
+	state.openingLock = claimFaultNeedsLockFD(state.scenario) && state.firstRootKnown &&
+		state.currentCall == unix.SYS_OPENAT && registers.Rdi == state.firstRootFD &&
+		path == state.lockName && int(registers.Rdx)&lockOpenFlags == lockOpenFlags &&
+		registers.R10&0o777 == 0o600
+	createdScenario := state.scenario == "root-created-open" ||
+		state.scenario == "root-created-fstat"
+	state.openingMissingTarget = claimFaultCreationScenario(state.scenario) &&
+		state.openingDirectory && state.currentDirectoryPath == state.targetPath
+	state.openingCreated = createdScenario && state.missingParentKnown &&
+		state.currentCall == unix.SYS_OPENAT && registers.Rdi == state.createdParent &&
+		state.currentDirectoryPath == state.targetPath && state.openingDirectory
+	state.creatingTarget = claimFaultCreationScenario(state.scenario) && state.missingParentKnown &&
+		state.currentCall == unix.SYS_MKDIRAT && registers.Rdi == state.missingParentFD &&
+		state.resolvePath(registers.Rdi, path) == state.targetPath && registers.Rdx&0o777 == 0o700
 }
 
 func (state *claimSyscallFaultState) observeExit(result int64) {
+	if state.openingDirectory && result >= 0 {
+		if state.directories == nil {
+			state.directories = make(map[uint64]string)
+		}
+		fd := uint64(result)
+		state.directories[fd] = state.currentDirectoryPath
+		switch state.currentSlashOpen {
+		case 1:
+			state.firstSlashFD = fd
+			state.firstSlashKnown = true
+		}
+		switch state.currentRootOpen {
+		case 1:
+			state.firstRootFD = fd
+			state.firstRootKnown = true
+		case 2:
+			state.secondRootFD = fd
+			state.secondRootKnown = true
+		}
+	}
+	if state.openingMissingTarget && result == -int64(unix.ENOENT) {
+		state.missingParentFD = state.currentFD
+		state.missingParentKnown = true
+	}
+	if state.creatingTarget && result >= 0 {
+		state.createdParent = state.currentFD
+	}
 	if state.openingLock && result >= 0 {
 		state.lockFD = uint64(result)
 		state.lockFDKnown = true
@@ -145,47 +269,143 @@ func (state *claimSyscallFaultState) observeExit(result int64) {
 		state.createdFD = uint64(result)
 		state.createdKnown = true
 	}
+	if state.currentCall == unix.SYS_FSTAT && state.firstRootKnown &&
+		state.currentFD == state.firstRootFD && result >= 0 {
+		state.firstRootStat = true
+	}
+	if state.currentCall == unix.SYS_FCHMOD && state.firstRootKnown &&
+		state.currentFD == state.firstRootFD && state.currentArg&0o777 == 0o700 && result >= 0 {
+		state.afterFchmod = true
+	}
+	if state.currentCall == unix.SYS_FLOCK && state.lockFDKnown &&
+		state.currentFD == state.lockFD && state.currentArg == unix.LOCK_EX|unix.LOCK_NB && result >= 0 {
+		state.afterFlock = true
+	}
+	if state.currentCall == unix.SYS_CLOSE && result >= 0 {
+		if state.firstRootKnown && state.currentFD == state.firstRootFD && state.firstRootStat {
+			state.firstRootClosed = true
+		}
+		state.clearClosedFD(state.currentFD)
+	}
+	state.resetEntryClassification()
+}
+
+func (state *claimSyscallFaultState) resetEntryClassification() {
+	state.openingDirectory = false
+	state.currentDirectoryPath = ""
+	state.currentSlashOpen = 0
+	state.currentRootOpen = 0
 	state.openingLock = false
 	state.openingCreated = false
+	state.openingMissingTarget = false
+	state.creatingTarget = false
+}
+
+func (state *claimSyscallFaultState) resolvePath(dirFD uint64, path string) string {
+	if path == "" {
+		return ""
+	}
+	if claimFaultAtCWD(dirFD) {
+		if !filepath.IsAbs(path) {
+			return ""
+		}
+		return filepath.Clean(path)
+	}
+	parent, ok := state.directories[dirFD]
+	if !ok || filepath.IsAbs(path) {
+		return ""
+	}
+	return filepath.Join(parent, path)
+}
+
+func claimFaultDirectoryOpen(registers *unix.PtraceRegs) bool {
+	flags := int(registers.Rdx)
+	return registers.Orig_rax == unix.SYS_OPENAT &&
+		flags&(unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW) ==
+			unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW &&
+		flags&unix.O_ACCMODE == unix.O_RDONLY && flags&unix.O_CREAT == 0
+}
+
+func claimFaultAtCWD(fd uint64) bool {
+	return int64(fd) == int64(unix.AT_FDCWD)
+}
+
+func claimFaultCreationScenario(scenario string) bool {
+	switch scenario {
+	case "root-parent-fstat", "root-mkdir", "root-created-open", "root-created-fstat":
+		return true
+	default:
+		return false
+	}
+}
+
+func claimFaultNeedsLockFD(scenario string) bool {
+	return scenario == "lock-fstat" || scenario == "lock-flock" ||
+		scenario == "lock-reinspection"
+}
+
+func (state *claimSyscallFaultState) clearClosedFD(fd uint64) {
+	delete(state.directories, fd)
+	if state.firstSlashKnown && fd == state.firstSlashFD {
+		state.firstSlashKnown = false
+	}
+	if state.firstRootKnown && fd == state.firstRootFD {
+		state.firstRootKnown = false
+	}
+	if state.secondRootKnown && fd == state.secondRootFD {
+		state.secondRootKnown = false
+	}
+	if state.createdKnown && fd == state.createdFD {
+		state.createdKnown = false
+	}
+	if state.lockFDKnown && fd == state.lockFD {
+		state.lockFDKnown = false
+	}
 }
 
 func (state *claimSyscallFaultState) shouldInject(call uint64) (bool, unix.Errno) {
-	switch call {
-	case unix.SYS_OPENAT:
-		state.openCalls++
-	case unix.SYS_FSTAT:
-		state.statCalls++
-	case unix.SYS_CLOSE:
-		state.closeCalls++
+	if state.scoped && !state.targetActive {
+		return false, 0
 	}
 	switch state.scenario {
-	case "root-missing-ancestors", "boundary-missing-ancestors":
-		if call == unix.SYS_NEWFSTATAT && state.statCalls < 4 {
-			state.statCalls++
+	case "boundary-missing-ancestors":
+		expected := state.targetPath
+		for index := 0; index < state.pathStatCalls; index++ {
+			expected = filepath.Dir(expected)
+		}
+		if call == unix.SYS_NEWFSTATAT && state.pathStatCalls < 4 &&
+			claimFaultAtCWD(state.currentFD) && state.currentPath == expected &&
+			state.currentFlag&unix.AT_SYMLINK_NOFOLLOW != 0 {
+			state.pathStatCalls++
 			return true, unix.ENOENT
 		}
 	case "root-open":
-		if call == unix.SYS_OPENAT && !state.injected {
+		if state.openingDirectory && state.currentDirectoryPath == string(os.PathSeparator) &&
+			state.currentSlashOpen == 1 && !state.injected {
 			return true, unix.EIO
 		}
 	case "root-initial-fstat":
-		if call == unix.SYS_FSTAT && state.statCalls == 1 {
+		if call == unix.SYS_FSTAT && state.firstSlashKnown && state.currentFD == state.firstSlashFD &&
+			!state.injected {
 			return true, unix.EIO
 		}
 	case "root-revalidation-open":
-		if call == unix.SYS_OPENAT && state.openCalls == state.hierarchy+1 {
+		if state.openingDirectory && state.currentDirectoryPath == string(os.PathSeparator) &&
+			state.currentSlashOpen == 2 && !state.injected {
 			return true, unix.EIO
 		}
 	case "root-parent-fstat":
-		if call == unix.SYS_FSTAT && state.statCalls == state.hierarchy+1 {
+		if call == unix.SYS_FSTAT && state.missingParentKnown &&
+			state.currentFD == state.missingParentFD && !state.injected {
 			return true, unix.EIO
 		}
 	case "root-mkdir":
-		if call == unix.SYS_MKDIRAT && !state.injected {
+		if state.creatingTarget && !state.injected {
 			return true, unix.EIO
 		}
 	case "root-close":
-		if call == unix.SYS_CLOSE && state.closeCalls == 1 {
+		if call == unix.SYS_CLOSE && state.firstSlashKnown && state.currentFD == state.firstSlashFD &&
+			!state.injected {
 			return true, unix.EIO
 		}
 	case "root-created-open":
@@ -197,69 +417,71 @@ func (state *claimSyscallFaultState) shouldInject(call uint64) (bool, unix.Errno
 			!state.injected {
 			return true, unix.EIO
 		}
-	case "boundary-canonicalization":
-		if call == unix.SYS_NEWFSTATAT {
-			state.statCalls++
-			if state.statCalls == 2 {
-				return true, unix.EIO
-			}
-		}
 	case "lock-fstat":
 		if call == unix.SYS_FSTAT && state.lockFDKnown && state.currentFD == state.lockFD &&
 			!state.injected {
 			return true, unix.EIO
 		}
 	case "lock-root-open":
-		if call == unix.SYS_OPENAT && state.openCalls == state.hierarchy+1 {
+		if state.openingDirectory && state.currentDirectoryPath == state.root &&
+			state.currentRootOpen == 1 && !state.injected {
 			return true, unix.EIO
 		}
 	case "lock-second-inspection":
-		if call == unix.SYS_OPENAT && state.openCalls == state.hierarchy+2 {
+		if state.openingDirectory && state.currentDirectoryPath == string(os.PathSeparator) &&
+			state.currentSlashOpen == 2 && state.firstRootKnown && !state.injected {
 			return true, unix.EIO
 		}
 	case "lock-root-close":
-		if call == unix.SYS_CLOSE && state.closeCalls == 2*state.hierarchy+1 {
-			return true, unix.EIO
-		}
-	case "test-lock-root-open":
-		if call == unix.SYS_OPENAT && state.openCalls == 1 {
-			return true, unix.EIO
-		}
-	case "test-lock-fstat", "test-root-prepare-fstat":
-		if call == unix.SYS_FSTAT && state.statCalls == 1 {
-			return true, unix.EIO
-		}
-	case "valid-root-open":
-		// Target the root reopen after inspectUnixClaimRoot has completed,
-		// rather than assuming it is the process's second observed openat.
-		// Ptrace can observe restarted or runtime open calls differently across
-		// hosted-runner kernels, while the completed fstat+close phase is stable.
-		if call == unix.SYS_OPENAT && state.statCalls >= 1 && state.closeCalls >= 1 &&
+		if call == unix.SYS_CLOSE && state.firstRootKnown && state.currentFD == state.firstRootFD &&
 			!state.injected {
 			return true, unix.EIO
 		}
+	case "test-lock-root-open":
+		if state.openingDirectory && state.currentDirectoryPath == state.root &&
+			state.currentRootOpen == 1 && !state.injected {
+			return true, unix.EIO
+		}
+	case "test-lock-fstat", "test-root-prepare-fstat":
+		if call == unix.SYS_FSTAT && state.firstRootKnown && state.currentFD == state.firstRootFD &&
+			!state.injected {
+			return true, unix.EIO
+		}
+	case "valid-root-open":
+		if state.openingDirectory && state.currentDirectoryPath == state.root &&
+			state.currentRootOpen == 2 && state.firstRootClosed && !state.injected {
+			return true, unix.EIO
+		}
 	case "valid-root-close":
-		if call == unix.SYS_CLOSE && state.closeCalls == 2 {
+		if call == unix.SYS_CLOSE && state.secondRootKnown && state.currentFD == state.secondRootFD &&
+			!state.injected {
 			return true, unix.EIO
 		}
 	case "valid-root-descriptor":
-		if call == unix.SYS_FSTAT && state.statCalls == 2 {
+		if call == unix.SYS_FSTAT && state.secondRootKnown && state.currentFD == state.secondRootFD &&
+			!state.injected {
 			return true, unix.EIO
 		}
 	case "test-root-chmod":
-		if call == unix.SYS_FCHMOD && !state.injected {
+		if call == unix.SYS_FCHMOD && state.firstRootKnown && state.currentFD == state.firstRootFD &&
+			state.currentArg&0o777 == 0o700 && !state.injected {
 			return true, unix.EIO
 		}
 	case "test-root-reinspect":
-		if state.afterFchmod && call == unix.SYS_NEWFSTATAT && !state.injected {
+		if state.afterFchmod && call == unix.SYS_NEWFSTATAT && claimFaultAtCWD(state.currentFD) &&
+			state.currentPath == state.root && state.currentFlag&unix.AT_SYMLINK_NOFOLLOW != 0 &&
+			!state.injected {
 			return true, unix.EIO
 		}
 	case "lock-flock":
-		if call == unix.SYS_FLOCK && !state.injected {
+		if call == unix.SYS_FLOCK && state.lockFDKnown && state.currentFD == state.lockFD &&
+			state.currentArg == unix.LOCK_EX|unix.LOCK_NB && !state.injected {
 			return true, unix.EIO
 		}
 	case "lock-reinspection":
-		if call == unix.SYS_NEWFSTATAT && !state.injected {
+		if state.afterFlock && call == unix.SYS_NEWFSTATAT && state.firstRootKnown &&
+			state.currentFD == state.firstRootFD && state.currentPath == state.lockName &&
+			state.currentFlag&unix.AT_SYMLINK_NOFOLLOW != 0 && !state.injected {
 			return true, unix.EIO
 		}
 	}
@@ -267,32 +489,44 @@ func (state *claimSyscallFaultState) shouldInject(call uint64) (bool, unix.Errno
 }
 
 func TestClaimSyscallFaultValidRootOpenUsesCompletedInspectionPhase(t *testing.T) {
-	state := claimSyscallFaultState{scenario: "valid-root-open"}
-	if inject, _ := state.shouldInject(unix.SYS_OPENAT); inject {
+	root := "/tmp/claim-root"
+	state := newClaimSyscallFaultState("valid-root-open", root, false)
+	atCWD := int64(unix.AT_FDCWD)
+	rootOpen := claimFaultDirectoryOpenRegisters(uint64(atCWD))
+	state.observeEntry(&rootOpen, root)
+	if inject, _ := state.shouldInject(state.currentCall); inject {
 		t.Fatal("valid-root reopen fault injected before root inspection")
 	}
-	state.shouldInject(unix.SYS_FSTAT)
-	state.shouldInject(unix.SYS_CLOSE)
-	if inject, errno := state.shouldInject(unix.SYS_OPENAT); !inject || errno != unix.EIO {
+	state.observeExit(40)
+	state.observeEntry(&unix.PtraceRegs{Orig_rax: unix.SYS_FSTAT, Rdi: 40}, "")
+	state.observeExit(0)
+	state.observeEntry(&unix.PtraceRegs{Orig_rax: unix.SYS_CLOSE, Rdi: 40}, "")
+	state.observeExit(0)
+	state.observeEntry(&rootOpen, root)
+	if inject, errno := state.shouldInject(state.currentCall); !inject || errno != unix.EIO {
 		t.Fatalf("valid-root reopen fault = %t, %v", inject, errno)
 	}
 }
 
 func TestClaimSyscallFaultLockFstatUsesCapturedDescriptor(t *testing.T) {
-	state := claimSyscallFaultState{scenario: "lock-fstat"}
+	root := "/tmp/claim-root"
+	state := newClaimSyscallFaultState("lock-fstat", root, false)
 	runtimeDirectory := int64(unix.AT_FDCWD)
 	runtimeOpen := unix.PtraceRegs{
 		Orig_rax: unix.SYS_OPENAT, Rdi: uint64(runtimeDirectory),
 		Rdx: unix.O_CREAT | unix.O_RDWR | unix.O_NOFOLLOW, R10: 0o600,
 	}
-	state.observeEntry(&runtimeOpen)
+	state.observeEntry(&runtimeOpen, "/tmp/runtime-file")
 	state.observeExit(41)
 	if state.lockFDKnown {
 		t.Fatal("runtime openat was captured as the claim lock")
 	}
+	rootOpen := claimFaultDirectoryOpenRegisters(uint64(runtimeDirectory))
+	state.observeEntry(&rootOpen, root)
+	state.observeExit(7)
 	lockOpen := runtimeOpen
 	lockOpen.Rdi = 7
-	state.observeEntry(&lockOpen)
+	state.observeEntry(&lockOpen, state.lockName)
 	state.observeExit(42)
 	state.currentFD = 41
 	if inject, _ := state.shouldInject(unix.SYS_FSTAT); inject {
@@ -309,20 +543,30 @@ func TestClaimSyscallFaultLockFstatUsesCapturedDescriptor(t *testing.T) {
 }
 
 func TestClaimSyscallFaultCreatedDirectoryUsesCapturedDescriptor(t *testing.T) {
+	root := "/tmp/claim-root"
 	runtimeDirectory := int64(unix.AT_FDCWD)
-	runtimeOpen := unix.PtraceRegs{
-		Orig_rax: unix.SYS_OPENAT, Rdi: uint64(runtimeDirectory),
-		Rdx: unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW,
-	}
-	state := claimSyscallFaultState{scenario: "root-created-fstat", afterMkdir: true}
-	state.observeEntry(&runtimeOpen)
+	runtimeOpen := claimFaultDirectoryOpenRegisters(uint64(runtimeDirectory))
+	state := newClaimSyscallFaultState("root-created-fstat", root, false)
+	state.directories = map[uint64]string{7: root, 8: "/tmp/unrelated"}
+	state.observeEntry(&runtimeOpen, "/tmp/runtime-directory")
 	state.observeExit(41)
 	if state.createdKnown {
 		t.Fatal("runtime directory openat was captured as the created claim root")
 	}
-	createdOpen := runtimeOpen
-	createdOpen.Rdi = 7
-	state.observeEntry(&createdOpen)
+	createdOpen := claimFaultDirectoryOpenRegisters(7)
+	state.observeEntry(&createdOpen, "new")
+	state.observeExit(-int64(unix.ENOENT))
+	mkdir := unix.PtraceRegs{Orig_rax: unix.SYS_MKDIRAT, Rdi: 7, Rdx: 0o700}
+	state.observeEntry(&mkdir, "new")
+	state.observeExit(0)
+	unrelatedOpen := createdOpen
+	unrelatedOpen.Rdi = 8
+	state.observeEntry(&unrelatedOpen, "new")
+	state.observeExit(41)
+	if state.createdKnown {
+		t.Fatal("unrelated relative directory openat was captured as the created claim root")
+	}
+	state.observeEntry(&createdOpen, "new")
 	state.observeExit(42)
 	state.currentFD = 41
 	if inject, _ := state.shouldInject(unix.SYS_FSTAT); inject {
@@ -337,15 +581,95 @@ func TestClaimSyscallFaultCreatedDirectoryUsesCapturedDescriptor(t *testing.T) {
 		t.Fatal("created claim root descriptor was faulted twice")
 	}
 
-	openState := claimSyscallFaultState{scenario: "root-created-open", afterMkdir: true}
-	openState.observeEntry(&runtimeOpen)
+	openState := newClaimSyscallFaultState("root-created-open", root, false)
+	openState.directories = map[uint64]string{7: root, 8: "/tmp/unrelated"}
+	openState.observeEntry(&createdOpen, "new")
+	openState.observeExit(-int64(unix.ENOENT))
+	openState.observeEntry(&mkdir, "new")
+	openState.observeExit(0)
+	openState.observeEntry(&runtimeOpen, "/tmp/runtime-directory")
 	if inject, _ := openState.shouldInject(unix.SYS_OPENAT); inject {
 		t.Fatal("runtime directory openat was faulted")
 	}
-	openState.observeEntry(&createdOpen)
+	openState.observeEntry(&unrelatedOpen, "new")
+	if inject, _ := openState.shouldInject(unix.SYS_OPENAT); inject {
+		t.Fatal("unrelated relative directory openat was faulted")
+	}
+	openState.observeEntry(&createdOpen, "new")
 	if inject, errno := openState.shouldInject(unix.SYS_OPENAT); !inject || errno != unix.EIO {
 		t.Fatalf("created claim root open fault = %t, %v", inject, errno)
 	}
+}
+
+func TestClaimSyscallFaultScopeMarkers(t *testing.T) {
+	state := newClaimSyscallFaultState("root-open", "/tmp/claim-root", true)
+	atCWD := int64(unix.AT_FDCWD)
+	open := claimFaultDirectoryOpenRegisters(uint64(atCWD))
+	state.observeEntry(&open, string(os.PathSeparator))
+	if inject, _ := state.shouldInject(state.currentCall); inject {
+		t.Fatal("fault injected before target marker")
+	}
+	begin := unix.PtraceRegs{
+		Orig_rax: unix.SYS_GETPID,
+		Rdi:      uint64(claimFaultMarkerTag),
+		Rsi:      uint64(claimFaultMarkerBegin),
+	}
+	state.observeEntry(&begin, "")
+	state.observeExit(int64(os.Getpid()))
+	state.observeEntry(&open, string(os.PathSeparator))
+	if inject, errno := state.shouldInject(state.currentCall); !inject || errno != unix.EIO {
+		t.Fatalf("marked target fault = %t, %v", inject, errno)
+	}
+	end := begin
+	end.Rsi = uint64(claimFaultMarkerEnd)
+	state.observeEntry(&end, "")
+	state.injected = false
+	state.observeEntry(&open, string(os.PathSeparator))
+	if inject, _ := state.shouldInject(state.currentCall); inject {
+		t.Fatal("fault injected after target marker")
+	}
+}
+
+func claimFaultDirectoryOpenRegisters(dirFD uint64) unix.PtraceRegs {
+	return unix.PtraceRegs{
+		Orig_rax: unix.SYS_OPENAT,
+		Rdi:      dirFD,
+		Rdx:      unix.O_RDONLY | unix.O_CLOEXEC | unix.O_DIRECTORY | unix.O_NOFOLLOW,
+	}
+}
+
+func claimFaultCallHasPath(call uint64) bool {
+	return call == unix.SYS_OPENAT || call == unix.SYS_MKDIRAT || call == unix.SYS_NEWFSTATAT
+}
+
+func readClaimTraceeString(pid int, address uintptr) (string, error) {
+	const (
+		chunkSize = 64
+		maxLength = 4096
+	)
+	if address == 0 {
+		return "", errors.New("null syscall path")
+	}
+	buffer := make([]byte, 0, 256)
+	for len(buffer) < maxLength {
+		chunk := make([]byte, chunkSize)
+		count, err := unix.PtracePeekData(pid, address+uintptr(len(buffer)), chunk)
+		if count > 0 {
+			chunk = chunk[:count]
+			if terminator := bytes.IndexByte(chunk, 0); terminator >= 0 {
+				buffer = append(buffer, chunk[:terminator]...)
+				return string(buffer), nil
+			}
+			buffer = append(buffer, chunk...)
+		}
+		if err != nil {
+			return "", fmt.Errorf("ptrace peek data: %w", err)
+		}
+		if count == 0 {
+			return "", errors.New("ptrace returned an empty syscall path chunk")
+		}
+	}
+	return "", errors.New("syscall path exceeds PATH_MAX")
 }
 
 func TestCoverageClaimSyscallFailureBranches(t *testing.T) {
@@ -417,12 +741,7 @@ func runClaimSyscallFault(t *testing.T, scenario string) {
 		t.Fatalf("configure claim fault child tracing: %v", err)
 	}
 
-	cleanRoot := strings.TrimPrefix(filepath.Clean(root), string(os.PathSeparator))
-	hierarchy := 1
-	if cleanRoot != "" {
-		hierarchy += len(strings.Split(cleanRoot, string(os.PathSeparator)))
-	}
-	state := claimSyscallFaultState{scenario: scenario, hierarchy: hierarchy}
+	state := newClaimSyscallFaultState(scenario, root, true)
 	entering := true
 	var injectedErrno unix.Errno
 	signalToDeliver := 0
@@ -472,7 +791,15 @@ func runClaimSyscallFault(t *testing.T, scenario string) {
 			t.Fatal(err)
 		}
 		if entering {
-			state.observeEntry(&registers)
+			path := ""
+			if claimFaultCallHasPath(registers.Orig_rax) && (!state.scoped || state.targetActive) {
+				var err error
+				path, err = readClaimTraceeString(pid, uintptr(registers.Rsi))
+				if err != nil {
+					t.Fatalf("read claim fault child syscall path: %v", err)
+				}
+			}
+			state.observeEntry(&registers, path)
 			inject, errno := state.shouldInject(state.currentCall)
 			if inject {
 				registers.Orig_rax = ^uint64(0)
@@ -491,10 +818,6 @@ func runClaimSyscallFault(t *testing.T, scenario string) {
 				if err := unix.PtraceSetRegs(pid, &registers); err != nil {
 					t.Fatal(err)
 				}
-			} else if state.currentCall == unix.SYS_MKDIRAT && int64(registers.Rax) >= 0 {
-				state.afterMkdir = true
-			} else if state.currentCall == unix.SYS_FCHMOD && int64(registers.Rax) >= 0 {
-				state.afterFchmod = true
 			}
 		}
 		entering = !entering
