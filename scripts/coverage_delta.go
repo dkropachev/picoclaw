@@ -1433,6 +1433,8 @@ func runIntegrationCoverage(
 		"INTEGRATION_COVERPROFILE_DIR=/workspace/.coverage/integration-"+label,
 		"INTEGRATION_COMPOSE_PROJECT_NAMESPACE="+filepath.Base(filepath.Dir(worktree))+"-"+label,
 		"INTEGRATION_GOMAXPROCS="+strconv.Itoa(coverageGoMaxProcs),
+		"INTEGRATION_GOCACHE="+coverageEnvironmentValue(environment, "GOCACHE"),
+		"INTEGRATION_GOMODCACHE="+coverageEnvironmentValue(environment, "GOMODCACHE"),
 	)
 	if tags != "" {
 		cmd.Env = append(cmd.Env, "GOFLAGS=-tags="+tags+",integration")
@@ -1576,7 +1578,10 @@ func coverageEnvironment(base []string, home string, caches goCachePaths) []stri
 		upper := strings.ToUpper(name)
 		if ok && (upper == "HOME" || upper == "USERPROFILE" ||
 			isAmbientTestCredentialOrAuthority(upper) ||
-			strings.HasPrefix(upper, "PICOCLAW_") || strings.HasPrefix(upper, "XDG_") ||
+			strings.HasPrefix(upper, "PICOCLAW_") ||
+			(strings.HasPrefix(upper, "INTEGRATION_") &&
+				upper != "INTEGRATION_RUNNER_UID" && upper != "INTEGRATION_RUNNER_GID") ||
+			strings.HasPrefix(upper, "XDG_") ||
 			upper == "CODEX_HOME" || upper == "CLAUDE_CONFIG_DIR" || upper == "OPENCLAW_HOME" ||
 			upper == "GNUPGHOME" || upper == "GIT_CONFIG_GLOBAL" ||
 			upper == "GIT_CONFIG_NOSYSTEM" || upper == "TMPDIR" ||

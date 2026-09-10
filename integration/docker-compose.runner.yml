@@ -1,19 +1,34 @@
 services:
   integration-runner:
-    image: golang:1.25-bookworm
-    working_dir: /workspace
+    image: golang:1.25.13-bookworm
+    user: "${INTEGRATION_RUNNER_UID}:${INTEGRATION_RUNNER_GID}"
+    working_dir: "${INTEGRATION_REPO_ROOT}"
     entrypoint: ["bash", "-c"]
     volumes:
-      - ${INTEGRATION_REPO_ROOT}:/workspace
-      - picoclaw-integration-gocache:/go-build-cache
-      - picoclaw-integration-gomodcache:/go-mod-cache
+      - type: bind
+        source: "${INTEGRATION_REPO_ROOT}"
+        target: "${INTEGRATION_REPO_ROOT}"
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${INTEGRATION_REPO_ROOT}"
+        target: /workspace
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${INTEGRATION_GOCACHE}"
+        target: "${INTEGRATION_GOCACHE}"
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${INTEGRATION_GOMODCACHE}"
+        target: "${INTEGRATION_GOMODCACHE}"
+        bind:
+          create_host_path: false
     environment:
-      GOCACHE: /go-build-cache
-      GOMODCACHE: /go-mod-cache
+      HOME: /tmp/picoclaw-integration-home
+      GOCACHE: "${INTEGRATION_GOCACHE}"
+      GOMODCACHE: "${INTEGRATION_GOMODCACHE}"
       GOTOOLCHAIN: local
       CGO_ENABLED: "0"
       GOFLAGS: -tags=goolm,stdjson,integration
-
-volumes:
-  picoclaw-integration-gocache:
-  picoclaw-integration-gomodcache:
