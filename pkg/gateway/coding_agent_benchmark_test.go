@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
@@ -46,7 +47,9 @@ const (
 // workflowAgentRunner-backed scope/completion AI without network access. LocalCI
 // results are scripted from the tracked production plan so the repair-feedback
 // cycle remains deterministic on hosts that cannot create the production
-// sandbox.
+// sandbox. This is the sole ordinary test that runs the complete external
+// grader against the Gateway-produced candidate; the dedicated integration
+// package separately owns hidden-evaluator mutation quality.
 func TestCodingAgentBenchmarkScriptedGatewayPath(t *testing.T) {
 	requireCodingAgentBenchmarkGit(t)
 	fixture := newCodingAgentBenchmarkFixture(t)
@@ -68,6 +71,15 @@ func TestCodingAgentBenchmarkScriptedGatewayPath(t *testing.T) {
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 			t.Fatalf("scripted artifact %q mode = %v, error = %v", name, info, err)
 		}
+	}
+	graderRaw := readCodingAgentBenchmarkBoundedFile(
+		t,
+		filepath.Join(artifactRoot, "grader-v2.json"),
+		codingAgentBenchmarkGraderMaxOutput,
+	)
+	if got, want := result.manifest.Grader.ArtifactSHA256,
+		codingAgentBenchmarkDigest("grader", string(graderRaw)); got != want {
+		t.Fatalf("manifest grader digest = %q, want %q", got, want)
 	}
 }
 
@@ -1314,14 +1326,36 @@ func runCodingAgentBenchmarkGrader(
 	requireCodingAgentBenchmarkGraderDependencies(t)
 	checkout := filepath.Join(t.TempDir(), "grader-checkout")
 	materializeCodingAgentBenchmarkCandidate(t, fixture, patch, checkout)
+	candidatePaths := []string{"ledger/ledger.go", "ledger/ledger_candidate_test.go"}
+	referenceContent := map[string]string{
+		"ledger/ledger.go":                fixture.referenceLedger,
+		"ledger/ledger_candidate_test.go": fixture.referenceTests,
+	}
+	candidateBefore := make(map[string][]byte, len(candidatePaths))
+	for _, relative := range candidatePaths {
+		candidateBefore[relative] = readCodingAgentBenchmarkBoundedFile(
+			t,
+			filepath.Join(checkout, filepath.FromSlash(relative)),
+			1<<20,
+		)
+		if string(candidateBefore[relative]) != referenceContent[relative] {
+			t.Fatalf("Gateway benchmark candidate %s does not match the canonical reference", relative)
+		}
+	}
 	graderOutput := filepath.Join(t.TempDir(), "grader-output")
-	command := exec.Command(
+	graderCtx, cancelGrader := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancelGrader()
+	command := exec.CommandContext(
+		graderCtx,
 		"bash", filepath.Join(fixture.graderRoot, "grade.sh"), checkout, graderOutput, fixture.head,
 	)
 	command.Env = append(codingAgentBenchmarkCommandEnv(), "GOWORK=off", "GOPROXY=off")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("benchmark grader failed: %v\n%s", err, output)
+	}
+	if graderCtx.Err() != nil {
+		t.Fatalf("benchmark grader timed out: %v", graderCtx.Err())
 	}
 	raw := readCodingAgentBenchmarkBoundedFile(
 		t, filepath.Join(graderOutput, "grader.json"), codingAgentBenchmarkGraderMaxOutput,
@@ -1330,10 +1364,130 @@ func runCodingAgentBenchmarkGrader(
 	if err != nil {
 		t.Fatalf("decode benchmark grader artifact: %v", err)
 	}
+	assertCodingAgentBenchmarkGraderEvidence(t, fixture, checkout, summary)
+	if head := runCodingAgentBenchmarkGit(t, checkout, "rev-parse", "HEAD"); head != fixture.head {
+		t.Fatalf("grader changed candidate HEAD = %q, want %q", head, fixture.head)
+	}
+	if _, statErr := os.Lstat(
+		filepath.Join(checkout, "ledger", "ledger_hidden_test.go"),
+	); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("grader left its hidden test in the candidate: %v", statErr)
+	}
+	for relative, before := range candidateBefore {
+		after := readCodingAgentBenchmarkBoundedFile(
+			t,
+			filepath.Join(checkout, filepath.FromSlash(relative)),
+			1<<20,
+		)
+		if !bytes.Equal(after, before) {
+			t.Fatalf("grader changed candidate file %s", relative)
+		}
+	}
 	if artifactRoot != "" {
 		writeCodingAgentBenchmarkArtifact(t, artifactRoot, "grader-v2.json", raw)
 	}
 	return codingAgentBenchmarkGraderSummary(summary, raw)
+}
+
+func assertCodingAgentBenchmarkGraderEvidence(
+	t *testing.T,
+	fixture codingAgentBenchmarkFixture,
+	checkout string,
+	artifact codingAgentBenchmarkGraderArtifact,
+) {
+	t.Helper()
+	wantChanged := []string{"ledger/ledger.go", "ledger/ledger_candidate_test.go"}
+	changed := append([]string(nil), artifact.ChangedFiles...)
+	sort.Strings(changed)
+	if strings.Join(changed, "\x00") != strings.Join(wantChanged, "\x00") {
+		t.Fatalf("grader changed files = %#v, want %#v", changed, wantChanged)
+	}
+
+	mutantsRoot := filepath.Join(fixture.graderRoot, "testdata", "mutants")
+	entries, err := os.ReadDir(mutantsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutantIDs := make([]string, 0, len(entries))
+	var mutantDigestInput bytes.Buffer
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			t.Fatalf("grader mutant inventory contains non-directory %q", entry.Name())
+		}
+		mutantID := entry.Name()
+		mutantIDs = append(mutantIDs, mutantID)
+		relative := "./" + mutantID + "/ledger.go"
+		raw := readCodingAgentBenchmarkBoundedFile(
+			t,
+			filepath.Join(mutantsRoot, mutantID, "ledger.go"),
+			1<<20,
+		)
+		fileDigest := sha256.Sum256(raw)
+		mutantDigestInput.WriteString(relative)
+		mutantDigestInput.WriteByte(0)
+		fmt.Fprintf(&mutantDigestInput, "%x  %s\n", fileDigest, relative)
+	}
+	sort.Strings(mutantIDs)
+	artifactMutantIDs := make([]string, 0, len(artifact.Mutation.Mutants))
+	for _, mutant := range artifact.Mutation.Mutants {
+		artifactMutantIDs = append(artifactMutantIDs, mutant.ID)
+	}
+	sort.Strings(artifactMutantIDs)
+	if strings.Join(artifactMutantIDs, "\x00") != strings.Join(mutantIDs, "\x00") {
+		t.Fatalf("grader mutant IDs = %#v, want %#v", artifactMutantIDs, mutantIDs)
+	}
+
+	wantDigests := []string{
+		codingAgentBenchmarkCandidatePatchSHA256(t, checkout),
+		codingAgentBenchmarkRawSHA256(readCodingAgentBenchmarkBoundedFile(
+			t, filepath.Join(fixture.graderRoot, "grade.sh"), 1<<20,
+		)),
+		codingAgentBenchmarkRawSHA256(readCodingAgentBenchmarkBoundedFile(
+			t,
+			filepath.Join(fixture.graderRoot, "testdata", "hidden", "ledger_hidden_test.go"),
+			1<<20,
+		)),
+		codingAgentBenchmarkRawSHA256(mutantDigestInput.Bytes()),
+	}
+	gotDigests := []string{
+		artifact.PatchSHA256,
+		artifact.GraderSHA256,
+		artifact.HiddenTestSHA256,
+		artifact.MutantsSHA256,
+	}
+	for index := range wantDigests {
+		if gotDigests[index] != wantDigests[index] {
+			t.Fatalf("grader evidence digest %d = %q, want %q", index, gotDigests[index], wantDigests[index])
+		}
+	}
+}
+
+func codingAgentBenchmarkCandidatePatchSHA256(t *testing.T, checkout string) string {
+	t.Helper()
+	patchIndex := filepath.Join(t.TempDir(), "grader-patch-index")
+	runGit := func(arguments ...string) []byte {
+		command := exec.Command("git", arguments...)
+		command.Dir = checkout
+		command.Env = append(codingAgentBenchmarkCommandEnv(), "GIT_INDEX_FILE="+patchIndex)
+		output, err := command.Output()
+		if err != nil {
+			t.Fatalf("canonical grader patch git %s: %v", strings.Join(arguments, " "), err)
+		}
+		return output
+	}
+	runGit("read-tree", "HEAD")
+	untracked := runGit("ls-files", "-z", "--others", "--exclude-standard")
+	if len(untracked) > 0 {
+		paths := strings.Split(strings.TrimSuffix(string(untracked), "\x00"), "\x00")
+		arguments := append([]string{"add", "--intent-to-add", "--"}, paths...)
+		runGit(arguments...)
+	}
+	return codingAgentBenchmarkRawSHA256(runGit("diff", "--binary", "HEAD"))
+}
+
+func codingAgentBenchmarkRawSHA256(raw []byte) string {
+	digest := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
 func runCodingAgentBenchmarkSandboxedGrader(

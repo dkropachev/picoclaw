@@ -42,6 +42,15 @@ mandatory check, and the sole direct-binary API test performs its own lazy,
 test-owned build. Coverage refs likewise use inert owned sentinels rather than
 building binaries that their selected tests replace.
 
+Coverage also excludes only the exact benchmark cases that recursively launch
+full graders, hidden mutation matrices, or cross-process test binaries. The
+ordinary package shards remain authoritative for those contracts. The scripted
+Gateway benchmark is the sole ordinary host owner of the complete external
+grader run and passes its real output through the strict manifest decoder. The
+dedicated grader package separately proves hidden-evaluator mutation quality
+and unsafe-input rejection without repeating the reference grader. Opt-in
+production and live benchmarks retain the real sandboxed grader.
+
 ## Data And State Model
 
 Portability state includes target OS/architecture tuples, release asset names,
