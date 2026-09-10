@@ -8,10 +8,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func generationHasSingleLink(path string, expected os.FileInfo) bool {
+func classifyGenerationLinkCount(path string, expected os.FileInfo) generationLinkClass {
 	pathPointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return false
+		return generationLinkUnavailable
 	}
 	handle, err := windows.CreateFile(
 		pathPointer,
@@ -23,24 +23,31 @@ func generationHasSingleLink(path string, expected os.FileInfo) bool {
 		0,
 	)
 	if err != nil {
-		return false
+		return generationLinkUnavailable
 	}
 	file := os.NewFile(uintptr(handle), path)
 	if file == nil {
 		_ = windows.CloseHandle(handle)
-		return false
+		return generationLinkUnavailable
 	}
 	defer file.Close()
 	opened, err := file.Stat()
 	if err != nil || expected == nil || !opened.Mode().IsRegular() || !os.SameFile(expected, opened) {
-		return false
+		return generationLinkUnavailable
 	}
 	var information windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &information); err != nil {
-		return false
+		return generationLinkUnavailable
 	}
 	if information.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
-		return false
+		return generationLinkUnsafe
 	}
-	return information.NumberOfLinks == 1
+	switch information.NumberOfLinks {
+	case 0:
+		return generationLinkZero
+	case 1:
+		return generationLinkSingle
+	default:
+		return generationLinkMultiple
+	}
 }

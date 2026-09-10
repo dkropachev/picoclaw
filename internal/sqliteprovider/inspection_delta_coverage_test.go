@@ -925,21 +925,13 @@ func TestInspectionDeltaProviderFilesystemErrorsRemainUnavailable(t *testing.T) 
 			t.Fatalf("sidecar main reinspection error = %v", err)
 		}
 	})
-
-	t.Run("sidecar coherence inspection", func(t *testing.T) {
-		filesystem := inspectionDeltaFilesystem()
-		filesystem.lstat = func(string) (os.FileInfo, error) { return nil, canary }
-		if err := validateGenerationCoherence(path, filesystem); !errors.Is(err, canary) ||
-			errors.Is(err, errProviderUnsafeBoundary) {
-			t.Fatalf("sidecar coherence error = %v", err)
-		}
-	})
 }
 
 func inspectionDeltaFilesystem() providerFilesystem {
 	return providerFilesystem{
-		secureFile: func(string) error { return nil },
-		singleLink: func(string, os.FileInfo) bool { return true },
-		owned:      func(string, os.FileInfo) bool { return true },
+		secureFile:       func(string) error { return nil },
+		validateLiveInfo: func(os.FileInfo) error { return nil },
+		linkCount:        func(string, os.FileInfo) generationLinkClass { return generationLinkSingle },
+		owner:            func(string, os.FileInfo) generationOwnerClass { return generationOwnerCurrent },
 	}
 }

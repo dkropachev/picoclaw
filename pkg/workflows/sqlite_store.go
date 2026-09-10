@@ -92,11 +92,12 @@ func (s *FileRunStore) workspaceDir() string {
 const workflowDatabaseIdleCloseDelay = 100 * time.Millisecond
 
 type workflowDatabasePool struct {
-	mu        sync.Mutex
-	workspace string
-	db        *sql.DB
-	users     int
-	timer     *time.Timer
+	mu              sync.Mutex
+	workspace       string
+	db              *sql.DB
+	users           int
+	timer           *time.Timer
+	timerGeneration uint64
 }
 
 var workflowDatabasePools sync.Map
@@ -128,13 +129,17 @@ func (pool *workflowDatabasePool) borrow(ctx context.Context) (*sql.DB, error) {
 	if pool.timer != nil {
 		pool.timer.Stop()
 		pool.timer = nil
+		pool.timerGeneration++
 	}
 	if pool.db == nil {
 		db, err := openWorkflowDatabase(ctx, pool.workspace)
 		if err != nil {
 			return nil, workflowDatabaseError("open", err)
 		}
-		db.SetMaxIdleConns(0)
+		// Keep one physical SQLite connection alive while this outer pool is
+		// retained. Closing every connection between operations can repeatedly
+		// tear down and recreate WAL/SHM state while another process is attaching.
+		db.SetMaxIdleConns(1)
 		pool.db = db
 	}
 	pool.users++
@@ -150,16 +155,25 @@ func (pool *workflowDatabasePool) release() {
 	if pool.users != 0 || pool.db == nil {
 		return
 	}
+	pool.timerGeneration++
+	generation := pool.timerGeneration
 	pool.timer = time.AfterFunc(workflowDatabaseIdleCloseDelay, func() {
-		pool.mu.Lock()
-		defer pool.mu.Unlock()
-		pool.timer = nil
-		if pool.users != 0 || pool.db == nil {
-			return
-		}
-		_ = pool.db.Close()
-		pool.db = nil
+		pool.closeIdleGeneration(generation)
 	})
+}
+
+func (pool *workflowDatabasePool) closeIdleGeneration(generation uint64) {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if pool.timerGeneration != generation {
+		return
+	}
+	pool.timer = nil
+	if pool.users != 0 || pool.db == nil {
+		return
+	}
+	_ = pool.db.Close()
+	pool.db = nil
 }
 
 func (pool *workflowDatabasePool) closeIdle() error {
@@ -175,6 +189,7 @@ func (pool *workflowDatabasePool) closeIdle() error {
 		pool.timer.Stop()
 		pool.timer = nil
 	}
+	pool.timerGeneration++
 	db := pool.db
 	pool.db = nil
 	return db.Close()

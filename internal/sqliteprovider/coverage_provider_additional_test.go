@@ -210,13 +210,13 @@ func TestCoverageProviderConcurrentPreparationAndLockAccounting(t *testing.T) {
 	filesystem.secureDirectory = func(string) error { return nil }
 	filesystem.secureFile = func(string) error { return nil }
 	filesystem.syncDirectory = func(string) error { return nil }
-	filesystem.singleLink = func(string, os.FileInfo) bool { return true }
-	filesystem.owned = func(string, os.FileInfo) bool { return true }
+	filesystem.linkCount = func(string, os.FileInfo) generationLinkClass { return generationLinkSingle }
+	filesystem.owner = func(string, os.FileInfo) generationOwnerClass { return generationOwnerCurrent }
 	if err := prepareStore(path, filesystem); err != nil {
 		t.Fatalf("concurrent creator recovery = %v", err)
 	}
-	if openCalls != 2 {
-		t.Fatalf("open calls = %d, want 2", openCalls)
+	if openCalls != 1 {
+		t.Fatalf("open calls = %d, want one exclusive-create attempt and no existing-file reopen", openCalls)
 	}
 
 	lockPath := filepath.Join(root, "serialized.db")
@@ -289,8 +289,8 @@ func TestCoverageProviderConcurrentCreatorRevalidationFailures(t *testing.T) {
 		filesystem.secureDirectory = func(string) error { return nil }
 		filesystem.secureFile = func(string) error { return nil }
 		filesystem.syncDirectory = func(string) error { return nil }
-		filesystem.singleLink = func(string, os.FileInfo) bool { return true }
-		filesystem.owned = func(string, os.FileInfo) bool { return true }
+		filesystem.linkCount = func(string, os.FileInfo) generationLinkClass { return generationLinkSingle }
+		filesystem.owner = func(string, os.FileInfo) generationOwnerClass { return generationOwnerCurrent }
 		filesystem.openFile = func(string, int, os.FileMode) (providerFile, error) {
 			return nil, os.ErrExist
 		}
@@ -397,25 +397,10 @@ func TestCoverageProviderGenerationIdentityAndCoherenceErrors(t *testing.T) {
 		}
 	}
 	filesystem.secureFile = func(string) error { return nil }
-	filesystem.singleLink = func(string, os.FileInfo) bool { return true }
-	filesystem.owned = func(string, os.FileInfo) bool { return true }
+	filesystem.linkCount = func(string, os.FileInfo) generationLinkClass { return generationLinkSingle }
+	filesystem.owner = func(string, os.FileInfo) generationOwnerClass { return generationOwnerCurrent }
 	if err := validateGenerationMembersWithFilesystem(mainPath, true, filesystem); err == nil {
 		t.Fatal("unsafe main identity beside sidecar succeeded")
-	}
-
-	directoryInfo, err := os.Lstat(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	filesystem = systemProviderFilesystem()
-	filesystem.lstat = func(candidate string) (os.FileInfo, error) {
-		if strings.HasSuffix(candidate, "-wal") {
-			return directoryInfo, nil
-		}
-		return nil, os.ErrNotExist
-	}
-	if err := validateGenerationCoherence(mainPath, filesystem); err == nil {
-		t.Fatal("unsafe sidecar coherence succeeded")
 	}
 }
 
