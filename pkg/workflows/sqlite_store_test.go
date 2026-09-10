@@ -23,6 +23,81 @@ func privateWorkflowTestWorkspace(t *testing.T) string {
 	return workspace
 }
 
+func TestWorkflowDatabasePoolRetainsIdleConnectionWhileBorrowed(t *testing.T) {
+	workspace := privateWorkflowTestWorkspace(t)
+	pool := workflowDatabasePoolFor(workspace)
+	db, borrowErr := pool.borrow(t.Context())
+	if borrowErr != nil {
+		t.Fatal(borrowErr)
+	}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			pool.release()
+		}
+		if closeErr := pool.closeIdle(); closeErr != nil {
+			t.Errorf("close workflow database pool: %v", closeErr)
+		}
+	})
+
+	before := db.Stats()
+	connection, connectionErr := db.Conn(t.Context())
+	if connectionErr != nil {
+		t.Fatal(connectionErr)
+	}
+	var one int
+	if queryErr := connection.QueryRowContext(t.Context(), `SELECT 1`).Scan(&one); queryErr != nil {
+		_ = connection.Close()
+		t.Fatal(queryErr)
+	}
+	if closeErr := connection.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	after := db.Stats()
+	if one != 1 {
+		t.Fatalf("SELECT 1 = %d", one)
+	}
+	if after.Idle < 1 {
+		t.Fatalf("idle physical connections = %d, want at least 1", after.Idle)
+	}
+	if after.MaxIdleClosed != before.MaxIdleClosed {
+		t.Fatalf(
+			"connections closed by idle limit = %d -> %d while pool retained",
+			before.MaxIdleClosed,
+			after.MaxIdleClosed,
+		)
+	}
+
+	pool.release()
+	released = true
+}
+
+func TestWorkflowDatabasePoolIgnoresStaleIdleCloseGeneration(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close stale-generation test database: %v", err)
+		}
+	})
+	pool := &workflowDatabasePool{db: db, timerGeneration: 2}
+
+	pool.closeIdleGeneration(1)
+	if pool.db != db {
+		t.Fatal("stale idle-close generation closed the current database")
+	}
+	if pool.timerGeneration != 2 {
+		t.Fatalf("timer generation = %d, want 2", pool.timerGeneration)
+	}
+
+	pool.closeIdleGeneration(2)
+	if pool.db != nil {
+		t.Fatal("current idle-close generation left the database open")
+	}
+}
+
 //nolint:govet // Test assertions intentionally scope independent errors.
 func TestSQLiteRunStoreSchemaDurabilityAndVersionFence(t *testing.T) {
 	workspace := privateWorkflowTestWorkspace(t)

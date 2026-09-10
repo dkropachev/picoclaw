@@ -4,8 +4,10 @@ package sqliteprovider
 
 import "os"
 
-func generationHasSingleLink(string, os.FileInfo) bool {
-	return false
+func classifyGenerationLinkCount(string, os.FileInfo) generationLinkClass {
+	return generationLinkUnavailable
 }
 
-func generationOwnedByCurrentUser(string, os.FileInfo) bool { return false }
+func classifyGenerationOwner(string, os.FileInfo) generationOwnerClass {
+	return generationOwnerUnavailable
+}

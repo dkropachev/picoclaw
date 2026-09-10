@@ -7,12 +7,34 @@ import (
 	"syscall"
 )
 
-func generationHasSingleLink(_ string, info os.FileInfo) bool {
+func classifyGenerationLinkCount(_ string, info os.FileInfo) generationLinkClass {
+	if info == nil {
+		return generationLinkUnavailable
+	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat != nil && stat.Nlink == 1
+	if !ok || stat == nil {
+		return generationLinkUnavailable
+	}
+	switch stat.Nlink {
+	case 0:
+		return generationLinkZero
+	case 1:
+		return generationLinkSingle
+	default:
+		return generationLinkMultiple
+	}
 }
 
-func generationOwnedByCurrentUser(_ string, info os.FileInfo) bool {
+func classifyGenerationOwner(_ string, info os.FileInfo) generationOwnerClass {
+	if info == nil {
+		return generationOwnerUnavailable
+	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat != nil && stat.Uid == uint32(os.Geteuid())
+	if !ok || stat == nil {
+		return generationOwnerUnavailable
+	}
+	if stat.Uid == uint32(os.Geteuid()) {
+		return generationOwnerCurrent
+	}
+	return generationOwnerForeign
 }

@@ -3,6 +3,8 @@
 package sqliteprovider
 
 import (
+	"os"
+
 	"github.com/sipeed/picoclaw/pkg/database"
 )
 
@@ -17,3 +19,6 @@ func validateProviderPathSyntax(string) error { return unsupportedProviderFilesy
 func validateProviderAncestors(string) error  { return unsupportedProviderFilesystem() }
 func secureProviderDirectory(string) error    { return unsupportedProviderFilesystem() }
 func secureProviderFile(string) error         { return unsupportedProviderFilesystem() }
+func validateProviderLiveFileInfo(os.FileInfo) error {
+	return unsupportedProviderFilesystem()
+}

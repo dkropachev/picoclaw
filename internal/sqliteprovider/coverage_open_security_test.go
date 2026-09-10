@@ -421,9 +421,25 @@ func TestCoverageProviderFilesystemFailurePhases(t *testing.T) {
 		filesystem.secureDirectory = func(string) error { return nil }
 		filesystem.secureFile = func(string) error { return nil }
 		filesystem.syncDirectory = func(string) error { return nil }
-		filesystem.singleLink = func(string, os.FileInfo) bool { return true }
-		filesystem.owned = func(string, os.FileInfo) bool { return true }
+		filesystem.linkCount = func(string, os.FileInfo) generationLinkClass { return generationLinkSingle }
+		filesystem.owner = func(string, os.FileInfo) generationOwnerClass { return generationOwnerCurrent }
 		return filesystem, file
+	}
+	forceCreated := func(filesystem *providerFilesystem) {
+		pathCalls := 0
+		filesystem.lstat = func(candidate string) (os.FileInfo, error) {
+			if candidate == filepath.Dir(path) {
+				return directoryInfo, nil
+			}
+			if candidate == path {
+				pathCalls++
+				if pathCalls <= 3 {
+					return nil, os.ErrNotExist
+				}
+				return fileInfo, nil
+			}
+			return nil, os.ErrNotExist
+		}
 	}
 	prepareTests := []struct {
 		name   string
@@ -458,41 +474,43 @@ func TestCoverageProviderFilesystemFailurePhases(t *testing.T) {
 			}
 		}},
 		{name: "open", mutate: func(fs *providerFilesystem, _ *providerFaultFile) {
+			forceCreated(fs)
 			fs.openFile = func(string, int, os.FileMode) (providerFile, error) { return nil, canary }
 		}},
-		{name: "opened stat", mutate: func(_ *providerFilesystem, file *providerFaultFile) {
+		{name: "opened stat", mutate: func(fs *providerFilesystem, file *providerFaultFile) {
+			forceCreated(fs)
 			file.statErr = canary
 		}},
 		{name: "identity", mutate: func(fs *providerFilesystem, _ *providerFaultFile) {
-			calls := 0
+			pathCalls := 0
 			fs.lstat = func(candidate string) (os.FileInfo, error) {
 				if candidate == filepath.Dir(path) {
 					return directoryInfo, nil
 				}
-				calls++
-				if calls <= 4 {
-					return nil, os.ErrNotExist
+				if candidate == path {
+					pathCalls++
+					if pathCalls <= 3 {
+						return nil, os.ErrNotExist
+					}
+					return otherInfo, nil
 				}
-				return otherInfo, nil
+				return nil, os.ErrNotExist
 			}
 		}},
-		{name: "chmod", mutate: func(_ *providerFilesystem, file *providerFaultFile) {
+		{name: "created chmod", mutate: func(fs *providerFilesystem, file *providerFaultFile) {
+			forceCreated(fs)
 			file.chmodErr = canary
 		}},
 		{name: "file security", mutate: func(fs *providerFilesystem, _ *providerFaultFile) {
-			calls := 0
-			fs.secureFile = func(string) error {
-				calls++
-				if calls >= 2 {
-					return canary
-				}
-				return nil
-			}
+			forceCreated(fs)
+			fs.secureFile = func(string) error { return canary }
 		}},
-		{name: "file sync", mutate: func(_ *providerFilesystem, file *providerFaultFile) {
+		{name: "file sync", mutate: func(fs *providerFilesystem, file *providerFaultFile) {
+			forceCreated(fs)
 			file.syncErr = canary
 		}},
-		{name: "file close", mutate: func(_ *providerFilesystem, file *providerFaultFile) {
+		{name: "file close", mutate: func(fs *providerFilesystem, file *providerFaultFile) {
+			forceCreated(fs)
 			file.closeErr = canary
 		}},
 	}
@@ -548,6 +566,96 @@ func TestCoverageProviderFilesystemFailurePhases(t *testing.T) {
 	if err := secureGeneration(path, filesystem); !errors.Is(err, canary) {
 		t.Fatalf("secure ancestor error = %v", err)
 	}
+	filesystem = systemProviderFilesystem()
+	filesystem.validateSyntax = func(string) error { return nil }
+	filesystem.validateAncestors = func(string) error { return nil }
+	filesystem.lstat = func(candidate string) (os.FileInfo, error) {
+		if candidate == path {
+			return fileInfo, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	filesystem.secureDirectory = nil
+	if err := secureGeneration(path, filesystem); err == nil {
+		t.Fatal("missing generation parent security succeeded")
+	}
+	filesystem.secureDirectory = func(string) error { return canary }
+	if err := secureGeneration(path, filesystem); !errors.Is(err, canary) {
+		t.Fatalf("secure generation parent error = %v", err)
+	}
+	for _, invalid := range []string{"", " ", ":memory:", "file:store.db"} {
+		secureCalls := 0
+		filesystem = systemProviderFilesystem()
+		filesystem.secureDirectory = func(string) error {
+			secureCalls++
+			return nil
+		}
+		if err := secureGeneration(invalid, filesystem); err == nil {
+			t.Fatalf("invalid generation path %q succeeded", invalid)
+		}
+		if secureCalls != 0 {
+			t.Fatalf("invalid generation path %q secured its parent", invalid)
+		}
+	}
+	for name, lstat := range map[string]func(string) (os.FileInfo, error){
+		"missing":    func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
+		"nonregular": func(string) (os.FileInfo, error) { return directoryInfo, nil },
+	} {
+		secureCalls := 0
+		filesystem = systemProviderFilesystem()
+		filesystem.validateSyntax = func(string) error { return nil }
+		filesystem.validateAncestors = func(string) error { return nil }
+		filesystem.lstat = lstat
+		filesystem.secureDirectory = func(string) error {
+			secureCalls++
+			return nil
+		}
+		if err := secureGeneration("store.db", filesystem); err == nil {
+			t.Fatalf("%s generation preflight succeeded", name)
+		}
+		if secureCalls != 0 {
+			t.Fatalf("%s generation preflight secured its parent", name)
+		}
+	}
+	secureCalls := 0
+	filesystem = systemProviderFilesystem()
+	filesystem.validateSyntax = func(string) error { return nil }
+	filesystem.validateAncestors = func(string) error { return nil }
+	filesystem.lstat = func(string) (os.FileInfo, error) { return nil, canary }
+	filesystem.secureDirectory = func(string) error {
+		secureCalls++
+		return nil
+	}
+	if err := secureGeneration("store.db", filesystem); !errors.Is(err, canary) ||
+		errors.Is(err, errProviderUnsafeBoundary) {
+		t.Fatalf("generation preflight I/O error = %v", err)
+	}
+	if secureCalls != 0 {
+		t.Fatal("generation preflight I/O error secured its parent")
+	}
+	for name, after := range map[string]func(string) (os.FileInfo, error){
+		"disappeared": func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
+		"replaced":    func(string) (os.FileInfo, error) { return otherInfo, nil },
+	} {
+		parentSecured := false
+		filesystem = systemProviderFilesystem()
+		filesystem.validateSyntax = func(string) error { return nil }
+		filesystem.validateAncestors = func(string) error { return nil }
+		filesystem.lstat = func(candidate string) (os.FileInfo, error) {
+			if parentSecured {
+				return after(candidate)
+			}
+			return fileInfo, nil
+		}
+		filesystem.secureDirectory = func(string) error {
+			parentSecured = true
+			return nil
+		}
+		if err := secureGeneration("store.db", filesystem); err == nil ||
+			!errors.Is(err, errProviderUnsafeBoundary) {
+			t.Fatalf("main %s during parent security error = %v", name, err)
+		}
+	}
 }
 
 func TestCoverageGenerationMemberFailurePhases(t *testing.T) {
@@ -574,8 +682,8 @@ func TestCoverageGenerationMemberFailurePhases(t *testing.T) {
 			return nil, os.ErrNotExist
 		}
 		filesystem.secureFile = func(string) error { return nil }
-		filesystem.singleLink = func(string, os.FileInfo) bool { return true }
-		filesystem.owned = func(string, os.FileInfo) bool { return true }
+		filesystem.linkCount = func(string, os.FileInfo) generationLinkClass { return generationLinkSingle }
+		filesystem.owner = func(string, os.FileInfo) generationOwnerClass { return generationOwnerCurrent }
 		return filesystem
 	}
 	tests := []struct {
@@ -593,10 +701,10 @@ func TestCoverageGenerationMemberFailurePhases(t *testing.T) {
 			fs.lstat = func(string) (os.FileInfo, error) { return directoryInfo, nil }
 		}},
 		{name: "link", mutate: func(fs *providerFilesystem) {
-			fs.singleLink = func(string, os.FileInfo) bool { return false }
+			fs.linkCount = func(string, os.FileInfo) generationLinkClass { return generationLinkMultiple }
 		}},
 		{name: "owner", mutate: func(fs *providerFilesystem) {
-			fs.owned = func(string, os.FileInfo) bool { return false }
+			fs.owner = func(string, os.FileInfo) generationOwnerClass { return generationOwnerForeign }
 		}},
 		{name: "security", mutate: func(fs *providerFilesystem) {
 			fs.secureFile = func(string) error { return canary }

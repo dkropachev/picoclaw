@@ -6,6 +6,24 @@ import (
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
+type generationLinkClass uint8
+
+const (
+	generationLinkUnavailable generationLinkClass = iota
+	generationLinkZero
+	generationLinkSingle
+	generationLinkMultiple
+	generationLinkUnsafe
+)
+
+type generationOwnerClass uint8
+
+const (
+	generationOwnerUnavailable generationOwnerClass = iota
+	generationOwnerCurrent
+	generationOwnerForeign
+)
+
 type providerFile interface {
 	Stat() (os.FileInfo, error)
 	Chmod(mode os.FileMode) error
@@ -21,9 +39,10 @@ type providerFilesystem struct {
 	openFile          func(string, int, os.FileMode) (providerFile, error)
 	secureDirectory   func(string) error
 	secureFile        func(string) error
+	validateLiveInfo  func(os.FileInfo) error
 	syncDirectory     func(string) error
-	singleLink        func(string, os.FileInfo) bool
-	owned             func(string, os.FileInfo) bool
+	linkCount         func(string, os.FileInfo) generationLinkClass
+	owner             func(string, os.FileInfo) generationOwnerClass
 }
 
 func systemProviderFilesystem() providerFilesystem {
@@ -32,7 +51,30 @@ func systemProviderFilesystem() providerFilesystem {
 		mkdirAll: makeProviderDirectories, lstat: os.Lstat,
 		openFile:        providerOpenFile,
 		secureDirectory: secureProviderDirectory, secureFile: secureProviderFile,
-		syncDirectory: fileutil.SyncDirectory,
-		singleLink:    generationHasSingleLink, owned: generationOwnedByCurrentUser,
+		validateLiveInfo: validateProviderLiveFileInfo,
+		syncDirectory:    fileutil.SyncDirectory,
+		linkCount:        classifyGenerationLinkCount, owner: classifyGenerationOwner,
 	}
+}
+
+func providerGenerationOwner(
+	filesystem providerFilesystem,
+	path string,
+	info os.FileInfo,
+) generationOwnerClass {
+	if filesystem.owner == nil {
+		return generationOwnerUnavailable
+	}
+	return filesystem.owner(path, info)
+}
+
+func providerGenerationLinkCount(
+	filesystem providerFilesystem,
+	path string,
+	info os.FileInfo,
+) generationLinkClass {
+	if filesystem.linkCount == nil {
+		return generationLinkUnavailable
+	}
+	return filesystem.linkCount(path, info)
 }

@@ -26,8 +26,9 @@ the active authority.
 - Core functions: `OpenStore`, `Configure`, `ConfigureOffline`, `PrepareStore`,
   `EnsurePrivateDirectory`, `SecureGeneration`, `DSN`, and `IsBusyOrLocked`.
 - Runtime ordering: validate input, traverse real directory components through
-  retained no-follow platform handles, create private members, eagerly open the
-  first connection, harden the complete generation, and recheck its identity.
+  retained no-follow platform handles, create and secure the main before SQLite
+  opens it, eagerly open the first connection, then validate the complete
+  generation without disturbing live SQLite locks and recheck its identity.
 - Non-obvious constraints: memory DSNs are unique; file DSNs cannot recreate a
   vanished main; WAL/SHM identities are transient under cooperating SQLite
   processes; rollback-journal replacement is not an allowed open transition;
@@ -39,7 +40,7 @@ the active authority.
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
 | `FR-DATABASE-SQLITE-PROVIDER-001` | MUST | Trusted infrastructure supplies a memory name or validated filesystem path and bounded busy timeout. | The provider constructs the only shipped-driver DSN, forces one connection open, and returns a pool only after the main generation remains the same exact file. Memory uses a unique shared cache; file DSNs use existing-file mode. Process-local keys capture an absolute clean path once and conservatively fold case on Windows and Darwin. | A missing file-backed endpoint may be created durably and privately. | Blank, padded, invalid-UTF-8, NUL-bearing, overlong, URI-shaped, ambiguous Windows device, symlink/reparse, irregular, hardlinked, foreign-owned, or replaced inputs fail without fallback. Distinct case-only files on a case-sensitive Darwin volume may contend on one key and fail by availability. | Physical addressing and driver binding must not split a commonly case-insensitive namespace into two process-local authorities; a conservative collision is safer than dual ownership. |
-| `FR-DATABASE-SQLITE-PROVIDER-002` | MUST | The provider prepares a directory, main file, or complete generation. | Unix traverses components with descriptor-relative no-follow operations and accepts only protected creation ancestry; Windows rejects reparses, retains the parent handle, and validates a current-user protected DACL. Main and sidecars are single-link owner-private regular files. Proven semantic violations—unsafe ancestry/type/owner/link count, DACL shape, reparse, identity drift, or incoherent sidecars—carry the provider's private unsafe-boundary classification; ordinary filesystem and platform API failures remain unclassified infrastructure errors. | Missing components and main files are private at creation, synced, and revalidated; existing owned members may be hardened. | Unsafe ancestry, type, owner, link count, mode/DACL, identity drift, orphan SHM, or mixed WAL and rollback journal fails closed; callers can distinguish proven integrity violations from transient I/O without parsing text. | SQLite must never follow an attacker-controlled generation member, while temporary metadata failure must not be mislabeled as corruption. |
+| `FR-DATABASE-SQLITE-PROVIDER-002` | MUST | The provider prepares a directory, main file, or complete generation. | Unix traverses components with descriptor-relative no-follow operations and accepts only protected creation ancestry; Windows rejects reparses, retains the parent handle, and validates a current-user protected DACL. Main and sidecars are single-link owner-private regular files. After SQLite opens a generation, Unix hardening never opens or closes a descriptor for the main, WAL, SHM, or journal, preserving SQLite's process-scoped POSIX locks. It narrows legacy SQLite-compatible modes through a retained current-user `0700` parent descriptor, then requires the same identity and exact `0600`. Link count `1` is valid, `>1` is a proven hardlink integrity violation, and a transient optional-member count of `0` is a fail-closed generation transition rather than a hardlink classification. | Missing components and main files are private at creation, synced, and revalidated. Existing Unix main and live sidecar modes derived from SQLite creation are narrowed to `0600` without opening the member; Windows retains handle-scoped DACL hardening. | Unsafe ancestry, type, owner, non-tightenable mode/DACL, reparse, identity drift, stable or main link-count zero, hardlink count above one, orphan SHM, or mixed WAL and rollback journal fails closed; callers can distinguish proven integrity violations from generation churn and transient I/O without parsing text. | SQLite must never follow an attacker-controlled generation member, and provider hardening must not release SQLite's own lock authority or mislabel a disappearing sidecar as a hardlink. |
 | `FR-DATABASE-SQLITE-PROVIDER-003` | MUST | Trusted code configures a live, memory, or caller-isolated offline pool. | Live file stores select WAL; offline pools select exclusive locking and DELETE journal; all modes verify foreign keys, bounded busy timeout, and `synchronous=FULL`. SQLite primary-code classification preserves only 5/6 as busy/locked and 11/26 as proven corruption/not-a-database; other result codes remain operational failures. | Configuration changes only provider connection state and SQLite journal metadata. | Nil/canceled context, nil pool, invalid timeout, unexpected selected mode, or provider failure returns an error. | Durability and concurrency settings must be explicit and verified without conflating transient I/O and corruption. |
 | `FR-DATABASE-SQLITE-PROVIDER-004` | MUST | Repository code adds a driver open, direct provider import, or platform implementation. | The exact-file guard permits compatibility open/schema, admits the exact readiness implementation when present, reserves future backup/migration filenames and shipped-driver use by future maintenance/staged-copy files; only `provider.go` calls `database/sql.Open`. Unsupported secure platforms fail closed. | Absent reserved files grant no capability; present importers remain governed by separate feature contracts. | Any unreviewed importer, driver binding, or open call fails tests. | Provider evolution must remain auditable without activating a second application owner. |
 
@@ -67,6 +68,7 @@ Owns: TEST internal/sqliteprovider/coverage_helpers_test.go *
 Owns: TEST internal/sqliteprovider/coverage_open_security_test.go *
 Owns: TEST internal/sqliteprovider/coverage_provider_additional_test.go *
 Owns: TEST internal/sqliteprovider/coverage_provider_additional_unix_test.go *
+Owns: TEST internal/sqliteprovider/provider_generation_coverage_test.go *
 Owns: TEST internal/sqliteprovider/hot_journal_test.go *
 Owns: TEST internal/sqliteprovider/import_guard_test.go TestSQLiteProviderBoundaryVersionIsStable
 Owns: TEST internal/sqliteprovider/import_guard_test.go TestSQLiteProviderOwnsDriverOpen
@@ -78,7 +80,7 @@ Owns: TEST internal/sqliteprovider/security_*_test.go *
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Internal Go API | `OpenStore`, `DSN`, `Configure`, `ConfigureOffline` | Bind and eagerly validate one provider pool with verified live or offline durability. | `FR-DATABASE-SQLITE-PROVIDER-001`, `FR-DATABASE-SQLITE-PROVIDER-003` |
-| Internal Go API | `PrepareStore`, `EnsurePrivateDirectory`, `SecureGeneration` | Create or harden an exact private no-follow SQLite generation. | `FR-DATABASE-SQLITE-PROVIDER-002` |
+| Internal Go API | `PrepareStore`, `EnsurePrivateDirectory`, `SecureGeneration` | Create or narrow an exact private no-follow SQLite generation without disturbing live Unix locks; Windows retains handle-scoped DACL hardening. | `FR-DATABASE-SQLITE-PROVIDER-002` |
 | Architecture gate | Provider import/driver guard | Keep the dormant driver boundary unconsumed and singular. | `FR-DATABASE-SQLITE-PROVIDER-004` |
 
 ## Algorithms And Ordering
@@ -88,7 +90,10 @@ Owns: TEST internal/sqliteprovider/security_*_test.go *
    and reparses; privately create and sync missing directories and the main.
    Tag proven unsafe semantic outcomes without tagging raw filesystem/API I/O.
 3. Capture main and complete-generation identities, build an existing-file DSN,
-   eagerly ping, harden all present members, and recheck the main.
+   eagerly ping, and secure all live members without opening another Unix file
+   descriptor. Unix narrows compatible legacy modes relative to a retained
+   owner-private parent descriptor and rechecks every identity; Windows retains
+   handle-scoped DACL hardening.
 4. Accept only coherent SQLite-managed WAL/SHM transitions around a stable main;
    reject a new or replaced rollback journal.
 5. Configure and query back the requested journal, locking, foreign-key,
@@ -108,6 +113,12 @@ through exact separately specified files.
   validated before open and it disappears rather than being replaced.
 - Cooperating cross-process WAL checkpoints may replace WAL/SHM while the main
   identity remains stable and the final generation is coherent and private.
+- A disappearing optional sidecar is a fail-closed generation transition, not
+  proof of a hardlink. A stable link count above one remains an integrity error.
+- Unix live hardening must not open and close generation files because POSIX
+  record locks are process-scoped and such a close can release SQLite's locks;
+  parent-relative `chmod` is allowed only after no-follow identity, owner, link,
+  and tightenable-mode checks and requires the same private file afterward.
 - Unsupported secure filesystem primitives return `Unsupported` rather than
   falling back to ordinary pathname creation.
 
@@ -116,7 +127,7 @@ through exact separately specified files.
 | Requirement IDs | Evidence |
 | --- | --- |
 | `FR-DATABASE-SQLITE-PROVIDER-001`, `FR-DATABASE-SQLITE-PROVIDER-003` | [internal/sqliteprovider/provider_core_test.go](../../internal/sqliteprovider/provider_core_test.go), [internal/sqliteprovider/provider_identity_test.go](../../internal/sqliteprovider/provider_identity_test.go), [internal/sqliteprovider/coverage_open_security_test.go](../../internal/sqliteprovider/coverage_open_security_test.go) |
-| `FR-DATABASE-SQLITE-PROVIDER-002` | [internal/sqliteprovider/provider_dirs_unix_test.go](../../internal/sqliteprovider/provider_dirs_unix_test.go), [internal/sqliteprovider/linkcount_unix_test.go](../../internal/sqliteprovider/linkcount_unix_test.go), [internal/sqliteprovider/security_windows_test.go](../../internal/sqliteprovider/security_windows_test.go) |
+| `FR-DATABASE-SQLITE-PROVIDER-002` | [internal/sqliteprovider/provider_dirs_unix_test.go](../../internal/sqliteprovider/provider_dirs_unix_test.go), [internal/sqliteprovider/linkcount_unix_test.go](../../internal/sqliteprovider/linkcount_unix_test.go), [internal/sqliteprovider/provider_generation_coverage_test.go](../../internal/sqliteprovider/provider_generation_coverage_test.go), [internal/sqliteprovider/security_live_unix_test.go](../../internal/sqliteprovider/security_live_unix_test.go), [internal/sqliteprovider/security_unix_live_coverage_test.go](../../internal/sqliteprovider/security_unix_live_coverage_test.go), [internal/sqliteprovider/security_windows_test.go](../../internal/sqliteprovider/security_windows_test.go) |
 | `FR-DATABASE-SQLITE-PROVIDER-004` | [internal/sqliteprovider/import_guard_test.go](../../internal/sqliteprovider/import_guard_test.go) |
 
 ## Implementation Anchors

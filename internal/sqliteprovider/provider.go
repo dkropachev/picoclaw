@@ -21,7 +21,13 @@ import (
 
 const driverName = "sqlite"
 
+const generationValidationAttempts = 3
+
 var memoryDatabaseSequence atomic.Uint64
+
+var errProviderGenerationTransition = errors.New("SQLite provider generation transitioned")
+
+var errProviderFileModeNeedsHardening = errors.New("SQLite provider file mode needs hardening")
 
 var providerOpenLocks = struct {
 	sync.Mutex
@@ -344,34 +350,36 @@ func prepareStore(path string, filesystem providerFilesystem) error {
 	if err := filesystem.secureDirectory(parent); err != nil {
 		return fmt.Errorf("secure SQLite provider directory: %w", err)
 	}
-	var prior os.FileInfo
-	created := false
-	prior, err = filesystem.lstat(path)
+	prior, err := filesystem.lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		created = true
 		prior = nil
 	} else if err != nil || prior == nil || !prior.Mode().IsRegular() ||
 		prior.Mode()&os.ModeSymlink != 0 {
 		return errors.Join(errors.New("SQLite provider store must be a regular file with a safe identity"), err)
 	}
+	if prior != nil {
+		if err := validateGenerationMembersWithFilesystem(path, true, filesystem); err != nil {
+			return err
+		}
+		return filesystem.syncDirectory(parent)
+	}
 	if err := validateGenerationMembersWithFilesystem(path, false, filesystem); err != nil {
 		return err
 	}
-	flag := os.O_RDWR
-	if created {
-		flag |= os.O_CREATE | os.O_EXCL
-	}
-	file, err := filesystem.openFile(path, flag, 0o600)
-	if created && errors.Is(err, os.ErrExist) {
-		prior, err = filesystem.lstat(path)
-		if err != nil || prior == nil || !prior.Mode().IsRegular() ||
-			prior.Mode()&os.ModeSymlink != 0 {
-			return errors.Join(errors.New("SQLite provider concurrently created store must be a regular file"), err)
+	file, err := filesystem.openFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		concurrent, lstatErr := filesystem.lstat(path)
+		if lstatErr != nil || concurrent == nil || !concurrent.Mode().IsRegular() ||
+			concurrent.Mode()&os.ModeSymlink != 0 {
+			return errors.Join(
+				errors.New("SQLite provider concurrently created store must be a regular file"),
+				lstatErr,
+			)
 		}
 		if err := validateGenerationMembersWithFilesystem(path, true, filesystem); err != nil {
 			return err
 		}
-		file, err = filesystem.openFile(path, os.O_RDWR, 0o600)
+		return filesystem.syncDirectory(parent)
 	}
 	if err != nil {
 		return fmt.Errorf("prepare SQLite provider store: %w", err)
@@ -380,7 +388,7 @@ func prepareStore(path string, filesystem providerFilesystem) error {
 	pathInfo, lstatErr := filesystem.lstat(path)
 	if statErr != nil || lstatErr != nil || !info.Mode().IsRegular() ||
 		!pathInfo.Mode().IsRegular() || pathInfo.Mode()&os.ModeSymlink != 0 ||
-		!os.SameFile(info, pathInfo) || prior != nil && !os.SameFile(prior, info) {
+		!os.SameFile(info, pathInfo) {
 		_ = file.Close()
 		return errors.Join(errors.New("SQLite provider store changed while opening"), statErr, lstatErr)
 	}
@@ -390,7 +398,30 @@ func prepareStore(path string, filesystem providerFilesystem) error {
 	}
 	if err := filesystem.secureFile(path); err != nil {
 		_ = file.Close()
+		if errors.Is(err, errProviderGenerationTransition) || errors.Is(err, os.ErrNotExist) {
+			return errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("new SQLite provider main changed while securing"),
+			)
+		}
 		return fmt.Errorf("secure SQLite provider store ACL: %w", err)
+	}
+	securedPathInfo, secureStatErr := filesystem.lstat(path)
+	if secureStatErr != nil || securedPathInfo == nil || !securedPathInfo.Mode().IsRegular() ||
+		securedPathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, securedPathInfo) {
+		_ = file.Close()
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider store changed while securing"),
+			secureStatErr,
+		)
+	}
+	_, metadataErr := validateGenerationMemberMetadata(
+		path, securedPathInfo, false, filesystem,
+	)
+	if metadataErr != nil {
+		_ = file.Close()
+		return metadataErr
 	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
@@ -437,17 +468,67 @@ func ensurePrivateDirectory(path string, filesystem providerFilesystem) error {
 	return filesystem.syncDirectory(path)
 }
 
-// SecureGeneration validates existing database, WAL, SHM, and rollback-journal members with
-// non-opening metadata operations and enforces owner-only modes.
+// SecureGeneration secures existing database, WAL, SHM, and rollback-journal members.
+// Unix narrows compatible modes relative to the protected parent without opening
+// a member, so it cannot disturb process-scoped SQLite locks; Windows uses
+// handle-scoped validation and DACL hardening.
 func SecureGeneration(path string) error {
 	return secureGeneration(path, systemProviderFilesystem())
 }
 
 func secureGeneration(path string, filesystem providerFilesystem) error {
+	if path == ":memory:" || !validProviderFilesystemPath(path) ||
+		strings.HasPrefix(strings.ToLower(path), "file:") {
+		return errors.New("SQLite provider generation path is invalid")
+	}
 	if err := filesystem.validateSyntax(path); err != nil {
 		return err
 	}
 	if err := filesystem.validateAncestors(path); err != nil {
+		return err
+	}
+	if filesystem.lstat == nil {
+		return errors.New("SQLite provider generation preflight is unavailable")
+	}
+	mainInfo, err := filesystem.lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider generation main is missing"),
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect SQLite provider generation main: %w", err)
+	}
+	if mainInfo == nil {
+		return errors.New("SQLite provider generation main metadata is unavailable")
+	}
+	if _, err = validateGenerationMemberMetadata(path, mainInfo, false, filesystem); err != nil {
+		return err
+	}
+	if filesystem.secureDirectory == nil {
+		return errors.New("SQLite provider generation parent security is unavailable")
+	}
+	if err := filesystem.secureDirectory(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("secure SQLite provider generation parent: %w", err)
+	}
+	securedMain, err := filesystem.lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider generation main disappeared while securing its parent"),
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("reinspect SQLite provider generation main: %w", err)
+	}
+	if securedMain == nil || !os.SameFile(mainInfo, securedMain) {
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider generation main changed while securing its parent"),
+		)
+	}
+	if _, err = validateGenerationMemberMetadata(path, securedMain, false, filesystem); err != nil {
 		return err
 	}
 	return validateGenerationMembersWithFilesystem(path, true, filesystem)
@@ -464,12 +545,35 @@ func validateGenerationMembersWithFilesystem(
 	requireDatabase bool,
 	filesystem providerFilesystem,
 ) error {
-	for index, member := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+	for range generationValidationAttempts {
+		transitioned, err := validateGenerationMembersOnce(path, requireDatabase, filesystem)
+		if err != nil {
+			return err
+		}
+		if !transitioned {
+			return nil
+		}
+	}
+	return errors.Join(
+		errProviderGenerationTransition,
+		errors.New("SQLite provider generation did not stabilize"),
+	)
+}
+
+func validateGenerationMembersOnce(
+	path string,
+	requireDatabase bool,
+	filesystem providerFilesystem,
+) (bool, error) {
+	members := [4]string{path, path + "-wal", path + "-shm", path + "-journal"}
+	var observed [4]os.FileInfo
+	var mainIdentity os.FileInfo
+	for index, member := range members {
 		optional := index > 0
 		info, err := filesystem.lstat(member)
 		if errors.Is(err, os.ErrNotExist) {
 			if requireDatabase && index == 0 {
-				return errors.Join(
+				return false, errors.Join(
 					errProviderUnsafeBoundary,
 					errors.New("SQLite provider store disappeared"),
 				)
@@ -477,89 +581,317 @@ func validateGenerationMembersWithFilesystem(
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("inspect SQLite provider generation: %w", err)
+			return false, fmt.Errorf("inspect SQLite provider generation: %w", err)
 		}
 		if optional {
 			main, mainErr := filesystem.lstat(path)
 			if errors.Is(mainErr, os.ErrNotExist) {
-				return errors.Join(
+				return false, errors.Join(
 					errProviderUnsafeBoundary,
 					errors.New("SQLite provider sidecar exists without its database"),
 				)
 			}
 			if mainErr != nil {
-				return mainErr
+				return false, mainErr
 			}
-			if main == nil || !main.Mode().IsRegular() || main.Mode()&os.ModeSymlink != 0 {
-				return errors.Join(
+			if mainIdentity == nil {
+				return true, nil
+			}
+			if main == nil || !os.SameFile(mainIdentity, main) {
+				return false, errors.Join(
 					errProviderUnsafeBoundary,
-					errors.New("SQLite provider database identity is unsafe"),
+					errors.New("SQLite provider main changed while validating sidecars"),
 				)
 			}
+			_, metadataErr := validateGenerationMemberMetadata(
+				path, main, false, filesystem,
+			)
+			if metadataErr != nil {
+				return false, metadataErr
+			}
 		}
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.Join(
-				errProviderUnsafeBoundary,
-				errors.New("SQLite provider generation member is not a regular file"),
+		transitioned, metadataErr := validateGenerationMemberMetadata(
+			member, info, optional, filesystem,
+		)
+		if metadataErr != nil || transitioned {
+			return transitioned, metadataErr
+		}
+		current, validationErr := validateProviderGenerationFile(filesystem, member, info)
+		if validationErr != nil {
+			return classifyGenerationFileValidationError(
+				filesystem, member, info, optional, validationErr,
 			)
 		}
-		if !filesystem.singleLink(member, info) {
-			return errors.Join(
+		transitioned, metadataErr = validateGenerationMemberMetadata(
+			member, current, optional, filesystem,
+		)
+		if metadataErr != nil || transitioned {
+			return transitioned, metadataErr
+		}
+		observed[index] = current
+		if index == 0 {
+			mainIdentity = current
+		}
+	}
+	transitioned, err := generationSnapshotTransitioned(members, observed, filesystem)
+	if err != nil || transitioned {
+		return transitioned, err
+	}
+	return false, validateGenerationSnapshotCoherence(observed)
+}
+
+func validateProviderGenerationFile(
+	filesystem providerFilesystem,
+	member string,
+	expected os.FileInfo,
+) (os.FileInfo, error) {
+	if filesystem.secureFile == nil || filesystem.lstat == nil {
+		return nil, errors.New("SQLite provider live-file validation is unavailable")
+	}
+	if err := filesystem.secureFile(member); err != nil {
+		return nil, err
+	}
+	current, err := filesystem.lstat(member)
+	if err != nil {
+		return nil, err
+	}
+	if expected == nil || current == nil || !os.SameFile(expected, current) {
+		return nil, errProviderGenerationTransition
+	}
+	if filesystem.validateLiveInfo == nil {
+		return nil, errors.New("SQLite provider final live-file validation is unavailable")
+	}
+	if err := filesystem.validateLiveInfo(current); err != nil {
+		return nil, err
+	}
+	return current, nil
+}
+
+func classifyGenerationFileValidationError(
+	filesystem providerFilesystem,
+	member string,
+	expected os.FileInfo,
+	optional bool,
+	validationErr error,
+) (bool, error) {
+	if errors.Is(validationErr, errProviderUnsafeBoundary) {
+		return false, validationErr
+	}
+	if optional && (errors.Is(validationErr, os.ErrNotExist) ||
+		errors.Is(validationErr, errProviderGenerationTransition)) {
+		return true, nil
+	}
+	if !optional && (errors.Is(validationErr, os.ErrNotExist) ||
+		errors.Is(validationErr, errProviderGenerationTransition)) {
+		return false, errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider main transitioned while validating"),
+		)
+	}
+	if filesystem.lstat != nil {
+		current, currentErr := filesystem.lstat(member)
+		switch {
+		case errors.Is(currentErr, os.ErrNotExist):
+			if optional {
+				return true, nil
+			}
+			return false, errors.Join(
 				errProviderUnsafeBoundary,
-				errors.New("SQLite provider generation member has a hardlink alias"),
+				errors.New("SQLite provider main disappeared while validating"),
+			)
+		case currentErr == nil && (expected == nil || current == nil || !os.SameFile(expected, current)):
+			if optional {
+				return true, nil
+			}
+			return false, errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider main changed while validating"),
 			)
 		}
-		if !filesystem.owned(member, info) {
-			return errors.Join(
+	}
+	return false, fmt.Errorf("validate SQLite provider generation: %w", validationErr)
+}
+
+func validateGenerationMemberMetadata(
+	member string,
+	info os.FileInfo,
+	optional bool,
+	filesystem providerFilesystem,
+) (bool, error) {
+	if info == nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return false, errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider generation member is not a regular file"),
+		)
+	}
+	if filesystem.validateLiveInfo == nil {
+		return false, errors.New("SQLite provider live-file metadata validation is unavailable")
+	}
+	if err := filesystem.validateLiveInfo(info); err != nil &&
+		!errors.Is(err, errProviderFileModeNeedsHardening) {
+		// Unix may safely narrow a legacy generation member by pathname without
+		// obtaining and closing another descriptor for the SQLite inode. Defer
+		// only that repairable condition to secureFile; every other unsafe
+		// classification remains fatal before mutation.
+		if errors.Is(err, errProviderGenerationTransition) {
+			if optional {
+				return true, nil
+			}
+			return false, errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider main transitioned during metadata validation"),
+			)
+		}
+		return false, err
+	}
+	switch providerGenerationLinkCount(filesystem, member, info) {
+	case generationLinkZero:
+		if optional {
+			return true, nil
+		}
+		return false, errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider main entered a zero-link generation transition"),
+		)
+	case generationLinkSingle:
+	case generationLinkMultiple:
+		return false, errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider generation member has a hardlink alias"),
+		)
+	case generationLinkUnsafe:
+		return false, errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider generation member link boundary is unsafe"),
+		)
+	default:
+		if filesystem.lstat == nil {
+			return false, errors.New("SQLite provider generation member link count is unavailable")
+		}
+		current, err := filesystem.lstat(member)
+		if errors.Is(err, os.ErrNotExist) {
+			if optional {
+				return true, nil
+			}
+			return false, errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider main disappeared during link validation"),
+			)
+		}
+		if err != nil {
+			return false, fmt.Errorf("reinspect SQLite provider generation link count: %w", err)
+		}
+		if current == nil || !os.SameFile(info, current) {
+			if optional {
+				return true, nil
+			}
+			return false, errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider main changed during link validation"),
+			)
+		}
+		return false, errors.New("SQLite provider generation member link count is unavailable")
+	}
+	owner := providerGenerationOwner(filesystem, member, info)
+	if owner != generationOwnerCurrent {
+		if filesystem.lstat == nil {
+			return false, errors.New("SQLite provider generation owner check is unavailable")
+		}
+		current, err := filesystem.lstat(member)
+		if errors.Is(err, os.ErrNotExist) {
+			if optional {
+				return true, nil
+			}
+			return false, errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider main disappeared during owner validation"),
+			)
+		}
+		if err != nil {
+			return false, fmt.Errorf("reinspect SQLite provider generation owner: %w", err)
+		}
+		if current == nil || !os.SameFile(info, current) {
+			if optional {
+				return true, nil
+			}
+			return false, errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider main changed during owner validation"),
+			)
+		}
+		if owner == generationOwnerForeign {
+			return false, errors.Join(
 				errProviderUnsafeBoundary,
 				errors.New("SQLite provider generation member is owned by another user"),
 			)
 		}
-		if err := filesystem.secureFile(member); err != nil {
-			if optional && errors.Is(err, os.ErrNotExist) {
-				if _, currentErr := filesystem.lstat(member); errors.Is(currentErr, os.ErrNotExist) {
-					continue
-				}
-			}
-			return fmt.Errorf("secure SQLite provider generation: %w", err)
-		}
-		current, currentErr := filesystem.lstat(member)
-		if optional && errors.Is(currentErr, os.ErrNotExist) {
-			continue
-		}
-		if currentErr != nil {
-			return fmt.Errorf("reinspect SQLite provider generation: %w", currentErr)
-		}
-		if current == nil || !current.Mode().IsRegular() ||
-			current.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, current) {
-			return errors.Join(
-				errProviderUnsafeBoundary,
-				errors.New("SQLite provider generation member changed while securing"),
-			)
-		}
+		return false, errors.New("SQLite provider generation owner check is unavailable")
 	}
-	return validateGenerationCoherence(path, filesystem)
+	return false, nil
 }
 
-func validateGenerationCoherence(path string, filesystem providerFilesystem) error {
-	present := [3]bool{}
-	for index, member := range []string{path + "-wal", path + "-shm", path + "-journal"} {
-		info, err := filesystem.lstat(member)
+func generationSnapshotTransitioned(
+	members [4]string,
+	observed [4]os.FileInfo,
+	filesystem providerFilesystem,
+) (bool, error) {
+	for index, member := range members {
+		optional := index > 0
+		current, err := filesystem.lstat(member)
 		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("inspect SQLite provider sidecar coherence: %w", err)
-		}
-		if info == nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.Join(
+			if observed[index] == nil {
+				continue
+			}
+			if optional {
+				return true, nil
+			}
+			return false, errors.Join(
 				errProviderUnsafeBoundary,
-				errors.New("SQLite provider sidecar coherence is unsafe"),
+				errors.New("SQLite provider main disappeared after validation"),
 			)
 		}
-		present[index] = true
+		if err != nil {
+			return false, fmt.Errorf("reinspect SQLite provider stable generation: %w", err)
+		}
+		if observed[index] == nil {
+			return true, nil
+		}
+		transitioned, metadataErr := validateGenerationMemberMetadata(
+			member, current, optional, filesystem,
+		)
+		if metadataErr != nil || transitioned {
+			return transitioned, metadataErr
+		}
+		if !os.SameFile(observed[index], current) {
+			if optional {
+				return true, nil
+			}
+			return false, errors.Join(
+				errProviderUnsafeBoundary,
+				errors.New("SQLite provider main changed after validation"),
+			)
+		}
+		validated, validationErr := validateProviderGenerationFile(
+			filesystem, member, observed[index],
+		)
+		if validationErr != nil {
+			return classifyGenerationFileValidationError(
+				filesystem, member, observed[index], optional, validationErr,
+			)
+		}
+		transitioned, metadataErr = validateGenerationMemberMetadata(
+			member, validated, optional, filesystem,
+		)
+		if metadataErr != nil || transitioned {
+			return transitioned, metadataErr
+		}
 	}
-	if present[0] && present[2] || present[1] && !present[0] {
+	return false, nil
+}
+
+func validateGenerationSnapshotCoherence(generation [4]os.FileInfo) error {
+	if generation[1] != nil && generation[3] != nil ||
+		generation[2] != nil && generation[1] == nil {
 		return errors.Join(
 			errProviderUnsafeBoundary,
 			errors.New("SQLite provider generation has incoherent sidecars"),

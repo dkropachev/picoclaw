@@ -4,6 +4,7 @@ package sqliteprovider
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,6 +107,16 @@ func validateProviderAncestors(path string) error {
 func secureProviderDirectory(path string) error { return secureWindowsProviderPath(path, true) }
 func secureProviderFile(path string) error      { return secureWindowsProviderPath(path, false) }
 
+func validateProviderLiveFileInfo(info os.FileInfo) error {
+	if info == nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider live generation member is not a regular file"),
+		)
+	}
+	return nil
+}
+
 func secureWindowsProviderPath(path string, directory bool) error {
 	expected, err := os.Lstat(path)
 	if err != nil {
@@ -143,17 +154,31 @@ func secureWindowsProviderPath(path string, directory bool) error {
 	defer file.Close()
 	opened, statErr := file.Stat()
 	currentPath, lstatErr := os.Lstat(path)
-	if statErr != nil || lstatErr != nil || opened == nil || currentPath == nil ||
-		!os.SameFile(expected, opened) || !os.SameFile(opened, currentPath) ||
-		opened.IsDir() != directory || opened.Mode()&os.ModeSymlink != 0 {
-		if statErr != nil || lstatErr != nil {
-			return errors.Join(
-				errors.New("inspect SQLite provider Windows path while opening"), statErr, lstatErr,
-			)
+	if statErr != nil {
+		return fmt.Errorf("inspect SQLite provider Windows handle while opening: %w", statErr)
+	}
+	if lstatErr != nil {
+		if !directory && errors.Is(lstatErr, os.ErrNotExist) {
+			return errProviderGenerationTransition
+		}
+		return fmt.Errorf("inspect SQLite provider Windows path while opening: %w", lstatErr)
+	}
+	if opened == nil || currentPath == nil {
+		return errors.New("SQLite provider Windows path metadata is unavailable")
+	}
+	if !os.SameFile(expected, opened) || !os.SameFile(opened, currentPath) {
+		if !directory {
+			return errProviderGenerationTransition
 		}
 		return errors.Join(
 			errProviderUnsafeBoundary,
 			errors.New("SQLite provider Windows path changed while opening"),
+		)
+	}
+	if opened.IsDir() != directory || opened.Mode()&os.ModeSymlink != 0 {
+		return errors.Join(
+			errProviderUnsafeBoundary,
+			errors.New("SQLite provider Windows path type is unsafe while opening"),
 		)
 	}
 	var attributes providerWindowsFileAttributeTagInfo
@@ -228,12 +253,21 @@ func secureWindowsProviderPath(path string, directory bool) error {
 	}
 	secured, statErr := file.Stat()
 	currentPath, lstatErr = os.Lstat(path)
-	if statErr != nil || lstatErr != nil || secured == nil || currentPath == nil ||
-		!os.SameFile(opened, secured) || !os.SameFile(secured, currentPath) {
-		if statErr != nil || lstatErr != nil {
-			return errors.Join(
-				errors.New("inspect SQLite provider Windows path while securing"), statErr, lstatErr,
-			)
+	if statErr != nil {
+		return fmt.Errorf("inspect SQLite provider Windows handle while securing: %w", statErr)
+	}
+	if lstatErr != nil {
+		if !directory && errors.Is(lstatErr, os.ErrNotExist) {
+			return errProviderGenerationTransition
+		}
+		return fmt.Errorf("inspect SQLite provider Windows path while securing: %w", lstatErr)
+	}
+	if secured == nil || currentPath == nil {
+		return errors.New("SQLite provider secured Windows path metadata is unavailable")
+	}
+	if !os.SameFile(opened, secured) || !os.SameFile(secured, currentPath) {
+		if !directory {
+			return errProviderGenerationTransition
 		}
 		return errors.Join(
 			errProviderUnsafeBoundary,
@@ -319,10 +353,10 @@ type providerWindowsFileAttributeTagInfo struct {
 	reparseTag     uint32
 }
 
-func generationOwnedByCurrentUser(path string, _ os.FileInfo) bool {
+func classifyGenerationOwner(path string, _ os.FileInfo) generationOwnerClass {
 	current, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || current == nil || current.User.Sid == nil {
-		return false
+		return generationOwnerUnavailable
 	}
 	descriptor, err := windows.GetNamedSecurityInfo(
 		path,
@@ -330,8 +364,14 @@ func generationOwnedByCurrentUser(path string, _ os.FileInfo) bool {
 		windows.OWNER_SECURITY_INFORMATION,
 	)
 	if err != nil {
-		return false
+		return generationOwnerUnavailable
 	}
 	owner, _, err := descriptor.Owner()
-	return err == nil && owner != nil && owner.Equals(current.User.Sid)
+	if err != nil || owner == nil {
+		return generationOwnerUnavailable
+	}
+	if owner.Equals(current.User.Sid) {
+		return generationOwnerCurrent
+	}
+	return generationOwnerForeign
 }
