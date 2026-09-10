@@ -277,15 +277,15 @@ func TestExtractZipWithSubdirectories(t *testing.T) {
 
 func TestClawHubRegistrySearchHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("Internal Server Error"))
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Bad Request"))
 	}))
 	defer srv.Close()
 
 	reg := newTestRegistry(srv.URL, "")
 	_, err := reg.Search(context.Background(), "test", 5)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "500")
+	assert.Contains(t, err.Error(), "400")
 }
 
 func TestClawHubRegistrySearchNullableFields(t *testing.T) {

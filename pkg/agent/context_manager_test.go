@@ -486,7 +486,6 @@ func TestLegacyContext_UnownedExplicitSessionFailsClosed(t *testing.T) {
 					t.Fatalf("Compact(%q) error = %v", reason, err)
 				}
 			}
-			time.Sleep(100 * time.Millisecond)
 			if err := al.contextManager.Clear(t.Context(), sessionKey); err == nil {
 				t.Fatal("Clear() succeeded for unowned explicit session")
 			}

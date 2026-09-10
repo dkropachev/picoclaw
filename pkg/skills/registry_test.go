@@ -2,9 +2,9 @@ package skills
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -147,20 +147,20 @@ func TestRegistryManagerSearchAllRespectLimit(t *testing.T) {
 	assert.Equal(t, "skill-0", got[0].Slug)
 }
 
-func TestRegistryManagerSearchAllTimeout(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
-	defer cancel()
-
-	time.Sleep(5 * time.Millisecond) // Let context expire.
-
+func TestRegistryManagerSearchAllCanceledBeforeSemaphore(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	mgr := NewRegistryManager()
+	// An unbuffered semaphore with no receiver makes cancellation the only
+	// selectable branch for the worker.
+	mgr.maxConcurrent = 0
 	mgr.AddRegistry(&mockRegistry{
 		name:      "slow",
-		searchErr: fmt.Errorf("context deadline exceeded"),
+		searchErr: errors.New("search must not run"),
 	})
 
 	_, err := mgr.SearchAll(ctx, "test", 5)
-	assert.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func TestSortByScoreDesc(t *testing.T) {

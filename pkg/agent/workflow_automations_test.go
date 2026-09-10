@@ -215,6 +215,30 @@ jobs:
 	}
 }
 
+func TestHandleWorkflowRuntimeEventRejectsUnsafeDefinitionsDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	al := newWorkflowAutomationTestLoop(workspace)
+	defer al.Close()
+	al.cfg.Workflows.DefinitionsDir = "../unsafe"
+
+	// The malformed definitions root must fail before any workflow can be
+	// discovered or started. This also exercises the catalog-error path without
+	// relying on cancellation racing the runtime-event pump.
+	al.handleWorkflowRuntimeEvent(t.Context(), runtimeevents.Event{
+		Kind:   runtimeevents.KindGatewayReady,
+		Source: runtimeevents.Source{Component: "gateway", Name: "main"},
+	})
+	store := workflows.NewFileRunStore(workspace)
+	defer store.Close()
+	runs, err := store.ListRuns(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("unsafe definitions directory started runs: %#v", runs)
+	}
+}
+
 func TestChannelAndCommandWorkflowsRunMatchedSnapshotAfterDefinitionDrift(t *testing.T) {
 	tests := []struct {
 		name    string

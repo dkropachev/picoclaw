@@ -616,6 +616,7 @@ func TestRepositoryReviewCoverageProgressMonitor(t *testing.T) {
 	monitorCtx, cancelMonitor := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	controller := newRepositoryReviewController(handler)
+	controller.progressEvery = 2 * time.Millisecond
 	go func() {
 		controller.monitorWorkflowProgress(monitorCtx, store, workflowStore, automation.ID, runID)
 		close(done)

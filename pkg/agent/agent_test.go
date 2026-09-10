@@ -5560,6 +5560,21 @@ func TestTargetReasoningChannelID_AllChannels(t *testing.T) {
 	}
 }
 
+type reasoningTestMessageBus struct {
+	*bus.MessageBus
+	publishOutbound func(context.Context, bus.OutboundMessage) error
+}
+
+func (messageBus *reasoningTestMessageBus) PublishOutbound(
+	ctx context.Context,
+	message bus.OutboundMessage,
+) error {
+	if messageBus.publishOutbound != nil {
+		return messageBus.publishOutbound(ctx, message)
+	}
+	return messageBus.MessageBus.PublishOutbound(ctx, message)
+}
+
 func TestHandleReasoning(t *testing.T) {
 	newLoop := func(t *testing.T) (*AgentLoop, *bus.MessageBus) {
 		t.Helper()
@@ -5584,27 +5599,17 @@ func TestHandleReasoning(t *testing.T) {
 
 	t.Run("skips when any required field is empty", func(t *testing.T) {
 		al, msgBus := newLoop(t)
+		var publishCalls atomic.Int64
+		al.bus = &reasoningTestMessageBus{
+			MessageBus: msgBus,
+			publishOutbound: func(context.Context, bus.OutboundMessage) error {
+				publishCalls.Add(1)
+				return nil
+			},
+		}
 		al.handleReasoning(context.Background(), "reasoning", "telegram", "")
-
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		for {
-			select {
-			case msg, ok := <-msgBus.OutboundChan():
-				if !ok {
-					t.Fatalf("expected no outbound message, got %+v", msg)
-				}
-				if msg.Content == "reasoning" {
-					t.Fatalf("expected no message for empty chatID, got %+v", msg)
-				}
-				return
-			case <-ctx.Done():
-				t.Log("expected an outbound message, got none within timeout")
-				return
-			default:
-				// Continue to check for message
-				time.Sleep(5 * time.Millisecond) // Avoid busy loop
-			}
+		if calls := publishCalls.Load(); calls != 0 {
+			t.Fatalf("PublishOutbound calls = %d, want 0", calls)
 		}
 	})
 
@@ -5675,58 +5680,56 @@ func TestHandleReasoning(t *testing.T) {
 		}
 	})
 
-	t.Run("returns promptly when bus is full", func(t *testing.T) {
+	t.Run("returns promptly when blocked publication is canceled", func(t *testing.T) {
 		al, msgBus := newLoop(t)
-
-		// Fill the outbound bus buffer until a publish would block.
-		// Use a short timeout to detect when the buffer is full,
-		// rather than hardcoding the buffer size.
-		for i := 0; ; i++ {
-			fillCtx, fillCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-			err := msgBus.PublishOutbound(fillCtx, bus.OutboundMessage{
-				Context: bus.NewOutboundContext("filler", "filler", ""),
-				Content: fmt.Sprintf("filler-%d", i),
-			})
-			fillCancel()
-			if err != nil {
-				// Buffer is full (timed out trying to send).
-				break
-			}
+		entered := make(chan bus.OutboundMessage, 1)
+		al.bus = &reasoningTestMessageBus{
+			MessageBus: msgBus,
+			publishOutbound: func(ctx context.Context, message bus.OutboundMessage) error {
+				entered <- message
+				<-ctx.Done()
+				return ctx.Err()
+			},
 		}
 
-		// Use a short-deadline parent context to bound the test.
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		defer cancel()
-
-		start := time.Now()
-		al.handleReasoning(ctx, "should timeout", "slack", "channel-full")
-		elapsed := time.Since(start)
-
-		// handleReasoning uses a 5s internal timeout, but the parent ctx
-		// expires in 500ms. It should return within ~500ms, not 5s.
-		if elapsed > 2*time.Second {
-			t.Fatalf("handleReasoning blocked too long (%v); expected prompt return", elapsed)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() {
+			al.handleReasoning(ctx, "should timeout", "slack", "channel-full")
+			close(done)
+		}()
+		var attempted bus.OutboundMessage
+		select {
+		case attempted = <-entered:
+		case <-time.After(time.Second):
+			cancel()
+			t.Fatal("handleReasoning did not attempt outbound publication")
 		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("handleReasoning did not return after parent cancellation")
+		}
+		if attempted.Context.Channel != "slack" || attempted.Context.ChatID != "channel-full" ||
+			attempted.Content != "should timeout" {
+			t.Fatalf("outbound attempt = %#v", attempted)
+		}
+	})
 
-		// Drain the bus and verify the reasoning message was NOT published
-		// (it should have been dropped due to timeout).
-		timeer := time.After(1 * time.Second)
-		for {
-			select {
-			case <-timeer:
-				t.Logf(
-					"no reasoning message received after draining bus for 1s, as expected,length=%d",
-					len(msgBus.OutboundChan()),
-				)
-				return
-			case msg, ok := <-msgBus.OutboundChan():
-				if !ok {
-					break
-				}
-				if msg.Content == "should timeout" {
-					t.Fatal("expected reasoning message to be dropped when bus is full, but it was published")
-				}
-			}
+	t.Run("classifies a publish deadline without waiting", func(t *testing.T) {
+		al, msgBus := newLoop(t)
+		var publishCalls atomic.Int64
+		al.bus = &reasoningTestMessageBus{
+			MessageBus: msgBus,
+			publishOutbound: func(context.Context, bus.OutboundMessage) error {
+				publishCalls.Add(1)
+				return context.DeadlineExceeded
+			},
+		}
+		al.handleReasoning(t.Context(), "deadline reasoning", "slack", "deadline-chat")
+		if calls := publishCalls.Load(); calls != 1 {
+			t.Fatalf("PublishOutbound calls = %d, want 1", calls)
 		}
 	})
 }
