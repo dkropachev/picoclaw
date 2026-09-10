@@ -45,6 +45,12 @@ The runner auto-discovers every suite under `integration/suites/`, so adding a s
 - The runner bind-mounts repository-local Go build and module caches at host-identical absolute paths, so compiled dependencies are reusable across suite projects and trusted CI runs. `INTEGRATION_GOCACHE` and `INTEGRATION_GOMODCACHE` may select other writable absolute paths; ambient global Go cache paths are not mounted automatically.
 - Rootful Linux runners use the invoking numeric user/group. Rootless engines and Docker Desktop use container root, which those engines map back to the invoking host user. `INTEGRATION_RUNNER_UID` and `INTEGRATION_RUNNER_GID` may be set together when a custom mapping is required.
 - The runner forces `-count=1` for `go test`, so the reusable build cache never turns a live integration check into a cached test result.
+- The top-level runner supervises each suite in its own process group. On
+  cancellation it terminates and reaps that complete group before preserving
+  the interrupt exit status, so host builds and fixtures cannot be orphaned.
+- Suites are non-interactive: the runner disconnects host stdin and disables
+  Docker pseudo-TTY allocation so a supervised background group cannot stop on
+  terminal input or wait for a prompt in CI.
 
 In practice, each suite gives us:
 

@@ -57,6 +57,51 @@ readonly INTEGRATION_GOMODCACHE="$integration_gomodcache"
 export INTEGRATION_GOCACHE INTEGRATION_GOMODCACHE
 readonly requested_integration_runner_uid="${INTEGRATION_RUNNER_UID:-}"
 readonly requested_integration_runner_gid="${INTEGRATION_RUNNER_GID:-}"
+active_suite_pid=""
+
+terminate_suite_and_wait() {
+  local pid="$1"
+  local target="-$pid"
+  if ! kill -0 -- "$target" 2>/dev/null; then
+    target="$pid"
+  fi
+  if kill -0 -- "$target" 2>/dev/null; then
+    kill -TERM -- "$target" 2>/dev/null || true
+    # A just-launched background group may have stopped on terminal input
+    # before `fg` transferred the terminal. Resume it so TERM cleanup runs.
+    kill -CONT -- "$target" 2>/dev/null || true
+    # Nested suite cleanup has its own bounded escalation, while Docker
+    # teardown may use the engine's ten-second stop grace. Do not preempt
+    # either cleanup boundary with an equally short outer deadline.
+    for ((attempt = 0; attempt < 600; attempt++)); do
+      if ! kill -0 -- "$target" 2>/dev/null; then
+        break
+      fi
+      sleep 0.05
+    done
+    if kill -0 -- "$target" 2>/dev/null; then
+      kill -KILL -- "$target" 2>/dev/null || true
+    fi
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+handle_runner_signal() {
+  local status="$1"
+  local pid="$active_suite_pid"
+  trap - INT TERM
+  if [[ -z "$pid" ]]; then
+    pid="$(jobs -p | head -n 1 || true)"
+  fi
+  if [[ -n "$pid" ]]; then
+    terminate_suite_and_wait "$pid"
+    active_suite_pid=""
+  fi
+  exit "$status"
+}
+
+trap 'handle_runner_signal 130' INT
+trap 'handle_runner_signal 143' TERM
 
 resolve_runner_identity() {
   local configured_uid="$requested_integration_runner_uid"
@@ -274,8 +319,28 @@ export -f go
     echo "==> [$suite_name] running: $TEST_COMMAND"
     # integration-runner already uses `bash -c` as its entrypoint, so pass the
     # suite command as a single argument for Bash to execute directly.
-    docker compose "${compose_args[@]}" run --rm "${run_env[@]}" "$runner_service" "$run_command"
+    docker compose "${compose_args[@]}" run --rm -T "${run_env[@]}" "$runner_service" "$run_command"
   )
+}
+
+run_suite_supervised() {
+  local suite_dir="$1"
+  local status=0
+
+  # Job control gives the suite its own process group. Integration suites are
+  # automation and explicitly receive no terminal input, so the parent can
+  # retain a PID that its signal traps supervise without risking SIGTTIN.
+  set -m
+  run_suite "$suite_dir" </dev/null &
+  active_suite_pid="$!"
+  set +m
+  if wait "$active_suite_pid"; then
+    status=0
+  else
+    status="$?"
+  fi
+  active_suite_pid=""
+  return "$status"
 }
 
 main() {
@@ -295,7 +360,7 @@ main() {
       echo "unknown integration suite: $suite_dir" >&2
       exit 1
     fi
-    run_suite "$suite_dir"
+    run_suite_supervised "$suite_dir"
   done
 }
 

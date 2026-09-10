@@ -126,6 +126,9 @@ esac
 	if !containsArg(runArgs, "integration-runner") {
 		t.Fatalf("docker compose run args missing runner service:\n%v", runArgs)
 	}
+	if !containsArg(runArgs, "-T") {
+		t.Fatalf("docker compose run did not disable pseudo-TTY allocation:\n%v", runArgs)
+	}
 	if !containsArg(runArgs, "printf runner-ok") {
 		t.Fatalf("docker compose run args missing suite command as a single argument:\n%v", runArgs)
 	}
