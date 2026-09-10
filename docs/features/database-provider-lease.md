@@ -13,7 +13,8 @@ consume it. Revocation immediately closes new admission and cancels admitted
 contexts; authority is not released until the callback and every admitted
 operation have returned.
 
-This slice opens no database, acquires no claim, and changes no runtime wiring.
+The claims bridge now binds this neutral lifecycle to an already-held migration
+guard. It opens no database and changes no runtime wiring.
 
 ## Reconstruction Notes
 
@@ -81,10 +82,13 @@ Owns: TEST internal/databaseproviderlease/*_test.go *
 
 ## Cross-Feature Behavior
 
-Physical claims will mint the lease from `MigrationRefreshingGuard`; the
-managed SQLite provider will consume it while draining/opening offline state.
-Neither dependency is active in this slice. D5 orchestration must complete the
-provider scope before releasing the migration guard.
+Physical claims mint the lease from `MigrationRefreshingGuard`; the managed
+SQLite provider consumes it while draining/opening offline state. The returned
+claims-owned drain closure revokes admission and waits for all admitted work.
+Only one undrained child exists per guard and unresolved pins cannot cross into
+a later child. D5 orchestration should observe the drain before releasing the
+migration guard; release itself revokes and fully drains the registered child
+while the claims/fence remain held before it can unlock.
 
 ## Failure And Edge Cases
 
@@ -105,7 +109,7 @@ provider scope before releasing the migration guard.
 
 | Requirement IDs | Evidence |
 | --- | --- |
-| `FR-DATABASE-PROVIDER-LEASE-001`, `FR-DATABASE-PROVIDER-LEASE-002`, `FR-DATABASE-PROVIDER-LEASE-003` | [lease_test.go](../../internal/databaseproviderlease/lease_test.go) |
+| `FR-DATABASE-PROVIDER-LEASE-001`, `FR-DATABASE-PROVIDER-LEASE-002`, `FR-DATABASE-PROVIDER-LEASE-003` | [lease_test.go](../../internal/databaseproviderlease/lease_test.go), [provider_lease_test.go](../../internal/databaseclaims/provider_lease_test.go) |
 | `FR-DATABASE-PROVIDER-LEASE-004` | [import_guard_test.go](../../internal/databaseproviderlease/import_guard_test.go) |
 
 ## Implementation Anchors
