@@ -147,7 +147,7 @@ func TestPRGoTestsBoundPackageParallelism(t *testing.T) {
 		"shard: [slow, workspace, remaining]",
 		"if: matrix.shard == 'remaining'",
 		"uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-		`go run ./scripts/hermetic-go-test -- bash ./scripts/run-go-test-shard.sh "${{ matrix.shard }}"`,
+		`go run ./scripts/hermetic-go-test -- --skip-core-build -- bash ./scripts/run-go-test-shard.sh "${{ matrix.shard }}"`,
 	} {
 		if !strings.Contains(testJob, snippet) {
 			t.Errorf("PR workflow is missing Go test sharding setting %q", snippet)

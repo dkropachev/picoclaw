@@ -35,6 +35,13 @@ compatible with low-cost hardware.
 | `FR-PORT-005` | SHOULD | Memory benchmark tools measure ingestion/evaluation behavior without affecting runtime packages. | Low-resource goals need measurable support. |
 | `FR-PORT-006` | MUST | Pull-request CI classifies NUL-delimited changed paths from immutable event revisions, runs every validation relevant to those paths, treats unknown paths and its own workflow or classifier changes as full-suite changes, and emits one stable aggregate result that fails for invalid classification or any selected failed, cancelled, or skipped job. Manual validation runs execute the full suite. | Scoped validation reduces feedback cost without letting rename, deletion, malformed-output, cancellation, or required-check semantics bypass a relevant gate. |
 
+Under `FR-PORT-004`, the root, web, and three pull-request Go test entrypoints
+explicitly skip the hermetic runner's otherwise compatible core build because
+none consumes that inherited executable. Cross-compilation remains a separate
+mandatory check, and the sole direct-binary API test performs its own lazy,
+test-owned build. Coverage refs likewise use inert owned sentinels rather than
+building binaries that their selected tests replace.
+
 ## Data And State Model
 
 Portability state includes target OS/architecture tuples, release asset names,
