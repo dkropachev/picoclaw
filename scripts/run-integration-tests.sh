@@ -6,11 +6,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_COMPOSE="$ROOT_DIR/integration/docker-compose.runner.yml"
 SUITES_DIR="$ROOT_DIR/integration/suites"
 
-if [[ ! -f "$BASE_COMPOSE" ]]; then
-  echo "missing base compose file: $BASE_COMPOSE" >&2
-  exit 1
-fi
-
 if [[ ! -d "$SUITES_DIR" ]]; then
   echo "missing integration suites directory: $SUITES_DIR" >&2
   exit 1
@@ -60,10 +55,12 @@ fi
 readonly INTEGRATION_GOCACHE="$integration_gocache"
 readonly INTEGRATION_GOMODCACHE="$integration_gomodcache"
 export INTEGRATION_GOCACHE INTEGRATION_GOMODCACHE
+readonly requested_integration_runner_uid="${INTEGRATION_RUNNER_UID:-}"
+readonly requested_integration_runner_gid="${INTEGRATION_RUNNER_GID:-}"
 
 resolve_runner_identity() {
-  local configured_uid="${INTEGRATION_RUNNER_UID:-}"
-  local configured_gid="${INTEGRATION_RUNNER_GID:-}"
+  local configured_uid="$requested_integration_runner_uid"
+  local configured_gid="$requested_integration_runner_gid"
   if [[ -n "$configured_uid" || -n "$configured_gid" ]]; then
     if [[ -z "$configured_uid" || -z "$configured_gid" ]]; then
       echo "INTEGRATION_RUNNER_UID and INTEGRATION_RUNNER_GID must be set together" >&2
@@ -102,16 +99,6 @@ resolve_runner_identity() {
   fi
   printf '%s %s\n' "$(id -u)" "$(id -g)"
 }
-
-runner_identity="$(resolve_runner_identity)"
-read -r integration_runner_uid integration_runner_gid <<< "$runner_identity"
-if [[ ! "$integration_runner_uid" =~ ^[0-9]+$ || ! "$integration_runner_gid" =~ ^[0-9]+$ ]]; then
-  echo "integration runner UID and GID must be numeric" >&2
-  exit 1
-fi
-readonly INTEGRATION_RUNNER_UID="$integration_runner_uid"
-readonly INTEGRATION_RUNNER_GID="$integration_runner_gid"
-export INTEGRATION_RUNNER_UID INTEGRATION_RUNNER_GID
 
 sanitize_project_name() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-'
@@ -153,11 +140,6 @@ run_suite() {
     compose_args+=(-f "$compose_file")
   done < <(find "$suite_dir" -maxdepth 1 -type f \( -name 'docker-compose.yml' -o -name 'docker-compose.*.yml' \) | sort)
 
-  if [[ "${#compose_files[@]}" -eq 0 ]]; then
-    echo "suite $suite_name has no docker-compose file" >&2
-    return 1
-  fi
-
   (
     set -a
     # shellcheck disable=SC1090
@@ -166,36 +148,18 @@ run_suite() {
     export INTEGRATION_REPO_ROOT="$ROOT_DIR"
 
     : "${TEST_COMMAND:?suite $suite_name must define TEST_COMMAND in $manifest}"
-    runner_service="${RUNNER_SERVICE:-integration-runner}"
-
-    cleanup() {
-      local cleanup_args=(down -v --remove-orphans)
-      if [[ -n "$project_namespace" ]]; then
-        cleanup_args+=(--rmi local)
-      fi
-      docker compose "${compose_args[@]}" "${cleanup_args[@]}" >/dev/null 2>&1 || true
-    }
-    trap cleanup EXIT
-
-    echo "==> [$suite_name] resolving services"
-    local services=()
-    while IFS= read -r service; do
-      services+=("$service")
-    done < <(docker compose "${compose_args[@]}" config --services)
-
-    local dependency_services=()
-    for service in "${services[@]}"; do
-      if [[ "$service" != "$runner_service" ]]; then
-        dependency_services+=("$service")
-      fi
-    done
-
-    if [[ "${#dependency_services[@]}" -gt 0 ]]; then
-      echo "==> [$suite_name] starting docker services: ${dependency_services[*]}"
-      docker compose "${compose_args[@]}" up -d --build --wait "${dependency_services[@]}"
+    runner_mode="${RUNNER_MODE:-docker}"
+    if [[ "$runner_mode" != "host" && "$runner_mode" != "docker" ]]; then
+      echo "suite $suite_name has invalid RUNNER_MODE: $runner_mode" >&2
+      return 1
+    fi
+    if [[ "$runner_mode" == "host" && -n "${RUNNER_SERVICE:-}" ]]; then
+      echo "suite $suite_name cannot set RUNNER_SERVICE in host mode" >&2
+      return 1
     fi
 
     local run_env=()
+    local host_cover_profile=""
     if [[ -n "${INTEGRATION_COVERPROFILE_DIR:-}" ]]; then
       local cover_profile="$INTEGRATION_COVERPROFILE_DIR/$suite_name.cover.out"
       local host_cover_dir=""
@@ -205,9 +169,12 @@ run_suite() {
         host_cover_dir="$INTEGRATION_COVERPROFILE_DIR"
       fi
       mkdir -p "$host_cover_dir"
-      run_env+=(-e "INTEGRATION_COVERPKG=${INTEGRATION_COVERPKG:-}")
-      run_env+=(-e "INTEGRATION_COVERPROFILE=$cover_profile")
-      run_env+=(-e "GOMAXPROCS=$integration_gomaxprocs")
+      host_cover_profile="$host_cover_dir/$suite_name.cover.out"
+      if [[ "$runner_mode" == "docker" ]]; then
+        run_env+=(-e "INTEGRATION_COVERPKG=${INTEGRATION_COVERPKG:-}")
+        run_env+=(-e "INTEGRATION_COVERPROFILE=$cover_profile")
+        run_env+=(-e "GOMAXPROCS=$integration_gomaxprocs")
+      fi
     fi
 
     local run_command='go() {
@@ -238,6 +205,71 @@ run_suite() {
 }
 export -f go
 '"$TEST_COMMAND"
+
+    if [[ "$runner_mode" == "host" ]]; then
+      export GOCACHE="$INTEGRATION_GOCACHE"
+      export GOMODCACHE="$INTEGRATION_GOMODCACHE"
+      export GOTOOLCHAIN=auto
+      export CGO_ENABLED=0
+      export GOFLAGS="${INTEGRATION_GOFLAGS:--tags=goolm,stdjson,integration}"
+      if [[ -n "$host_cover_profile" ]]; then
+        export INTEGRATION_COVERPKG="${INTEGRATION_COVERPKG:-}"
+        export INTEGRATION_COVERPROFILE="$host_cover_profile"
+        export GOMAXPROCS="$integration_gomaxprocs"
+      fi
+      echo "==> [$suite_name] running on host: $TEST_COMMAND"
+      cd "$ROOT_DIR"
+      bash -c "$run_command"
+      return
+    fi
+
+    if [[ ! -f "$BASE_COMPOSE" ]]; then
+      echo "missing base compose file: $BASE_COMPOSE" >&2
+      return 1
+    fi
+    if [[ "${#compose_files[@]}" -eq 0 ]]; then
+      echo "suite $suite_name has no docker-compose file" >&2
+      return 1
+    fi
+
+    local runner_identity integration_runner_uid integration_runner_gid
+    runner_identity="$(resolve_runner_identity)"
+    read -r integration_runner_uid integration_runner_gid <<< "$runner_identity"
+    if [[ ! "$integration_runner_uid" =~ ^[0-9]+$ || ! "$integration_runner_gid" =~ ^[0-9]+$ ]]; then
+      echo "integration runner UID and GID must be numeric" >&2
+      return 1
+    fi
+    readonly INTEGRATION_RUNNER_UID="$integration_runner_uid"
+    readonly INTEGRATION_RUNNER_GID="$integration_runner_gid"
+    export INTEGRATION_RUNNER_UID INTEGRATION_RUNNER_GID
+
+    runner_service="${RUNNER_SERVICE:-integration-runner}"
+    cleanup() {
+      local cleanup_args=(down -v --remove-orphans)
+      if [[ -n "$project_namespace" ]]; then
+        cleanup_args+=(--rmi local)
+      fi
+      docker compose "${compose_args[@]}" "${cleanup_args[@]}" >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+
+    echo "==> [$suite_name] resolving services"
+    local services=()
+    while IFS= read -r service; do
+      services+=("$service")
+    done < <(docker compose "${compose_args[@]}" config --services)
+
+    local dependency_services=()
+    for service in "${services[@]}"; do
+      if [[ "$service" != "$runner_service" ]]; then
+        dependency_services+=("$service")
+      fi
+    done
+
+    if [[ "${#dependency_services[@]}" -gt 0 ]]; then
+      echo "==> [$suite_name] starting docker services: ${dependency_services[*]}"
+      docker compose "${compose_args[@]}" up -d --build --wait "${dependency_services[@]}"
+    fi
 
     echo "==> [$suite_name] running: $TEST_COMMAND"
     # integration-runner already uses `bash -c` as its entrypoint, so pass the

@@ -143,7 +143,7 @@ func main() {
 	integration := flag.Bool(
 		"integration",
 		true,
-		"include Docker-backed integration coverage when impacted features own integration suites",
+		"include integration coverage when impacted features own integration suites",
 	)
 	flag.Parse()
 
@@ -1428,6 +1428,10 @@ func runIntegrationCoverage(
 	args := append([]string{filepath.Join(worktree, "scripts", "run-integration-tests.sh")}, suites...)
 	cmd := exec.Command("bash", args...)
 	cmd.Dir = worktree
+	integrationGoFlags := "-tags=integration"
+	if tags = strings.Trim(tags, ","); tags != "" {
+		integrationGoFlags = "-tags=" + tags + ",integration"
+	}
 	cmd.Env = append(append([]string(nil), environment...),
 		"INTEGRATION_COVERPKG="+strings.Join(coverImports, ","),
 		"INTEGRATION_COVERPROFILE_DIR=/workspace/.coverage/integration-"+label,
@@ -1435,6 +1439,7 @@ func runIntegrationCoverage(
 		"INTEGRATION_GOMAXPROCS="+strconv.Itoa(coverageGoMaxProcs),
 		"INTEGRATION_GOCACHE="+coverageEnvironmentValue(environment, "GOCACHE"),
 		"INTEGRATION_GOMODCACHE="+coverageEnvironmentValue(environment, "GOMODCACHE"),
+		"INTEGRATION_GOFLAGS="+integrationGoFlags,
 	)
 	if tags != "" {
 		cmd.Env = append(cmd.Env, "GOFLAGS=-tags="+tags+",integration")

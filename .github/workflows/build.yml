@@ -23,6 +23,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
       - name: Compute host Go cache generation
         id: go-cache-key
         run: echo "epoch=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
@@ -38,7 +44,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
             ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
 
-      - name: Run Docker-backed integration suites
+      - name: Run integration suites
         run: bash ./scripts/run-integration-tests.sh
 
   build:

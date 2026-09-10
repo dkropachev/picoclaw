@@ -340,7 +340,7 @@ test: generate
 	@$(GO) run ./scripts/hermetic-go-test -- $(GO) test $(GOFLAGS) $$($(GO) list $(GOFLAGS) ./... | grep -v github.com/sipeed/picoclaw/web/)
 	@cd web && make test
 
-## integration-test: Run Docker-backed integration test suites
+## integration-test: Run integration test suites
 integration-test:
 	@bash ./scripts/run-integration-tests.sh
 

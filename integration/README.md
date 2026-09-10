@@ -15,12 +15,12 @@ These tests exist to catch regressions that are easy to miss with unit tests alo
 PicoClaw currently uses two related mechanisms:
 
 1. Go integration tests, usually in `*_integration_test.go` files and guarded by `//go:build integration`
-2. Docker-backed suites in `integration/suites/` that start real dependencies and run one or more of those Go tests in CI
+2. Merge-gating suites in `integration/suites/` that run on the host or start Docker dependencies before executing one or more tagged Go tests
 
 That distinction matters:
 
 - a tagged Go integration test is the test implementation
-- a Docker-backed suite is how we make that test reproducible and CI-safe
+- a suite manifest is how we make that test reproducible and CI-safe
 
 If a test should actively protect merges between PRs, it should be reachable from [`scripts/run-integration-tests.sh`](../scripts/run-integration-tests.sh), either by extending an existing suite or by adding a new one.
 
@@ -38,10 +38,10 @@ The runner auto-discovers every suite under `integration/suites/`, so adding a s
 
 ## How the Runner Works
 
-- The shared runner is defined in [`integration/docker-compose.runner.yml`](docker-compose.runner.yml).
 - Each suite lives in `integration/suites/<suite-name>/`.
-- The runner script loads `suite.env`, merges the shared compose file with the suite-specific compose files, starts dependency services, runs the suite command, and then tears everything down.
-- The shared runner container sets `GOFLAGS=-tags=goolm,stdjson,integration`, so tests run with the same build tags used by CI.
+- The runner script loads `suite.env`, then runs a self-contained suite directly on the host or merges Docker Compose files for a suite that needs isolated services.
+- Host suites use the repository's selected Go toolchain, disable CGO, and force uncached results. They are not sandboxes and must use deterministic test-owned fixtures without external credentials or shared state.
+- Docker suites use the shared runner in [`integration/docker-compose.runner.yml`](docker-compose.runner.yml) and set `GOFLAGS=-tags=goolm,stdjson,integration`.
 - The runner bind-mounts repository-local Go build and module caches at host-identical absolute paths, so compiled dependencies are reusable across suite projects and trusted CI runs. `INTEGRATION_GOCACHE` and `INTEGRATION_GOMODCACHE` may select other writable absolute paths; ambient global Go cache paths are not mounted automatically.
 - Rootful Linux runners use the invoking numeric user/group. Rootless engines and Docker Desktop use container root, which those engines map back to the invoking host user. `INTEGRATION_RUNNER_UID` and `INTEGRATION_RUNNER_GID` may be set together when a custom mapping is required.
 - The runner forces `-count=1` for `go test`, so the reusable build cache never turns a live integration check into a cached test result.
@@ -55,12 +55,12 @@ In practice, each suite gives us:
 
 ## Current Reference Suite
 
-[`integration/suites/mcp-streamable/`](suites/mcp-streamable/) is the reference example today.
+[`integration/suites/mcp-streamable/`](suites/mcp-streamable/) is a host-suite reference example today.
 
 It does three things:
 
-- builds and starts a fixture MCP server from [`integration/fixtures/mcp-streamable-server/`](fixtures/mcp-streamable-server/)
-- injects connection details into the runner container through environment variables
+- builds and starts a fixture MCP server from [`integration/fixtures/mcp-streamable-server/`](fixtures/mcp-streamable-server/) on a kernel-assigned IPv4 loopback port
+- waits for an atomically published readiness address, injects the exact endpoint through environment variables, and terminates the fixture on every exit path
 - runs [`TestIntegration_RealConfiguredServer`](../pkg/mcp/manager_real_server_integration_test.go) to verify that PicoClaw can connect to a real server, discover tools, invoke one, and validate the response payload
 
 That suite complements [`TestIntegration_StreamableHTTPCompatibility`](../pkg/mcp/manager_integration_test.go), which exercises the same area in-process. Together they cover both protocol behavior and real service wiring.
@@ -102,13 +102,12 @@ are not part of ordinary CI.
 Each suite directory must contain:
 
 - `suite.env`
-- at least one `docker-compose.yml` or `docker-compose.*.yml`
+- a Docker Compose file only when `RUNNER_MODE=docker`
 
 Example:
 
 ```text
 integration/suites/my-suite/
-├── docker-compose.yml
 └── suite.env
 ```
 
@@ -116,24 +115,27 @@ integration/suites/my-suite/
 
 `suite.env` is sourced by the runner script and must define:
 
-- `TEST_COMMAND`: shell command executed inside the integration runner container
+- `TEST_COMMAND`: shell command executed from the repository root in the selected runner mode
+- `RUNNER_MODE`: `host` or `docker` (defaults to `docker` for compatibility)
 
 Optional fields:
 
-- `RUNNER_SERVICE`: override the default runner service name (`integration-runner`)
+- `RUNNER_SERVICE`: override the default Docker runner service name (`integration-runner`); Docker mode only
+- `INTEGRATION_GOFLAGS`: override host-suite Go flags; coverage uses this to preserve the requested build tags
 
 Example:
 
 ```bash
-TEST_COMMAND='go test ./pkg/mcp -run TestIntegration_RealConfiguredServer -v'
+RUNNER_MODE=host
+TEST_COMMAND='go test -tags=goolm,stdjson,integration ./pkg/mcp -run TestIntegration_RealConfiguredServer -v'
 ```
 
 ## Running Integration Tests Locally
 
 ### Prerequisites
 
-- Docker with the `docker compose` plugin for Docker-backed suites
-- Go 1.25+ only if you want to run tagged integration tests directly on your host instead of through Docker
+- The Go version declared by `go.mod` for host suites
+- Docker with the `docker compose` plugin only when a selected suite uses Docker mode
 
 ### Run Everything That CI Runs
 
@@ -176,7 +178,7 @@ go test -tags=goolm,stdjson,integration ./pkg/mcp -run TestIntegration_RealConfi
 Notes:
 
 - avoid `-short`: the current integration tests skip in short mode
-- use direct `go test` for tight feedback loops, then validate the Docker suite before committing
+- use direct `go test` for tight feedback loops, then validate the complete suite before committing
 
 ## When to Add an Integration Test
 
@@ -221,7 +223,7 @@ Guidelines:
 Use this rule of thumb:
 
 - if the test is only a manual smoke check, a tagged Go test may be enough
-- if the test should prevent regressions from landing through PR merges, wire it into a Docker-backed suite
+- if the test should prevent regressions from landing through PR merges, wire it into a host or Docker suite according to its dependency/isolation needs
 
 ### 4. Reuse or add a suite
 
@@ -229,7 +231,6 @@ If an existing suite already exercises the same subsystem, extend it. Otherwise 
 
 ```text
 integration/suites/<name>/
-├── docker-compose.yml
 └── suite.env
 ```
 
@@ -242,6 +243,7 @@ In `suite.env`, point `TEST_COMMAND` at the Go test you want CI to run.
 Examples:
 
 ```bash
+RUNNER_MODE=host
 TEST_COMMAND='go test ./pkg/mcp -run TestIntegration_RealConfiguredServer -v'
 ```
 
@@ -251,9 +253,9 @@ TEST_COMMAND='go test ./pkg/somepkg -run TestIntegration_MyScenario -v'
 
 You can also run multiple tests if they share the same environment, but keep suites cohesive and easy to diagnose when they fail.
 
-### 6. Model the dependencies in Docker Compose
+### 6. Model external dependencies when needed
 
-Suite compose files can:
+Use host mode for deterministic, self-contained fixtures. Docker-mode suite compose files can:
 
 - define dependency services needed by the tests
 - extend or override the shared `integration-runner` service
