@@ -24,6 +24,7 @@ const (
 	workflowConfigGuardPathEnv      = "_PICOCLAW_WORKFLOW_CONFIG_GUARD_PATH"
 	workflowConfigGuardWorkspaceEnv = "_PICOCLAW_WORKFLOW_CONFIG_GUARD_WORKSPACE"
 	workflowConfigGuardReadyEnv     = "_PICOCLAW_WORKFLOW_CONFIG_GUARD_READY"
+	workflowConfigGuardCreatedEnv   = "_PICOCLAW_WORKFLOW_CONFIG_GUARD_CREATED"
 	workflowConfigGuardCompletedEnv = "_PICOCLAW_WORKFLOW_CONFIG_GUARD_COMPLETED"
 )
 
@@ -887,6 +888,7 @@ func TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesC
 	executor.WorkflowSnapshots = admission.Snapshots
 
 	readyPath := configPath + ".save-started"
+	createdPath := configPath + ".create-completed"
 	completedPath := configPath + ".save-completed"
 	command := exec.Command(
 		os.Args[0],
@@ -902,6 +904,7 @@ func TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesC
 		workflowConfigGuardPathEnv+"="+configPath,
 		workflowConfigGuardWorkspaceEnv+"="+workspace,
 		workflowConfigGuardReadyEnv+"="+readyPath,
+		workflowConfigGuardCreatedEnv+"="+createdPath,
 		workflowConfigGuardCompletedEnv+"="+completedPath,
 	)
 	helperStarted := false
@@ -964,7 +967,10 @@ func TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesC
 						if startErr != nil {
 							return startErr
 						}
-						return guarded()
+						if guardedErr := guarded(); guardedErr != nil {
+							return guardedErr
+						}
+						return os.WriteFile(createdPath, []byte("created"), 0o600)
 					},
 				)
 			},
@@ -992,9 +998,9 @@ func TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesC
 	if err != nil {
 		t.Fatalf("ReadFile(save completion) error = %v", err)
 	}
-	if string(completed) != "run-present" {
+	if string(completed) != "create-observed" {
 		t.Fatalf(
-			"SaveConfig completion observation = %q, want durable run present",
+			"SaveConfig completion observation = %q, want guarded create observed",
 			completed,
 		)
 	}
@@ -1073,13 +1079,15 @@ func runWorkflowAdmissionConfigGuardSaveChild(t *testing.T) {
 	configPath := os.Getenv(workflowConfigGuardPathEnv)
 	workspace := os.Getenv(workflowConfigGuardWorkspaceEnv)
 	readyPath := os.Getenv(workflowConfigGuardReadyEnv)
+	createdPath := os.Getenv(workflowConfigGuardCreatedEnv)
 	completedPath := os.Getenv(workflowConfigGuardCompletedEnv)
-	if configPath == "" || workspace == "" || readyPath == "" || completedPath == "" {
+	if configPath == "" || workspace == "" || readyPath == "" || createdPath == "" || completedPath == "" {
 		t.Fatal("workflow config guard helper environment is incomplete")
 	}
 	configPath = requireAPITestOwnedHelperPath(t, configPath)
 	workspace = requireAPITestOwnedHelperPath(t, workspace)
 	readyPath = requireAPITestOwnedHelperPath(t, readyPath)
+	createdPath = requireAPITestOwnedHelperPath(t, createdPath)
 	completedPath = requireAPITestOwnedHelperPath(t, completedPath)
 	next := config.DefaultConfig()
 	next.Agents.Defaults.Workspace = workspace
@@ -1092,15 +1100,14 @@ func runWorkflowAdmissionConfigGuardSaveChild(t *testing.T) {
 	if err := config.SaveConfig(configPath, next); err != nil {
 		t.Fatalf("SaveConfig(helper) error = %v", err)
 	}
-	runs, err := workflows.NewFileRunStore(workspace).ListRuns(context.Background())
+	created, err := os.ReadFile(createdPath)
 	if err != nil {
-		t.Fatalf("ListRuns(helper) error = %v", err)
+		t.Fatalf("ReadFile(guarded create) error = %v", err)
 	}
-	observation := "run-missing"
-	if len(runs) > 0 {
-		observation = "run-present"
+	if string(created) != "created" {
+		t.Fatalf("guarded create marker = %q, want created", created)
 	}
-	if err := os.WriteFile(completedPath, []byte(observation), 0o600); err != nil {
+	if err := os.WriteFile(completedPath, []byte("create-observed"), 0o600); err != nil {
 		t.Fatalf("WriteFile(helper completion) error = %v", err)
 	}
 }

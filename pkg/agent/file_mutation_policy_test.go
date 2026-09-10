@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -1766,6 +1767,10 @@ func TestAgentFileMutationStorageHelperBoundaries(t *testing.T) {
 		if err := os.WriteFile(path, []byte("state"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		fixedTime := time.Unix(1_700_000_000, 0)
+		if err := os.Chtimes(path, fixedTime, fixedTime); err != nil {
+			t.Fatal(err)
+		}
 	}
 	leftInfo, err := os.Stat(leftPath)
 	if err != nil {
@@ -1774,6 +1779,16 @@ func TestAgentFileMutationStorageHelperBoundaries(t *testing.T) {
 	rightInfo, err := os.Stat(rightPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if leftInfo.Mode() != rightInfo.Mode() || leftInfo.Size() != rightInfo.Size() ||
+		!leftInfo.ModTime().Equal(rightInfo.ModTime()) {
+		t.Fatalf("distinct-file fixture metadata differs: left=%#v right=%#v", leftInfo, rightInfo)
+	}
+	if equalAgentCheckpointStateSnapshots(
+		agentCheckpointStateSnapshot{"state": {info: leftInfo}},
+		agentCheckpointStateSnapshot{"state": {info: rightInfo}},
+	) {
+		t.Fatal("checkpoint snapshots with distinct file identities compared equal")
 	}
 	if equalAgentAccountRouterLegacySidecarSnapshots(
 		agentLegacySidecarSnapshot{"state": leftInfo},
