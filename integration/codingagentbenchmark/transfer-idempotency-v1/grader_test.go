@@ -2,7 +2,6 @@ package transferidempotencybenchmark
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -10,7 +9,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -40,32 +38,6 @@ type benchmarkManifest struct {
 		Definition string          `yaml:"definition"`
 		Steps      []benchmarkStep `yaml:"steps"`
 	} `yaml:"local-ci"`
-}
-
-type graderArtifact struct {
-	Version       int      `json:"version"`
-	Fixture       string   `json:"fixture"`
-	Score         int      `json:"score"`
-	MandatoryPass bool     `json:"mandatory_pass"`
-	ChangedFiles  []string `json:"changed_files"`
-	Checks        struct {
-		Format       bool `json:"format"`
-		Vet          bool `json:"vet"`
-		Test         bool `json:"test"`
-		Race         bool `json:"race"`
-		Scope        bool `json:"scope"`
-		GitHead      bool `json:"git_head"`
-		TestsChanged bool `json:"tests_changed"`
-	} `json:"checks"`
-	Mutation struct {
-		Killed  int `json:"killed"`
-		Total   int `json:"total"`
-		Points  int `json:"points"`
-		Mutants []struct {
-			ID     string `json:"id"`
-			Killed bool   `json:"killed"`
-		} `json:"mutants"`
-	} `json:"mutation"`
 }
 
 func TestFixtureDeclaresExactSandboxedLocalCISteps(t *testing.T) {
@@ -170,81 +142,6 @@ func TestHiddenSuiteKillsEveryFixedMutant(t *testing.T) {
 				t.Fatalf("mutant %q timed out: %v\n%s", entry.Name(), ctx.Err(), output)
 			}
 		})
-	}
-}
-
-func TestGraderAcceptsReferenceAndReportsMutationEvidence(t *testing.T) {
-	requireBenchmarkTools(t)
-	checkout := newFixtureCheckout(t)
-	commit := gitOutput(t, checkout, "rev-parse", "HEAD")
-	graderRoot := graderRoot(t)
-	referenceRoot := filepath.Join(graderRoot, "testdata", "reference")
-	copyFile(t, filepath.Join(referenceRoot, "ledger.go"), filepath.Join(checkout, "ledger", "ledger.go"))
-	copyFile(
-		t,
-		filepath.Join(referenceRoot, "ledger_candidate_test.go"),
-		filepath.Join(checkout, "ledger", "ledger_candidate_test.go"),
-	)
-	beforeLedger := fileDigest(t, filepath.Join(checkout, "ledger", "ledger.go"))
-	beforeTests := fileDigest(t, filepath.Join(checkout, "ledger", "ledger_candidate_test.go"))
-
-	outputRoot := filepath.Join(t.TempDir(), "grader-output")
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bash", filepath.Join(graderRoot, "grade.sh"), checkout, outputRoot, commit)
-	command.Env = append(os.Environ(), "GOWORK=off", "GOPROXY=off")
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("grade.sh error = %v\noutput:\n%s", err, output)
-	}
-	if ctx.Err() != nil {
-		t.Fatalf("grade.sh timed out: %v", ctx.Err())
-	}
-
-	raw, err := os.ReadFile(filepath.Join(outputRoot, "grader.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var artifact graderArtifact
-	if err = json.Unmarshal(raw, &artifact); err != nil {
-		t.Fatalf("decode grader.json: %v\n%s", err, raw)
-	}
-	if artifact.Version != 2 || artifact.Fixture != "transfer-idempotency-v1" ||
-		artifact.Score != 100 || !artifact.MandatoryPass {
-		t.Fatalf("grader result = %#v", artifact)
-	}
-	if !artifact.Checks.Format || !artifact.Checks.Vet || !artifact.Checks.Test ||
-		!artifact.Checks.Race || !artifact.Checks.Scope || !artifact.Checks.GitHead ||
-		!artifact.Checks.TestsChanged {
-		t.Fatalf("grader checks = %#v", artifact.Checks)
-	}
-	if artifact.Mutation.Killed != 5 || artifact.Mutation.Total != 5 ||
-		artifact.Mutation.Points != 10 || len(artifact.Mutation.Mutants) != 5 {
-		t.Fatalf("mutation result = %#v", artifact.Mutation)
-	}
-	for _, mutant := range artifact.Mutation.Mutants {
-		if !mutant.Killed {
-			t.Fatalf("mutant survived: %#v", mutant)
-		}
-	}
-	sort.Strings(artifact.ChangedFiles)
-	wantChanged := []string{"ledger/ledger.go", "ledger/ledger_candidate_test.go"}
-	if !reflect.DeepEqual(artifact.ChangedFiles, wantChanged) {
-		t.Fatalf("changed files = %#v, want %#v", artifact.ChangedFiles, wantChanged)
-	}
-	if _, statErr := os.Lstat(
-		filepath.Join(checkout, "ledger", "ledger_hidden_test.go"),
-	); !errors.Is(
-		statErr,
-		os.ErrNotExist,
-	) {
-		t.Fatalf("hidden test remained in checkout: %v", statErr)
-	}
-	if after := fileDigest(t, filepath.Join(checkout, "ledger", "ledger.go")); after != beforeLedger {
-		t.Fatal("grader changed candidate implementation")
-	}
-	if after := fileDigest(t, filepath.Join(checkout, "ledger", "ledger_candidate_test.go")); after != beforeTests {
-		t.Fatal("grader changed candidate tests")
 	}
 }
 
@@ -365,15 +262,6 @@ func gitOutput(t *testing.T, directory string, args ...string) string {
 		t.Fatalf("git %s error = %v\n%s", strings.Join(args, " "), err, output)
 	}
 	return strings.TrimSpace(string(output))
-}
-
-func fileDigest(t *testing.T, path string) string {
-	t.Helper()
-	value, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(value)
 }
 
 func requireBenchmarkTools(t *testing.T) {

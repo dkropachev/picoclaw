@@ -19,12 +19,15 @@ authenticated provider. Every mode stops at the publication gate.
 
 ## Offline verification
 
-Ordinary CI can verify LocalCI discovery, hidden behavior, every fixed mutant,
-grader cleanup, and the version 2 grader artifact without model or network
-access:
+Ordinary CI verifies LocalCI discovery, hidden behavior against every fixed
+mutant, and unsafe grader input rejection in the dedicated package. The Gateway
+benchmark is the sole owner of the complete reference grade; it verifies grader
+cleanup, authentic evidence digests, strict version 2 artifact decoding, and
+manifest correlation without model or network access:
 
 ```bash
 go test ./integration/codingagentbenchmark/transfer-idempotency-v1
+go test ./pkg/gateway -run '^TestCodingAgentBenchmarkScriptedGatewayPath$'
 ```
 
 The grader accepts a Git worktree, a new output path outside that worktree, and

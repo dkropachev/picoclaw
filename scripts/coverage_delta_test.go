@@ -1037,6 +1037,7 @@ func TestCoverageNestedBenchmarkSkipPatternIsExact(t *testing.T) {
 
 	pattern := regexp.MustCompile(coverageNestedBenchmarkSkipPattern)
 	for _, name := range []string{
+		"TestHiddenSuiteKillsEveryFixedMutant",
 		"TestGraderAcceptsReferenceAndReportsMutationEvidence",
 		"TestCodingAgentBenchmarkScriptedGatewayPath",
 		"TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig",
@@ -1047,6 +1048,7 @@ func TestCoverageNestedBenchmarkSkipPatternIsExact(t *testing.T) {
 	}
 	for _, name := range []string{
 		"TestGraderRejectsOutsideOutput",
+		"TestHiddenSuiteKillsEveryFixedMutantExtra",
 		"TestCodingAgentBenchmarkLiveOptIn",
 		"PrefixTestCodingAgentBenchmarkScriptedGatewayPath",
 		"TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfigExtra",
