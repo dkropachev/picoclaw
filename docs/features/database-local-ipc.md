@@ -10,25 +10,28 @@ PicoClaw provides a dormant, provider-neutral local client/server transport for
 the database protocol. One process can own a canonical home through an
 authenticated Unix-domain socket or current-user Windows named pipe, publish a
 private discovery manifest, optionally compose typed protocol domains through
-a domain-handler registry, and drain safely at shutdown. This stage does not
-configure or supervise that process, open a
-physical database provider, publish a catalog, run migration, expose a command,
-or change any application persistence path.
+a domain-handler registry, optionally admit only an immutable set of logical
+StoreID/domain bindings, and drain safely at shutdown. This stage does not
+configure or supervise that process, open a physical database provider, publish
+a physical catalog, run migration, expose a command, or change any application
+persistence path.
 
 ## Reconstruction Notes
 
 - Similarity target: recreate secure same-user IPC and broker lifecycle without
   introducing TCP, caller-selected endpoints, provider handles, or file paths
   into application APIs.
-- Core types/functions: `Manifest`, `Client`, `Server`, `StartServer`,
-  `Connect`, `ConnectInherited`, `HandlerRegistry`, canonical-home helpers,
-  local transport implementations, storage fences, runtime-client publication,
-  and owner-only file helpers.
+- Core types/functions: `Manifest`, `Client`, `Client.CallStore`,
+  `Client.CallStoreWithOptions`, `CallOptions.StoreID`, `StoreBinding`, `Server`, `StartServer`,
+  `ServerOptions.ServedStores`, `Connect`, `ConnectInherited`,
+  `HandlerRegistry`, canonical-home helpers, local transport implementations,
+  storage fences, runtime-client publication, and owner-only file helpers.
 - Runtime ordering: canonicalize and secure the home, acquire singleton and
   online fences, prepare the manifest candidate, run the optional trusted
   startup guard, remove only a validated stale endpoint, listen, publish
-  discovery, validate/authenticate requests, dispatch, drain, remove epoch-bound
-  discovery, and release locks.
+  discovery, validate/authenticate requests, enforce any logical served-store
+  scope before idempotency admission and handler dispatch, drain, remove
+  epoch-bound discovery, and release locks.
 - Non-obvious constraints: Unix socket names are derived into a short private
   runtime directory; Windows uses an owner-restricted named pipe and DACL;
   unsupported secure transports fail closed.
@@ -41,19 +44,22 @@ or change any application persistence path.
 | `FR-DATABASE-IPC-002` | MUST | A server publishes or a client reads broker discovery. | A private canonical manifest binds PID, protocol, random token, derived endpoint, and broker epoch to the canonical home. | Publication is temporary-file, sync, rename, and directory-sync ordered; a failed final sync attempts manifest removal and a second directory sync before returning the joined failure; removal requires the expected epoch and owner PID. | Missing discovery is `Unavailable`; symlinks, wrong modes, invalid identities, oversized content, and changed epochs fail without exposing paths or tokens. | A client must authenticate only the current same-home broker generation. |
 | `FR-DATABASE-IPC-003` | MUST | A supported platform starts or dials local transport. | Unix uses an owner-only Unix-domain socket; Windows uses a current-user named pipe with remote clients rejected; endpoint names are derived, not caller supplied. | Listen creates only the private endpoint boundary and cleanup removes only the validated socket/pipe generation. | Unsafe pre-existing endpoints, insecure ownership, overlong Unix home paths, unavailable transport, and unsupported operating systems fail closed; TCP is never enabled. | Local ownership must not broaden network or cross-user authority. |
 | `FR-DATABASE-IPC-004` | MUST | `StartServer` begins, serves, closes, receives shutdown, or is configured with `ServerOptions.StartupGuard`. | Exactly one server owns the canonical home, retains its epoch and online fence while serving, validates protocol/token/epoch/deadline before dispatch, and reports detached readiness through callbacks. The optional trusted startup guard runs exactly once after temporary-manifest preparation but before endpoint retirement, listener creation, or discovery publication. | A successful startup guard permits endpoint preparation, listener creation, manifest rename, and serving. Shutdown stops admission, drains workers, invokes configured trusted callbacks, removes matching discovery/endpoint state, and releases the online and singleton fences in order. | Duplicate owners conflict; migration fencing blocks startup; a startup-guard error is preserved and a startup-guard panic becomes generic `Internal`; either failure leaves the candidate epoch unpublished, creates no current-generation listener, preserves any preexisting canonical manifest and endpoint, and releases the online fence and singleton. Canceled close returns a deadline error while draining continues in the background. Callback completion itself is not time-bounded. | No process may discover an unapproved generation or replace or mutate storage while an admitted broker request or trusted lifecycle callback remains active. |
-| `FR-DATABASE-IPC-005` | MUST | A client connects or invokes a read or mutation. | The client uses only the discovered endpoint/token/epoch, canonical framed requests, typed results, and structured failures; reads may rediscover once after broker replacement. | `InstallProcessClient` publishes only an in-process client pointer, and inherited authority is consumed once from a bounded canonical environment value. | Local validation fails before dialing; mutation disconnect becomes `OutcomeUnknown`; noncanonical, mismatched, stale-epoch, or invalid responses fail closed; no provider fallback occurs. | Callers must not infer whether a disconnected mutation committed or bypass the broker. |
+| `FR-DATABASE-IPC-005` | MUST | A client connects or invokes a read or mutation, optionally through `CallStore`, `CallStoreWithOptions`, or `CallOptions.StoreID`. | The client uses only the discovered endpoint/token/epoch, the caller's exact logical StoreID, canonical framed requests, typed results, and structured failures; store-bound reads may rediscover once after broker replacement without changing their target, and store-bound mutations reuse one exact encoded envelope for their single keyed lost-response retry. | `InstallProcessClient` publishes only an in-process client pointer, and inherited authority is consumed once from a bounded canonical environment value. | Store-bound entry points validate their target before discovery or payload work; mutation disconnect becomes `OutcomeUnknown`; noncanonical, mismatched, stale-epoch, or invalid responses fail closed; no provider fallback occurs. | Callers must not infer whether a disconnected mutation committed, retarget a retry, or bypass the broker. |
 | `FR-DATABASE-IPC-006` | MUST | Online or migration code acquires a storage-root fence. | Multiple online shared fences may coexist, while a migration fence is exclusive and nonblocking. A live fence retains and rechecks the exact home, private state-directory, and lock-file identities. `Guard` holds that authority across a short transfer; `GuardMigration` additionally requires the exclusive capability. Checked variants return a non-reentrant boundary checker that remains safe only until its idempotent release, detects drift while guarded, and reports false after release. An exclusive fence may derive a context capability for one exact provider target, and capability checks fail after fence close or for another target. | Close waits for live guards, invalidates derived authority, and releases the OS lock exactly once; checked-guard release is idempotent and invalidates its checker before unlocking; lock files remain private and may persist. | Symlinked, foreign, non-regular, publicly accessible, physically replaced, or contended lock boundaries return structured integrity/conflict errors. A nil, closed, wrong-home, non-migration, malformed-target, memory, URI-shaped, or wrong-target authority fails closed. | Online serving and offline replacement must be mutually exclusive across processes, while guarded transitions must revalidate without recursively acquiring a lock behind queued shutdown. |
 | `FR-DATABASE-IPC-007` | MUST | Code registers a domain handler or dispatches an authenticated non-control request through `HandlerRegistry`. | The zero-value registry accepts one non-nil handler per valid non-control domain, preserves request context and values, and dispatches deterministically. | Registration retains the handler and, when applicable, its unique closer ownership. | Invalid domains and nil handlers return `Invalid`; duplicates return `AlreadyExists`; unknown domains return `Unsupported`; registration after close returns `Conflict`; dispatch after close returns `Unavailable`; handler panic returns generic `Internal` without exposing panic content. | Typed domain composition needs one explicit dispatch boundary with deterministic failures and panic containment. |
 | `FR-DATABASE-IPC-008` | MUST | `HandlerRegistry.Close` begins while dispatches or other close callers may be active. | Close stops new admission, waits for every admitted dispatch, closes each uniquely owned handler once in reverse first-registration order, joins failures, contains closer panic, and returns the same result to concurrent and repeated callers. | Closing clears retained handler and closer references after taking its private cleanup snapshot. | Typed-nil handlers and value-typed, nil-pointer, or zero-sized-pointer closeable handlers return `Invalid` because they lack stable unique ownership identity. An admitted handler or owned closer must not synchronously reenter its registry's `Close`. | Shutdown must neither race active domain work nor double-close shared resources, and pointer-address aliasing must not collapse distinct zero-sized owners. |
+| `FR-DATABASE-IPC-009` | MUST | `StartServer` receives non-nil `ServedStores`, or an authenticated non-control request/status query reaches that scoped server. | Startup freezes a detached, canonical, duplicate-free StoreID-to-domain set. After protocol, token, epoch, and deadline validation, every non-control request must name one included StoreID whose bound domain exactly equals the request domain; admission recursively rejects case/underscore/hyphen-equivalent payload keys for `StoreID` or `WorkspaceSelector` and rejects `resolve-store`, then completes before idempotency policy/registration and before `Handler.Handle`. A repository-wide architecture guard freezes every external `StoreID`/`ParseStoreID`, request-envelope, and unscoped `Call`/`CallWithOptions` reference so adapters cannot introduce another typed target, manual wire path, wrapper, or resolver without first changing the reviewed contract. Control requests carry no StoreID. Status contains exactly one validated entry for every served StoreID, and required stores are a subset of that same set. | Scope admission mutates neither the caller's bindings nor provider state; rejected requests create no idempotency record and invoke no handler. | Invalid bindings, duplicate IDs, invalid domains, a required ID outside the served set, extra/missing/duplicate status entries, control requests with a StoreID, non-control requests with an omitted, invalid, unknown, or wrong-domain StoreID, malformed/reserved payload targeting at any depth, and store-resolution operations fail closed. Nil `ServedStores` retains the explicitly unscoped compatibility mode; a non-nil empty slice is a control-only scope. | Domain-only routing and payload-local IDs cannot prove which physical claim a future adapter may use; one authenticated logical target must be admitted centrally without turning it into physical authority. |
 
 ## Data And State Model
 
 IPC state consists only of the owner-only state directory, manifest, derived
 local endpoint, persistent private lock files, process-local client pointer,
 in-flight workers, registered domain handlers, unique ordered closer ownership,
-admitted-call count, shared close completion/result, and the
-protocol/idempotency state defined by `FR-DATABASE`. No provider filename,
-schema, catalog entry, or application data is introduced here.
+admitted-call count, immutable logical served bindings, shared close
+completion/result, and the protocol/idempotency state defined by `FR-DATABASE`.
+`StoreBinding` contains only a StoreID and domain; it grants no physical path,
+provider, claim, migration, or open authority. No provider filename, schema,
+physical catalog entry, or application data is introduced here.
 
 ## Surface Ownership
 
@@ -99,14 +105,18 @@ Owns: TEST pkg/database/server_unix_test.go *
 Owns: TEST pkg/database/handler_registry_test.go *
 Owns: TEST pkg/database/server_startup_guard_test.go *
 Owns: TEST pkg/database/windows_acl_policy_test.go *
+Owns: TEST pkg/database/client_store_test.go *
+Owns: TEST pkg/database/client_store_retry_unix_test.go *
+Owns: TEST pkg/database/server_scope_test.go *
+Owns: TEST pkg/database/store_scope_integration_test.go *
 
 ## Auxiliary Interfaces
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Discovery | `Manifest`, `ReadManifest` | Private, canonical, epoch-bound local authority. | `FR-DATABASE-IPC-001`, `FR-DATABASE-IPC-002` |
-| Client | `Client`, `Connect`, `ConnectInherited` | Typed calls over discovered authenticated local IPC only. | `FR-DATABASE-IPC-003`, `FR-DATABASE-IPC-005` |
-| Server | `StartServer`, `ServerOptions.StartupGuard`, `Server.Close` | Singleton admission, guarded discovery publication, dispatch, drain, and ordered cleanup. | `FR-DATABASE-IPC-003`, `FR-DATABASE-IPC-004` |
+| Client | `Client`, `Client.CallStore`, `Client.CallStoreWithOptions`, `CallOptions.StoreID`, `Connect`, `ConnectInherited` | Typed calls over discovered authenticated local IPC with an exact stable logical target. | `FR-DATABASE-IPC-003`, `FR-DATABASE-IPC-005`, `FR-DATABASE-IPC-009` |
+| Server | `StartServer`, `ServerOptions.StartupGuard`, `ServerOptions.ServedStores`, `StoreBinding`, `Server.Close` | Singleton admission, guarded discovery publication, optional exact logical scope admission/status, dispatch, drain, and ordered cleanup. | `FR-DATABASE-IPC-003`, `FR-DATABASE-IPC-004`, `FR-DATABASE-IPC-009` |
 | Handler registry | `HandlerRegistry.Register`, `HandlerRegistry.Handle`, `HandlerRegistry.Close` | Explicit domain dispatch, admitted-call drain, and unique reverse-order handler cleanup. | `FR-DATABASE-IPC-007`, `FR-DATABASE-IPC-008` |
 | Fence | `AcquireOnlineFence`, `AcquireMigrationFence`, `Fence.Authorizes`, `Fence.Guard`, `Fence.GuardChecked`, `Fence.GuardMigration`, `Fence.GuardMigrationChecked`, `Fence.MigrationContext`, `MigrationContextPresent`, `MigrationContextActive`, `MigrationContextAuthorizes` | Shared-online versus exclusive-offline process lock plus guarded, non-reentrant live exact-home and exact-target capability checks. | `FR-DATABASE-IPC-006` |
 
@@ -120,8 +130,10 @@ Owns: TEST pkg/database/windows_acl_policy_test.go *
    fully write and sync a temporary manifest, invoke the optional trusted
    startup guard, securely prepare the endpoint, listen, rename and
    directory-sync discovery only on success, then start the accept loop.
-4. For each connection, bound the frame and deadline, validate token, protocol,
-   epoch, request shape, and idempotency, then dispatch through `Handler`.
+4. For each connection, bound the frame, validate protocol, token, epoch,
+   request shape, and deadline freshness, then enforce control StoreID absence or
+   the exact scoped StoreID/domain binding. Only an admitted target may enter the
+   idempotency registry or dispatch through `Handler`.
 5. On shutdown, stop admission, drain workers, close handlers, remove only the
    matching manifest and endpoint, then release online and singleton locks.
 6. A checked fence guard validates from inside its already-held read lock,
@@ -134,12 +146,15 @@ Owns: TEST pkg/database/windows_acl_policy_test.go *
 ## Cross-Feature Behavior
 
 This feature consumes the canonical values and frames from `FR-DATABASE` but
-does not activate them for any application. The authenticated hidden supervisor
-command derives one `FR-DATABASE-PROVIDER-CATALOG` logical snapshot and starts
-`StartServer` with its opaque fingerprint, required IDs, empty handler registry,
-and complete unavailable-status set. No provider, claim, migration, readiness
-probe, gateway, launcher auto-start, public command, or application client is
-connected; domain adapters and runtime cutover follow separately.
+does not activate them for any application. `ServedStores` is an admission
+mechanism for a later trusted assembly, not a catalog constructor: arbitrary
+logical bindings cannot resolve or authorize physical storage. The current
+authenticated hidden supervisor still starts with an empty handler registry and
+no application client; the review-scope milestone will supply its closed
+`FR-DATABASE-PROVIDER-CATALOG` projection, scope fingerprint, exact served and
+required IDs, and matching unavailable-status set. No provider, claim,
+migration, readiness probe, gateway, launcher auto-start, public command, or
+application client is connected by this change.
 
 ## Failure And Edge Cases
 
@@ -157,6 +172,18 @@ connected; domain adapters and runtime cutover follow separately.
   without exposing panic content; invalid closer identities fail registration.
 - A handler or closer must not synchronously call `Close` on its owning
   registry because owner shutdown waits for those callbacks.
+- A scoped request with no StoreID, an unknown StoreID, or a StoreID bound to a
+  different domain never creates idempotency state and never reaches a handler.
+- A scoped payload cannot repeat `store_id`, submit `workspace_selector`, or use
+  `resolve-store`; catalog-issued client bindings are the only targeting path.
+- Control operations reject StoreIDs, while unscoped compatibility grants no
+  physical storage authority and is not valid review-broker assembly.
+- Scoped status cannot advertise a store outside `ServedStores` or omit one of
+  its logical bindings; required stores cannot escape that served set.
+- The additive v1 field is omitted for control/unscoped calls. A scoped data
+  call to an older strict v1 peer fails closed rather than interoperating, so
+  scoped clients remain dormant until same-generation replacement is proven by
+  #411/#382.
 - Mutation transport loss is outcome-unknown even when a read would be safely
   retryable.
 - This dormant layer changes no existing application persistence behavior.
@@ -167,8 +194,9 @@ connected; domain adapters and runtime cutover follow separately.
 | --- | --- |
 | `FR-DATABASE-IPC-001`, `FR-DATABASE-IPC-002`, `FR-DATABASE-IPC-006` | [pkg/database/ipc_boundaries_test.go](../../pkg/database/ipc_boundaries_test.go), [pkg/database/ipc_boundaries_unix_test.go](../../pkg/database/ipc_boundaries_unix_test.go), [pkg/database/home_windows_test.go](../../pkg/database/home_windows_test.go), [pkg/database/fence_authority_additional_test.go](../../pkg/database/fence_authority_additional_test.go), [pkg/database/fence_authority_additional_unix_test.go](../../pkg/database/fence_authority_additional_unix_test.go) |
 | `FR-DATABASE-IPC-003`, `FR-DATABASE-IPC-004` | [pkg/database/server_unix_test.go](../../pkg/database/server_unix_test.go), [pkg/database/server_startup_guard_test.go](../../pkg/database/server_startup_guard_test.go), [pkg/database/discovery_unix_test.go](../../pkg/database/discovery_unix_test.go), [pkg/database/ipc_real_boundaries_unix_test.go](../../pkg/database/ipc_real_boundaries_unix_test.go) |
-| `FR-DATABASE-IPC-005` | [pkg/database/idempotency_test.go](../../pkg/database/idempotency_test.go), [pkg/database/ipc_additional_test.go](../../pkg/database/ipc_additional_test.go), [pkg/database/ipc_additional_unix_test.go](../../pkg/database/ipc_additional_unix_test.go) |
+| `FR-DATABASE-IPC-005` | [pkg/database/idempotency_test.go](../../pkg/database/idempotency_test.go), [pkg/database/ipc_additional_test.go](../../pkg/database/ipc_additional_test.go), [pkg/database/ipc_additional_unix_test.go](../../pkg/database/ipc_additional_unix_test.go), [pkg/database/client_store_test.go](../../pkg/database/client_store_test.go), [pkg/database/client_store_retry_unix_test.go](../../pkg/database/client_store_retry_unix_test.go) |
 | `FR-DATABASE-IPC-007`, `FR-DATABASE-IPC-008` | [pkg/database/handler_registry_test.go](../../pkg/database/handler_registry_test.go) |
+| `FR-DATABASE-IPC-009` | [pkg/database/store_scope_architecture_test.go](../../pkg/database/store_scope_architecture_test.go), [pkg/database/store_scope_integration_test.go](../../pkg/database/store_scope_integration_test.go), [pkg/database/client_store_retry_unix_test.go](../../pkg/database/client_store_retry_unix_test.go), [pkg/database/server_scope_test.go](../../pkg/database/server_scope_test.go) |
 
 ## Implementation Anchors
 

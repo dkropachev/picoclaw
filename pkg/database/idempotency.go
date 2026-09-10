@@ -107,13 +107,16 @@ func (registry *idempotencyRegistry) complete(
 }
 
 func idempotencyOperationKey(envelope RequestEnvelope) string {
-	return envelope.Domain + "\x00" + strconv.Itoa(envelope.DomainVersion) + "\x00" +
+	return envelope.StoreID.String() + "\x00" + envelope.Domain + "\x00" +
+		strconv.Itoa(envelope.DomainVersion) + "\x00" +
 		envelope.Operation + "\x00" + envelope.IdempotencyKey
 }
 
 func idempotencyRequestFingerprint(envelope RequestEnvelope) [sha256.Size]byte {
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(envelope.RequestID))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(envelope.StoreID))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write(envelope.Payload)
 	var fingerprint [sha256.Size]byte

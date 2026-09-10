@@ -32,6 +32,7 @@ type RequestEnvelope struct {
 	RequestID      string          `json:"request_id"`
 	Token          string          `json:"token"`
 	BrokerEpoch    string          `json:"broker_epoch"`
+	StoreID        StoreID         `json:"store_id,omitempty"`
 	Domain         string          `json:"domain"`
 	DomainVersion  int             `json:"domain_version"`
 	Operation      string          `json:"operation"`
@@ -53,11 +54,19 @@ type ResponseEnvelope struct {
 // Request is the authenticated, epoch-fenced request given to a domain handler.
 type Request struct {
 	ID             string
+	StoreID        StoreID
 	Domain         string
 	Version        int
 	Operation      string
 	IdempotencyKey string
 	Payload        json.RawMessage
+}
+
+// StoreBinding binds one admitted logical store to its exact protocol domain.
+// It carries no physical path or provider authority.
+type StoreBinding struct {
+	ID     StoreID
+	Domain string
 }
 
 // DecodePayload strictly decodes the request's canonical JSON object.
@@ -113,6 +122,10 @@ func validRequestEnvelope(envelope RequestEnvelope) error {
 	if !validProtocolName(envelope.Domain, maxDomainBytes) ||
 		!validProtocolName(envelope.Operation, maxOperationBytes) || envelope.DomainVersion <= 0 {
 		return NewError(CodeInvalid, "database domain operation is invalid")
+	}
+	if (!envelope.StoreID.IsZero() && !envelope.StoreID.Valid()) ||
+		(envelope.Domain == ControlDomain && !envelope.StoreID.IsZero()) {
+		return NewError(CodeInvalid, "database request store ID is invalid")
 	}
 	if envelope.IdempotencyKey != "" && !validIdempotencyKey(envelope.IdempotencyKey) {
 		return NewError(CodeInvalid, "database idempotency key is invalid")
