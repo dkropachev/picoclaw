@@ -99,10 +99,10 @@ Owns: TEST internal/sqliteprovider/staged_source_ops_test.go *
 
 The provider core supplies security/open/configuration; SQLite control supplies
 integrity/version checks; the neutral provider lease carries claims-owned
-authority without a package cycle. A later guarded backup-consumption slice is
-the sole approved caller of `NewImmutableGenerationSource` and will bind the
-backup manifest's exact StoreID; later migration orchestration will
-mint/revoke/drain child leases and hold the claims migration guard throughout.
+authority without a package cycle. Guarded backup consumption is the sole
+approved caller of `NewImmutableGenerationSource` and binds the backup
+manifest's exact StoreID. Later migration orchestration will mint, revoke, and
+drain child leases while holding the claims migration guard throughout.
 
 ## Failure And Edge Cases
 
