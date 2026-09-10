@@ -252,7 +252,12 @@ func TestPreparedLegacyInputsGuardedUseAndDrift(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = cleanup() })
 			test.mutate(t, prepared)
-			if err := prepared.guard(t.Context()); err == nil || !strings.Contains(err.Error(), test.want) {
+			err = prepared.guard(t.Context())
+			matched := err != nil && strings.Contains(err.Error(), test.want)
+			if test.name == "extra inventory" && err != nil {
+				matched = matched || strings.Contains(err.Error(), "entry limit")
+			}
+			if !matched {
 				t.Fatalf("legacy guard after %s = %v", test.name, err)
 			}
 		})

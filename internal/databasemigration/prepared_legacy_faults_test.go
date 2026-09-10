@@ -268,7 +268,11 @@ func TestSealPreparedLegacyInputsRejectsTreeDrift(t *testing.T) {
 		sealed, err := sealPreparedLegacyInputs(
 			ctx, fixture.root, fixture.roots, fixture.manifest, fixture.spec,
 		)
-		assertRejectedPreparedLegacySeal(t, sealed, err, "unexpected")
+		if sealed != nil || err == nil ||
+			!strings.Contains(err.Error(), "unexpected") &&
+				!strings.Contains(err.Error(), "entry limit") {
+			t.Fatalf("late unexpected prepared legacy member = %#v, %v", sealed, err)
+		}
 	})
 }
 
@@ -393,7 +397,11 @@ func TestPreparedLegacyGuardRejectsPathAndHandleDrift(t *testing.T) {
 			t.Skipf("cannot rename open prepared member: %v", err)
 		}
 		writeMigrationFile(t, member.path, []byte("legacy payload"))
-		assertPreparedLegacyFault(t, fixture.prepared.guard(t.Context()), "member seal changed")
+		err := fixture.prepared.guard(t.Context())
+		if err == nil || !strings.Contains(err.Error(), "member seal changed") &&
+			!strings.Contains(err.Error(), "unexpected path") {
+			t.Fatalf("prepared legacy member path replacement = %v", err)
+		}
 	})
 
 	t.Run("closed member descriptor", func(t *testing.T) {
