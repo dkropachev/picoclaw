@@ -69,23 +69,26 @@ make generate    # Run go generate only
 make check       # Full pre-commit check: deps + fmt + vet + test + docs consistency checks
 ```
 
-`make test` and CI run Go tests through the hermetic test runner. It builds the
-current checkout into a disposable directory with its own OS/PicoClaw homes,
-config, workspace, database, and loopback port; it never installs or starts a
-PicoClaw service. Prefer `make test` for the full suite. Direct launcher API
-package tests retain the same host-safety boundary through their package
-`TestMain` fixture.
+`make test` and CI run Go tests through the hermetic test runner. It creates a
+disposable directory with its own OS/PicoClaw homes, config, workspace,
+database, loopback port, and inert binary sentinel; it never installs or starts
+a PicoClaw service. Prefer `make test` for the full suite. The direct launcher
+API lifecycle test builds the current core binary lazily inside its package-owned
+runtime, while other tests avoid that redundant build.
 
 ### Running Tests
 
 ```bash
 make test                                    # Run all tests
-make integration-test                        # Run Docker-backed integration suites
+make integration-test                        # Run integration suites
 go test -run TestName -v ./pkg/session/      # Run a single test
 go test -bench=. -benchmem -run='^$' ./...  # Run benchmarks
 ```
 
-Docker-backed integration suites are auto-discovered from [`integration/suites/`](integration/suites/). See [`integration/README.md`](integration/README.md) for the suite layout and the conventions used by CI.
+Integration suites are auto-discovered from [`integration/suites/`](integration/suites/).
+Self-contained suites run on the host, while service-backed suites can select
+Docker mode. See [`integration/README.md`](integration/README.md) for the suite
+layout and CI conventions.
 
 ### Code Style
 

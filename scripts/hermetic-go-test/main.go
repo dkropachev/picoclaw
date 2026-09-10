@@ -16,9 +16,16 @@ import (
 )
 
 const (
-	coreBuildTags = "goolm,stdjson"
-	testGoEnv     = "PICOCLAW_TEST_GO_BINARY"
+	coreBuildTags        = "goolm,stdjson"
+	testGoEnv            = "PICOCLAW_TEST_GO_BINARY"
+	skipCoreBuildOption  = "--skip-core-build"
+	inertCoreBinaryBytes = "PicoClaw test sentinel: core binary intentionally not built\n"
 )
+
+type runOptions struct {
+	command       []string
+	skipCoreBuild bool
+}
 
 type testConfig struct {
 	Agents struct {
@@ -53,11 +60,9 @@ func main() {
 }
 
 func run(arguments []string) (code int) {
-	if len(arguments) > 0 && arguments[0] == "--" {
-		arguments = arguments[1:]
-	}
-	if len(arguments) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: go run ./scripts/hermetic-go-test -- <command> [args...]")
+	options, err := parseRunOptions(arguments)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 
@@ -96,25 +101,32 @@ func run(arguments []string) (code int) {
 	)
 	defer stopSignals()
 
-	build := exec.CommandContext(
-		commandContext,
-		goBinary,
-		"build",
-		"-tags", coreBuildTags,
-		"-o", layout.binary,
-		"./cmd/picoclaw",
-	)
-	build.Dir = repositoryRoot
-	build.Env = layout.environment
-	build.Stdin = os.Stdin
-	build.Stdout = os.Stdout
-	build.Stderr = os.Stderr
-	if err = runHermeticCommand(build); err != nil {
-		fmt.Fprintf(os.Stderr, "build isolated PicoClaw binary: %v\n", err)
-		return exitCode(err)
+	if options.skipCoreBuild {
+		if err = createInertCoreBinary(layout.binary); err != nil {
+			fmt.Fprintf(os.Stderr, "create isolated PicoClaw binary sentinel: %v\n", err)
+			return 1
+		}
+	} else {
+		build := exec.CommandContext(
+			commandContext,
+			goBinary,
+			"build",
+			"-tags", coreBuildTags,
+			"-o", layout.binary,
+			"./cmd/picoclaw",
+		)
+		build.Dir = repositoryRoot
+		build.Env = layout.environment
+		build.Stdin = os.Stdin
+		build.Stdout = os.Stdout
+		build.Stderr = os.Stderr
+		if err = runHermeticCommand(build); err != nil {
+			fmt.Fprintf(os.Stderr, "build isolated PicoClaw binary: %v\n", err)
+			return exitCode(err)
+		}
 	}
 
-	command := exec.CommandContext(commandContext, arguments[0], arguments[1:]...)
+	command := exec.CommandContext(commandContext, options.command[0], options.command[1:]...)
 	command.Env = layout.environment
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
@@ -124,6 +136,46 @@ func run(arguments []string) (code int) {
 		return exitCode(err)
 	}
 	return 0
+}
+
+func parseRunOptions(arguments []string) (runOptions, error) {
+	if len(arguments) > 0 && arguments[0] == "--" {
+		arguments = arguments[1:]
+	}
+	options := runOptions{}
+	for len(arguments) > 0 && strings.HasPrefix(arguments[0], "--") {
+		argument := arguments[0]
+		arguments = arguments[1:]
+		if argument == "--" {
+			break
+		}
+		switch argument {
+		case skipCoreBuildOption:
+			if options.skipCoreBuild {
+				return runOptions{}, fmt.Errorf("duplicate hermetic test runner option: %s", argument)
+			}
+			options.skipCoreBuild = true
+		default:
+			return runOptions{}, fmt.Errorf("unknown hermetic test runner option: %s", argument)
+		}
+	}
+	if len(arguments) == 0 {
+		return runOptions{}, errors.New(
+			"usage: go run ./scripts/hermetic-go-test -- [--skip-core-build --] <command> [args...]",
+		)
+	}
+	options.command = append([]string(nil), arguments...)
+	return options, nil
+}
+
+func createInertCoreBinary(path string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.WriteString(inertCoreBinaryBytes)
+	closeErr := file.Close()
+	return errors.Join(writeErr, closeErr)
 }
 
 func runHermeticCommand(command *exec.Cmd) error {

@@ -1249,7 +1249,6 @@ func TestRunCoverageDeltaCollectsTinyRefsAndCleansWorktrees(t *testing.T) {
 
 	for path, contents := range map[string]string{
 		"go.mod":               "module example.com/coveragepair\n\ngo 1.25\n",
-		"cmd/picoclaw/main.go": "package main\n\nfunc main() {}\n",
 		"pkg/sample/sample.go": "package sample\n\nfunc Value() int { return 1 }\n",
 		"pkg/sample/sample_test.go": `package sample
 
@@ -2623,8 +2622,23 @@ func TestPrepareCoverageStorageDefersConfigUntilAfterUnitCoverage(t *testing.T) 
 	if err := prepareCoverageStorage(home); err != nil {
 		t.Fatalf("prepareCoverageStorage() error = %v", err)
 	}
+	binaryPath := filepath.Join(home, "bin", coverageExecutableName("picoclaw"))
+	binaryData, err := os.ReadFile(binaryPath)
+	if err != nil || string(binaryData) != coverageInertCoreBinaryBytes {
+		t.Fatalf("coverage binary sentinel = %q, error = %v", binaryData, err)
+	}
+	if info, statErr := os.Stat(binaryPath); statErr != nil || !info.Mode().IsRegular() ||
+		info.Mode().Perm()&0o111 != 0 {
+		t.Fatalf("coverage binary sentinel info = (%v, %v)", info, statErr)
+	}
+	if err = exec.Command(binaryPath).Run(); err == nil {
+		t.Fatal("coverage binary sentinel executed successfully")
+	}
+	if err = createCoverageBinarySentinel(binaryPath); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("second createCoverageBinarySentinel() error = %v, want exists", err)
+	}
 	configPath := filepath.Join(home, ".picoclaw", "config.json")
-	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+	if _, err = os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("coverage config existed during fallback-home unit tests: %v", err)
 	}
 	if err := writeCoverageConfig(home); err != nil {

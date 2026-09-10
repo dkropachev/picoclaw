@@ -315,9 +315,9 @@ chmod 000 "$PICOCLAW_TEST_ROOT"
 
 func TestOfficialGoTestEntryPointsUseHermeticRunner(t *testing.T) {
 	checks := map[string]string{
-		"Makefile":                 "$(GO) run ./scripts/hermetic-go-test -- $(GO) test",
-		"web/Makefile":             "${WEB_GO} run ../../scripts/hermetic-go-test -- $(GO) test",
-		".github/workflows/pr.yml": "go run ./scripts/hermetic-go-test -- bash ./scripts/run-go-test-shard.sh",
+		"Makefile":                 "$(GO) run ./scripts/hermetic-go-test -- --skip-core-build -- $(GO) test",
+		"web/Makefile":             "${WEB_GO} run ../../scripts/hermetic-go-test -- --skip-core-build -- $(GO) test",
+		".github/workflows/pr.yml": "go run ./scripts/hermetic-go-test -- --skip-core-build -- bash ./scripts/run-go-test-shard.sh",
 	}
 	for path, snippet := range checks {
 		if content := readRepoFile(t, path); !strings.Contains(content, snippet) {

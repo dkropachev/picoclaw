@@ -337,7 +337,7 @@ jobs:
         run: go generate ./...
 
       - name: Run Go test shard
-        run: go run ./scripts/hermetic-go-test -- bash ./scripts/run-go-test-shard.sh "${{ matrix.shard }}"
+        run: go run ./scripts/hermetic-go-test -- --skip-core-build -- bash ./scripts/run-go-test-shard.sh "${{ matrix.shard }}"
 
   cross_compile:
     name: Cross-compile core binaries

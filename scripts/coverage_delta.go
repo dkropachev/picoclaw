@@ -104,6 +104,7 @@ const (
 	coverageGoTestCount                = 1
 	coverageGoTestParallelism          = 1
 	coverageGoMaxProcs                 = 2
+	coverageInertCoreBinaryBytes       = "PicoClaw coverage sentinel: core binary intentionally not built\n"
 )
 
 type listedPackage struct {
@@ -986,9 +987,6 @@ func coverageForPreparedRef(
 	if err := runGoGenerate(worktree, label, ref, environment); err != nil {
 		return coverageProfile{}, err
 	}
-	if err := buildCoverageTestBinary(worktree, label, ref, tags, environment); err != nil {
-		return coverageProfile{}, err
-	}
 
 	packages, err := listGoPackages(worktree, tags, environment)
 	if err != nil {
@@ -1773,7 +1771,10 @@ func prepareCoverageStorage(home string) error {
 	if err != nil {
 		return err
 	}
-	return database.Close()
+	if err = database.Close(); err != nil {
+		return err
+	}
+	return createCoverageBinarySentinel(filepath.Join(home, "bin", coverageExecutableName("picoclaw")))
 }
 
 func writeCoverageConfig(home string) error {
@@ -1799,33 +1800,14 @@ func writeCoverageConfig(home string) error {
 	return os.WriteFile(filepath.Join(picoHome, "config.json"), append(configData, '\n'), 0o600)
 }
 
-func buildCoverageTestBinary(
-	worktree, label, ref, tags string,
-	environment []string,
-) error {
-	binary := strings.TrimSpace(coverageEnvironmentValue(environment, "PICOCLAW_BINARY"))
-	if binary == "" {
-		return errors.New("coverage test binary path is unavailable")
-	}
-	arguments := []string{"build", "-buildvcs=false"}
-	if strings.TrimSpace(tags) != "" {
-		arguments = append(arguments, "-tags", tags)
-	}
-	arguments = append(arguments, "-o", binary, "./cmd/picoclaw")
-	command := exec.Command("go", arguments...)
-	command.Dir = worktree
-	command.Env = append([]string(nil), environment...)
-	output, err := command.CombinedOutput()
+func createCoverageBinarySentinel(path string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return fmt.Errorf(
-			"build isolated test binary for %s (%s): %w\n%s",
-			label,
-			ref,
-			err,
-			trimCommandOutput(output),
-		)
+		return err
 	}
-	return nil
+	_, writeErr := file.WriteString(coverageInertCoreBinaryBytes)
+	closeErr := file.Close()
+	return errors.Join(writeErr, closeErr)
 }
 
 func coverageEnvironmentValue(environment []string, key string) string {
