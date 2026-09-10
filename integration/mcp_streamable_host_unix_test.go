@@ -25,6 +25,7 @@ func TestMCPStreamableHostSuiteReapsFixtureAndTestOnSignal(t *testing.T) {
 	runtimeParent := t.TempDir()
 	serverPIDPath := filepath.Join(t.TempDir(), "server.pid")
 	testPIDPath := filepath.Join(t.TempDir(), "test.pid")
+	parentTestPIDPath := filepath.Join(t.TempDir(), "parent-test.pid")
 	serverStoppedPath := filepath.Join(t.TempDir(), "server.stopped")
 	writeExecutable(t, filepath.Join(stubDir, "curl"), "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, filepath.Join(stubDir, "go"), `#!/bin/sh
@@ -44,8 +45,8 @@ case "${1:-}" in
     {
       printf '%s\n' '#!/bin/sh'
       printf '%s\n' 'set -eu'
-      printf '%s\n' 'printf "%s\n" "$$" >"${SERVER_PID_FILE:?}"'
       printf '%s\n' 'trap '\''printf stopped >"${SERVER_STOPPED_FILE:?}"; exit 0'\'' TERM INT'
+      printf '%s\n' 'printf "%s\n" "$$" >"${SERVER_PID_FILE:?}"'
       printf '%s\n' 'printf "127.0.0.1:12345\n" >"${STREAMABLE_READY_FILE:?}.tmp"'
       printf '%s\n' 'mv "${STREAMABLE_READY_FILE}.tmp" "$STREAMABLE_READY_FILE"'
       printf '%s\n' 'while :; do sleep 0.05; done'
@@ -53,8 +54,8 @@ case "${1:-}" in
     chmod 755 "$output"
     ;;
   test)
-    printf '%s\n' "$$" >"${TEST_PID_FILE:?}"
     trap '' TERM INT
+    printf '%s\n' "$$" >"${TEST_PID_FILE:?}"
     while :; do sleep 0.05; done
     ;;
   *)
@@ -71,13 +72,14 @@ esac
 	command.Dir = repoRoot
 	cacheRoot := t.TempDir()
 	command.Env = replaceIntegrationTestEnvironment(os.Environ(), map[string]string{
-		"PATH":                   stubDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"TMPDIR":                 runtimeParent,
-		"SERVER_PID_FILE":        serverPIDPath,
-		"TEST_PID_FILE":          testPIDPath,
-		"SERVER_STOPPED_FILE":    serverStoppedPath,
-		"INTEGRATION_GOCACHE":    filepath.Join(cacheRoot, "build"),
-		"INTEGRATION_GOMODCACHE": filepath.Join(cacheRoot, "modules"),
+		"PATH":                                stubDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TMPDIR":                              runtimeParent,
+		"SERVER_PID_FILE":                     serverPIDPath,
+		"TEST_PID_FILE":                       testPIDPath,
+		"MCP_STREAMABLE_TEST_PARENT_PID_FILE": parentTestPIDPath,
+		"SERVER_STOPPED_FILE":                 serverStoppedPath,
+		"INTEGRATION_GOCACHE":                 filepath.Join(cacheRoot, "build"),
+		"INTEGRATION_GOMODCACHE":              filepath.Join(cacheRoot, "modules"),
 	})
 	if err = command.Start(); err != nil {
 		t.Fatal(err)
@@ -97,7 +99,9 @@ esac
 		}
 	})
 
-	waitForIntegrationTestPath(t, testPIDPath, 3*time.Second)
+	waitForIntegrationTestPID(t, serverPIDPath, 3*time.Second)
+	waitForIntegrationTestPID(t, testPIDPath, 3*time.Second)
+	waitForIntegrationTestPID(t, parentTestPIDPath, 3*time.Second)
 	if err = command.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("signal runner: %v", err)
 	}
@@ -160,8 +164,8 @@ func testMCPStreamableHostBuildSignal(
 	writeExecutable(t, filepath.Join(stubDir, "go"), `#!/bin/sh
 set -eu
 [ "${1:-}" = build ]
-printf '%s\n' "$$" >"${BUILD_PID_FILE:?}"
 trap 'printf stopped >"${BUILD_STOPPED_FILE:?}"; exit 0' TERM INT
+printf '%s\n' "$$" >"${BUILD_PID_FILE:?}"
 while :; do sleep 0.05; done
 `)
 
@@ -198,7 +202,7 @@ while :; do sleep 0.05; done
 		}
 	})
 
-	waitForIntegrationTestPath(t, buildPIDPath, 3*time.Second)
+	waitForIntegrationTestPID(t, buildPIDPath, 3*time.Second)
 	if err := command.Process.Signal(signal); err != nil {
 		t.Fatalf("signal top-level runner during build: %v", err)
 	}
@@ -236,6 +240,27 @@ func assertIntegrationTestPIDStopped(t *testing.T, path string) {
 	}
 	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Errorf("child PID %d remains after runner exit: %v", pid, err)
+	}
+}
+
+func waitForIntegrationTestPID(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			value := string(raw)
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(value))
+			if strings.HasSuffix(value, "\n") && parseErr == nil && pid > 0 {
+				return
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for complete PID in %s", path)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

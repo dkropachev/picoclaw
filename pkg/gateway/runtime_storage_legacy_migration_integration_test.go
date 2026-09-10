@@ -908,12 +908,13 @@ func exerciseRuntimeLegacyMigrationFirstStartup(
 		_ = workflowStore.Close()
 		t.Fatalf("legacy workflow second event number = %#v", events[1].Payload["order"])
 	}
-	if err := workflowStore.Close(); err != nil {
-		t.Fatal(err)
-	}
 	development, err := workflows.GetWorkflowDevelopmentSession(fixture.workspace)
 	if err != nil || development == nil || development.ID != "dev_legacy_fixture" {
+		_ = workflowStore.Close()
 		t.Fatalf("legacy workflow development = %#v err=%v", development, err)
+	}
+	if err := workflowStore.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	reviewStore := repoaudit.NewSQLiteStore(fixture.workspace)

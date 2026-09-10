@@ -573,6 +573,29 @@ func TestPruneExpiredEventsBoundsEachMaintenanceCycle(t *testing.T) {
 	}
 }
 
+func TestPruneExpiredEventsPropagatesNotificationPruneFailure(t *testing.T) {
+	canary := errors.New("notification retention failure")
+	pruner := &eventRetentionNotificationPruner{notificationErr: canary}
+
+	pruned, err := pruneExpiredEvents(
+		context.Background(),
+		pruner,
+		30,
+		func() time.Time { return time.Date(2026, 7, 29, 21, 0, 0, 0, time.UTC) },
+	)
+	if !errors.Is(err, canary) {
+		t.Fatalf("pruneExpiredEvents() error = %v, want notification failure", err)
+	}
+	if pruned != 0 || pruner.eventCalls != 1 || pruner.notificationCalls != 1 {
+		t.Fatalf(
+			"notification failure result = count:%d event calls:%d notification calls:%d",
+			pruned,
+			pruner.eventCalls,
+			pruner.notificationCalls,
+		)
+	}
+}
+
 func TestHandleConfigReloadFailedCandidateCannotPruneWithShorterRetention(t *testing.T) {
 	workspace := t.TempDir()
 	databasePath := filepath.Join(workspace, "eventing", "events.db")
@@ -1741,4 +1764,28 @@ func (f eventRetentionPrunerFunc) Prune(
 	limit int,
 ) (int64, error) {
 	return f(ctx, before, limit)
+}
+
+type eventRetentionNotificationPruner struct {
+	eventCalls        int
+	notificationCalls int
+	notificationErr   error
+}
+
+func (pruner *eventRetentionNotificationPruner) Prune(
+	context.Context,
+	time.Time,
+	int,
+) (int64, error) {
+	pruner.eventCalls++
+	return 0, nil
+}
+
+func (pruner *eventRetentionNotificationPruner) PruneDevelopmentNotifications(
+	context.Context,
+	time.Time,
+	int,
+) (int64, error) {
+	pruner.notificationCalls++
+	return 0, pruner.notificationErr
 }

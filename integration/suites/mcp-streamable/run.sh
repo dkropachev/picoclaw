@@ -103,6 +103,11 @@ set -m
 go test ./pkg/mcp -run '^TestIntegration_RealConfiguredServer$' -v &
 test_pid="$!"
 test_process_group=true
+if [[ -n "${MCP_STREAMABLE_TEST_PARENT_PID_FILE:-}" ]]; then
+  parent_pid_file_tmp="${MCP_STREAMABLE_TEST_PARENT_PID_FILE}.tmp.$$"
+  printf '%s\n' "$test_pid" >"$parent_pid_file_tmp"
+  mv -- "$parent_pid_file_tmp" "$MCP_STREAMABLE_TEST_PARENT_PID_FILE"
+fi
 set +m
 if wait "$test_pid"; then
   test_pid=""

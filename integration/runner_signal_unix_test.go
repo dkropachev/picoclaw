@@ -51,8 +51,8 @@ case "$*" in
     printf '%s\n' integration-runner
     ;;
   *" run --rm -T "*)
-    printf '%s\n' "$$" >"${DOCKER_RUN_PID_FILE:?}"
     trap 'exit 0' TERM INT
+    printf '%s\n' "$$" >"${DOCKER_RUN_PID_FILE:?}"
     while :; do sleep 0.05; done
     ;;
   *" down -v --remove-orphans"*)
@@ -100,7 +100,7 @@ esac
 		}
 	})
 
-	waitForIntegrationTestPath(t, runPIDPath, 3*time.Second)
+	waitForIntegrationTestPID(t, runPIDPath, 3*time.Second)
 	if err = command.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("signal Docker integration runner: %v", err)
 	}
