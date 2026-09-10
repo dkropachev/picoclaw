@@ -2,6 +2,7 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -10,19 +11,26 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 const unauthenticatedConnectionTimeout = 30 * time.Second
 
+const scopedStoreResolverOperation = "resolve-store"
+
 // ServerOptions configure one broker control server for a canonical home.
 type ServerOptions struct {
 	Home               string
 	CatalogFingerprint string
 	RequiredStores     []StoreID
-	StatusProvider     StatusProvider
-	Handler            Handler
+	// ServedStores enables exact StoreID/domain admission when non-nil. An
+	// explicit empty slice is a control-only scope; nil preserves the legacy
+	// unscoped server used by callers that have not adopted scoped dispatch.
+	ServedStores   []StoreBinding
+	StatusProvider StatusProvider
+	Handler        Handler
 	// StartupGuard runs exactly once after private manifest-candidate preparation
 	// but before endpoint retirement, listener creation, or discovery publication.
 	// A failure aborts startup and releases every acquired fence without changing
@@ -51,6 +59,9 @@ type Server struct {
 	startedAt          time.Time
 	catalogFingerprint string
 	requiredStores     []StoreID
+	servedStores       []StoreBinding
+	servedStoreDomains map[StoreID]string
+	servedScope        bool
 	statusProvider     StatusProvider
 	handler            Handler
 	now                func() time.Time
@@ -94,6 +105,16 @@ func StartServer(parent context.Context, options ServerOptions) (*Server, error)
 	requiredStores, err := validateRequiredStores(options.RequiredStores)
 	if err != nil {
 		return nil, err
+	}
+	servedStores, servedStoreDomains, err := validateServedStores(options.ServedStores)
+	if err != nil {
+		return nil, err
+	}
+	servedScope := options.ServedStores != nil
+	if servedScope {
+		if err := requiredStoresBelongToScope(requiredStores, servedStoreDomains); err != nil {
+			return nil, err
+		}
 	}
 	singleton, err := acquireBrokerSingleton(stateDir)
 	if err != nil {
@@ -165,8 +186,10 @@ func StartServer(parent context.Context, options ServerOptions) (*Server, error)
 	server := &Server{
 		home: home, stateDir: stateDir, listener: listener, manifest: manifest,
 		startedAt: now().UTC(), catalogFingerprint: options.CatalogFingerprint,
-		requiredStores: requiredStores, statusProvider: options.StatusProvider,
-		handler: options.Handler, now: now, onShutdown: options.OnShutdownRequested,
+		requiredStores: requiredStores, servedStores: servedStores,
+		servedStoreDomains: servedStoreDomains, servedScope: servedScope,
+		statusProvider: options.StatusProvider,
+		handler:        options.Handler, now: now, onShutdown: options.OnShutdownRequested,
 		closeHandler:      options.CloseHandler,
 		idempotency:       newIdempotencyRegistry(),
 		allowsIdempotency: options.AllowsIdempotency,
@@ -343,16 +366,19 @@ func (server *Server) dispatchContext(
 	if err := validRequestEnvelope(envelope); err != nil {
 		return setError(err)
 	}
+	deadline := time.Unix(0, envelope.DeadlineUnixNs)
+	if !deadline.After(server.now()) {
+		return setError(NewError(CodeDeadline, "database request deadline was exceeded"))
+	}
+	if err := server.authorizeServedStore(envelope); err != nil {
+		return setError(err)
+	}
 	if envelope.IdempotencyKey != "" && (server.allowsIdempotency == nil ||
 		!server.allowsIdempotency(envelope.Domain, envelope.DomainVersion, envelope.Operation)) {
 		return setError(NewError(
 			CodeUnsupported,
 			"database operation does not declare stable idempotency",
 		))
-	}
-	deadline := time.Unix(0, envelope.DeadlineUnixNs)
-	if !deadline.After(server.now()) {
-		return setError(NewError(CodeDeadline, "database request deadline was exceeded"))
 	}
 	if parent == nil {
 		parent = context.Background()
@@ -371,7 +397,8 @@ func (server *Server) dispatchContext(
 	}
 
 	request := Request{
-		ID: envelope.RequestID, Domain: envelope.Domain, Version: envelope.DomainVersion,
+		ID: envelope.RequestID, StoreID: envelope.StoreID,
+		Domain: envelope.Domain, Version: envelope.DomainVersion,
 		Operation: envelope.Operation, IdempotencyKey: envelope.IdempotencyKey,
 		Payload: append(json.RawMessage(nil), envelope.Payload...),
 	}
@@ -425,6 +452,11 @@ func (server *Server) handle(ctx context.Context, request Request) (result any, 
 			if validateErr != nil {
 				return nil, false, validateErr
 			}
+			if server.servedScope {
+				if validateErr = servedStoresHaveExactStatuses(server.servedStores, validated); validateErr != nil {
+					return nil, false, validateErr
+				}
+			}
 			if validateErr = requiredStoresHaveStatuses(server.requiredStores, validated); validateErr != nil {
 				return nil, false, validateErr
 			}
@@ -460,6 +492,123 @@ func validateRequiredStores(ids []StoreID) ([]StoreID, error) {
 	}
 	sort.Slice(validated, func(i, j int) bool { return validated[i] < validated[j] })
 	return validated, nil
+}
+
+func validateServedStores(
+	bindings []StoreBinding,
+) ([]StoreBinding, map[StoreID]string, error) {
+	validated := append([]StoreBinding(nil), bindings...)
+	domains := make(map[StoreID]string, len(validated))
+	for _, binding := range validated {
+		if !binding.ID.Valid() || binding.Domain == ControlDomain ||
+			!validProtocolName(binding.Domain, maxDomainBytes) {
+			return nil, nil, NewError(CodeInvalid, "database served-store catalog is invalid")
+		}
+		if _, duplicate := domains[binding.ID]; duplicate {
+			return nil, nil, NewError(
+				CodeIntegrity,
+				"database served-store catalog contains a duplicate",
+			)
+		}
+		domains[binding.ID] = binding.Domain
+	}
+	sort.Slice(validated, func(left, right int) bool {
+		return validated[left].ID < validated[right].ID
+	})
+	return validated, domains, nil
+}
+
+func requiredStoresBelongToScope(required []StoreID, served map[StoreID]string) error {
+	for _, id := range required {
+		if _, found := served[id]; !found {
+			return NewError(
+				CodeIntegrity,
+				"database required-store catalog is outside the served scope",
+			)
+		}
+	}
+	return nil
+}
+
+func (server *Server) authorizeServedStore(envelope RequestEnvelope) error {
+	if server == nil || !server.servedScope || envelope.Domain == ControlDomain {
+		return nil
+	}
+	if !envelope.StoreID.Valid() {
+		return NewError(CodeInvalid, "database request store ID is invalid")
+	}
+	domain, found := server.servedStoreDomains[envelope.StoreID]
+	if !found || domain != envelope.Domain {
+		return NewError(CodeUnsupported, "database request store is not served")
+	}
+	if scopedTargetKey(envelope.Operation) == "resolvestore" ||
+		scopedPayloadContainsTargeting(envelope.Payload) {
+		return NewError(CodeInvalid, "database scoped request payload is invalid")
+	}
+	return nil
+}
+
+func scopedPayloadContainsTargeting(payload json.RawMessage) bool {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return true
+	}
+	return scopedPayloadValueContainsTargeting(value)
+}
+
+func scopedPayloadValueContainsTargeting(value any) bool {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, child := range value {
+			switch scopedTargetKey(key) {
+			case "storeid", "workspaceselector":
+				return true
+			}
+			if scopedPayloadValueContainsTargeting(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if scopedPayloadValueContainsTargeting(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func scopedTargetKey(value string) string {
+	var normalized strings.Builder
+	for _, character := range value {
+		switch {
+		case character == '_', character == '-', character == '.':
+			continue
+		default:
+			normalized.WriteRune(character)
+		}
+	}
+	compacted := normalized.String()
+	for _, canonical := range []string{"storeid", "workspaceselector"} {
+		if strings.EqualFold(compacted, canonical) {
+			return canonical
+		}
+	}
+	return strings.ToLower(compacted)
+}
+
+func servedStoresHaveExactStatuses(served []StoreBinding, statuses []StoreStatus) error {
+	if len(served) != len(statuses) {
+		return NewError(CodeIntegrity, "database served-store status catalog is incomplete")
+	}
+	for index := range served {
+		if served[index].ID != statuses[index].ID {
+			return NewError(CodeIntegrity, "database served-store status catalog is incomplete")
+		}
+	}
+	return nil
 }
 
 func requiredStoresHaveStatuses(required []StoreID, statuses []StoreStatus) error {

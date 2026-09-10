@@ -10,9 +10,11 @@ import (
 
 const defaultRequestTimeout = 10 * time.Second
 
-// CallOptions describe mutation ambiguity and optional stable idempotency.
+// CallOptions describe logical-store identity, mutation ambiguity, and optional
+// stable idempotency. An empty StoreID retains unscoped protocol compatibility.
 // The client never retries mutations implicitly.
 type CallOptions struct {
+	StoreID        StoreID
 	Mutation       bool
 	IdempotencyKey string
 }
@@ -92,10 +94,68 @@ func (client *Client) Call(
 	input any,
 	output any,
 ) error {
+	return client.callRead(ctx, "", domain, version, operation, input, output)
+}
+
+// CallStore invokes one typed read/nonmutating operation for an exact logical
+// store. The StoreID is carried independently from the domain payload and is
+// retained unchanged across the single safe rediscovery retry.
+func (client *Client) CallStore(
+	ctx context.Context,
+	storeID StoreID,
+	domain string,
+	version int,
+	operation string,
+	input any,
+	output any,
+) error {
 	if client == nil {
 		return NewError(CodeUnavailable, "database broker client is unavailable")
 	}
-	err := client.CallWithOptions(ctx, domain, version, operation, input, output, CallOptions{})
+	if !storeID.Valid() {
+		return NewError(CodeInvalid, "database request store ID is invalid")
+	}
+	return client.callRead(ctx, storeID, domain, version, operation, input, output)
+}
+
+// CallStoreWithOptions invokes one typed store operation without the additional
+// read-style rediscovery retry. Mutations use this entry point so their
+// ambiguity and optional idempotency policy remain explicit while the logical
+// target cannot be omitted or replaced through CallOptions.
+func (client *Client) CallStoreWithOptions(
+	ctx context.Context,
+	storeID StoreID,
+	domain string,
+	version int,
+	operation string,
+	input any,
+	output any,
+	options CallOptions,
+) error {
+	if client == nil {
+		return NewError(CodeUnavailable, "database broker client is unavailable")
+	}
+	if !storeID.Valid() || (!options.StoreID.IsZero() && options.StoreID != storeID) {
+		return NewError(CodeInvalid, "database request store ID is invalid")
+	}
+	options.StoreID = storeID
+	return client.CallWithOptions(ctx, domain, version, operation, input, output, options)
+}
+
+func (client *Client) callRead(
+	ctx context.Context,
+	storeID StoreID,
+	domain string,
+	version int,
+	operation string,
+	input any,
+	output any,
+) error {
+	if client == nil {
+		return NewError(CodeUnavailable, "database broker client is unavailable")
+	}
+	options := CallOptions{StoreID: storeID}
+	err := client.CallWithOptions(ctx, domain, version, operation, input, output, options)
 	if (CodeOf(err) != CodeUnavailable && CodeOf(err) != CodeConflict) || !client.rediscover {
 		return err
 	}
@@ -104,7 +164,7 @@ func (client *Client) Call(
 	if refreshErr := client.Refresh(); refreshErr != nil {
 		return err
 	}
-	return client.CallWithOptions(ctx, domain, version, operation, input, output, CallOptions{})
+	return client.CallWithOptions(ctx, domain, version, operation, input, output, options)
 }
 
 // CallWithOptions invokes one typed domain operation. A transport failure after
@@ -120,6 +180,10 @@ func (client *Client) CallWithOptions(
 ) error {
 	if client == nil {
 		return NewError(CodeUnavailable, "database broker client is unavailable")
+	}
+	if (!options.StoreID.IsZero() && !options.StoreID.Valid()) ||
+		(domain == ControlDomain && !options.StoreID.IsZero()) {
+		return NewError(CodeInvalid, "database request store ID is invalid")
 	}
 	if client.rediscover {
 		manifest, discoveryErr := ReadManifest(client.home)
@@ -155,7 +219,8 @@ func (client *Client) CallWithOptions(
 	client.mu.RUnlock()
 	envelope := RequestEnvelope{
 		Protocol: ProtocolVersion, RequestID: requestID, Token: manifest.Token,
-		BrokerEpoch: manifest.Epoch, Domain: domain, DomainVersion: version,
+		BrokerEpoch: manifest.Epoch, StoreID: options.StoreID,
+		Domain: domain, DomainVersion: version,
 		Operation: operation, DeadlineUnixNs: deadline.UnixNano(),
 		IdempotencyKey: options.IdempotencyKey, Payload: payload,
 	}
