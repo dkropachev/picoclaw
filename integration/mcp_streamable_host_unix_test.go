@@ -26,7 +26,6 @@ func TestMCPStreamableHostSuiteReapsFixtureAndTestOnSignal(t *testing.T) {
 	serverPIDPath := filepath.Join(t.TempDir(), "server.pid")
 	testPIDPath := filepath.Join(t.TempDir(), "test.pid")
 	serverStoppedPath := filepath.Join(t.TempDir(), "server.stopped")
-	testStoppedPath := filepath.Join(t.TempDir(), "test.stopped")
 	writeExecutable(t, filepath.Join(stubDir, "curl"), "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, filepath.Join(stubDir, "go"), `#!/bin/sh
 set -eu
@@ -55,7 +54,7 @@ case "${1:-}" in
     ;;
   test)
     printf '%s\n' "$$" >"${TEST_PID_FILE:?}"
-    trap 'printf stopped >"${TEST_STOPPED_FILE:?}"; exit 0' TERM INT
+    trap '' TERM INT
     while :; do sleep 0.05; done
     ;;
   *)
@@ -64,28 +63,37 @@ case "${1:-}" in
 esac
 `)
 
-	command := exec.Command(bashPath, filepath.Join(repoRoot, "integration", "suites", "mcp-streamable", "run.sh"))
+	command := exec.Command(
+		bashPath,
+		filepath.Join(repoRoot, "scripts", "run-integration-tests.sh"),
+		"mcp-streamable",
+	)
 	command.Dir = repoRoot
+	cacheRoot := t.TempDir()
 	command.Env = replaceIntegrationTestEnvironment(os.Environ(), map[string]string{
-		"PATH":                stubDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"TMPDIR":              runtimeParent,
-		"SERVER_PID_FILE":     serverPIDPath,
-		"TEST_PID_FILE":       testPIDPath,
-		"SERVER_STOPPED_FILE": serverStoppedPath,
-		"TEST_STOPPED_FILE":   testStoppedPath,
+		"PATH":                   stubDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TMPDIR":                 runtimeParent,
+		"SERVER_PID_FILE":        serverPIDPath,
+		"TEST_PID_FILE":          testPIDPath,
+		"SERVER_STOPPED_FILE":    serverStoppedPath,
+		"INTEGRATION_GOCACHE":    filepath.Join(cacheRoot, "build"),
+		"INTEGRATION_GOMODCACHE": filepath.Join(cacheRoot, "modules"),
 	})
 	if err = command.Start(); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- command.Wait() }()
+	finished := false
 	t.Cleanup(func() {
-		if command.Process != nil {
-			_ = command.Process.Kill()
+		if finished || command.Process == nil {
+			return
 		}
+		_ = command.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-done:
-		default:
+		case <-time.After(2 * time.Second):
+			_ = command.Process.Kill()
 		}
 	})
 
@@ -95,6 +103,7 @@ esac
 	}
 	select {
 	case waitErr := <-done:
+		finished = true
 		var exitErr *exec.ExitError
 		if !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 143 {
 			t.Fatalf("runner signal exit = %v, want 143", waitErr)
@@ -103,21 +112,9 @@ esac
 		_ = command.Process.Kill()
 		t.Fatal("runner did not exit after SIGTERM")
 	}
-	for _, marker := range []string{serverStoppedPath, testStoppedPath} {
-		waitForIntegrationTestPath(t, marker, time.Second)
-	}
+	waitForIntegrationTestPath(t, serverStoppedPath, time.Second)
 	for _, path := range []string{serverPIDPath, testPIDPath} {
-		raw, readErr := os.ReadFile(path)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
-		if parseErr != nil {
-			t.Fatal(parseErr)
-		}
-		if signalErr := syscall.Kill(pid, 0); !errors.Is(signalErr, syscall.ESRCH) {
-			t.Errorf("child PID %d remains after runner exit: %v", pid, signalErr)
-		}
+		assertIntegrationTestPIDStopped(t, path)
 	}
 	runtimeDirs, err := filepath.Glob(filepath.Join(runtimeParent, "picoclaw-mcp-streamable.*"))
 	if err != nil {
@@ -125,6 +122,120 @@ esac
 	}
 	if len(runtimeDirs) != 0 {
 		t.Fatalf("fixture runtime directories remain: %v", runtimeDirs)
+	}
+}
+
+func TestMCPStreamableHostSuiteReapsBuildOnTopLevelSignal(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	for _, test := range []struct {
+		name     string
+		signal   os.Signal
+		exitCode int
+	}{
+		{name: "interrupt", signal: os.Interrupt, exitCode: 130},
+		{name: "terminate", signal: syscall.SIGTERM, exitCode: 143},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testMCPStreamableHostBuildSignal(t, bashPath, test.signal, test.exitCode)
+		})
+	}
+}
+
+func testMCPStreamableHostBuildSignal(
+	t *testing.T,
+	bashPath string,
+	signal os.Signal,
+	wantExit int,
+) {
+	t.Helper()
+	repoRoot := repoRootFromTestFile(t)
+	stubDir := t.TempDir()
+	runtimeParent := t.TempDir()
+	buildPIDPath := filepath.Join(t.TempDir(), "build.pid")
+	buildStoppedPath := filepath.Join(t.TempDir(), "build.stopped")
+	writeExecutable(t, filepath.Join(stubDir, "curl"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(stubDir, "go"), `#!/bin/sh
+set -eu
+[ "${1:-}" = build ]
+printf '%s\n' "$$" >"${BUILD_PID_FILE:?}"
+trap 'printf stopped >"${BUILD_STOPPED_FILE:?}"; exit 0' TERM INT
+while :; do sleep 0.05; done
+`)
+
+	command := exec.Command(
+		bashPath,
+		filepath.Join(repoRoot, "scripts", "run-integration-tests.sh"),
+		"mcp-streamable",
+	)
+	command.Dir = repoRoot
+	cacheRoot := t.TempDir()
+	command.Env = replaceIntegrationTestEnvironment(os.Environ(), map[string]string{
+		"PATH":                   stubDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TMPDIR":                 runtimeParent,
+		"BUILD_PID_FILE":         buildPIDPath,
+		"BUILD_STOPPED_FILE":     buildStoppedPath,
+		"INTEGRATION_GOCACHE":    filepath.Join(cacheRoot, "build"),
+		"INTEGRATION_GOMODCACHE": filepath.Join(cacheRoot, "modules"),
+	})
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	finished := false
+	t.Cleanup(func() {
+		if finished || command.Process == nil {
+			return
+		}
+		_ = command.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			_ = command.Process.Kill()
+		}
+	})
+
+	waitForIntegrationTestPath(t, buildPIDPath, 3*time.Second)
+	if err := command.Process.Signal(signal); err != nil {
+		t.Fatalf("signal top-level runner during build: %v", err)
+	}
+	select {
+	case waitErr := <-done:
+		finished = true
+		var exitErr *exec.ExitError
+		if !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != wantExit {
+			t.Fatalf("top-level build signal exit = %v, want %d", waitErr, wantExit)
+		}
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatal("top-level runner did not exit after build signal")
+	}
+	waitForIntegrationTestPath(t, buildStoppedPath, time.Second)
+	assertIntegrationTestPIDStopped(t, buildPIDPath)
+	runtimeDirs, globErr := filepath.Glob(filepath.Join(runtimeParent, "picoclaw-mcp-streamable.*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(runtimeDirs) != 0 {
+		t.Fatalf("build-interrupted runtime directories remain: %v", runtimeDirs)
+	}
+}
+
+func assertIntegrationTestPIDStopped(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Errorf("child PID %d remains after runner exit: %v", pid, err)
 	}
 }
 
