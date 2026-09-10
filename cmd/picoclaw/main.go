@@ -26,6 +26,7 @@ import (
 	codecmd "github.com/sipeed/picoclaw/cmd/picoclaw/internal/code"
 	configcmd "github.com/sipeed/picoclaw/cmd/picoclaw/internal/config"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/cron"
+	databasecmd "github.com/sipeed/picoclaw/cmd/picoclaw/internal/database"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/events"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/gateway"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/mcp"
@@ -143,6 +144,7 @@ picoclaw --no-color status`,
 		gateway.NewGatewayCommand(),
 		status.NewStatusCommand(),
 		cron.NewCronCommand(),
+		databasecmd.NewDatabaseCommand(),
 		codecmd.NewCodeCommand(),
 		events.NewEventsCommand(),
 		workflow.NewWorkflowCommand(),

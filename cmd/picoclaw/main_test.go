@@ -20,6 +20,7 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	codecmd "github.com/sipeed/picoclaw/cmd/picoclaw/internal/code"
 	"github.com/sipeed/picoclaw/pkg/config"
+	dblayer "github.com/sipeed/picoclaw/pkg/database"
 )
 
 type rootTestExitError struct {
@@ -74,13 +75,62 @@ func TestNewPicoclawCommand(t *testing.T) {
 	}
 
 	subcommands := cmd.Commands()
-	assert.Len(t, subcommands, len(allowedCommands))
+	assert.Len(t, subcommands, len(allowedCommands)+1)
 
+	var databaseCommandFound bool
 	for _, subcmd := range subcommands {
+		if subcmd.Name() == "database" {
+			databaseCommandFound = true
+			assert.True(t, subcmd.Hidden)
+			assert.Nil(t, subcmd.Run)
+			assert.Nil(t, subcmd.RunE)
+			assert.Equal(t, "database", subcmd.Use)
+			children := subcmd.Commands()
+			assert.Len(t, children, 1)
+			if len(children) == 1 {
+				assert.Equal(t, "__serve", children[0].Name())
+				assert.True(t, children[0].Hidden)
+			}
+			continue
+		}
 		found := slices.Contains(allowedCommands, subcmd.Name())
 		assert.True(t, found, "unexpected subcommand %q", subcmd.Name())
 
 		assert.False(t, subcmd.Hidden)
+	}
+	assert.True(t, databaseCommandFound, "hidden database command is missing")
+
+	var help bytes.Buffer
+	cmd.SetOut(&help)
+	cmd.SetArgs([]string{"--help"})
+	require.NoError(t, cmd.Execute())
+	assert.NotContains(t, help.String(), "database")
+	assert.NotContains(t, help.String(), "__serve")
+}
+
+func TestHiddenDatabaseCommandAuthenticatesBeforeRootHooks(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configDirectory := filepath.Join(root, "config-must-remain-absent")
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvConfig, filepath.Join(configDirectory, "config.json"))
+	t.Setenv("PICOCLAW_DATABASE_SUPERVISOR_BOOTSTRAP", "")
+	t.Setenv("PICOCLAW_DATABASE_SUPERVISOR_BOOTSTRAP_IDENTITY", "")
+	t.Setenv("PICOCLAW_DATABASE_SUPERVISOR_EXECUTABLE_IDENTITY", "")
+
+	command := NewPicoclawCommand()
+	command.SetOut(io.Discard)
+	command.SetErr(io.Discard)
+	command.SetArgs([]string{"database", "__serve", "--unknown-private-flag"})
+	err := command.Execute()
+	if dblayer.CodeOf(err) != dblayer.CodeUnauthorized {
+		t.Fatalf("hidden command error = %v, want Unauthorized", err)
+	}
+	if _, statErr := os.Stat(configDirectory); !os.IsNotExist(statErr) {
+		t.Fatalf("pre-authorization config directory stat error = %v, want absent", statErr)
 	}
 }
 

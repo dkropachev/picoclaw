@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -18,11 +19,13 @@ const logicalCatalogImportPath = "github.com/sipeed/picoclaw/pkg/database/catalo
 
 const internalStoreCatalogImportPath = "github.com/sipeed/picoclaw/internal/storecatalog"
 
-func TestLogicalCatalogHasNoProductionConsumers(t *testing.T) {
+const logicalCatalogProductionConsumer = "cmd/picoclaw/internal/database/command.go"
+
+func TestLogicalCatalogHasOneExactProductionConsumer(t *testing.T) {
 	t.Parallel()
 
 	repositoryRoot := logicalCatalogRepositoryRoot(t)
-	var violations []string
+	sources := make(map[string]string)
 	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -36,36 +39,255 @@ func TestLogicalCatalogHasNoProductionConsumers(t *testing.T) {
 		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("production Go source is a symlink: %s", path)
+		}
 
 		relative, err := filepath.Rel(repositoryRoot, path)
 		if err != nil {
 			return err
 		}
-		fileSet := token.NewFileSet()
-		parsed, err := parser.ParseFile(fileSet, path, nil, parser.ImportsOnly)
+		raw, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("parse production Go file %s: %w", filepath.ToSlash(relative), err)
+			return fmt.Errorf("read production Go file %s: %w", filepath.ToSlash(relative), err)
 		}
-		for _, imported := range parsed.Imports {
-			importPath, err := strconv.Unquote(imported.Path.Value)
-			if err != nil {
-				return err
-			}
-			if importPath == logicalCatalogImportPath {
-				violations = append(violations, fmt.Sprintf(
-					"%s:%d", filepath.ToSlash(relative), fileSet.Position(imported.Pos()).Line,
-				))
-			}
-		}
+		sources[filepath.ToSlash(relative)] = string(raw)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("scan production imports: %v", err)
 	}
+	violations := logicalCatalogConsumerViolations(sources)
 	if len(violations) != 0 {
-		sort.Strings(violations)
-		t.Fatalf("dormant logical catalog has production consumers:\n%s", strings.Join(violations, "\n"))
+		t.Fatalf("logical catalog consumer boundary violations:\n%s", strings.Join(violations, "\n"))
 	}
+}
+
+func TestLogicalCatalogConsumerGuardRejectsEscapeFixtures(t *testing.T) {
+	t.Parallel()
+
+	valid := `package database
+import dbcatalog "github.com/sipeed/picoclaw/pkg/database/catalog"
+func NewDatabaseCommand() { _ = dbcatalog.NewSnapshot }
+`
+	fixtures := []struct {
+		name     string
+		sources  map[string]string
+		contains string
+	}{
+		{
+			name:     "missing consumer",
+			sources:  map[string]string{"main.go": "package main\n"},
+			contains: "exact consumer import count = 0, want 1",
+		},
+		{
+			name: "additional consumer",
+			sources: map[string]string{
+				logicalCatalogProductionConsumer: valid,
+				"pkg/escape/escape.go": `package escape
+import dbcatalog "github.com/sipeed/picoclaw/pkg/database/catalog"
+var _ = dbcatalog.NewSnapshot
+`,
+			},
+			contains: "additional production consumer",
+		},
+		{
+			name: "exported function value",
+			sources: map[string]string{
+				logicalCatalogProductionConsumer: `package database
+import dbcatalog "github.com/sipeed/picoclaw/pkg/database/catalog"
+var ExportedSnapshot = dbcatalog.NewSnapshot
+`,
+			},
+			contains: "re-exports the logical catalog",
+		},
+		{
+			name: "exported type alias",
+			sources: map[string]string{
+				logicalCatalogProductionConsumer: `package database
+import dbcatalog "github.com/sipeed/picoclaw/pkg/database/catalog"
+type ExportedCatalog = dbcatalog.Catalog
+`,
+			},
+			contains: "re-exports the logical catalog",
+		},
+		{
+			name: "dot import",
+			sources: map[string]string{
+				logicalCatalogProductionConsumer: `package database
+import . "github.com/sipeed/picoclaw/pkg/database/catalog"
+var _ = NewSnapshot
+`,
+			},
+			contains: "alias = \".\", want \"dbcatalog\"",
+		},
+		{
+			name: "linkname consumer",
+			sources: map[string]string{
+				logicalCatalogProductionConsumer: valid,
+				"pkg/escape/escape.go": `package escape
+import _ "unsafe"
+//go:linkname snapshot github.com/sipeed/picoclaw/pkg/database/catalog.NewSnapshot
+func snapshot()
+`,
+			},
+			contains: "linknames the logical catalog",
+		},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			t.Parallel()
+			violations := logicalCatalogConsumerViolations(fixture.sources)
+			if !logicalCatalogViolationContains(violations, fixture.contains) {
+				t.Fatalf("violations = %q, want one containing %q", violations, fixture.contains)
+			}
+		})
+	}
+}
+
+func logicalCatalogConsumerViolations(sources map[string]string) []string {
+	paths := make([]string, 0, len(sources))
+	for path := range sources {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	exactImports := 0
+	var violations []string
+	for _, path := range paths {
+		fileSet := token.NewFileSet()
+		parsed, err := parser.ParseFile(
+			fileSet, path, sources[path], parser.ParseComments|parser.AllErrors,
+		)
+		if err != nil {
+			violations = append(violations, fmt.Sprintf("%s: parse production source: %v", path, err))
+			continue
+		}
+		aliases := make(map[string]bool)
+		for _, group := range parsed.Comments {
+			for _, comment := range group.List {
+				if strings.Contains(comment.Text, "go:linkname") &&
+					strings.Contains(comment.Text, logicalCatalogImportPath+".") {
+					violations = append(violations, fmt.Sprintf(
+						"%s:%d linknames the logical catalog", path,
+						fileSet.Position(comment.Pos()).Line,
+					))
+				}
+			}
+		}
+		for _, imported := range parsed.Imports {
+			importPath, err := strconv.Unquote(imported.Path.Value)
+			if err != nil || importPath != logicalCatalogImportPath {
+				continue
+			}
+			alias := "catalog"
+			if imported.Name != nil {
+				alias = imported.Name.Name
+			}
+			aliases[alias] = true
+			if path != logicalCatalogProductionConsumer {
+				violations = append(violations, fmt.Sprintf(
+					"%s:%d is an additional production consumer", path,
+					fileSet.Position(imported.Pos()).Line,
+				))
+				continue
+			}
+			exactImports++
+			if alias != "dbcatalog" {
+				violations = append(violations, fmt.Sprintf(
+					"%s:%d logical catalog alias = %q, want %q", path,
+					fileSet.Position(imported.Pos()).Line, alias, "dbcatalog",
+				))
+			}
+		}
+		if len(aliases) != 0 {
+			violations = append(violations, logicalCatalogReexportViolations(path, parsed, aliases)...)
+		}
+	}
+	if exactImports != 1 {
+		violations = append(violations, fmt.Sprintf(
+			"logical catalog exact consumer import count = %d, want 1", exactImports,
+		))
+	}
+	sort.Strings(violations)
+	return violations
+}
+
+func logicalCatalogReexportViolations(
+	path string,
+	parsed *ast.File,
+	aliases map[string]bool,
+) []string {
+	var violations []string
+	for _, declaration := range parsed.Decls {
+		if logicalCatalogDeclarationReexports(declaration, aliases) {
+			violations = append(violations, path+": re-exports the logical catalog")
+		}
+	}
+	return violations
+}
+
+func logicalCatalogDeclarationReexports(declaration ast.Decl, aliases map[string]bool) bool {
+	switch declaration := declaration.(type) {
+	case *ast.FuncDecl:
+		if !ast.IsExported(declaration.Name.Name) {
+			return false
+		}
+		return logicalCatalogExpressionUsesAlias(declaration.Type, aliases) ||
+			(declaration.Recv != nil && logicalCatalogExpressionUsesAlias(declaration.Recv, aliases))
+	case *ast.GenDecl:
+		for _, specification := range declaration.Specs {
+			switch specification := specification.(type) {
+			case *ast.TypeSpec:
+				if ast.IsExported(specification.Name.Name) &&
+					logicalCatalogExpressionUsesAlias(specification, aliases) {
+					return true
+				}
+			case *ast.ValueSpec:
+				if logicalCatalogExportedValueUsesAlias(specification, aliases) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func logicalCatalogExportedValueUsesAlias(
+	specification *ast.ValueSpec,
+	aliases map[string]bool,
+) bool {
+	exported := false
+	for _, name := range specification.Names {
+		exported = exported || ast.IsExported(name.Name)
+	}
+	return exported && logicalCatalogExpressionUsesAlias(specification, aliases)
+}
+
+func logicalCatalogExpressionUsesAlias(node ast.Node, aliases map[string]bool) bool {
+	uses := false
+	ast.Inspect(node, func(child ast.Node) bool {
+		selector, ok := child.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		qualifier, ok := selector.X.(*ast.Ident)
+		if ok && aliases[qualifier.Name] {
+			uses = true
+			return false
+		}
+		return true
+	})
+	return uses
+}
+
+func logicalCatalogViolationContains(violations []string, fragment string) bool {
+	for _, violation := range violations {
+		if strings.Contains(violation, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
@@ -359,7 +581,7 @@ func logicalCatalogRepositoryRoot(t *testing.T) string {
 
 func logicalCatalogGuardSkipsDir(name string) bool {
 	switch strings.ToLower(name) {
-	case ".git", ".cache", "cache", "generated", "gen", "node_modules", "testdata", "vendor":
+	case ".git", ".cache", "node_modules", "testdata", "vendor":
 		return true
 	default:
 		return false
