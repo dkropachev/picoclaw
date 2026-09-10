@@ -382,7 +382,7 @@ Owns: EVENT agent.*
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | CLI | `picoclaw agent`, `picoclaw model`, `picoclaw status`, `picoclaw version` | Direct agent use, model selection, status, and build metadata. | `FR-AGENT-003`, `FR-AGENT-009` |
-| CLI | root `picoclaw` command registration | Compose feature-owned subcommands such as workflow and event operations while leaving their implementation and policy in the owning package. | `FR-AGENT-009` |
+| CLI | root `picoclaw` command registration | Compose feature-owned subcommands, including owner-hidden infrastructure trees, while leaving their implementation, visibility, and policy in the owning package. | `FR-AGENT-009` |
 | Config | `agents.*`, `model_aliases[]`, `account_routers[]`, `model_routers[]`, `model_list[]` | Default/per-agent account refs, exact aliases and fallback aliases, alias-to-concrete-model mappings, account overrides, routing, provider transport configuration, and execution policy. | `FR-AGENT-002`, `FR-AGENT-003`, `FR-AGENT-004` |
 | Config | `model_list[].reasoning_effort` | Optional OpenAI-style reasoning effort forwarded only after shared normalization and validation. | `FR-AGENT-003`, `FR-AGENT-010` |
 | Go API | `WithToolPolicy`, admitted turn policy snapshot, `Pipeline.ExecuteTools` | Install and freeze one explicit model-tool policy, then compose exact offered/prepared invocation checks, trusted hook fulfillment, legacy approval, safe decision events, and effect dispatch at one post-hook boundary. | `FR-AGENT-044` |

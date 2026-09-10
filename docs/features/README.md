@@ -38,7 +38,7 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Portability, updates, and packaging    | [portability-updates.md](portability-updates.md)                   |
 | Database protocol foundation           | [database-layer.md](database-layer.md)                             |
 | Database owner-only local IPC          | [database-local-ipc.md](database-local-ipc.md)                     |
-| Database supervisor process lifecycle  | [database-supervisor-control.md](database-supervisor-control.md)   |
+| Database supervisor control plane      | [database-supervisor-control.md](database-supervisor-control.md)   |
 | Database provider catalog foundation   | [database-provider-catalog.md](database-provider-catalog.md)       |
 | Database storage contracts             | [database-storage-contracts.md](database-storage-contracts.md)     |
 | Database physical claims               | [database-physical-claims.md](database-physical-claims.md)         |
