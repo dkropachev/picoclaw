@@ -162,6 +162,73 @@ func TestPRGoTestsBoundPackageParallelism(t *testing.T) {
 	}
 }
 
+func TestPRShardsFrontendUIWithoutIncreasingWorkerContention(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/pr.yml")
+	frontendUIJob := targetBlock(t, workflow, "  frontend_ui:\n", "  vuln_check:\n")
+	for _, snippet := range []string{
+		`- label: smoke / desktop, shard 1/2
+            suite: smoke
+            project: desktop
+            shard: 1/2
+            artifact: smoke-desktop-1-of-2`,
+		`- label: smoke / desktop, shard 2/2
+            suite: smoke
+            project: desktop
+            shard: 2/2
+            artifact: smoke-desktop-2-of-2`,
+		`- label: smoke / mobile, shard 1/2
+            suite: smoke
+            project: mobile
+            shard: 1/2
+            artifact: smoke-mobile-1-of-2`,
+		`- label: smoke / mobile, shard 2/2
+            suite: smoke
+            project: mobile
+            shard: 2/2
+            artifact: smoke-mobile-2-of-2`,
+		`- label: visual, shard 1/2
+            suite: visual
+            project: all
+            shard: 1/2
+            artifact: visual-1-of-2`,
+		`- label: visual, shard 2/2
+            suite: visual
+            project: all
+            shard: 2/2
+            artifact: visual-2-of-2`,
+	} {
+		if !strings.Contains(frontendUIJob, snippet) {
+			t.Errorf("PR workflow is missing frontend UI matrix entry %q", snippet)
+		}
+	}
+	if got := strings.Count(frontendUIJob, `--shard="${{ matrix.shard }}"`); got != 2 {
+		t.Errorf("frontend UI shard argument count = %d, want 2 suite commands", got)
+	}
+
+	playwrightConfig := readRepoFile(t, "web/frontend/playwright.config.ts")
+	for _, snippet := range []string{
+		"fullyParallel: true",
+		"workers: process.env.CI ? 2 : 4",
+		`trace: process.env.CI ? "on-first-retry" : "retain-on-failure"`,
+	} {
+		if !strings.Contains(playwrightConfig, snippet) {
+			t.Errorf("Playwright config is missing sharding safety setting %q", snippet)
+		}
+	}
+}
+
+func TestFrontendUnitTestsUseBoundedCIThreads(t *testing.T) {
+	vitestConfig := readRepoFile(t, "web/frontend/vitest.config.ts")
+	for _, snippet := range []string{
+		`pool: ci ? "threads" : "forks"`,
+		"maxWorkers: ci ? 4 : undefined",
+	} {
+		if !strings.Contains(vitestConfig, snippet) {
+			t.Errorf("Vitest config is missing bounded CI thread setting %q", snippet)
+		}
+	}
+}
+
 func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
 	const cacheAction = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 	const sharedPaths = "path: |\n            .cache/go-build\n            .cache/go-mod"

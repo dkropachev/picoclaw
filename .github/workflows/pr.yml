@@ -193,18 +193,36 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: smoke / desktop
+          - label: smoke / desktop, shard 1/2
             suite: smoke
             project: desktop
-            artifact: smoke-desktop
-          - label: smoke / mobile
+            shard: 1/2
+            artifact: smoke-desktop-1-of-2
+          - label: smoke / desktop, shard 2/2
+            suite: smoke
+            project: desktop
+            shard: 2/2
+            artifact: smoke-desktop-2-of-2
+          - label: smoke / mobile, shard 1/2
             suite: smoke
             project: mobile
-            artifact: smoke-mobile
-          - label: visual
+            shard: 1/2
+            artifact: smoke-mobile-1-of-2
+          - label: smoke / mobile, shard 2/2
+            suite: smoke
+            project: mobile
+            shard: 2/2
+            artifact: smoke-mobile-2-of-2
+          - label: visual, shard 1/2
             suite: visual
             project: all
-            artifact: visual
+            shard: 1/2
+            artifact: visual-1-of-2
+          - label: visual, shard 2/2
+            suite: visual
+            project: all
+            shard: 2/2
+            artifact: visual-2-of-2
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -246,11 +264,11 @@ jobs:
 
       - name: Frontend UI smoke tests
         if: matrix.suite == 'smoke'
-        run: cd web/frontend && pnpm exec playwright test tests/ui-smoke.spec.ts --project="${{ matrix.project }}"
+        run: cd web/frontend && pnpm exec playwright test tests/ui-smoke.spec.ts --project="${{ matrix.project }}" --shard="${{ matrix.shard }}"
 
       - name: Frontend collection visual tests
         if: matrix.suite == 'visual'
-        run: cd web/frontend && COLLECTION_VISUAL_BASELINE=system pnpm test:ui:visual
+        run: cd web/frontend && COLLECTION_VISUAL_BASELINE=system pnpm exec playwright test tests/collection-visual.spec.ts --shard="${{ matrix.shard }}"
 
       - name: Upload Playwright failure artifacts
         if: failure()
