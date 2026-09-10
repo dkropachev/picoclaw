@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -12,6 +15,25 @@ import (
 )
 
 func main() {
+	if err := run(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(ctx context.Context) error {
+	listenAddress := envString("STREAMABLE_LISTEN_ADDRESS", "127.0.0.1:8080")
+	if err := validateListenAddress(listenAddress); err != nil {
+		return fmt.Errorf("STREAMABLE_LISTEN_ADDRESS must use IPv4 loopback %q: %w", listenAddress, err)
+	}
+	listener, err := net.Listen("tcp4", listenAddress)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", listenAddress, err)
+	}
+	defer listener.Close()
+	if err = publishReadyAddress(listener.Addr().String()); err != nil {
+		return fmt.Errorf("publish ready address: %w", err)
+	}
+
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "picoclaw-integration-streamable-server",
 		Version: "1.0.0",
@@ -43,15 +65,58 @@ func main() {
 	})
 
 	srv := &http.Server{
-		Addr:              ":8080",
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	serveDone := make(chan struct{})
+	defer close(serveDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = srv.Close()
+		case <-serveDone:
+		}
+	}()
 
-	log.Printf("streamable MCP integration server listening on %s", srv.Addr)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+	log.Printf("streamable MCP integration server listening on %s", listener.Addr())
+	if err = srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+		return err
 	}
+	return nil
+}
+
+func envString(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func validateListenAddress(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("parse listen address: %w", err)
+	}
+	if host != "127.0.0.1" {
+		return errors.New("listen address is not IPv4 loopback")
+	}
+	return nil
+}
+
+func publishReadyAddress(address string) error {
+	path := strings.TrimSpace(os.Getenv("STREAMABLE_READY_FILE"))
+	if path == "" {
+		return nil
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, []byte(address+"\n"), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return fmt.Errorf("publish readiness: %w", err)
+	}
+	return nil
 }
 
 func envBool(name string, fallback bool) bool {

@@ -263,6 +263,251 @@ esac
 	}
 }
 
+func TestRunIntegrationTestsScriptExecutesHostSuiteWithoutDocker(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("host integration runner is exercised by POSIX CI")
+	}
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+
+	repoRoot := repoRootFromTestFile(t)
+	suiteDir, err := os.MkdirTemp(filepath.Join(repoRoot, "integration", "suites"), "runner-host-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(suiteDir) })
+	if err = os.WriteFile(
+		filepath.Join(suiteDir, "suite.env"),
+		[]byte("RUNNER_MODE=host\nTEST_COMMAND='go test ./pkg/sample -v'\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	stubDir := t.TempDir()
+	dockerMarker := filepath.Join(t.TempDir(), "docker-called")
+	goLog := filepath.Join(t.TempDir(), "go.log")
+	writeExecutable(t, filepath.Join(stubDir, "docker"), `#!/bin/sh
+set -eu
+: >"${DOCKER_MARKER:?}"
+exit 97
+`)
+	writeExecutable(t, filepath.Join(stubDir, "go"), `#!/bin/sh
+set -eu
+printf 'pwd=%s\n' "$PWD" >"${GO_LOG:?}"
+printf 'args=%s\n' "$*" >>"${GO_LOG:?}"
+printf 'gocache=%s\n' "${GOCACHE:?}" >>"${GO_LOG:?}"
+printf 'gomodcache=%s\n' "${GOMODCACHE:?}" >>"${GO_LOG:?}"
+printf 'gotoolchain=%s\n' "${GOTOOLCHAIN:?}" >>"${GO_LOG:?}"
+printf 'goflags=%s\n' "${GOFLAGS:?}" >>"${GO_LOG:?}"
+printf 'cgo=%s\n' "${CGO_ENABLED:?}" >>"${GO_LOG:?}"
+`)
+	cacheRoot := t.TempDir()
+	buildCache := filepath.Join(cacheRoot, "build")
+	moduleCache := filepath.Join(cacheRoot, "modules")
+	command := exec.Command(
+		bashPath,
+		filepath.Join(repoRoot, "scripts", "run-integration-tests.sh"),
+		filepath.Base(suiteDir),
+	)
+	command.Dir = repoRoot
+	command.Env = replaceIntegrationTestEnvironment(os.Environ(), map[string]string{
+		"PATH":                   stubDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"DOCKER_MARKER":          dockerMarker,
+		"GO_LOG":                 goLog,
+		"INTEGRATION_GOCACHE":    buildCache,
+		"INTEGRATION_GOMODCACHE": moduleCache,
+	})
+	if output, runErr := command.CombinedOutput(); runErr != nil {
+		t.Fatalf("host runner error = %v\n%s", runErr, output)
+	}
+	if _, statErr := os.Stat(dockerMarker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("host suite invoked Docker: %v", statErr)
+	}
+	logData, err := os.ReadFile(goLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"pwd=" + repoRoot,
+		"args=test -buildvcs=false -count=1 ./pkg/sample -v",
+		"gocache=" + buildCache,
+		"gomodcache=" + moduleCache,
+		"gotoolchain=auto",
+		"goflags=-tags=goolm,stdjson,integration",
+		"cgo=0",
+	} {
+		if !strings.Contains(string(logData), want+"\n") {
+			t.Fatalf("host Go invocation is missing %q:\n%s", want, logData)
+		}
+	}
+}
+
+func TestRunIntegrationTestsScriptHostCoverageUsesTranslatedPath(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("host integration runner is exercised by POSIX CI")
+	}
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	repoRoot := repoRootFromTestFile(t)
+	suiteDir, err := os.MkdirTemp(filepath.Join(repoRoot, "integration", "suites"), "runner-host-cover-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(suiteDir) })
+	if err = os.WriteFile(
+		filepath.Join(suiteDir, "suite.env"),
+		[]byte("RUNNER_MODE=host\nTEST_COMMAND='go test ./pkg/sample'\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	stubDir := t.TempDir()
+	goLog := filepath.Join(t.TempDir(), "go.log")
+	writeExecutable(t, filepath.Join(stubDir, "go"), `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >"${GO_LOG:?}"
+case "$*" in
+  *"-coverprofile="*) ;;
+  *) exit 98 ;;
+esac
+`)
+	cacheRoot := t.TempDir()
+	command := exec.Command(
+		bashPath,
+		filepath.Join(repoRoot, "scripts", "run-integration-tests.sh"),
+		filepath.Base(suiteDir),
+	)
+	command.Dir = repoRoot
+	command.Env = replaceIntegrationTestEnvironment(os.Environ(), map[string]string{
+		"PATH":                         stubDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GO_LOG":                       goLog,
+		"INTEGRATION_GOCACHE":          filepath.Join(cacheRoot, "build"),
+		"INTEGRATION_GOMODCACHE":       filepath.Join(cacheRoot, "modules"),
+		"INTEGRATION_COVERPKG":         "example.com/sample",
+		"INTEGRATION_COVERPROFILE_DIR": "/workspace/.coverage/runner-test",
+		"INTEGRATION_GOMAXPROCS":       "2",
+	})
+	if output, runErr := command.CombinedOutput(); runErr != nil {
+		t.Fatalf("host coverage runner error = %v\n%s", runErr, output)
+	}
+	logData, err := os.ReadFile(goLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProfile := filepath.Join(repoRoot, ".coverage", "runner-test", filepath.Base(suiteDir)+".cover.out")
+	for _, want := range []string{
+		"-count=1",
+		"-covermode=atomic",
+		"-coverpkg=example.com/sample",
+		"-coverprofile=" + wantProfile,
+	} {
+		if !strings.Contains(string(logData), want) {
+			t.Fatalf("host coverage invocation is missing %q: %s", want, logData)
+		}
+	}
+	if info, statErr := os.Stat(filepath.Dir(wantProfile)); statErr != nil || !info.IsDir() {
+		t.Fatalf("host coverage directory = %v, error = %v", info, statErr)
+	}
+}
+
+func TestRunIntegrationTestsScriptRejectsInvalidHostManifest(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("host integration runner is exercised by POSIX CI")
+	}
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	repoRoot := repoRootFromTestFile(t)
+
+	for _, manifest := range []string{
+		"RUNNER_MODE=invalid\nTEST_COMMAND='exit 99'\n",
+		"RUNNER_MODE=host\nRUNNER_SERVICE=custom\nTEST_COMMAND='exit 99'\n",
+	} {
+		suiteDir, makeErr := os.MkdirTemp(filepath.Join(repoRoot, "integration", "suites"), "runner-invalid-")
+		if makeErr != nil {
+			t.Fatal(makeErr)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(suiteDir) })
+		if writeErr := os.WriteFile(filepath.Join(suiteDir, "suite.env"), []byte(manifest), 0o644); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		stubDir := t.TempDir()
+		dockerMarker := filepath.Join(t.TempDir(), "docker-called")
+		writeExecutable(t, filepath.Join(stubDir, "docker"), `#!/bin/sh
+set -eu
+: >"${DOCKER_MARKER:?}"
+exit 97
+`)
+		cacheRoot := t.TempDir()
+		command := exec.Command(
+			bashPath,
+			filepath.Join(repoRoot, "scripts", "run-integration-tests.sh"),
+			filepath.Base(suiteDir),
+		)
+		command.Dir = repoRoot
+		command.Env = replaceIntegrationTestEnvironment(os.Environ(), map[string]string{
+			"PATH":                   stubDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"DOCKER_MARKER":          dockerMarker,
+			"INTEGRATION_GOCACHE":    filepath.Join(cacheRoot, "build"),
+			"INTEGRATION_GOMODCACHE": filepath.Join(cacheRoot, "modules"),
+		})
+		if output, runErr := command.CombinedOutput(); runErr == nil ||
+			!strings.Contains(string(output), "suite ") {
+			t.Fatalf("invalid manifest error = %v, output=%q", runErr, output)
+		}
+		if _, statErr := os.Stat(dockerMarker); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("invalid host manifest invoked Docker: %v", statErr)
+		}
+	}
+}
+
+func TestCurrentIntegrationSuitesRunOnHostWithoutComposeFiles(t *testing.T) {
+	repoRoot := repoRootFromTestFile(t)
+	for suite, snippets := range map[string][]string{
+		"mcp-streamable": {
+			"RUNNER_MODE=host",
+			"TEST_COMMAND='bash ./integration/suites/mcp-streamable/run.sh'",
+		},
+		"storage-json": {
+			"RUNNER_MODE=host",
+			"PICOCLAW_STORAGE_JSON_ALLOWLIST_SUITE=1",
+			"TestIntegrationRuntimeOwnedJSON",
+		},
+	} {
+		manifestPath := filepath.Join(repoRoot, "integration", "suites", suite, "suite.env")
+		data, err := os.ReadFile(manifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, snippet := range snippets {
+			if !strings.Contains(string(data), snippet) {
+				t.Errorf("%s is missing %q", manifestPath, snippet)
+			}
+		}
+		composeFiles, err := filepath.Glob(filepath.Join(filepath.Dir(manifestPath), "docker-compose*.yml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(composeFiles) != 0 {
+			t.Errorf("host suite %s still has Compose files: %v", suite, composeFiles)
+		}
+	}
+	for _, obsolete := range []string{
+		filepath.Join(repoRoot, "integration", "fixtures", "mcp-streamable-server", "Dockerfile"),
+	} {
+		if _, err := os.Stat(obsolete); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("obsolete Docker fixture remains: %s", obsolete)
+		}
+	}
+}
+
 func TestRunIntegrationTestsScriptExportsReusableHostCaches(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("integration runner script is exercised by POSIX CI")

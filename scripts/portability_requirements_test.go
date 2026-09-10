@@ -211,6 +211,8 @@ func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
 	}
 	prIntegration := targetBlock(t, prWorkflow, "  integration:\n", "  required:\n")
 	for _, snippet := range []string{
+		"- name: Setup Go\n        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
+		"go-version-file: go.mod\n          cache: false",
 		"uses: actions/cache/restore@" + cacheAction,
 		"go-v3-host-" + dependencyHash + "-" + consumerEpoch,
 		sharedPaths,
@@ -240,6 +242,8 @@ func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
 	buildWorkflow := readRepoFile(t, ".github/workflows/build.yml")
 	manualIntegration := targetBlock(t, buildWorkflow, "  integration:\n", "  build:\n")
 	for _, snippet := range []string{
+		"- name: Setup Go\n        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
+		"go-version-file: go.mod\n          cache: false",
 		`echo "epoch=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"`,
 		"uses: actions/cache/restore@" + cacheAction,
 		"go-v3-host-" + dependencyHash + "-${{ steps.go-cache-key.outputs.epoch }}",

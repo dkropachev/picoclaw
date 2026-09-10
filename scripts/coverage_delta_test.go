@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,24 @@ import (
 	"time"
 	"unicode/utf8"
 )
+
+func TestCoverageDeltaMainSkipsMatchingRefs(t *testing.T) {
+	originalArgs := os.Args
+	originalFlags := flag.CommandLine
+	t.Cleanup(func() {
+		os.Args = originalArgs
+		flag.CommandLine = originalFlags
+	})
+
+	os.Args = []string{
+		"coverage-delta-test",
+		"--base", "HEAD",
+		"--head", "HEAD",
+		"--integration=false",
+	}
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	main()
+}
 
 func TestChangedGoLinesHandlesOddPathsC100AndFeedsChangedCoverage(t *testing.T) {
 	t.Parallel()
@@ -1375,6 +1394,7 @@ set -euo pipefail
 [[ "${INTEGRATION_GOMODCACHE}" == "${EXPECTED_GOMODCACHE}" ]]
 [[ "${INTEGRATION_RUNNER_UID}" == "34567" ]]
 [[ "${INTEGRATION_RUNNER_GID}" == "45678" ]]
+[[ "${INTEGRATION_GOFLAGS}" == "-tags=goolm,stdjson,integration" ]]
 [[ "${GOFLAGS}" == "-tags=goolm,stdjson,integration" ]]
 [[ "$#" == 1 && "$1" == "sample-suite" ]]
 mkdir -p .coverage/integration-head

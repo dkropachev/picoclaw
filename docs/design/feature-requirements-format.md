@@ -119,7 +119,7 @@ it is also used to track per-feature Go test coverage deltas.
 
 `make coverage-delta` compares the PR base and head with a scoped Go coverage
 plan derived from changed files and `Owns: CODE` mappings. The gate runs tests
-with `-coverpkg` for impacted feature-owned packages, includes Docker-backed
+with `-coverpkg` for impacted feature-owned packages, includes configured
 integration suites when an impacted feature owns them, and uses
 statement-weighted Go coverage blocks with exact integer-ratio comparisons;
 rounded display percentages never decide a result. An impacted feature with

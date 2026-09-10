@@ -107,7 +107,7 @@ Owns: EVENT mcp.*
 | Runtime     | MCP manager, canonical tool identity, and MCP tool wrapper | Connection lifecycle, collision-safe atomic factory registration, detached wrapper/factory metadata, admission-derived prompts, canonical readiness, and remote tool execution. | `FR-MCP-001`, `FR-MCP-002`, `FR-MCP-004`, `FR-MCP-011`, `FR-MCP-012`, `FR-MCP-014` |
 | HTTP        | `/api/mcp*`, `/mcp/oauth/callback`            | Sanitized settings/server inventory, isolated mutations, probes, bearer management, and short-lived OAuth flows.        | `FR-MCP-007`, `FR-MCP-009`, `FR-MCP-010`               |
 | Frontend    | `/agent/mcp/servers*`, `/agent/mcp/settings`  | Standard server collection plus dedicated forms, settings, testing, status, token actions, and OAuth login/reconnect.   | `FR-MCP-009`, `FR-MCP-010`, `FR-MCP-013`              |
-| Integration | Docker-backed MCP streamable suite            | Real server protocol compatibility.                                                                                    | `FR-MCP-001`, `FR-MCP-004`                             |
+| Integration | Host-supervised MCP streamable suite          | Real server protocol compatibility over an ephemeral loopback endpoint.                                                | `FR-MCP-001`, `FR-MCP-004`                             |
 
 | HTTP/UI | `/api/mcp/servers*`; `/agent/mcp/servers*`; `/agent/mcp/settings` | Typed name-addressed list/detail, revision-fenced explicit-name bulk delete with safe blockers, dedicated server routes, and isolated global settings. | `FR-MCP-009`, `FR-MCP-010`, `FR-MCP-013` |
 
