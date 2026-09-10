@@ -46,6 +46,15 @@ func TestWorkflowManagedSimilarityAndSliceCoverage(t *testing.T) {
 		workflowSetSimilarity([]string{"a", "b"}, []string{"b", "c", " "}) != 1.0/3.0 {
 		t.Fatal("managed similarity helper mismatch")
 	}
+	if _, score, found := workflowManagedSimilarCalibrationCacheEntry(
+		map[string]workflowManagedCalibrationCacheEntry{
+			"dissimilar": {LastMatch: true, Strategy: "source"},
+		},
+		map[string]any{"strategy": "target"},
+		workflowManagedExecutionOptions{calibrationSimilarityThreshold: 0.72},
+	); found || score != 0 {
+		t.Fatalf("dissimilar calibration cache entry = found:%t score:%v", found, score)
+	}
 
 	if got := workflowManagedSortedSet(map[string]struct{}{"b": {}, "": {}, "a": {}}); !reflect.DeepEqual(
 		got,

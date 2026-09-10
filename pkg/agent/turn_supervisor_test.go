@@ -935,6 +935,37 @@ func TestRunTurnSupervisorStopsAtFailureCancellationBoundaries(t *testing.T) {
 			t.Fatalf("Save count = %d, want 0", saves)
 		}
 	})
+
+	t.Run("during successful finalization", func(t *testing.T) {
+		provider := &supervisorCountingProvider{}
+		al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+		defer cleanup()
+		store := newSupervisorSessionStore(nil, "")
+		agent.Sessions = store
+		runCtx, cancelRun := context.WithCancel(context.Background())
+		defer cancelRun()
+		store.onSave = cancelRun
+		ts := newSupervisorTurnState(agent, "cancel-during-finalize", "turn-cancel-during-finalize")
+
+		result, err := al.runTurn(runCtx, ts, NewPipeline(al))
+		if !errors.Is(err, context.Canceled) || result.status != TurnEndStatusError {
+			t.Fatalf("runTurn() = %#v, %v", result, err)
+		}
+		if provider.calls.Load() != 1 {
+			t.Fatalf("provider calls = %d, want 1", provider.calls.Load())
+		}
+		if saves, _, _, _ := store.counts(); saves != 1 {
+			t.Fatalf("Save count = %d, want 1", saves)
+		}
+		select {
+		case <-ts.Finished():
+		default:
+			t.Fatal("finalization-canceled turn did not finish")
+		}
+		if al.getActiveTurnState(ts.sessionKey) != nil {
+			t.Fatal("finalization-canceled turn leaked exact active owner")
+		}
+	})
 }
 
 func TestAttachedChildStartsOnlyWhenParentCompletionPolicyAllows(t *testing.T) {

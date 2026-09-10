@@ -217,17 +217,47 @@ jobs:
 
 func TestHandleWorkflowRuntimeEventRejectsUnsafeDefinitionsDirectory(t *testing.T) {
 	workspace := t.TempDir()
+	writeWorkflowAutomationFile(t, workspace, "runtime.yml", `
+name: Runtime
+on:
+  runtime_event:
+    kinds: gateway.ready
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/default
+`)
 	al := newWorkflowAutomationTestLoop(workspace)
 	defer al.Close()
+	if _, err := workflows.RevalidateLocal(
+		t.Context(),
+		workspace,
+		workflowRuntimeCompatibility(),
+	); err != nil {
+		t.Fatalf("RevalidateLocal() error = %v", err)
+	}
+	triggered := make(chan struct{}, 1)
+	al.runtimeEvents = &workflowTriggerMutationBus{
+		Bus: al.runtimeEvents,
+		mutate: func() {
+			triggered <- struct{}{}
+		},
+	}
 	al.cfg.Workflows.DefinitionsDir = "../unsafe"
 
-	// The malformed definitions root must fail before any workflow can be
-	// discovered or started. This also exercises the catalog-error path without
-	// relying on cancellation racing the runtime-event pump.
+	// The malformed definitions root must fail before the already-revalidated
+	// matching workflow can be discovered or started. The trigger event is
+	// synchronous, so this needs no timing-based negative assertion.
 	al.handleWorkflowRuntimeEvent(t.Context(), runtimeevents.Event{
 		Kind:   runtimeevents.KindGatewayReady,
 		Source: runtimeevents.Source{Component: "gateway", Name: "main"},
 	})
+	select {
+	case <-triggered:
+		t.Fatal("unsafe definitions directory triggered the safe workflow")
+	default:
+	}
 	store := workflows.NewFileRunStore(workspace)
 	defer store.Close()
 	runs, err := store.ListRuns(t.Context())

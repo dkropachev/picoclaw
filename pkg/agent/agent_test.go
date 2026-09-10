@@ -5719,17 +5719,26 @@ func TestHandleReasoning(t *testing.T) {
 
 	t.Run("classifies a publish deadline without waiting", func(t *testing.T) {
 		al, msgBus := newLoop(t)
-		var publishCalls atomic.Int64
+		var attempted bus.OutboundMessage
+		publishCalls := 0
 		al.bus = &reasoningTestMessageBus{
 			MessageBus: msgBus,
-			publishOutbound: func(context.Context, bus.OutboundMessage) error {
-				publishCalls.Add(1)
+			publishOutbound: func(ctx context.Context, message bus.OutboundMessage) error {
+				publishCalls++
+				attempted = message
+				if _, ok := ctx.Deadline(); !ok {
+					t.Error("PublishOutbound context has no deadline")
+				}
 				return context.DeadlineExceeded
 			},
 		}
 		al.handleReasoning(t.Context(), "deadline reasoning", "slack", "deadline-chat")
-		if calls := publishCalls.Load(); calls != 1 {
-			t.Fatalf("PublishOutbound calls = %d, want 1", calls)
+		if publishCalls != 1 {
+			t.Fatalf("PublishOutbound calls = %d, want 1", publishCalls)
+		}
+		if attempted.Context.Channel != "slack" || attempted.Context.ChatID != "deadline-chat" ||
+			attempted.Content != "deadline reasoning" {
+			t.Fatalf("outbound attempt = %#v", attempted)
 		}
 	})
 }
@@ -7347,19 +7356,19 @@ func TestProcessMessage_ContextOverflow_AnthropicStyle(t *testing.T) {
 }
 
 func TestParallelMessageProcessing_DifferentSessionsProcessedConcurrently(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "agent-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	// Track concurrent executions using a unique ID per turn
 	var mu sync.Mutex
 	activeTurns := make(map[string]bool)
 	maxConcurrent := 0
 	turnCounter := 0
-	var wg sync.WaitGroup
-	wg.Add(3) // Wait for 3 turns to complete
+	entered := make(chan struct{}, 3)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseTurns := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
 
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
@@ -7377,7 +7386,6 @@ func TestParallelMessageProcessing_DifferentSessionsProcessedConcurrently(t *tes
 	}
 
 	msgBus := bus.NewMessageBus()
-	defer msgBus.Close()
 
 	// Create a slow mock provider that tracks concurrency
 	provider := &concurrentMockProvider{
@@ -7392,46 +7400,60 @@ func TestParallelMessageProcessing_DifferentSessionsProcessedConcurrently(t *tes
 			}
 			mu.Unlock()
 
-			// Simulate some processing time
-			time.Sleep(100 * time.Millisecond)
+			entered <- struct{}{}
+			<-release
 
 			mu.Lock()
 			delete(activeTurns, turnID)
 			mu.Unlock()
 
-			wg.Done()
 			return fmt.Sprintf("Response %s", turnID)
 		},
 	}
 
 	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
-	defer al.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Start the agent loop
-	go func() {
-		if err := al.Run(ctx); err != nil {
-			t.Logf("Agent loop error: %v", err)
-		}
-	}()
-
-	// Give the loop time to start
-	time.Sleep(50 * time.Millisecond)
+	runErr := make(chan error, 1)
+	go func() { runErr <- al.Run(ctx) }()
+	var shutdownOnce sync.Once
+	shutdown := func() {
+		shutdownOnce.Do(func() {
+			defer al.Close()
+			defer msgBus.Close()
+			releaseTurns()
+			cancel()
+			al.Stop()
+			select {
+			case err := <-runErr:
+				if err != nil {
+					t.Errorf("Agent loop error: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("timeout waiting for agent loop shutdown")
+			}
+			waitForAgentTurnUXRuntimeIdle(t, al)
+		})
+	}
+	t.Cleanup(shutdown)
 
 	// Send 3 messages from different sessions
 	sessions := []string{"user1", "user2", "user3"}
+	expectedChats := make(map[string]struct{}, len(sessions))
 	for i, session := range sessions {
+		chatID := fmt.Sprintf("chat%d", i)
+		expectedChats[chatID] = struct{}{}
 		msg := bus.InboundMessage{
 			Context: bus.InboundContext{
 				Channel:  "telegram",
-				ChatID:   fmt.Sprintf("chat%d", i),
+				ChatID:   chatID,
 				ChatType: "direct",
 				SenderID: session,
 			},
 			Channel:  "telegram",
-			ChatID:   fmt.Sprintf("chat%d", i),
+			ChatID:   chatID,
 			SenderID: session,
 			Content:  fmt.Sprintf("Hello from %s", session),
 		}
@@ -7440,29 +7462,49 @@ func TestParallelMessageProcessing_DifferentSessionsProcessedConcurrently(t *tes
 		}
 	}
 
-	// Wait for all turns to complete with timeout
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// All turns completed successfully
-	case <-time.After(5 * time.Second):
-		t.Fatal("timeout waiting for turns to complete")
+	waitCtx, waitCancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer waitCancel()
+	for range sessions {
+		select {
+		case <-entered:
+		case <-waitCtx.Done():
+			t.Fatalf("timeout waiting for concurrent provider calls: %v", waitCtx.Err())
+		}
 	}
+	releaseTurns()
+	for range sessions {
+		select {
+		case outbound, ok := <-msgBus.OutboundChan():
+			if !ok {
+				t.Fatal("outbound bus closed before every turn finalized")
+			}
+			if _, expected := expectedChats[outbound.ChatID]; !expected {
+				t.Fatalf("unexpected or duplicate finalized outbound chat: %#v", outbound)
+			}
+			delete(expectedChats, outbound.ChatID)
+			if outbound.Context.Raw[metadataKeyOutboundKind] != outboundKindFinal {
+				t.Fatalf("outbound for %q is not final: %#v", outbound.ChatID, outbound)
+			}
+		case <-waitCtx.Done():
+			t.Fatalf("timeout waiting for finalized outbound responses: %v", waitCtx.Err())
+		}
+	}
+	shutdown()
 
 	// Verify that we had concurrent executions
 	mu.Lock()
-	defer mu.Unlock()
+	observedMax := maxConcurrent
+	remainingActive := len(activeTurns)
+	mu.Unlock()
 
-	if maxConcurrent < 2 {
-		t.Errorf("Expected at least 2 concurrent executions, got max %d", maxConcurrent)
+	if observedMax != len(sessions) {
+		t.Errorf("concurrent executions = %d, want %d", observedMax, len(sessions))
+	}
+	if remainingActive != 0 {
+		t.Errorf("active provider calls after finalization = %d, want 0", remainingActive)
 	}
 
-	t.Logf("Maximum concurrent executions: %d", maxConcurrent)
+	t.Logf("Maximum concurrent executions: %d", observedMax)
 }
 
 func TestParallelMessageProcessing_SameSessionProcessedSequentially(t *testing.T) {
