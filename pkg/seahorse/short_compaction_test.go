@@ -20,7 +20,7 @@ func waitForCondensed(ce *CompactionEngine, convID int64, timeout time.Duration)
 		if _, exists := ce.condensing.Load(convID); !exists {
 			return true
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 	return false
 }
@@ -55,7 +55,7 @@ func newTestCompactionEngine(t *testing.T) (*CompactionEngine, *Store, int64) {
 			if _, exists := ce.condensing.Load(convID); !exists {
 				break
 			}
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(5 * time.Millisecond)
 		}
 	})
 	return ce, s, conv.ConversationID
@@ -287,10 +287,7 @@ func TestCompactCondensedDoesNotOrphanSummaryWhenCandidatesRemovedConcurrently(t
 	}
 
 	ce, cancel := newTestCompactionEngineWithStore(s, slowComplete)
-	t.Cleanup(func() {
-		cancel()
-		time.Sleep(100 * time.Millisecond)
-	})
+	t.Cleanup(cancel)
 
 	// Run compactCondensed in background
 	type compactResult struct {
@@ -833,12 +830,22 @@ func TestGenerateCondensedSummaryEscalation(t *testing.T) {
 // --- Async Condensed Compaction (Phase 2) ---
 
 func TestCompactAsyncReturnsBeforeCondensed(t *testing.T) {
-	// Use a slow CompleteFn to verify Compact returns before condensed finishes
+	// Gate CompleteFn to verify Compact returns before condensed finishes.
 	var callCount int32
-	slowComplete := func(ctx context.Context, prompt string, opts CompleteOptions) (string, error) {
+	completeEntered := make(chan struct{})
+	var completeEnteredOnce sync.Once
+	releaseComplete := make(chan struct{})
+	var releaseCompleteOnce sync.Once
+	release := func() { releaseCompleteOnce.Do(func() { close(releaseComplete) }) }
+	gatedComplete := func(ctx context.Context, prompt string, opts CompleteOptions) (string, error) {
 		atomic.AddInt32(&callCount, 1)
-		time.Sleep(500 * time.Millisecond) // simulate slow LLM
-		return "Slow condensed summary.", nil
+		completeEnteredOnce.Do(func() { close(completeEntered) })
+		select {
+		case <-releaseComplete:
+			return "Gated condensed summary.", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 
 	s := openTestStore(t)
@@ -846,10 +853,11 @@ func TestCompactAsyncReturnsBeforeCondensed(t *testing.T) {
 	conv, _ := s.GetOrCreateConversation(ctx, "test:async")
 	convID := conv.ConversationID
 
-	ce, cancel := newTestCompactionEngineWithStore(s, slowComplete)
+	ce, cancel := newTestCompactionEngineWithStore(s, gatedComplete)
 	t.Cleanup(func() {
+		release()
 		cancel()
-		time.Sleep(100 * time.Millisecond)
+		waitForCondensed(ce, convID, 2*time.Second)
 	})
 
 	// Create enough leaf summaries for condensation + fresh tail
@@ -871,25 +879,36 @@ func TestCompactAsyncReturnsBeforeCondensed(t *testing.T) {
 		s.AppendContextMessage(ctx, convID, m.ID)
 	}
 
-	// Compact with force — should return quickly, condensed runs async
-	start := time.Now()
-	result, err := ce.Compact(ctx, convID, CompactInput{Force: true})
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("Compact: %v", err)
+	type compactCallResult struct {
+		result *CompactResult
+		err    error
 	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
+	compactReturned := make(chan compactCallResult, 1)
+	go func() {
+		result, err := ce.Compact(ctx, convID, CompactInput{Force: true})
+		compactReturned <- compactCallResult{result: result, err: err}
+	}()
+	select {
+	case <-completeEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("async condensed completion did not start")
 	}
-
-	// Should return well before the 500ms LLM call
-	if elapsed > 200*time.Millisecond {
-		t.Errorf("Compact took %v, should return before async condensed finishes", elapsed)
+	var compacted compactCallResult
+	select {
+	case compacted = <-compactReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Compact waited for the gated condensed completion")
 	}
-
-	// Wait for async to complete
-	time.Sleep(800 * time.Millisecond)
+	if compacted.err != nil || compacted.result == nil {
+		t.Fatalf("Compact = (%#v, %v)", compacted.result, compacted.err)
+	}
+	if _, exists := ce.condensing.Load(convID); !exists {
+		t.Fatal("Compact waited for the gated condensed completion")
+	}
+	release()
+	if !waitForCondensed(ce, convID, 2*time.Second) {
+		t.Fatal("timeout waiting for condensed compaction")
+	}
 
 	// Verify condensed summary was created by background goroutine
 	summaries, _ := s.GetSummariesByConversation(ctx, convID)
@@ -907,10 +926,20 @@ func TestCompactAsyncReturnsBeforeCondensed(t *testing.T) {
 
 func TestCompactAsyncDedup(t *testing.T) {
 	var callCount int32
-	slowComplete := func(ctx context.Context, prompt string, opts CompleteOptions) (string, error) {
+	completeEntered := make(chan struct{})
+	var completeEnteredOnce sync.Once
+	releaseComplete := make(chan struct{})
+	var releaseCompleteOnce sync.Once
+	release := func() { releaseCompleteOnce.Do(func() { close(releaseComplete) }) }
+	gatedComplete := func(ctx context.Context, prompt string, opts CompleteOptions) (string, error) {
 		atomic.AddInt32(&callCount, 1)
-		time.Sleep(300 * time.Millisecond)
-		return "Slow condensed summary.", nil
+		completeEnteredOnce.Do(func() { close(completeEntered) })
+		select {
+		case <-releaseComplete:
+			return "Gated condensed summary.", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 
 	s := openTestStore(t)
@@ -918,8 +947,9 @@ func TestCompactAsyncDedup(t *testing.T) {
 	conv, _ := s.GetOrCreateConversation(ctx, "test:dedup")
 	convID := conv.ConversationID
 
-	ce, cancel := newTestCompactionEngineWithStore(s, slowComplete)
+	ce, cancel := newTestCompactionEngineWithStore(s, gatedComplete)
 	t.Cleanup(func() {
+		release()
 		cancel()
 		waitForCondensed(ce, convID, 2*time.Second)
 	})
@@ -943,18 +973,49 @@ func TestCompactAsyncDedup(t *testing.T) {
 		s.AppendContextMessage(ctx, convID, m.ID)
 	}
 
-	// Call Compact twice rapidly
-	ce.Compact(ctx, convID, CompactInput{Force: true})
-	ce.Compact(ctx, convID, CompactInput{Force: true})
-
-	// Wait for async to finish
-	time.Sleep(600 * time.Millisecond)
-
-	// LLM should only be called once for condensed (dedup)
-	// callCount may be 0 if no leaf was created (only condensed in goroutine)
-	// The key is that we don't get 2+ condensed calls
-	if atomic.LoadInt32(&callCount) > 1 {
-		t.Errorf("LLM called %d times, expected at most 1 (dedup)", callCount)
+	type compactCallResult struct {
+		result *CompactResult
+		err    error
+	}
+	callCompact := func() <-chan compactCallResult {
+		returned := make(chan compactCallResult, 1)
+		go func() {
+			result, err := ce.Compact(ctx, convID, CompactInput{Force: true})
+			returned <- compactCallResult{result: result, err: err}
+		}()
+		return returned
+	}
+	firstReturned := callCompact()
+	select {
+	case <-completeEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("async condensed completion did not start")
+	}
+	select {
+	case result := <-firstReturned:
+		if result.err != nil || result.result == nil {
+			t.Fatalf("first Compact = (%#v, %v)", result.result, result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Compact waited for the gated condensed completion")
+	}
+	select {
+	case result := <-callCompact():
+		if result.err != nil || result.result == nil {
+			t.Fatalf("second Compact = (%#v, %v)", result.result, result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("deduplicated Compact did not return")
+	}
+	if calls := atomic.LoadInt32(&callCount); calls != 1 {
+		t.Fatalf("LLM calls while first completion is gated = %d, want 1", calls)
+	}
+	release()
+	if !waitForCondensed(ce, convID, 2*time.Second) {
+		t.Fatal("timeout waiting for condensed compaction")
+	}
+	if calls := atomic.LoadInt32(&callCount); calls != 1 {
+		t.Errorf("LLM calls = %d, want 1 (dedup)", calls)
 	}
 }
 

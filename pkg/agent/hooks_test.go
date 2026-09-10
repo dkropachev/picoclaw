@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/isolation"
@@ -1162,7 +1163,7 @@ func TestAgentLoop_HookRespond_MediaError(t *testing.T) {
 
 	al.channelManager = newStartedTestChannelManager(t,
 		al.bus.(*bus.MessageBus), al.mediaStore, "discord", &errorMediaChannel{
-			sendErr: errors.New("channel unavailable"),
+			sendErr: fmt.Errorf("channel unavailable: %w", channels.ErrSendFailed),
 		})
 
 	runtimeCh, closeRuntimeEvents := subscribeRuntimeEventsForTest(

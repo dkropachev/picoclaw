@@ -995,9 +995,6 @@ func TestProcessSessionIDReservationCollisionAndExhaustion(t *testing.T) {
 }
 
 func TestProcessSessionPromotionFailureCleansStartedProcess(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses a POSIX shell cleanup canary")
-	}
 	tool, err := NewExecTool(t.TempDir(), false)
 	if err != nil {
 		t.Fatal(err)
@@ -1010,19 +1007,43 @@ func TestProcessSessionPromotionFailureCleansStartedProcess(t *testing.T) {
 			t.Error("failed to invalidate reservation before promotion")
 		}
 	}
-	marker := filepath.Join(t.TempDir(), "leaked-process")
+	operations := tool.resolveBackgroundProcessOperations()
+	realStart := operations.start
+	realTerminate := operations.terminate
+	realWait := operations.wait
+	var startedCommand *exec.Cmd
+	terminateCalls := 0
+	waitCalls := 0
+	operations.start = func(command *exec.Cmd) error {
+		startErr := realStart(command)
+		if startErr == nil {
+			startedCommand = command
+		}
+		return startErr
+	}
+	operations.terminate = func(command *exec.Cmd) error {
+		terminateCalls++
+		return realTerminate(command)
+	}
+	operations.wait = func(command *exec.Cmd) error {
+		waitCalls++
+		return realWait(command)
+	}
+	tool.backgroundOps = &operations
 	result := tool.Execute(processTestContext(owner), map[string]any{
 		"action":     "run",
-		"command":    fmt.Sprintf("sleep 1; echo leaked > %q", marker),
+		"command":    processTestSleepCommand(30),
 		"background": true,
 	})
 	if result == nil || !result.IsError ||
 		!strings.Contains(result.ForLLM, ErrSessionReservationInvalid.Error()) {
 		t.Fatalf("promotion failure result = %#v", result)
 	}
-	time.Sleep(1200 * time.Millisecond)
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("promotion failure leaked process: %v", err)
+	if startedCommand == nil || startedCommand.Process == nil || startedCommand.ProcessState == nil {
+		t.Fatalf("promotion failure did not synchronously reap its started command: %#v", startedCommand)
+	}
+	if terminateCalls != 1 || waitCalls != 1 {
+		t.Fatalf("promotion cleanup calls terminate=%d wait=%d, want 1 each", terminateCalls, waitCalls)
 	}
 	if sessions, err := manager.List(owner); err != nil || len(sessions) != 0 {
 		t.Fatalf("promotion failure sessions=%#v err=%v", sessions, err)

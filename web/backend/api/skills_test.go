@@ -1160,7 +1160,7 @@ func TestHandleInstallSkillForcePreservesExistingSkillOnFailure(t *testing.T) {
 				},
 			})
 		case "/api/v1/download":
-			http.Error(w, "upstream download failed", http.StatusBadGateway)
+			http.Error(w, "upstream download failed", http.StatusUnprocessableEntity)
 		default:
 			http.NotFound(w, r)
 		}

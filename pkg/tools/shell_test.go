@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -709,11 +710,8 @@ func TestShellTool_URLsNotBlocked(t *testing.T) {
 	}
 
 	for _, cmd := range commands {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		result := tool.Execute(ctx, map[string]any{"action": "run", "command": cmd})
-		cancel()
-		if result.IsError && strings.Contains(result.ForLLM, "path outside working dir") {
-			t.Errorf("command with URL should not be blocked by workspace check: %s\n  error: %s", cmd, result.ForLLM)
+		if result := tool.guardCommand(cmd, tmpDir); strings.Contains(result, "path outside working dir") {
+			t.Errorf("command with URL should not be blocked by workspace check: %s\n  error: %s", cmd, result)
 		}
 	}
 }
@@ -1003,6 +1001,104 @@ func TestShellTool_List_Empty(t *testing.T) {
 	require.Contains(t, result.ForUser, "0 active sessions")
 }
 
+func waitForShellToolOutput(
+	t *testing.T,
+	tool *ExecTool,
+	ctx context.Context,
+	sessionID, wanted string,
+) string {
+	t.Helper()
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	var output strings.Builder
+	for {
+		result := tool.Execute(ctx, map[string]any{
+			"action":    "read",
+			"sessionId": sessionID,
+		})
+		require.False(t, result.IsError, "read should succeed: %s", result.ForLLM)
+		var response ExecResponse
+		require.NoError(t, json.Unmarshal([]byte(result.ForLLM), &response))
+		output.WriteString(response.Output)
+		if strings.Contains(output.String(), wanted) {
+			return output.String()
+		}
+		if response.Status == "done" {
+			t.Fatalf("session %s exited before producing %q; output=%q", sessionID, wanted, output.String())
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for session %s output %q; output=%q", sessionID, wanted, output.String())
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForShellTestPath(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("inspect shell test path %q: %v", path, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for shell test path %q", path)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func shellTestGatedCommand(t *testing.T) (command, started, release string) {
+	t.Helper()
+	root := t.TempDir()
+	started = filepath.Join(root, "started")
+	release = filepath.Join(root, "release")
+	if runtime.GOOS == "windows" {
+		quote := func(value string) string { return strings.ReplaceAll(value, "'", "''") }
+		return fmt.Sprintf(
+			"New-Item -ItemType File -Force -LiteralPath '%s' | Out-Null; "+
+				"while (-not (Test-Path -LiteralPath '%s')) { Start-Sleep -Milliseconds 5 }",
+			quote(started),
+			quote(release),
+		), started, release
+	}
+	return fmt.Sprintf(
+		"touch %q; while [ ! -f %q ]; do sleep 0.005; done",
+		started,
+		release,
+	), started, release
+}
+
+func shellTestIncrementalOutputCommand(t *testing.T) (string, []string) {
+	t.Helper()
+	root := t.TempDir()
+	releases := []string{
+		filepath.Join(root, "release-line-2"),
+		filepath.Join(root, "release-line-3"),
+		filepath.Join(root, "release-exit"),
+	}
+	if runtime.GOOS == "windows" {
+		quote := func(value string) string { return strings.ReplaceAll(value, "'", "''") }
+		return fmt.Sprintf(
+			"Write-Output 'line1'; while (-not (Test-Path -LiteralPath '%s')) { Start-Sleep -Milliseconds 5 }; "+
+				"Write-Output 'line2'; while (-not (Test-Path -LiteralPath '%s')) { Start-Sleep -Milliseconds 5 }; "+
+				"Write-Output 'line3'; while (-not (Test-Path -LiteralPath '%s')) { Start-Sleep -Milliseconds 5 }",
+			quote(releases[0]), quote(releases[1]), quote(releases[2]),
+		), releases
+	}
+	return fmt.Sprintf(
+		"printf 'line1\\n'; while [ ! -f %q ]; do sleep 0.005; done; "+
+			"printf 'line2\\n'; while [ ! -f %q ]; do sleep 0.005; done; "+
+			"printf 'line3\\n'; while [ ! -f %q ]; do sleep 0.005; done",
+		releases[0], releases[1], releases[2],
+	), releases
+}
+
 func TestShellTool_RunBackground_List(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
@@ -1023,8 +1119,6 @@ func TestShellTool_RunBackground_List(t *testing.T) {
 	err = json.Unmarshal([]byte(runResult.ForLLM), &resp)
 	require.NoError(t, err)
 	require.NotEmpty(t, resp.SessionID)
-
-	time.Sleep(100 * time.Millisecond)
 
 	listResult := tool.Execute(ctx, map[string]any{"action": "list"})
 	require.False(t, listResult.IsError)
@@ -1047,7 +1141,7 @@ func TestShellTool_Read_Output(t *testing.T) {
 	require.NoError(t, err)
 
 	owner := processTestOwner("shell")
-	installProcessTestManager(t, tool, owner)
+	manager := installProcessTestManager(t, tool, owner)
 
 	ctx := processTestContext(owner)
 
@@ -1062,18 +1156,19 @@ func TestShellTool_Read_Output(t *testing.T) {
 	err = json.Unmarshal([]byte(runResult.ForLLM), &resp)
 	require.NoError(t, err)
 
-	time.Sleep(200 * time.Millisecond)
+	session, err := manager.Get(owner, resp.SessionID)
+	require.NoError(t, err)
+	awaitProcessTestWait(t, session, resp.SessionID)
 
 	readResult := tool.Execute(ctx, map[string]any{
 		"action":    "read",
 		"sessionId": resp.SessionID,
 	})
-
-	if !readResult.IsError {
-		var readResp ExecResponse
-		err = json.Unmarshal([]byte(readResult.ForLLM), &readResp)
-		require.NoError(t, err)
-	}
+	require.False(t, readResult.IsError, "read should succeed: %s", readResult.ForLLM)
+	var readResp ExecResponse
+	err = json.Unmarshal([]byte(readResult.ForLLM), &readResp)
+	require.NoError(t, err)
+	require.Contains(t, readResp.Output, "hello")
 }
 
 func TestShellTool_Kill(t *testing.T) {
@@ -1101,8 +1196,6 @@ func TestShellTool_Kill(t *testing.T) {
 		"sessionId": resp.SessionID,
 	})
 	require.False(t, killResult.IsError, "kill should succeed: %s", killResult.ForLLM)
-
-	time.Sleep(100 * time.Millisecond)
 
 	listResult := tool.Execute(ctx, map[string]any{"action": "list"})
 	var listResp ExecResponse
@@ -1181,22 +1274,8 @@ func TestShellTool_PTY_WriteRead(t *testing.T) {
 	})
 	require.False(t, writeResult.IsError, "write should succeed: %s", writeResult.ForLLM)
 
-	// Give cat time to process and output
-	time.Sleep(200 * time.Millisecond)
-
-	// Read the output
-	readResult := tool.Execute(ctx, map[string]any{
-		"action":    "read",
-		"sessionId": resp.SessionID,
-	})
-
-	require.False(t, readResult.IsError, "read should succeed: %s", readResult.ForLLM)
-
-	var readResp ExecResponse
-	err = json.Unmarshal([]byte(readResult.ForLLM), &readResp)
-	require.NoError(t, err)
-	// PTY output should contain "hello"
-	require.Contains(t, readResp.Output, "hello")
+	output := waitForShellToolOutput(t, tool, ctx, resp.SessionID, "hello")
+	require.Contains(t, output, "hello")
 
 	// Clean up
 	tool.Execute(ctx, map[string]any{
@@ -1214,14 +1293,15 @@ func TestShellTool_PTY_Poll(t *testing.T) {
 	require.NoError(t, err)
 
 	owner := processTestOwner("shell")
-	installProcessTestManager(t, tool, owner)
+	manager := installProcessTestManager(t, tool, owner)
 
 	ctx := processTestContext(owner)
+	command, started, release := shellTestGatedCommand(t)
 
-	// Start a PTY session with a long-running command
+	// Start a PTY session whose completion is released explicitly by the test.
 	result := tool.Execute(ctx, map[string]any{
 		"action":     "run",
-		"command":    "sleep 2",
+		"command":    command,
 		"pty":        "true",
 		"background": "true",
 	})
@@ -1230,6 +1310,7 @@ func TestShellTool_PTY_Poll(t *testing.T) {
 	var resp ExecResponse
 	err = json.Unmarshal([]byte(result.ForLLM), &resp)
 	require.NoError(t, err)
+	waitForShellTestPath(t, started)
 
 	// Poll should show running
 	pollResult := tool.Execute(ctx, map[string]any{
@@ -1243,8 +1324,10 @@ func TestShellTool_PTY_Poll(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "running", pollResp.Status)
 
-	// Wait for sleep to complete
-	time.Sleep(2500 * time.Millisecond)
+	require.NoError(t, os.WriteFile(release, []byte("release\n"), 0o600))
+	session, err := manager.Get(owner, resp.SessionID)
+	require.NoError(t, err)
+	awaitProcessTestWait(t, session, resp.SessionID)
 
 	// Poll should show done
 	pollResult = tool.Execute(ctx, map[string]any{
@@ -1338,20 +1421,8 @@ func TestShellTool_Write_Read_NonPTY(t *testing.T) {
 	})
 	require.False(t, writeResult.IsError, "write should succeed: %s", writeResult.ForLLM)
 
-	// Give cat time to process and output
-	time.Sleep(200 * time.Millisecond)
-
-	// Read the output
-	readResult := tool.Execute(ctx, map[string]any{
-		"action":    "read",
-		"sessionId": resp.SessionID,
-	})
-	require.False(t, readResult.IsError, "read should succeed: %s", readResult.ForLLM)
-
-	var readResp ExecResponse
-	err = json.Unmarshal([]byte(readResult.ForLLM), &readResp)
-	require.NoError(t, err)
-	require.Contains(t, readResp.Output, "hello world")
+	output := waitForShellToolOutput(t, tool, ctx, resp.SessionID, "hello world")
+	require.Contains(t, output, "hello world")
 
 	// Clean up
 	tool.Execute(ctx, map[string]any{
@@ -1365,15 +1436,15 @@ func TestShellTool_Read_NonPTY_Running(t *testing.T) {
 	require.NoError(t, err)
 
 	owner := processTestOwner("shell")
-	installProcessTestManager(t, tool, owner)
+	manager := installProcessTestManager(t, tool, owner)
 
 	ctx := processTestContext(owner)
+	command, releases := shellTestIncrementalOutputCommand(t)
 
-	// Start a long-running process that produces output over time
-	// Using sh -c with sleep at the end so process doesn't exit immediately
+	// Start a process whose output stages are released explicitly by the test.
 	result := tool.Execute(ctx, map[string]any{
 		"action":     "run",
-		"command":    "sh -c 'echo line1; sleep 0.5; echo line2; sleep 0.5; echo line3; sleep 10'",
+		"command":    command,
 		"pty":        false,
 		"background": "true",
 	})
@@ -1383,41 +1454,17 @@ func TestShellTool_Read_NonPTY_Running(t *testing.T) {
 	err = json.Unmarshal([]byte(result.ForLLM), &resp)
 	require.NoError(t, err)
 
-	// Give time for first outputs to be produced
-	time.Sleep(300 * time.Millisecond)
+	require.Contains(t, waitForShellToolOutput(t, tool, ctx, resp.SessionID, "line1"), "line1")
+	for index, line := range []string{"line2", "line3"} {
+		require.NoError(t, os.WriteFile(releases[index], []byte("release\n"), 0o600))
+		require.Contains(t, waitForShellToolOutput(t, tool, ctx, resp.SessionID, line), line)
+	}
 
-	// Read output while process is running
-	readResult := tool.Execute(ctx, map[string]any{
-		"action":    "read",
-		"sessionId": resp.SessionID,
-	})
-	require.False(t, readResult.IsError, "read should succeed: %s", readResult.ForLLM)
-
-	var readResp ExecResponse
-	err = json.Unmarshal([]byte(readResult.ForLLM), &readResp)
+	// Release the final gate so cleanup observes an ordinary process exit.
+	require.NoError(t, os.WriteFile(releases[2], []byte("release\n"), 0o600))
+	session, err := manager.Get(owner, resp.SessionID)
 	require.NoError(t, err)
-	// Should have at least line1
-	require.Contains(t, readResp.Output, "line1")
-
-	// Wait for line3 to be produced (line1=0s, line2=0.5s, line3=1s, then sleep 10)
-	time.Sleep(1200 * time.Millisecond)
-
-	// Read again - should have line3 as well
-	readResult = tool.Execute(ctx, map[string]any{
-		"action":    "read",
-		"sessionId": resp.SessionID,
-	})
-	require.False(t, readResult.IsError, "read should succeed: %s", readResult.ForLLM)
-
-	err = json.Unmarshal([]byte(readResult.ForLLM), &readResp)
-	require.NoError(t, err)
-	require.Contains(t, readResp.Output, "line3")
-
-	// Clean up
-	tool.Execute(ctx, map[string]any{
-		"action":    "kill",
-		"sessionId": resp.SessionID,
-	})
+	awaitProcessTestWait(t, session, resp.SessionID)
 }
 
 func TestShellTool_ProcessGroupKill(t *testing.T) {
@@ -1437,11 +1484,10 @@ func TestShellTool_ProcessGroupKill(t *testing.T) {
 
 	ctx := processTestContext(owner)
 
-	// Start a shell that spawns child processes (non-PTY mode)
-	// The sh -c command creates child sleep processes
+	// Start a shell that reports readiness after spawning child processes.
 	result := tool.Execute(ctx, map[string]any{
 		"action":     "run",
-		"command":    "sh -c 'sleep 30 & sleep 30 & wait'",
+		"command":    "sleep 30 & sleep 30 & printf 'children-ready\\n'; wait",
 		"pty":        false,
 		"background": "true",
 	})
@@ -1451,8 +1497,11 @@ func TestShellTool_ProcessGroupKill(t *testing.T) {
 	err = json.Unmarshal([]byte(result.ForLLM), &resp)
 	require.NoError(t, err)
 
-	// Give time for child processes to spawn
-	time.Sleep(500 * time.Millisecond)
+	require.Contains(
+		t,
+		waitForShellToolOutput(t, tool, ctx, resp.SessionID, "children-ready"),
+		"children-ready",
+	)
 
 	// Kill the session - should kill the entire process group
 	killResult := tool.Execute(ctx, map[string]any{
@@ -1636,13 +1685,14 @@ func TestShellTool_Poll_Status(t *testing.T) {
 	require.NoError(t, err)
 
 	owner := processTestOwner("shell")
-	installProcessTestManager(t, tool, owner)
+	manager := installProcessTestManager(t, tool, owner)
 
 	ctx := processTestContext(owner)
+	command, started, release := shellTestGatedCommand(t)
 
 	runResult := tool.Execute(ctx, map[string]any{
 		"action":     "run",
-		"command":    "sleep 1",
+		"command":    command,
 		"background": "true",
 	})
 	require.False(t, runResult.IsError)
@@ -1650,6 +1700,7 @@ func TestShellTool_Poll_Status(t *testing.T) {
 	var resp ExecResponse
 	err = json.Unmarshal([]byte(runResult.ForLLM), &resp)
 	require.NoError(t, err)
+	waitForShellTestPath(t, started)
 
 	pollResult := tool.Execute(ctx, map[string]any{
 		"action":    "poll",
@@ -1662,7 +1713,10 @@ func TestShellTool_Poll_Status(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "running", pollResp.Status)
 
-	time.Sleep(1200 * time.Millisecond)
+	require.NoError(t, os.WriteFile(release, []byte("release\n"), 0o600))
+	session, err := manager.Get(owner, resp.SessionID)
+	require.NoError(t, err)
+	awaitProcessTestWait(t, session, resp.SessionID)
 
 	pollResult = tool.Execute(ctx, map[string]any{
 		"action":    "poll",
@@ -1697,13 +1751,13 @@ func TestShellTool_Background_ReadAfterExit(t *testing.T) {
 	require.NoError(t, err)
 
 	owner := processTestOwner("read-after-exit")
-	installProcessTestManager(t, tool, owner)
+	manager := installProcessTestManager(t, tool, owner)
 	ctx := processTestContext(owner)
 
 	// Start a background command that produces output and exits quickly
 	runResult := tool.Execute(ctx, map[string]any{
 		"action":     "run",
-		"command":    "echo hello && sleep 1 && echo world",
+		"command":    "echo hello && echo world",
 		"background": "true",
 	})
 	require.False(t, runResult.IsError, "run should succeed: %s", runResult.ForUser)
@@ -1715,8 +1769,9 @@ func TestShellTool_Background_ReadAfterExit(t *testing.T) {
 	require.NotEmpty(t, resp.SessionID)
 	sessionID := resp.SessionID
 
-	// Wait for process to exit (sleep 1 + some buffer)
-	time.Sleep(1500 * time.Millisecond)
+	session, err := manager.Get(owner, sessionID)
+	require.NoError(t, err)
+	awaitProcessTestWait(t, session, sessionID)
 
 	// Poll to verify process is done
 	pollResult := tool.Execute(ctx, map[string]any{
@@ -1913,9 +1968,8 @@ func TestShellTool_SchemelessURLDetection(t *testing.T) {
 	}
 
 	for _, cmd := range allowedCommands {
-		result := tool.Execute(context.Background(), map[string]any{"action": "run", "command": cmd})
-		if result.IsError && strings.Contains(result.ForLLM, "path outside working dir") {
-			t.Errorf("command with recognized web scheme should not be blocked: %s\n  error: %s", cmd, result.ForLLM)
+		if result := tool.guardCommand(cmd, tmpDir); strings.Contains(result, "path outside working dir") {
+			t.Errorf("command with recognized web scheme should not be blocked: %s\n  error: %s", cmd, result)
 		}
 	}
 
@@ -1926,9 +1980,8 @@ func TestShellTool_SchemelessURLDetection(t *testing.T) {
 	}
 
 	for _, cmd := range multiURLCommands {
-		result := tool.Execute(context.Background(), map[string]any{"action": "run", "command": cmd})
-		if result.IsError && strings.Contains(result.ForLLM, "path outside working dir") {
-			t.Errorf("command with multiple web URLs should not be blocked: %s\n  error: %s", cmd, result.ForLLM)
+		if result := tool.guardCommand(cmd, tmpDir); strings.Contains(result, "path outside working dir") {
+			t.Errorf("command with multiple web URLs should not be blocked: %s\n  error: %s", cmd, result)
 		}
 	}
 }
