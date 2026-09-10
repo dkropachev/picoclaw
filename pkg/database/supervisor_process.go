@@ -1055,7 +1055,20 @@ func replacementEpochGoneWith(
 // ConsumeSupervisorBootstrap proves that the hidden serve command was created
 // by EnsureSupervisor. The authority is consumed before config or stores load
 // and is never converted into provider access authority.
+//
+// Deprecated: production supervisor composition must use
+// ConsumeSupervisorBootstrapGuard and retain its physical-home guard through
+// discovery publication.
 func ConsumeSupervisorBootstrap(home string) bool {
+	_, err := consumeSupervisorBootstrapGuardWith(
+		home,
+		consumeSupervisorBootstrapEnvironment(),
+		defaultSupervisorBootstrapGuardOps(),
+	)
+	return err == nil
+}
+
+func consumeSupervisorBootstrapEnvironment() supervisorBootstrapAuthority {
 	authority := supervisorBootstrapAuthority{
 		token:              os.Getenv(supervisorBootstrapEnvironment),
 		bootstrapIdentity:  os.Getenv(supervisorBootstrapIdentityEnvironment),
@@ -1064,13 +1077,7 @@ func ConsumeSupervisorBootstrap(home string) bool {
 	_ = os.Unsetenv(supervisorBootstrapEnvironment)
 	_ = os.Unsetenv(supervisorBootstrapIdentityEnvironment)
 	_ = os.Unsetenv(supervisorExecutableIdentityEnvironment)
-	return consumeSupervisorBootstrapWith(home, authority, supervisorBootstrapConsumeOps{
-		executable:        os.Executable,
-		pathIdentity:      supervisorPathIdentity,
-		stateDirectory:    StateDirectory,
-		directoryIdentity: supervisorDirectoryIdentity,
-		consume:           consumeSupervisorBootstrapFile,
-	})
+	return authority
 }
 
 type supervisorBootstrapAuthority struct {
@@ -1096,16 +1103,7 @@ func consumeSupervisorBootstrapWith(
 		ops.directoryIdentity == nil || ops.consume == nil {
 		return false
 	}
-	if !validLowerHex(authority.token, tokenBytes*2) || authority.bootstrapIdentity == "" ||
-		authority.executableIdentity == "" {
-		return false
-	}
-	currentExecutable, err := ops.executable()
-	if err != nil {
-		return false
-	}
-	currentIdentity, err := ops.pathIdentity(currentExecutable)
-	if err != nil || currentIdentity.String() != authority.executableIdentity {
+	if !supervisorBootstrapImageAuthorityValid(authority, ops) {
 		return false
 	}
 	stateDir, err := ops.stateDirectory(home)
