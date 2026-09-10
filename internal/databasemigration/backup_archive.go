@@ -85,6 +85,9 @@ func loadBackupSession(ctx context.Context, root string) (*backupSession, error)
 	if useParsedManifest {
 		return nil, errors.New("database backup recovery manifest was not verified")
 	}
+	if _, _, err := session.readMigrationStatus(); err != nil {
+		return nil, fmt.Errorf("read database backup recovery status: %w", err)
+	}
 	return session, nil
 }
 
