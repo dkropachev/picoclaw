@@ -35,6 +35,7 @@ type Hooks struct {
 	Check                func(context.Context) error
 	Reconcile            func(context.Context) error
 	PinReplacement       func(context.Context, string) error
+	DiscardReplacement   func(context.Context) error
 	ReconcileReplacement func(context.Context) error
 }
 
@@ -264,6 +265,14 @@ func (access Access) PinReplacement(ctx context.Context, path string) error {
 	}
 	return access.invoke(ctx, func(state *leaseState, operationContext context.Context) error {
 		return state.hooks.PinReplacement(operationContext, path)
+	})
+}
+
+// DiscardReplacement retires an exact unused replacement pin before the
+// provider removes a stage after a known pre-cutover failure.
+func (access Access) DiscardReplacement(ctx context.Context) error {
+	return access.invoke(ctx, func(state *leaseState, operationContext context.Context) error {
+		return state.hooks.DiscardReplacement(operationContext)
 	})
 }
 
@@ -545,7 +554,7 @@ func (ctx fallbackValueContext) Value(key any) any {
 
 func validHooks(hooks Hooks) bool {
 	return hooks.Check != nil && hooks.Reconcile != nil && hooks.PinReplacement != nil &&
-		hooks.ReconcileReplacement != nil
+		hooks.DiscardReplacement != nil && hooks.ReconcileReplacement != nil
 }
 
 func validTarget(path string) bool {

@@ -18,6 +18,7 @@ type hookRecorder struct {
 	checks       atomic.Int32
 	reconciles   atomic.Int32
 	pins         atomic.Int32
+	discards     atomic.Int32
 	replacements atomic.Int32
 	err          error
 	path         string
@@ -36,6 +37,10 @@ func (recorder *hookRecorder) hooks() Hooks {
 		PinReplacement: func(ctx context.Context, path string) error {
 			recorder.pins.Add(1)
 			recorder.path = path
+			return errors.Join(ctx.Err(), recorder.err)
+		},
+		DiscardReplacement: func(ctx context.Context) error {
+			recorder.discards.Add(1)
 			return errors.Join(ctx.Err(), recorder.err)
 		},
 		ReconcileReplacement: func(ctx context.Context) error {
@@ -77,13 +82,20 @@ func TestLeaseConsumesOneTargetBoundScope(t *testing.T) {
 		if err := access.PinReplacement(ctx, replacement); err != nil {
 			return err
 		}
+		if err := access.DiscardReplacement(ctx); err != nil {
+			return err
+		}
+		if err := access.PinReplacement(ctx, replacement); err != nil {
+			return err
+		}
 		return access.ReconcileReplacement(ctx)
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if recorder.checks.Load() != 1 || recorder.reconciles.Load() != 1 ||
-		recorder.pins.Load() != 1 || recorder.replacements.Load() != 1 ||
+		recorder.pins.Load() != 2 || recorder.discards.Load() != 1 ||
+		recorder.replacements.Load() != 1 ||
 		recorder.path != replacement {
 		t.Fatalf("hook calls = %#v", recorder)
 	}
@@ -92,6 +104,9 @@ func TestLeaseConsumesOneTargetBoundScope(t *testing.T) {
 	}
 	if err := retained.Check(t.Context()); !errors.Is(err, errRevoked) {
 		t.Fatalf("retained Check = %v", err)
+	}
+	if err := retained.DiscardReplacement(t.Context()); !errors.Is(err, errRevoked) {
+		t.Fatalf("retained DiscardReplacement = %v", err)
 	}
 	if err := Consume(
 		t.Context(), lease, func(context.Context, Access) error { return nil },
@@ -118,6 +133,7 @@ func TestLeaseRevokeIsNonblockingAndWaitsForCallbackAndOperations(t *testing.T) 
 		},
 		Reconcile:            func(context.Context) error { return nil },
 		PinReplacement:       func(context.Context, string) error { return nil },
+		DiscardReplacement:   func(context.Context) error { return nil },
 		ReconcileReplacement: func(context.Context) error { return nil },
 	}
 	parent, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -506,7 +522,7 @@ func TestLeaseRejectsInvalidConstructionAndOperations(t *testing.T) {
 			}
 		})
 	}
-	for _, missing := range []string{"check", "reconcile", "pin", "replacement"} {
+	for _, missing := range []string{"check", "reconcile", "pin", "discard", "replacement"} {
 		t.Run("missing "+missing+" hook", func(t *testing.T) {
 			hooks := recorder.hooks()
 			switch missing {
@@ -516,6 +532,8 @@ func TestLeaseRejectsInvalidConstructionAndOperations(t *testing.T) {
 				hooks.Reconcile = nil
 			case "pin":
 				hooks.PinReplacement = nil
+			case "discard":
+				hooks.DiscardReplacement = nil
 			case "replacement":
 				hooks.ReconcileReplacement = nil
 			}
@@ -545,6 +563,9 @@ func TestLeaseRejectsInvalidConstructionAndOperations(t *testing.T) {
 	}
 	if err := (Access{}).Check(t.Context()); !errors.Is(err, errUnavailable) {
 		t.Fatalf("empty Check = %v", err)
+	}
+	if err := (Access{}).DiscardReplacement(t.Context()); !errors.Is(err, errUnavailable) {
+		t.Fatalf("empty DiscardReplacement = %v", err)
 	}
 	lease := newTestLease(t, recorder)
 	if err := Consume(t.Context(), lease, func(ctx context.Context, access Access) error {
@@ -758,6 +779,62 @@ func TestLeaseDefensiveCauseAndCancelBookkeeping(t *testing.T) {
 		}
 		if cause := externalCause(custom); !errors.Is(cause, custom) {
 			t.Fatalf("external custom cause = %v", cause)
+		}
+	})
+}
+
+func TestLeaseCloseoutCauseBranches(t *testing.T) {
+	t.Run("revoked tracking prefers immediate caller cause", func(t *testing.T) {
+		revokeCause := errors.New("lease revoked")
+		preferredCause := errors.New("operation caller canceled")
+		state := &leaseState{
+			ctx:         context.Background(),
+			revoked:     true,
+			revokeCause: revokeCause,
+		}
+		var canceledWith error
+		stop := state.trackCancel(
+			func(cause error) { canceledWith = cause },
+			func() error { return preferredCause },
+		)
+		stop()
+		if !errors.Is(canceledWith, preferredCause) || errors.Is(canceledWith, revokeCause) {
+			t.Fatalf("tracked cancellation cause = %v", canceledWith)
+		}
+	})
+
+	t.Run("operation retains recorded state cause", func(t *testing.T) {
+		stateCause := errors.New("recorded state cause")
+		operationErr := errors.New("operation failed")
+		state := &leaseState{
+			ctx:             context.Background(),
+			callbackRunning: true,
+			scope:           1,
+			done:            make(chan struct{}),
+			activeCancels:   make(map[uint64]trackedCancel),
+		}
+		access := Access{
+			state: state, caller: context.Background(),
+			scopeContext: context.Background(), scope: 1,
+		}
+		err := access.invoke(context.Background(), func(state *leaseState, _ context.Context) error {
+			state.mu.Lock()
+			state.revokeCause = stateCause
+			state.mu.Unlock()
+			return operationErr
+		})
+		if !errors.Is(err, stateCause) || !errors.Is(err, operationErr) {
+			t.Fatalf("operation/state causes = %v", err)
+		}
+	})
+
+	t.Run("operation context falls back to callback value", func(t *testing.T) {
+		type contextKey string
+		key := contextKey("lease-closeout")
+		fallback := context.WithValue(context.Background(), key, "callback")
+		ctx := fallbackValueContext{Context: context.Background(), fallback: fallback}
+		if value := ctx.Value(key); value != "callback" {
+			t.Fatalf("fallback value = %#v", value)
 		}
 	})
 }

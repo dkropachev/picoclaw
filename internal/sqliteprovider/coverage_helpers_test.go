@@ -38,6 +38,7 @@ type providerScriptStep struct {
 	closeErr         error
 	hasNextResultSet bool
 	action           func()
+	waitForContext   bool
 }
 
 type providerScriptDriver struct{}
@@ -65,13 +66,17 @@ func (connection *providerScriptConn) Ping(context.Context) error {
 }
 
 func (connection *providerScriptConn) QueryContext(
-	_ context.Context,
+	ctx context.Context,
 	query string,
 	_ []driver.NamedValue,
 ) (driver.Rows, error) {
 	step, err := connection.next(query)
 	if step.action != nil {
 		step.action()
+	}
+	if step.waitForContext {
+		<-ctx.Done()
+		return nil, context.Cause(ctx)
 	}
 	if err != nil || step.err != nil {
 		if err != nil {
