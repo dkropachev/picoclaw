@@ -1371,6 +1371,10 @@ func Value() int { return 1 }
 set -euo pipefail
 [[ "${INTEGRATION_COMPOSE_PROJECT_NAMESPACE}" == "${EXPECTED_NAMESPACE}" ]]
 [[ "${INTEGRATION_GOMAXPROCS}" == "2" ]]
+[[ "${INTEGRATION_GOCACHE}" == "${EXPECTED_GOCACHE}" ]]
+[[ "${INTEGRATION_GOMODCACHE}" == "${EXPECTED_GOMODCACHE}" ]]
+[[ "${INTEGRATION_RUNNER_UID}" == "34567" ]]
+[[ "${INTEGRATION_RUNNER_GID}" == "45678" ]]
 [[ "${GOFLAGS}" == "-tags=goolm,stdjson,integration" ]]
 [[ "$#" == 1 && "$1" == "sample-suite" ]]
 mkdir -p .coverage/integration-head
@@ -1387,6 +1391,21 @@ printf '%s\n' \
 	}
 
 	expectedNamespace := filepath.Base(parent) + "-head"
+	cachePaths := goCachePaths{
+		Build:   filepath.Join(parent, "shared-cache", "build"),
+		Modules: filepath.Join(parent, "shared-cache", "modules"),
+	}
+	environment := coverageEnvironment([]string{
+		"PATH=" + os.Getenv("PATH"),
+		"INTEGRATION_RUNNER_UID=34567",
+		"INTEGRATION_RUNNER_GID=45678",
+	}, filepath.Join(parent, "coverage-home"), cachePaths)
+	environment = append(
+		environment,
+		"EXPECTED_NAMESPACE="+expectedNamespace,
+		"EXPECTED_GOCACHE="+cachePaths.Build,
+		"EXPECTED_GOMODCACHE="+cachePaths.Modules,
+	)
 	profile, err := runIntegrationCoverage(
 		worktree,
 		"head",
@@ -1394,7 +1413,7 @@ printf '%s\n' \
 		"goolm,stdjson",
 		[]string{"example.com/integrationcoverage/pkg/sample"},
 		[]string{"sample-suite"},
-		append(os.Environ(), "EXPECTED_NAMESPACE="+expectedNamespace),
+		environment,
 	)
 	if err != nil {
 		t.Fatalf("runIntegrationCoverage() error = %v", err)
@@ -2498,6 +2517,10 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 		"LISTEN_FDS=3",
 		"GOAUTH=/operator/goauth-helper",
 		"GOENV=/operator/goenv",
+		"INTEGRATION_GOCACHE=/operator/go-build-cache",
+		"INTEGRATION_GOMODCACHE=/operator/go-mod-cache",
+		"INTEGRATION_RUNNER_UID=34567",
+		"INTEGRATION_RUNNER_GID=45678",
 		"VALUE=with=equals",
 	}
 	original := append([]string(nil), base...)
@@ -2537,6 +2560,8 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 	assertEnvironmentValue(t, baseEnvironment, "GCM_INTERACTIVE", "never")
 	assertEnvironmentValue(t, baseEnvironment, "GOAUTH", "off")
 	assertEnvironmentValue(t, baseEnvironment, "GOENV", "off")
+	assertEnvironmentValue(t, baseEnvironment, "INTEGRATION_RUNNER_UID", "34567")
+	assertEnvironmentValue(t, baseEnvironment, "INTEGRATION_RUNNER_GID", "45678")
 	assertEnvironmentValue(t, baseEnvironment, "PATH", "/bin")
 	assertEnvironmentValue(t, baseEnvironment, "VALUE", "with=equals")
 	for _, name := range []string{
@@ -2560,6 +2585,8 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 		"OPENAI_API_KEY",
 		"SERVICE_API_KEY",
 		"SSH_AUTH_SOCK",
+		"INTEGRATION_GOCACHE",
+		"INTEGRATION_GOMODCACHE",
 	} {
 		assertEnvironmentMissing(t, baseEnvironment, name)
 	}

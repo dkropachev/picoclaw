@@ -16,6 +16,103 @@ if [[ ! -d "$SUITES_DIR" ]]; then
   exit 1
 fi
 
+resolve_cache_directory() {
+  local name="$1"
+  local configured="$2"
+  local fallback="$3"
+  local path="${configured:-$fallback}"
+
+  if [[ "$path" == *$'\n'* || "$path" == *$'\r'* ]]; then
+    echo "$name contains a line break" >&2
+    return 1
+  fi
+  if [[ "$path" != /* ]]; then
+    echo "$name must be an absolute path: $path" >&2
+    return 1
+  fi
+  if [[ -e "$path" && ! -d "$path" ]]; then
+    echo "$name is not a directory: $path" >&2
+    return 1
+  fi
+  mkdir -p "$path"
+  path="$(cd "$path" && pwd -P)"
+  if [[ "$path" == "/" ]]; then
+    echo "$name resolves to an unsafe directory: $path" >&2
+    return 1
+  fi
+  if [[ ! -w "$path" ]]; then
+    echo "$name is not writable: $path" >&2
+    return 1
+  fi
+  printf '%s\n' "$path"
+}
+
+integration_gocache="$(resolve_cache_directory \
+  INTEGRATION_GOCACHE "${INTEGRATION_GOCACHE:-}" "$ROOT_DIR/.cache/go-build")"
+integration_gomodcache="$(resolve_cache_directory \
+  INTEGRATION_GOMODCACHE "${INTEGRATION_GOMODCACHE:-}" "$ROOT_DIR/.cache/go-mod")"
+if [[ "$integration_gocache" == "$integration_gomodcache" ||
+  "$integration_gocache" == "$integration_gomodcache/"* ||
+  "$integration_gomodcache" == "$integration_gocache/"* ]]; then
+  echo "integration Go build and module caches must not overlap" >&2
+  exit 1
+fi
+readonly INTEGRATION_GOCACHE="$integration_gocache"
+readonly INTEGRATION_GOMODCACHE="$integration_gomodcache"
+export INTEGRATION_GOCACHE INTEGRATION_GOMODCACHE
+
+resolve_runner_identity() {
+  local configured_uid="${INTEGRATION_RUNNER_UID:-}"
+  local configured_gid="${INTEGRATION_RUNNER_GID:-}"
+  if [[ -n "$configured_uid" || -n "$configured_gid" ]]; then
+    if [[ -z "$configured_uid" || -z "$configured_gid" ]]; then
+      echo "INTEGRATION_RUNNER_UID and INTEGRATION_RUNNER_GID must be set together" >&2
+      return 1
+    fi
+    printf '%s %s\n' "$configured_uid" "$configured_gid"
+    return
+  fi
+
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    printf '0 0\n'
+    return
+  fi
+
+  local engine_details
+  if engine_details="$(
+    docker info --format '{{json .SecurityOptions}} {{.OperatingSystem}} {{.Name}}' 2>/dev/null
+  )"; then
+    engine_details="${engine_details,,}"
+    if [[ "$engine_details" == *rootless* || "$engine_details" == *"docker desktop"* ||
+      "$engine_details" == *docker-desktop* ]]; then
+      printf '0 0\n'
+      return
+    fi
+    if [[ "$engine_details" == *userns* ]]; then
+      echo "Docker userns-remap requires explicit integration runner UID and GID" >&2
+      return 1
+    fi
+  else
+    local podman_rootless
+    podman_rootless="$(docker info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)"
+    if [[ "${podman_rootless,,}" == "true" ]]; then
+      printf '0 0\n'
+      return
+    fi
+  fi
+  printf '%s %s\n' "$(id -u)" "$(id -g)"
+}
+
+runner_identity="$(resolve_runner_identity)"
+read -r integration_runner_uid integration_runner_gid <<< "$runner_identity"
+if [[ ! "$integration_runner_uid" =~ ^[0-9]+$ || ! "$integration_runner_gid" =~ ^[0-9]+$ ]]; then
+  echo "integration runner UID and GID must be numeric" >&2
+  exit 1
+fi
+readonly INTEGRATION_RUNNER_UID="$integration_runner_uid"
+readonly INTEGRATION_RUNNER_GID="$integration_runner_gid"
+export INTEGRATION_RUNNER_UID INTEGRATION_RUNNER_GID
+
 sanitize_project_name() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-'
 }
@@ -98,7 +195,6 @@ run_suite() {
       docker compose "${compose_args[@]}" up -d --build --wait "${dependency_services[@]}"
     fi
 
-    local run_command="$TEST_COMMAND"
     local run_env=()
     if [[ -n "${INTEGRATION_COVERPROFILE_DIR:-}" ]]; then
       local cover_profile="$INTEGRATION_COVERPROFILE_DIR/$suite_name.cover.out"
@@ -112,21 +208,36 @@ run_suite() {
       run_env+=(-e "INTEGRATION_COVERPKG=${INTEGRATION_COVERPKG:-}")
       run_env+=(-e "INTEGRATION_COVERPROFILE=$cover_profile")
       run_env+=(-e "GOMAXPROCS=$integration_gomaxprocs")
-      run_command='go() {
+    fi
+
+    local run_command='go() {
   if [[ "$1" == "test" ]]; then
     shift
-    if [[ -n "${INTEGRATION_COVERPKG:-}" ]]; then
-      command go test -buildvcs=false -covermode=atomic -coverpkg="$INTEGRATION_COVERPKG" -coverprofile="$INTEGRATION_COVERPROFILE" "$@"
-    else
-      command go test -buildvcs=false -covermode=atomic -coverprofile="$INTEGRATION_COVERPROFILE" "$@"
+    local argument
+    for argument in "$@"; do
+      case "$argument" in
+        -count=1 | --count=1 | -test.count=1 | --test.count=1) ;;
+        -count | --count | -test.count | --test.count | \
+          -count=* | --count=* | -test.count=* | --test.count=*)
+          printf "integration suites cannot override go test -count=1: %s\n" "$argument" >&2
+          return 2
+          ;;
+      esac
+    done
+    local test_args=(-buildvcs=false -count=1)
+    if [[ -n "${INTEGRATION_COVERPROFILE:-}" ]]; then
+      test_args+=(-covermode=atomic -coverprofile="$INTEGRATION_COVERPROFILE")
+      if [[ -n "${INTEGRATION_COVERPKG:-}" ]]; then
+        test_args+=(-coverpkg="$INTEGRATION_COVERPKG")
+      fi
     fi
+    command go test "${test_args[@]}" "$@"
   else
     command go "$@"
   fi
 }
 export -f go
 '"$TEST_COMMAND"
-    fi
 
     echo "==> [$suite_name] running: $TEST_COMMAND"
     # integration-runner already uses `bash -c` as its entrypoint, so pass the

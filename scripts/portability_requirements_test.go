@@ -177,17 +177,17 @@ func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
 			t.Errorf("PR workflow is missing Go cache generation setting %q", snippet)
 		}
 	}
-	if got := strings.Count(prWorkflow, "uses: actions/cache/restore@"+cacheAction); got != 6 {
-		t.Errorf("PR workflow shared Go cache restore count = %d, want 6", got)
+	if got := strings.Count(prWorkflow, "uses: actions/cache/restore@"+cacheAction); got != 7 {
+		t.Errorf("PR workflow shared Go cache restore count = %d, want 7", got)
 	}
-	if got := strings.Count(prWorkflow, sharedPaths); got != 6 {
-		t.Errorf("PR workflow shared Go cache path count = %d, want 6", got)
+	if got := strings.Count(prWorkflow, sharedPaths); got != 7 {
+		t.Errorf("PR workflow shared Go cache path count = %d, want 7", got)
 	}
 	for _, cache := range []struct {
 		name string
 		want int
 	}{
-		{name: "host", want: 5},
+		{name: "host", want: 6},
 		{name: "cross", want: 1},
 	} {
 		consumerKey := "key: " + keyBase + cache.name + "-" + dependencyHash + "-" + consumerEpoch
@@ -209,6 +209,19 @@ func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
 	if strings.Contains(prWorkflow, "uses: actions/cache/save@") {
 		t.Error("PR workflow must not save the shared Go cache")
 	}
+	prIntegration := targetBlock(t, prWorkflow, "  integration:\n", "  required:\n")
+	for _, snippet := range []string{
+		"uses: actions/cache/restore@" + cacheAction,
+		"go-v3-host-" + dependencyHash + "-" + consumerEpoch,
+		sharedPaths,
+	} {
+		if !strings.Contains(prIntegration, snippet) {
+			t.Errorf("PR integration cache consumer is missing %q", snippet)
+		}
+	}
+	if strings.Contains(prIntegration, "actions/cache/save@") {
+		t.Error("PR integration job must not save its writable Go caches")
+	}
 	if strings.Contains(prWorkflow, "go-v2-") {
 		t.Error("PR workflow still has a legacy v2 Go cache fallback")
 	}
@@ -225,6 +238,20 @@ func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
 	}
 
 	buildWorkflow := readRepoFile(t, ".github/workflows/build.yml")
+	manualIntegration := targetBlock(t, buildWorkflow, "  integration:\n", "  build:\n")
+	for _, snippet := range []string{
+		`echo "epoch=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"`,
+		"uses: actions/cache/restore@" + cacheAction,
+		"go-v3-host-" + dependencyHash + "-${{ steps.go-cache-key.outputs.epoch }}",
+		sharedPaths,
+	} {
+		if !strings.Contains(manualIntegration, snippet) {
+			t.Errorf("manual integration cache consumer is missing %q", snippet)
+		}
+	}
+	if strings.Contains(manualIntegration, "actions/cache/save@") {
+		t.Error("manual integration job must not save its writable Go caches")
+	}
 	cacheOwners := []struct {
 		name  string
 		block string

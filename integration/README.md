@@ -42,6 +42,9 @@ The runner auto-discovers every suite under `integration/suites/`, so adding a s
 - Each suite lives in `integration/suites/<suite-name>/`.
 - The runner script loads `suite.env`, merges the shared compose file with the suite-specific compose files, starts dependency services, runs the suite command, and then tears everything down.
 - The shared runner container sets `GOFLAGS=-tags=goolm,stdjson,integration`, so tests run with the same build tags used by CI.
+- The runner bind-mounts repository-local Go build and module caches at host-identical absolute paths, so compiled dependencies are reusable across suite projects and trusted CI runs. `INTEGRATION_GOCACHE` and `INTEGRATION_GOMODCACHE` may select other writable absolute paths; ambient global Go cache paths are not mounted automatically.
+- Rootful Linux runners use the invoking numeric user/group. Rootless engines and Docker Desktop use container root, which those engines map back to the invoking host user. `INTEGRATION_RUNNER_UID` and `INTEGRATION_RUNNER_GID` may be set together when a custom mapping is required.
+- The runner forces `-count=1` for `go test`, so the reusable build cache never turns a live integration check into a cached test result.
 
 In practice, each suite gives us:
 

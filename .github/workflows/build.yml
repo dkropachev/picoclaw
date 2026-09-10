@@ -23,6 +23,21 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Compute host Go cache generation
+        id: go-cache-key
+        run: echo "epoch=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore host Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-${{ steps.go-cache-key.outputs.epoch }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
+
       - name: Run Docker-backed integration suites
         run: bash ./scripts/run-integration-tests.sh
 
