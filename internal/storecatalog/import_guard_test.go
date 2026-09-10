@@ -24,6 +24,7 @@ func TestStoreCatalogHasNoProductionImporters(t *testing.T) {
 		"internal/databasemigration/backup.go":         {},
 		"internal/databasemigration/backup_archive.go": {},
 		"internal/databasemigration/backup_parent.go":  {},
+		"internal/databasemigration/backup_prepare.go": {},
 		"internal/databasemigration/migration.go":      {},
 		"internal/databasereadiness/readiness.go":      {},
 		"pkg/database/catalog/catalog.go":              {},
