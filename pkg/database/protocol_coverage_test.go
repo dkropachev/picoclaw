@@ -26,9 +26,24 @@ type observedWaitContext struct {
 	waiting chan struct{}
 }
 
+type cancelAfterReadyContext struct {
+	context.Context
+	errCalls int
+}
+
 func (ctx *observedWaitContext) Done() <-chan struct{} {
 	ctx.once.Do(func() { close(ctx.waiting) })
 	return ctx.Context.Done()
+}
+
+func (ctx *cancelAfterReadyContext) Done() <-chan struct{} { return nil }
+
+func (ctx *cancelAfterReadyContext) Err() error {
+	ctx.errCalls++
+	if ctx.errCalls > 1 {
+		return context.Canceled
+	}
+	return nil
 }
 
 func (writer *coverageFrameWriter) Write(payload []byte) (int, error) {
@@ -386,7 +401,8 @@ func TestCoverageFrameBoundaries(t *testing.T) {
 
 func TestCoverageIdempotencyRegistryLimitsAndCancellation(t *testing.T) {
 	envelope := RequestEnvelope{
-		RequestID: "request", Domain: "domain", DomainVersion: 1, Operation: "mutate",
+		RequestID: "request-1", BrokerEpoch: "epoch",
+		Domain: "domain", DomainVersion: 1, Operation: "mutate",
 		IdempotencyKey: "stable", Payload: []byte(`{"value":1}`),
 	}
 	if record, replay, shutdown, err := (*idempotencyRegistry)(
@@ -408,13 +424,34 @@ func TestCoverageIdempotencyRegistryLimitsAndCancellation(t *testing.T) {
 	if _, _, _, err := registry.begin(t.Context(), conflicting); CodeOf(err) != CodeConflict {
 		t.Fatalf("reused idempotency key error = %v", err)
 	}
+	canceledEnvelope := envelope
+	canceledEnvelope.RequestID = "request-canceled"
 	canceled, cancel := context.WithCancel(context.Background())
+	canceledWait := &observedWaitContext{
+		Context: canceled,
+		waiting: make(chan struct{}),
+	}
+	canceledResult := make(chan error, 1)
+	go func() {
+		_, _, _, waitErr := registry.begin(canceledWait, canceledEnvelope)
+		canceledResult <- waitErr
+	}()
+	select {
+	case <-canceledWait.waiting:
+	case <-time.After(time.Second):
+		t.Fatal("cancelable idempotency replay did not begin waiting")
+	}
 	cancel()
-	if _, _, _, err := registry.begin(canceled, envelope); CodeOf(err) != CodeDeadline {
-		t.Fatalf("waiting replay cancellation = %v", err)
+	select {
+	case waitErr := <-canceledResult:
+		if CodeOf(waitErr) != CodeDeadline {
+			t.Fatalf("waiting replay cancellation = %v", waitErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled idempotency replay remained blocked")
 	}
 	response := ResponseEnvelope{
-		Protocol: 1, RequestID: "request", BrokerEpoch: "epoch",
+		Protocol: 1, RequestID: envelope.RequestID, BrokerEpoch: envelope.BrokerEpoch,
 		Payload: []byte(`{"ok":true}`),
 	}
 	waitContext := &observedWaitContext{
@@ -427,8 +464,10 @@ func TestCoverageIdempotencyRegistryLimitsAndCancellation(t *testing.T) {
 		err      error
 	}
 	waited := make(chan waitResult, 1)
+	waitEnvelope := envelope
+	waitEnvelope.RequestID = "request-waiter"
 	go func() {
-		_, replay, shutdown, waitErr := registry.begin(waitContext, envelope)
+		_, replay, shutdown, waitErr := registry.begin(waitContext, waitEnvelope)
 		waited <- waitResult{replay: replay, shutdown: shutdown, err: waitErr}
 	}()
 	select {
@@ -443,6 +482,8 @@ func TestCoverageIdempotencyRegistryLimitsAndCancellation(t *testing.T) {
 	select {
 	case result := <-waited:
 		if result.err != nil || result.replay == nil || !result.shutdown ||
+			result.replay.RequestID != waitEnvelope.RequestID ||
+			result.replay.BrokerEpoch != response.BrokerEpoch ||
 			string(result.replay.Payload) != string(response.Payload) {
 			t.Fatalf("coalesced idempotency replay = %#v", result)
 		}
@@ -450,9 +491,32 @@ func TestCoverageIdempotencyRegistryLimitsAndCancellation(t *testing.T) {
 		t.Fatal("idempotency replay was not released by completion")
 	}
 	completed.Payload[0] = 'x'
-	_, replay, replayShutdown, err := registry.begin(t.Context(), envelope)
+	alreadyCanceled, cancelAlready := context.WithCancel(context.Background())
+	cancelAlready()
+	alreadyCanceledEnvelope := envelope
+	alreadyCanceledEnvelope.RequestID = "request-already-canceled"
+	if _, replay, _, err := registry.begin(
+		alreadyCanceled,
+		alreadyCanceledEnvelope,
+	); CodeOf(err) != CodeDeadline || replay != nil {
+		t.Fatalf("already-ready canceled replay = %#v, %v", replay, err)
+	}
+	canceledAfterReadyEnvelope := envelope
+	canceledAfterReadyEnvelope.RequestID = "request-canceled-after-ready"
+	if _, replay, _, err := registry.begin(
+		&cancelAfterReadyContext{Context: context.Background()},
+		canceledAfterReadyEnvelope,
+	); CodeOf(err) != CodeDeadline || replay != nil {
+		t.Fatalf("canceled-after-ready replay = %#v, %v", replay, err)
+	}
+	lateEnvelope := envelope
+	lateEnvelope.RequestID = "request-late"
+	_, replay, replayShutdown, err := registry.begin(t.Context(), lateEnvelope)
 	if err != nil || replay == nil || !replayShutdown || string(replay.Payload) != string(response.Payload) {
 		t.Fatalf("detached replay = %#v, %v, %v", replay, replayShutdown, err)
+	}
+	if replay.RequestID != lateEnvelope.RequestID || replay.BrokerEpoch != response.BrokerEpoch {
+		t.Fatalf("detached replay identity = %#v", replay)
 	}
 	if got, flag := (*idempotencyRegistry)(nil).complete(nil, response, true); !flag ||
 		string(got.Payload) != string(response.Payload) {
@@ -470,11 +534,25 @@ func TestCoverageIdempotencyRegistryLimitsAndCancellation(t *testing.T) {
 		t.Fatalf("full idempotency registry = %v", err)
 	}
 	bounded := newIdempotencyRegistry()
+	boundedEnvelope := envelope
+	boundedEnvelope.IdempotencyKey = "bounded"
+	boundedRecord, _, _, err := bounded.begin(t.Context(), boundedEnvelope)
+	if err != nil || boundedRecord == nil {
+		t.Fatalf("bounded idempotency admission = %#v, %v", boundedRecord, err)
+	}
 	bounded.resultBytes = maxIdempotencyResultBytes
-	boundedRecord := &idempotencyRecord{ready: make(chan struct{})}
 	stored, storedShutdown := bounded.complete(boundedRecord, response, true)
 	if storedShutdown || CodeOf(stored.Error) != CodeOutcomeUnknown || len(stored.Payload) != 0 {
 		t.Fatalf("bounded idempotency response = %#v, shutdown=%v", stored, storedShutdown)
+	}
+	boundedReplayEnvelope := boundedEnvelope
+	boundedReplayEnvelope.RequestID = "request-bounded-replay"
+	_, boundedReplay, boundedReplayShutdown, err := bounded.begin(t.Context(), boundedReplayEnvelope)
+	if err != nil || boundedReplay == nil || boundedReplayShutdown ||
+		boundedReplay.RequestID != boundedReplayEnvelope.RequestID ||
+		boundedReplay.BrokerEpoch != response.BrokerEpoch ||
+		CodeOf(boundedReplay.Error) != CodeOutcomeUnknown || len(boundedReplay.Payload) != 0 {
+		t.Fatalf("bounded idempotency replay = %#v, %v, %v", boundedReplay, boundedReplayShutdown, err)
 	}
 	withError := cloneResponseEnvelope(ResponseEnvelope{
 		Payload: []byte("payload"), Error: NewError(CodeConflict, "conflict"),

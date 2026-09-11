@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"strconv"
 	"sync"
 )
@@ -56,12 +57,19 @@ func (registry *idempotencyRegistry) begin(
 		}
 		ready := existing.ready
 		registry.mu.Unlock()
+		if ctx.Err() != nil {
+			return nil, nil, false, NewError(CodeDeadline, "database request deadline was exceeded")
+		}
 		select {
 		case <-ready:
 			registry.mu.Lock()
 			response := cloneResponseEnvelope(existing.response)
+			response.RequestID = envelope.RequestID
 			shutdown := existing.shutdown
 			registry.mu.Unlock()
+			if ctx.Err() != nil {
+				return nil, nil, false, NewError(CodeDeadline, "database request deadline was exceeded")
+			}
 			return nil, &response, shutdown, nil
 		case <-ctx.Done():
 			return nil, nil, false, NewError(CodeDeadline, "database request deadline was exceeded")
@@ -114,11 +122,20 @@ func idempotencyOperationKey(envelope RequestEnvelope) string {
 
 func idempotencyRequestFingerprint(envelope RequestEnvelope) [sha256.Size]byte {
 	hash := sha256.New()
-	_, _ = hash.Write([]byte(envelope.RequestID))
-	_, _ = hash.Write([]byte{0})
-	_, _ = hash.Write([]byte(envelope.StoreID))
-	_, _ = hash.Write([]byte{0})
-	_, _ = hash.Write(envelope.Payload)
+	writeField := func(value []byte) {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+		_, _ = hash.Write(size[:])
+		_, _ = hash.Write(value)
+	}
+	writeField([]byte(envelope.StoreID))
+	writeField([]byte(envelope.Domain))
+	var version [8]byte
+	binary.BigEndian.PutUint64(version[:], uint64(envelope.DomainVersion))
+	writeField(version[:])
+	writeField([]byte(envelope.Operation))
+	writeField([]byte(envelope.IdempotencyKey))
+	writeField(envelope.Payload)
 	var fingerprint [sha256.Size]byte
 	copy(fingerprint[:], hash.Sum(nil))
 	return fingerprint
