@@ -73,22 +73,31 @@ func newProjectedCatalog(specs []storecatalog.Spec) (*Catalog, error) {
 	}
 
 	entries := make([]Entry, 0, len(specs))
-	byID := make(map[StoreID]Entry, len(specs))
 	for _, spec := range specs {
-		if !spec.ID.Valid() || !validDomain(spec.Domain) {
+		entries = append(entries, Entry{ID: spec.ID, Domain: spec.Domain, Required: spec.Required})
+	}
+	return newLogicalCatalog(entries)
+}
+
+func newLogicalCatalog(entries []Entry) (*Catalog, error) {
+	if len(entries) == 0 {
+		return nil, database.NewError(database.CodeIntegrity, catalogInvalidMessage)
+	}
+	detached := append([]Entry(nil), entries...)
+	byID := make(map[StoreID]Entry, len(detached))
+	for _, entry := range detached {
+		if !entry.ID.Valid() || !validDomain(entry.Domain) {
 			return nil, database.NewError(database.CodeIntegrity, catalogInvalidMessage)
 		}
-		if _, duplicate := byID[spec.ID]; duplicate {
+		if _, duplicate := byID[entry.ID]; duplicate {
 			return nil, database.NewError(database.CodeIntegrity, catalogInvalidMessage)
 		}
-		entry := Entry{ID: spec.ID, Domain: spec.Domain, Required: spec.Required}
-		entries = append(entries, entry)
 		byID[entry.ID] = entry
 	}
-	sort.Slice(entries, func(left, right int) bool {
-		return entries[left].ID < entries[right].ID
+	sort.Slice(detached, func(left, right int) bool {
+		return detached[left].ID < detached[right].ID
 	})
-	return &Catalog{entries: entries, byID: byID}, nil
+	return &Catalog{entries: detached, byID: byID}, nil
 }
 
 func newCatalogSnapshot(
@@ -108,6 +117,19 @@ func (catalog *Catalog) Entries() []Entry {
 		return nil
 	}
 	return append([]Entry(nil), catalog.entries...)
+}
+
+// Bindings returns a detached, ID-sorted snapshot suitable for scoped server
+// admission. Bindings contain no required policy or physical catalog metadata.
+func (catalog *Catalog) Bindings() []database.StoreBinding {
+	if catalog == nil {
+		return nil
+	}
+	bindings := make([]database.StoreBinding, len(catalog.entries))
+	for index, entry := range catalog.entries {
+		bindings[index] = database.StoreBinding{ID: entry.ID, Domain: entry.Domain}
+	}
+	return bindings
 }
 
 // RequiredStores returns a detached, ID-sorted snapshot of store IDs marked

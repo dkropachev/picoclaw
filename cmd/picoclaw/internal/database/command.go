@@ -38,6 +38,7 @@ type supervisorServeGuard interface {
 
 type supervisorServeCatalog interface {
 	Entries() []dbcatalog.Entry
+	Bindings() []dblayer.StoreBinding
 	RequiredStores() []dblayer.StoreID
 }
 
@@ -58,7 +59,7 @@ type supervisorServeOps struct {
 	configPath         func() string
 	loadConfigSnapshot func(string) (*config.Config, string, error)
 	userHome           func() (string, error)
-	newSnapshot        func(dbcatalog.Options, string) (supervisorServeCatalog, string, error)
+	newReviewSnapshot  func(dbcatalog.Options, string) (supervisorServeCatalog, string, error)
 	configRevision     func(string) (string, error)
 	withConfigLock     func(string, func() error) error
 	newRegistry        func() supervisorServeRegistry
@@ -77,11 +78,11 @@ func defaultSupervisorServeOps() supervisorServeOps {
 		configPath:         internal.GetConfigPath,
 		loadConfigSnapshot: config.LoadCurrentConfigSnapshot,
 		userHome:           os.UserHomeDir,
-		newSnapshot: func(
+		newReviewSnapshot: func(
 			options dbcatalog.Options,
 			revision string,
 		) (supervisorServeCatalog, string, error) {
-			return dbcatalog.NewSnapshot(options, revision)
+			return dbcatalog.NewReviewSnapshot(options, revision)
 		},
 		configRevision: config.ConfigRevision,
 		withConfigLock: config.WithConfigMutationLock,
@@ -197,7 +198,7 @@ func runServeCommand(
 			"database catalog user home is unavailable",
 		)
 	}
-	logicalCatalog, catalogFingerprint, err := ops.newSnapshot(dbcatalog.Options{
+	logicalCatalog, scopeFingerprint, err := ops.newReviewSnapshot(dbcatalog.Options{
 		Home: canonicalHome, Config: cfg, ConfigPath: configPath, UserHome: userHome,
 	}, configRevision)
 	if err != nil {
@@ -209,7 +210,7 @@ func runServeCommand(
 
 	generation := supervisorLaunchGeneration{
 		guard: guard, home: canonicalHome, configPath: configPath,
-		configRevision: configRevision, catalogFingerprint: catalogFingerprint,
+		configRevision: configRevision, catalogFingerprint: scopeFingerprint,
 		expectedCatalogFingerprint: parsed.expectedCatalogFingerprint,
 		startupDeadline:            parsed.startupDeadline,
 	}
@@ -218,6 +219,11 @@ func runServeCommand(
 	}
 
 	entries := logicalCatalog.Entries()
+	bindings := logicalCatalog.Bindings()
+	requiredStores := logicalCatalog.RequiredStores()
+	if err = validateReviewPublication(entries, bindings, requiredStores); err != nil {
+		return err
+	}
 	registry := ops.newRegistry()
 	if registry == nil {
 		return dblayer.NewError(dblayer.CodeInternal, "database supervisor registry is unavailable")
@@ -233,8 +239,9 @@ func runServeCommand(
 		}
 		server, callbackErr = ops.startServer(serverContext, dblayer.ServerOptions{
 			Home:               canonicalHome,
-			CatalogFingerprint: catalogFingerprint,
-			RequiredStores:     logicalCatalog.RequiredStores(),
+			CatalogFingerprint: scopeFingerprint,
+			RequiredStores:     requiredStores,
+			ServedStores:       bindings,
 			StatusProvider: func(context.Context) ([]dblayer.StoreStatus, error) {
 				return unavailableStatuses(entries), nil
 			},
@@ -270,7 +277,7 @@ func runServeCommand(
 func validSupervisorServeOps(ops supervisorServeOps) bool {
 	return ops.home != nil && ops.consumeGuard != nil && ops.canonicalHome != nil &&
 		ops.configPath != nil && ops.loadConfigSnapshot != nil && ops.userHome != nil &&
-		ops.newSnapshot != nil && ops.configRevision != nil && ops.withConfigLock != nil &&
+		ops.newReviewSnapshot != nil && ops.configRevision != nil && ops.withConfigLock != nil &&
 		ops.newRegistry != nil && ops.startServer != nil && ops.notifyContext != nil &&
 		ops.now != nil
 }
@@ -369,4 +376,32 @@ func unavailableStatuses(entries []dbcatalog.Entry) []dblayer.StoreStatus {
 		})
 	}
 	return statuses
+}
+
+func validateReviewPublication(
+	entries []dbcatalog.Entry,
+	bindings []dblayer.StoreBinding,
+	required []dblayer.StoreID,
+) error {
+	if len(entries) == 0 || len(bindings) != len(entries) || len(required) == 0 {
+		return dblayer.NewError(dblayer.CodeIntegrity, "database review scope is invalid")
+	}
+	requiredIndex := 0
+	for index, entry := range entries {
+		if !entry.ID.Valid() || bindings[index].ID != entry.ID || bindings[index].Domain != entry.Domain ||
+			(index > 0 && entries[index-1].ID >= entry.ID) {
+			return dblayer.NewError(dblayer.CodeIntegrity, "database review scope is invalid")
+		}
+		if !entry.Required {
+			continue
+		}
+		if requiredIndex >= len(required) || required[requiredIndex] != entry.ID {
+			return dblayer.NewError(dblayer.CodeIntegrity, "database review scope is invalid")
+		}
+		requiredIndex++
+	}
+	if requiredIndex != len(required) {
+		return dblayer.NewError(dblayer.CodeIntegrity, "database review scope is invalid")
+	}
+	return nil
 }

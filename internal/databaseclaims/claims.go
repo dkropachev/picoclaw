@@ -49,6 +49,7 @@ type Lease struct {
 	replacementPins   map[database.StoreID]*replacementPin
 	approvedMains     map[database.StoreID]fileidentity.Identity
 	fence             *database.Fence
+	reviewScope       *reviewScopeLeaseState
 	closed            atomic.Bool
 	poisoned          atomic.Bool
 	once              sync.Once
@@ -241,6 +242,16 @@ func acquireCatalogWithOps(
 	fence *database.Fence,
 	ops claimAcquireOps,
 ) (*Lease, error) {
+	return acquireOwnedCatalogWithOps(options, projected, fence, ops, nil)
+}
+
+func acquireOwnedCatalogWithOps(
+	options storecatalog.Options,
+	projected *storecatalog.Catalog,
+	fence *database.Fence,
+	ops claimAcquireOps,
+	reviewScope *reviewScopeLeaseState,
+) (*Lease, error) {
 	if ops.authorizes == nil || ops.project == nil || ops.claimIDs == nil ||
 		ops.lexical == nil || ops.claimRoot == nil || ops.acquire == nil ||
 		ops.observe == nil || ops.revalidate == nil {
@@ -258,6 +269,14 @@ func acquireCatalogWithOps(
 		if err != nil {
 			return nil, err
 		}
+	}
+	if reviewScope != nil {
+		var err error
+		projected, err = reviewScope.revalidateSelected(projected)
+		if err != nil {
+			return nil, err
+		}
+		ops.revalidate = reviewScope.revalidateSelected
 	}
 	identities, err := ops.claimIDs(projected)
 	if err != nil {
@@ -281,7 +300,10 @@ func acquireCatalogWithOps(
 		return nil, err
 	}
 
-	lease := &Lease{claims: make([]claimHandle, 0, len(lexicalIdentities))}
+	lease := &Lease{
+		claims:      make([]claimHandle, 0, len(lexicalIdentities)),
+		reviewScope: reviewScope,
+	}
 	fail := func(primary error) (*Lease, error) {
 		return nil, errors.Join(primary, lease.Close())
 	}
@@ -412,32 +434,30 @@ func acquireCatalogWithOps(
 			lease.approvedMains[observation.StoreID] = observation.Identity
 		}
 	}
+	if err := lease.validateReviewScopeLocked(true, "", true); err != nil {
+		return fail(err)
+	}
+	lease.adoptReviewScopeSelectedLocked()
 	return lease, nil
 }
 
 // Home returns the canonical home bound to this lease.
 func (lease *Lease) Home() string {
-	if lease == nil {
+	release, err := lease.lockValidatedExposure()
+	if err != nil {
 		return ""
 	}
-	lease.mu.RLock()
-	defer lease.mu.RUnlock()
-	if !lease.authorized() {
-		return ""
-	}
+	defer release()
 	return lease.home
 }
 
 // Stores returns a detached, ID-sorted copy of every claimed store.
 func (lease *Lease) Stores() []storecatalog.Spec {
-	if lease == nil {
+	release, err := lease.lockValidatedExposure()
+	if err != nil {
 		return nil
 	}
-	lease.mu.RLock()
-	defer lease.mu.RUnlock()
-	if !lease.authorized() {
-		return nil
-	}
+	defer release()
 	stores := make([]storecatalog.Spec, len(lease.stores))
 	for index := range lease.stores {
 		stores[index] = cloneSpec(lease.stores[index])
@@ -447,14 +467,11 @@ func (lease *Lease) Stores() []storecatalog.Spec {
 
 // Lookup returns a detached claimed store for one typed logical ID.
 func (lease *Lease) Lookup(id database.StoreID) (storecatalog.Spec, bool) {
-	if lease == nil {
+	release, err := lease.lockValidatedExposure()
+	if err != nil {
 		return storecatalog.Spec{}, false
 	}
-	lease.mu.RLock()
-	defer lease.mu.RUnlock()
-	if !lease.authorized() {
-		return storecatalog.Spec{}, false
-	}
+	defer release()
 	index, ok := lease.byID[id]
 	if !ok {
 		return storecatalog.Spec{}, false
@@ -487,40 +504,40 @@ func (lease *Lease) Close() error {
 // Check verifies that the retained fence and every replaceable claim pathname
 // still name the exact locked objects. Failure permanently poisons the lease.
 func (lease *Lease) Check() error {
-	if lease == nil {
-		return database.NewError(database.CodeUnavailable, "physical database lease is unavailable")
+	release, err := lease.lockValidatedExposure()
+	if err != nil {
+		return err
 	}
-	lease.mu.RLock()
-	defer lease.mu.RUnlock()
-	if !lease.authorized() {
-		return database.NewError(database.CodeIntegrity, "physical database lease lost authority")
-	}
+	release()
 	return nil
 }
 
 // Guard holds the lease live across one short ownership transfer. The returned
 // release function must be called exactly once when err is nil.
 func (lease *Lease) Guard() (func(), error) {
-	if lease == nil {
-		return nil, database.NewError(database.CodeUnavailable, "physical database lease is unavailable")
+	releaseLease, err := lease.lockValidatedExposure()
+	if err != nil {
+		return nil, err
 	}
-	lease.mu.RLock()
-	if !lease.authorized() {
-		lease.mu.RUnlock()
-		return nil, database.NewError(database.CodeIntegrity, "physical database lease lost authority")
-	}
-	releaseFence, err := lease.fence.Guard(lease.home)
+	guardedFence, releaseFence, err := lease.fence.GuardChecked(lease.home)
 	if err != nil {
 		lease.poisoned.Store(true)
-		lease.mu.RUnlock()
+		releaseLease()
 		return nil, errors.Join(database.NewError(
 			database.CodeIntegrity,
 			"physical database lease lost fence authority",
 		), err)
 	}
 	return func() {
+		if lease.closed.Load() || lease.poisoned.Load() ||
+			!claimHandlesValid(lease.claims) || !lease.replacementPinsValid() ||
+			!guardedFence() {
+			lease.poisoned.Store(true)
+		} else if scopeErr := lease.validateReviewScopeLocked(true, "", true); scopeErr == nil {
+			lease.adoptReviewScopeSelectedLocked()
+		}
 		releaseFence()
-		lease.mu.RUnlock()
+		releaseLease()
 	}, nil
 }
 
@@ -564,6 +581,11 @@ func (lease *Lease) GuardStoresRefreshing() (
 			"physical database lease lost authority",
 		)
 	}
+	if err := lease.validateReviewScopeLocked(true, "", true); err != nil {
+		lease.mu.Unlock()
+		return nil, nil, nil, err
+	}
+	lease.adoptReviewScopeSelectedLocked()
 	guardedFence, releaseFence, guardErr := lease.fence.GuardChecked(lease.home)
 	if guardErr != nil {
 		lease.poisoned.Store(true)
@@ -582,6 +604,13 @@ func (lease *Lease) GuardStoresRefreshing() (
 			return
 		}
 		active = false
+		if lease.closed.Load() || lease.poisoned.Load() ||
+			!claimHandlesValid(lease.claims) || !lease.replacementPinsValid() ||
+			!guardedFence() {
+			lease.poisoned.Store(true)
+		} else if scopeErr := lease.validateReviewScopeLocked(true, "", true); scopeErr == nil {
+			lease.adoptReviewScopeSelectedLocked()
+		}
 		releaseFence()
 		lease.mu.Unlock()
 	}
@@ -658,6 +687,10 @@ func (lease *Lease) GuardStoresMigrating() (*MigrationRefreshingGuard, error) {
 			database.CodeIntegrity,
 			"physical database lease lost authority",
 		)
+	}
+	if err := lease.validateReviewScopeLocked(false, "", true); err != nil {
+		lease.mu.Unlock()
+		return nil, err
 	}
 	guardedFence, releaseFence, guardErr := lease.fence.GuardMigrationChecked(lease.home)
 	if guardErr != nil {
@@ -754,7 +787,7 @@ func (guard *MigrationRefreshingGuard) Reconcile() error {
 	state := guard.state
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if err := state.checkLocked(); err != nil {
+	if err := state.checkForReconcileLocked(""); err != nil {
 		return err
 	}
 	if err := state.validateExpectedMainsLocked(); err != nil {
@@ -781,7 +814,7 @@ func (guard *MigrationRefreshingGuard) PinReplacement(
 	state := guard.state
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if err := state.checkLocked(); err != nil {
+	if err := state.checkForReconcileLocked(""); err != nil {
 		return err
 	}
 	if err := state.validateExpectedMainsLocked(); err != nil {
@@ -844,11 +877,8 @@ func (guard *MigrationRefreshingGuard) ReconcileReplacement(id database.StoreID)
 	state := guard.state
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if err := state.checkLocked(); err != nil {
+	if err := state.checkForReconcileLocked(id); err != nil {
 		return err
-	}
-	if _, claimed := state.lease.byID[id]; !claimed {
-		return database.NewError(database.CodeInvalid, "replacement store is not claimed")
 	}
 	if _, pinned := state.pinned[id]; !pinned {
 		return state.lease.poison(database.NewError(
@@ -910,7 +940,7 @@ func (guard *MigrationRefreshingGuard) Release() error {
 	state.releasing = false
 	state.releaseErr = errors.Join(state.releaseErr, childDrainErr)
 	lease := state.lease
-	if checkErr := state.checkLocked(); checkErr != nil {
+	if checkErr := state.checkForReconcileLocked(""); checkErr != nil {
 		state.releaseErr = errors.Join(state.releaseErr, checkErr)
 	} else if stateErr := state.validateExpectedMainsLocked(); stateErr != nil {
 		state.releaseErr = errors.Join(state.releaseErr, stateErr)
@@ -948,6 +978,22 @@ func (guard *MigrationRefreshingGuard) Release() error {
 }
 
 func (state *migrationRefreshingGuardState) checkLocked() error {
+	return state.checkReviewScopeLocked(true, "")
+}
+
+// checkForReconcileLocked validates every selected transition while allowing
+// only unclaimed non-main members that the immediately following refresh will
+// claim. A nonzero replacement permits exactly its active pinned main.
+func (state *migrationRefreshingGuardState) checkForReconcileLocked(
+	replacement database.StoreID,
+) error {
+	return state.checkReviewScopeLocked(false, replacement)
+}
+
+func (state *migrationRefreshingGuardState) checkReviewScopeLocked(
+	requireSelectedClaims bool,
+	replacement database.StoreID,
+) error {
 	if state == nil || !state.active || state.lease == nil {
 		return database.NewError(
 			database.CodeIntegrity,
@@ -975,6 +1021,21 @@ func (state *migrationRefreshingGuardState) checkLocked() error {
 			database.CodeIntegrity,
 			"physical database migration guard lost authority",
 		)
+	}
+	if !replacement.IsZero() {
+		if _, claimed := lease.byID[replacement]; !claimed {
+			return database.NewError(database.CodeInvalid, "replacement store is not claimed")
+		}
+	}
+	if err := lease.validateReviewScopeLocked(
+		requireSelectedClaims,
+		replacement,
+		true,
+	); err != nil {
+		return err
+	}
+	if requireSelectedClaims {
+		lease.adoptReviewScopeSelectedLocked()
 	}
 	return nil
 }
@@ -1011,19 +1072,34 @@ func (state *migrationRefreshingGuardState) validateMigrationObservationsLocked(
 			))
 		}
 	}
-	strict, err := state.ops.revalidate(state.lease.catalog)
-	if err != nil || !catalogsEqual(state.lease.catalog, strict) {
-		return state.lease.poison(errors.Join(
-			database.NewError(
-				database.CodeIntegrity,
-				"database catalog changed while validating migration state",
-			),
-			err,
-		))
-	}
-	observed, err := state.ops.observe(strict)
-	if err != nil {
-		return state.lease.poison(err)
+	var observed []memberObservation
+	if state.lease.reviewScope != nil {
+		if err := state.lease.validateReviewScopeLocked(
+			requireClaimed,
+			"",
+			true,
+		); err != nil {
+			return err
+		}
+		observed = cloneObservations(state.lease.reviewScope.selectedObservation)
+		if requireClaimed {
+			state.lease.adoptReviewScopeSelectedLocked()
+		}
+	} else {
+		strict, err := state.ops.revalidate(state.lease.catalog)
+		if err != nil || !catalogsEqual(state.lease.catalog, strict) {
+			return state.lease.poison(errors.Join(
+				database.NewError(
+					database.CodeIntegrity,
+					"database catalog changed while validating migration state",
+				),
+				err,
+			))
+		}
+		observed, err = state.ops.observe(strict)
+		if err != nil {
+			return state.lease.poison(err)
+		}
 	}
 	current := make(map[database.StoreID]fileidentity.Identity, len(state.expectedMain))
 	for _, observation := range observed {
@@ -1062,7 +1138,10 @@ func (state *migrationRefreshingGuardState) validateMigrationObservationsLocked(
 			"database migration observed an unclaimed physical assignment",
 		))
 	}
-	return state.checkLocked()
+	if requireClaimed {
+		return state.checkLocked()
+	}
+	return state.checkForReconcileLocked("")
 }
 
 func countValidMigrationMainIdentities(values map[database.StoreID]fileidentity.Identity) int {
@@ -1199,6 +1278,9 @@ func (lease *Lease) PinReplacement(id database.StoreID, path string) (resultErr 
 	if !lease.authorized() || lease.root == "" || lease.catalog == nil || lease.acquireClaim == nil {
 		return database.NewError(database.CodeIntegrity, "physical database lease lost authority")
 	}
+	if err := lease.validateReviewScopeLocked(false, "", true); err != nil {
+		return err
+	}
 	index, claimed := lease.byID[id]
 	if !claimed {
 		return database.NewError(database.CodeInvalid, "replacement store is not claimed")
@@ -1275,7 +1357,8 @@ func (lease *Lease) pinReplacementLocked(
 	targetAssignment := observationMemberKey(memberObservation{
 		StoreID: id, Role: memberMain, Path: lease.stores[index].Path,
 	})
-	if _, cataloged := lease.catalogIdentities[claimIdentity]; cataloged {
+	if _, cataloged := lease.catalogIdentities[claimIdentity]; cataloged ||
+		lease.reviewScopeCatalogContains(claimIdentity, stagedIdentity.String()) {
 		lease.poisoned.Store(true)
 		return database.NewError(
 			database.CodeIntegrity,
@@ -1335,7 +1418,8 @@ func (lease *Lease) pinReplacementLocked(
 			verifyErr,
 		)
 	}
-	if _, cataloged := lease.catalogIdentities[claimIdentity]; cataloged {
+	if _, cataloged := lease.catalogIdentities[claimIdentity]; cataloged ||
+		lease.reviewScopeCatalogContains(claimIdentity, stagedIdentity.String()) {
 		lease.poisoned.Store(true)
 		return database.NewError(
 			database.CodeIntegrity,
@@ -1425,6 +1509,9 @@ func (lease *Lease) refreshLockedWithOps(replacement database.StoreID, ops claim
 			"physical database refresh operations are invalid",
 		))
 	}
+	if err := lease.validateReviewScopeLocked(false, replacement, true); err != nil {
+		return err
+	}
 	strict, err := ops.revalidate(lease.catalog)
 	if err != nil || !catalogsEqual(lease.catalog, strict) {
 		return lease.poison(errors.Join(
@@ -1496,6 +1583,13 @@ func (lease *Lease) refreshLockedWithOps(replacement database.StoreID, ops claim
 			database.CodeIntegrity,
 			"physical database lease lost authority while refreshing claims",
 		))
+	}
+	if err := lease.validateReviewScopeLocked(true, replacement, true); err != nil {
+		return err
+	}
+	if lease.reviewScope != nil {
+		verifiedCatalog = lease.reviewScope.currentSelected
+		verified = cloneObservations(lease.reviewScope.selectedObservation)
 	}
 	lease.catalog = verifiedCatalog
 	lease.observations = cloneObservations(verified)

@@ -64,6 +64,9 @@ func TestSuccessfulProductionClaimWrappersAreNotUsedByTests(t *testing.T) {
 		"lease_safety_test.go": {
 			"TestAcquireProjectedRejectsUnavailableInventory": {"AcquireProjected": {}},
 		},
+		"scoped_claims_test.go": {
+			"TestAcquireReviewScopeRejectsInvalidAuthorityWithoutStableMutation": {"AcquireReviewScope": {}},
+		},
 	}
 	err := filepath.WalkDir(repository, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -132,6 +135,7 @@ func testingAPIProductionReferences(file *ast.File) []string {
 			qualifier, ok := value.X.(*ast.Ident)
 			_, imported := aliases[qualifierName(qualifier, ok)]
 			if imported && (value.Sel.Name == "AcquireForTesting" ||
+				value.Sel.Name == "AcquireReviewScopeForTesting" ||
 				value.Sel.Name == "PrepareRootForTesting") {
 				references = append(references, value.Sel.Name)
 			}
@@ -153,7 +157,8 @@ func testingAPIProductionReferences(file *ast.File) []string {
 }
 
 func testingOnlyClaimIdentifier(name string) bool {
-	return name == "PrepareRootForTesting" || name == "AcquireForTesting"
+	return name == "PrepareRootForTesting" || name == "AcquireForTesting" ||
+		name == "AcquireReviewScopeForTesting"
 }
 
 func productionClaimWrapperReferences(file *ast.File) []claimWrapperReference {
@@ -168,7 +173,8 @@ func productionClaimWrapperReferences(file *ast.File) []claimWrapperReference {
 		case *ast.SelectorExpr:
 			qualifier, ok := value.X.(*ast.Ident)
 			_, imported := aliases[qualifierName(qualifier, ok)]
-			if imported && (value.Sel.Name == "Acquire" || value.Sel.Name == "AcquireProjected") {
+			if imported && (value.Sel.Name == "Acquire" || value.Sel.Name == "AcquireProjected" ||
+				value.Sel.Name == "AcquireReviewScope") {
 				name = value.Sel.Name
 			}
 		case *ast.Ident:
@@ -177,7 +183,8 @@ func productionClaimWrapperReferences(file *ast.File) []claimWrapperReference {
 			}
 			_, dotImported := aliases["."]
 			if (file.Name.Name == "databaseclaims" || dotImported) &&
-				(value.Name == "Acquire" || value.Name == "AcquireProjected") &&
+				(value.Name == "Acquire" || value.Name == "AcquireProjected" ||
+					value.Name == "AcquireReviewScope") &&
 				!functionDeclarationName(parents[value], value) {
 				name = value.Name
 			}
@@ -248,14 +255,16 @@ func TestProductionClaimWrapperReferenceDetectionRejectsAliases(t *testing.T) {
 import claims "github.com/sipeed/picoclaw/internal/databaseclaims"
 var escaped = claims.Acquire
 func direct() { claims.AcquireProjected(nil, nil) }
+func scoped() { claims.AcquireReviewScope(nil, nil) }
 `
 	file, err := parser.ParseFile(token.NewFileSet(), "fixture_test.go", source, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	references := productionClaimWrapperReferences(file)
-	if len(references) != 2 || references[0].name != "Acquire" || references[0].directCall ||
-		references[1].name != "AcquireProjected" || !references[1].directCall {
+	if len(references) != 3 || references[0].name != "Acquire" || references[0].directCall ||
+		references[1].name != "AcquireProjected" || !references[1].directCall ||
+		references[2].name != "AcquireReviewScope" || !references[2].directCall {
 		t.Fatalf("wrapper references = %#v", references)
 	}
 }
@@ -263,14 +272,14 @@ func direct() { claims.AcquireProjected(nil, nil) }
 func TestTestingAPIReferenceDetectionRejectsDotImport(t *testing.T) {
 	source := `package fixture
 import . "github.com/sipeed/picoclaw/internal/databaseclaims"
-var escaped = AcquireForTesting
+var escaped = AcquireReviewScopeForTesting
 `
 	file, err := parser.ParseFile(token.NewFileSet(), "fixture.go", source, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	references := testingAPIProductionReferences(file)
-	if len(references) != 1 || references[0] != "AcquireForTesting" {
+	if len(references) != 1 || references[0] != "AcquireReviewScopeForTesting" {
 		t.Fatalf("testing API references = %#v", references)
 	}
 }

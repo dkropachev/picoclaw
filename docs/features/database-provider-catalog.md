@@ -17,7 +17,9 @@ physical inventory to the exact configuration revision used to create it. A
 atomic constructor derives the logical facade and that fingerprint from one
 internal projection so the two outputs cannot describe different inventories.
 The authenticated hidden supervisor command is the sole production consumer of
-that logical pair; the physical provider catalog remains dormant.
+the logical facade. It now consumes a closed review-only snapshot whose separate
+scope fingerprint remains bound to the complete physical catalog and exact
+configuration revision; the physical provider catalog remains dormant.
 
 The catalog can also strictly revalidate one detached projection without its
 former mutable configuration object and derive sorted opaque claim IDs for
@@ -40,7 +42,9 @@ must be separately specified.
   `Build`, `Project`, `Revalidate`, `Catalog.Fingerprint`, `Catalog.ClaimIDs`, exact lookup, detached snapshots,
   deterministic dynamic channel identities, and the logical `catalog.Options`,
   `Entry`, `Catalog`, `New`, `NewSnapshot`, `Entries`, `Lookup`, `Entry`,
-  `LookupChannel`, `Contains`, and `RequiredStores` facade.
+  `LookupChannel`, `Contains`, `RequiredStores`, and `Bindings` facade; fixed
+  `ReviewScope`, `NewReviewScope`, `RevalidateReviewScope`,
+  `ReviewScopeCatalogs`, and `NewReviewSnapshot` composition.
 - Runtime ordering: accept the already trusted canonical home, resolve every
   configured path in its declared context, generate canonical slash-separated
   store IDs, canonicalize existing leaves when building, reject catalog
@@ -68,6 +72,7 @@ must be separately specified.
 | `FR-DATABASE-PROVIDER-CATALOG-007` | MUST | Trusted supervisor or later owner composition asks one constructed internal `Catalog` to fingerprint the exact configuration revision from which that inventory was derived. | `Fingerprint` returns lowercase `sha256:` plus 64 hexadecimal digits. The digest uses a fixed version tag and unambiguous length/count framing to bind the canonical catalog home, exact configuration revision, ID-sorted complete specs, each ID/domain/candidate path/required flag, and every retained legacy root in its declared order. The accepted revision is exactly `missing` or lowercase `sha256:` plus 64 hexadecimal digits; input is never trimmed. Before hashing, the detached inventory must satisfy the same lexical ID, platform-path, generation-namespace, and legacy-alias rules as `Project`. | Fingerprinting clones and sorts detached specs, mutates neither retained catalog nor caller state, performs no filesystem or configuration read, and retains no digest state. | A nil or empty catalog; invalid revision, home, store ID, domain, candidate path, or legacy path; duplicate ID or legacy identity; generation overlap; or exact generation-to-legacy alias returns one generic error without echoing input. A matching fingerprint grants no catalog, path, provider, readiness, migration, transport, or application authority. | A broker generation needs one collision-resistant equality token identifying which complete catalog inventory belongs to which atomic configuration revision without publishing physical fields. |
 | `FR-DATABASE-PROVIDER-CATALOG-008` | MUST | Trusted supervisor or later owner composition supplies `NewSnapshot` the same explicit `Options` accepted by `New` plus the exact revision paired with that already validated immutable `Options.Config`. | One and only one `Project` result is used first to derive its internal `Fingerprint` and then to construct the logical `Catalog`; success returns both, and failure returns neither. The logical output uses the same conversion as `New`, while the fingerprint binds that exact projection's complete provider-private inventory under `FR-DATABASE-PROVIDER-CATALOG-007`. | Construction changes no filesystem, configuration, provider, transport, readiness, or application state. The returned object retains only logical catalog metadata, while the fingerprint is returned separately; neither retains a configuration pointer, internal catalog, spec, path, or legacy root. | The caller is responsible for pairing the exact revision with `Options.Config`; this primitive cannot prove that relationship. Invalid projection, revision, fingerprint input, or logical projection returns a nil catalog and empty fingerprint through one bounded provider-neutral error without exposing physical fields. No partial output is usable. | Owner composition needs an indivisible logical-catalog/fingerprint pair without independently rebuilding an inventory or making its physical paths part of a public API. |
 | `FR-DATABASE-PROVIDER-CATALOG-009` | MUST | Trusted infrastructure supplies an immutable projected catalog for strict revalidation or asks it for physical claim IDs. | `Revalidate` canonicalizes existing leaves, repeats complete collision validation, and returns a detached catalog without reading configuration. `ClaimIDs` returns sorted, deduplicated lowercase SHA-256 identities for every reserved main, WAL, SHM, rollback-journal, and legacy namespace without exposing a path or logical ID. | Both operations perform metadata reads only and retain no process-global state. | Nil, empty, changed-home, unsafe, invalid, or colliding projection and malformed claim input fail without a partial catalog or identity set. | Later ownership must freeze one projection and name its complete namespaces without retaining mutable configuration or disclosing paths. |
+| `FR-DATABASE-PROVIDER-CATALOG-010` | MUST | Privileged composition calls `NewReviewScope` with one trusted options/config-revision pair, revalidates it, obtains its claims bridge, or asks `NewReviewSnapshot` for the safe logical view. | Construction calls `Project` once for the complete catalog before selection. The immutable closed scope contains exactly five fixed review/PR stores plus one complete three-store review/evaluation/local-CI group for each distinct non-primary workspace. Every exact StoreID/domain pair and original required bit is preserved. Bindings, required IDs, and logical entries are detached and ID-sorted. A separate versioned scope fingerprint length-frames the complete catalog fingerprint and every selected ID/domain/required binding. `RevalidateReviewScope` strictly revalidates the complete catalog and requires both fingerprints and the complete selection to remain unchanged. `ReviewScopeCatalogs` is referenced only by the exact claims bridge and returns detached complete and selected catalog clones; the public facade returns no physical catalog or full fingerprint. | Scope construction and queries retain immutable process-local values only and perform no provider open, claim, migration, IPC, or application mutation. | Invalid revision/catalog, missing fixed entry, malformed or incomplete dynamic group, duplicate/unknown selected identity, wrong domain, selected/unselected lexical or existing physical alias, changed full catalog, corrupted scope, or partial logical conversion fails without a usable scope, catalog, or fingerprint. | A partial broker must derive authority from the complete trusted inventory while exposing and eventually claiming only the closed review selection; a filtered handler set or bare full-catalog fingerprint cannot prove that boundary. |
 
 ## Data And State Model
 
@@ -105,6 +110,15 @@ into the logical catalog. The supplied configuration revision is a trusted
 association asserted by the caller, not a value loaded or verified against a
 configuration file by this feature.
 
+`ReviewScope` retains the complete projected catalog, a selected physical clone,
+the asserted configuration revision, the complete-catalog fingerprint, a
+domain-separated scope fingerprint, and detached sorted logical bindings. The
+selection policy is code-closed: two global PR stores, three primary review
+stores, and one exact three-store group per distinct non-primary workspace. No
+caller supplies an ID, domain, spec, or path. `NewReviewSnapshot` copies only
+the selected logical bindings into the provider-neutral `Catalog`; only the
+claims package may use `ReviewScopeCatalogs` to obtain detached physical clones.
+
 Path contexts are fixed as follows:
 
 | Logical namespace | Candidate path context |
@@ -128,6 +142,7 @@ rules do not make any candidate exist and do not authorize reading its contents.
 Owns: CODE internal/storecatalog/catalog.go
 Owns: CODE internal/storecatalog/fingerprint.go
 Owns: CODE internal/storecatalog/claim_ids.go
+Owns: CODE internal/storecatalog/review_scope.go
 Owns: CODE internal/storecatalog/path_*.go
 Owns: TEST internal/storecatalog/*_test.go *
 Owns: TEST internal/storecatalog/fingerprint_test.go *
@@ -135,9 +150,11 @@ Owns: TEST internal/storecatalog/revalidate_safety_test.go *
 Owns: TEST internal/storecatalog/revalidate_safety_unix_test.go *
 Owns: CODE pkg/database/catalog/catalog.go
 Owns: CODE pkg/database/catalog/snapshot.go
+Owns: CODE pkg/database/catalog/review_scope.go
 Owns: TEST pkg/database/catalog/catalog_test.go *
 Owns: TEST pkg/database/catalog/import_guard_test.go *
 Owns: TEST pkg/database/catalog/snapshot_test.go *
+Owns: TEST pkg/database/catalog/review_scope_test.go *
 
 ## Auxiliary Interfaces
 
@@ -150,8 +167,10 @@ Owns: TEST pkg/database/catalog/snapshot_test.go *
 | Internal Go API | `Catalog.Fingerprint(configRevision)` | Derive a versioned opaque equality binding for the complete physical inventory and exact configuration revision without reading or publishing either source. | `FR-DATABASE-PROVIDER-CATALOG-007` |
 | Internal Go API | `Revalidate`, `Catalog.ClaimIDs` | Strictly rebuild one immutable projection and derive its sorted path-private namespace identities. | `FR-DATABASE-PROVIDER-CATALOG-009` |
 | Provider-neutral Go value | `catalog.Entry`, `catalog.Catalog` | Retain only detached logical ID, domain, and required-store policy without physical provider fields or readiness. | `FR-DATABASE-PROVIDER-CATALOG-006` |
-| Provider-neutral Go API | `catalog.New`, `Entries`, `Lookup`, `Entry`, `LookupChannel`, `Contains`, `RequiredStores` | Project and query exact logical membership and required-store policy without inspecting generation members, exposing internal specs, or deriving readiness. | `FR-DATABASE-PROVIDER-CATALOG-006` |
+| Provider-neutral Go API | `catalog.New`, `Entries`, `Lookup`, `Entry`, `LookupChannel`, `Contains`, `RequiredStores`, `Bindings` | Project and query exact logical membership, admission bindings, and required-store policy without inspecting generation members, exposing internal specs, or deriving readiness. | `FR-DATABASE-PROVIDER-CATALOG-006` |
 | Provider-neutral Go API | `catalog.NewSnapshot(options, configRevision)` | Atomically derive one logical catalog and its opaque complete-inventory fingerprint from one internal projection supplied with a trusted revision/config pairing. | `FR-DATABASE-PROVIDER-CATALOG-008` |
+| Internal review scope | `NewReviewScope`, `RevalidateReviewScope`, `ReviewScope.Fingerprint`, `FullFingerprint`, `Bindings`, `RequiredStores`, `ReviewScopeCatalogs` | Derive the immutable fixed review selection from the complete catalog, bind it to both fingerprints, expose only detached logical policy generally, and release detached physical catalogs only through the exact claims bridge. | `FR-DATABASE-PROVIDER-CATALOG-010` |
+| Provider-neutral review facade | `catalog.NewReviewSnapshot`, `Catalog.Bindings` | Return only the selected logical catalog, safe served bindings, required policy, and scope fingerprint without retaining or exposing physical authority. | `FR-DATABASE-PROVIDER-CATALOG-010` |
 | Architecture gates | Internal-catalog and logical-facade import guards | Permit the exact facade implementation to consume the internal inventory and the hidden database command to consume that facade; reject every additional production consumer unless its owner composition is specified first. | `FR-DATABASE-PROVIDER-CATALOG-005` |
 
 ## Algorithms And Ordering
@@ -197,6 +216,11 @@ Owns: TEST pkg/database/catalog/snapshot_test.go *
     every reserved namespace with a versioned prefix, deduplicate, and sort.
 11. A later provider repeats final path, owner, type, link, and generation checks
    around its open; it never infers authority from this earlier snapshot alone.
+12. To construct the review scope, project and fingerprint the complete catalog,
+    require every fixed ID and every complete dynamic three-store group with its
+    exact domain, sort the selected records, then fingerprint the full token and
+    each ID/domain/required binding. Strict revalidation repeats the complete
+    physical alias checks before rebuilding and comparing that same scope.
 
 ## Cross-Feature Behavior
 
@@ -204,9 +228,10 @@ Owns: TEST pkg/database/catalog/snapshot_test.go *
 `FR-DATABASE-IPC` supplies the trusted canonical-home identity. This feature
 keeps physical candidates internal and exposes only its logical facade. Its one
 production consumer is the authenticated hidden supervisor command, which
-loads an atomic current configuration/revision pair, calls `NewSnapshot` once,
-and publishes only logical required-store IDs, an opaque fingerprint, and
-explicitly unavailable statuses through the IPC control server. The base
+loads an atomic current configuration/revision pair, calls `NewReviewSnapshot`
+once, and publishes only the review bindings, selected required IDs, separate
+scope fingerprint, and explicitly unavailable selected statuses through the IPC
+control server. The complete catalog fingerprint remains internal. The base
 `pkg/database` protocol/IPC package stays below both catalogs in the dependency
 graph and never imports its `catalog` subpackage, avoiding the cycle through
 `internal/storecatalog`. `NewSnapshot` itself does not load configuration,
@@ -257,6 +282,13 @@ Neither path is wired into runtime migration or opens a live store.
   containment alone as a collision.
 - An internal catalog error does not fall back to caller-supplied paths or an
   existing application store.
+- Review selection never accepts a caller-provided subset. A missing fixed ID,
+  incomplete dynamic group, selected suffix under a malformed namespace, or
+  selected domain under an unknown ID invalidates the entire scope.
+- A change confined to an unselected catalog record changes both the full and
+  scope fingerprints even when the selected logical bindings are unchanged.
+- Scope bindings and the provider-neutral review snapshot contain no path,
+  legacy root, physical catalog, claim ID, provider, or full fingerprint.
 
 ## Acceptance Evidence
 
@@ -266,10 +298,11 @@ Neither path is wired into runtime migration or opens a live store.
 | `FR-DATABASE-PROVIDER-CATALOG-002` | [internal/storecatalog/catalog_test.go](../../internal/storecatalog/catalog_test.go), [internal/storecatalog/catalog_boundaries_test.go](../../internal/storecatalog/catalog_boundaries_test.go), [internal/storecatalog/catalog_security_test.go](../../internal/storecatalog/catalog_security_test.go) |
 | `FR-DATABASE-PROVIDER-CATALOG-004` | [internal/storecatalog/catalog_test.go](../../internal/storecatalog/catalog_test.go), [internal/storecatalog/catalog_boundaries_test.go](../../internal/storecatalog/catalog_boundaries_test.go), [internal/storecatalog/catalog_security_test.go](../../internal/storecatalog/catalog_security_test.go) |
 | `FR-DATABASE-PROVIDER-CATALOG-005` | [internal/storecatalog/import_guard_test.go](../../internal/storecatalog/import_guard_test.go), [pkg/database/catalog/import_guard_test.go](../../pkg/database/catalog/import_guard_test.go) |
-| `FR-DATABASE-PROVIDER-CATALOG-006` | [pkg/database/catalog/catalog_test.go](../../pkg/database/catalog/catalog_test.go), [pkg/database/catalog/import_guard_test.go](../../pkg/database/catalog/import_guard_test.go) |
+| `FR-DATABASE-PROVIDER-CATALOG-006` | [pkg/database/catalog/catalog_test.go](../../pkg/database/catalog/catalog_test.go), [pkg/database/catalog/review_scope_test.go](../../pkg/database/catalog/review_scope_test.go), [pkg/database/catalog/import_guard_test.go](../../pkg/database/catalog/import_guard_test.go) |
 | `FR-DATABASE-PROVIDER-CATALOG-007` | [internal/storecatalog/fingerprint_test.go](../../internal/storecatalog/fingerprint_test.go), [internal/storecatalog/import_guard_test.go](../../internal/storecatalog/import_guard_test.go) |
 | `FR-DATABASE-PROVIDER-CATALOG-008` | [pkg/database/catalog/snapshot_test.go](../../pkg/database/catalog/snapshot_test.go), [pkg/database/catalog/import_guard_test.go](../../pkg/database/catalog/import_guard_test.go) |
 | `FR-DATABASE-PROVIDER-CATALOG-009` | [internal/storecatalog/catalog_test.go](../../internal/storecatalog/catalog_test.go), [internal/storecatalog/claim_ids_test.go](../../internal/storecatalog/claim_ids_test.go) |
+| `FR-DATABASE-PROVIDER-CATALOG-010` | [internal/storecatalog/review_scope_test.go](../../internal/storecatalog/review_scope_test.go), [internal/storecatalog/import_guard_test.go](../../internal/storecatalog/import_guard_test.go), [pkg/database/catalog/review_scope_test.go](../../pkg/database/catalog/review_scope_test.go), [pkg/database/catalog/import_guard_test.go](../../pkg/database/catalog/import_guard_test.go) |
 
 ## Implementation Anchors
 
@@ -280,9 +313,13 @@ Neither path is wired into runtime migration or opens a live store.
 - [internal/storecatalog/fingerprint.go](../../internal/storecatalog/fingerprint.go)
 - [internal/storecatalog/fingerprint_test.go](../../internal/storecatalog/fingerprint_test.go)
 - [internal/storecatalog/claim_ids.go](../../internal/storecatalog/claim_ids.go)
+- [internal/storecatalog/review_scope.go](../../internal/storecatalog/review_scope.go)
+- [internal/storecatalog/review_scope_test.go](../../internal/storecatalog/review_scope_test.go)
 - [internal/storecatalog/import_guard_test.go](../../internal/storecatalog/import_guard_test.go)
 - [pkg/database/catalog/catalog.go](../../pkg/database/catalog/catalog.go)
 - [pkg/database/catalog/catalog_test.go](../../pkg/database/catalog/catalog_test.go)
 - [pkg/database/catalog/import_guard_test.go](../../pkg/database/catalog/import_guard_test.go)
 - [pkg/database/catalog/snapshot.go](../../pkg/database/catalog/snapshot.go)
+- [pkg/database/catalog/review_scope.go](../../pkg/database/catalog/review_scope.go)
+- [pkg/database/catalog/review_scope_test.go](../../pkg/database/catalog/review_scope_test.go)
 - [pkg/database/catalog/snapshot_test.go](../../pkg/database/catalog/snapshot_test.go)
