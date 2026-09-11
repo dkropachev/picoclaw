@@ -3,6 +3,7 @@ package databasemigration
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/sipeed/picoclaw/internal/databaseadapter"
 	"github.com/sipeed/picoclaw/internal/sqliteprovider"
+	"github.com/sipeed/picoclaw/internal/sqlitestore"
 	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
@@ -111,6 +113,126 @@ func TestAdapterReceivesDisposableLegacyBackupCopy(t *testing.T) {
 		if readErr != nil || string(payload) != "original legacy" {
 			t.Fatalf("master legacy backup changed: %q, %v", payload, readErr)
 		}
+	}
+}
+
+func TestAdapterUsesDeferredImporterWithoutMutatingLiveSource(t *testing.T) {
+	home := migrationHome(t)
+	liveLegacy := filepath.Join(home, "workspace", "workflow_runs", "run.json")
+	liveDatabase := filepath.Join(home, "workspace", "state", "workflows.db")
+	writeMigrationFile(t, liveLegacy, []byte("sealed workflow"))
+	stamp := time.Date(2026, 9, 10, 12, 34, 56, 0, time.UTC)
+	if err := os.Chtimes(liveLegacy, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(liveLegacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	registry := migrationRegistry(t, databaseadapter.Adapter{
+		Domain: "workflows",
+		Contract: databaseadapter.Contract{
+			CurrentVersion: 1,
+			EmptyPolicy:    databaseadapter.EmptyMigrateOffline,
+			RequiredObjects: []databaseadapter.SchemaObject{
+				{Type: "table", Name: "items"},
+				{Type: "table", Name: "storage_imports"},
+				{Type: "table", Name: "storage_import_issues"},
+				{Type: "table", Name: "storage_import_horizons"},
+				{Type: "index", Name: "storage_imports_archive_status_idx"},
+			},
+			RequiredColumns: []databaseadapter.ColumnSet{
+				{Table: "items", Columns: []string{"id", "value"}},
+				{Table: "storage_imports", Columns: []string{
+					"component", "source_id", "archive_status",
+				}},
+				{Table: "storage_import_horizons", Columns: []string{
+					"component", "completed_at",
+				}},
+			},
+			ImportHorizon: "workflows",
+		},
+		Migrate: func(ctx context.Context, target databaseadapter.Target) error {
+			if len(target.LegacyRoots) != 4 || target.LegacyRoots[0] == filepath.Dir(liveLegacy) {
+				return errors.New("adapter did not receive ordered disposable legacy roots")
+			}
+			db, openErr := sqlitestore.Open(ctx, target.GenerationPath, sqlitestore.Options{
+				Component: "workflows",
+				Migrations: []sqlitestore.Migration{{
+					Version: 1,
+					Statements: []string{`CREATE TABLE items (
+                        id TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    ) STRICT`},
+				}},
+				Legacy: &sqlitestore.LegacyOptions{
+					SourceRoot: target.LegacyRoots[0],
+					Closeout:   sqlitestore.LegacyCloseoutDeferred,
+					Sources: func() ([]sqlitestore.LegacySource, error) {
+						return []sqlitestore.LegacySource{{
+							ID: "run", Relative: "run.json",
+						}}, nil
+					},
+					Import: func(
+						ctx context.Context,
+						conn *sql.Conn,
+						input sqlitestore.LegacyInput,
+					) (sqlitestore.ImportResult, error) {
+						_, importErr := conn.ExecContext(
+							ctx,
+							`INSERT INTO items(id, value) VALUES (?, ?)`,
+							input.ID,
+							string(input.Data),
+						)
+						return sqlitestore.ImportResult{Imported: 1}, importErr
+					},
+				},
+			})
+			if openErr != nil {
+				return openErr
+			}
+			return db.Close()
+		},
+	})
+	result, err := migrationEngine(t, home, registry).Run(t.Context(), Options{
+		Stores: []database.StoreID{"workspace/workflows"},
+	})
+	if err != nil || result.BackupDir == "" {
+		t.Fatalf("Run() = %#v, %v", result, err)
+	}
+	after, err := os.Lstat(liveLegacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(liveLegacy)
+	if err != nil || string(data) != "sealed workflow" || !os.SameFile(before, after) ||
+		before.Mode() != after.Mode() || before.Size() != after.Size() ||
+		!before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("live sealed source changed = %q, %#v/%#v, %v", data, before, after, err)
+	}
+
+	db, err := sqliteprovider.OpenStore(liveDatabase, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var value, archiveStatus string
+	var archivedAt any
+	if err := db.QueryRow(`SELECT item.value, imported.archive_status, imported.archived_at
+        FROM items AS item
+        JOIN storage_imports AS imported ON imported.source_id = item.id
+        WHERE imported.component = 'workflows' AND item.id = 'run'`).Scan(
+		&value,
+		&archiveStatus,
+		&archivedAt,
+	); err != nil || value != "sealed workflow" || archiveStatus != "pending" || archivedAt != nil {
+		t.Fatalf("installed import = %q/%q/%#v, %v", value, archiveStatus, archivedAt, err)
+	}
+	var horizons int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM storage_import_horizons
+        WHERE component = 'workflows'`).Scan(&horizons); err != nil || horizons != 1 {
+		t.Fatalf("installed import horizon = %d, %v", horizons, err)
 	}
 }
 

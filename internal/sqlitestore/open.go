@@ -68,12 +68,23 @@ func Open(ctx context.Context, path string, options Options) (_ *sql.DB, returnE
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if options.Legacy != nil {
+		// Freeze caller-owned policy and roots before any callback can mutate the
+		// original pointer and change authority or closeout behavior mid-open.
+		legacy := *options.Legacy
+		options.Legacy = &legacy
+	}
 	component := strings.TrimSpace(options.Component)
 	if !validIdentifier(component) {
 		return nil, errors.New("sqlite store component is invalid")
 	}
 	if err := validateMigrations(options.Migrations); err != nil {
 		return nil, fmt.Errorf("%s schema: %w", component, err)
+	}
+	if options.Legacy != nil {
+		if err := validateLegacyCloseout(*options.Legacy); err != nil {
+			return nil, fmt.Errorf("%s legacy migration: %w", component, err)
+		}
 	}
 	if err := validateDatabasePath(path); err != nil {
 		return nil, fmt.Errorf("%s database path: %w", component, err)
@@ -85,6 +96,22 @@ func Open(ctx context.Context, path string, options Options) (_ *sql.DB, returnE
 		return nil, fmt.Errorf("%s database migration authority does not match path", component)
 	}
 	offline := fileBacked && dblayer.MigrationContextAuthorizes(ctx, path)
+	if options.Legacy != nil && options.Legacy.Closeout == LegacyCloseoutDeferred {
+		if !offline {
+			return nil, fmt.Errorf(
+				"%s deferred legacy import requires exact-target offline migration authority",
+				component,
+			)
+		}
+		sourceRoot, err := validateLegacySourceRoot(options.Legacy.SourceRoot)
+		if err != nil {
+			return nil, fmt.Errorf("%s deferred legacy import: %w", component, err)
+		}
+		if err := validateDeferredLegacyTarget(path, sourceRoot); err != nil {
+			return nil, fmt.Errorf("%s deferred legacy import: %w", component, err)
+		}
+		options.Legacy.SourceRoot = sourceRoot
+	}
 	busyTimeout := options.BusyTimeout
 	if busyTimeout == 0 {
 		busyTimeout = DefaultBusyTimeout
@@ -141,7 +168,7 @@ func Open(ctx context.Context, path string, options Options) (_ *sql.DB, returnE
 			return nil, fmt.Errorf("secure %s database files: %w", component, err)
 		}
 	}
-	if options.Legacy != nil {
+	if options.Legacy != nil && options.Legacy.Closeout == LegacyCloseoutArchive {
 		if err = archiveOpenedSQLiteLegacyFiles(ctx, db, component, *options.Legacy); err != nil {
 			return nil, err
 		}
@@ -303,7 +330,20 @@ func migrate(ctx context.Context, db *sql.DB, options Options) error {
 		if err := validateImportSchema(ctx, conn); err != nil {
 			return fmt.Errorf("%w: validate %s import schema: %v", ErrInvalidSchema, options.Component, err)
 		}
-		return integrityCheckConn(ctx, conn, options.Component)
+		if err := integrityCheckConn(ctx, conn, options.Component); err != nil {
+			return err
+		}
+		if options.Legacy != nil {
+			if err := revalidateDeferredLegacyProof(
+				ctx,
+				options.Component,
+				*options.Legacy,
+				importSummary.deferred,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return err
