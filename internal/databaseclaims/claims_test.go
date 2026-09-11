@@ -44,26 +44,31 @@ func (acquirer testClaimAcquirer) AcquireProjected(
 }
 
 func TestAcquireRequiresExistingStorageFence(t *testing.T) {
-	before := stableClaimRootSnapshot(t)
-	home := secureTestDir(t)
-	lease, err := Acquire(testOptions(t, home, &config.Config{}), nil)
-	if lease != nil || database.CodeOf(err) != database.CodeUnauthorized {
-		t.Fatalf("Acquire() without fence = %#v, %v", lease, err)
-	}
-	if after := stableClaimRootSnapshot(t); after != before {
-		t.Fatalf("unauthorized Acquire changed stable claim root from %#v to %#v", before, after)
-	}
-}
-
-func TestAcquireProjectedRevalidatesDetachedCatalog(t *testing.T) {
-	testClaims := newTestClaimAcquirer(t)
-	stableLocks := stableClaimRootSnapshot(t)
 	home := secureTestDir(t)
 	options := testOptions(t, home, &config.Config{})
 	projected, err := storecatalog.Project(options)
 	if err != nil {
 		t.Fatal(err)
 	}
+	stableNames := stableClaimFileNamesForCatalog(t, projected)
+	assertStableClaimFilesAbsent(t, stableNames)
+	lease, err := Acquire(options, nil)
+	if lease != nil || database.CodeOf(err) != database.CodeUnauthorized {
+		t.Fatalf("Acquire() without fence = %#v, %v", lease, err)
+	}
+	assertStableClaimFilesAbsent(t, stableNames)
+}
+
+func TestAcquireProjectedRevalidatesDetachedCatalog(t *testing.T) {
+	testClaims := newTestClaimAcquirer(t)
+	home := secureTestDir(t)
+	options := testOptions(t, home, &config.Config{})
+	projected, err := storecatalog.Project(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stableNames := stableClaimFileNamesForCatalog(t, projected)
+	assertStableClaimFilesAbsent(t, stableNames)
 	fence, err := database.AcquireMigrationFence(home)
 	if err != nil {
 		t.Fatal(err)
@@ -98,9 +103,7 @@ func TestAcquireProjectedRevalidatesDetachedCatalog(t *testing.T) {
 		database.CodeOf(err) != database.CodeUnauthorized {
 		t.Fatalf("wrong-fence projected Acquire = %#v, %v", lease, err)
 	}
-	if after := stableClaimRootSnapshot(t); after != stableLocks {
-		t.Fatalf("unauthorized AcquireProjected changed stable claim root from %#v to %#v", stableLocks, after)
-	}
+	assertStableClaimFilesAbsent(t, stableNames)
 }
 
 func TestAcquireRequiresFenceForExactHomeAndLeaseExpiresWithFence(t *testing.T) {

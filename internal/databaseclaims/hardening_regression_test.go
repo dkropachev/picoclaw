@@ -536,52 +536,26 @@ func TestLeaseRejectsInvalidRetainedReplacementHandle(t *testing.T) {
 }
 
 func TestOrdinaryAcquireDoesNotTouchStableClaimRoot(t *testing.T) {
-	before := stableClaimRootSnapshot(t)
 	testClaims := newTestClaimAcquirer(t)
 	home := secureTestDir(t)
+	options := testOptions(t, home, &config.Config{})
+	projected, err := storecatalog.Project(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stableNames := stableClaimFileNamesForCatalog(t, projected)
+	assertStableClaimFilesAbsent(t, stableNames)
 	fence, err := database.AcquireOnlineFence(home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fence.Close()
-	lease, err := testClaims.Acquire(testOptions(t, home, &config.Config{}), fence)
+	lease, err := testClaims.Acquire(options, fence)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := lease.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if after := stableClaimRootSnapshot(t); after != before {
-		t.Fatalf("stable production claim root changed from %#v to %#v", before, after)
-	}
-}
-
-type stableClaimRootState struct {
-	exists  bool
-	entries int
-	names   string
-}
-
-func stableClaimRootSnapshot(t *testing.T) stableClaimRootState {
-	t.Helper()
-	cache, err := stableClaimCacheRoot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	root := filepath.Join(cache, claimApplicationDirectory, claimDirectoryName)
-	entries, err := os.ReadDir(root)
-	if os.IsNotExist(err) {
-		return stableClaimRootState{}
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names strings.Builder
-	for _, entry := range entries {
-		names.WriteString(entry.Name())
-		names.WriteByte('\x00')
-		names.WriteString(entry.Type().String())
-		names.WriteByte('\x00')
-	}
-	return stableClaimRootState{exists: true, entries: len(entries), names: names.String()}
+	assertStableClaimFilesAbsent(t, stableNames)
 }

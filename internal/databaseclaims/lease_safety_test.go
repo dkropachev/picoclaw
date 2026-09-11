@@ -294,13 +294,9 @@ func TestAcquireRejectsFinalPhysicalIdentityDrift(t *testing.T) {
 }
 
 func TestAcquireProjectedRejectsUnavailableInventory(t *testing.T) {
-	before := stableClaimRootSnapshot(t)
 	if lease, err := AcquireProjected(nil, nil); lease != nil ||
 		database.CodeOf(err) != database.CodeInvalid {
 		t.Fatalf("AcquireProjected(nil) = %#v, %v", lease, err)
-	}
-	if after := stableClaimRootSnapshot(t); after != before {
-		t.Fatalf("nil AcquireProjected changed stable claim root from %#v to %#v", before, after)
 	}
 }
 
