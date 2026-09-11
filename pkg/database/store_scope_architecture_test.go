@@ -58,16 +58,19 @@ func TestScopedStoreTargetHasOneWireAuthority(t *testing.T) {
 			scopedTargetLiteralStoreID: 2,
 		},
 		"cmd/picoclaw/internal/database/command.go": {
-			scopedTargetExternalStoreID: 1,
+			scopedTargetExternalStoreID: 2,
 		},
 		"internal/databaseadapter/registry.go": {
 			scopedTargetExternalStoreID: 1,
 		},
 		"internal/databaseclaims/claims.go": {
-			scopedTargetExternalStoreID: 31,
+			scopedTargetExternalStoreID: 33,
 		},
 		"internal/databaseclaims/provider_lease.go": {
 			scopedTargetExternalStoreID: 1,
+		},
+		"internal/databaseclaims/scoped_claims.go": {
+			scopedTargetExternalStoreID: 8,
 		},
 		"internal/databasemigration/backup_archive.go": {
 			scopedTargetExternalStoreID: 4,
@@ -94,6 +97,9 @@ func TestScopedStoreTargetHasOneWireAuthority(t *testing.T) {
 		"internal/storecatalog/catalog.go": {
 			scopedTargetExternalStoreID: 12,
 			scopedTargetExternalParseID: 1,
+		},
+		"internal/storecatalog/review_scope.go": {
+			scopedTargetExternalStoreID: 13,
 		},
 		"pkg/database/catalog/catalog.go": {
 			scopedTargetExternalStoreID: 1,

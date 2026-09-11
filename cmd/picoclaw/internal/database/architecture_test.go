@@ -44,7 +44,7 @@ var commandRequiredBindings = map[string]int{
 	"config.ConfigRevision":                   1,
 	"config.LoadCurrentConfigSnapshot":        1,
 	"config.WithConfigMutationLock":           1,
-	"dbcatalog.NewSnapshot":                   1,
+	"dbcatalog.NewReviewSnapshot":             1,
 	"dblayer.CanonicalHome":                   1,
 	"dblayer.ConsumeSupervisorBootstrapGuard": 1,
 	"dblayer.NewHandlerRegistry":              1,
@@ -52,15 +52,17 @@ var commandRequiredBindings = map[string]int{
 }
 
 var commandAllowedDatabaseBindings = map[string]bool{
-	"CanonicalHome": true, "CodeConflict": true, "CodeDeadline": true, "CodeInternal": true,
-	"CodeInvalid": true, "CodeMigrationRequired": true, "CodeOf": true, "CodeUnavailable": true,
+	"CanonicalHome": true, "CodeConflict": true, "CodeDeadline": true, "CodeIntegrity": true,
+	"CodeInternal": true, "CodeInvalid": true, "CodeMigrationRequired": true, "CodeOf": true,
+	"CodeUnavailable":                 true,
 	"ConsumeSupervisorBootstrapGuard": true, "Handler": true, "NewError": true,
-	"NewHandlerRegistry": true, "ServerOptions": true, "StartServer": true, "StoreID": true,
+	"NewHandlerRegistry": true, "ServerOptions": true, "StartServer": true,
+	"StoreBinding": true, "StoreID": true,
 	"StoreStatus": true, "StoreUnavailable": true,
 }
 
 var commandAllowedCatalogBindings = map[string]bool{
-	"Entry": true, "NewSnapshot": true, "Options": true,
+	"Entry": true, "NewReviewSnapshot": true, "Options": true,
 }
 
 var commandAllowedConfigBindings = map[string]bool{
@@ -394,7 +396,7 @@ func commandBindingViolations(name string, parsed *ast.File) []string {
 		}
 	}
 	for _, binding := range []string{
-		"dblayer.ConsumeSupervisorBootstrapGuard", "dbcatalog.NewSnapshot",
+		"dblayer.ConsumeSupervisorBootstrapGuard", "dbcatalog.NewReviewSnapshot",
 		"dblayer.NewHandlerRegistry", "dblayer.StartServer",
 	} {
 		if calls[binding] != 1 {
@@ -416,7 +418,7 @@ func commandBindingViolations(name string, parsed *ast.File) []string {
 		"ops.consumeGuard":       1,
 		"ops.loadConfigSnapshot": 1,
 		"ops.newRegistry":        1,
-		"ops.newSnapshot":        1,
+		"ops.newReviewSnapshot":  1,
 		"ops.startServer":        1,
 		"ops.withConfigLock":     1,
 	} {
@@ -431,6 +433,7 @@ func commandBindingViolations(name string, parsed *ast.File) []string {
 		want int
 	}{
 		{name: "AddCommand", want: 1},
+		{name: "Bindings", want: 1},
 		{name: "Entries", want: 1},
 		{name: "RequiredStores", want: 1},
 		{name: "Validate", want: 2},
@@ -603,7 +606,8 @@ func commandTreeViolations(name string, parsed *ast.File) []string {
 func commandServerOptionsViolations(name string, parsed *ast.File) []string {
 	want := map[string]bool{
 		"Home": true, "CatalogFingerprint": true, "RequiredStores": true,
-		"StatusProvider": true, "Handler": true, "StartupGuard": true, "CloseHandler": true,
+		"ServedStores": true, "StatusProvider": true, "Handler": true,
+		"StartupGuard": true, "CloseHandler": true,
 	}
 	count := 0
 	var violations []string

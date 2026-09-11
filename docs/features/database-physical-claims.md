@@ -7,10 +7,11 @@
 ## Behavior Summary
 
 PicoClaw defines a dormant process-external claim lease for every physical
-namespace in one immutable store catalog. A caller already holding the exact
-online or migration home fence acquires sorted path-private lexical and
-existing physical identities, strictly revalidates the catalog, and retains
-all claims for the lease lifetime.
+namespace in one immutable store catalog, or for the exact selected stores in
+an opaque review scope. A caller already holding the exact online or migration
+home fence acquires sorted path-private lexical and existing physical
+identities, strictly revalidates the governing catalog, and retains all claims
+for the lease lifetime.
 
 Claims and fences coordinate participating PicoClaw processes. They do not
 exclude arbitrary same-user filesystem or SQLite writers. Runtime activation
@@ -23,8 +24,9 @@ no application persistence path.
 - Similarity target: prevent two participating homes or owners from assigning
   one physical generation while paths materialize and controlled replacement
   occurs.
-- Core APIs: `Acquire`, `AcquireProjected`, test-gated `PrepareRootForTesting`
-  and `AcquireForTesting`, `Lease.Check`, `Guard`,
+- Core APIs: `Acquire`, `AcquireProjected`, `AcquireReviewScope`, test-gated
+  `PrepareRootForTesting`, `AcquireForTesting`, and
+  `AcquireReviewScopeForTesting`, `Lease.Check`, `Guard`,
   `GuardStores`, `GuardStoresRefreshing`, `GuardStoresMigrating`,
   `MigrationRefreshingGuard`, `NewProviderLease`, `PinReplacement`,
   `DiscardReplacement`, `Refresh`, `RefreshReplacement`, and `Close`.
@@ -36,6 +38,10 @@ no application persistence path.
   owner-private user-cache root; identities and old claims accumulate
   monotonically; controlled replacement requires an exclusive fence and an
   exact StoreID-bound pinned stage.
+- A review lease uses the same unsalted claim IDs as a complete lease, but
+  acquires only selected identities. It retains the complete catalog as a
+  validation-only deny-set: current unselected observations are replaceable,
+  while selected observations and claims remain monotonic.
 
 ## Requirements
 
@@ -45,14 +51,17 @@ no application persistence path.
 | `FR-DATABASE-PHYSICAL-CLAIMS-002` | MUST | A lease exposes catalog data or transfers short-lived ownership work. | `Home`, `Stores`, and `Lookup` return detached data only while the retained fence and every claim pathname still name their locked objects. `Check` validates authority; `Guard`/`GuardStores` retain it across a handoff. `GuardStoresRefreshing` holds an exclusive lease/fence guard, pre-refreshes all assignments, and returns a non-reentrant reconciliation callback plus release. `GuardStoresMigrating` requires an exclusive migration fence and returns an opaque guard whose methods operate without reacquiring the already-held lease mutex. `NewProviderLease` derives one finite one-consumer child for an exact claimed StoreID/path and returns a drain closure that revokes admission before waiting for all provider work. Only one undrained child exists per guard; guard release closes new child/hook admission, revokes and drains that child while retaining the fence and lease mutex, then performs final reconciliation and unlock. | Ordinary reads mutate nothing; a refreshing guard may add monotonic claims and a child allocates only in-process revocation state. A detected loss permanently poisons the lease. | Nil/closed/poisoned lease, invalid or unclaimed ID, simultaneous child, unresolved prior pin, unbounded/canceled child context, wrong fence mode, fence replacement, lock-path replacement, reconcile after release, or close/refresh race exposes no stale catalog and cannot deadlock. | Consumers must not outlive or race the exact physical authority they rely on. |
 | `FR-DATABASE-PHYSICAL-CLAIMS-003` | MUST | Catalog sidecars materialize or an exclusively fenced staged generation is about to replace one claimed store. | `Refresh` and readiness refreshing reconciliation strictly revalidate the retained catalog, compare role-aware observations, monotonically claim new identities, repeat revalidation/observation, and reject ordinary main replacement. Migration-guard ordinary reconciliation permits sidecar/legacy changes but requires every main to retain its approved baseline, established at lease acquisition and advanced only by exact pinned replacement reconciliation. `MigrationRefreshingGuard.PinReplacement` first validates that invariant. It and `Lease.PinReplacement` reconcile the catalog, require an absolute canonical ancestor-safe regular single-link stage, lock/recheck it, permanently record its target assignment, and retain an exact no-follow handle until replacement reconciliation consumes the active association. `DiscardReplacement` immediately retires an unused published pin and is a no-op when none exists, while retaining monotonic claim/assignment history. The migration guard holds one checked migration fence continuously across pin, discard, and promotion; release performs mandatory validation/reconciliation, retires any remaining unused pins, then checks authority once more. Retired stages can never materialize or pin for another target. | New physical claim locks and bounded active stage handles accumulate until replacement consumption or retirement; assignment history remains monotonic. | Unknown StoreID is rejected before mutation without poisoning. Shared online fence, missing main materialized without a pin inside a migration guard, stale/new catalog alias, relative/directory/hardlinked/ancestor-aliased stage, unpinned/unreconciled/retired/different replacement, contention, identity drift, or claim/resource limit permanently poisons/fails the lease. | Replacement authority must be explicit, target-bound, identity-pinned, and unavailable while shared owners exist; an installed generation cannot escape final reconciliation. |
 | `FR-DATABASE-PHYSICAL-CLAIMS-004` | MUST | The lease closes or acquisition unwinds. | Claim-lock and retained stage handles close once in reverse acquisition order; repeated/nil close is safe. | OS locks and stage handles release, while private claim files may persist for reuse. | Close errors are joined without skipping remaining handles; retired/consumed pin resources are removed from the bounded ordered ledger. | Partial cleanup must not strand in-process ownership or hide a release failure. |
+| `FR-DATABASE-PHYSICAL-CLAIMS-005` | MUST | Trusted infrastructure calls `AcquireReviewScope` with an opaque immutable review scope and a live fence for its exact home. | The lease acquires the ordinary unsalted lexical and existing physical IDs for selected specs only, exposes only detached selected stores plus `ScopeFingerprint`, `FullCatalogFingerprint`, and sorted `StoreIDs`, and conflicts with selected claims held by review or complete leases. The full catalog is revalidated and observed before acquisition publication and at every exposure, check, guard entry/release, refresh, and migration boundary. | Selected identity/assignment history, selected replacement-pin assignment history, and selected claims accumulate monotonically. The current unselected observation is replaced on each validation and acquires no claim solely because it is unselected. | Scope/fingerprint/binding drift, current selected-to-unselected aliasing, reuse of a historically selected or pinned identity by an unselected assignment, missing selected claim, or partial acquisition fails closed and releases all acquired handles. Unselected-only materialization, deletion, replacement, inode reassignment, and inode reuse remain valid when they do not intersect selected authority. | A subset owner must conflict through the same physical locks without freezing or exposing unrelated stores, while the complete catalog still defines the collision boundary. |
 
 ## Data And State Model
 
-A `Lease` retains the strict immutable catalog, canonical home, claim-cache
-root, detached index, all locked claim handles, lexical identities, typed
-role-aware observations, monotonic opaque identity sets, StoreID-bound retained
-replacement handles, and the originating fence. No claim name contains a path
-or logical ID.
+A `Lease` retains the strict immutable selected catalog, canonical home,
+claim-cache root, detached index, all locked claim handles, lexical identities,
+typed role-aware observations, monotonic opaque selected identity sets,
+StoreID-bound retained replacement handles, and the originating fence. A
+review lease additionally retains opaque scope fingerprints and a complete
+catalog validator with a replaceable current unselected deny-set. No claim name
+contains a path or logical ID.
 
 ## Surface Ownership
 
@@ -64,7 +73,8 @@ Owns: TEST internal/databaseclaims/*_test.go *
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Internal Go API | `Acquire`, `AcquireProjected`, `Lease.Check`, `Stores`, `Lookup` | Acquire and expose one complete immutable catalog under retained physical authority. | `FR-DATABASE-PHYSICAL-CLAIMS-001`, `FR-DATABASE-PHYSICAL-CLAIMS-002` |
-| Test-only internal Go API | `PrepareRootForTesting`, `AcquireForTesting` | In a Go test process only, canonicalize/secure one explicit private root and route real lifecycle locks there; architecture tests forbid production callers and a non-test binary is rejected before mutation. | `FR-DATABASE-PHYSICAL-CLAIMS-001` |
+| Internal Go API | `AcquireReviewScope`, `Lease.ScopeFingerprint`, `FullCatalogFingerprint`, `StoreIDs` | Acquire only the immutable review selection while continuously validating the complete collision boundary; expose path-free scope metadata and selected stores only. | `FR-DATABASE-PHYSICAL-CLAIMS-005` |
+| Test-only internal Go API | `PrepareRootForTesting`, `AcquireForTesting`, `AcquireReviewScopeForTesting` | In a Go test process only, canonicalize/secure one explicit private root and route real lifecycle locks there; architecture tests forbid production callers and a non-test binary is rejected before mutation. | `FR-DATABASE-PHYSICAL-CLAIMS-001`, `FR-DATABASE-PHYSICAL-CLAIMS-005` |
 | Internal Go API | `Lease.Guard`, `Lease.GuardStores`, `Lease.GuardStoresRefreshing` | Keep lease and fence authority live across a short handoff; the refreshing form exclusively reconciles members materialized within it. | `FR-DATABASE-PHYSICAL-CLAIMS-002`, `FR-DATABASE-PHYSICAL-CLAIMS-003` |
 | Internal Go API | `Lease.GuardStoresMigrating`, `MigrationRefreshingGuard`, `NewProviderLease` | Hold one exclusive migration fence and lease mutex across detached catalog access, finite child-provider authority, checks, ordinary reconciliation, target-bound stage pinning/discard, replacement promotion, unused-pin retirement, and mandatory final reconciliation. | `FR-DATABASE-PHYSICAL-CLAIMS-002`, `FR-DATABASE-PHYSICAL-CLAIMS-003` |
 | Internal Go API | `Lease.Refresh`, `PinReplacement`, `RefreshReplacement` | Monotonically claim materialized or controlled replacement identities. | `FR-DATABASE-PHYSICAL-CLAIMS-003` |
@@ -102,6 +112,14 @@ Owns: TEST internal/databaseclaims/*_test.go *
    validate/reconcile again, retire any remaining unused pin, then perform a
    final fence/claim check before unlocking.
 8. Poison on ambiguous authority and close handles in reverse order.
+9. For a review scope, perform the same acquisition over the selected catalog
+   only. At the initial, final, exposure, check, guard, refresh, and migration
+   and final guard-release checkpoints, reconstruct the immutable scope,
+   require both fingerprints and bindings unchanged, strictly revalidate and
+   observe the complete catalog, and reject any current selected/unselected
+   cross-assignment. Replace the unselected deny-set after each successful
+   observation; do not require one unselected generation or assignment to equal
+   the next. Retain selected and replacement-pin assignment history.
 
 ## Cross-Feature Behavior
 
@@ -110,6 +128,11 @@ storage contracts supply stable physical identities; local IPC supplies shared
 online and exclusive migration fences. Separately specified readiness and
 migration consumers acquire a lease, but claims themselves never open a
 database.
+
+The privileged review-scope catalog bridge supplies both a selected ownership
+catalog and its complete validation catalog. Only selected specs can reach
+lease stores, lookup, refresh, migration, provider targets, or lock acquisition;
+the complete catalog is retained solely to reject aliases and scope drift.
 
 ## Failure And Edge Cases
 
@@ -127,6 +150,14 @@ database.
 - Old and replacement claims remain held until final close.
 - Releasing a migration guard after an installed but unreconciled replacement
   fails, poisons the lease, and still retires retained stage handles.
+- Review leases tolerate arbitrary unselected generation churn but reject a
+  current selected/unselected hardlink, an unselected stage alias, or later
+  reassignment of any identity previously observed for a selected member.
+- Review acquisition failure, normal close, and process death release every
+  selected OS lock; persistent claim files remain harmless and reusable.
+- Guard release validates live fence/claim authority and the complete review
+  collision boundary before unlocking; a transient loss or alias permanently
+  poisons the lease even if the filesystem is restored before the next call.
 
 ## Acceptance Evidence
 
@@ -134,9 +165,11 @@ database.
 | --- | --- |
 | `FR-DATABASE-PHYSICAL-CLAIMS-001`, `FR-DATABASE-PHYSICAL-CLAIMS-004` | [internal/databaseclaims/claims_test.go](../../internal/databaseclaims/claims_test.go), [internal/databaseclaims/coverage_closeout_test.go](../../internal/databaseclaims/coverage_closeout_test.go), [internal/databaseclaims/testing_api_guard_test.go](../../internal/databaseclaims/testing_api_guard_test.go), [internal/databaseclaims/testing_api_external_test.go](../../internal/databaseclaims/testing_api_external_test.go) |
 | `FR-DATABASE-PHYSICAL-CLAIMS-002`, `FR-DATABASE-PHYSICAL-CLAIMS-003` | [internal/databaseclaims/lease_safety_test.go](../../internal/databaseclaims/lease_safety_test.go), [internal/databaseclaims/claims_unix_test.go](../../internal/databaseclaims/claims_unix_test.go), [internal/databaseclaims/claims_windows_test.go](../../internal/databaseclaims/claims_windows_test.go), [internal/databaseclaims/hardening_regression_test.go](../../internal/databaseclaims/hardening_regression_test.go), [internal/databaseclaims/refreshing_guard_test.go](../../internal/databaseclaims/refreshing_guard_test.go), [internal/databaseclaims/refreshing_guard_coverage_test.go](../../internal/databaseclaims/refreshing_guard_coverage_test.go), [internal/databaseclaims/migration_refreshing_guard_test.go](../../internal/databaseclaims/migration_refreshing_guard_test.go), [internal/databaseclaims/provider_lease_test.go](../../internal/databaseclaims/provider_lease_test.go), [internal/databaseclaims/windows_semantics_test.go](../../internal/databaseclaims/windows_semantics_test.go) |
+| `FR-DATABASE-PHYSICAL-CLAIMS-005` | [internal/databaseclaims/scoped_claims_test.go](../../internal/databaseclaims/scoped_claims_test.go), [internal/databaseclaims/scoped_claims_process_test.go](../../internal/databaseclaims/scoped_claims_process_test.go), [internal/databaseclaims/testing_api_guard_test.go](../../internal/databaseclaims/testing_api_guard_test.go) |
 
 ## Implementation Anchors
 
 - [internal/databaseclaims/claims.go](../../internal/databaseclaims/claims.go)
+- [internal/databaseclaims/scoped_claims.go](../../internal/databaseclaims/scoped_claims.go)
 - [internal/databaseclaims/provider_lease.go](../../internal/databaseclaims/provider_lease.go)
 - [internal/databaseclaims/root.go](../../internal/databaseclaims/root.go)

@@ -30,6 +30,9 @@ func TestLogicalCatalogHasOneExactProductionConsumer(t *testing.T) {
 		if walkErr != nil {
 			return walkErr
 		}
+		if path != repositoryRoot && entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("repository entry is a symlink: %s", path)
+		}
 		if entry.IsDir() {
 			if path != repositoryRoot && logicalCatalogGuardSkipsDir(entry.Name()) {
 				return filepath.SkipDir
@@ -39,10 +42,6 @@ func TestLogicalCatalogHasOneExactProductionConsumer(t *testing.T) {
 		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("production Go source is a symlink: %s", path)
-		}
-
 		relative, err := filepath.Rel(repositoryRoot, path)
 		if err != nil {
 			return err
@@ -294,7 +293,9 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 	t.Parallel()
 
 	packageRoot := filepath.Join(logicalCatalogRepositoryRoot(t), "pkg", "database", "catalog")
-	allowedFiles := map[string]bool{"catalog.go": true, "snapshot.go": true}
+	allowedFiles := map[string]bool{
+		"catalog.go": true, "review_scope.go": true, "snapshot.go": true,
+	}
 	allowedImports := map[string]map[string]bool{
 		"catalog.go": {
 			"sort": true,
@@ -305,11 +306,16 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 		"snapshot.go": {
 			"github.com/sipeed/picoclaw/pkg/database": true,
 		},
+		"review_scope.go": {
+			"github.com/sipeed/picoclaw/internal/storecatalog": true,
+			"github.com/sipeed/picoclaw/pkg/database":          true,
+		},
 	}
 	allowedExports := map[string]bool{
 		"StoreID": true, "Options": true, "Entry": true, "Catalog": true, "New": true,
 		"NewSnapshot": true, "Entries": true, "Lookup": true, "LookupChannel": true,
-		"Contains": true, "RequiredStores": true,
+		"Contains": true, "RequiredStores": true, "Bindings": true,
+		"NewReviewSnapshot": true,
 	}
 	forbiddenImports := map[string]bool{
 		"crypto/sha256":       true,
@@ -326,8 +332,10 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 	}
 	var violations []string
 	newSnapshotDeclarations := 0
+	newReviewSnapshotDeclarations := 0
 	requiredStoresDeclarations := 0
-	storeCatalogImports := 0
+	bindingsDeclarations := 0
+	storeCatalogImports := make(map[string]int)
 	err := filepath.WalkDir(packageRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -366,10 +374,10 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 				))
 			}
 			if importPath == internalStoreCatalogImportPath {
-				storeCatalogImports++
-				if entry.Name() != "catalog.go" {
+				storeCatalogImports[entry.Name()]++
+				if entry.Name() != "catalog.go" && entry.Name() != "review_scope.go" {
 					violations = append(violations, fmt.Sprintf(
-						"%s:%d imports the physical catalog outside catalog.go",
+						"%s:%d imports the physical catalog outside reviewed facade files",
 						entry.Name(), fileSet.Position(imported.Pos()).Line,
 					))
 				}
@@ -409,10 +417,35 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 						))
 					}
 				}
+				if declaration.Name.Name == "NewReviewSnapshot" {
+					newReviewSnapshotDeclarations++
+					if entry.Name() != "review_scope.go" || !validNewSnapshotDeclaration(declaration) {
+						violations = append(violations, entry.Name()+": NewReviewSnapshot has an invalid surface")
+					}
+					newScopeCalls, bindingsCalls, fingerprintCalls, snapshotCalls := newReviewSnapshotCallCounts(
+						declaration,
+					)
+					if newScopeCalls != 1 || bindingsCalls != 1 || fingerprintCalls != 1 || snapshotCalls != 1 {
+						violations = append(violations, fmt.Sprintf(
+							"%s: NewReviewSnapshot calls NewReviewScope/Bindings/Fingerprint/newReviewCatalogSnapshot %d/%d/%d/%d times",
+							entry.Name(),
+							newScopeCalls,
+							bindingsCalls,
+							fingerprintCalls,
+							snapshotCalls,
+						))
+					}
+				}
 				if declaration.Name.Name == "RequiredStores" {
 					requiredStoresDeclarations++
 					if entry.Name() != "catalog.go" || !validRequiredStoresDeclaration(declaration) {
 						violations = append(violations, entry.Name()+": RequiredStores has an invalid surface")
+					}
+				}
+				if declaration.Name.Name == "Bindings" {
+					bindingsDeclarations++
+					if entry.Name() != "catalog.go" || !validBindingsDeclaration(declaration) {
+						violations = append(violations, entry.Name()+": Bindings has an invalid surface")
 					}
 				}
 			}
@@ -436,7 +469,8 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 					"MonitorSupervisor", "ConsumeSupervisorBootstrap", "ConnectInherited",
 					"ConnectWithManifest", "InstallProcessClient", "BrokerStatus", "Handler",
 					"StatusProvider", "Manifest", "ControlOperationStatus", "DriverName", "DSN",
-					"ProtectedRoots", "ProtectedRootsForDomains":
+					"ProtectedRoots", "ProtectedRootsForDomains", "ReviewScopeCatalogs",
+					"FullFingerprint":
 					violations = append(violations, fmt.Sprintf(
 						"%s:%d uses forbidden %s binding",
 						entry.Name(), fileSet.Position(selector.Pos()).Line, selector.Sel.Name,
@@ -455,20 +489,63 @@ func TestLogicalCatalogProductionSurfaceStaysProviderNeutral(t *testing.T) {
 			"NewSnapshot declaration count = %d, want 1", newSnapshotDeclarations,
 		))
 	}
+	if newReviewSnapshotDeclarations != 1 {
+		violations = append(violations, fmt.Sprintf(
+			"NewReviewSnapshot declaration count = %d, want 1", newReviewSnapshotDeclarations,
+		))
+	}
 	if requiredStoresDeclarations != 1 {
 		violations = append(violations, fmt.Sprintf(
 			"RequiredStores declaration count = %d, want 1", requiredStoresDeclarations,
 		))
 	}
-	if storeCatalogImports != 1 {
+	if bindingsDeclarations != 1 {
 		violations = append(violations, fmt.Sprintf(
-			"internal store catalog import count = %d, want exact catalog.go import", storeCatalogImports,
+			"Bindings declaration count = %d, want 1", bindingsDeclarations,
+		))
+	}
+	if storeCatalogImports["catalog.go"] != 1 || storeCatalogImports["review_scope.go"] != 1 ||
+		len(storeCatalogImports) != 2 {
+		violations = append(violations, fmt.Sprintf(
+			"internal store catalog imports = %#v, want exact catalog.go/review_scope.go imports",
+			storeCatalogImports,
 		))
 	}
 	if len(violations) != 0 {
 		sort.Strings(violations)
 		t.Fatalf("logical catalog exposed provider or activation surface:\n%s", strings.Join(violations, "\n"))
 	}
+}
+
+func validBindingsDeclaration(declaration *ast.FuncDecl) bool {
+	if declaration == nil || declaration.Type.TypeParams != nil || declaration.Recv == nil ||
+		declaration.Type.Params == nil || declaration.Type.Results == nil ||
+		len(fieldListTypes(declaration.Type.Params)) != 0 {
+		return false
+	}
+	receivers := fieldListTypes(declaration.Recv)
+	if len(receivers) != 1 {
+		return false
+	}
+	receiver, ok := receivers[0].(*ast.StarExpr)
+	if !ok || !identType(receiver.X, "Catalog") {
+		return false
+	}
+	results := fieldListTypes(declaration.Type.Results)
+	if len(results) != 1 {
+		return false
+	}
+	slice, ok := results[0].(*ast.ArrayType)
+	return ok && slice.Len == nil && qualifiedIdentType(slice.Elt, "database", "StoreBinding")
+}
+
+func qualifiedIdentType(expression ast.Expr, qualifier, name string) bool {
+	selector, ok := expression.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != name {
+		return false
+	}
+	prefix, ok := selector.X.(*ast.Ident)
+	return ok && prefix.Name == qualifier
 }
 
 func validRequiredStoresDeclaration(declaration *ast.FuncDecl) bool {
@@ -547,6 +624,37 @@ func newSnapshotCallCounts(declaration *ast.FuncDecl) (project, fingerprint, sna
 	return project, fingerprint, snapshot
 }
 
+func newReviewSnapshotCallCounts(
+	declaration *ast.FuncDecl,
+) (newScope, bindings, fingerprint, snapshot int) {
+	if declaration == nil {
+		return 0, 0, 0, 0
+	}
+	ast.Inspect(declaration.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch function := call.Fun.(type) {
+		case *ast.Ident:
+			if function.Name == "newReviewCatalogSnapshot" {
+				snapshot++
+			}
+		case *ast.SelectorExpr:
+			switch function.Sel.Name {
+			case "NewReviewScope":
+				newScope++
+			case "Bindings":
+				bindings++
+			case "Fingerprint":
+				fingerprint++
+			}
+		}
+		return true
+	})
+	return newScope, bindings, fingerprint, snapshot
+}
+
 func fieldListTypes(fields *ast.FieldList) []ast.Expr {
 	if fields == nil {
 		return nil
@@ -580,10 +688,26 @@ func logicalCatalogRepositoryRoot(t *testing.T) string {
 }
 
 func logicalCatalogGuardSkipsDir(name string) bool {
-	switch strings.ToLower(name) {
+	switch name {
 	case ".git", ".cache", "node_modules", "testdata", "vendor":
 		return true
 	default:
 		return false
+	}
+}
+
+func TestLogicalCatalogGuardSkipsOnlyExactNonProductionDirectories(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{".git", ".cache", "node_modules", "testdata", "vendor"} {
+		if !logicalCatalogGuardSkipsDir(name) {
+			t.Errorf("guard did not skip exact non-production directory %q", name)
+		}
+	}
+	for _, name := range []string{
+		".Cache", "Node_Modules", "TestData", "Vendor", "cache", "gen", "generated",
+	} {
+		if logicalCatalogGuardSkipsDir(name) {
+			t.Errorf("guard skipped buildable lookalike directory %q", name)
+		}
 	}
 }

@@ -13,8 +13,9 @@ launch a bounded child attempt through a one-use owner-private bootstrap. The
 supervisor retains an opaque physical-home guard from bootstrap consumption
 through startup publication, monitors readiness, and owns child cleanup. Its
 authenticated hidden command loads one current configuration snapshot, derives
-the matching logical catalog policy/fingerprint, and starts an otherwise empty
-control server. It opens no provider and starts nothing automatically.
+the closed review-only logical scope and its full-catalog-bound fingerprint,
+and starts an otherwise empty scoped control server. It opens no provider,
+acquires no physical claim, and starts nothing automatically.
 
 ## Reconstruction Notes
 
@@ -45,13 +46,13 @@ control server. It opens no provider and starts nothing automatically.
 | `FR-DATABASE-SUPERVISOR-003` | MUST | A child consumes its bootstrap or a failed attempt is cleaned up. | One lowercase token names an owner-only, regular, single-link file beneath the exact private state directory. Parent authority binds the bootstrap's full physical identity and the expected child executable identity; the child must match both before consumption. Consumption and discard remove only the exact bootstrap object. All authority environment values are unset on every consumption attempt. | The bootstrap file is exclusively created, file-synced, closed, and directory-synced where supported; consumption isolates/deletes the exact generation. | Missing, malformed, replayed, wrong-home, wrong-image, symlinked/reparse, hard-linked, public, swapped, or unverifiably removed artifacts fail closed without deleting a substitute. | Direct child invocation and a swapped launch image must not gain supervisor authority, and cleanup must not erase another same-user generation. |
 | `FR-DATABASE-SUPERVISOR-004` | MUST | An ensure call succeeds, fails, is canceled, or monitoring observes loss. | Only an exact authenticated fingerprint/PID match whose corresponding attempt root is still live may be retained. Other attempts wait concurrently through their fixed deadlines, probe once immediately before cleanup, receive bounded cooperative termination followed by forced group/Job termination, prove containment empty, and are reaped. `MonitorSupervisor` retries transient absence with bounded exponential backoff and stops on permanent errors or cancellation. | Losing Unix process groups receive TERM then one KILL even if the root exits first, then only non-destructive probes run until the inherited group drains; Windows Jobs terminate and report zero active processes before their handles close. | PID/PGID reuse, a closed matching root, root-first exit, stuck inherited-group descendants, cleanup errors, and multiple concurrent deadlines cannot silently preserve or leak an attempt. A Unix descendant that deliberately escapes the inherited session/process group is outside this process-group containment contract. | Numeric PID/fingerprint equality alone is insufficient ownership evidence, and caller cancellation must not leak contained children or kill a proven live winner. |
 | `FR-DATABASE-SUPERVISOR-005` | MUST | A hidden child successfully consumes its exact bootstrap and later prepares to publish discovery. | `ConsumeSupervisorBootstrapGuard` returns one opaque immutable guard only after matching pre-consumption snapshots, exact bootstrap consumption, and matching post-consumption snapshots bind the same canonical home and owner-private state-directory identities. `Validate(home)` repeats the paired read-only snapshot and succeeds only for that exact generation; it is safe for concurrent repeated use. | Validation creates, repairs, chmods, renames, and deletes nothing. The legacy boolean consume wrapper is compatibility-only and discards the returned guard. | A nil/zero guard, wrong home, whole-home or state-directory replacement, alias, unsafe mode/owner/type, missing boundary, mixed snapshot, or lookup failure returns one redacted `Integrity` error. Invalid bootstrap authority remains `Unauthorized`. Checkpoints do not claim continuous pathname pinning or replace exact publication/endpoint work tracked in #401/#402. | One-use file authority must not be rebound to another physical home at the same path before the hidden child publishes its generation. |
-| `FR-DATABASE-SUPERVISOR-006` | MUST | The root dispatches the private `database __serve` child with a valid one-use bootstrap receipt, exact home/fingerprint, and absolute startup deadline. | Authorization consumes before private argument validation. The child validates its retained home guard immediately, loads exactly one current-schema configuration/revision snapshot without migration, derives one logical catalog/fingerprint pair, and matches the expected fingerprint. A shared predicate validates command context, deadline, exact config revision, fingerprint, and retained home identity before locking, under the config mutation lock, and from `ServerOptions.StartupGuard`. The server publishes the snapshot fingerprint, sorted required IDs, an empty handler registry, and one explicit `Unavailable` status for every logical entry. | Only authenticated infrastructure lifecycle/coordination state is created: local IPC state plus the persistent configuration mutation-lock file. No provider or application storage is opened or created. The hidden root is absent from public help; no launcher/gateway caller starts it automatically. | Missing/replayed bootstrap is `Unauthorized`; malformed private arguments are rejected only after authority consumption; cancellation, deadline, revision/fingerprint drift, or physical home/state replacement observed at any generation checkpoint aborts before that checkpoint permits startup. These checkpoints do not continuously pin pathnames or close mutation after the final `StartupGuard`; exact manifest/endpoint publication races remain tracked in #401/#402. The startup deadline does not become the healthy server lifetime. Startup failure joins registry cleanup; authenticated shutdown and OS signals use normal server drain. | Hidden composition must bind one immutable config/catalog/home generation without giving direct invocations, stale launch attempts, or logical policy any provider/storage authority. |
+| `FR-DATABASE-SUPERVISOR-006` | MUST | The root dispatches the private `database __serve` child with a valid one-use bootstrap receipt, exact home/review-scope fingerprint, and absolute startup deadline. | Authorization consumes before private argument validation. The child validates its retained home guard immediately, loads exactly one current-schema configuration/revision snapshot without migration, derives the closed review logical catalog and full-catalog-bound scope fingerprint, and matches the expected fingerprint. A shared predicate validates command context, deadline, exact config revision, scope fingerprint, and retained home identity before locking, under the config mutation lock, and from `ServerOptions.StartupGuard`. The server publishes exactly the review bindings as `ServedStores`, their selected required subset, an empty handler registry, and one explicit `Unavailable` status for each selected entry. | Only authenticated infrastructure lifecycle/coordination state is created: local IPC state plus the persistent configuration mutation-lock file. No provider, physical claim, migration, readiness probe, adapter, client, or application storage is opened or created. The hidden root is absent from public help; no launcher/gateway caller starts it automatically. | Missing/replayed bootstrap is `Unauthorized`; malformed private arguments are rejected only after authority consumption; empty/inconsistent logical scope, cancellation, deadline, revision/scope-fingerprint drift, or physical home/state replacement observed at any generation checkpoint aborts before that checkpoint permits startup. Omitted, unknown, wrong-domain, resolver, or payload-local StoreIDs fail scoped IPC admission before the empty registry. These checkpoints do not continuously pin pathnames or close mutation after the final `StartupGuard`; exact manifest/endpoint publication races remain tracked in #401/#402. The startup deadline does not become the healthy server lifetime. Startup failure joins registry cleanup; authenticated shutdown and OS signals use normal server drain. | Hidden composition must bind one immutable full-config/review-scope/home generation without giving direct invocations, stale launch attempts, or logical policy any provider/storage authority. |
 | `FR-DATABASE-SUPERVISOR-007` | MUST | Repository code adds or changes supervisor implementation, command bridges, logical-catalog consumers, or root wiring. | Architecture tests dynamically enumerate every production `supervisor_*.go` and hidden-command package file, enforce exact reviewed filenames/imports/exports/selectors/call counts, detect activation references including function-value aliases and dot imports, require the hidden command as the sole logical-catalog consumer, and require one hidden root registration. | Guards mutate no production state. | Unknown files, missing expected files/consumers, additional wrappers, public lifecycle commands, auto-start callers, boolean-bootstrap use, handler registration, process-client installation, provider/claims/readiness/migration/SQLite/SQL imports or selectors, raw store opening, and hidden-help exposure fail tests. | A fixed filename list or direct-call-only scan would let later files and function aliases silently activate or broaden the dormant control plane. |
 
 ## Data And State Model
 
 `EnsureOptions` carries one home, executable/config launch context, opaque
-catalog fingerprint, and bounded timeout. A launch specification freezes the
+catalog-or-scope fingerprint, and bounded timeout. A launch specification freezes the
 resolved executable and ancestor identities/trust, exact child arguments,
 sanitized environment, bootstrap token, and absolute deadline before launch
 filesystem mutation. A successful child bootstrap also yields an immutable
@@ -119,11 +120,12 @@ Owns: TEST cmd/picoclaw/internal/database/architecture_test.go *
    home/state snapshots, consumes the exact bootstrap, captures matching
    snapshots again, and retains the resulting immutable guard. Callers validate
    it immediately before startup and from the final IPC startup guard.
-6. The hidden command loads one current config/revision, derives one logical
-   catalog/fingerprint pair, verifies expected fingerprint and deadline, then
+6. The hidden command loads one current config/revision, derives one closed
+   review catalog/scope-fingerprint pair, verifies the expected fingerprint and deadline, then
    holds the config mutation lock while rechecking context, revision,
    fingerprint, and home guard before and during `StartServer` publication. It
-   publishes an empty registry and complete unavailable statuses only.
+   publishes its exact StoreID/domain bindings, selected required subset, empty
+   registry, and selected unavailable statuses only.
 7. Probe readiness until the operation deadline. Cleanup waits for attempt
    deadlines in parallel and authenticates status immediately before mutation.
 8. Release only a still-live attempt matching the authenticated PID and
@@ -138,10 +140,13 @@ Owns: TEST cmd/picoclaw/internal/database/architecture_test.go *
 
 `FR-DATABASE-IPC` supplies authenticated discovery, status, shutdown, manifest
 epochs, and singleton ownership. The hidden command is the sole privileged
-consumer of `FR-DATABASE-PROVIDER-CATALOG`'s logical snapshot; it publishes only
-logical IDs, unavailable status, and the opaque fingerprint. It does not open
-SQLite, acquire claims, run migration, register a domain handler, install a
-process client, or add a launcher/gateway caller. Known broader manifest
+consumer of `FR-DATABASE-PROVIDER-CATALOG`'s closed review snapshot; it publishes
+only selected logical bindings, unavailable status, and the opaque scope
+fingerprint, which is itself bound to the complete catalog/configuration
+fingerprint. A former full-catalog-fingerprint broker is a mismatched generation
+and is replaced; a matching review generation is attached unchanged. The child
+does not open SQLite, acquire claims, run migration, register a domain handler,
+install a process client, or add a launcher/gateway caller. Known broader manifest
 durability and endpoint-generation cleanup work remains tracked in #401 and
 #402 and does not broaden this slice.
 
@@ -161,6 +166,9 @@ durability and endpoint-generation cleanup work remains tracked in #401 and
 - No lifecycle path changes application persistence behavior.
 - Direct or malformed hidden invocation cannot inspect configuration before
   consuming valid one-use authority, and the command remains absent from help.
+- With `N` distinct configured non-primary workspace paths, hidden status
+  contains exactly `5 + 3*N` review entries; shared/primary paths add no duplicate
+  group, and local-CI retains its configuration-derived required policy.
 
 ## Acceptance Evidence
 

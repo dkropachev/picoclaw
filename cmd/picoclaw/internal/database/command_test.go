@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -58,14 +59,21 @@ func (guard *testServeGuard) Validate(home string) error {
 
 type testServeCatalog struct {
 	entries       []dbcatalog.Entry
+	bindings      []dblayer.StoreBinding
 	required      []dblayer.StoreID
 	entryCalls    int
+	bindingCalls  int
 	requiredCalls int
 }
 
 func (catalog *testServeCatalog) Entries() []dbcatalog.Entry {
 	catalog.entryCalls++
 	return append([]dbcatalog.Entry(nil), catalog.entries...)
+}
+
+func (catalog *testServeCatalog) Bindings() []dblayer.StoreBinding {
+	catalog.bindingCalls++
+	return append([]dblayer.StoreBinding(nil), catalog.bindings...)
 }
 
 func (catalog *testServeCatalog) RequiredStores() []dblayer.StoreID {
@@ -140,10 +148,14 @@ func newSupervisorServeHarness(t *testing.T) (*supervisorServeHarness, superviso
 		guard:      &testServeGuard{},
 		catalog: &testServeCatalog{
 			entries: []dbcatalog.Entry{
-				{ID: "global/auth", Domain: "auth", Required: true},
-				{ID: "workspace/workflows", Domain: "workflows"},
+				{ID: "global/git-workspace-inventory", Domain: "git-workspace-inventory", Required: true},
+				{ID: "workspace/local-ci", Domain: "local-ci"},
 			},
-			required: []dblayer.StoreID{"global/auth"},
+			bindings: []dblayer.StoreBinding{
+				{ID: "global/git-workspace-inventory", Domain: "git-workspace-inventory"},
+				{ID: "workspace/local-ci", Domain: "local-ci"},
+			},
+			required: []dblayer.StoreID{"global/git-workspace-inventory"},
 		},
 		registry: &testServeRegistry{},
 		server:   &testServeServer{done: done},
@@ -174,7 +186,7 @@ func newSupervisorServeHarness(t *testing.T) (*supervisorServeHarness, superviso
 			harness.trace = append(harness.trace, "user-home")
 			return harness.userHome, nil
 		},
-		newSnapshot: func(
+		newReviewSnapshot: func(
 			options dbcatalog.Options,
 			revision string,
 		) (supervisorServeCatalog, string, error) {
@@ -270,13 +282,15 @@ func TestDatabaseCommandIsHiddenAndRunsOneGuardedSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if harness.loadCalls != 1 || harness.snapshotCalls != 1 ||
-		harness.catalog.entryCalls != 1 || harness.catalog.requiredCalls != 1 ||
+		harness.catalog.entryCalls != 1 || harness.catalog.bindingCalls != 1 ||
+		harness.catalog.requiredCalls != 1 ||
 		harness.revisionCalls != 3 || harness.lockCalls != 1 || harness.startCalls != 1 {
 		t.Fatalf(
-			"composition calls load=%d snapshot=%d entries=%d required=%d revision=%d lock=%d start=%d",
+			"composition calls load=%d snapshot=%d entries=%d bindings=%d required=%d revision=%d lock=%d start=%d",
 			harness.loadCalls,
 			harness.snapshotCalls,
 			harness.catalog.entryCalls,
+			harness.catalog.bindingCalls,
 			harness.catalog.requiredCalls,
 			harness.revisionCalls,
 			harness.lockCalls,
@@ -294,12 +308,16 @@ func TestDatabaseCommandIsHiddenAndRunsOneGuardedSnapshot(t *testing.T) {
 	if harness.serverOptions.Home != harness.home ||
 		harness.serverOptions.CatalogFingerprint != testCatalogFingerprint ||
 		len(harness.serverOptions.RequiredStores) != 1 ||
-		harness.serverOptions.RequiredStores[0] != "global/auth" ||
+		harness.serverOptions.RequiredStores[0] != "global/git-workspace-inventory" ||
+		len(harness.serverOptions.ServedStores) != 2 ||
+		harness.serverOptions.ServedStores[0] != harness.catalog.bindings[0] ||
+		harness.serverOptions.ServedStores[1] != harness.catalog.bindings[1] ||
 		harness.serverOptions.Handler != harness.registry {
 		t.Fatalf("server options = %#v", harness.serverOptions)
 	}
 	if len(harness.statuses) != 2 || len(harness.statuses[0]) != 2 ||
-		len(harness.statuses[1]) != 2 || harness.statuses[1][0].ID != "global/auth" {
+		len(harness.statuses[1]) != 2 ||
+		harness.statuses[1][0].ID != "global/git-workspace-inventory" {
 		t.Fatalf("detached complete statuses = %#v", harness.statuses)
 	}
 	for _, status := range harness.statuses[1] {
@@ -331,6 +349,70 @@ func TestDatabaseCommandIsHiddenAndRunsOneGuardedSnapshot(t *testing.T) {
 		if harness.trace[index] != wantPrefix[index] {
 			t.Fatalf("composition trace = %#v, want prefix %#v", harness.trace, wantPrefix)
 		}
+	}
+}
+
+func TestValidateReviewPublicationRequiresOneExactLogicalScope(t *testing.T) {
+	entries := []dbcatalog.Entry{
+		{ID: "global/git-workspace-inventory", Domain: "git-workspace-inventory", Required: true},
+		{ID: "workspace/local-ci", Domain: "local-ci"},
+	}
+	bindings := []dblayer.StoreBinding{
+		{ID: entries[0].ID, Domain: entries[0].Domain},
+		{ID: entries[1].ID, Domain: entries[1].Domain},
+	}
+	required := []dblayer.StoreID{entries[0].ID}
+	if err := validateReviewPublication(entries, bindings, required); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name     string
+		entries  []dbcatalog.Entry
+		bindings []dblayer.StoreBinding
+		required []dblayer.StoreID
+	}{
+		{name: "empty"},
+		{name: "missing binding", entries: entries, bindings: bindings[:1], required: required},
+		{
+			name: "wrong binding ID", entries: entries,
+			bindings: []dblayer.StoreBinding{{ID: "global/other", Domain: entries[0].Domain}, bindings[1]},
+			required: required,
+		},
+		{
+			name: "wrong binding domain", entries: entries,
+			bindings: []dblayer.StoreBinding{{ID: entries[0].ID, Domain: "other"}, bindings[1]},
+			required: required,
+		},
+		{
+			name: "unsorted entries", entries: []dbcatalog.Entry{entries[1], entries[0]},
+			bindings: []dblayer.StoreBinding{bindings[1], bindings[0]}, required: required,
+		},
+		{
+			name: "invalid entry", entries: []dbcatalog.Entry{{ID: "bad id", Domain: "bad", Required: true}},
+			bindings: []dblayer.StoreBinding{{ID: "bad id", Domain: "bad"}}, required: []dblayer.StoreID{"bad id"},
+		},
+		{name: "missing required", entries: entries, bindings: bindings},
+		{
+			name: "wrong required", entries: entries, bindings: bindings,
+			required: []dblayer.StoreID{entries[1].ID},
+		},
+		{
+			name: "extra required", entries: entries, bindings: bindings,
+			required: []dblayer.StoreID{entries[0].ID, entries[1].ID},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateReviewPublication(
+				test.entries,
+				test.bindings,
+				test.required,
+			); dblayer.CodeOf(
+				err,
+			) != dblayer.CodeIntegrity {
+				t.Fatalf("invalid publication error = %v, want Integrity", err)
+			}
+		})
 	}
 }
 
@@ -541,7 +623,7 @@ func TestSupervisorServeRejectsEveryPrecompositionFailure(t *testing.T) {
 		{
 			name: "catalog snapshot", wantCode: dblayer.CodeIntegrity,
 			configure: func(_ *supervisorServeHarness, ops *supervisorServeOps) {
-				ops.newSnapshot = func(
+				ops.newReviewSnapshot = func(
 					dbcatalog.Options,
 					string,
 				) (supervisorServeCatalog, string, error) {
@@ -552,12 +634,18 @@ func TestSupervisorServeRejectsEveryPrecompositionFailure(t *testing.T) {
 		{
 			name: "missing catalog", wantCode: dblayer.CodeInternal,
 			configure: func(_ *supervisorServeHarness, ops *supervisorServeOps) {
-				ops.newSnapshot = func(
+				ops.newReviewSnapshot = func(
 					dbcatalog.Options,
 					string,
 				) (supervisorServeCatalog, string, error) {
 					return nil, testCatalogFingerprint, nil
 				}
+			},
+		},
+		{
+			name: "invalid review publication", wantCode: dblayer.CodeIntegrity,
+			configure: func(harness *supervisorServeHarness, _ *supervisorServeOps) {
+				harness.catalog.bindings = nil
 			},
 		},
 		{
@@ -582,7 +670,7 @@ func TestSupervisorServeRejectsEveryPrecompositionFailure(t *testing.T) {
 		{
 			name: "empty catalog fingerprint", wantCode: dblayer.CodeConflict,
 			configure: func(_ *supervisorServeHarness, ops *supervisorServeOps) {
-				ops.newSnapshot = func(
+				ops.newReviewSnapshot = func(
 					options dbcatalog.Options,
 					revision string,
 				) (supervisorServeCatalog, string, error) {
@@ -883,10 +971,11 @@ func TestDefaultSupervisorServeOperationAdapters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	logical, fingerprint, err := ops.newSnapshot(dbcatalog.Options{
+	logical, fingerprint, err := ops.newReviewSnapshot(dbcatalog.Options{
 		Home: home, Config: loaded, ConfigPath: configPath, UserHome: userHome,
 	}, revision)
-	if err != nil || logical == nil || fingerprint == "" {
+	if err != nil || logical == nil || fingerprint == "" || len(logical.Entries()) != 5 ||
+		len(logical.Bindings()) != 5 || len(logical.RequiredStores()) != 4 {
 		t.Fatalf("default snapshot adapter = %#v, %q, %v", logical, fingerprint, err)
 	}
 	registry := ops.newRegistry()
@@ -913,6 +1002,13 @@ func TestEnsureSupervisorRunsCopiedBinaryThroughHiddenCommand(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = filepath.Join(home, "workspace")
+	firstWorkspace := filepath.Join(home, "agents", "first")
+	secondWorkspace := filepath.Join(home, "agents", "second")
+	cfg.Agents.List = []config.AgentConfig{
+		{ID: "first", Workspace: firstWorkspace},
+		{ID: "shared", Workspace: firstWorkspace},
+		{ID: "second", Workspace: secondWorkspace},
+	}
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -924,12 +1020,39 @@ func TestEnsureSupervisorRunsCopiedBinaryThroughHiddenCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	logical, fingerprint, err := dbcatalog.NewSnapshot(dbcatalog.Options{
+	options := dbcatalog.Options{
 		Home: home, Config: loaded, ConfigPath: configPath, UserHome: userHome,
-	}, revision)
+	}
+	fullCatalog, fullFingerprint, err := dbcatalog.NewSnapshot(options, revision)
+	if err != nil || fullCatalog == nil || fullFingerprint == "" {
+		t.Fatalf("full catalog snapshot = %#v, %q, %v", fullCatalog, fullFingerprint, err)
+	}
+	logical, fingerprint, err := dbcatalog.NewReviewSnapshot(options, revision)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if fingerprint == fullFingerprint || len(logical.Entries()) != 11 ||
+		len(logical.Bindings()) != 11 || len(logical.RequiredStores()) != 8 {
+		t.Fatalf(
+			"review snapshot fingerprint=%q full=%q entries=%d bindings=%d required=%d",
+			fingerprint,
+			fullFingerprint,
+			len(logical.Entries()),
+			len(logical.Bindings()),
+			len(logical.RequiredStores()),
+		)
+	}
+	oldServer, err := dblayer.StartServer(context.Background(), dblayer.ServerOptions{
+		Home: home, CatalogFingerprint: fullFingerprint,
+	})
+	if err != nil {
+		t.Fatalf("start old full-fingerprint broker: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = oldServer.Close(cleanupContext)
+	})
 	executable := copyCommandTestExecutable(t, home)
 	t.Setenv(supervisorCommandChildEnvironment, "1")
 	client, err := dblayer.EnsureSupervisor(t.Context(), dblayer.EnsureOptions{
@@ -940,6 +1063,11 @@ func TestEnsureSupervisorRunsCopiedBinaryThroughHiddenCommand(t *testing.T) {
 		logData, _ := os.ReadFile(filepath.Join(home, "logs", "database-supervisor.log"))
 		t.Fatalf("start copied hidden command: %v\n%s", err, logData)
 	}
+	select {
+	case <-oldServer.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("old full-fingerprint broker was not replaced")
+	}
 	t.Cleanup(func() {
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -949,22 +1077,95 @@ func TestEnsureSupervisorRunsCopiedBinaryThroughHiddenCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.CatalogFingerprint != fingerprint ||
-		len(status.RequiredStores) != len(logical.RequiredStores()) ||
-		len(status.Stores) != len(logical.Entries()) {
+	entries := logical.Entries()
+	if status.CatalogFingerprint != fingerprint || len(status.Stores) != 11 ||
+		!slices.Equal(status.RequiredStores, logical.RequiredStores()) ||
+		len(status.Stores) != len(entries) {
 		t.Fatalf("hidden broker status = %#v", status)
 	}
-	for _, store := range status.Stores {
+	for index, store := range status.Stores {
+		if store.ID != entries[index].ID {
+			t.Fatalf("hidden broker store %d = %q, want %q", index, store.ID, entries[index].ID)
+		}
 		if store.Readiness != dblayer.StoreUnavailable || store.Error == nil ||
 			store.Error.Code != dblayer.CodeUnavailable {
 			t.Fatalf("hidden broker store status = %#v", store)
 		}
 	}
+	attached, err := dblayer.EnsureSupervisor(t.Context(), dblayer.EnsureOptions{
+		Home: home, Executable: executable, ConfigPath: configPath,
+		CatalogFingerprint: fingerprint, Timeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("attach same review generation: %v", err)
+	}
+	attachedStatus, err := attached.Status(t.Context())
+	if err != nil || attachedStatus.Epoch != status.Epoch || attachedStatus.PID != status.PID {
+		t.Fatalf("same-generation attach status = %#v, %v; original %#v", attachedStatus, err, status)
+	}
 	assertNoPhysicalStoreFiles(t, home)
-	if err := client.Call(
-		t.Context(), "auth", 1, "read", dblayer.EmptyPayload{}, &dblayer.EmptyPayload{},
-	); dblayer.CodeOf(err) != dblayer.CodeUnsupported {
-		t.Fatalf("empty hidden broker domain call error = %v", err)
+	selected := entries[0]
+	for _, request := range []struct {
+		name string
+		call func() error
+		code dblayer.ErrorCode
+	}{
+		{
+			name: "valid target reaches empty registry",
+			call: func() error {
+				return client.CallStore(
+					t.Context(), selected.ID, selected.Domain, 1, "read",
+					dblayer.EmptyPayload{}, &dblayer.EmptyPayload{},
+				)
+			},
+			code: dblayer.CodeUnsupported,
+		},
+		{
+			name: "omitted target",
+			call: func() error {
+				return client.Call(
+					t.Context(), selected.Domain, 1, "read",
+					dblayer.EmptyPayload{}, &dblayer.EmptyPayload{},
+				)
+			},
+			code: dblayer.CodeInvalid,
+		},
+		{
+			name: "unknown target",
+			call: func() error {
+				return client.CallStore(
+					t.Context(), "global/auth", selected.Domain, 1, "read",
+					dblayer.EmptyPayload{}, &dblayer.EmptyPayload{},
+				)
+			},
+			code: dblayer.CodeUnsupported,
+		},
+		{
+			name: "wrong domain",
+			call: func() error {
+				return client.CallStore(
+					t.Context(), selected.ID, "auth", 1, "read",
+					dblayer.EmptyPayload{}, &dblayer.EmptyPayload{},
+				)
+			},
+			code: dblayer.CodeUnsupported,
+		},
+		{
+			name: "payload target",
+			call: func() error {
+				return client.CallStore(
+					t.Context(), selected.ID, selected.Domain, 1, "read",
+					map[string]any{"store_id": "global/auth"}, &dblayer.EmptyPayload{},
+				)
+			},
+			code: dblayer.CodeInvalid,
+		},
+	} {
+		t.Run(request.name, func(t *testing.T) {
+			if err := request.call(); dblayer.CodeOf(err) != request.code {
+				t.Fatalf("scoped hidden broker call error = %v, want %s", err, request.code)
+			}
+		})
 	}
 	if err := client.Shutdown(t.Context()); err != nil &&
 		dblayer.CodeOf(err) != dblayer.CodeOutcomeUnknown {
