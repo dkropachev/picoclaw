@@ -8,14 +8,16 @@
 
 PicoClaw-owned mutable runtime state is stored in subsystem-local SQLite
 databases. Every database uses the same durability, schema, migration, and
-legacy-archive contract while each subsystem retains typed ownership of its
+legacy-closeout contract while each subsystem retains typed ownership of its
 domain rows.
 
 The internal compatibility store now delegates driver binding, DSN creation,
 generation security, control queries, and live/offline configuration to the
 shared SQLite provider. Existing subsystem adapters still open these stores
 directly; this refactor does not route them through broker IPC or perform a
-production cutover.
+production cutover. Existing callers retain archive-and-remove closeout by
+default; sealed/deferred closeout has no runtime effect until an adapter
+explicitly selects it.
 
 Human-authored configuration, portable immutable artifacts, external formats,
 and the small recovery journals that must operate before a database opens remain
@@ -29,17 +31,20 @@ file-backed.
   exactly once.
 - Core types/functions: `sqlitestore.Open`, `Options`, `Migration`,
   `LegacyOptions`, `LegacySource`, `LegacyImporter`, `LegacyResultFinalizer`,
-  `LegacySealer`, and `sqlitestore.Immediate`, backed by the internal provider.
+  `LegacySealer`, `LegacyCloseoutPolicy`, and `sqlitestore.Immediate`, backed by
+  the internal provider.
 - Runtime ordering: validate the path and migration catalog, securely prepare
   the directory and database, enable and verify PRAGMAs, reject corruption or a
   future schema, run upgrades and legacy import in `BEGIN IMMEDIATE`, validate
-  the exact retained schema, commit, then archive verified legacy sources.
+  the exact retained schema, commit, then either archive verified legacy
+  sources by default or leave explicitly deferred sealed sources untouched.
 - Non-obvious constraints: import diagnostics never retain payloads or secrets;
   an archive transition is resumable after either side of its filesystem move;
-  a changed committed source is never archived; the primary database remains
-  present and private while transient WAL/SHM companions are identity-fenced and
-  hardened without opening or closing their inodes so SQLite's process-scoped
-  locks remain intact across concurrent processes; and
+  a changed committed source is never archived; explicit deferred closeout
+  leaves every source unchanged with truthful pending archive state; the primary
+  database remains present and private while transient WAL/SHM companions are
+  identity-fenced and hardened without opening or closing their inodes so
+  SQLite's process-scoped locks remain intact across concurrent processes; and
   arbitrary JSON may be a bounded column payload but not a generic whole-store
   document table.
 
@@ -49,8 +54,8 @@ file-backed.
 | --- | --- | --- | --- | --- | --- | --- |
 | `FR-SQLITE-001` | MUST | A subsystem opens a mutable database at a filesystem path. | The returned handle uses WAL, foreign keys, a five-second busy timeout, and `synchronous=FULL`; the parent is private and the database and present companions are `0600` on POSIX hosts or carry a protected owner-only DACL on Windows. On Unix, every hardening pass binds each initial pathname identity to a retained owner-private parent descriptor, narrows only SQLite-compatible legacy modes with parent-relative `chmod`, and requires the same final private-file identity without opening or closing the generation member. The chmod is no-follow where supported; otherwise it follows repeated no-follow parent/child proofs under the protected parent. Windows uses reparse-aware member handles. | A missing directory/database is securely created; compatible legacy file modes may be narrowed. | Empty, URI, NUL-bearing, symlinked/reparse, irregular, non-tightenable, replaced, or otherwise unsafe boundaries fail before domain use. The primary database must remain present at every hardening stage; transient WAL/SHM companions may request only a bounded whole-generation retry when they disappear or change, while a stable dangling link, foreign owner, hardlink, non-not-found error, or hardening failure remains fatal. | Every store needs one durable and secure baseline without surrendering SQLite's lock authority. |
 | `FR-SQLITE-002` | MUST | The database schema is older, current, too new, malformed, or corrupt. | Contiguous migrations reach the supported `PRAGMA user_version` and the retained schema validates exactly. | Migrations run in one explicit `BEGIN IMMEDIATE` transaction during existing runtime use, or `BEGIN EXCLUSIVE` on a single-connection pool in provider-owned rollback-journal mode when the call context carries a live migration-fence capability for that exact path. | Failure rolls back; a future version, invalid schema, failed integrity check, expired capability, or capability for another path returns an error and never falls back to JSON. | Mixed schemas and partial upgrades must fail closed without a process-global migration mode. |
-| `FR-SQLITE-003` | MUST | A subsystem performs its first complete bounded legacy JSON/JSONL enumeration, including an enumeration with no present source. | Valid records are imported deterministically by dependency order and relative path; selected malformed records are skipped with counts and safe issue codes/digests only. Aggregate/dependency importers may resolve relationships in `LegacyResultFinalizer`; their returned per-source outcomes atomically replace provisional counts and issues before commit. An optional idempotent `LegacySealer` may perform subsystem-specific closeout or validation; independently, the shared `storage_import_horizons` row always closes the generic import horizon before validation. | Domain rows, final durable import/issue rows, and the subsystem import-horizon marker commit in the same immediate transaction. A source first appearing after that marker is audited as SQLite-authoritative rather than imported. | Unsafe enumeration, symlinks or modes, size/count bounds, incomplete/extra/invalid final accounting, SQLite errors, importer errors, or seal failure abort without an import commit or closed marker. | Automatic upgrade must preserve valid state and relationships, become authoritative even after an empty first open, and make the audit describe committed rows without exposing secrets. |
-| `FR-SQLITE-004` | MUST | A committed import has an unarchived legacy source. | The exact imported bytes move to `legacy-json/<component>-v1/` without overwriting an existing archive and with their permissions retained. | Archive completion is durably recorded after the filesystem transition. | A crash before/after the move is retried without re-import; changed bytes or a conflicting archive fail closed. | SQLite becomes authoritative immediately while rollback material remains recoverable. |
+| `FR-SQLITE-003` | MUST | A subsystem performs its first complete bounded legacy JSON/JSONL enumeration, including an enumeration with no present source. | Valid records are imported deterministically by dependency order and relative path; selected malformed records are skipped with counts and safe issue codes/digests only. Aggregate/dependency importers may resolve relationships in `LegacyResultFinalizer`; their returned per-source outcomes atomically replace provisional counts and issues before commit. An optional idempotent `LegacySealer` may perform subsystem-specific closeout or validation; independently, the shared `storage_import_horizons` row always closes the generic import horizon before validation. | Domain rows, final durable import/issue rows, and the subsystem import-horizon marker commit in the same immediate transaction. A source first appearing after that marker is audited as SQLite-authoritative rather than imported. Explicit deferred closeout changes no source and does not weaken this atomic destination commit. | Unsafe enumeration, symlinks or modes, size/count bounds, invalid closeout policy or policy/archive-root combination, incomplete/extra/invalid final accounting, SQLite errors, importer errors, or seal failure abort without an import commit or closed marker. | Automatic upgrade must preserve valid state and relationships, become authoritative even after an empty first open, and make the audit describe committed rows without exposing secrets. |
+| `FR-SQLITE-004` | MUST | A committed import has a legacy source whose archive status is pending. | The default archive closeout moves the exact imported bytes to `legacy-json/<component>-v1/` without overwrite and retains their permissions. Explicit deferred closeout instead performs no write-side operation on the source and truthfully leaves `archive_status='pending'`; it is intended for engine-supplied sealed disposable roots whose owner verifies the post-callback seal. | Default archive completion is durably recorded after the filesystem transition. Deferred closeout neither mutates the source nor marks it archived or itself schedules cleanup; a later separately authorized owner may explicitly resolve the still-pending live artifact. | A crash before/after a default move is retried without re-import; changed bytes or a conflicting archive fail closed. Deferred closeout rejects a nonempty archive root, while its exact-target/namespace checks, source proofs, and outer prepared-input seal reject aliases or drift without source cleanup or a partial installed destination. | SQLite becomes authoritative immediately while normal rollback material remains recoverable and sealed migration inputs remain immutable. |
 | `FR-SQLITE-005` | MUST | Concurrent PicoClaw processes mutate a subsystem store. | Bounded lock waits and immediate write transactions serialize domain operations; version-fenced owners can reject stale updates. A live exact-path migration capability instead limits only that opened pool to one connection and uses an exclusive transaction. | Only the committed SQLite transaction becomes visible. | Busy, canceled, stale-version, expired-capability, and wrong-target operations return errors without partial domain state or JSON dual writes. | CLI, launcher, and gateway processes must share one authority without unrelated in-process stores inheriting offline mode. |
 | `FR-SQLITE-006` | MUST | A clean integration runtime exercises persistent subsystems and then starts their owners a second time. | The exact expected private database inventory is present; every surviving JSON, JSONL, migrated snapshot, history slot, or invalidation sidecar matches an intentional configuration, recovery, exact component archive, sidecar, or immutable-artifact path; and the second startup creates no additional candidate path. | The test writes representative typed rows and immutable evidence, mutates and reopens Git workspace inventory through `Manager.Acquire`/`Stats`, and imports, version-fenced updates, and reopens a PR candidate checkpoint. Deliberate non-allowlisted JSON, exact Git/checkpoint archive-label near misses, JSON-like directory, unsafe archive-link, and SQLite-extension canaries are rejected without reading or reporting their payloads. | An unexpected candidate file/directory, unregistered `.db`/`.sqlite`/`.sqlite3` path, unsafe archive ancestry, missing/extra database (including `inventory.db` or `checkpoints.db`), non-private database mode, traversal failure, or changed second-start inventory fails the merge-gating suite. | A subsystem must not silently reintroduce mutable JSON persistence after its focused tests pass. |
 
@@ -69,6 +74,12 @@ import ledger stores component and relative source identities, SHA-256 digests,
 bounded source sizes, imported/skipped counts, archive status, timestamps, and
 issue codes plus record digests. It never stores an original rejected payload,
 credential, token, or diagnostic string derived from one.
+
+`archive_status='complete'` means the default no-overwrite archive transition
+finished. `archive_status='pending'` means closeout remains outstanding; for an
+explicitly deferred sealed source it never claims that the disposable source
+was moved. The sealed callback cannot clean it up. Any later live-artifact
+closeout requires a separate explicit owner-controlled authorization.
 
 Database paths are ordinary filesystem paths rather than caller-provided SQLite
 URIs. The database directory is owner-only. SQLite `-wal` and `-shm` companions
@@ -108,6 +119,7 @@ Owns: INTEGRATION storage-json
 | Go API | `sqlitestore.Immediate(ctx, db, callback)` | Runs one callback in `BEGIN IMMEDIATE`, or `BEGIN EXCLUSIVE` when `ctx` carries the live exact-target migration capability used to open that pool, and rolls back on callback, context, or commit failure. | `FR-SQLITE-002`, `FR-SQLITE-005` |
 | Go API | `LegacyOptions.FinalizeResults` / `LegacyResultFinalizer` | Resolve ordered multi-source relationships and return exact final `ImportResult` for every newly imported source; the helper replaces provisional ledger counts/issues inside the import transaction. | `FR-SQLITE-003` |
 | Go API | `LegacyOptions.Seal` / `LegacySealer` | Performs optional idempotent subsystem-specific closeout or validation after every successful deterministic enumeration, including zero-source and already-closed opens, inside the migration transaction and before validation. The shared helper, not this callback, owns the generic durable horizon. | `FR-SQLITE-003` |
+| Go API | `LegacyOptions.Closeout` / `LegacyCloseoutPolicy`; `LegacyCloseoutArchive`, `LegacyCloseoutDeferred` | Select default archive-and-remove closeout or explicit sealed/deferred closeout. Deferred mode requires an empty archive root, preserves sources exactly, and keeps their archive ledger state pending. | `FR-SQLITE-003`, `FR-SQLITE-004` |
 | File | `<root>/*.db`, `<root>/*.db-wal`, `<root>/*.db-shm` | Private mutable SQLite authority owned by its subsystem. | `FR-SQLITE-001`, `FR-SQLITE-005` |
 | File | `<root>/legacy-json/<component>-v1/**` | Immutable retained legacy bytes, created once after their import transaction commits. | `FR-SQLITE-003`, `FR-SQLITE-004` |
 | File | `<PICOCLAW_HOME>/auth.db`, `auth.db.locks/`; `legacy-json/auth-v1/auth.json` | Typed, version-fenced credential authority, protected cross-process refresh locks, and retained legacy source. | `FR-SQLITE-001` through `FR-SQLITE-005` |
@@ -147,10 +159,12 @@ Owns: INTEGRATION storage-json
    optional subsystem closeout, always close the shared generic import horizon
    after its first complete enumeration, validate domain and import schemas,
    and commit once.
-5. Recheck integrity and permissions. For each pending import, revalidate the
-   recorded relative identity and digest, complete or recover its no-overwrite
-   archive transition, and mark the ledger row complete in an immediate
-   transaction.
+5. Recheck integrity and permissions. For each pending import under the default
+   archive policy, revalidate the recorded relative identity and digest,
+   complete or recover its no-overwrite archive transition, and mark the ledger
+   row complete in an immediate transaction. Under explicit deferred closeout,
+   perform no source write, rename, removal, permission change, or sync and
+   retain the pending ledger state for the sealed disposable input owner.
 
 ## Cross-Feature Behavior
 
@@ -159,7 +173,10 @@ provider candidates. The SQLite provider and control foundations now supply
 mechanics used by this compatibility store. Subsystem-local SQLite stores
 remain active persistence authority. No readiness, backup engine, database
 CLI, supervisor/runtime wiring, concrete broker domain adapter, configuration
-or HTTP contract, or production cutover is added here.
+or HTTP contract, or production cutover is added here. The deferred closeout
+capability is likewise dormant until a selected offline-migration adapter opts
+in for engine-supplied sealed disposable legacy roots; existing runtime
+adapters keep the default archive policy.
 
 Each owning subsystem defines its own relational schema, normalization rules,
 version fences, and compatibility constructors. Workspace protection treats
@@ -196,6 +213,8 @@ selecting a mutable JSON fallback.
   winner and record later conflicts as safe issues.
 - An archive destination is never overwritten. Matching partial transition
   states resume; mismatched bytes fail.
+- Deferred closeout requires an empty archive root, leaves admitted sources and
+  their metadata unchanged on every outcome, and retains pending archive state.
 - A second startup neither imports again nor creates a mutable JSON file.
 - An in-memory database is non-persistent and isolated from every other open.
 
@@ -205,7 +224,7 @@ selecting a mutable JSON fallback.
 | --- | --- |
 | `FR-SQLITE-001`, `FR-SQLITE-002`, `FR-SQLITE-005` | [internal/sqlitestore/open_test.go](../../internal/sqlitestore/open_test.go) |
 | `FR-SQLITE-002`, `FR-SQLITE-005` | [internal/sqlitestore/offline_test.go](../../internal/sqlitestore/offline_test.go), [internal/sqlitestore/permission_routing_coverage_test.go](../../internal/sqlitestore/permission_routing_coverage_test.go) |
-| `FR-SQLITE-003`, `FR-SQLITE-004` | [internal/sqlitestore/open_test.go](../../internal/sqlitestore/open_test.go), [internal/sqlitestore/legacy_finalize_results_test.go](../../internal/sqlitestore/legacy_finalize_results_test.go), [pkg/memory/sqlite_store_test.go](../../pkg/memory/sqlite_store_test.go) |
+| `FR-SQLITE-003`, `FR-SQLITE-004` | [internal/sqlitestore/open_test.go](../../internal/sqlitestore/open_test.go), [internal/sqlitestore/legacy_deferred_test.go](../../internal/sqlitestore/legacy_deferred_test.go), [internal/sqlitestore/legacy_fault_test.go](../../internal/sqlitestore/legacy_fault_test.go), [internal/sqlitestore/legacy_finalize_results_test.go](../../internal/sqlitestore/legacy_finalize_results_test.go), [internal/databasemigration/migration_backup_integration_test.go](../../internal/databasemigration/migration_backup_integration_test.go), [pkg/memory/sqlite_store_test.go](../../pkg/memory/sqlite_store_test.go) |
 | `FR-SQLITE-003`, `FR-SQLITE-004`, `FR-SQLITE-006` | [pkg/gateway/runtime_storage_legacy_migration_integration_test.go](../../pkg/gateway/runtime_storage_legacy_migration_integration_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/auth/store_sqlite_test.go](../../pkg/auth/store_sqlite_test.go), [web/backend/api/model_catalog_sqlite_test.go](../../web/backend/api/model_catalog_sqlite_test.go), [pkg/tools/adaptation_state_sqlite_test.go](../../pkg/tools/adaptation_state_sqlite_test.go) |
 | `FR-SQLITE-001` through `FR-SQLITE-005` | [pkg/state/state_test.go](../../pkg/state/state_test.go), [pkg/channels/wecom/reqid_store_test.go](../../pkg/channels/wecom/reqid_store_test.go), [pkg/channels/weixin/state_sqlite_test.go](../../pkg/channels/weixin/state_sqlite_test.go) |

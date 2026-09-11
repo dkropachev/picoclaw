@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/internal/fileidentity"
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
@@ -29,10 +30,25 @@ const (
 	maximumLegacyRelativeBytes = 16 << 10
 )
 
+// LegacyCloseoutPolicy selects what happens to a legacy source after its
+// transactional import commits.
+type LegacyCloseoutPolicy uint8
+
+const (
+	// LegacyCloseoutArchive preserves the historical default: imported sources
+	// are durably archived below ArchiveRoot and removed from SourceRoot.
+	LegacyCloseoutArchive LegacyCloseoutPolicy = iota
+	// LegacyCloseoutDeferred leaves sealed legacy inputs untouched. Import
+	// accounting and the monotonic import horizon still commit, while archive
+	// status remains pending for a later owner-controlled closeout.
+	LegacyCloseoutDeferred
+)
+
 // LegacyOptions describes the legacy sources owned by one database.
 type LegacyOptions struct {
 	SourceRoot  string
 	ArchiveRoot string
+	Closeout    LegacyCloseoutPolicy
 	Sources     func() ([]LegacySource, error)
 	Import      LegacyImporter
 	// Finalize resolves relationships among sources imported by this exact
@@ -199,6 +215,25 @@ type legacyImportSummary struct {
 	Imported         int64
 	Skipped          int64
 	NewSourceIDs     []string
+	deferred         *deferredLegacyProof
+}
+
+type deferredLegacySource struct {
+	source   LegacySource
+	snapshot legacyFileSnapshot
+}
+
+type deferredLegacyDirectory struct {
+	path     string
+	identity fileidentity.Identity
+	mode     os.FileMode
+	modTime  time.Time
+}
+
+type deferredLegacyProof struct {
+	directories         map[string]deferredLegacyDirectory
+	directoryIdentities map[fileidentity.Identity]string
+	sources             []deferredLegacySource
 }
 
 func logLegacyImportSummary(component string, summary legacyImportSummary) {
@@ -219,8 +254,28 @@ func importLegacySources(
 	component string,
 	options LegacyOptions,
 ) (legacyImportSummary, error) {
+	if err := validateLegacyCloseout(options); err != nil {
+		return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
+	}
 	if options.Sources == nil || options.Import == nil {
 		return legacyImportSummary{}, fmt.Errorf("%s legacy migration is incomplete", component)
+	}
+	var deferred *deferredLegacyProof
+	if options.Closeout == LegacyCloseoutDeferred {
+		root, err := validateLegacySourceRoot(options.SourceRoot)
+		if err != nil {
+			return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
+		}
+		rootSnapshot, err := snapshotDeferredLegacyDirectory(root)
+		if err != nil {
+			return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
+		}
+		deferred = &deferredLegacyProof{
+			directories: map[string]deferredLegacyDirectory{"": rootSnapshot},
+			directoryIdentities: map[fileidentity.Identity]string{
+				rootSnapshot.identity: "",
+			},
+		}
 	}
 	if options.Finalize != nil && options.FinalizeResults != nil {
 		return legacyImportSummary{}, fmt.Errorf(
@@ -242,7 +297,7 @@ func importLegacySources(
 			component,
 		)
 	}
-	if len(sources) > 0 {
+	if len(sources) > 0 && options.Closeout == LegacyCloseoutArchive {
 		if rootErr := validateLegacyRoots(options); rootErr != nil {
 			return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, rootErr)
 		}
@@ -263,8 +318,9 @@ func importLegacySources(
 	}
 	seenID := make(map[string]struct{}, len(sources))
 	seenRelative := make(map[string]struct{}, len(sources))
+	seenDeferredIdentity := make(map[fileidentity.Identity]string, len(sources))
 	var totalBytes int64
-	var summary legacyImportSummary
+	summary := legacyImportSummary{deferred: deferred}
 	for _, source := range sources {
 		if err := ctx.Err(); err != nil {
 			return legacyImportSummary{}, err
@@ -299,7 +355,12 @@ func importLegacySources(
 			)
 		}
 
-		input, found, err := readLegacySource(options.SourceRoot, source, options.MaxBytes)
+		input, snapshot, found, err := readLegacySourceSnapshot(
+			options.SourceRoot,
+			source,
+			options.MaxBytes,
+			options.Closeout == LegacyCloseoutDeferred,
+		)
 		if err != nil {
 			return legacyImportSummary{}, fmt.Errorf(
 				"read %s legacy source %s: %w",
@@ -310,6 +371,32 @@ func importLegacySources(
 		}
 		if !found {
 			continue
+		}
+		if options.Closeout == LegacyCloseoutDeferred {
+			if previous, duplicate := seenDeferredIdentity[snapshot.identity]; duplicate {
+				return legacyImportSummary{}, fmt.Errorf(
+					"read %s legacy source %s: physical alias of source %s",
+					component,
+					source.ID,
+					previous,
+				)
+			}
+			seenDeferredIdentity[snapshot.identity] = source.ID
+			if directoryErr := rememberDeferredLegacyDirectories(
+				options.SourceRoot,
+				source.Relative,
+				deferred,
+			); directoryErr != nil {
+				return legacyImportSummary{}, fmt.Errorf(
+					"read %s legacy source %s: %w",
+					component,
+					source.ID,
+					directoryErr,
+				)
+			}
+			deferred.sources = append(deferred.sources, deferredLegacySource{
+				source: source, snapshot: snapshot,
+			})
 		}
 		inputBytes := int64(len(input.Data))
 		if inputBytes > maximumTotalBytes-totalBytes {
@@ -580,6 +667,9 @@ func archiveImportedSources(
 	component string,
 	options LegacyOptions,
 ) error {
+	if options.Closeout != LegacyCloseoutArchive {
+		return fmt.Errorf("archive %s legacy sources: closeout policy is not archive", component)
+	}
 	type pending struct {
 		id, relative string
 		digest       []byte
@@ -682,9 +772,10 @@ func archiveImportedSources(
 }
 
 type legacyFileSnapshot struct {
-	digest [sha256.Size]byte
-	mode   os.FileMode
-	info   os.FileInfo
+	digest   [sha256.Size]byte
+	mode     os.FileMode
+	info     os.FileInfo
+	identity fileidentity.Identity
 }
 
 var (
@@ -704,6 +795,8 @@ var (
 	legacyAbsolutePath        = filepath.Abs
 	legacyRelativePath        = filepath.Rel
 	legacyPathLstat           = os.Lstat
+	legacyExistingIdentity    = fileidentity.ExistingWithType
+	legacyOpenedIdentity      = fileidentity.Opened
 	legacySyncOpen            = func(path string, flag int, mode os.FileMode) (legacySyncFile, error) {
 		return os.OpenFile(path, flag, mode)
 	}
@@ -884,14 +977,12 @@ func legacySnapshotMatches(
 }
 
 func validateLegacyRoots(options LegacyOptions) error {
-	if options.SourceRoot == "" || options.ArchiveRoot == "" ||
-		options.SourceRoot != strings.TrimSpace(options.SourceRoot) ||
+	if options.ArchiveRoot == "" ||
 		options.ArchiveRoot != strings.TrimSpace(options.ArchiveRoot) ||
-		strings.ContainsRune(options.SourceRoot, '\x00') ||
 		strings.ContainsRune(options.ArchiveRoot, '\x00') {
 		return errors.New("legacy source and archive roots are required")
 	}
-	sourceAbs, err := legacyAbsolutePath(options.SourceRoot)
+	sourceAbs, err := validateLegacySourceRoot(options.SourceRoot)
 	if err != nil {
 		return err
 	}
@@ -902,10 +993,190 @@ func validateLegacyRoots(options LegacyOptions) error {
 	if pathsEqual(sourceAbs, archiveAbs) || !pathWithin(sourceAbs, archiveAbs) {
 		return errors.New("legacy archive root must be below the source root")
 	}
-	if sourceRootErr := requireSafeLegacyDirectory(sourceAbs, "legacy source root"); sourceRootErr != nil {
-		return sourceRootErr
-	}
 	return validateLegacyArchiveAncestors(sourceAbs, archiveAbs)
+}
+
+func validateLegacyCloseout(options LegacyOptions) error {
+	switch options.Closeout {
+	case LegacyCloseoutArchive:
+		if !validLegacyRootValue(options.SourceRoot) {
+			return errors.New("legacy source and archive roots are required")
+		}
+		if !validLegacyRootValue(options.ArchiveRoot) {
+			return errors.New("legacy archive closeout requires an archive root")
+		}
+		return nil
+	case LegacyCloseoutDeferred:
+		if options.ArchiveRoot != "" {
+			return errors.New("legacy deferred closeout does not accept an archive root")
+		}
+		if !validLegacyRootValue(options.SourceRoot) {
+			return errors.New("legacy deferred closeout requires a source root")
+		}
+		return nil
+	default:
+		return errors.New("legacy closeout policy is invalid")
+	}
+}
+
+func validLegacyRootValue(root string) bool {
+	return root != "" && root == strings.TrimSpace(root) && !strings.ContainsRune(root, '\x00')
+}
+
+func validateLegacySourceRoot(sourceRoot string) (string, error) {
+	if !validLegacyRootValue(sourceRoot) {
+		return "", errors.New("legacy source root is required")
+	}
+	sourceAbs, err := legacyAbsolutePath(sourceRoot)
+	if err != nil {
+		return "", err
+	}
+	if err := requireSafeLegacyDirectory(sourceAbs, "legacy source root"); err != nil {
+		return "", err
+	}
+	return sourceAbs, nil
+}
+
+func validateDeferredLegacyTarget(path, sourceRoot string) error {
+	target, err := legacyAbsolutePath(path)
+	if err != nil {
+		return err
+	}
+	root, err := legacyAbsolutePath(sourceRoot)
+	if err != nil {
+		return err
+	}
+	if pathsEqual(root, target) || pathWithin(root, target) || pathWithin(target, root) {
+		return errors.New("deferred legacy source root overlaps the database target")
+	}
+	return nil
+}
+
+func snapshotDeferredLegacyDirectory(path string) (deferredLegacyDirectory, error) {
+	info, err := legacyPathLstat(path)
+	if err != nil {
+		return deferredLegacyDirectory{}, err
+	}
+	if safetyErr := requireSafeLegacyDirectoryInfo(
+		path,
+		info,
+		"legacy source directory",
+	); safetyErr != nil {
+		return deferredLegacyDirectory{}, safetyErr
+	}
+	identity, objectType, exists, err := legacyExistingIdentity(path)
+	if err != nil || !exists || !identity.Valid() || objectType != fileidentity.ObjectTypeDirectory {
+		return deferredLegacyDirectory{}, errors.Join(
+			errors.New("legacy source directory identity is unavailable"),
+			err,
+		)
+	}
+	after, err := legacyPathLstat(path)
+	if err != nil || !os.SameFile(info, after) || info.Mode() != after.Mode() ||
+		!info.ModTime().Equal(after.ModTime()) {
+		return deferredLegacyDirectory{}, errors.Join(
+			errors.New("legacy source directory changed during inspection"),
+			err,
+		)
+	}
+	return deferredLegacyDirectory{
+		path: path, identity: identity, mode: after.Mode(), modTime: after.ModTime(),
+	}, nil
+}
+
+func rememberDeferredLegacyDirectories(
+	root,
+	relative string,
+	proof *deferredLegacyProof,
+) error {
+	if proof == nil {
+		return errors.New("deferred legacy source proof is unavailable")
+	}
+	parts := strings.Split(filepath.FromSlash(relative), string(filepath.Separator))
+	current := filepath.Clean(root)
+	relativeParts := make([]string, 0, len(parts)-1)
+	for _, part := range parts[:len(parts)-1] {
+		relativeParts = append(relativeParts, part)
+		current = filepath.Join(current, part)
+		key := legacyRelativePathKey(filepath.ToSlash(filepath.Join(relativeParts...)))
+		if existing, exists := proof.directories[key]; exists {
+			if filepath.Clean(existing.path) != filepath.Clean(current) {
+				return errors.New("legacy source directories have ambiguous paths")
+			}
+			continue
+		}
+		snapshot, err := snapshotDeferredLegacyDirectory(current)
+		if err != nil {
+			return err
+		}
+		if existingKey, duplicate := proof.directoryIdentities[snapshot.identity]; duplicate &&
+			existingKey != key {
+			return errors.New("legacy source directories are physical aliases")
+		}
+		proof.directories[key] = snapshot
+		proof.directoryIdentities[snapshot.identity] = key
+	}
+	return nil
+}
+
+func revalidateDeferredLegacyProof(
+	ctx context.Context,
+	component string,
+	options LegacyOptions,
+	proof *deferredLegacyProof,
+) error {
+	if options.Closeout != LegacyCloseoutDeferred {
+		return nil
+	}
+	if proof == nil {
+		return errors.New("deferred legacy source proof is unavailable")
+	}
+	for _, source := range proof.sources {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := revalidateDeferredLegacySource(
+			options.SourceRoot,
+			source.source,
+			options.MaxBytes,
+			source.snapshot,
+		); err != nil {
+			return fmt.Errorf(
+				"revalidate %s legacy source %s: %w",
+				component,
+				source.source.ID,
+				err,
+			)
+		}
+	}
+	keys := make([]string, 0, len(proof.directories))
+	for key := range proof.directories {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(left, right int) bool {
+		if len(keys[left]) != len(keys[right]) {
+			return len(keys[left]) > len(keys[right])
+		}
+		return keys[left] < keys[right]
+	})
+	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		expected := proof.directories[key]
+		current, err := snapshotDeferredLegacyDirectory(expected.path)
+		if err != nil || expected.identity != current.identity || expected.mode != current.mode ||
+			!expected.modTime.Equal(current.modTime) {
+			return errors.Join(
+				fmt.Errorf(
+					"revalidate %s legacy source directory: identity or metadata changed",
+					component,
+				),
+				err,
+			)
+		}
+	}
+	return nil
 }
 
 func validateLegacyArchiveAncestors(sourceRoot, archiveRoot string) error {
@@ -1012,6 +1283,12 @@ func legacyEnumerationBounds(options LegacyOptions) (int, int64, error) {
 }
 
 func validateLegacySourceOutsideArchive(options LegacyOptions, relative string) error {
+	if options.Closeout == LegacyCloseoutDeferred {
+		return nil
+	}
+	if options.Closeout != LegacyCloseoutArchive {
+		return errors.New("legacy closeout policy is invalid")
+	}
 	sourcePath := filepath.Join(options.SourceRoot, filepath.FromSlash(relative))
 	sourceAbs, err := filepath.Abs(sourcePath)
 	if err != nil {
@@ -1039,6 +1316,16 @@ func readLegacySource(
 	source LegacySource,
 	defaultMax int64,
 ) (LegacyInput, bool, error) {
+	input, _, found, err := readLegacySourceSnapshot(root, source, defaultMax, false)
+	return input, found, err
+}
+
+func readLegacySourceSnapshot(
+	root string,
+	source LegacySource,
+	defaultMax int64,
+	requireIdentity bool,
+) (LegacyInput, legacyFileSnapshot, bool, error) {
 	path := filepath.Join(root, filepath.FromSlash(source.Relative))
 	maxBytes := source.MaxBytes
 	if maxBytes == 0 {
@@ -1048,55 +1335,100 @@ func readLegacySource(
 		maxBytes = defaultLegacyMaxBytes
 	}
 	if maxBytes < 1 || maxBytes > 1<<30 {
-		return LegacyInput{}, false, errors.New("legacy source size limit is invalid")
+		return LegacyInput{}, legacyFileSnapshot{}, false,
+			errors.New("legacy source size limit is invalid")
 	}
 	if err := rejectSymlinkPath(root, source.Relative); err != nil {
-		return LegacyInput{}, false, err
+		return LegacyInput{}, legacyFileSnapshot{}, false, err
 	}
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		return LegacyInput{}, false, nil
+		return LegacyInput{}, legacyFileSnapshot{}, false, nil
 	}
 	if err != nil {
-		return LegacyInput{}, false, err
+		return LegacyInput{}, legacyFileSnapshot{}, false, err
 	}
 	if !safeLegacyRegularFile(path, info) {
-		return LegacyInput{}, false, errors.New("legacy source has an unsafe type or mode")
+		return LegacyInput{}, legacyFileSnapshot{}, false,
+			errors.New("legacy source has an unsafe type or mode")
 	}
 	if info.Size() > maxBytes {
-		return LegacyInput{}, false, errors.New("legacy source exceeds the size limit")
+		return LegacyInput{}, legacyFileSnapshot{}, false,
+			errors.New("legacy source exceeds the size limit")
 	}
 	file, err := legacySourceOpen(path)
 	if err != nil {
-		return LegacyInput{}, false, err
+		return LegacyInput{}, legacyFileSnapshot{}, false, err
 	}
 	defer file.Close()
 	openedInfo, err := file.Stat()
 	if err != nil {
-		return LegacyInput{}, false, err
+		return LegacyInput{}, legacyFileSnapshot{}, false, err
+	}
+	var identity fileidentity.Identity
+	if requireIdentity {
+		var objectType fileidentity.ObjectType
+		identity, objectType, err = legacyOpenedIdentity(file)
+		if err != nil || !identity.Valid() || objectType != fileidentity.ObjectTypeRegular {
+			return LegacyInput{}, legacyFileSnapshot{}, false, errors.Join(
+				errors.New("legacy source physical identity is unavailable"),
+				err,
+			)
+		}
 	}
 	currentInfo, err := os.Lstat(path)
 	if err != nil || !safeLegacyRegularFile(path, openedInfo) ||
 		!safeLegacyRegularFile(path, currentInfo) || !os.SameFile(info, openedInfo) ||
 		!os.SameFile(openedInfo, currentInfo) {
-		return LegacyInput{}, false, errors.New("legacy source changed while opening")
+		return LegacyInput{}, legacyFileSnapshot{}, false,
+			errors.New("legacy source changed while opening")
 	}
 	data, err := legacySourceReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
-		return LegacyInput{}, false, err
+		return LegacyInput{}, legacyFileSnapshot{}, false, err
 	}
 	if int64(len(data)) > maxBytes {
-		return LegacyInput{}, false, errors.New("legacy source exceeds the size limit")
+		return LegacyInput{}, legacyFileSnapshot{}, false,
+			errors.New("legacy source exceeds the size limit")
 	}
-	return LegacyInput{
+	digest := sha256.Sum256(data)
+	input := LegacyInput{
 		ID:       source.ID,
 		Relative: source.Relative,
 		Data:     data,
-		Digest:   sha256.Sum256(data),
+		Digest:   digest,
 		Limit:    maxBytes,
 		Mode:     openedInfo.Mode().Perm(),
 		ModTime:  openedInfo.ModTime(),
+	}
+	return input, legacyFileSnapshot{
+		digest:   digest,
+		mode:     openedInfo.Mode().Perm(),
+		info:     openedInfo,
+		identity: identity,
 	}, true, nil
+}
+
+func revalidateDeferredLegacySource(
+	root string,
+	source LegacySource,
+	defaultMax int64,
+	expectedSnapshot legacyFileSnapshot,
+) error {
+	_, snapshot, found, err := readLegacySourceSnapshot(root, source, defaultMax, true)
+	if err != nil {
+		return err
+	}
+	if !found || !expectedSnapshot.identity.Valid() ||
+		expectedSnapshot.identity != snapshot.identity ||
+		!os.SameFile(expectedSnapshot.info, snapshot.info) ||
+		!equalDigest(expectedSnapshot.digest[:], snapshot.digest[:]) ||
+		expectedSnapshot.mode != snapshot.mode ||
+		expectedSnapshot.info.Size() != snapshot.info.Size() ||
+		!expectedSnapshot.info.ModTime().Equal(snapshot.info.ModTime()) {
+		return errors.New("legacy source changed during deferred import")
+	}
+	return nil
 }
 
 func inspectLegacyRegularFile(
