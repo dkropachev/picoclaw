@@ -53,6 +53,9 @@ type ResponseEnvelope struct {
 
 // Request is the authenticated, epoch-fenced request given to a domain handler.
 type Request struct {
+	// ID is transport correlation only. A declared-idempotent handler must not
+	// derive durable identity or mutation semantics from it; use IdempotencyKey
+	// and the typed payload instead.
 	ID             string
 	StoreID        StoreID
 	Domain         string

@@ -25,6 +25,11 @@ type scopedEchoResponse struct {
 	Value string `json:"value"`
 }
 
+type scopedIdempotencyResponse struct {
+	Count int64  `json:"count"`
+	Value string `json:"value"`
+}
+
 func TestScopedStoreRoundTripRediscoveryAndAdmission(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	bindings := []database.StoreBinding{{ID: integrationStoreID, Domain: integrationDomain}}
@@ -159,6 +164,53 @@ func TestCallStoreConflictRetryRetainsExactTarget(t *testing.T) {
 		if storeID := <-storeIDs; storeID != integrationStoreID {
 			t.Fatalf("attempt %d StoreID = %q, want %q", attempt, storeID, integrationStoreID)
 		}
+	}
+}
+
+func TestCallStoreWithOptionsReplaysFreshClientRequests(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	var calls atomic.Int64
+	server, err := database.StartServer(context.Background(), database.ServerOptions{
+		Home: home,
+		ServedStores: []database.StoreBinding{{
+			ID: integrationStoreID, Domain: integrationDomain,
+		}},
+		Handler: database.HandlerFunc(func(_ context.Context, request database.Request) (any, error) {
+			var input scopedEchoRequest
+			if err := request.DecodePayload(&input); err != nil {
+				return nil, database.NewError(database.CodeInvalid, "scoped mutation payload is invalid")
+			}
+			return scopedIdempotencyResponse{Count: calls.Add(1), Value: input.Value}, nil
+		}),
+		AllowsIdempotency: func(domain string, version int, operation string) bool {
+			return domain == integrationDomain && version == 1 && operation == "mutate"
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closeScopedIntegrationServer(t, server) })
+	client, err := database.Connect(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(output *scopedIdempotencyResponse) error {
+		return client.CallStoreWithOptions(
+			context.Background(), integrationStoreID, integrationDomain, 1, "mutate",
+			scopedEchoRequest{Value: "semantic-mutation"}, output,
+			database.CallOptions{Mutation: true, IdempotencyKey: "stable-client-call"},
+		)
+	}
+	var first, second scopedIdempotencyResponse
+	if err := call(&first); err != nil {
+		t.Fatalf("first CallStoreWithOptions() error = %v", err)
+	}
+	if err := call(&second); err != nil {
+		t.Fatalf("fresh CallStoreWithOptions() replay error = %v", err)
+	}
+	if first != (scopedIdempotencyResponse{Count: 1, Value: "semantic-mutation"}) ||
+		second != first || calls.Load() != 1 {
+		t.Fatalf("fresh client results/calls = %#v, %#v/%d", first, second, calls.Load())
 	}
 }
 

@@ -16,7 +16,7 @@ type idempotencyMutationResponse struct {
 	Value string `json:"value"`
 }
 
-func TestServerReplaysStableIdempotentMutationOnce(t *testing.T) {
+func TestServerReplaysStableIdempotentMutationAcrossRequestIDs(t *testing.T) {
 	t.Parallel()
 	var mutations atomic.Int64
 	server := newIdempotencyTestServer(HandlerFunc(func(
@@ -32,11 +32,23 @@ func TestServerReplaysStableIdempotentMutationOnce(t *testing.T) {
 			Value: input.Value,
 		}, nil
 	}))
-	envelope := idempotencyTestEnvelope(t, "stable-1", "request-1", "first")
-	first, _ := server.dispatch(envelope)
-	second, _ := server.dispatch(envelope)
+	firstRequest := idempotencyTestEnvelope(t, "stable-1", "request-1", "first")
+	secondRequest := firstRequest
+	secondRequest.RequestID = "request-2"
+	first, _ := server.dispatch(firstRequest)
+	second, _ := server.dispatch(secondRequest)
 	if first.Error != nil || second.Error != nil {
 		t.Fatalf("dispatch errors = %v, %v", first.Error, second.Error)
+	}
+	if first.RequestID != firstRequest.RequestID || second.RequestID != secondRequest.RequestID ||
+		first.BrokerEpoch != firstRequest.BrokerEpoch || second.BrokerEpoch != secondRequest.BrokerEpoch {
+		t.Fatalf("response identities = %#v, %#v", first, second)
+	}
+	if err := validResponseEnvelope(first, firstRequest.RequestID, firstRequest.BrokerEpoch); err != nil {
+		t.Fatalf("first response is invalid: %v", err)
+	}
+	if err := validResponseEnvelope(second, secondRequest.RequestID, secondRequest.BrokerEpoch); err != nil {
+		t.Fatalf("replayed response is invalid: %v", err)
 	}
 	if string(first.Payload) != string(second.Payload) {
 		t.Fatalf("replayed payload = %s, want %s", second.Payload, first.Payload)
@@ -46,7 +58,7 @@ func TestServerReplaysStableIdempotentMutationOnce(t *testing.T) {
 	}
 }
 
-func TestServerRejectsIdempotencyKeyReuseForDifferentRequest(t *testing.T) {
+func TestServerRejectsIdempotencyKeyReuseForDifferentPayload(t *testing.T) {
 	t.Parallel()
 	var mutations atomic.Int64
 	server := newIdempotencyTestServer(HandlerFunc(func(context.Context, Request) (any, error) {
@@ -79,21 +91,37 @@ func TestServerCoalescesConcurrentIdempotentMutation(t *testing.T) {
 		<-release
 		return idempotencyMutationResponse{Count: 1, Value: "coalesced"}, nil
 	}))
-	envelope := idempotencyTestEnvelope(t, "stable-concurrent", "request-concurrent", "value")
-	responses := make(chan ResponseEnvelope, 2)
+	firstRequest := idempotencyTestEnvelope(t, "stable-concurrent", "request-concurrent-1", "value")
+	secondRequest := firstRequest
+	secondRequest.RequestID = "request-concurrent-2"
+	type result struct {
+		request  RequestEnvelope
+		response ResponseEnvelope
+	}
+	responses := make(chan result, 2)
 	go func() {
-		response, _ := server.dispatch(envelope)
-		responses <- response
+		response, _ := server.dispatch(firstRequest)
+		responses <- result{request: firstRequest, response: response}
 	}()
 	<-started
 	go func() {
-		response, _ := server.dispatch(envelope)
-		responses <- response
+		response, _ := server.dispatch(secondRequest)
+		responses <- result{request: secondRequest, response: response}
 	}()
 	close(release)
 	first, second := <-responses, <-responses
-	if first.Error != nil || second.Error != nil || string(first.Payload) != string(second.Payload) {
+	if first.response.Error != nil || second.response.Error != nil ||
+		string(first.response.Payload) != string(second.response.Payload) {
 		t.Fatalf("concurrent responses = %#v, %#v", first, second)
+	}
+	for _, completed := range []result{first, second} {
+		if err := validResponseEnvelope(
+			completed.response,
+			completed.request.RequestID,
+			completed.request.BrokerEpoch,
+		); err != nil {
+			t.Fatalf("concurrent response for %q is invalid: %v", completed.request.RequestID, err)
+		}
 	}
 	if got := mutations.Load(); got != 1 {
 		t.Fatalf("domain mutation count = %d, want 1", got)
