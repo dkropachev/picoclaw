@@ -355,6 +355,18 @@ func migrate(ctx context.Context, db *sql.DB, options Options) error {
 // Immediate executes fn inside BEGIN IMMEDIATE, or BEGIN EXCLUSIVE when ctx
 // carries the exact-target offline migration capability used to open the pool.
 func Immediate(ctx context.Context, db *sql.DB, fn func(*sql.Conn) error) (err error) {
+	return immediateWithBeforeCommit(ctx, db, fn, nil)
+}
+
+// immediateWithBeforeCommit keeps one internal final proof between two
+// transaction-boundary barriers. The proof receives no SQL connection and
+// must complete before the sole owner-authorized COMMIT.
+func immediateWithBeforeCommit(
+	ctx context.Context,
+	db *sql.DB,
+	fn func(*sql.Conn) error,
+	beforeCommit func() error,
+) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -383,22 +395,43 @@ func Immediate(ctx context.Context, db *sql.DB, fn func(*sql.Conn) error) (err e
 		}
 		begin = "BEGIN EXCLUSIVE"
 	}
+	boundary, err := sqliteprovider.NewTransactionBoundary(conn)
+	if err != nil {
+		return err
+	}
+	boundaryClosed := false
+	defer func() {
+		if !boundaryClosed {
+			err = errors.Join(err, boundary.Close())
+			boundaryClosed = true
+		}
+	}()
+	if err = boundary.BeginAttempted(); err != nil {
+		return err
+	}
 	if _, err = conn.ExecContext(ctx, begin); err != nil {
 		return err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	if err = boundary.Started(); err != nil {
+		return err
+	}
+	callbackErr := fn(conn)
+	boundaryErr := boundary.Check(ctx)
+	if boundaryErr != nil || callbackErr != nil {
+		return errors.Join(boundaryErr, callbackErr)
+	}
+	if beforeCommit != nil {
+		if err = beforeCommit(); err != nil {
+			return err
 		}
-	}()
-	if err = fn(conn); err != nil {
+	}
+	if err = boundary.Check(ctx); err != nil {
 		return err
 	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+	if err = boundary.Commit(ctx); err != nil {
 		return err
 	}
-	committed = true
+	boundaryClosed = true
 	return nil
 }
 
