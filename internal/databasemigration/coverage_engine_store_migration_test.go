@@ -330,6 +330,7 @@ func TestMigrationProviderAndStoreRejectUnavailableAuthority(t *testing.T) {
 		1,
 		func(context.Context, string) error { return nil },
 		func(context.Context, string) error { return nil },
+		nil,
 	); err == nil {
 		t.Fatal("provider accepted unavailable authority")
 	}

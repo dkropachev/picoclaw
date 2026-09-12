@@ -47,6 +47,7 @@ type offlineProviderAuthority interface {
 	Check(ctx context.Context) error
 	Reconcile(ctx context.Context) error
 	PinReplacement(ctx context.Context, path string) error
+	CheckReplacement(ctx context.Context, path string) error
 	DiscardReplacement(ctx context.Context) error
 	ReconcileReplacement(ctx context.Context) error
 }
@@ -76,6 +77,39 @@ func MigrateStagedOfflineFrom(
 	)
 }
 
+// MigrateStagedOfflineFromWithLiveVerification is MigrateStagedOfflineFrom
+// with one final callback after the exact validated stage is claims-pinned and
+// before it can replace the live target. The callback receives no selectable
+// path; it must consume the opaque replacement capability synchronously.
+func MigrateStagedOfflineFromWithLiveVerification(
+	ctx context.Context,
+	lease *databaseproviderlease.Lease,
+	source ImmutableGenerationSource,
+	busyTimeout time.Duration,
+	expectedVersion int,
+	migrate StagedMigration,
+	validate StagedValidation,
+	liveVerification StagedLiveVerification,
+) (result MaintenanceResult, returnErr error) {
+	if liveVerification == nil {
+		return result, dblayer.NewError(
+			dblayer.CodeInvalid,
+			"SQLite offline live verification callback is required",
+		)
+	}
+	return migrateStagedOfflineFromWithConsumerAndLiveVerification(
+		ctx,
+		lease,
+		source,
+		busyTimeout,
+		expectedVersion,
+		migrate,
+		validate,
+		liveVerification,
+		databaseproviderlease.Consume,
+	)
+}
+
 type offlineProviderLeaseConsumer func(
 	context.Context,
 	*databaseproviderlease.Lease,
@@ -90,6 +124,22 @@ func migrateStagedOfflineFromWithConsumer(
 	expectedVersion int,
 	migrate StagedMigration,
 	validate StagedValidation,
+	consume offlineProviderLeaseConsumer,
+) (result MaintenanceResult, returnErr error) {
+	return migrateStagedOfflineFromWithConsumerAndLiveVerification(
+		ctx, lease, source, busyTimeout, expectedVersion, migrate, validate, nil, consume,
+	)
+}
+
+func migrateStagedOfflineFromWithConsumerAndLiveVerification(
+	ctx context.Context,
+	lease *databaseproviderlease.Lease,
+	source ImmutableGenerationSource,
+	busyTimeout time.Duration,
+	expectedVersion int,
+	migrate StagedMigration,
+	validate StagedValidation,
+	liveVerification StagedLiveVerification,
 	consume offlineProviderLeaseConsumer,
 ) (result MaintenanceResult, returnErr error) {
 	if ctx == nil || consume == nil || !source.storeID.Valid() || source.use == nil ||
@@ -115,7 +165,7 @@ func migrateStagedOfflineFromWithConsumer(
 					"immutable SQLite generation source does not match its target",
 				)
 			}
-			result, err = migrateStagedOfflineAuthorized(
+			result, err = migrateStagedOfflineAuthorizedWithLiveVerification(
 				providerCtx,
 				source,
 				target,
@@ -123,6 +173,7 @@ func migrateStagedOfflineFromWithConsumer(
 				expectedVersion,
 				migrate,
 				validate,
+				liveVerification,
 				access,
 				stagedMigrationOps{
 					replace: replaceStagedGeneration, activate: activateInstalledGeneration,

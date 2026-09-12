@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/internal/fileidentity"
+	"github.com/sipeed/picoclaw/internal/sqliteprovider"
 	"github.com/sipeed/picoclaw/internal/storecatalog"
 	"github.com/sipeed/picoclaw/pkg/database"
 	"github.com/sipeed/picoclaw/pkg/fileutil"
@@ -565,7 +566,7 @@ func snapshotBackupWithOps(
 		return fail(fmt.Errorf("index final database backup source verification: %w", err))
 	}
 	for _, spec := range selected {
-		if err := session.verifyLiveSourcesWithState(ctx, spec, liveOps, liveState); err != nil {
+		if err := session.verifyLiveSourcesWithState(ctx, spec, liveOps, liveState, nil); err != nil {
 			return fail(fmt.Errorf("final database backup source verification: %w", err))
 		}
 	}
@@ -750,6 +751,15 @@ type backupLiveVerifyOps struct {
 	walkLegacy func(
 		context.Context, string, string, map[string]struct{}, *backupBudget, func(string) error,
 	) error
+	walkLegacyExact func(
+		context.Context,
+		string,
+		string,
+		map[string]struct{},
+		*legacyExactExclusion,
+		*backupBudget,
+		func(string) error,
+	) error
 	verifyRecord func(context.Context, string, BackupFileManifest) (fileidentity.Identity, error)
 }
 
@@ -793,7 +803,9 @@ func defaultBackupVerifyOps() backupVerifyOps {
 func defaultBackupLiveVerifyOps() backupLiveVerifyOps {
 	return backupLiveVerifyOps{
 		lstat: os.Lstat, identity: fileidentity.Existing,
-		walkLegacy: walkLegacyInputs, verifyRecord: verifyLiveSourceRecord,
+		walkLegacy:      walkLegacyInputs,
+		walkLegacyExact: walkLegacyInputsWithExactExclusion,
+		verifyRecord:    verifyLiveSourceRecord,
 	}
 }
 
@@ -1063,6 +1075,116 @@ func (b *backupSession) verifyLiveSources(ctx context.Context, spec storecatalog
 	return b.verifyLiveSourcesWithOps(ctx, spec, defaultBackupLiveVerifyOps())
 }
 
+// verifyLiveSourcesForReplacement consumes one provider-minted, callback-scoped
+// replacement witness. Only its exact pinned main is added to the detached
+// in-memory exclusion state; the backup manifest and ordinary verifier remain
+// unchanged, and sidecars are deliberately never excluded.
+func (b *backupSession) verifyLiveSourcesForReplacement(
+	ctx context.Context,
+	spec storecatalog.Spec,
+	replacement sqliteprovider.ValidatedReplacement,
+) error {
+	return replacement.Use(ctx, spec.ID, spec.Path, func(
+		verificationCtx context.Context,
+		stage string,
+		checkExact sqliteprovider.ValidatedReplacementCheck,
+	) error {
+		return b.verifyLiveSourcesForReplacementStageWithOps(
+			verificationCtx,
+			spec,
+			stage,
+			checkExact,
+			defaultBackupLiveVerifyOps(),
+		)
+	})
+}
+
+func (b *backupSession) verifyLiveSourcesForReplacementStageWithOps(
+	ctx context.Context,
+	spec storecatalog.Spec,
+	stage string,
+	checkExact sqliteprovider.ValidatedReplacementCheck,
+	ops backupLiveVerifyOps,
+) error {
+	if err := b.verifyStore(ctx, spec.ID); err != nil {
+		return fmt.Errorf("verify database backup before live sources: %w", err)
+	}
+	return b.verifyLiveSourcesForStageWithOps(ctx, spec, stage, checkExact, ops)
+}
+
+func (b *backupSession) verifyLiveSourcesForStageWithOps(
+	ctx context.Context,
+	spec storecatalog.Spec,
+	stage string,
+	checkExact sqliteprovider.ValidatedReplacementCheck,
+	ops backupLiveVerifyOps,
+) error {
+	if !validBackupAbsolutePath(stage) || checkExact == nil || ops.lstat == nil ||
+		ops.walkLegacyExact == nil {
+		return errors.New("database replacement live-source stage is invalid")
+	}
+	state, err := b.newBackupLiveVerificationState(ctx, ops)
+	if err != nil {
+		return err
+	}
+	stage = filepath.Clean(stage)
+	for _, catalogPath := range b.manifest.CatalogGenerations {
+		if filepath.Clean(catalogPath) == stage {
+			return errors.New("database replacement stage collides with a catalog generation")
+		}
+	}
+	for _, records := range state.records {
+		for _, record := range records.legacy {
+			if filepath.Clean(record.Source) == stage {
+				return errors.New("database replacement stage collides with a legacy input")
+			}
+		}
+	}
+	info, statErr := ops.lstat(stage)
+	if statErr != nil || info == nil || !info.Mode().IsRegular() ||
+		info.Mode()&os.ModeSymlink != 0 {
+		return errors.Join(
+			errors.New("database replacement live-source stage is unsafe"),
+			statErr,
+		)
+	}
+	identity, identityErr := checkExact(ctx, info)
+	if identityErr != nil || !identity.Valid() {
+		return errors.Join(errors.New(
+			"database replacement live-source stage identity is unavailable",
+		), identityErr)
+	}
+	if err := rememberLiveIdentity(state.identityOwners, identity, stage); err != nil {
+		return err
+	}
+	exact := &legacyExactExclusion{
+		path: stage,
+		validate: func(
+			validationCtx context.Context,
+			observedPath string,
+			observed os.FileInfo,
+		) error {
+			if filepath.Clean(observedPath) != stage {
+				return errors.New("database replacement exclusion path changed")
+			}
+			observedIdentity, err := checkExact(validationCtx, observed)
+			if err != nil || observedIdentity != identity {
+				return errors.Join(
+					errors.New("database replacement exclusion identity changed"), err,
+				)
+			}
+			return nil
+		},
+	}
+	if err := b.verifyLiveSourcesWithState(ctx, spec, ops, state, exact); err != nil {
+		return err
+	}
+	if exactPathWithinLegacyRoots(stage, spec.LegacyRoots) && exact.seen == 0 {
+		return errors.New("database replacement stage was not observed in its legacy root")
+	}
+	return nil
+}
+
 func (b *backupSession) verifyLiveSourcesWithOps(
 	ctx context.Context,
 	spec storecatalog.Spec,
@@ -1072,7 +1194,7 @@ func (b *backupSession) verifyLiveSourcesWithOps(
 	if err != nil {
 		return err
 	}
-	return b.verifyLiveSourcesWithState(ctx, spec, ops, state)
+	return b.verifyLiveSourcesWithState(ctx, spec, ops, state, nil)
 }
 
 func (b *backupSession) newBackupLiveVerificationState(
@@ -1148,6 +1270,7 @@ func (b *backupSession) verifyLiveSourcesWithState(
 	spec storecatalog.Spec,
 	ops backupLiveVerifyOps,
 	state *backupLiveVerificationState,
+	exact *legacyExactExclusion,
 ) error {
 	if b == nil || b.root == "" || !spec.ID.Valid() || !validBackupAbsolutePath(spec.Path) {
 		return errors.New("database live-source verification input is invalid")
@@ -1237,21 +1360,36 @@ func (b *backupSession) verifyLiveSourcesWithState(
 				return err
 			}
 		}
-		walkErr := ops.walkLegacy(
-			ctx,
-			root,
-			b.root,
-			state.excludedKeys,
-			budget,
-			func(path string) error {
-				key := fmt.Sprintf("%06d\x00%s", rootIndex, backupPathKey(path))
-				if len(actualLegacy) >= backupMaxFiles {
-					return errors.New("live legacy input file count limit exceeded")
-				}
-				actualLegacy[key] = filepath.Clean(path)
-				return nil
-			},
-		)
+		visit := func(path string) error {
+			key := fmt.Sprintf("%06d\x00%s", rootIndex, backupPathKey(path))
+			if len(actualLegacy) >= backupMaxFiles {
+				return errors.New("live legacy input file count limit exceeded")
+			}
+			actualLegacy[key] = filepath.Clean(path)
+			return nil
+		}
+		var walkErr error
+		if exact != nil {
+			if ops.walkLegacyExact == nil {
+				return errors.New("database exact live-source walker is unavailable")
+			}
+			walkErr = ops.walkLegacyExact(
+				ctx,
+				root,
+				b.root,
+				state.excludedKeys,
+				exact,
+				budget,
+				visit,
+			)
+		} else {
+			if ops.walkLegacy == nil {
+				return errors.New("database live-source walker is unavailable")
+			}
+			walkErr = ops.walkLegacy(
+				ctx, root, b.root, state.excludedKeys, budget, visit,
+			)
+		}
 		if walkErr != nil {
 			return fmt.Errorf("enumerate live legacy inputs: %w", walkErr)
 		}
@@ -1398,6 +1536,17 @@ func rememberLiveIdentity(
 	}
 	owners[identity] = path
 	return nil
+}
+
+func exactPathWithinLegacyRoots(path string, roots []string) bool {
+	clean := filepath.Clean(path)
+	for _, root := range roots {
+		root = filepath.Clean(root)
+		if clean == root || strings.HasPrefix(clean, root+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
 }
 
 func verifyLiveSourceRecord(

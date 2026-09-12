@@ -85,6 +85,11 @@ func (guard *MigrationRefreshingGuard) NewProviderLease(
 					return guard.PinReplacement(id, path)
 				})
 			},
+			CheckReplacement: func(ctx context.Context, path string) error {
+				return providerLeaseGuardHook(ctx, func() error {
+					return guard.CheckReplacement(id, path)
+				})
+			},
 			DiscardReplacement: func(ctx context.Context) error {
 				return providerLeaseGuardHook(ctx, func() error {
 					return guard.DiscardReplacement(id)

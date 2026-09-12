@@ -159,7 +159,7 @@ func TestArchiveLiveSourceVerificationAdditionalFaultBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := session.verifyLiveSourcesWithState(
-		canceled, spec, defaultBackupLiveVerifyOps(), state,
+		canceled, spec, defaultBackupLiveVerifyOps(), state, nil,
 	); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled indexed live-source verification = %v", err)
 	}

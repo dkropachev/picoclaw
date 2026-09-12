@@ -55,7 +55,11 @@ func TestMigrationGuardProviderLeaseBindsExactTargetAndReplacementHooks(t *testi
 			if pinErr := access.PinReplacement(ctx, stage); pinErr != nil {
 				return pinErr
 			}
-			if claimsLease.replacementPins[id] == nil {
+			if checkErr := access.CheckReplacement(ctx, stage); checkErr != nil {
+				return checkErr
+			}
+			if claimsLease.replacementPins[id] == nil ||
+				claimsLease.replacementPins[id].path != stage {
 				return errors.New("provider pin was not published")
 			}
 			if discardErr := access.DiscardReplacement(ctx); discardErr != nil {
@@ -71,6 +75,13 @@ func TestMigrationGuardProviderLeaseBindsExactTargetAndReplacementHooks(t *testi
 			replacement := writeReplacementStage(t, claimsLease.home, "provider-installed-stage.db")
 			if pinErr := access.PinReplacement(ctx, replacement); pinErr != nil {
 				return pinErr
+			}
+			if checkErr := access.CheckReplacement(ctx, replacement); checkErr != nil {
+				return checkErr
+			}
+			if claimsLease.replacementPins[id] == nil ||
+				claimsLease.replacementPins[id].path != replacement {
+				return errors.New("provider replacement path was not retained")
 			}
 			if renameErr := os.Rename(target, target+".old"); renameErr != nil {
 				return renameErr

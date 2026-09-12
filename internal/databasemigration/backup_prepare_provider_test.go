@@ -102,6 +102,7 @@ func newPreparedProviderLease(t *testing.T, spec storecatalog.Spec) *databasepro
 			Check:                func(context.Context) error { return nil },
 			Reconcile:            func(context.Context) error { return nil },
 			PinReplacement:       func(context.Context, string) error { return nil },
+			CheckReplacement:     func(context.Context, string) error { return nil },
 			DiscardReplacement:   func(context.Context) error { return nil },
 			ReconcileReplacement: func(context.Context) error { return nil },
 		},

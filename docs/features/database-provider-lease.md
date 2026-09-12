@@ -25,6 +25,9 @@ guard. It opens no database and changes no runtime wiring.
   hook set, and finite future deadline clamped to ten minutes.
 - `Access` is synchronous and scope-bound. Retained copies fail after callback
   return, revocation, parent cancellation, or deadline.
+- An exact replacement recheck accepts only the canonical path currently bound
+  to the retained StoreID replacement pin; a generic authority check cannot
+  stand in for this path-and-identity proof.
 - Callback and hook contexts expose the earliest applicable deadline. Explicit
   revocation cancels every admitted context before returning, while operation
   contexts preserve values from their immediate caller.
@@ -38,7 +41,7 @@ guard. It opens no database and changes no runtime wiring.
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
 | `FR-DATABASE-PROVIDER-LEASE-001` | MUST | Claims constructs a child capability with a live bounded context, exact `StoreID`/path, and migration-guard hooks. | A copy-safe opaque lease is bound immutably to that target and expires no later than ten minutes; an already-ended parent reports its exact cancellation cause. | Allocates only in-process lifecycle state and cancellation callbacks. | Nil/canceled/unbounded context, invalid ID/path, or incomplete hooks fails before publication. | Provider authority must be exact, finite, and independent of mutable catalog objects. |
-| `FR-DATABASE-PROVIDER-LEASE-002` | MUST | The provider consumes a live lease. | Exactly one synchronous callback receives `Access`; target, check, ordinary reconciliation, replacement pin, idempotent unused-pin discard, and replacement reconciliation operations are admitted only within that scope, expose the earliest caller/lease deadline, preserve immediate caller values, and retain caller/lease cancellation causes. Cleanup runs during return, panic, and `Goexit`; consumption does not unwind past any admitted operation that ignores cancellation. | Marks the lease consumed, counts all in-flight operations, then revokes it when the callback returns. A pin call may have published before its final check reports failure, so every known pre-cutover pin error is followed by discard. A successful discard retires any unused pin before the provider removes its stage; no-pin discard is a no-op and physical claim/assignment history remains monotonic. | Repeated consumption, retained access, caller cancellation, panic/`Goexit`, hook failure, concurrent revocation, or deadline fails closed. | A callback or copied value cannot retain migration authority or let unproved provider work outlive the consuming boundary; provider cleanup must not invalidate a possibly published claims pin. |
+| `FR-DATABASE-PROVIDER-LEASE-002` | MUST | The provider consumes a live lease. | Exactly one synchronous callback receives `Access`; target, check, ordinary reconciliation, replacement pin, exact active-pin recheck, idempotent unused-pin discard, and replacement reconciliation operations are admitted only within that scope, expose the earliest caller/lease deadline, preserve immediate caller values, and retain caller/lease cancellation causes. An active-pin recheck supplies the immutable lease StoreID and target internally and accepts only the exact canonical stage path retained by that association; it cannot validate a former, foreign, or superseded pin. Cleanup runs during return, panic, and `Goexit`; consumption does not unwind past any admitted operation that ignores cancellation. | Marks the lease consumed, counts all in-flight operations, then revokes it when the callback returns. A pin call may have published before its final check reports failure, so every known pre-cutover pin error is followed by discard. A successful discard retires any unused pin before the provider removes its stage; no-pin discard is a no-op and physical claim/assignment history remains monotonic. | Repeated consumption, retained access, stale/wrong-path pin recheck, caller cancellation, panic/`Goexit`, hook failure, concurrent revocation, or deadline fails closed. | A callback or copied value cannot retain migration authority or let unproved provider work outlive the consuming boundary; provider cleanup and final source verification must not infer authority from a raw pathname or invalidate a possibly published claims pin. |
 | `FR-DATABASE-PROVIDER-LEASE-003` | MUST | Claims revokes and drains a child before releasing its migration guard. | `Revoke` closes admission and synchronously cancels every admitted context without waiting for provider code; `Wait` returns only after callback and all operations drain, or reports its own exact cancellation cause. | Monotonically transitions live → revoked → drained; never reopens. | Nil/repeated revoke is safe as specified; a callback ignoring cancellation keeps drain incomplete and therefore cannot authorize fence release. | Claims must never wait while holding provider locks, and unproved quiescence must fail-stop. |
 | `FR-DATABASE-PROVIDER-LEASE-004` | MUST | Repository code imports or invokes the neutral capability. | Only the exact claims bridge may construct/revoke/wait and only the exact provider bridge may consume it. | None. | Any other production importer or cross-role package call fails an architecture test. | The neutral package must not become a general authority bypass. |
 
@@ -60,7 +63,7 @@ Owns: TEST internal/databaseproviderlease/*_test.go *
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Internal Go API | `New`, `Lease`, `Hooks` | Mint one exact finite child authority from claims-owned closures. | `FR-DATABASE-PROVIDER-LEASE-001`, `FR-DATABASE-PROVIDER-LEASE-004` |
-| Internal Go API | `Consume`, `Access` | Admit one provider scope and invoke target-bound check, reconcile, pin, discard-pin, and promote-replacement hooks without exposing claims. | `FR-DATABASE-PROVIDER-LEASE-002`, `FR-DATABASE-PROVIDER-LEASE-004` |
+| Internal Go API | `Consume`, `Access.CheckReplacement` and other `Access` methods | Admit one provider scope and invoke target-bound check, reconcile, pin, exact-pin recheck, discard-pin, and promote-replacement hooks without exposing claims. | `FR-DATABASE-PROVIDER-LEASE-002`, `FR-DATABASE-PROVIDER-LEASE-004` |
 | Internal Go API | `Revoke`, `Wait` | Separate nonblocking cancellation from bounded drain proof. | `FR-DATABASE-PROVIDER-LEASE-003`, `FR-DATABASE-PROVIDER-LEASE-004` |
 
 ## Algorithms And Ordering
@@ -71,9 +74,10 @@ Owns: TEST internal/databaseproviderlease/*_test.go *
    callback without holding the lifecycle mutex.
 4. Admit hook calls only for the current live scope, count them, combine the
    scope and operation contexts with the earliest deadline and operation
-   values, call hooks outside the mutex, then decrement exactly once. An unused
-   replacement pin is discarded through its dedicated hook before the provider
-   deletes a known-uninstalled stage.
+   values, call hooks outside the mutex, then decrement exactly once. Recheck a
+   replacement only through the exact current pin hook. An unused replacement
+   pin is discarded through its dedicated hook before the provider deletes a
+   known-uninstalled stage.
 5. Callback completion, explicit revoke, parent cancellation, or deadline
    closes admission and cancels the capability. Drain closes only after the
    callback and all operations return.
@@ -94,6 +98,8 @@ while the claims/fence remain held before it can unlock.
 
 - A lease cannot be consumed twice, even through value copies.
 - A retained `Access` cannot read the target or invoke hooks after scope end.
+- A generic `Check` or a pin belonging to a prior path, child, StoreID, or
+  invocation cannot authorize an exact-stage final verification.
 - Discarding an unused replacement pin grants no main-replacement authority and
   cannot reopen or reuse the one-shot lease.
 - Revocation is nonblocking even while a hook is stalled.

@@ -64,7 +64,7 @@ func TestScopedStoreTargetHasOneWireAuthority(t *testing.T) {
 			scopedTargetExternalStoreID: 1,
 		},
 		"internal/databaseclaims/claims.go": {
-			scopedTargetExternalStoreID: 33,
+			scopedTargetExternalStoreID: 35,
 		},
 		"internal/databaseclaims/provider_lease.go": {
 			scopedTargetExternalStoreID: 1,
@@ -94,6 +94,9 @@ func TestScopedStoreTargetHasOneWireAuthority(t *testing.T) {
 		"internal/sqliteprovider/provider_offline.go": {
 			scopedTargetExternalStoreID: 2,
 		},
+		"internal/sqliteprovider/staged_live_verification.go": {
+			scopedTargetExternalStoreID: 3,
+		},
 		"internal/storecatalog/catalog.go": {
 			scopedTargetExternalStoreID: 12,
 			scopedTargetExternalParseID: 1,
@@ -112,6 +115,9 @@ func TestScopedStoreTargetHasOneWireAuthority(t *testing.T) {
 			scopedTargetUnscopedCall: 1,
 		},
 		"internal/databasemigration/backup_status_exchange_windows.go": {
+			scopedTargetUnscopedCall: 1,
+		},
+		"internal/sqliteprovider/staged_retirement_windows.go": {
 			scopedTargetUnscopedCall: 1,
 		},
 		"pkg/agent/hook_process.go": {

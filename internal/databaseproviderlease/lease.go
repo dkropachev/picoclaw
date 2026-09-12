@@ -35,6 +35,7 @@ type Hooks struct {
 	Check                func(context.Context) error
 	Reconcile            func(context.Context) error
 	PinReplacement       func(context.Context, string) error
+	CheckReplacement     func(context.Context, string) error
 	DiscardReplacement   func(context.Context) error
 	ReconcileReplacement func(context.Context) error
 }
@@ -265,6 +266,21 @@ func (access Access) PinReplacement(ctx context.Context, path string) error {
 	}
 	return access.invoke(ctx, func(state *leaseState, operationContext context.Context) error {
 		return state.hooks.PinReplacement(operationContext, path)
+	})
+}
+
+// CheckReplacement proves that path still names the exact replacement pinned
+// for this lease's immutable target. It does not admit a new path or refresh a
+// missing pin.
+func (access Access) CheckReplacement(ctx context.Context, path string) error {
+	if !validTarget(path) {
+		return database.NewError(
+			database.CodeInvalid,
+			"database provider replacement path is invalid",
+		)
+	}
+	return access.invoke(ctx, func(state *leaseState, operationContext context.Context) error {
+		return state.hooks.CheckReplacement(operationContext, path)
 	})
 }
 
@@ -554,6 +570,7 @@ func (ctx fallbackValueContext) Value(key any) any {
 
 func validHooks(hooks Hooks) bool {
 	return hooks.Check != nil && hooks.Reconcile != nil && hooks.PinReplacement != nil &&
+		hooks.CheckReplacement != nil &&
 		hooks.DiscardReplacement != nil && hooks.ReconcileReplacement != nil
 }
 

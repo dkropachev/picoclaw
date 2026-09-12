@@ -92,6 +92,7 @@ type migrationStoreOps struct {
 		int,
 		sqliteprovider.StagedMigration,
 		sqliteprovider.StagedValidation,
+		sqliteprovider.StagedLiveVerification,
 	) (sqliteprovider.MaintenanceResult, error)
 }
 
@@ -755,7 +756,17 @@ func (engine *Engine) migrateStoreWithOps(
 		if !ready {
 			return ErrAdapterRequired
 		}
-		if verifyErr := backup.verifyLiveSources(validationCtx, spec); verifyErr != nil {
+		return nil
+	}
+	liveVerification := func(
+		verificationCtx context.Context,
+		replacement sqliteprovider.ValidatedReplacement,
+	) error {
+		if verifyErr := backup.verifyLiveSourcesForReplacement(
+			verificationCtx,
+			spec,
+			replacement,
+		); verifyErr != nil {
 			return fmt.Errorf("reverify live database migration sources: %w", verifyErr)
 		}
 		return nil
@@ -802,6 +813,7 @@ func (engine *Engine) migrateStoreWithOps(
 		adapter.Contract.CurrentVersion,
 		migrateStage,
 		validateStage,
+		liveVerification,
 	)
 	result.BeforeVersion = maintenance.BeforeVersion
 	result.AfterVersion = maintenance.AfterVersion
@@ -822,6 +834,7 @@ func runMigrationProvider(
 	expectedVersion int,
 	migrate sqliteprovider.StagedMigration,
 	validate sqliteprovider.StagedValidation,
+	liveVerification sqliteprovider.StagedLiveVerification,
 ) (result sqliteprovider.MaintenanceResult, returnErr error) {
 	if ctx == nil || guard == nil {
 		return result, errors.New("database migration provider authority is unavailable")
@@ -835,7 +848,7 @@ func runMigrationProvider(
 	return runMigrationProviderChild(
 		drain,
 		func() (sqliteprovider.MaintenanceResult, error) {
-			return sqliteprovider.MigrateStagedOfflineFrom(
+			return sqliteprovider.MigrateStagedOfflineFromWithLiveVerification(
 				providerCtx,
 				providerLease,
 				source,
@@ -843,6 +856,7 @@ func runMigrationProvider(
 				expectedVersion,
 				migrate,
 				validate,
+				liveVerification,
 			)
 		},
 	)

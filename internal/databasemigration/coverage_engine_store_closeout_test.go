@@ -379,6 +379,7 @@ func TestMigrationProviderRejectsCanceledChildContext(t *testing.T) {
 		1,
 		func(context.Context, string) error { return nil },
 		func(context.Context, string) error { return nil },
+		nil,
 	); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled provider child = %v", err)
 	}
@@ -442,6 +443,7 @@ func migrationProviderCallsValidation(stage string) func(
 	int,
 	sqliteprovider.StagedMigration,
 	sqliteprovider.StagedValidation,
+	sqliteprovider.StagedLiveVerification,
 ) (sqliteprovider.MaintenanceResult, error) {
 	return func(
 		ctx context.Context,
@@ -452,6 +454,7 @@ func migrationProviderCallsValidation(stage string) func(
 		_ int,
 		_ sqliteprovider.StagedMigration,
 		validate sqliteprovider.StagedValidation,
+		_ sqliteprovider.StagedLiveVerification,
 	) (sqliteprovider.MaintenanceResult, error) {
 		return sqliteprovider.MaintenanceResult{}, validate(ctx, stage)
 	}
@@ -466,6 +469,7 @@ func migrationProviderCallsMigration(stage string) func(
 	int,
 	sqliteprovider.StagedMigration,
 	sqliteprovider.StagedValidation,
+	sqliteprovider.StagedLiveVerification,
 ) (sqliteprovider.MaintenanceResult, error) {
 	return func(
 		ctx context.Context,
@@ -476,6 +480,7 @@ func migrationProviderCallsMigration(stage string) func(
 		_ int,
 		migrate sqliteprovider.StagedMigration,
 		_ sqliteprovider.StagedValidation,
+		_ sqliteprovider.StagedLiveVerification,
 	) (sqliteprovider.MaintenanceResult, error) {
 		return sqliteprovider.MaintenanceResult{AfterVersion: 1}, migrate(ctx, stage)
 	}

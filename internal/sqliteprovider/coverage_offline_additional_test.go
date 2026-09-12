@@ -354,7 +354,7 @@ func TestCoverageStagedMigrationRemainingPreCutoverBoundaries(t *testing.T) {
 			time.Second, 1, validMigration,
 			func(_ context.Context, stage string) error { return os.Remove(stage) }, validOps,
 		)
-		if err == nil || !strings.Contains(err.Error(), "changed during domain validation") {
+		if err == nil || !strings.Contains(err.Error(), "retained SQLite stage after domain validation") {
 			t.Fatalf("removed stage error = %v", err)
 		}
 	})
