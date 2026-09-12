@@ -244,9 +244,152 @@ func walkLegacyInputs(
 }
 
 type legacyExactExclusion struct {
-	path     string
-	validate func(context.Context, string, os.FileInfo) error
-	seen     int
+	path                 string
+	targetParent         string
+	validate             func(context.Context, string, os.FileInfo) error
+	validateTargetParent func(
+		context.Context,
+		string,
+		os.FileInfo,
+	) (fileidentity.Identity, error)
+	seen int
+}
+
+func walkProviderCreatedTargetParent(
+	ctx context.Context,
+	root string,
+	exact *legacyExactExclusion,
+	budget *backupBudget,
+) (returnErr error) {
+	return walkProviderCreatedTargetParentWithOps(
+		ctx,
+		root,
+		exact,
+		budget,
+		providerCreatedTargetParentWalkOps{
+			lstat:  os.Lstat,
+			open:   func(path string) (*os.File, os.FileInfo, error) { return openPinnedBackupPath(path, true) },
+			opened: fileidentity.Opened,
+			read:   readBackupDirectoryBatch,
+			close:  func(file *os.File) error { return file.Close() },
+		},
+	)
+}
+
+type providerCreatedTargetParentWalkOps struct {
+	lstat  func(string) (os.FileInfo, error)
+	open   func(string) (*os.File, os.FileInfo, error)
+	opened func(*os.File) (fileidentity.Identity, fileidentity.ObjectType, error)
+	read   func(backupDirectoryReader) ([]os.DirEntry, error)
+	close  func(*os.File) error
+}
+
+func walkProviderCreatedTargetParentWithOps(
+	ctx context.Context,
+	root string,
+	exact *legacyExactExclusion,
+	budget *backupBudget,
+	ops providerCreatedTargetParentWalkOps,
+) (returnErr error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !validBackupAbsolutePath(root) || exact == nil ||
+		filepath.Clean(root) != exact.targetParent || filepath.Dir(exact.path) != root ||
+		exact.validate == nil || exact.validateTargetParent == nil || exact.seen != 0 ||
+		budget == nil || ops.lstat == nil || ops.open == nil || ops.opened == nil ||
+		ops.read == nil || ops.close == nil {
+		return errors.New("provider-created target-parent walk is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := budget.enter("."); err != nil {
+		return err
+	}
+	before, err := ops.lstat(root)
+	if err != nil {
+		return err
+	}
+	parentIdentity, err := exact.validateTargetParent(ctx, root, before)
+	if err != nil || !parentIdentity.Valid() {
+		return errors.Join(
+			errors.New("provider-created target-parent identity is unavailable"),
+			err,
+		)
+	}
+	directory, opened, err := ops.open(root)
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, ops.close(directory)) }()
+	openedIdentity, openedType, openedErr := ops.opened(directory)
+	if openedErr != nil || opened == nil || !opened.IsDir() ||
+		openedType != fileidentity.ObjectTypeDirectory || openedIdentity != parentIdentity ||
+		before.Mode() != opened.Mode() || !before.ModTime().Equal(opened.ModTime()) {
+		return errors.Join(
+			errors.New("provider-created target parent changed while opening"),
+			openedErr,
+		)
+	}
+	for {
+		entries, readErr := ops.read(directory)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return readErr
+		}
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !validBackupPathComponent(entry.Name()) {
+				return errors.New(
+					"provider-created target parent contains an invalid entry",
+				)
+			}
+			child := filepath.Clean(filepath.Join(root, entry.Name()))
+			if child != exact.path {
+				return errors.New(
+					"provider-created target parent contains an unexpected entry",
+				)
+			}
+			if err := budget.enter(entry.Name()); err != nil {
+				return err
+			}
+			info, err := ops.lstat(child)
+			if err != nil {
+				return err
+			}
+			if err := exact.validate(ctx, child, info); err != nil {
+				return err
+			}
+			exact.seen++
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+	}
+	if exact.seen != 1 {
+		return errors.New(
+			"provider-created target parent does not contain exactly its replacement stage",
+		)
+	}
+	after, err := ops.lstat(root)
+	if err != nil || after == nil || !after.IsDir() ||
+		after.Mode()&os.ModeSymlink != 0 || !os.SameFile(before, after) ||
+		before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) {
+		return errors.Join(
+			errors.New("provider-created target parent changed during traversal"),
+			err,
+		)
+	}
+	afterIdentity, err := exact.validateTargetParent(ctx, root, after)
+	if err != nil || afterIdentity != parentIdentity {
+		return errors.Join(
+			errors.New("provider-created target-parent proof changed during traversal"),
+			err,
+		)
+	}
+	return nil
 }
 
 func walkLegacyInputsWithExactExclusion(

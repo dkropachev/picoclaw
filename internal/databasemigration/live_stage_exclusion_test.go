@@ -78,6 +78,187 @@ func liveStageCheck(t *testing.T, stage string) sqliteprovider.ValidatedReplacem
 	}
 }
 
+func liveTargetParentCheck(
+	t *testing.T,
+	parent string,
+) sqliteprovider.ValidatedTargetParentCheck {
+	t.Helper()
+	expected, err := os.Lstat(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, objectType, exists, err := fileidentity.ExistingWithType(parent)
+	if err != nil || !exists || objectType != fileidentity.ObjectTypeDirectory {
+		t.Fatalf("capture test target-parent identity: %v", err)
+	}
+	return func(ctx context.Context, observed os.FileInfo) (fileidentity.Identity, error) {
+		if err := ctx.Err(); err != nil {
+			return fileidentity.Identity{}, err
+		}
+		current, err := os.Lstat(parent)
+		if err != nil || observed == nil || current == nil ||
+			!os.SameFile(expected, observed) || !os.SameFile(expected, current) ||
+			!current.IsDir() || current.Mode()&os.ModeSymlink != 0 {
+			return fileidentity.Identity{}, errors.Join(
+				errors.New("test target-parent identity changed"),
+				err,
+			)
+		}
+		entries, err := os.ReadDir(parent)
+		if err != nil || len(entries) != 1 {
+			return fileidentity.Identity{}, errors.Join(
+				errors.New("test target parent is not sole-entry"),
+				err,
+			)
+		}
+		return identity, nil
+	}
+}
+
+func newMissingLiveTargetParentFixture(t *testing.T) *liveStageExclusionFixture {
+	t.Helper()
+	home := migrationHome(t)
+	root := filepath.Join(home, "workspace", "repository_reviews")
+	spec := storecatalog.Spec{
+		ID:          "global/repository-reviews",
+		Path:        filepath.Join(root, "repository-reviews.db"),
+		LegacyRoots: []string{root},
+	}
+	session := snapshotLiveSources(
+		t,
+		home,
+		[]storecatalog.Spec{spec},
+		[]storecatalog.Spec{spec},
+	)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(root, ".repository-reviews.db.migration-stage-exact")
+	writeMigrationFile(t, stage, []byte("staged database"))
+	return &liveStageExclusionFixture{
+		home: home, root: root, stage: stage, spec: spec, session: session,
+	}
+}
+
+func TestReplacementLiveVerificationAcceptsOnlyProvenCreatedTargetParent(t *testing.T) {
+	fixture := newMissingLiveTargetParentFixture(t)
+	if err := fixture.session.verifyLiveSourcesForReplacementStageWithOps(
+		t.Context(),
+		fixture.spec,
+		fixture.stage,
+		liveStageCheck(t, fixture.stage),
+		defaultBackupLiveVerifyOps(),
+	); err == nil || !strings.Contains(err.Error(), "layout changed") {
+		t.Fatalf("missing-root verification without parent proof = %v", err)
+	}
+	if err := fixture.session.verifyLiveSourcesForReplacementStageAndParentWithOps(
+		t.Context(),
+		fixture.spec,
+		fixture.stage,
+		liveStageCheck(t, fixture.stage),
+		liveTargetParentCheck(t, fixture.root),
+		defaultBackupLiveVerifyOps(),
+	); err != nil {
+		t.Fatalf("proven provider-created target parent = %v", err)
+	}
+}
+
+func TestReplacementPreexistingEmptyTargetParentUsesOrdinaryVerification(t *testing.T) {
+	home := migrationHome(t)
+	root := filepath.Join(home, "workspace", "repository_reviews")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spec := storecatalog.Spec{
+		ID:          "global/repository-reviews",
+		Path:        filepath.Join(root, "repository-reviews.db"),
+		LegacyRoots: []string{root},
+	}
+	session := snapshotLiveSources(
+		t, home, []storecatalog.Spec{spec}, []storecatalog.Spec{spec},
+	)
+	stage := filepath.Join(root, ".repository-reviews.db.migration-stage-exact")
+	writeMigrationFile(t, stage, []byte("staged database"))
+	if err := session.verifyLiveSourcesForReplacementStageWithOps(
+		t.Context(), spec, stage, liveStageCheck(t, stage), defaultBackupLiveVerifyOps(),
+	); err != nil {
+		t.Fatalf("ordinary preexisting empty target parent = %v", err)
+	}
+}
+
+func TestReplacementCreatedTargetParentRejectsEveryExtraEntryClass(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		create func(*testing.T, string)
+	}{
+		{name: "file", create: func(t *testing.T, path string) {
+			writeMigrationFile(t, path, []byte("extra"))
+		}},
+		{name: "empty directory", create: func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "normally skipped legacy-json", create: func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "normally skipped backups", create: func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "normally skipped state", create: func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "near stage", create: func(t *testing.T, path string) {
+			writeMigrationFile(t, path, []byte("near"))
+		}},
+		{name: "sidecar", create: func(t *testing.T, path string) {
+			writeMigrationFile(t, path, []byte("sidecar"))
+		}},
+		{name: "symlink", create: func(t *testing.T, path string) {
+			if err := os.Symlink(filepath.Join(filepath.Dir(path), "missing"), path); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newMissingLiveTargetParentFixture(t)
+			name := map[string]string{
+				"file":                         "extra.json",
+				"empty directory":              "empty",
+				"normally skipped legacy-json": "legacy-json",
+				"normally skipped backups":     "backups",
+				"normally skipped state":       ".picoclaw",
+				"near stage":                   filepath.Base(fixture.stage) + "-near",
+				"sidecar":                      filepath.Base(fixture.stage) + "-wal",
+				"symlink":                      "alias",
+			}[test.name]
+			test.create(t, filepath.Join(fixture.root, name))
+			ops := defaultBackupLiveVerifyOps()
+			// This stub checks only parent identity so the engine's strict walker,
+			// not the test capability, must reject the extra entry.
+			identity, _, _, err := fileidentity.ExistingWithType(fixture.root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parentCheck := func(context.Context, os.FileInfo) (fileidentity.Identity, error) {
+				return identity, nil
+			}
+			if err := fixture.session.verifyLiveSourcesForReplacementStageAndParentWithOps(
+				t.Context(), fixture.spec, fixture.stage,
+				liveStageCheck(t, fixture.stage), parentCheck, ops,
+			); err == nil || !strings.Contains(err.Error(), "unexpected entry") {
+				t.Fatalf("created parent extra %s = %v", test.name, err)
+			}
+		})
+	}
+}
+
 func TestReplacementLiveVerificationExcludesOnlyExactStage(t *testing.T) {
 	fixture := newLiveStageExclusionFixture(t, false)
 	if err := fixture.session.verifyLiveSources(t.Context(), fixture.spec); err == nil ||

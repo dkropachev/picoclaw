@@ -760,6 +760,12 @@ type backupLiveVerifyOps struct {
 		*backupBudget,
 		func(string) error,
 	) error
+	walkCreatedTargetParent func(
+		context.Context,
+		string,
+		*legacyExactExclusion,
+		*backupBudget,
+	) error
 	verifyRecord func(context.Context, string, BackupFileManifest) (fileidentity.Identity, error)
 }
 
@@ -803,9 +809,10 @@ func defaultBackupVerifyOps() backupVerifyOps {
 func defaultBackupLiveVerifyOps() backupLiveVerifyOps {
 	return backupLiveVerifyOps{
 		lstat: os.Lstat, identity: fileidentity.Existing,
-		walkLegacy:      walkLegacyInputs,
-		walkLegacyExact: walkLegacyInputsWithExactExclusion,
-		verifyRecord:    verifyLiveSourceRecord,
+		walkLegacy:              walkLegacyInputs,
+		walkLegacyExact:         walkLegacyInputsWithExactExclusion,
+		walkCreatedTargetParent: walkProviderCreatedTargetParent,
+		verifyRecord:            verifyLiveSourceRecord,
 	}
 }
 
@@ -1084,16 +1091,18 @@ func (b *backupSession) verifyLiveSourcesForReplacement(
 	spec storecatalog.Spec,
 	replacement sqliteprovider.ValidatedReplacement,
 ) error {
-	return replacement.Use(ctx, spec.ID, spec.Path, func(
+	return replacement.UseWithTargetParent(ctx, spec.ID, spec.Path, func(
 		verificationCtx context.Context,
 		stage string,
 		checkExact sqliteprovider.ValidatedReplacementCheck,
+		checkTargetParent sqliteprovider.ValidatedTargetParentCheck,
 	) error {
-		return b.verifyLiveSourcesForReplacementStageWithOps(
+		return b.verifyLiveSourcesForReplacementStageAndParentWithOps(
 			verificationCtx,
 			spec,
 			stage,
 			checkExact,
+			checkTargetParent,
 			defaultBackupLiveVerifyOps(),
 		)
 	})
@@ -1106,10 +1115,35 @@ func (b *backupSession) verifyLiveSourcesForReplacementStageWithOps(
 	checkExact sqliteprovider.ValidatedReplacementCheck,
 	ops backupLiveVerifyOps,
 ) error {
+	return b.verifyLiveSourcesForReplacementStageAndParentWithOps(
+		ctx,
+		spec,
+		stage,
+		checkExact,
+		nil,
+		ops,
+	)
+}
+
+func (b *backupSession) verifyLiveSourcesForReplacementStageAndParentWithOps(
+	ctx context.Context,
+	spec storecatalog.Spec,
+	stage string,
+	checkExact sqliteprovider.ValidatedReplacementCheck,
+	checkTargetParent sqliteprovider.ValidatedTargetParentCheck,
+	ops backupLiveVerifyOps,
+) error {
 	if err := b.verifyStore(ctx, spec.ID); err != nil {
 		return fmt.Errorf("verify database backup before live sources: %w", err)
 	}
-	return b.verifyLiveSourcesForStageWithOps(ctx, spec, stage, checkExact, ops)
+	return b.verifyLiveSourcesForStageAndParentWithOps(
+		ctx,
+		spec,
+		stage,
+		checkExact,
+		checkTargetParent,
+		ops,
+	)
 }
 
 func (b *backupSession) verifyLiveSourcesForStageWithOps(
@@ -1117,6 +1151,24 @@ func (b *backupSession) verifyLiveSourcesForStageWithOps(
 	spec storecatalog.Spec,
 	stage string,
 	checkExact sqliteprovider.ValidatedReplacementCheck,
+	ops backupLiveVerifyOps,
+) error {
+	return b.verifyLiveSourcesForStageAndParentWithOps(
+		ctx,
+		spec,
+		stage,
+		checkExact,
+		nil,
+		ops,
+	)
+}
+
+func (b *backupSession) verifyLiveSourcesForStageAndParentWithOps(
+	ctx context.Context,
+	spec storecatalog.Spec,
+	stage string,
+	checkExact sqliteprovider.ValidatedReplacementCheck,
+	checkTargetParent sqliteprovider.ValidatedTargetParentCheck,
 	ops backupLiveVerifyOps,
 ) error {
 	if !validBackupAbsolutePath(stage) || checkExact == nil || ops.lstat == nil ||
@@ -1157,8 +1209,29 @@ func (b *backupSession) verifyLiveSourcesForStageWithOps(
 	if err := rememberLiveIdentity(state.identityOwners, identity, stage); err != nil {
 		return err
 	}
+	var validateTargetParent func(
+		context.Context,
+		string,
+		os.FileInfo,
+	) (fileidentity.Identity, error)
+	if checkTargetParent != nil {
+		validateTargetParent = func(
+			validationCtx context.Context,
+			observedPath string,
+			observed os.FileInfo,
+		) (fileidentity.Identity, error) {
+			if filepath.Clean(observedPath) != filepath.Dir(stage) {
+				return fileidentity.Identity{}, errors.New(
+					"database replacement target-parent path changed",
+				)
+			}
+			return checkTargetParent(validationCtx, observed)
+		}
+	}
 	exact := &legacyExactExclusion{
-		path: stage,
+		path:                 stage,
+		targetParent:         filepath.Dir(stage),
+		validateTargetParent: validateTargetParent,
 		validate: func(
 			validationCtx context.Context,
 			observedPath string,
@@ -1325,6 +1398,24 @@ func (b *backupSession) verifyLiveSourcesWithState(
 	}
 
 	legacyRoots := spec.LegacyRoots
+	providerCreatedTargetParentRoot := -1
+	if exact != nil && exact.validateTargetParent != nil && !store.Exists {
+		if _, targetRecorded := generationRecords["database"]; !targetRecorded {
+			for index, root := range legacyRoots {
+				if store.LegacyRootKinds[index] != "missing" ||
+					filepath.Clean(root) != filepath.Dir(spec.Path) ||
+					filepath.Clean(root) != exact.targetParent {
+					continue
+				}
+				if providerCreatedTargetParentRoot >= 0 {
+					return errors.New(
+						"multiple snapshot-missing roots match the provider-created target parent",
+					)
+				}
+				providerCreatedTargetParentRoot = index
+			}
+		}
+	}
 
 	actualLegacy := make(map[string]string, len(legacyRecords))
 	budget := newBackupBudget()
@@ -1347,6 +1438,35 @@ func (b *backupSession) verifyLiveSourcesWithState(
 			}
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return fmt.Errorf("inspect live legacy root: %w", statErr)
+		}
+		providerCreatedTargetParent := actualKind == "directory" &&
+			rootIndex == providerCreatedTargetParentRoot &&
+			exact != nil && filepath.Dir(exact.path) == filepath.Clean(root)
+		if providerCreatedTargetParent {
+			if ops.walkCreatedTargetParent == nil {
+				return errors.New("database provider-created target-parent walker is unavailable")
+			}
+			for _, record := range legacyRecords {
+				if record.LegacyRoot == rootIndex {
+					return errors.New(
+						"snapshot-missing target parent has recorded legacy inputs",
+					)
+				}
+			}
+			rootIdentity, parentErr := exact.validateTargetParent(ctx, root, info)
+			if parentErr != nil || !rootIdentity.Valid() {
+				return errors.Join(
+					errors.New("provider-created target-parent identity is unavailable"),
+					parentErr,
+				)
+			}
+			if err := rememberLiveIdentity(state.identityOwners, rootIdentity, root); err != nil {
+				return err
+			}
+			if err := ops.walkCreatedTargetParent(ctx, root, exact, budget); err != nil {
+				return fmt.Errorf("verify provider-created target parent: %w", err)
+			}
+			continue
 		}
 		if actualKind != store.LegacyRootKinds[rootIndex] {
 			return errors.New("live legacy root layout changed after snapshot")

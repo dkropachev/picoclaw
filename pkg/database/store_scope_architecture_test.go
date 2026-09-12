@@ -95,7 +95,7 @@ func TestScopedStoreTargetHasOneWireAuthority(t *testing.T) {
 			scopedTargetExternalStoreID: 2,
 		},
 		"internal/sqliteprovider/staged_live_verification.go": {
-			scopedTargetExternalStoreID: 3,
+			scopedTargetExternalStoreID: 6,
 		},
 		"internal/storecatalog/catalog.go": {
 			scopedTargetExternalStoreID: 12,

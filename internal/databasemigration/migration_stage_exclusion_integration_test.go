@@ -3,6 +3,7 @@ package databasemigration
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -117,6 +118,108 @@ func TestRepositoryReviewMigrationExcludesPinnedStageFromNestedLegacyRoot(t *tes
 				}
 			}
 		})
+	}
+}
+
+func TestRepositoryReviewMigrationCreatesProvenParentForSealedAbsentRoot(t *testing.T) {
+	home := migrationHome(t)
+	liveRoot := filepath.Join(home, "workspace", "repository_reviews")
+	targetPath := filepath.Join(liveRoot, "repository-reviews.db")
+	if _, err := os.Lstat(liveRoot); !os.IsNotExist(err) {
+		t.Fatalf("fresh repository-review root is present: %v", err)
+	}
+
+	var disposableRoot string
+	imports := 0
+	registry := migrationRegistry(t, databaseadapter.Adapter{
+		Domain:   "repository-reviews",
+		Contract: repositoryReviewStageExclusionContract(),
+		Migrate: func(ctx context.Context, target databaseadapter.Target) error {
+			if target.ID != "workspace/repository-reviews" ||
+				len(target.LegacyRoots) != 1 || target.LegacyRoots[0] == liveRoot {
+				return database.NewError(
+					database.CodeIntegrity,
+					"repository-review adapter received unsealed absent inputs",
+				)
+			}
+			disposableRoot = target.LegacyRoots[0]
+			if _, err := os.Lstat(disposableRoot); !os.IsNotExist(err) {
+				return errors.New("sealed absent disposable root was materialized")
+			}
+			store, openErr := sqlitestore.Open(ctx, target.GenerationPath, sqlitestore.Options{
+				Component: "repository-reviews",
+				Migrations: []sqlitestore.Migration{{
+					Version: 1,
+					Statements: []string{`CREATE TABLE items (
+						id TEXT PRIMARY KEY,
+						value TEXT NOT NULL
+					) STRICT`},
+				}},
+				Legacy: &sqlitestore.LegacyOptions{
+					SourceRoot:       disposableRoot,
+					SourceRootPolicy: sqlitestore.LegacySourceRootSealedAbsent,
+					Closeout:         sqlitestore.LegacyCloseoutDeferred,
+					Sources: func() ([]sqlitestore.LegacySource, error) {
+						return nil, nil
+					},
+					Import: func(
+						context.Context,
+						*sql.Conn,
+						sqlitestore.LegacyInput,
+					) (sqlitestore.ImportResult, error) {
+						imports++
+						return sqlitestore.ImportResult{}, errors.New(
+							"sealed absent repository-review importer was invoked",
+						)
+					},
+				},
+			})
+			if openErr != nil {
+				return openErr
+			}
+			return store.Close()
+		},
+	})
+
+	result, runErr := migrationEngine(t, home, registry).Run(t.Context(), Options{
+		Stores: []database.StoreID{"workspace/repository-reviews"},
+	})
+	if runErr != nil || len(result.Stores) != 1 || !result.Stores[0].Migrated || imports != 0 {
+		t.Fatalf("fresh repository-review Run() = %#v, imports:%d error:%v", result, imports, runErr)
+	}
+	if disposableRoot == "" {
+		t.Fatal("fresh repository-review adapter did not receive a disposable root")
+	}
+	if _, err := os.Lstat(disposableRoot); !os.IsNotExist(err) {
+		t.Fatalf("sealed absent disposable root survived migration: %v", err)
+	}
+	entries, err := os.ReadDir(liveRoot)
+	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(targetPath) {
+		t.Fatalf("fresh repository-review live inventory = %v, %v", entries, err)
+	}
+	for _, suffix := range []string{
+		"-wal", "-shm", "-journal",
+	} {
+		if _, statErr := os.Lstat(targetPath + suffix); !os.IsNotExist(statErr) {
+			t.Fatalf("fresh repository-review sidecar %s remains: %v", suffix, statErr)
+		}
+	}
+	stages, err := filepath.Glob(filepath.Join(liveRoot, ".*.migration-stage-*.db*"))
+	if err != nil || len(stages) != 0 {
+		t.Fatalf("fresh repository-review stages remain = %v, %v", stages, err)
+	}
+	store, err := sqliteprovider.OpenStore(targetPath, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var horizons, rows int
+	if err := store.QueryRow(`SELECT COUNT(*) FROM storage_import_horizons
+		WHERE component = 'repository-reviews'`).Scan(&horizons); err != nil || horizons != 1 {
+		t.Fatalf("fresh repository-review horizon = %d, %v", horizons, err)
+	}
+	if err := store.QueryRow(`SELECT COUNT(*) FROM items`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("fresh repository-review rows = %d, %v", rows, err)
 	}
 }
 
