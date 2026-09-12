@@ -524,9 +524,10 @@ func TestSQLiteProviderOwnsDriverOpen(t *testing.T) {
 
 	root := filepath.Join(sqliteProviderRepositoryRoot(t), "internal", "sqliteprovider")
 	moderncUsers := map[string]bool{
-		"maintenance.go":      true,
-		"provider.go":         true,
-		"staged_migration.go": true,
+		"maintenance.go":          true,
+		"provider.go":             true,
+		"staged_migration.go":     true,
+		"transaction_boundary.go": true,
 	}
 	var violations []string
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {

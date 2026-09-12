@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	dblayer "github.com/sipeed/picoclaw/pkg/database"
 )
 
 func TestOpenValidatesInputsAndLimits(t *testing.T) {
@@ -396,8 +398,8 @@ func TestMigrationApplyValidationAndImmediateEdges(t *testing.T) {
 	if err := Immediate(t.Context(), db, func(conn *sql.Conn) error {
 		_, err := conn.ExecContext(t.Context(), "ROLLBACK")
 		return err
-	}); err == nil {
-		t.Fatal("Immediate() did not report failed COMMIT after callback rollback")
+	}); err == nil || dblayer.CodeOf(err) != dblayer.CodeIntegrity {
+		t.Fatalf("Immediate() callback rollback error = %v", err)
 	}
 	closed, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
