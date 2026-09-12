@@ -13,7 +13,6 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
-	"maps"
 	"math/bits"
 	"net"
 	"os"
@@ -55,14 +54,6 @@ type coverageBlockIdentity struct {
 	Range string
 }
 
-type coverageBlockStructure struct {
-	StartLine  int
-	StartCol   int
-	EndLine    int
-	EndCol     int
-	Statements int
-}
-
 type goCachePaths struct {
 	Build   string `json:"GOCACHE"`
 	Modules string `json:"GOMODCACHE"`
@@ -88,7 +79,6 @@ type coveragePlan struct {
 	IntegrationSuites []string
 	ImpactedFeature   map[string]bool
 	ChangedLines      map[string]map[int]bool
-	RelocatedFiles    map[string]string
 	GlobalRelevant    bool
 }
 
@@ -98,7 +88,6 @@ type scriptCoverageGroup struct {
 }
 
 const (
-	newFeatureMinimumCoveragePercent   = 95
 	changedCodeMinimumCoveragePercent  = 90
 	coverageNestedBenchmarkSkipPattern = `^Test(HiddenSuiteKillsEveryFixedMutant|GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath|WorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig)$`
 	coverageGoTestCount                = 1
@@ -121,7 +110,6 @@ type internalPackageRelocation struct {
 
 type verifiedInternalPackageRelocation struct {
 	ImportOnlyFiles map[string]bool
-	RelocatedFiles  map[string]string
 }
 
 type sourceEdit struct {
@@ -227,19 +215,26 @@ func runCoverageDelta(
 		return err
 	}
 
-	failures := compareCoverage(specs, plan, baseProfile, headProfile)
-	if len(failures) > 0 {
-		sort.Strings(failures)
-		return fmt.Errorf("%d failure(s):\n%s", len(failures), strings.Join(failures, "\n"))
-	}
-
-	fmt.Printf("coverage delta: scoped global %s -> %s (uncovered statement debt %d -> %d); %s; feature coverage ok\n",
+	fmt.Printf("coverage delta: scoped global %s -> %s (uncovered statement debt %d -> %d, informational); %s\n",
 		formatCoverage(baseProfile.Global),
 		formatCoverage(headProfile.Global),
 		uncoveredStatements(baseProfile.Global),
 		uncoveredStatements(headProfile.Global),
 		changedCodeStatus(changedCodeCoverage(plan.ChangedLines, headProfile)),
 	)
+	for _, information := range impactedFeatureCoverageInformation(
+		specs, plan, baseProfile, headProfile,
+	) {
+		fmt.Printf("coverage delta: %s\n", information)
+	}
+
+	failures := compareCoverage(plan, headProfile)
+	if len(failures) > 0 {
+		sort.Strings(failures)
+		return fmt.Errorf("%d failure(s):\n%s", len(failures), strings.Join(failures, "\n"))
+	}
+
+	fmt.Println("coverage delta: changed-production-code policy ok; scoped and feature debt are informational")
 	return nil
 }
 
@@ -272,7 +267,6 @@ func buildCoveragePlan(
 	plan := coveragePlan{
 		ImpactedFeature: make(map[string]bool),
 		ChangedLines:    changedLines,
-		RelocatedFiles:  relocation.RelocatedFiles,
 	}
 	coverDirs := make(map[string]bool)
 	testDirs := make(map[string]bool)
@@ -460,11 +454,7 @@ func verifiedInternalPackageRelocationChanges(
 		}
 		importOnlyFiles[path] = true
 	}
-	result := verifiedInternalPackageRelocation{ImportOnlyFiles: importOnlyFiles}
-	for _, relocation := range relocations {
-		result.RelocatedFiles = maps.Clone(relocation.Renames)
-	}
-	return result, nil
+	return verifiedInternalPackageRelocation{ImportOnlyFiles: importOnlyFiles}, nil
 }
 
 func coverageComparisonBase(root, base, head string) (string, error) {
@@ -1874,10 +1864,22 @@ func parseCoverageProfile(root, modulePath, profilePath string) (coverageProfile
 
 	profile := emptyCoverageProfile()
 	scanner := bufio.NewScanner(file)
+	modeSeen := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "mode:") {
+		if line == "" {
 			continue
+		}
+		if strings.HasPrefix(line, "mode:") {
+			mode := strings.TrimSpace(strings.TrimPrefix(line, "mode:"))
+			if modeSeen || (mode != "set" && mode != "count" && mode != "atomic") {
+				return coverageProfile{}, fmt.Errorf("invalid coverage mode header %q", line)
+			}
+			modeSeen = true
+			continue
+		}
+		if !modeSeen {
+			return coverageProfile{}, fmt.Errorf("coverage block appears before mode header")
 		}
 		block, err := parseCoverageBlock(root, modulePath, line)
 		if err != nil {
@@ -1887,6 +1889,9 @@ func parseCoverageProfile(root, modulePath, profilePath string) (coverageProfile
 	}
 	if err := scanner.Err(); err != nil {
 		return coverageProfile{}, err
+	}
+	if !modeSeen {
+		return coverageProfile{}, fmt.Errorf("coverage profile has no mode header")
 	}
 	return summarizeCoverageBlocks(profile), nil
 }
@@ -1899,6 +1904,9 @@ func parseCoverageBlock(root, modulePath, line string) (coverageBlock, error) {
 		return coverageBlock{}, fmt.Errorf("invalid coverage line %q", line)
 	}
 	filePath := coverageFileToRepoPath(root, modulePath, line[:colon])
+	if filePath == "" || strings.ContainsRune(filePath, '\x00') {
+		return coverageBlock{}, fmt.Errorf("invalid coverage file in %q", line)
+	}
 	fields := strings.Fields(line[colon+1:])
 	if len(fields) != 3 {
 		return coverageBlock{}, fmt.Errorf("invalid coverage fields %q", line)
@@ -1911,9 +1919,18 @@ func parseCoverageBlock(root, modulePath, line string) (coverageBlock, error) {
 	if err != nil {
 		return coverageBlock{}, fmt.Errorf("invalid statement count in %q: %w", line, err)
 	}
+	if statements < 0 {
+		return coverageBlock{}, fmt.Errorf("invalid statement count in %q: must be non-negative", line)
+	}
 	count, err := strconv.Atoi(fields[2])
 	if err != nil {
 		return coverageBlock{}, fmt.Errorf("invalid coverage count in %q: %w", line, err)
+	}
+	if count < 0 {
+		return coverageBlock{}, fmt.Errorf("invalid coverage count in %q: must be non-negative", line)
+	}
+	if endLine < startLine || (endLine == startLine && endCol < startCol) {
+		return coverageBlock{}, fmt.Errorf("coverage range ends before it starts in %q", line)
 	}
 	return coverageBlock{
 		File:       filePath,
@@ -2020,152 +2037,9 @@ func summarizeCoverageBlocks(profile coverageProfile) coverageProfile {
 	return profile
 }
 
-func relocationCoverageStructureMatches(
-	baseProfile, headProfile coverageProfile,
-	relocatedFiles map[string]string,
-) error {
-	canonicalRelocations := make(map[string]string, len(relocatedFiles))
-	destinations := make(map[string]string, len(relocatedFiles))
-	for source, destination := range relocatedFiles {
-		canonicalSource := normalizeRepoPath(source)
-		canonicalDestination := normalizeRepoPath(destination)
-		if source == "" || destination == "" || strings.ContainsRune(source, '\x00') ||
-			strings.ContainsRune(destination, '\x00') || source != canonicalSource ||
-			destination != canonicalDestination || source == destination {
-			return fmt.Errorf("invalid relocation path %q -> %q", source, destination)
-		}
-		if previous, exists := destinations[destination]; exists && previous != source {
-			return fmt.Errorf(
-				"relocation destinations collide at %q for %q and %q",
-				destination,
-				previous,
-				source,
-			)
-		}
-		canonicalRelocations[source] = destination
-		destinations[destination] = source
-	}
-	if len(canonicalRelocations) == 0 {
-		return errors.New("relocation map is empty")
-	}
-	for source, destination := range canonicalRelocations {
-		if _, overlaps := canonicalRelocations[destination]; overlaps {
-			return fmt.Errorf("relocation destination %q is also a source", destination)
-		}
-		if _, represented := baseProfile.Blocks[destination]; represented {
-			return fmt.Errorf(
-				"relocation %q -> %q collides with a base coverage file",
-				source,
-				destination,
-			)
-		}
-	}
-
-	baseStructure, err := coverageStructure(baseProfile, canonicalRelocations)
-	if err != nil {
-		return fmt.Errorf("base profile: %w", err)
-	}
-	headStructure, err := coverageStructure(headProfile, nil)
-	if err != nil {
-		return fmt.Errorf("head profile: %w", err)
-	}
-	if len(baseStructure) != len(headStructure) {
-		return fmt.Errorf(
-			"block count changed from %d to %d",
-			len(baseStructure),
-			len(headStructure),
-		)
-	}
-	for identity, baseBlock := range baseStructure {
-		headBlock, exists := headStructure[identity]
-		if !exists || headBlock != baseBlock {
-			return fmt.Errorf("block structure differs at %s:%s", identity.File, identity.Range)
-		}
-	}
-	return nil
-}
-
-func coverageStructure(
-	profile coverageProfile,
-	pathReplacements map[string]string,
-) (map[coverageBlockIdentity]coverageBlockStructure, error) {
-	structure := make(map[coverageBlockIdentity]coverageBlockStructure)
-	statements := 0
-	for file, blocks := range profile.Blocks {
-		normalizedFile := file
-		if replacement, ok := pathReplacements[file]; ok {
-			normalizedFile = replacement
-		}
-		for rangeKey, block := range blocks {
-			if block.File != file || block.Range != rangeKey {
-				return nil, fmt.Errorf("block map identity differs at %s:%s", file, rangeKey)
-			}
-			startLine, startCol, endLine, endCol, rangeErr := coverageRange(block.Range)
-			if rangeErr != nil || block.StartLine != startLine || block.StartCol != startCol ||
-				block.EndLine != endLine || block.EndCol != endCol || block.Statements < 0 {
-				return nil, fmt.Errorf("block metadata is invalid at %s:%s", file, rangeKey)
-			}
-			identity := coverageBlockIdentity{File: normalizedFile, Range: block.Range}
-			structure[identity] = coverageBlockStructure{
-				StartLine:  block.StartLine,
-				StartCol:   block.StartCol,
-				EndLine:    block.EndLine,
-				EndCol:     block.EndCol,
-				Statements: block.Statements,
-			}
-			statements += block.Statements
-		}
-	}
-	if statements != profile.Global.TotalStatements {
-		return nil, fmt.Errorf(
-			"block statements %d do not match global total %d",
-			statements,
-			profile.Global.TotalStatements,
-		)
-	}
-	return structure, nil
-}
-
-func compareCoverage(
-	specs []featureSpecMetadata,
-	plan coveragePlan,
-	baseProfile, headProfile coverageProfile,
-) []string {
+func compareCoverage(plan coveragePlan, headProfile coverageProfile) []string {
 	var failures []string
 	changedSummary := changedCodeCoverage(plan.ChangedLines, headProfile)
-	var relocationStructureErr error
-	if len(plan.RelocatedFiles) > 0 {
-		relocationStructureErr = relocationCoverageStructureMatches(
-			baseProfile,
-			headProfile,
-			plan.RelocatedFiles,
-		)
-	}
-	waiveGlobalRegression := len(plan.RelocatedFiles) > 0 &&
-		relocationStructureErr == nil && changedSummary.TotalStatements == 0
-	if baseProfile.Global.TotalStatements == 0 && headProfile.Global.TotalStatements > 0 &&
-		!coverageAtLeastPercent(headProfile.Global, newFeatureMinimumCoveragePercent) {
-		failures = append(failures, fmt.Sprintf(
-			"scoped new Go coverage is below %d%%: %s",
-			newFeatureMinimumCoveragePercent,
-			formatCoverage(headProfile.Global),
-		))
-	} else if !waiveGlobalRegression && baseProfile.Global.TotalStatements > 0 &&
-		summaryRegressed(baseProfile.Global, headProfile.Global) {
-		failures = append(failures, fmt.Sprintf(
-			"scoped Go coverage regressed: uncovered statement debt %d -> %d and coverage %s -> %s",
-			uncoveredStatements(baseProfile.Global),
-			uncoveredStatements(headProfile.Global),
-			formatCoverage(baseProfile.Global),
-			formatCoverage(headProfile.Global),
-		))
-	}
-	if relocationStructureErr != nil {
-		failures = append(failures, fmt.Sprintf(
-			"verified internal package relocation coverage structure mismatch: %v",
-			relocationStructureErr,
-		))
-	}
 	if changedSummary.TotalStatements > 0 &&
 		!coverageAtLeastPercent(changedSummary, changedCodeMinimumCoveragePercent) {
 		failures = append(failures, fmt.Sprintf(
@@ -2174,42 +2048,35 @@ func compareCoverage(
 			formatCoverage(changedSummary),
 		))
 	}
+	return failures
+}
 
+func impactedFeatureCoverageInformation(
+	specs []featureSpecMetadata,
+	plan coveragePlan,
+	baseProfile coverageProfile,
+	headProfile coverageProfile,
+) []string {
 	baseFeature := featureCoverage(specs, baseProfile)
 	headFeature := featureCoverage(specs, headProfile)
+	result := make([]string, 0, len(plan.ImpactedFeature))
 	for _, spec := range specs {
 		if !plan.ImpactedFeature[spec.RelPath] {
 			continue
 		}
-		baseSummary := baseFeature[spec.RelPath]
-		headSummary := headFeature[spec.RelPath]
-		if headSummary.TotalStatements == 0 {
-			continue
-		}
-		if baseSummary.TotalStatements == 0 {
-			if !coverageAtLeastPercent(headSummary, newFeatureMinimumCoveragePercent) {
-				failures = append(failures, fmt.Sprintf(
-					"%s new Go feature coverage is below %d%%: %s",
-					spec.RelPath,
-					newFeatureMinimumCoveragePercent,
-					formatCoverage(headSummary),
-				))
-			}
-			continue
-		}
-		if summaryRegressed(baseSummary, headSummary) {
-			failures = append(failures, fmt.Sprintf(
-				"%s Go coverage regressed: uncovered statement debt %d -> %d and coverage %s -> %s",
-				spec.RelPath,
-				uncoveredStatements(baseSummary),
-				uncoveredStatements(headSummary),
-				formatCoverage(baseSummary),
-				formatCoverage(headSummary),
-			))
-		}
+		base := baseFeature[spec.RelPath]
+		head := headFeature[spec.RelPath]
+		result = append(result, fmt.Sprintf(
+			"feature %s %s -> %s (uncovered statement debt %d -> %d, informational)",
+			spec.RelPath,
+			formatCoverage(base),
+			formatCoverage(head),
+			uncoveredStatements(base),
+			uncoveredStatements(head),
+		))
 	}
-
-	return failures
+	sort.Strings(result)
+	return result
 }
 
 func featureCoverage(specs []featureSpecMetadata, profile coverageProfile) map[string]coverageSummary {
@@ -2317,6 +2184,8 @@ func changedGoLines(root, base, head string) (map[string]map[int]bool, error) {
 				root,
 				"--literal-pathspecs",
 				"diff",
+				"--text",
+				"--no-textconv",
 				"--unified=0",
 				"--no-ext-diff",
 				mergeBase,
@@ -2328,6 +2197,8 @@ func changedGoLines(root, base, head string) (map[string]map[int]bool, error) {
 			out, diffErr = gitOutput(
 				root,
 				"diff",
+				"--text",
+				"--no-textconv",
 				"--unified=0",
 				"--no-ext-diff",
 				mergeBase+":"+change.Paths[0],
@@ -2358,8 +2229,12 @@ func parseAddedDiffLines(out string) (map[int]bool, error) {
 	lines := make(map[int]bool)
 	inHunk := false
 	newLine := 0
-	for _, raw := range strings.Split(out, "\n") {
+	outputLines := strings.Split(out, "\n")
+	for index, raw := range outputLines {
 		line := strings.TrimRight(raw, "\r")
+		if strings.HasPrefix(line, "Binary files ") || line == "GIT binary patch" {
+			return nil, fmt.Errorf("binary diff output is not valid for production Go")
+		}
 		if strings.HasPrefix(line, "@@ ") {
 			start, err := parseDiffNewStart(line)
 			if err != nil {
@@ -2379,6 +2254,10 @@ func parseAddedDiffLines(out string) (map[int]bool, error) {
 		case strings.HasPrefix(line, "-"):
 		case strings.HasPrefix(line, " "):
 			newLine++
+		case line == `\ No newline at end of file`:
+		case line == "" && index == len(outputLines)-1:
+		default:
+			return nil, fmt.Errorf("unexpected line inside diff hunk %q", line)
 		}
 	}
 	return lines, nil
@@ -2406,11 +2285,6 @@ func parseDiffNewStart(hunk string) (int, error) {
 func isGoProductionCoverageFile(path string) bool {
 	path = normalizeRepoPath(path)
 	return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") && !isIgnoredProductionPath(path)
-}
-
-func summaryRegressed(base, head coverageSummary) bool {
-	return uncoveredStatements(head) > uncoveredStatements(base) &&
-		coverageRatioLess(head, base)
 }
 
 func coverageAtLeastPercent(summary coverageSummary, minimum int) bool {

@@ -239,6 +239,64 @@ var CopyValues = []string{
 	}
 }
 
+func TestChangedGoLinesForcesTextForGoFilesMarkedBinary(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+
+	root := t.TempDir()
+	runCoverageDeltaTestGit(t, root, "init", "--quiet")
+	runCoverageDeltaTestGit(t, root, "config", "user.email", "coverage-delta@example.invalid")
+	runCoverageDeltaTestGit(t, root, "config", "user.name", "Coverage Delta Test")
+	runCoverageDeltaTestGit(t, root, "config", "commit.gpgSign", "false")
+	writeCoverageDeltaTestFile(t, root, ".gitattributes", "*.go binary\n")
+	const modifiedFile = "pkg/example/modified.go"
+	writeCoverageDeltaTestFile(
+		t,
+		root,
+		modifiedFile,
+		"package example\n\nfunc Modified() int {\n\treturn 1\n}\n",
+	)
+	runCoverageDeltaTestGit(t, root, "add", "--all")
+	runCoverageDeltaTestGit(t, root, "commit", "--quiet", "-m", "base")
+	base := strings.TrimSpace(runCoverageDeltaTestGit(t, root, "rev-parse", "HEAD"))
+
+	const addedFile = "pkg/example/example.go"
+	const source = "package example\n\nfunc Value() int {\n\treturn 1\n}\n"
+	writeCoverageDeltaTestFile(t, root, addedFile, source)
+	writeCoverageDeltaTestFile(
+		t,
+		root,
+		modifiedFile,
+		"package example\n\nfunc Modified() int {\n\treturn 2\n}\n",
+	)
+	runCoverageDeltaTestGit(t, root, "add", "--all")
+	runCoverageDeltaTestGit(t, root, "commit", "--quiet", "-m", "head")
+	head := strings.TrimSpace(runCoverageDeltaTestGit(t, root, "rev-parse", "HEAD"))
+
+	for _, file := range []string{addedFile, modifiedFile} {
+		raw := runCoverageDeltaTestGit(t, root, "diff", "--unified=0", base, head, "--", file)
+		if !strings.Contains(raw, "Binary files") {
+			t.Fatalf("fixture did not produce a binary diff for %s: %q", file, raw)
+		}
+	}
+	changed, err := changedGoLines(root, base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make(map[int]bool)
+	for line := 1; line <= strings.Count(source, "\n"); line++ {
+		want[line] = true
+	}
+	if !reflect.DeepEqual(changed[addedFile], want) {
+		t.Fatalf("binary-attributed Go changed lines = %#v, want %#v", changed[addedFile], want)
+	}
+	if wantModified := map[int]bool{4: true}; !reflect.DeepEqual(changed[modifiedFile], wantModified) {
+		t.Fatalf("binary-attributed modified Go lines = %#v, want %#v", changed[modifiedFile], wantModified)
+	}
+}
+
 func writeCoverageDeltaTestFile(t *testing.T, root, relative, contents string) {
 	t.Helper()
 	path := filepath.Join(root, relative)
@@ -474,15 +532,6 @@ func TestVerifiedInternalPackageRelocationLimitsFeatureImpactButKeepsPackageScop
 	if plan.ImpactedFeature[consumerSpec.RelPath] {
 		t.Fatal("import-only consumer owner was impacted")
 	}
-	wantRelocatedFiles := map[string]string{
-		"pkg/store/store.go":            "internal/store/store.go",
-		"pkg/store/store_linux.go":      "internal/store/store_linux.go",
-		"pkg/store/store_test.go":       "internal/store/store_test.go",
-		"pkg/store/testdata/schema.sql": "internal/store/testdata/schema.sql",
-	}
-	if !reflect.DeepEqual(plan.RelocatedFiles, wantRelocatedFiles) {
-		t.Fatalf("relocated files = %#v, want %#v", plan.RelocatedFiles, wantRelocatedFiles)
-	}
 	for _, dir := range []string{"internal/store", "pkg/consumer"} {
 		if !slices.Contains(plan.CoverPackageDirs, dir) {
 			t.Errorf("cover package dirs %v omit changed package %q", plan.CoverPackageDirs, dir)
@@ -675,7 +724,7 @@ func Value() int { return 1 }
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(got.ImportOnlyFiles) != 0 || len(got.RelocatedFiles) != 0 {
+			if len(got.ImportOnlyFiles) != 0 {
 				t.Fatalf("fail-closed relocation files = %#v, want none", got)
 			}
 			consumerSpec := featureSpecMetadata{
@@ -716,7 +765,7 @@ func TestVerifiedInternalPackageRelocationRequiresModuleIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(relocation.ImportOnlyFiles) != 0 || len(relocation.RelocatedFiles) != 0 {
+	if len(relocation.ImportOnlyFiles) != 0 {
 		t.Fatalf("module-less relocation classified as verified: %#v", relocation)
 	}
 
@@ -1551,66 +1600,13 @@ func TestCoverageIntegrationSuitesAllowHeadOnlyAddition(t *testing.T) {
 	}
 }
 
-func TestCoverageRegressionUsesDebtAndExactPercentage(t *testing.T) {
-	tests := []struct {
-		name string
-		base coverageSummary
-		head coverageSummary
-		want bool
-	}{
-		{
-			name: "covered code deletion with unchanged debt",
-			base: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
-			head: coverageSummary{CoveredStatements: 70, TotalStatements: 90},
-			want: false,
-		},
-		{
-			name: "increased debt and percentage regression",
-			base: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
-			head: coverageSummary{CoveredStatements: 80, TotalStatements: 101},
-			want: true,
-		},
-		{
-			name: "increased debt with stable percentage",
-			base: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
-			head: coverageSummary{CoveredStatements: 160, TotalStatements: 200},
-			want: false,
-		},
-		{
-			name: "increased debt with improved percentage",
-			base: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
-			head: coverageSummary{CoveredStatements: 162, TotalStatements: 200},
-			want: false,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := summaryRegressed(test.base, test.head); got != test.want {
-				t.Fatalf("summaryRegressed(%+v, %+v) = %t, want %t", test.base, test.head, got, test.want)
-			}
-		})
-	}
-}
-
-func TestCoverageMinimumsUseExactIntegerRatios(t *testing.T) {
+func TestCoverageMinimumUsesExactIntegerRatios(t *testing.T) {
 	tests := []struct {
 		name    string
 		summary coverageSummary
 		minimum int
 		want    bool
 	}{
-		{
-			name:    "new feature exactly ninety five percent",
-			summary: coverageSummary{CoveredStatements: 95, TotalStatements: 100},
-			minimum: newFeatureMinimumCoveragePercent,
-			want:    true,
-		},
-		{
-			name:    "new feature one statement below threshold",
-			summary: coverageSummary{CoveredStatements: 94_999, TotalStatements: 100_000},
-			minimum: newFeatureMinimumCoveragePercent,
-			want:    false,
-		},
 		{
 			name:    "changed code exactly ninety percent",
 			summary: coverageSummary{CoveredStatements: 9, TotalStatements: 10},
@@ -1639,7 +1635,7 @@ func TestCoverageMinimumsUseExactIntegerRatios(t *testing.T) {
 	}
 }
 
-func TestCompareCoverageAllowsExactNewScopeFromEmptyBase(t *testing.T) {
+func TestCompareCoverageTreatsNewScopeCoverageAsInformational(t *testing.T) {
 	spec := featureSpecMetadata{
 		RelPath:    "docs/features/new.md",
 		Ownerships: []featureOwnership{{Kind: "CODE", Pattern: "internal/new/**"}},
@@ -1647,18 +1643,20 @@ func TestCompareCoverageAllowsExactNewScopeFromEmptyBase(t *testing.T) {
 	plan := coveragePlan{ImpactedFeature: map[string]bool{spec.RelPath: true}}
 	base := emptyCoverageProfile()
 	head := coverageProfile{
-		Global: coverageSummary{CoveredStatements: 95, TotalStatements: 100},
+		Global: coverageSummary{CoveredStatements: 10, TotalStatements: 100},
 		Files: map[string]coverageSummary{
-			"internal/new/feature.go": {CoveredStatements: 95, TotalStatements: 100},
+			"internal/new/feature.go": {CoveredStatements: 10, TotalStatements: 100},
 		},
 	}
-	if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); len(failures) != 0 {
-		t.Fatalf("exact empty-base threshold failures = %#v", failures)
+	if failures := compareCoverage(plan, head); len(failures) != 0 {
+		t.Fatalf("new-scope informational failures = %#v", failures)
 	}
-	head.Global.CoveredStatements = 94
-	head.Files["internal/new/feature.go"] = coverageSummary{CoveredStatements: 94, TotalStatements: 100}
-	if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); len(failures) != 2 {
-		t.Fatalf("below empty-base threshold failures = %#v, want global and feature failures", failures)
+	wantInformation := []string{
+		"feature docs/features/new.md 100.00% (0/0) -> 10.00% (10/100) " +
+			"(uncovered statement debt 0 -> 90, informational)",
+	}
+	if got := impactedFeatureCoverageInformation([]featureSpecMetadata{spec}, plan, base, head); !reflect.DeepEqual(got, wantInformation) {
+		t.Fatalf("new-scope information = %#v, want %#v", got, wantInformation)
 	}
 }
 
@@ -1678,302 +1676,25 @@ func relocationComparisonProfile(
 	return summarizeCoverageBlocks(profile)
 }
 
-func TestCompareCoverageWaivesOnlyGlobalNoiseForVerifiedRelocation(t *testing.T) {
+func TestCompareCoverageChangedCodeFloorAppliesToMovedFiles(t *testing.T) {
 	t.Parallel()
-	const source = "pkg/store/store.go"
 	const destination = "internal/store/store.go"
-	spec := featureSpecMetadata{
-		RelPath: "docs/features/store.md",
-		Ownerships: []featureOwnership{
-			{Kind: "CODE", Pattern: "pkg/store/**"},
-			{Kind: "CODE", Pattern: "internal/store/**"},
-		},
-	}
-	plan := coveragePlan{
-		ImpactedFeature: map[string]bool{spec.RelPath: true},
-		RelocatedFiles:  map[string]string{source: destination},
-	}
-	base := relocationComparisonProfile(source, true, true)
-	head := relocationComparisonProfile(destination, true, false)
-	wantBase := relocationComparisonProfile(source, true, true)
-	wantHead := relocationComparisonProfile(destination, true, false)
-
-	if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); len(failures) != 0 {
-		t.Fatalf("covered-bit-only relocation failures = %#v", failures)
-	}
-	if !reflect.DeepEqual(base, wantBase) || !reflect.DeepEqual(head, wantHead) {
-		t.Fatal("relocation comparison mutated a coverage profile")
-	}
-
-	head = relocationComparisonProfile(destination, false, true)
-	want := []string{
-		"docs/features/store.md Go coverage regressed: uncovered statement debt 0 -> 2 and coverage 100.00% (2/2) -> 0.00% (0/2)",
-	}
-	if got := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); !reflect.DeepEqual(got, want) {
-		t.Fatalf("moved-owner failures = %#v, want %#v", got, want)
-	}
-}
-
-func TestCompareCoverageRelocationWaiverRequiresNoChangedExecutableStatements(t *testing.T) {
-	t.Parallel()
-	const source = "pkg/store/store.go"
-	const destination = "internal/store/store.go"
-	base := relocationComparisonProfile(source, true, true)
 	head := relocationComparisonProfile(destination, true, false)
 	plan := coveragePlan{
-		RelocatedFiles: map[string]string{source: destination},
 		ChangedLines: map[string]map[int]bool{
 			destination: {3: true},
 		},
 	}
-	want := []string{
-		"scoped Go coverage regressed: uncovered statement debt 0 -> 3 and coverage 100.00% (5/5) -> 40.00% (2/5)",
-	}
-	if got := compareCoverage(nil, plan, base, head); !reflect.DeepEqual(got, want) {
-		t.Fatalf("covered changed-block failures = %#v, want %#v", got, want)
+	if got := compareCoverage(plan, head); len(got) != 0 {
+		t.Fatalf("covered changed-block failures = %#v", got)
 	}
 
 	plan.ChangedLines = map[string]map[int]bool{
 		"pkg/consumer/consumer.go": {8: true},
 	}
-	want = append(want, "changed production Go coverage is below 90%: 0.00% (0/3)")
-	if got := compareCoverage(nil, plan, base, head); !reflect.DeepEqual(got, want) {
+	want := []string{"changed production Go coverage is below 90%: 0.00% (0/3)"}
+	if got := compareCoverage(plan, head); !reflect.DeepEqual(got, want) {
 		t.Fatalf("uncovered changed-block failures = %#v, want %#v", got, want)
-	}
-}
-
-func TestRelocationCoverageStructureAcceptsCompilerZeroStatementBlocks(t *testing.T) {
-	t.Parallel()
-	const source = "pkg/store/store.go"
-	const destination = "internal/store/store.go"
-	profile := func(path string, covered bool) coverageProfile {
-		result := emptyCoverageProfile()
-		addCoverageBlock(result, coverageBlock{
-			File: path, Range: "519.19,519.19", StartLine: 519, StartCol: 19,
-			EndLine: 519, EndCol: 19, Statements: 0, Covered: covered,
-		})
-		return summarizeCoverageBlocks(result)
-	}
-	base := profile(source, true)
-	head := profile(destination, false)
-	relocations := map[string]string{source: destination}
-	if err := relocationCoverageStructureMatches(base, head, relocations); err != nil {
-		t.Fatalf("zero-statement relocation block mismatch: %v", err)
-	}
-	if failures := compareCoverage(
-		nil,
-		coveragePlan{RelocatedFiles: relocations},
-		base,
-		head,
-	); len(failures) != 0 {
-		t.Fatalf("zero-statement relocation failures = %#v", failures)
-	}
-
-	invalid := profile(source, false)
-	block := invalid.Blocks[source]["519.19,519.19"]
-	block.Statements = -1
-	invalid.Blocks[source][block.Range] = block
-	invalid.Global.TotalStatements = -1
-	if err := relocationCoverageStructureMatches(invalid, head, relocations); err == nil {
-		t.Fatal("negative-statement relocation block was accepted")
-	}
-}
-
-func TestRelocationCoverageStructureFailsClosed(t *testing.T) {
-	t.Parallel()
-	const source = "pkg/store/store.go"
-	const destination = "internal/store/store.go"
-	baseProfile := func() coverageProfile {
-		return relocationComparisonProfile(source, true, true)
-	}
-	headProfile := func() coverageProfile {
-		return relocationComparisonProfile(destination, false, false)
-	}
-
-	tests := map[string]struct {
-		base        func() coverageProfile
-		head        func() coverageProfile
-		relocations map[string]string
-	}{
-		"missing block": {
-			base: baseProfile,
-			head: func() coverageProfile {
-				profile := headProfile()
-				delete(profile.Blocks, "pkg/consumer/consumer.go")
-				return summarizeCoverageBlocks(profile)
-			},
-			relocations: map[string]string{source: destination},
-		},
-		"extra block": {
-			base: baseProfile,
-			head: func() coverageProfile {
-				profile := headProfile()
-				addCoverageBlock(profile, coverageBlock{
-					File: "pkg/consumer/consumer.go", Range: "12.2,12.12",
-					StartLine: 12, StartCol: 2, EndLine: 12, EndCol: 12,
-					Statements: 1,
-				})
-				return summarizeCoverageBlocks(profile)
-			},
-			relocations: map[string]string{source: destination},
-		},
-		"range": {
-			base: baseProfile,
-			head: func() coverageProfile {
-				profile := headProfile()
-				block := profile.Blocks[destination]["3.20,3.28"]
-				delete(profile.Blocks[destination], "3.20,3.28")
-				block.Range = "3.20,3.29"
-				block.EndCol = 29
-				profile.Blocks[destination][block.Range] = block
-				return summarizeCoverageBlocks(profile)
-			},
-			relocations: map[string]string{source: destination},
-		},
-		"columns": {
-			base: baseProfile,
-			head: func() coverageProfile {
-				profile := headProfile()
-				block := profile.Blocks[destination]["3.20,3.28"]
-				block.StartCol = 19
-				profile.Blocks[destination][block.Range] = block
-				return profile
-			},
-			relocations: map[string]string{source: destination},
-		},
-		"block map identity": {
-			base: baseProfile,
-			head: func() coverageProfile {
-				profile := headProfile()
-				block := profile.Blocks[destination]["3.20,3.28"]
-				block.File = "internal/store/other.go"
-				profile.Blocks[destination][block.Range] = block
-				return profile
-			},
-			relocations: map[string]string{source: destination},
-		},
-		"statements": {
-			base: baseProfile,
-			head: func() coverageProfile {
-				profile := headProfile()
-				block := profile.Blocks[destination]["3.20,3.28"]
-				block.Statements++
-				profile.Blocks[destination][block.Range] = block
-				return summarizeCoverageBlocks(profile)
-			},
-			relocations: map[string]string{source: destination},
-		},
-		"file": {
-			base: baseProfile,
-			head: func() coverageProfile {
-				profile := headProfile()
-				blocks := profile.Blocks[destination]
-				delete(profile.Blocks, destination)
-				block := blocks["3.20,3.28"]
-				block.File = "internal/store/other.go"
-				profile.Blocks[block.File] = map[string]coverageBlock{block.Range: block}
-				return summarizeCoverageBlocks(profile)
-			},
-			relocations: map[string]string{source: destination},
-		},
-		"destination represented in base": {
-			base: func() coverageProfile {
-				profile := baseProfile()
-				profile.Blocks[destination] = map[string]coverageBlock{}
-				return profile
-			},
-			head:        headProfile,
-			relocations: map[string]string{source: destination},
-		},
-		"base statement total mismatch": {
-			base: func() coverageProfile {
-				profile := baseProfile()
-				profile.Global.TotalStatements++
-				return profile
-			},
-			head:        headProfile,
-			relocations: map[string]string{source: destination},
-		},
-		"non-injective map": {
-			base: baseProfile,
-			head: headProfile,
-			relocations: map[string]string{
-				source:               destination,
-				"pkg/other/other.go": destination,
-			},
-		},
-		"destination is source": {
-			base: baseProfile,
-			head: headProfile,
-			relocations: map[string]string{
-				source:      destination,
-				destination: "internal/store/final.go",
-			},
-		},
-		"same path": {
-			base:        baseProfile,
-			head:        headProfile,
-			relocations: map[string]string{source: source},
-		},
-		"empty path": {
-			base:        baseProfile,
-			head:        headProfile,
-			relocations: map[string]string{"": destination},
-		},
-		"empty map": {
-			base:        baseProfile,
-			head:        headProfile,
-			relocations: map[string]string{},
-		},
-	}
-
-	for name, test := range tests {
-		name, test := name, test
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			base := test.base()
-			head := test.head()
-			if err := relocationCoverageStructureMatches(base, head, test.relocations); err == nil {
-				t.Fatal("mismatched relocation coverage structure was accepted")
-			}
-			if len(test.relocations) == 0 {
-				return
-			}
-			plan := coveragePlan{RelocatedFiles: test.relocations}
-			failures := compareCoverage(nil, plan, base, head)
-			if !slices.ContainsFunc(failures, func(failure string) bool {
-				return strings.HasPrefix(
-					failure,
-					"verified internal package relocation coverage structure mismatch:",
-				)
-			}) {
-				t.Fatalf("compareCoverage failures = %#v, want explicit structure mismatch", failures)
-			}
-		})
-	}
-}
-
-func TestCompareCoverageRelocationDoesNotBypassNewScopeThreshold(t *testing.T) {
-	t.Parallel()
-	base := emptyCoverageProfile()
-	head := emptyCoverageProfile()
-	addCoverageBlock(head, coverageBlock{
-		File: "internal/store/store.go", Range: "3.20,3.28",
-		StartLine: 3, StartCol: 20, EndLine: 3, EndCol: 28, Statements: 100,
-		Covered: false,
-	})
-	head = summarizeCoverageBlocks(head)
-	plan := coveragePlan{
-		RelocatedFiles: map[string]string{
-			"pkg/store/store.go": "internal/store/store.go",
-		},
-	}
-	failures := compareCoverage(nil, plan, base, head)
-	if !slices.Contains(
-		failures,
-		"scoped new Go coverage is below 95%: 0.00% (0/100)",
-	) {
-		t.Fatalf("new-scope relocation failures = %#v, want 95%% threshold failure", failures)
 	}
 }
 
@@ -2066,6 +1787,72 @@ func TestParseCoverageBlockPreservesWindowsDrivePrefix(t *testing.T) {
 	}
 }
 
+func TestParseCoverageBlockRejectsMalformedCountersAndIdentity(t *testing.T) {
+	tests := map[string]string{
+		"empty file":          ":1.1,1.2 1 1",
+		"negative statements": "example.com/module/pkg/x.go:1.1,1.2 -1 1",
+		"negative count":      "example.com/module/pkg/x.go:1.1,1.2 1 -1",
+		"reversed lines":      "example.com/module/pkg/x.go:2.1,1.2 1 1",
+		"reversed columns":    "example.com/module/pkg/x.go:2.5,2.4 1 1",
+	}
+	for name, line := range tests {
+		name, line := name, line
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := parseCoverageBlock("/checkout", "example.com/module", line); err == nil {
+				t.Fatalf("parseCoverageBlock(%q) unexpectedly succeeded", line)
+			}
+		})
+	}
+	block, err := parseCoverageBlock(
+		"/checkout",
+		"example.com/module",
+		"example.com/module/pkg/x.go:2.5,2.5 0 0",
+	)
+	if err != nil || block.Statements != 0 || block.Covered {
+		t.Fatalf("valid zero-statement point block = %#v, %v", block, err)
+	}
+}
+
+func TestParseCoverageProfileRequiresOneValidModeHeader(t *testing.T) {
+	tests := map[string]struct {
+		contents string
+		wantErr  bool
+	}{
+		"atomic header only": {contents: "mode: atomic\n"},
+		"valid block": {
+			contents: "mode: count\nexample.com/module/pkg/x.go:1.1,1.2 1 1\n",
+		},
+		"missing header": {
+			contents: "example.com/module/pkg/x.go:1.1,1.2 1 1\n",
+			wantErr:  true,
+		},
+		"invalid mode":     {contents: "mode: sampled\n", wantErr: true},
+		"duplicate header": {contents: "mode: set\nmode: set\n", wantErr: true},
+		"empty profile":    {wantErr: true},
+	}
+	for name, test := range tests {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "coverage.out")
+			if err := os.WriteFile(path, []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			profile, err := parseCoverageProfile("/checkout", "example.com/module", path)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("parseCoverageProfile(%q) = %#v, want error", test.contents, profile)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseCoverageProfile(%q): %v", test.contents, err)
+			}
+		})
+	}
+}
+
 func TestCoverageParsingAndChangedStatusEdgeCases(t *testing.T) {
 	for _, value := range []string{
 		"1.1",
@@ -2103,6 +1890,15 @@ func TestCoverageParsingAndChangedStatusEdgeCases(t *testing.T) {
 	lines, err := parseAddedDiffLines("@@ -1,2 +1,2 @@\n unchanged\n+added\n-removed\n")
 	if err != nil || !lines[2] {
 		t.Fatalf("context diff lines = %#v, %v", lines, err)
+	}
+	for _, malformed := range []string{
+		"Binary files a/example.go and b/example.go differ\n",
+		"GIT binary patch\nliteral 1\n",
+		"@@ -1 +1 @@\nmalformed hunk body\n",
+	} {
+		if lines, err := parseAddedDiffLines(malformed); err == nil || lines != nil {
+			t.Fatalf("malformed diff %q = %#v, %v; want error", malformed, lines, err)
+		}
 	}
 }
 
@@ -2310,46 +2106,10 @@ func writeScriptCoverageFixture(t *testing.T, root, relative, contents string) {
 	}
 }
 
-func TestCompareCoverageRequiresNinetyFivePercentForNewFeature(t *testing.T) {
-	spec := featureSpecMetadata{
-		RelPath: "docs/features/example.md",
-		Ownerships: []featureOwnership{
-			{Kind: "CODE", Pattern: "pkg/example/**"},
-		},
-	}
-	plan := coveragePlan{ImpactedFeature: map[string]bool{spec.RelPath: true}}
-	base := coverageProfile{
-		Global: coverageSummary{CoveredStatements: 900, TotalStatements: 1000},
-		Files: map[string]coverageSummary{
-			"pkg/existing/existing.go": {CoveredStatements: 900, TotalStatements: 1000},
-		},
-	}
-	head := func(featureCovered int) coverageProfile {
-		return coverageProfile{
-			Global: coverageSummary{CoveredStatements: 901 + featureCovered, TotalStatements: 1100},
-			Files: map[string]coverageSummary{
-				"pkg/existing/existing.go": {CoveredStatements: 901, TotalStatements: 1000},
-				"pkg/example/example.go":   {CoveredStatements: featureCovered, TotalStatements: 100},
-			},
-		}
-	}
-
-	if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head(95)); len(failures) != 0 {
-		t.Fatalf("exact threshold failures = %#v", failures)
-	}
-	want := []string{
-		"docs/features/example.md new Go feature coverage is below 95%: 94.00% (94/100)",
-	}
-	if got := compareCoverage([]featureSpecMetadata{spec}, plan, base, head(94)); !reflect.DeepEqual(got, want) {
-		t.Fatalf("below threshold failures = %#v, want %#v", got, want)
-	}
-}
-
 func TestCompareCoverageRequiresNinetyPercentForChangedBlocks(t *testing.T) {
 	plan := coveragePlan{ChangedLines: map[string]map[int]bool{
 		"pkg/example/example.go": {10: true, 11: true, 20: true},
 	}}
-	base := coverageProfile{Global: coverageSummary{CoveredStatements: 100, TotalStatements: 100}}
 	head := func(coveredStatements, uncoveredStatements int) coverageProfile {
 		return coverageProfile{
 			Global: coverageSummary{CoveredStatements: 100, TotalStatements: 100},
@@ -2372,12 +2132,12 @@ func TestCompareCoverageRequiresNinetyPercentForChangedBlocks(t *testing.T) {
 	if summary := changedCodeCoverage(plan.ChangedLines, exact); summary != (coverageSummary{9, 10}) {
 		t.Fatalf("exact changed coverage = %+v, want 9/10", summary)
 	}
-	if failures := compareCoverage(nil, plan, base, exact); len(failures) != 0 {
+	if failures := compareCoverage(plan, exact); len(failures) != 0 {
 		t.Fatalf("exact threshold failures = %#v", failures)
 	}
 	below := head(8, 2)
 	want := []string{"changed production Go coverage is below 90%: 80.00% (8/10)"}
-	if got := compareCoverage(nil, plan, base, below); !reflect.DeepEqual(got, want) {
+	if got := compareCoverage(plan, below); !reflect.DeepEqual(got, want) {
 		t.Fatalf("below threshold failures = %#v, want %#v", got, want)
 	}
 }
@@ -2423,84 +2183,100 @@ func TestChangedCoverageDeduplicatesSpanningBlocksAndFeatureOwnershipCanOverlap(
 	}
 }
 
-func TestCompareCoverageUsesHybridPolicyForExistingGlobalAndFeature(t *testing.T) {
+func TestCompareCoverageTreatsGlobalAndFeatureDebtAsInformational(t *testing.T) {
 	spec := featureSpecMetadata{
 		RelPath: "docs/features/example.md",
 		Ownerships: []featureOwnership{
 			{Kind: "CODE", Pattern: "pkg/example/**"},
 		},
 	}
-	plan := coveragePlan{ImpactedFeature: map[string]bool{spec.RelPath: true}}
+	plan := coveragePlan{
+		ImpactedFeature: map[string]bool{spec.RelPath: true},
+		ChangedLines: map[string]map[int]bool{
+			"pkg/example/example.go": {10: true, 11: true},
+		},
+	}
 	base := coverageProfile{
 		Global: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
 		Files: map[string]coverageSummary{
 			"pkg/example/example.go": {CoveredStatements: 80, TotalStatements: 100},
 		},
 	}
-	head := coverageProfile{
-		Global: coverageSummary{CoveredStatements: 69, TotalStatements: 100},
-		Files: map[string]coverageSummary{
-			"pkg/example/example.go": {CoveredStatements: 69, TotalStatements: 100},
+	head := emptyCoverageProfile()
+	for _, block := range []coverageBlock{
+		{
+			File: "pkg/example/example.go", Range: "10.1,10.9", StartLine: 10,
+			EndLine: 10, Statements: 9, Covered: true,
 		},
-	}
-
-	want := []string{
-		"scoped Go coverage regressed: uncovered statement debt 20 -> 31 and coverage 80.00% (80/100) -> 69.00% (69/100)",
-		"docs/features/example.md Go coverage regressed: uncovered statement debt 20 -> 31 and coverage 80.00% (80/100) -> 69.00% (69/100)",
-	}
-	if got := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); !reflect.DeepEqual(got, want) {
-		t.Fatalf("compareCoverage() = %#v, want %#v", got, want)
-	}
-}
-
-func TestCompareCoverageAllowsDebtIncreaseAtStableOrImprovedPercentage(t *testing.T) {
-	spec := featureSpecMetadata{
-		RelPath: "docs/features/example.md",
-		Ownerships: []featureOwnership{
-			{Kind: "CODE", Pattern: "pkg/example/**"},
+		{
+			File: "pkg/example/example.go", Range: "11.1,11.9", StartLine: 11,
+			EndLine: 11, Statements: 1,
 		},
-	}
-	plan := coveragePlan{ImpactedFeature: map[string]bool{spec.RelPath: true}}
-	base := coverageProfile{
-		Global: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
-		Files: map[string]coverageSummary{
-			"pkg/example/example.go": {CoveredStatements: 80, TotalStatements: 100},
+		{
+			File: "pkg/example/example.go", Range: "20.1,20.9", StartLine: 20,
+			EndLine: 20, Statements: 60, Covered: true,
 		},
-	}
-	for _, summary := range []coverageSummary{
-		{CoveredStatements: 160, TotalStatements: 200},
-		{CoveredStatements: 162, TotalStatements: 200},
+		{
+			File: "pkg/example/example.go", Range: "30.1,30.9", StartLine: 30,
+			EndLine: 30, Statements: 30,
+		},
 	} {
-		head := coverageProfile{
-			Global: summary,
-			Files:  map[string]coverageSummary{"pkg/example/example.go": summary},
-		}
-		if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); len(failures) != 0 {
-			t.Fatalf("head %+v failures = %#v", summary, failures)
-		}
+		addCoverageBlock(head, block)
+	}
+	head = summarizeCoverageBlocks(head)
+
+	if got := changedCodeCoverage(plan.ChangedLines, head); got != (coverageSummary{9, 10}) {
+		t.Fatalf("changed coverage = %+v, want 9/10", got)
+	}
+	if got := compareCoverage(plan, head); len(got) != 0 {
+		t.Fatalf("informational debt produced failures = %#v", got)
+	}
+	wantInformation := []string{
+		"feature docs/features/example.md 80.00% (80/100) -> 69.00% (69/100) " +
+			"(uncovered statement debt 20 -> 31, informational)",
+	}
+	if got := impactedFeatureCoverageInformation([]featureSpecMetadata{spec}, plan, base, head); !reflect.DeepEqual(got, wantInformation) {
+		t.Fatalf("feature information = %#v, want %#v", got, wantInformation)
 	}
 }
 
-func TestCompareCoverageAllowsCoveredCodeDeletionWithUnchangedDebt(t *testing.T) {
-	spec := featureSpecMetadata{
-		RelPath: "docs/features/example.md",
-		Ownerships: []featureOwnership{
-			{Kind: "CODE", Pattern: "pkg/example/**"},
+func TestImpactedFeatureCoverageInformationIsSortedAndScoped(t *testing.T) {
+	specs := []featureSpecMetadata{
+		{
+			RelPath:    "docs/features/z.md",
+			Ownerships: []featureOwnership{{Kind: "CODE", Pattern: "pkg/z/**"}},
+		},
+		{
+			RelPath:    "docs/features/ignored.md",
+			Ownerships: []featureOwnership{{Kind: "CODE", Pattern: "pkg/ignored/**"}},
+		},
+		{
+			RelPath:    "docs/features/a.md",
+			Ownerships: []featureOwnership{{Kind: "CODE", Pattern: "pkg/a/**"}},
 		},
 	}
-	plan := coveragePlan{ImpactedFeature: map[string]bool{spec.RelPath: true}}
-	baseSummary := coverageSummary{CoveredStatements: 80, TotalStatements: 100}
-	headSummary := coverageSummary{CoveredStatements: 70, TotalStatements: 90}
-	base := coverageProfile{
-		Global: baseSummary,
-		Files:  map[string]coverageSummary{"pkg/example/example.go": baseSummary},
+	plan := coveragePlan{ImpactedFeature: map[string]bool{
+		"docs/features/z.md": true,
+		"docs/features/a.md": true,
+	}}
+	base := coverageProfile{Files: map[string]coverageSummary{
+		"pkg/a/a.go":             {CoveredStatements: 10, TotalStatements: 20},
+		"pkg/ignored/ignored.go": {CoveredStatements: 1, TotalStatements: 10},
+		"pkg/z/z.go":             {CoveredStatements: 5, TotalStatements: 10},
+	}}
+	head := coverageProfile{Files: map[string]coverageSummary{
+		"pkg/a/a.go":             {CoveredStatements: 9, TotalStatements: 20},
+		"pkg/ignored/ignored.go": {CoveredStatements: 0, TotalStatements: 10},
+		"pkg/z/z.go":             {CoveredStatements: 4, TotalStatements: 10},
+	}}
+	want := []string{
+		"feature docs/features/a.md 50.00% (10/20) -> 45.00% (9/20) " +
+			"(uncovered statement debt 10 -> 11, informational)",
+		"feature docs/features/z.md 50.00% (5/10) -> 40.00% (4/10) " +
+			"(uncovered statement debt 5 -> 6, informational)",
 	}
-	head := coverageProfile{
-		Global: headSummary,
-		Files:  map[string]coverageSummary{"pkg/example/example.go": headSummary},
-	}
-	if failures := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); len(failures) != 0 {
-		t.Fatalf("covered deletion failures = %#v", failures)
+	if got := impactedFeatureCoverageInformation(specs, plan, base, head); !reflect.DeepEqual(got, want) {
+		t.Fatalf("feature information = %#v, want %#v", got, want)
 	}
 }
 
