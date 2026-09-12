@@ -117,7 +117,11 @@ coordinates those layers but is not an online owner and is not connected to
 readiness, broker startup, IPC dispatch, or application persistence. The shared
 deferred closeout option changes no runtime adapter behavior; it is used only
 when a selected adapter explicitly opts in for engine-supplied sealed
-disposable roots.
+disposable roots. The SQLite boundary can also bind a disposable root that is
+provably absent to a zero-source transaction without materializing it. No
+adapter selects that policy yet. The separate provider-created live
+target-parent transition remains outside this requirement until its dedicated
+infrastructure contract is implemented.
 
 ## Failure And Edge Cases
 
@@ -130,6 +134,11 @@ disposable roots.
 - A shared-importer adapter cannot give a sealed disposable root a normal
   archive destination; deferred closeout leaves every source and its metadata
   unchanged while retaining truthful pending archive state.
+- A future adapter may explicitly select sealed-absent deferred input only for
+  a zero-source transaction. The SQLite boundary retains a no-follow ancestor
+  proof through commit and never creates the disposable root. This does not
+  relax final live-source verification when a database target is nested inside
+  a configured live legacy root.
 - Adapter panic text and provider diagnostics are not promoted into trusted
   migration state; a known pre-cutover failure records `failed`.
 - A temporary provider source that cannot be conclusively removed blocks final

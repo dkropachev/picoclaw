@@ -44,13 +44,28 @@ const (
 	LegacyCloseoutDeferred
 )
 
+// LegacySourceRootPolicy states how deferred import proves the exact source
+// root supplied by trusted offline migration infrastructure.
+type LegacySourceRootPolicy uint8
+
+const (
+	// LegacySourceRootExistingDirectory preserves the historical contract: the
+	// source root must be an existing safe directory for the whole import.
+	LegacySourceRootExistingDirectory LegacySourceRootPolicy = iota
+	// LegacySourceRootSealedAbsent admits only an exact, provably absent
+	// directory root with zero enumerated sources. It requires deferred
+	// closeout and exact-target offline migration authority.
+	LegacySourceRootSealedAbsent
+)
+
 // LegacyOptions describes the legacy sources owned by one database.
 type LegacyOptions struct {
-	SourceRoot  string
-	ArchiveRoot string
-	Closeout    LegacyCloseoutPolicy
-	Sources     func() ([]LegacySource, error)
-	Import      LegacyImporter
+	SourceRoot       string
+	SourceRootPolicy LegacySourceRootPolicy
+	ArchiveRoot      string
+	Closeout         LegacyCloseoutPolicy
+	Sources          func() ([]LegacySource, error)
+	Import           LegacyImporter
 	// Finalize resolves relationships among sources imported by this exact
 	// transaction. It is invoked at most once, only when at least one source is
 	// newly imported, before subsystem schema validation and commit.
@@ -70,6 +85,11 @@ type LegacyOptions struct {
 	MaxSources    int
 	MaxTotalBytes int64
 	Now           func() time.Time
+
+	// sealedAbsentRoot is minted only by Open after exact-target offline
+	// authority and the canonical source path have been validated. Keeping it
+	// unexported prevents callers from supplying or retaining proof handles.
+	sealedAbsentRoot *sealedAbsentLegacyRoot
 }
 
 // LegacySource is one deterministic, relative source below SourceRoot.
@@ -234,6 +254,7 @@ type deferredLegacyProof struct {
 	directories         map[string]deferredLegacyDirectory
 	directoryIdentities map[fileidentity.Identity]string
 	sources             []deferredLegacySource
+	sealedAbsent        *sealedAbsentLegacyRoot
 }
 
 func logLegacyImportSummary(component string, summary legacyImportSummary) {
@@ -262,19 +283,37 @@ func importLegacySources(
 	}
 	var deferred *deferredLegacyProof
 	if options.Closeout == LegacyCloseoutDeferred {
-		root, err := validateLegacySourceRoot(options.SourceRoot)
-		if err != nil {
-			return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
-		}
-		rootSnapshot, err := snapshotDeferredLegacyDirectory(root)
-		if err != nil {
-			return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
-		}
-		deferred = &deferredLegacyProof{
-			directories: map[string]deferredLegacyDirectory{"": rootSnapshot},
-			directoryIdentities: map[fileidentity.Identity]string{
-				rootSnapshot.identity: "",
-			},
+		switch options.SourceRootPolicy {
+		case LegacySourceRootExistingDirectory:
+			root, err := validateLegacySourceRoot(options.SourceRoot)
+			if err != nil {
+				return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
+			}
+			rootSnapshot, err := snapshotDeferredLegacyDirectory(root)
+			if err != nil {
+				return legacyImportSummary{}, fmt.Errorf("%s legacy migration: %w", component, err)
+			}
+			deferred = &deferredLegacyProof{
+				directories: map[string]deferredLegacyDirectory{"": rootSnapshot},
+				directoryIdentities: map[fileidentity.Identity]string{
+					rootSnapshot.identity: "",
+				},
+			}
+		case LegacySourceRootSealedAbsent:
+			if options.sealedAbsentRoot == nil {
+				return legacyImportSummary{}, fmt.Errorf(
+					"%s legacy migration: sealed absent source proof is unavailable",
+					component,
+				)
+			}
+			if err := revalidateSealedAbsentLegacyRoot(ctx, options.sealedAbsentRoot); err != nil {
+				return legacyImportSummary{}, fmt.Errorf(
+					"%s legacy migration: revalidate sealed absent source root: %w",
+					component,
+					err,
+				)
+			}
+			deferred = &deferredLegacyProof{sealedAbsent: options.sealedAbsentRoot}
 		}
 	}
 	if options.Finalize != nil && options.FinalizeResults != nil {
@@ -290,6 +329,24 @@ func importLegacySources(
 	sources, err := options.Sources()
 	if err != nil {
 		return legacyImportSummary{}, fmt.Errorf("enumerate %s legacy sources: %w", component, err)
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return legacyImportSummary{}, contextErr
+	}
+	if options.SourceRootPolicy == LegacySourceRootSealedAbsent {
+		if len(sources) != 0 {
+			return legacyImportSummary{}, fmt.Errorf(
+				"enumerate %s legacy sources: sealed absent source root returned sources",
+				component,
+			)
+		}
+		if proofErr := markSealedAbsentLegacyRootEnumerated(ctx, options.sealedAbsentRoot); proofErr != nil {
+			return legacyImportSummary{}, fmt.Errorf(
+				"enumerate %s legacy sources: seal empty absent source root: %w",
+				component,
+				proofErr,
+			)
+		}
 	}
 	if len(sources) > maximumSources {
 		return legacyImportSummary{}, fmt.Errorf(
@@ -997,6 +1054,15 @@ func validateLegacyRoots(options LegacyOptions) error {
 }
 
 func validateLegacyCloseout(options LegacyOptions) error {
+	switch options.SourceRootPolicy {
+	case LegacySourceRootExistingDirectory:
+	case LegacySourceRootSealedAbsent:
+		if options.Closeout != LegacyCloseoutDeferred {
+			return errors.New("sealed absent legacy source root requires deferred closeout")
+		}
+	default:
+		return errors.New("legacy source root policy is invalid")
+	}
 	switch options.Closeout {
 	case LegacyCloseoutArchive:
 		if !validLegacyRootValue(options.SourceRoot) {
@@ -1033,6 +1099,22 @@ func validateLegacySourceRoot(sourceRoot string) (string, error) {
 	}
 	if err := requireSafeLegacyDirectory(sourceAbs, "legacy source root"); err != nil {
 		return "", err
+	}
+	return sourceAbs, nil
+}
+
+func canonicalLegacySourceRoot(sourceRoot string) (string, error) {
+	if !validLegacyRootValue(sourceRoot) || !filepath.IsAbs(sourceRoot) ||
+		filepath.Clean(sourceRoot) != sourceRoot {
+		return "", errors.New("legacy source root is required")
+	}
+	sourceAbs, err := legacyAbsolutePath(sourceRoot)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(sourceAbs) || !validLegacyRootValue(sourceAbs) ||
+		filepath.Clean(sourceAbs) != sourceAbs || sourceAbs != sourceRoot {
+		return "", errors.New("legacy source root is invalid")
 	}
 	return sourceAbs, nil
 }
@@ -1128,8 +1210,24 @@ func revalidateDeferredLegacyProof(
 	if options.Closeout != LegacyCloseoutDeferred {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if proof == nil {
 		return errors.New("deferred legacy source proof is unavailable")
+	}
+	if options.SourceRootPolicy == LegacySourceRootSealedAbsent {
+		if proof.sealedAbsent == nil || len(proof.sources) != 0 ||
+			len(proof.directories) != 0 || len(proof.directoryIdentities) != 0 {
+			return errors.New("sealed absent legacy source proof is invalid")
+		}
+		if err := checkSealedAbsentLegacyRootBeforeCommit(ctx, proof.sealedAbsent); err != nil {
+			return fmt.Errorf("revalidate %s sealed absent legacy source root: %w", component, err)
+		}
+		return context.Cause(ctx)
+	}
+	if options.SourceRootPolicy != LegacySourceRootExistingDirectory || proof.sealedAbsent != nil {
+		return errors.New("deferred legacy source proof policy is invalid")
 	}
 	for _, source := range proof.sources {
 		if err := ctx.Err(); err != nil {
@@ -1176,7 +1274,7 @@ func revalidateDeferredLegacyProof(
 			)
 		}
 	}
-	return nil
+	return context.Cause(ctx)
 }
 
 func validateLegacyArchiveAncestors(sourceRoot, archiveRoot string) error {

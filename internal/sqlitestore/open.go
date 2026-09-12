@@ -72,6 +72,7 @@ func Open(ctx context.Context, path string, options Options) (_ *sql.DB, returnE
 		// Freeze caller-owned policy and roots before any callback can mutate the
 		// original pointer and change authority or closeout behavior mid-open.
 		legacy := *options.Legacy
+		legacy.sealedAbsentRoot = nil
 		options.Legacy = &legacy
 	}
 	component := strings.TrimSpace(options.Component)
@@ -96,6 +97,7 @@ func Open(ctx context.Context, path string, options Options) (_ *sql.DB, returnE
 		return nil, fmt.Errorf("%s database migration authority does not match path", component)
 	}
 	offline := fileBacked && dblayer.MigrationContextAuthorizes(ctx, path)
+	var retainedAbsentRoot *sealedAbsentLegacyRoot
 	if options.Legacy != nil && options.Legacy.Closeout == LegacyCloseoutDeferred {
 		if !offline {
 			return nil, fmt.Errorf(
@@ -103,14 +105,40 @@ func Open(ctx context.Context, path string, options Options) (_ *sql.DB, returnE
 				component,
 			)
 		}
-		sourceRoot, err := validateLegacySourceRoot(options.Legacy.SourceRoot)
+		var sourceRoot string
+		var err error
+		switch options.Legacy.SourceRootPolicy {
+		case LegacySourceRootExistingDirectory:
+			sourceRoot, err = validateLegacySourceRoot(options.Legacy.SourceRoot)
+		case LegacySourceRootSealedAbsent:
+			sourceRoot, err = canonicalLegacySourceRoot(options.Legacy.SourceRoot)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("%s deferred legacy import: %w", component, err)
 		}
-		if err := validateDeferredLegacyTarget(path, sourceRoot); err != nil {
-			return nil, fmt.Errorf("%s deferred legacy import: %w", component, err)
+		if targetErr := validateDeferredLegacyTarget(path, sourceRoot); targetErr != nil {
+			return nil, fmt.Errorf("%s deferred legacy import: %w", component, targetErr)
 		}
 		options.Legacy.SourceRoot = sourceRoot
+		if options.Legacy.SourceRootPolicy == LegacySourceRootSealedAbsent {
+			retainedAbsentRoot, err = captureSealedAbsentLegacyRoot(ctx, sourceRoot)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"%s deferred legacy import: capture sealed absent source root: %w",
+					component,
+					err,
+				)
+			}
+			options.Legacy.sealedAbsentRoot = retainedAbsentRoot
+			defer func() {
+				if retainedAbsentRoot != nil {
+					returnErr = errors.Join(
+						returnErr,
+						closeSealedAbsentLegacyRoot(retainedAbsentRoot),
+					)
+				}
+			}()
+		}
 	}
 	busyTimeout := options.BusyTimeout
 	if busyTimeout == 0 {
@@ -159,6 +187,21 @@ func Open(ctx context.Context, path string, options Options) (_ *sql.DB, returnE
 	}
 	if err = migrateOpenedSQLiteDatabase(ctx, db, options); err != nil {
 		return nil, err
+	}
+	if retainedAbsentRoot != nil {
+		if consumedErr := requireSealedAbsentLegacyRootConsumed(retainedAbsentRoot); consumedErr != nil {
+			return nil, fmt.Errorf(
+				"validate %s sealed absent source proof consumption: %w",
+				component,
+				consumedErr,
+			)
+		}
+		closeErr := closeSealedAbsentLegacyRoot(retainedAbsentRoot)
+		retainedAbsentRoot = nil
+		options.Legacy.sealedAbsentRoot = nil
+		if closeErr != nil {
+			return nil, fmt.Errorf("close %s sealed absent source proof: %w", component, closeErr)
+		}
 	}
 	if err = checkOpenedSQLiteIntegrity(ctx, db, component); err != nil {
 		return nil, err
@@ -267,7 +310,7 @@ func validateMigrations(migrations []Migration) error {
 
 func migrate(ctx context.Context, db *sql.DB, options Options) error {
 	var importSummary legacyImportSummary
-	err := Immediate(ctx, db, func(conn *sql.Conn) error {
+	err := immediateWithBeforeCommit(ctx, db, func(conn *sql.Conn) error {
 		// Check the pre-migration image while the same immediate transaction that
 		// will perform the upgrade is active. A corrupt database must never enter
 		// a committing migration.
@@ -333,17 +376,17 @@ func migrate(ctx context.Context, db *sql.DB, options Options) error {
 		if err := integrityCheckConn(ctx, conn, options.Component); err != nil {
 			return err
 		}
-		if options.Legacy != nil {
-			if err := revalidateDeferredLegacyProof(
-				ctx,
-				options.Component,
-				*options.Legacy,
-				importSummary.deferred,
-			); err != nil {
-				return err
-			}
-		}
 		return nil
+	}, func() error {
+		if options.Legacy == nil {
+			return nil
+		}
+		return revalidateDeferredLegacyProof(
+			ctx,
+			options.Component,
+			*options.Legacy,
+			importSummary.deferred,
+		)
 	})
 	if err != nil {
 		return err
