@@ -37,7 +37,7 @@ claims nor opens SQLite.
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
 | `FR-DATABASE-BACKUP-ARCHIVE-001` | MUST | Externally quiesced orchestration supplies the canonical catalog and selected subset. | A marker-complete, exact, private archive whose final live rescan matches every copied source. | Creates, syncs, no-replace publishes, and parent-syncs one archive. | Catalog/provenance drift, unsafe sources, aliasing, sidecar incoherence, bounds, cancellation, sync, or publication failure returns no usable session. | Only committed recovery evidence may authorize later migration. |
-| `FR-DATABASE-BACKUP-ARCHIVE-002` | MUST | Trusted code loads or verifies an archive/session/store, including the final live-source pass invoked with a provider-minted pinned-stage scope. | Durable manifest/marker/payload tree and in-memory inventory agree by bytes, metadata, and stable identity maps. Ordinary and backup-creation live verification uses only the immutable manifest catalog exclusions. The final pre-cutover pass admits exactly one opaque StoreID/target/invocation-bound stage scope, rechecks it before and after the whole pass, excludes only its exact canonical main path from legacy membership, and records that main identity in the shared physical-alias deny-set. Near names, a second stage, and the stage's WAL/SHM/journal are never excluded. | Read-only. The dynamic stage exclusion is invocation-local and is never written into the archive manifest. | Partial, extra, missing, linked, reparsed, public, replaced, noncanonical, hash-mismatched, stale/foreign/reused scope, stage identity drift, hardlink alias, sidecar appearance, or any other legacy drift fails closed. | Recovery evidence must remain immutable across verification, and a provider-created main nested under a legacy root must not weaken exact-tree drift detection. |
+| `FR-DATABASE-BACKUP-ARCHIVE-002` | MUST | Trusted code loads or verifies an archive/session/store, including the final live-source pass invoked with a provider-minted pinned-stage scope. | Durable manifest/marker/payload tree and in-memory inventory agree by bytes, metadata, and stable identity maps. Ordinary and backup-creation live verification uses only the immutable manifest catalog exclusions. The final pre-cutover pass admits exactly one opaque StoreID/target/invocation-bound stage scope, rechecks it before and after the whole pass, excludes only its exact canonical main path from legacy membership, and records that main identity in the shared physical-alias deny-set. Only when one manifest root was missing, equals `Dir(target)`, has zero records, and the target was absent may a separate provider-created-parent check admit `missing → directory`; a strict walker requires the pinned stage main as its sole entry. Near names, directories normally skipped by legacy traversal, a second stage, and every stage/target sidecar are fatal. | Read-only. Dynamic stage and parent proofs are invocation-local and never written into the archive manifest. | Partial, extra, missing, linked, reparsed, public, replaced, noncanonical, hash-mismatched, stale/foreign/reused scope, stage or parent identity/metadata drift, hardlink alias, sidecar appearance, unavailable parent proof, or any other legacy drift fails closed. | Recovery evidence must remain immutable, and a provider-created container may not become a generic missing-root or directory-exclusion rule. |
 | `FR-DATABASE-BACKUP-ARCHIVE-003` | MUST | Orchestration records migration progress and one terminal result. | Owner-private digest-bound status advances monotonically through revisions 1 and 2. | Exclusive create then locked atomic exchange of only the expected incumbent. | Direct terminal, replay, stale identity/revision/bytes, concurrent writer, parent/archive drift, or post-exchange uncertainty is explicit. | Participating stale writers must not rewrite operational truth. |
 
 ## Data And State Model
@@ -76,6 +76,7 @@ Owns: TEST internal/databasemigration/coverage_snapshot_additional_test.go *
 Owns: TEST internal/databasemigration/coverage_snapshot_faults_test.go *
 Owns: TEST internal/databasemigration/live_sources_test.go *
 Owns: TEST internal/databasemigration/live_stage_exclusion_test.go *
+Owns: TEST internal/databasemigration/provider_created_parent_coverage_test.go *
 
 ## Auxiliary Interfaces
 
@@ -95,11 +96,14 @@ and legacy bytes; sort/validate inventory; perform one shared-index final live
 rescan; write and sync manifest then marker; exact-verify; no-replace rename;
 sync parent; exact-verify again.
 Immediately before provider cutover, build the same manifest-backed live index
-inside one pinned-stage scope, seed only its retained-handle identity, scan and
+inside one pinned-stage scope, seed its retained-handle identity, scan and
 verify every root/record, and validate the exact directory-entry observation
 against that same retained handle at the skip decision. Recheck the scope after
 final root inspection. The dynamic path never enters the case-folded catalog
-exclusion map.
+exclusion map. For the one eligible snapshot-missing target parent, also seed
+the retained directory identity and enter strict sole-entry mode before any
+backup/catalog/top-level-directory skip logic; check the parent before and
+after that scan.
 The walker charges the skipped main against its bounds and never skips by
 physical identity, prefix, hidden-name policy, directory, or sidecar name.
 Status operations verify archive and parent, lock/read/reread the incumbent
@@ -125,6 +129,8 @@ An exact excluded stage main is still identity-indexed, so a hardlink under any
 other name fails as a physical alias. A stage sidecar or second/near-name stage
 is an added legacy member. Scope cancellation, replacement, reuse, or failed
 post-pass recheck rejects the cutover even when all recorded legacy bytes match.
+A pre-existing or concurrently created target parent receives no special proof;
+ordinary `missing → directory` comparison still rejects it.
 
 ## Acceptance Evidence
 

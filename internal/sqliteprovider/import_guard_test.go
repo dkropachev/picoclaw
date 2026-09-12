@@ -33,6 +33,9 @@ var validatedReplacementConsumers = map[string]map[string]bool{
 	"ValidatedReplacementCheck": {
 		"internal/databasemigration/backup_archive.go": true,
 	},
+	"ValidatedTargetParentCheck": {
+		"internal/databasemigration/backup_archive.go": true,
+	},
 }
 
 const validatedReplacementUseConsumer = "internal/databasemigration/backup_archive.go"
@@ -197,6 +200,7 @@ func denied(ctx context.Context, replacement provider.ValidatedReplacement) erro
 }
 var _ = provider.MigrateStagedOfflineFromWithLiveVerification
 var _ provider.ValidatedReplacementCheck
+var _ provider.ValidatedTargetParentCheck
 `,
 		"internal/rogue/dot_import.go": `package rogue
 import . "github.com/sipeed/picoclaw/internal/sqliteprovider"
@@ -276,6 +280,7 @@ func deniedCrossFile(ctx context.Context) error {
 		{"internal/rogue/rogue.go", "cannot reference sqliteprovider.ValidatedReplacement"},
 		{"internal/rogue/rogue.go", "cannot call sqliteprovider.MigrateStagedOfflineFromWithLiveVerification"},
 		{"internal/rogue/rogue.go", "cannot reference sqliteprovider.ValidatedReplacementCheck"},
+		{"internal/rogue/rogue.go", "cannot reference sqliteprovider.ValidatedTargetParentCheck"},
 		{"internal/rogue/rogue.go", "cannot consume ValidatedReplacement.Use"},
 		{"internal/rogue/dot_import.go", "cannot use a dot SQLite-provider import"},
 		{"internal/rogue/type_alias.go", "cannot consume ValidatedReplacement.Use"},
@@ -462,12 +467,12 @@ func validatedReplacementBoundaryViolations(repositoryRoot string) ([]string, er
 				}
 			}
 
-			// ValidatedReplacement.Use can be reached through type aliases,
+			// ValidatedReplacement.Use and UseWithTargetParent can be reached through type aliases,
 			// package variables, inferred locals, or interface receivers. An
 			// AST-only receiver-name allowlist cannot distinguish those safely,
 			// so every Use selector in a provider-importing production file is
 			// denied outside the single approved synchronous consumer.
-			if selector.Sel.Name == "Use" {
+			if selector.Sel.Name == "Use" || selector.Sel.Name == "UseWithTargetParent" {
 				if relative != validatedReplacementUseConsumer {
 					violations = append(violations, fmt.Sprintf(
 						"%s:%d: cannot consume ValidatedReplacement.Use",

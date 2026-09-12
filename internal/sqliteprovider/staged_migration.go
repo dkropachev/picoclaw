@@ -142,9 +142,12 @@ func migrateStagedOfflineAuthorizedWithLiveVerification(
 	if err := authority.Check(ctx); err != nil {
 		return result, err
 	}
-	if err := EnsurePrivateDirectory(filepath.Dir(absoluteTarget)); err != nil {
+	targetParentPath := filepath.Dir(absoluteTarget)
+	targetParent, err := prepareRetainedStagedTargetParent(ctx, targetParentPath)
+	if err != nil {
 		return result, fmt.Errorf("prepare SQLite staged migration directory: %w", err)
 	}
+	defer func() { returnErr = errors.Join(returnErr, targetParent.Close()) }()
 	working, err := unusedStagedGenerationPath(absoluteTarget)
 	if err != nil {
 		return result, err
@@ -268,6 +271,17 @@ func migrateStagedOfflineAuthorizedWithLiveVerification(
 				return false, err
 			}
 			defer func() { returnErr = errors.Join(returnErr, seal.close()) }()
+			if targetParent != nil {
+				if _, err := targetParent.SealSoleStage(
+					ctx,
+					targetParentPath,
+					stage,
+					seal.identity,
+					seal.handleIdentity,
+				); err != nil {
+					return false, err
+				}
+			}
 			targetExists, targetIdentity, err := captureStagedTargetIdentity(live)
 			if err != nil {
 				return false, err
@@ -338,11 +352,12 @@ func migrateStagedOfflineAuthorizedWithLiveVerification(
 			if err := seal.verify(ctx); err != nil {
 				return discardPinned(err)
 			}
-			if err := invokeStagedLiveVerification(
+			if err := invokeStagedLiveVerificationWithTargetParent(
 				ctx,
 				source.storeID,
 				live,
 				seal,
+				targetParent,
 				liveVerification,
 			); err != nil {
 				return discardPinned(err)
@@ -356,10 +371,31 @@ func migrateStagedOfflineAuthorizedWithLiveVerification(
 			if err := seal.verify(ctx); err != nil {
 				return discardPinned(err)
 			}
+			if targetParent != nil {
+				if _, err := targetParent.CheckSoleStage(
+					ctx,
+					targetParentPath,
+					stage,
+					seal.identity,
+				); err != nil {
+					return discardPinned(err)
+				}
+			}
 			if err := recheckStagedTargetIdentity(live, targetExists, targetIdentity); err != nil {
 				return discardPinned(err)
 			}
-			complete, replaceErr := ops.replace(stage, live)
+			var replaceErr error
+			if targetParent != nil {
+				complete, replaceErr = targetParent.ReplaceStage(
+					ctx,
+					stage,
+					live,
+					seal.identity,
+					seal.file,
+				)
+			} else {
+				complete, replaceErr = ops.replace(stage, live)
+			}
 			if !complete {
 				if replaceErr == nil {
 					replaceErr = errors.New("SQLite staged replacement did not complete")
@@ -368,7 +404,15 @@ func migrateStagedOfflineAuthorizedWithLiveVerification(
 			}
 			targetReplaced = true
 			result.installed = true
-			return true, errors.Join(replaceErr, authority.ReconcileReplacement(ctx))
+			var parentErr error
+			if targetParent != nil {
+				_, parentErr = targetParent.CheckSoleInstalledTarget(ctx, live)
+			}
+			return true, errors.Join(
+				replaceErr,
+				parentErr,
+				authority.ReconcileReplacement(ctx),
+			)
 		},
 		activate: func(
 			activateCtx context.Context,
@@ -377,7 +421,20 @@ func migrateStagedOfflineAuthorizedWithLiveVerification(
 			version int,
 		) error {
 			activateErr := ops.activate(activateCtx, live, timeout, version)
-			return errors.Join(activateErr, authority.Reconcile(activateCtx))
+			reconcileErr := authority.Reconcile(activateCtx)
+			var parentErr error
+			if targetParent != nil {
+				if _, err := targetParent.CheckSoleInstalledTarget(activateCtx, live); err != nil {
+					parentErr = errors.Join(
+						dblayer.NewError(
+							dblayer.CodeOutcomeUnknown,
+							"installed database target parent changed during activation",
+						),
+						err,
+					)
+				}
+			}
+			return errors.Join(activateErr, reconcileErr, parentErr)
 		},
 	}
 	if err := migrateStagedOffline(
@@ -400,6 +457,17 @@ func migrateStagedOfflineAuthorizedWithLiveVerification(
 			),
 			err,
 		)
+	}
+	if targetParent != nil {
+		if _, err := targetParent.CheckSoleInstalledTarget(ctx, absoluteTarget); err != nil {
+			return result, errors.Join(
+				dblayer.NewError(
+					dblayer.CodeOutcomeUnknown,
+					"installed database target parent could not be revalidated",
+				),
+				err,
+			)
+		}
 	}
 	result.AfterVersion = expectedVersion
 	return result, nil
