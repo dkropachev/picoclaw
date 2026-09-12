@@ -105,7 +105,7 @@ func TestSharedLiveVerificationIndexesCatalogAndRecordsOnce(t *testing.T) {
 	}
 	for _, spec := range specs {
 		if verifyErr := session.verifyLiveSourcesWithState(
-			t.Context(), spec, ops, state,
+			t.Context(), spec, ops, state, nil,
 		); verifyErr != nil {
 			t.Fatal(verifyErr)
 		}
@@ -227,7 +227,7 @@ func TestBackupVerificationRechecksBytesAfterHashing(t *testing.T) {
 func TestBackupArchiveRemainingInputBoundaries(t *testing.T) {
 	if err := (*backupSession)(nil).verifyLiveSourcesWithState(
 		t.Context(), storecatalog.Spec{}, defaultBackupLiveVerifyOps(),
-		&backupLiveVerificationState{},
+		&backupLiveVerificationState{}, nil,
 	); err == nil || !strings.Contains(err.Error(), "input") {
 		t.Fatalf("nil live-source state receiver = %v", err)
 	}

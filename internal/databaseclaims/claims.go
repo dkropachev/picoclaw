@@ -72,6 +72,7 @@ type replacementHandle interface {
 type replacementPin struct {
 	identity      fileidentity.Identity
 	claimIdentity string
+	path          string
 	handle        replacementHandle
 }
 
@@ -831,6 +832,40 @@ func (guard *MigrationRefreshingGuard) PinReplacement(
 	return state.validateFinalMigrationObservationsLocked()
 }
 
+// CheckReplacement proves that path still names the exact main identity held
+// by the active replacement pin for id. Unlike PinReplacement it cannot mint,
+// replace, or refresh a capability.
+func (guard *MigrationRefreshingGuard) CheckReplacement(
+	id database.StoreID,
+	path string,
+) error {
+	if guard == nil || guard.state == nil || !id.Valid() || path == "" {
+		return database.NewError(
+			database.CodeInvalid,
+			"physical database migration replacement check is invalid",
+		)
+	}
+	state := guard.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := state.checkLocked(); err != nil {
+		return err
+	}
+	if err := state.validateExpectedMainsLocked(); err != nil {
+		return err
+	}
+	if _, pinned := state.pinned[id]; !pinned {
+		return database.NewError(
+			database.CodeIntegrity,
+			"physical database migration replacement was not pinned",
+		)
+	}
+	if err := state.lease.checkReplacementLocked(id, path); err != nil {
+		return err
+	}
+	return state.validateFinalMigrationObservationsLocked()
+}
+
 // DiscardReplacement retires an exact unused replacement pin before its
 // provider-owned stage is removed. A target with no published pin is an
 // idempotent no-op; physical claims and assignment history remain monotonic.
@@ -1329,7 +1364,7 @@ func (lease *Lease) pinReplacementLocked(
 		lease.poisoned.Store(true)
 		return err
 	}
-	pin := &replacementPin{handle: handle}
+	pin := &replacementPin{path: canonical, handle: handle}
 	keepPin := false
 	defer func() {
 		if !keepPin {
@@ -1460,6 +1495,51 @@ func (lease *Lease) pinReplacementLocked(
 		return database.NewError(database.CodeIntegrity, "physical database pin authority changed before publication")
 	}
 	keepPin = true
+	return nil
+}
+
+func (lease *Lease) checkReplacementLocked(id database.StoreID, path string) error {
+	if lease == nil || !id.Valid() || path == "" {
+		return database.NewError(
+			database.CodeInvalid,
+			"physical database replacement check is invalid",
+		)
+	}
+	pin := lease.replacementPins[id]
+	if pin == nil || pin.handle == nil || !pin.identity.Valid() || pin.path == "" {
+		return lease.poison(database.NewError(
+			database.CodeIntegrity,
+			"physical database replacement pin is unavailable",
+		))
+	}
+	canonical, err := canonicalReplacementPath(path)
+	if err != nil || canonical != pin.path {
+		return lease.poison(errors.Join(
+			database.NewError(
+				database.CodeIntegrity,
+				"physical database replacement path does not match its pin",
+			),
+			err,
+		))
+	}
+	identity, exists, err := regularPhysicalIdentity(canonical)
+	if err != nil || !exists || identity != pin.identity ||
+		pin.claimIdentity != digestPhysicalIdentity(identity) ||
+		!pin.handle.valid() || !pin.handle.matches(identity) {
+		return lease.poison(errors.Join(
+			database.NewError(
+				database.CodeIntegrity,
+				"physical database replacement identity changed while pinned",
+			),
+			err,
+		))
+	}
+	if _, held := lease.identities[pin.claimIdentity]; !held {
+		return lease.poison(database.NewError(
+			database.CodeIntegrity,
+			"physical database replacement claim is unavailable",
+		))
+	}
 	return nil
 }
 

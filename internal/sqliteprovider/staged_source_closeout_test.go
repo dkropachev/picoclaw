@@ -273,6 +273,49 @@ func TestStagedSourceCloseoutDetectsPostCopyDrift(t *testing.T) {
 	})
 }
 
+func TestImmutableStageCopyCleanupRejectsRenamedMainAndPreservesDecoy(t *testing.T) {
+	root := t.TempDir()
+	escapeRoot := t.TempDir()
+	source := filepath.Join(root, "source.db")
+	stage := filepath.Join(root, "stage.db")
+	escaped := filepath.Join(escapeRoot, "escaped-stage.db")
+	stamp := time.Unix(1_700_000_125, 0)
+	writeImmutableSourceTestFile(t, source, []byte("original"), stamp)
+	writeImmutableSourceTestFile(t, source+"-wal", []byte("wal"), stamp)
+	capability := immutableGenerationSourceForTest(func(
+		ctx context.Context,
+		use func(context.Context, string) error,
+	) error {
+		return use(ctx, source)
+	})
+	canary := errors.New("stop after main rename")
+	ops := defaultImmutableGenerationCopyOps()
+	ops.retain = retainStagedGeneration
+	ops.beforeDestinationOpen = func(index int, _ string) error {
+		if index != 1 {
+			return nil
+		}
+		if err := os.Rename(stage, escaped); err != nil {
+			return err
+		}
+		if err := os.WriteFile(stage, []byte("decoy"), 0o600); err != nil {
+			return err
+		}
+		return canary
+	}
+	if _, err := copyImmutableGenerationToStageWithOps(
+		t.Context(), capability, stage, ops,
+	); !errors.Is(err, canary) || !strings.Contains(err.Error(), "retirement path no longer names") {
+		t.Fatalf("renamed partial-stage cleanup = %v", err)
+	}
+	if payload, err := os.ReadFile(escaped); err != nil || string(payload) != "original" {
+		t.Fatalf("escaped partial-stage main = %q, %v", payload, err)
+	}
+	if payload, err := os.ReadFile(stage); err != nil || string(payload) != "decoy" {
+		t.Fatalf("partial-stage decoy = %q, %v", payload, err)
+	}
+}
+
 func TestStagedSourceCloseoutCaptureAndOpenFailures(t *testing.T) {
 	t.Parallel()
 

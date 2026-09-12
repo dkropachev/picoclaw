@@ -440,7 +440,13 @@ func TestBackupCoreLiveStateAndRecordFaults(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			invalid, faultOps := backupCoreCloneLiveState(state), ops
 			test.edit(invalid, &faultOps)
-			requireBackupError(t, session.verifyLiveSourcesWithState(t.Context(), spec, faultOps, invalid), test.want)
+			requireBackupError(
+				t,
+				session.verifyLiveSourcesWithState(
+					t.Context(), spec, faultOps, invalid, nil,
+				),
+				test.want,
+			)
 		})
 	}
 

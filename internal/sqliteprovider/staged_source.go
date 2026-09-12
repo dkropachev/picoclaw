@@ -24,6 +24,7 @@ var errImmutableGenerationSourceContract = errors.New(
 type immutableGenerationCopyOps struct {
 	afterSourceOpen       func(string) error
 	beforeDestinationOpen func(int, string) error
+	retain                func(context.Context, string) (*retainedStagedGeneration, error)
 	remove                func(string) error
 	syncDirectory         func(string) error
 }
@@ -39,6 +40,7 @@ type immutableStageWriteOps struct {
 	sync     func(*os.File) error
 	hash     func(context.Context, context.Context, *os.File, int64) ([sha256.Size]byte, int64, error)
 	validate func(string, os.FileInfo) error
+	retain   func(context.Context, string) (*retainedStagedGeneration, error)
 }
 
 func defaultImmutableGenerationCopyOps() immutableGenerationCopyOps {
@@ -82,8 +84,11 @@ type immutableGenerationOpenMember struct {
 }
 
 type immutableStageMember struct {
-	path string
-	info os.FileInfo
+	index              int
+	path               string
+	info               os.FileInfo
+	retained           *retainedStagedGeneration
+	retentionAttempted bool
 }
 
 // copyImmutableGenerationToStage invokes source exactly once and copies the
@@ -94,8 +99,24 @@ func copyImmutableGenerationToStage(
 	source ImmutableGenerationSource,
 	stage string,
 ) (sourceExists bool, returnErr error) {
-	return copyImmutableGenerationToStageWithOps(
-		ctx, source, stage, defaultImmutableGenerationCopyOps(),
+	sourceExists, retainedMain, returnErr := copyImmutableGenerationToRetainedStage(
+		ctx, source, stage,
+	)
+	if retainedMain != nil {
+		returnErr = errors.Join(returnErr, retainedMain.Close())
+	}
+	return sourceExists, returnErr
+}
+
+func copyImmutableGenerationToRetainedStage(
+	ctx context.Context,
+	source ImmutableGenerationSource,
+	stage string,
+) (sourceExists bool, retainedMain *retainedStagedGeneration, returnErr error) {
+	ops := defaultImmutableGenerationCopyOps()
+	ops.retain = retainStagedGeneration
+	return copyImmutableGenerationToRetainedStageWithOps(
+		ctx, source, stage, ops,
 	)
 }
 
@@ -105,20 +126,35 @@ func copyImmutableGenerationToStageWithOps(
 	stage string,
 	ops immutableGenerationCopyOps,
 ) (sourceExists bool, returnErr error) {
+	sourceExists, retainedMain, returnErr := copyImmutableGenerationToRetainedStageWithOps(
+		ctx, source, stage, ops,
+	)
+	if retainedMain != nil {
+		returnErr = errors.Join(returnErr, retainedMain.Close())
+	}
+	return sourceExists, returnErr
+}
+
+func copyImmutableGenerationToRetainedStageWithOps(
+	ctx context.Context,
+	source ImmutableGenerationSource,
+	stage string,
+	ops immutableGenerationCopyOps,
+) (sourceExists bool, retainedMain *retainedStagedGeneration, returnErr error) {
 	if ctx == nil || !source.storeID.Valid() || source.use == nil ||
 		!validImmutableGenerationPath(stage) ||
 		ops.afterSourceOpen == nil || ops.beforeDestinationOpen == nil ||
 		ops.remove == nil || ops.syncDirectory == nil {
-		return false, errors.New("immutable SQLite generation copy input is invalid")
+		return false, nil, errors.New("immutable SQLite generation copy input is invalid")
 	}
 	if cause := context.Cause(ctx); cause != nil {
-		return false, cause
+		return false, nil, cause
 	}
 	if err := EnsurePrivateDirectory(filepath.Dir(stage)); err != nil {
-		return false, fmt.Errorf("prepare immutable SQLite generation stage: %w", err)
+		return false, nil, fmt.Errorf("prepare immutable SQLite generation stage: %w", err)
 	}
 	if err := requireUnusedImmutableStage(stage); err != nil {
-		return false, err
+		return false, nil, err
 	}
 
 	created := make([]immutableStageMember, 0, 4)
@@ -145,13 +181,19 @@ func copyImmutableGenerationToStageWithOps(
 		},
 	)
 	if invokeErr != nil {
-		return false, invokeErr
+		return false, nil, invokeErr
 	}
 	if cause := context.Cause(ctx); cause != nil {
-		return false, cause
+		return false, nil, cause
+	}
+	retainedMain, closeErr := detachImmutableStageRetentions(
+		ctx, created, sourceExists, ops.retain != nil,
+	)
+	if closeErr != nil {
+		return false, nil, closeErr
 	}
 	completed = true
-	return sourceExists, nil
+	return sourceExists, retainedMain, nil
 }
 
 func invokeImmutableGenerationSource(
@@ -322,13 +364,16 @@ func copyImmutableGeneration(
 		if err := ops.beforeDestinationOpen(opened[index].index, destinationPath); err != nil {
 			return false, err
 		}
-		member, copyErr := writeImmutableStageMember(
+		writeOps := defaultImmutableStageWriteOps()
+		writeOps.retain = ops.retain
+		member, copyErr := writeImmutableStageMemberWithOps(
 			parentCtx,
 			sourceCtx,
 			destinationRoot,
 			filepath.Base(destinationPath),
 			destinationPath,
 			&opened[index],
+			writeOps,
 		)
 		if member.info != nil {
 			*created = append(*created, member)
@@ -477,7 +522,7 @@ func writeImmutableStageMemberWithOps(
 	if err != nil {
 		return member, err
 	}
-	member = immutableStageMember{path: path, info: info}
+	member = immutableStageMember{index: source.index, path: path, info: info}
 	if chmodErr := ops.chmod(file, 0o600); chmodErr != nil {
 		return member, fmt.Errorf("secure immutable SQLite stage member: %w", chmodErr)
 	}
@@ -498,6 +543,13 @@ func writeImmutableStageMemberWithOps(
 		)
 	}
 	member.info = securedHandle
+	if ops.retain != nil {
+		member.retentionAttempted = true
+		member.retained, err = ops.retain(parentCtx, path)
+		if err != nil {
+			return member, fmt.Errorf("retain immutable SQLite stage member: %w", err)
+		}
+	}
 	if _, seekErr := ops.seek(source.file, 0, io.SeekStart); seekErr != nil {
 		return member, fmt.Errorf("rewind immutable SQLite source member: %w", seekErr)
 	}
@@ -793,6 +845,54 @@ func requireUnusedImmutableStage(stage string) error {
 	return nil
 }
 
+func detachImmutableStageRetentions(
+	ctx context.Context,
+	created []immutableStageMember,
+	sourceExists bool,
+	requireRetainedMain bool,
+) (*retainedStagedGeneration, error) {
+	var (
+		main      *retainedStagedGeneration
+		closeErrs error
+	)
+	for index := range created {
+		retained := created[index].retained
+		if retained == nil {
+			continue
+		}
+		if err := retained.Check(ctx, created[index].path); err != nil {
+			return nil, fmt.Errorf("recheck copied immutable SQLite stage member: %w", err)
+		}
+		if created[index].index == 0 {
+			if main != nil {
+				return nil, errors.New("immutable SQLite stage retained multiple mains")
+			}
+			main = retained
+			continue
+		}
+		closeErrs = errors.Join(closeErrs, retained.Close())
+		created[index].retained = nil
+	}
+	if closeErrs != nil {
+		return nil, closeErrs
+	}
+	if !sourceExists && main != nil {
+		return nil, errors.New("missing immutable SQLite source created a retained stage main")
+	}
+	if sourceExists && requireRetainedMain && main == nil {
+		return nil, errors.New("immutable SQLite stage main retention is unavailable")
+	}
+	if main != nil {
+		for index := range created {
+			if created[index].retained == main {
+				created[index].retained = nil
+				break
+			}
+		}
+	}
+	return main, nil
+}
+
 func cleanupImmutableStage(
 	created []immutableStageMember,
 	parent string,
@@ -800,8 +900,26 @@ func cleanupImmutableStage(
 ) error {
 	var result error
 	removed := false
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), maximumStagedCleanupDuration)
+	defer cancel()
 	for index := len(created) - 1; index >= 0; index-- {
 		member := created[index]
+		if member.retentionAttempted {
+			if member.retained == nil {
+				result = errors.Join(
+					result,
+					errors.New("immutable SQLite stage retention was not established before cleanup"),
+				)
+				continue
+			}
+			retireErr := member.retained.Retire(cleanupCtx)
+			closeErr := member.retained.Close()
+			result = errors.Join(result, retireErr, closeErr)
+			if retireErr == nil {
+				removed = true
+			}
+			continue
+		}
 		current, err := os.Lstat(member.path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue

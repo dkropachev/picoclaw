@@ -39,6 +39,8 @@ func (authority *stagedCloseoutAuthority) PinReplacement(_ context.Context, path
 	return nil
 }
 
+func (*stagedCloseoutAuthority) CheckReplacement(context.Context, string) error { return nil }
+
 func (authority *stagedCloseoutAuthority) DiscardReplacement(context.Context) error {
 	authority.discardCalls++
 	return authority.discardErr
@@ -190,7 +192,7 @@ func TestStagedAuthorizedChecksAroundNormalizedSourceAndPin(t *testing.T) {
 		{name: "before source inspection", failCheck: 2},
 		{name: "after source normalization", failCheck: 6},
 		{name: "before replacement pin", failCheck: 7},
-		{name: "after replacement pin with failed discard", failCheck: 8, discardErr: errors.New("discard failed")},
+		{name: "after replacement pin with failed discard", failCheck: 9, discardErr: errors.New("discard failed")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()

@@ -238,8 +238,28 @@ func walkLegacyInputs(
 	budget *backupBudget,
 	visit func(string) error,
 ) error {
-	return walkLegacyInputsWithPhysicalExclusions(
-		ctx, root, backupRoot, excluded, nil, budget, visit,
+	return walkLegacyInputsWithExclusions(
+		ctx, root, backupRoot, excluded, nil, nil, budget, visit,
+	)
+}
+
+type legacyExactExclusion struct {
+	path     string
+	validate func(context.Context, string, os.FileInfo) error
+	seen     int
+}
+
+func walkLegacyInputsWithExactExclusion(
+	ctx context.Context,
+	root string,
+	backupRoot string,
+	excluded map[string]struct{},
+	exact *legacyExactExclusion,
+	budget *backupBudget,
+	visit func(string) error,
+) error {
+	return walkLegacyInputsWithExclusions(
+		ctx, root, backupRoot, excluded, nil, exact, budget, visit,
 	)
 }
 
@@ -249,6 +269,21 @@ func walkLegacyInputsWithPhysicalExclusions(
 	backupRoot string,
 	excluded map[string]struct{},
 	physicalExcluded map[fileidentity.Identity]struct{},
+	budget *backupBudget,
+	visit func(string) error,
+) error {
+	return walkLegacyInputsWithExclusions(
+		ctx, root, backupRoot, excluded, physicalExcluded, nil, budget, visit,
+	)
+}
+
+func walkLegacyInputsWithExclusions(
+	ctx context.Context,
+	root string,
+	backupRoot string,
+	excluded map[string]struct{},
+	physicalExcluded map[fileidentity.Identity]struct{},
+	exact *legacyExactExclusion,
 	budget *backupBudget,
 	visit func(string) error,
 ) error {
@@ -265,6 +300,19 @@ func walkLegacyInputsWithPhysicalExclusions(
 	if err != nil {
 		return err
 	}
+	if exact != nil && filepath.Clean(root) == exact.path {
+		if err := budget.enter("."); err != nil {
+			return err
+		}
+		if exact.validate == nil {
+			return errors.New("exact legacy exclusion validation is unavailable")
+		}
+		if err := exact.validate(ctx, filepath.Clean(root), info); err != nil {
+			return err
+		}
+		exact.seen++
+		return nil
+	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("legacy input is a symlink")
 	}
@@ -280,9 +328,9 @@ func walkLegacyInputsWithPhysicalExclusions(
 	if !info.IsDir() {
 		return errors.New("legacy input is not a regular file or directory")
 	}
-	return walkLegacyDirectoryWithPhysicalExclusions(
+	return walkLegacyDirectoryWithExclusions(
 		ctx, filepath.Clean(root), ".", filepath.Clean(backupRoot),
-		excluded, physicalExcluded, budget, visit,
+		excluded, physicalExcluded, exact, budget, visit,
 	)
 }
 
@@ -295,18 +343,19 @@ func walkLegacyDirectory(
 	budget *backupBudget,
 	visit func(string) error,
 ) (returnErr error) {
-	return walkLegacyDirectoryWithPhysicalExclusions(
-		ctx, path, relative, backupRoot, excluded, nil, budget, visit,
+	return walkLegacyDirectoryWithExclusions(
+		ctx, path, relative, backupRoot, excluded, nil, nil, budget, visit,
 	)
 }
 
-func walkLegacyDirectoryWithPhysicalExclusions(
+func walkLegacyDirectoryWithExclusions(
 	ctx context.Context,
 	path,
 	relative,
 	backupRoot string,
 	excluded map[string]struct{},
 	physicalExcluded map[fileidentity.Identity]struct{},
+	exact *legacyExactExclusion,
 	budget *backupBudget,
 	visit func(string) error,
 ) (returnErr error) {
@@ -373,6 +422,19 @@ func walkLegacyDirectoryWithPhysicalExclusions(
 			if statErr != nil {
 				return statErr
 			}
+			if exact != nil && clean == exact.path {
+				if err := budget.enter(childRelative); err != nil {
+					return err
+				}
+				if exact.validate == nil {
+					return errors.New("exact legacy exclusion validation is unavailable")
+				}
+				if err := exact.validate(ctx, clean, info); err != nil {
+					return err
+				}
+				exact.seen++
+				continue
+			}
 			if info.Mode()&os.ModeSymlink != 0 {
 				return errors.New("legacy input tree contains a symlink")
 			}
@@ -383,9 +445,9 @@ func walkLegacyDirectoryWithPhysicalExclusions(
 					}
 					continue
 				}
-				if err := walkLegacyDirectoryWithPhysicalExclusions(
+				if err := walkLegacyDirectoryWithExclusions(
 					ctx, child, childRelative, backupRoot, excluded,
-					physicalExcluded, budget, visit,
+					physicalExcluded, exact, budget, visit,
 				); err != nil {
 					return err
 				}

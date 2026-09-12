@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -60,6 +61,9 @@ func newOfflineProviderTestLease(
 				recorder.pinned = path
 				recorder.mu.Unlock()
 				return recorder.record("pin")
+			},
+			CheckReplacement: func(context.Context, string) error {
+				return recorder.record("check-replacement")
 			},
 			DiscardReplacement: func(context.Context) error {
 				return recorder.record("discard")
@@ -133,6 +137,635 @@ func TestMigrateStagedOfflineFromUsesSealedSourceAndDerivedTarget(t *testing.T) 
 		installProviderOfflineFixture, func(context.Context, string) error { return nil },
 	); dblayer.CodeOf(secondErr) != dblayer.CodeConflict {
 		t.Fatalf("second lease consumption = %v", secondErr)
+	}
+}
+
+func TestMigrateStagedOfflineFromLiveVerificationSeesOnlyPinnedReplacement(t *testing.T) {
+	home := t.TempDir()
+	sourcePath := filepath.Join(home, "verified-backup.db")
+	target := filepath.Join(home, "live.db")
+	createProviderOfflineFixture(t, sourcePath)
+	createProviderOfflineFixture(t, target)
+	recorder := &offlineProviderHookRecorder{}
+	lease := newOfflineProviderTestLease(t, target, recorder)
+	source := immutableGenerationSourceForTest(func(
+		ctx context.Context,
+		use func(context.Context, string) error,
+	) error {
+		return use(ctx, sourcePath)
+	})
+
+	result, err := MigrateStagedOfflineFromWithLiveVerification(
+		t.Context(),
+		lease,
+		source,
+		5*time.Second,
+		1,
+		installProviderOfflineFixture,
+		func(context.Context, string) error { return nil },
+		func(ctx context.Context, replacement ValidatedReplacement) error {
+			return replacement.Use(ctx, "global/auth", target, func(
+				_ context.Context, stage string, _ ValidatedReplacementCheck,
+			) error {
+				entries, readErr := os.ReadDir(home)
+				if readErr != nil {
+					return readErr
+				}
+				stages := make([]string, 0, 2)
+				for _, entry := range entries {
+					if strings.Contains(entry.Name(), ".migration-stage-") {
+						stages = append(stages, filepath.Join(home, entry.Name()))
+					}
+				}
+				if len(stages) != 1 || stages[0] != stage {
+					return fmt.Errorf("live verification stages = %v, want [%s]", stages, stage)
+				}
+				return recorder.record("live-verification")
+			})
+		},
+	)
+	if err != nil || !result.installed {
+		t.Fatalf("verified migration result=%#v error=%v", result, err)
+	}
+	events, _ := recorder.snapshot()
+	pin := indexProviderOfflineEvent(events, "pin")
+	pinCheck := indexProviderOfflineEvent(events, "check-replacement")
+	live := indexProviderOfflineEvent(events, "live-verification")
+	reconciled := indexProviderOfflineEvent(events, "reconcile-replacement")
+	if pin < 0 || pinCheck <= pin || live <= pinCheck || reconciled <= live {
+		t.Fatalf("verified replacement event order = %v", events)
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".migration-stage-") {
+			t.Fatalf("provider stage remained after successful cutover: %s", entry.Name())
+		}
+	}
+}
+
+func TestMigrateStagedOfflineFromLiveVerificationSupportsMissingTarget(t *testing.T) {
+	home := t.TempDir()
+	sourcePath := filepath.Join(home, "missing-backup.db")
+	target := filepath.Join(home, "live.db")
+	recorder := &offlineProviderHookRecorder{}
+	lease := newOfflineProviderTestLease(t, target, recorder)
+	source := immutableGenerationSourceForTest(func(
+		ctx context.Context,
+		use func(context.Context, string) error,
+	) error {
+		return use(ctx, sourcePath)
+	})
+	verified := false
+	result, err := MigrateStagedOfflineFromWithLiveVerification(
+		t.Context(), lease, source, 5*time.Second, 1,
+		installProviderOfflineFixture,
+		func(context.Context, string) error { return nil },
+		func(ctx context.Context, replacement ValidatedReplacement) error {
+			return replacement.Use(ctx, "global/auth", target, func(
+				_ context.Context, stage string, _ ValidatedReplacementCheck,
+			) error {
+				verified = true
+				if stage == sourcePath {
+					return errors.New("missing immutable source became the replacement stage")
+				}
+				return nil
+			})
+		},
+	)
+	if err != nil || !verified || !result.installed || result.BeforeVersion != 0 ||
+		result.AfterVersion != 1 {
+		t.Fatalf("missing-target result=%#v verified=%t error=%v", result, verified, err)
+	}
+	if !providerOfflineTableExists(t, target, "installed") {
+		t.Fatal("missing target did not receive its verified replacement")
+	}
+}
+
+func TestMigrateStagedOfflineFromLiveVerificationFailureDiscardsPin(t *testing.T) {
+	home := t.TempDir()
+	sourcePath := filepath.Join(home, "verified-backup.db")
+	target := filepath.Join(home, "live.db")
+	createProviderOfflineFixture(t, sourcePath)
+	createProviderOfflineFixture(t, target)
+	before, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &offlineProviderHookRecorder{}
+	lease := newOfflineProviderTestLease(t, target, recorder)
+	source := immutableGenerationSourceForTest(func(
+		ctx context.Context,
+		use func(context.Context, string) error,
+	) error {
+		return use(ctx, sourcePath)
+	})
+	canary := errors.New("live source drift")
+	result, err := MigrateStagedOfflineFromWithLiveVerification(
+		t.Context(), lease, source, 5*time.Second, 1,
+		installProviderOfflineFixture,
+		func(context.Context, string) error { return nil },
+		func(ctx context.Context, replacement ValidatedReplacement) error {
+			return replacement.Use(ctx, "global/auth", target, func(
+				context.Context, string, ValidatedReplacementCheck,
+			) error {
+				return canary
+			})
+		},
+	)
+	if !errors.Is(err, canary) || result.installed ||
+		dblayer.CodeOf(err) == dblayer.CodeOutcomeUnknown {
+		t.Fatalf("failed live verification result=%#v error=%v", result, err)
+	}
+	events, pinned := recorder.snapshot()
+	if indexProviderOfflineEvent(events, "discard") <=
+		indexProviderOfflineEvent(events, "check-replacement") ||
+		indexProviderOfflineEvent(events, "reconcile-replacement") >= 0 {
+		t.Fatalf("failed live verification events = %v", events)
+	}
+	if _, statErr := os.Lstat(pinned); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed live-verification stage remains at %q: %v", pinned, statErr)
+	}
+	after, err := os.ReadFile(target)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("failed live verification changed target: equal=%t error=%v", bytes.Equal(before, after), err)
+	}
+}
+
+func TestMigrateStagedOfflineFromRejectsPostValidationPrePinContentMutation(t *testing.T) {
+	home := t.TempDir()
+	sourcePath := filepath.Join(home, "verified-backup.db")
+	target := filepath.Join(home, "live.db")
+	createProviderOfflineFixture(t, sourcePath)
+	createProviderOfflineFixture(t, target)
+	recorder := &offlineProviderHookRecorder{}
+	parent, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	mutated := false
+	lease, err := databaseproviderlease.New(
+		parent,
+		"global/auth",
+		target,
+		databaseproviderlease.Hooks{
+			Check:     func(context.Context) error { return recorder.record("check") },
+			Reconcile: func(context.Context) error { return recorder.record("reconcile") },
+			PinReplacement: func(_ context.Context, path string) error {
+				recorder.mu.Lock()
+				recorder.pinned = path
+				recorder.mu.Unlock()
+				return recorder.record("pin")
+			},
+			CheckReplacement: func(_ context.Context, path string) error {
+				if !mutated {
+					info, statErr := os.Lstat(path)
+					payload, readErr := os.ReadFile(path)
+					if statErr != nil || readErr != nil || len(payload) == 0 {
+						return errors.Join(statErr, readErr, errors.New("empty replacement fixture"))
+					}
+					payload[len(payload)-1] ^= 0xff
+					if writeErr := os.WriteFile(path, payload, info.Mode().Perm()); writeErr != nil {
+						return writeErr
+					}
+					if timeErr := os.Chtimes(path, time.Now(), info.ModTime()); timeErr != nil {
+						return timeErr
+					}
+					mutated = true
+				}
+				return recorder.record("check-replacement")
+			},
+			DiscardReplacement: func(context.Context) error {
+				return recorder.record("discard")
+			},
+			ReconcileReplacement: func(context.Context) error {
+				return recorder.record("reconcile-replacement")
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := immutableGenerationSourceForTest(func(
+		ctx context.Context,
+		use func(context.Context, string) error,
+	) error {
+		return use(ctx, sourcePath)
+	})
+	liveCalled := false
+	result, err := MigrateStagedOfflineFromWithLiveVerification(
+		t.Context(), lease, source, 5*time.Second, 1,
+		installProviderOfflineFixture,
+		func(context.Context, string) error { return nil },
+		func(context.Context, ValidatedReplacement) error {
+			liveCalled = true
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "contents changed after validation") ||
+		result.installed || liveCalled || !mutated {
+		t.Fatalf(
+			"post-validation mutation result=%#v mutated=%t live=%t error=%v",
+			result, mutated, liveCalled, err,
+		)
+	}
+}
+
+func TestMigrateStagedOfflineFromRejectsRenamedNormalizedSource(t *testing.T) {
+	home := t.TempDir()
+	escapeRoot := t.TempDir()
+	sourcePath := filepath.Join(home, "verified-backup.db")
+	target := filepath.Join(home, "live.db")
+	escaped := filepath.Join(escapeRoot, "escaped-working.db")
+	createProviderOfflineFixture(t, sourcePath)
+	createProviderOfflineFixture(t, target)
+	recorder := &offlineProviderHookRecorder{}
+	var inner string
+	renamed := false
+	parent, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	lease, err := databaseproviderlease.New(
+		parent,
+		"global/auth",
+		target,
+		databaseproviderlease.Hooks{
+			Check: func(context.Context) error {
+				if inner != "" && !renamed {
+					stages, globErr := filepath.Glob(filepath.Join(home, ".*.migration-stage-*.db"))
+					if globErr != nil {
+						return globErr
+					}
+					for _, stage := range stages {
+						if filepath.Clean(stage) == filepath.Clean(inner) {
+							continue
+						}
+						if renameErr := os.Rename(stage, escaped); renameErr != nil {
+							return renameErr
+						}
+						renamed = true
+						break
+					}
+				}
+				return recorder.record("check")
+			},
+			Reconcile: func(context.Context) error { return recorder.record("reconcile") },
+			PinReplacement: func(_ context.Context, path string) error {
+				recorder.mu.Lock()
+				recorder.pinned = path
+				recorder.mu.Unlock()
+				return recorder.record("pin")
+			},
+			CheckReplacement: func(context.Context, string) error {
+				return recorder.record("check-replacement")
+			},
+			DiscardReplacement: func(context.Context) error {
+				return recorder.record("discard")
+			},
+			ReconcileReplacement: func(context.Context) error {
+				return recorder.record("reconcile-replacement")
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := immutableGenerationSourceForTest(func(
+		ctx context.Context,
+		use func(context.Context, string) error,
+	) error {
+		return use(ctx, sourcePath)
+	})
+	result, err := MigrateStagedOfflineFromWithLiveVerification(
+		t.Context(), lease, source, 5*time.Second, 1,
+		func(ctx context.Context, stage string) error {
+			inner = stage
+			return installProviderOfflineFixture(ctx, stage)
+		},
+		func(context.Context, string) error { return nil },
+		func(ctx context.Context, replacement ValidatedReplacement) error {
+			return replacement.Use(ctx, "global/auth", target, func(
+				context.Context, string, ValidatedReplacementCheck,
+			) error {
+				return nil
+			})
+		},
+	)
+	if err == nil || !renamed || result.installed ||
+		!strings.Contains(err.Error(), "retained SQLite stage path") {
+		t.Fatalf("renamed working result=%#v renamed=%t error=%v", result, renamed, err)
+	}
+	if _, statErr := os.Lstat(escaped); statErr != nil {
+		t.Fatalf("escaped working identity was not retained: %v", statErr)
+	}
+	if events, _ := recorder.snapshot(); indexProviderOfflineEvent(events, "pin") >= 0 {
+		t.Fatalf("renamed working source reached replacement pin: %v", events)
+	}
+}
+
+func TestStagedProviderDoesNotPathCleanDecoyAfterRetainedCopyFailure(t *testing.T) {
+	home := t.TempDir()
+	escapeRoot := t.TempDir()
+	target := filepath.Join(home, "live.db")
+	escaped := filepath.Join(escapeRoot, "escaped-partial-copy.db")
+	canary := errors.New("retained copy failure")
+	var decoy string
+	authority := offlineProviderTestAuthority{recorder: &offlineProviderHookRecorder{}}
+	source := immutableGenerationSourceForTest(func(
+		ctx context.Context,
+		use func(context.Context, string) error,
+	) error {
+		return use(ctx, filepath.Join(home, "unused-source.db"))
+	})
+	result, err := migrateStagedOfflineAuthorizedWithLiveVerification(
+		t.Context(), source, target, 5*time.Second, 1,
+		installProviderOfflineFixture,
+		func(context.Context, string) error { return nil },
+		func(context.Context, ValidatedReplacement) error { return nil },
+		authority,
+		stagedMigrationOps{
+			replace: func(string, string) (bool, error) { return true, nil },
+			activate: func(context.Context, string, time.Duration, int) error {
+				return nil
+			},
+			copySource: func(
+				ctx context.Context,
+				_ ImmutableGenerationSource,
+				stage string,
+			) (bool, *retainedStagedGeneration, error) {
+				if err := installProviderOfflineFixture(ctx, stage); err != nil {
+					return false, nil, err
+				}
+				if err := os.Rename(stage, escaped); err != nil {
+					return false, nil, err
+				}
+				decoy = stage
+				if err := installProviderOfflineFixture(ctx, decoy); err != nil {
+					return false, nil, err
+				}
+				return false, nil, canary
+			},
+		},
+	)
+	if !errors.Is(err, canary) || result.installed {
+		t.Fatalf("retained copy failure result=%#v error=%v", result, err)
+	}
+	for name, path := range map[string]string{"escaped": escaped, "decoy": decoy} {
+		if _, statErr := os.Lstat(path); statErr != nil {
+			t.Fatalf("%s partial-copy object was removed: %v", name, statErr)
+		}
+	}
+}
+
+func TestMigrateStagedOfflineFromDoesNotDeleteDecoyAfterDiscardedStageRename(t *testing.T) {
+	home := t.TempDir()
+	escapeRoot := t.TempDir()
+	sourcePath := filepath.Join(home, "verified-backup.db")
+	target := filepath.Join(home, "live.db")
+	escaped := filepath.Join(escapeRoot, "escaped-final.db")
+	createProviderOfflineFixture(t, sourcePath)
+	createProviderOfflineFixture(t, target)
+	recorder := &offlineProviderHookRecorder{}
+	renamed := false
+	parent, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	lease, err := databaseproviderlease.New(
+		parent,
+		"global/auth",
+		target,
+		databaseproviderlease.Hooks{
+			Check:     func(context.Context) error { return recorder.record("check") },
+			Reconcile: func(context.Context) error { return recorder.record("reconcile") },
+			PinReplacement: func(_ context.Context, path string) error {
+				recorder.mu.Lock()
+				recorder.pinned = path
+				recorder.mu.Unlock()
+				return recorder.record("pin")
+			},
+			CheckReplacement: func(context.Context, string) error {
+				return recorder.record("check-replacement")
+			},
+			DiscardReplacement: func(context.Context) error {
+				recorder.mu.Lock()
+				stage := recorder.pinned
+				recorder.mu.Unlock()
+				if stage != "" && !renamed {
+					if renameErr := os.Rename(stage, escaped); renameErr != nil {
+						return renameErr
+					}
+					if writeErr := os.WriteFile(stage, []byte("decoy"), 0o600); writeErr != nil {
+						return writeErr
+					}
+					renamed = true
+				}
+				return recorder.record("discard")
+			},
+			ReconcileReplacement: func(context.Context) error {
+				return recorder.record("reconcile-replacement")
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := immutableGenerationSourceForTest(func(
+		ctx context.Context,
+		use func(context.Context, string) error,
+	) error {
+		return use(ctx, sourcePath)
+	})
+	canary := errors.New("live verification canary")
+	result, err := MigrateStagedOfflineFromWithLiveVerification(
+		t.Context(), lease, source, 5*time.Second, 1,
+		installProviderOfflineFixture,
+		func(context.Context, string) error { return nil },
+		func(ctx context.Context, replacement ValidatedReplacement) error {
+			return replacement.Use(ctx, "global/auth", target, func(
+				context.Context, string, ValidatedReplacementCheck,
+			) error {
+				return canary
+			})
+		},
+	)
+	if !errors.Is(err, canary) || !renamed || result.installed {
+		t.Fatalf("renamed final result=%#v renamed=%t error=%v", result, renamed, err)
+	}
+	if _, statErr := os.Lstat(escaped); statErr != nil {
+		t.Fatalf("escaped final identity was not retained: %v", statErr)
+	}
+	_, stage := recorder.snapshot()
+	if payload, readErr := os.ReadFile(stage); readErr != nil || string(payload) != "decoy" {
+		t.Fatalf("replacement decoy changed = %q, %v", payload, readErr)
+	}
+}
+
+func TestMigrateStagedOfflineFromRetainsStageRenamedByMigrationCallback(t *testing.T) {
+	home := t.TempDir()
+	escapeRoot := t.TempDir()
+	sourcePath := filepath.Join(home, "verified-backup.db")
+	target := filepath.Join(home, "live.db")
+	escaped := filepath.Join(escapeRoot, "escaped-callback-stage.db")
+	createProviderOfflineFixture(t, sourcePath)
+	createProviderOfflineFixture(t, target)
+	recorder := &offlineProviderHookRecorder{}
+	lease := newOfflineProviderTestLease(t, target, recorder)
+	source := immutableGenerationSourceForTest(func(
+		ctx context.Context,
+		use func(context.Context, string) error,
+	) error {
+		return use(ctx, sourcePath)
+	})
+	canary := errors.New("migration callback canary")
+	var decoy string
+	result, err := MigrateStagedOfflineFromWithLiveVerification(
+		t.Context(), lease, source, 5*time.Second, 1,
+		func(_ context.Context, stage string) error {
+			if renameErr := os.Rename(stage, escaped); renameErr != nil {
+				return renameErr
+			}
+			decoy = stage
+			if writeErr := os.WriteFile(decoy, []byte("decoy"), 0o600); writeErr != nil {
+				return writeErr
+			}
+			return canary
+		},
+		func(context.Context, string) error { return nil },
+		func(context.Context, ValidatedReplacement) error { return nil },
+	)
+	if !errors.Is(err, canary) || result.installed {
+		t.Fatalf("callback-renamed stage result=%#v error=%v", result, err)
+	}
+	if _, statErr := os.Lstat(escaped); statErr != nil {
+		t.Fatalf("callback-renamed stage identity was not retained: %v", statErr)
+	}
+	if payload, readErr := os.ReadFile(decoy); readErr != nil || string(payload) != "decoy" {
+		t.Fatalf("callback stage decoy changed = %q, %v", payload, readErr)
+	}
+}
+
+func TestMigrateStagedOfflineFromRejectsValidDecoyReplacingRetainedStage(t *testing.T) {
+	home := t.TempDir()
+	escapeRoot := t.TempDir()
+	sourcePath := filepath.Join(home, "verified-backup.db")
+	target := filepath.Join(home, "live.db")
+	escaped := filepath.Join(escapeRoot, "escaped-provider-stage.db")
+	createProviderOfflineFixture(t, sourcePath)
+	createProviderOfflineFixture(t, target)
+	before, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &offlineProviderHookRecorder{}
+	lease := newOfflineProviderTestLease(t, target, recorder)
+	source := immutableGenerationSourceForTest(func(
+		ctx context.Context,
+		use func(context.Context, string) error,
+	) error {
+		return use(ctx, sourcePath)
+	})
+	var decoy string
+	liveCalled := false
+	result, err := MigrateStagedOfflineFromWithLiveVerification(
+		t.Context(), lease, source, 5*time.Second, 1,
+		func(ctx context.Context, stage string) error {
+			if renameErr := os.Rename(stage, escaped); renameErr != nil {
+				return renameErr
+			}
+			decoy = stage
+			return installProviderOfflineFixture(ctx, decoy)
+		},
+		func(context.Context, string) error { return nil },
+		func(context.Context, ValidatedReplacement) error {
+			liveCalled = true
+			return nil
+		},
+	)
+	if err == nil || result.installed || liveCalled ||
+		!strings.Contains(err.Error(), "retained SQLite stage after migration") {
+		t.Fatalf("valid stage decoy result=%#v live=%t error=%v", result, liveCalled, err)
+	}
+	if _, statErr := os.Lstat(escaped); statErr != nil {
+		t.Fatalf("escaped retained provider stage is unavailable: %v", statErr)
+	}
+	if _, statErr := os.Lstat(decoy); statErr != nil {
+		t.Fatalf("valid replacement decoy was deleted: %v", statErr)
+	}
+	after, err := os.ReadFile(target)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("valid stage decoy changed live target: equal=%t error=%v", bytes.Equal(before, after), err)
+	}
+}
+
+func TestMigrateStagedOfflineFromRechecksTargetAfterLiveVerification(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		existing bool
+		mutate   func(*testing.T, string)
+	}{
+		{
+			name:     "existing target replaced",
+			existing: true,
+			mutate: func(t *testing.T, target string) {
+				t.Helper()
+				if err := os.Rename(target, target+".old"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, []byte("replacement"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing target appeared",
+			mutate: func(t *testing.T, target string) {
+				t.Helper()
+				if err := os.WriteFile(target, []byte("appeared"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			sourcePath := filepath.Join(home, "verified-backup.db")
+			target := filepath.Join(home, "live.db")
+			if test.existing {
+				createProviderOfflineFixture(t, sourcePath)
+				createProviderOfflineFixture(t, target)
+			}
+			recorder := &offlineProviderHookRecorder{}
+			lease := newOfflineProviderTestLease(t, target, recorder)
+			source := immutableGenerationSourceForTest(func(
+				ctx context.Context,
+				use func(context.Context, string) error,
+			) error {
+				return use(ctx, sourcePath)
+			})
+			result, err := MigrateStagedOfflineFromWithLiveVerification(
+				t.Context(), lease, source, 5*time.Second, 1,
+				installProviderOfflineFixture,
+				func(context.Context, string) error { return nil },
+				func(ctx context.Context, replacement ValidatedReplacement) error {
+					return replacement.Use(ctx, "global/auth", target, func(
+						context.Context, string, ValidatedReplacementCheck,
+					) error {
+						test.mutate(t, target)
+						return nil
+					})
+				},
+			)
+			if err == nil || result.installed || dblayer.CodeOf(err) == dblayer.CodeOutcomeUnknown ||
+				!strings.Contains(err.Error(), "target") {
+				t.Fatalf("target drift result=%#v error=%v", result, err)
+			}
+			events, pinned := recorder.snapshot()
+			if indexProviderOfflineEvent(events, "discard") < 0 ||
+				indexProviderOfflineEvent(events, "reconcile-replacement") >= 0 {
+				t.Fatalf("target drift events = %v", events)
+			}
+			if _, statErr := os.Lstat(pinned); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("target-drift stage remains at %q: %v", pinned, statErr)
+			}
+		})
 	}
 }
 
@@ -325,6 +958,15 @@ func TestMigrateStagedOfflineFromInvalidInputDoesNotConsumeLease(t *testing.T) {
 	if events, _ := recorder.snapshot(); len(events) != 0 {
 		t.Fatalf("invalid input invoked lease hooks: %v", events)
 	}
+	if _, err := MigrateStagedOfflineFromWithLiveVerification(
+		t.Context(), lease, source, time.Second, 1,
+		installProviderOfflineFixture, func(context.Context, string) error { return nil }, nil,
+	); dblayer.CodeOf(err) != dblayer.CodeInvalid {
+		t.Fatalf("nil live verification error = %v", err)
+	}
+	if events, _ := recorder.snapshot(); len(events) != 0 {
+		t.Fatalf("nil live verification invoked lease hooks: %v", events)
+	}
 	if strconv.IntSize > 32 {
 		tooLargeValue := maxSQLiteSchemaVersion
 		tooLargeValue++
@@ -456,7 +1098,7 @@ func TestMigrateStagedOfflineFromPreservesPostCutoverAuthorityCauses(t *testing.
 	}
 }
 
-func TestMigrateStagedOfflineFromPreservesPostCutoverWorkingCleanupCause(t *testing.T) {
+func TestMigrateStagedOfflineFromRetiresWorkingGenerationBeforeCutover(t *testing.T) {
 	home := t.TempDir()
 	sourcePath := filepath.Join(home, "verified-backup.db")
 	target := filepath.Join(home, "live.db")
@@ -481,9 +1123,9 @@ func TestMigrateStagedOfflineFromPreservesPostCutoverWorkingCleanupCause(t *test
 			discard: func(string, time.Duration) error { return canary },
 		},
 	)
-	if !result.installed || dblayer.CodeOf(err) != dblayer.CodeOutcomeUnknown ||
+	if result.installed || dblayer.CodeOf(err) == dblayer.CodeOutcomeUnknown ||
 		!errors.Is(err, canary) {
-		t.Fatalf("post-cutover cleanup result=%#v error=%v", result, err)
+		t.Fatalf("pre-cutover cleanup result=%#v error=%v", result, err)
 	}
 }
 
@@ -968,6 +1610,13 @@ func (authority offlineProviderTestAuthority) PinReplacement(
 	authority.recorder.pinned = path
 	authority.recorder.mu.Unlock()
 	return authority.recorder.record("pin")
+}
+
+func (authority offlineProviderTestAuthority) CheckReplacement(
+	context.Context,
+	string,
+) error {
+	return authority.recorder.record("check-replacement")
 }
 
 func (authority offlineProviderTestAuthority) DiscardReplacement(context.Context) error {

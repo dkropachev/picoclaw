@@ -19,6 +19,24 @@ const sqliteProviderImportPath = "github.com/sipeed/picoclaw/internal/sqliteprov
 
 const immutableGenerationSourceMinter = "internal/databasemigration/backup_prepare.go"
 
+var validatedReplacementConsumers = map[string]map[string]bool{
+	"MigrateStagedOfflineFromWithLiveVerification": {
+		"internal/databasemigration/migration.go": true,
+	},
+	"StagedLiveVerification": {
+		"internal/databasemigration/migration.go": true,
+	},
+	"ValidatedReplacement": {
+		"internal/databasemigration/backup_archive.go": true,
+		"internal/databasemigration/migration.go":      true,
+	},
+	"ValidatedReplacementCheck": {
+		"internal/databasemigration/backup_archive.go": true,
+	},
+}
+
+const validatedReplacementUseConsumer = "internal/databasemigration/backup_archive.go"
+
 func TestSQLiteProviderBoundaryVersionIsStable(t *testing.T) {
 	if providerBoundaryVersion != "picoclaw/sqlite-provider-boundary/v1" {
 		t.Fatalf("provider boundary version = %q", providerBoundaryVersion)
@@ -30,11 +48,12 @@ func TestSQLiteProviderProductionImportersAreExplicit(t *testing.T) {
 
 	repositoryRoot := sqliteProviderRepositoryRoot(t)
 	allowed := map[string]bool{
-		"internal/databasemigration/backup.go":    true,
-		"internal/databasemigration/migration.go": true,
-		"internal/databasereadiness/readiness.go": true,
-		"internal/sqlitestore/open.go":            false,
-		"internal/sqlitestore/schema.go":          false,
+		"internal/databasemigration/backup.go":         true,
+		"internal/databasemigration/backup_archive.go": true,
+		"internal/databasemigration/migration.go":      true,
+		"internal/databasereadiness/readiness.go":      true,
+		"internal/sqlitestore/open.go":                 false,
+		"internal/sqlitestore/schema.go":               false,
 	}
 	var violations []string
 	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -51,9 +70,9 @@ func TestSQLiteProviderProductionImportersAreExplicit(t *testing.T) {
 			filepath.Clean(filepath.Dir(path)) == filepath.Join(repositoryRoot, "internal", "sqliteprovider") {
 			return nil
 		}
-		relative, err := filepath.Rel(repositoryRoot, path)
-		if err != nil {
-			return err
+		relative, relativeErr := filepath.Rel(repositoryRoot, path)
+		if relativeErr != nil {
+			return relativeErr
 		}
 		relative = filepath.ToSlash(relative)
 		fileSet := token.NewFileSet()
@@ -141,6 +160,149 @@ import . "github.com/sipeed/picoclaw/internal/sqliteprovider"
 	}
 }
 
+func TestSQLiteProviderValidatedReplacementBoundaryIsNarrow(t *testing.T) {
+	t.Parallel()
+	violations, err := validatedReplacementBoundaryViolations(sqliteProviderRepositoryRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) != 0 {
+		t.Fatalf(
+			"validated SQLite replacement boundary violations:\n%s",
+			strings.Join(violations, "\n"),
+		)
+	}
+}
+
+func TestSQLiteProviderValidatedReplacementBoundaryRejectsUnauthorizedConsumers(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	files := map[string]string{
+		validatedReplacementUseConsumer: `package databasemigration
+import (
+    "context"
+    provider "github.com/sipeed/picoclaw/internal/sqliteprovider"
+)
+func allowed(ctx context.Context, replacement provider.ValidatedReplacement) error {
+    return replacement.Use(ctx, "global/auth", "/tmp/auth.db", func(context.Context, string) error { return nil })
+}
+`,
+		"internal/rogue/rogue.go": `package rogue
+import (
+    "context"
+    provider "github.com/sipeed/picoclaw/internal/sqliteprovider"
+)
+func denied(ctx context.Context, replacement provider.ValidatedReplacement) error {
+    return replacement.Use(ctx, "global/auth", "/tmp/auth.db", func(context.Context, string) error { return nil })
+}
+var _ = provider.MigrateStagedOfflineFromWithLiveVerification
+var _ provider.ValidatedReplacementCheck
+`,
+		"internal/rogue/dot_import.go": `package rogue
+import . "github.com/sipeed/picoclaw/internal/sqliteprovider"
+var _ ValidatedReplacement
+`,
+		"internal/rogue/type_alias.go": `package rogue
+import (
+    "context"
+    provider "github.com/sipeed/picoclaw/internal/sqliteprovider"
+)
+type localReplacement = provider.ValidatedReplacement
+func deniedAlias(ctx context.Context, replacement localReplacement) error {
+    return replacement.Use(ctx, "global/auth", "/tmp/auth.db", func(context.Context, string) error { return nil })
+}
+`,
+		"internal/rogue/variable.go": `package rogue
+import (
+    "context"
+    provider "github.com/sipeed/picoclaw/internal/sqliteprovider"
+)
+var replacement provider.ValidatedReplacement
+func deniedVariable(ctx context.Context) error {
+    return replacement.Use(ctx, "global/auth", "/tmp/auth.db", func(context.Context, string) error { return nil })
+}
+`,
+		"internal/rogue/inferred.go": `package rogue
+import (
+    "context"
+    provider "github.com/sipeed/picoclaw/internal/sqliteprovider"
+)
+func deniedInferred(ctx context.Context, replacement provider.ValidatedReplacement) error {
+    inferred := replacement
+    return inferred.Use(ctx, "global/auth", "/tmp/auth.db", func(context.Context, string) error { return nil })
+}
+`,
+		"internal/rogue/interface.go": `package rogue
+import (
+    "context"
+    provider "github.com/sipeed/picoclaw/internal/sqliteprovider"
+)
+type replacementUser interface {
+    Use(context.Context, string, string, func(context.Context, string) error) error
+}
+func deniedInterface(ctx context.Context, replacement provider.ValidatedReplacement) error {
+    var user replacementUser = replacement
+    return user.Use(ctx, "global/auth", "/tmp/auth.db", func(context.Context, string) error { return nil })
+}
+`,
+		"internal/rogue/cross_file.go": `package rogue
+import "context"
+func deniedCrossFile(ctx context.Context) error {
+    return replacement.Use(ctx, "global/auth", "/tmp/auth.db", nil)
+}
+`,
+	}
+	for relative, source := range files {
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	violations, err := validatedReplacementBoundaryViolations(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(violations, "\n")
+	if strings.Contains(joined, validatedReplacementUseConsumer) {
+		t.Fatalf("approved validated-replacement consumer was rejected:\n%s", joined)
+	}
+	for _, expected := range []struct {
+		path    string
+		message string
+	}{
+		{"internal/rogue/rogue.go", "cannot reference sqliteprovider.ValidatedReplacement"},
+		{"internal/rogue/rogue.go", "cannot call sqliteprovider.MigrateStagedOfflineFromWithLiveVerification"},
+		{"internal/rogue/rogue.go", "cannot reference sqliteprovider.ValidatedReplacementCheck"},
+		{"internal/rogue/rogue.go", "cannot consume ValidatedReplacement.Use"},
+		{"internal/rogue/dot_import.go", "cannot use a dot SQLite-provider import"},
+		{"internal/rogue/type_alias.go", "cannot consume ValidatedReplacement.Use"},
+		{"internal/rogue/variable.go", "cannot consume ValidatedReplacement.Use"},
+		{"internal/rogue/inferred.go", "cannot consume ValidatedReplacement.Use"},
+		{"internal/rogue/interface.go", "cannot consume ValidatedReplacement.Use"},
+		{"internal/rogue/cross_file.go", "cannot consume ValidatedReplacement.Use"},
+	} {
+		found := false
+		for _, violation := range violations {
+			if strings.HasPrefix(violation, expected.path+":") &&
+				strings.Contains(violation, expected.message) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf(
+				"boundary violations missing %s containing %q:\n%s",
+				expected.path,
+				expected.message,
+				joined,
+			)
+		}
+	}
+}
+
 func immutableGenerationSourceMintViolations(repositoryRoot string) ([]string, error) {
 	var violations []string
 	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -157,15 +319,15 @@ func immutableGenerationSourceMintViolations(repositoryRoot string) ([]string, e
 			filepath.Clean(filepath.Dir(path)) == filepath.Join(repositoryRoot, "internal", "sqliteprovider") {
 			return nil
 		}
-		relative, err := filepath.Rel(repositoryRoot, path)
-		if err != nil {
-			return err
+		relative, relativeErr := filepath.Rel(repositoryRoot, path)
+		if relativeErr != nil {
+			return relativeErr
 		}
 		relative = filepath.ToSlash(relative)
 		fileSet := token.NewFileSet()
-		parsed, err := parser.ParseFile(fileSet, path, nil, parser.AllErrors)
-		if err != nil {
-			return fmt.Errorf("parse production Go file %s: %w", relative, err)
+		parsed, parseErr := parser.ParseFile(fileSet, path, nil, parser.AllErrors)
+		if parseErr != nil {
+			return fmt.Errorf("parse production Go file %s: %w", relative, parseErr)
 		}
 		aliases := make(map[string]struct{})
 		for _, imported := range parsed.Imports {
@@ -213,6 +375,148 @@ func immutableGenerationSourceMintViolations(repositoryRoot string) ([]string, e
 	})
 	sort.Strings(violations)
 	return violations, err
+}
+
+func validatedReplacementBoundaryViolations(repositoryRoot string) ([]string, error) {
+	providerDirectories, err := sqliteProviderProductionImportDirectories(repositoryRoot)
+	if err != nil {
+		return nil, err
+	}
+	var violations []string
+	err = filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != repositoryRoot && sqliteProviderImportGuardSkipsDir(entry.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") ||
+			filepath.Clean(filepath.Dir(path)) == filepath.Join(repositoryRoot, "internal", "sqliteprovider") {
+			return nil
+		}
+		relative, relativeErr := filepath.Rel(repositoryRoot, path)
+		if relativeErr != nil {
+			return relativeErr
+		}
+		relative = filepath.ToSlash(relative)
+		fileSet := token.NewFileSet()
+		parsed, parseErr := parser.ParseFile(fileSet, path, nil, parser.AllErrors)
+		if parseErr != nil {
+			return fmt.Errorf("parse production Go file %s: %w", relative, parseErr)
+		}
+		aliases := make(map[string]struct{})
+		hasUsableProviderImport := false
+		for _, imported := range parsed.Imports {
+			importPath, unquoteErr := strconv.Unquote(imported.Path.Value)
+			if unquoteErr != nil {
+				return unquoteErr
+			}
+			if importPath != sqliteProviderImportPath {
+				continue
+			}
+			alias := "sqliteprovider"
+			if imported.Name != nil {
+				alias = imported.Name.Name
+			}
+			switch alias {
+			case ".":
+				hasUsableProviderImport = true
+				violations = append(violations, fmt.Sprintf(
+					"%s:%d: cannot use a dot SQLite-provider import at the validated-replacement boundary",
+					relative, fileSet.Position(imported.Pos()).Line,
+				))
+			case "_":
+				// A blank import cannot name any protected provider capability.
+			default:
+				hasUsableProviderImport = true
+				aliases[alias] = struct{}{}
+			}
+		}
+		_, packageUsesProvider := providerDirectories[filepath.Clean(filepath.Dir(path))]
+		if !hasUsableProviderImport && !packageUsesProvider {
+			return nil
+		}
+
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			selector, ok := node.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if identifier, identifierReceiver := selector.X.(*ast.Ident); identifierReceiver {
+				_, imported := aliases[identifier.Name]
+				if imported {
+					allowed, protected := validatedReplacementConsumers[selector.Sel.Name]
+					if protected && !allowed[relative] {
+						verb := "reference"
+						if selector.Sel.Name == "MigrateStagedOfflineFromWithLiveVerification" {
+							verb = "call"
+						}
+						violations = append(violations, fmt.Sprintf(
+							"%s:%d: cannot %s sqliteprovider.%s",
+							relative, fileSet.Position(selector.Pos()).Line, verb, selector.Sel.Name,
+						))
+					}
+				}
+			}
+
+			// ValidatedReplacement.Use can be reached through type aliases,
+			// package variables, inferred locals, or interface receivers. An
+			// AST-only receiver-name allowlist cannot distinguish those safely,
+			// so every Use selector in a provider-importing production file is
+			// denied outside the single approved synchronous consumer.
+			if selector.Sel.Name == "Use" {
+				if relative != validatedReplacementUseConsumer {
+					violations = append(violations, fmt.Sprintf(
+						"%s:%d: cannot consume ValidatedReplacement.Use",
+						relative, fileSet.Position(selector.Pos()).Line,
+					))
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	sort.Strings(violations)
+	return violations, err
+}
+
+func sqliteProviderProductionImportDirectories(repositoryRoot string) (map[string]struct{}, error) {
+	result := make(map[string]struct{})
+	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != repositoryRoot && sqliteProviderImportGuardSkipsDir(entry.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") ||
+			filepath.Clean(filepath.Dir(path)) == filepath.Join(repositoryRoot, "internal", "sqliteprovider") {
+			return nil
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+		if err != nil {
+			return err
+		}
+		for _, imported := range parsed.Imports {
+			importPath, err := strconv.Unquote(imported.Path.Value)
+			if err != nil {
+				return err
+			}
+			if importPath == sqliteProviderImportPath &&
+				(imported.Name == nil || imported.Name.Name != "_") {
+				result[filepath.Clean(filepath.Dir(path))] = struct{}{}
+				break
+			}
+		}
+		return nil
+	})
+	return result, err
 }
 
 func TestSQLiteProviderOwnsDriverOpen(t *testing.T) {

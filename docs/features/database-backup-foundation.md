@@ -22,6 +22,10 @@ PicoClaw provides dormant, bounded backup filesystem primitives that copy, rehas
   A prospective parent projects its missing suffix through identity-matched
   catalog ancestors, so bind/null-mount aliases are rejected before `mkdir`.
 - Cleanup preflights the whole tree without crossing a mount boundary, quarantines each leaf relative to a retained parent, revalidates identity and mount binding, then uses retained Unix directory handles or exact write-through Windows handles.
+- Legacy traversal may receive one invocation-local exact-path exclusion whose
+  validator must approve the actual `Lstat` observation at the skip decision.
+  It remains separate from case-folded catalog exclusions, is charged to the
+  traversal budget, and never skips by prefix or physical identity.
 - `backup.go` bridges private-directory creation; `backup_io.go` stays provider-free.
 
 ## Requirements
@@ -80,6 +84,7 @@ Owns: TEST internal/databasemigration/backup_source_owner_*_test.go *
 | Internal Go API | `copyBackupFile` | Produce a self-validating private copy record. | `FR-DATABASE-BACKUP-FOUNDATION-002` |
 | Internal Go API | `openPinnedBackupPath` | Prove path/opened identity and object type. | `FR-DATABASE-BACKUP-FOUNDATION-001` |
 | Internal Go API | `removePinnedBackupTreeIdentity` | Quarantine/remove only an expected identity. | `FR-DATABASE-BACKUP-FOUNDATION-003` |
+| Internal Go API | `walkLegacyInputsWithExactExclusion` | Traverse bounded legacy inputs while admitting only one exact, synchronously validated entry; ordinary and physical backup exclusions remain unchanged. | `FR-DATABASE-BACKUP-FOUNDATION-001`, `FR-DATABASE-BACKUP-FOUNDATION-002` |
 | Internal Go API | `validateBackupParent`, `removePinnedEmptyBackupDirectoryIdentity` | Prove physical namespace separation and roll back only an exclusively created empty parent. | `FR-DATABASE-BACKUP-FOUNDATION-004` |
 
 ## Algorithms And Ordering

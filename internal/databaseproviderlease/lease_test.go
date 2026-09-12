@@ -18,6 +18,7 @@ type hookRecorder struct {
 	checks       atomic.Int32
 	reconciles   atomic.Int32
 	pins         atomic.Int32
+	pinChecks    atomic.Int32
 	discards     atomic.Int32
 	replacements atomic.Int32
 	err          error
@@ -36,6 +37,11 @@ func (recorder *hookRecorder) hooks() Hooks {
 		},
 		PinReplacement: func(ctx context.Context, path string) error {
 			recorder.pins.Add(1)
+			recorder.path = path
+			return errors.Join(ctx.Err(), recorder.err)
+		},
+		CheckReplacement: func(ctx context.Context, path string) error {
+			recorder.pinChecks.Add(1)
 			recorder.path = path
 			return errors.Join(ctx.Err(), recorder.err)
 		},
@@ -79,7 +85,13 @@ func TestLeaseConsumesOneTargetBoundScope(t *testing.T) {
 		if err := access.Reconcile(ctx); err != nil {
 			return err
 		}
+		if err := access.CheckReplacement(ctx, "relative"); database.CodeOf(err) != database.CodeInvalid {
+			return errors.New("provider lease accepted a relative replacement check")
+		}
 		if err := access.PinReplacement(ctx, replacement); err != nil {
+			return err
+		}
+		if err := access.CheckReplacement(ctx, replacement); err != nil {
 			return err
 		}
 		if err := access.DiscardReplacement(ctx); err != nil {
@@ -94,7 +106,7 @@ func TestLeaseConsumesOneTargetBoundScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	if recorder.checks.Load() != 1 || recorder.reconciles.Load() != 1 ||
-		recorder.pins.Load() != 2 || recorder.discards.Load() != 1 ||
+		recorder.pins.Load() != 2 || recorder.pinChecks.Load() != 1 || recorder.discards.Load() != 1 ||
 		recorder.replacements.Load() != 1 ||
 		recorder.path != replacement {
 		t.Fatalf("hook calls = %#v", recorder)
@@ -104,6 +116,9 @@ func TestLeaseConsumesOneTargetBoundScope(t *testing.T) {
 	}
 	if err := retained.Check(t.Context()); !errors.Is(err, errRevoked) {
 		t.Fatalf("retained Check = %v", err)
+	}
+	if err := retained.CheckReplacement(t.Context(), replacement); !errors.Is(err, errRevoked) {
+		t.Fatalf("retained CheckReplacement = %v", err)
 	}
 	if err := retained.DiscardReplacement(t.Context()); !errors.Is(err, errRevoked) {
 		t.Fatalf("retained DiscardReplacement = %v", err)
@@ -133,6 +148,7 @@ func TestLeaseRevokeIsNonblockingAndWaitsForCallbackAndOperations(t *testing.T) 
 		},
 		Reconcile:            func(context.Context) error { return nil },
 		PinReplacement:       func(context.Context, string) error { return nil },
+		CheckReplacement:     func(context.Context, string) error { return nil },
 		DiscardReplacement:   func(context.Context) error { return nil },
 		ReconcileReplacement: func(context.Context) error { return nil },
 	}

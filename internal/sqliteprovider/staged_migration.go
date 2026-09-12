@@ -53,15 +53,22 @@ type StagedMigration func(context.Context, string) error
 type StagedValidation func(context.Context, string) error
 
 type stagedMigrationOps struct {
-	replace  func(string, string) (bool, error)
-	activate func(context.Context, string, time.Duration, int) error
-	discard  func(string, time.Duration) error
+	replace    func(string, string) (bool, error)
+	activate   func(context.Context, string, time.Duration, int) error
+	discard    func(string, time.Duration) error
+	copySource func(
+		context.Context,
+		ImmutableGenerationSource,
+		string,
+	) (bool, *retainedStagedGeneration, error)
 }
 
 type stagedMigrationFilesystemOps struct {
 	exists     func(string) (bool, error)
 	lstat      func(string) (os.FileInfo, error)
 	unused     func(string) (string, error)
+	prepare    func(string) error
+	retain     func(context.Context, string) (*retainedStagedGeneration, error)
 	backup     func(context.Context, string, string, time.Duration) error
 	validate   func(context.Context, string, time.Duration, int) error
 	same       func(string, os.FileInfo) (bool, error)
@@ -73,6 +80,8 @@ func systemStagedMigrationFilesystemOps() stagedMigrationFilesystemOps {
 		exists:     regularGenerationExists,
 		lstat:      os.Lstat,
 		unused:     unusedStagedGenerationPath,
+		prepare:    PrepareStore,
+		retain:     retainStagedGeneration,
 		backup:     backupGenerationToStage,
 		validate:   validateStagedGeneration,
 		same:       sameRegularGeneration,
@@ -88,6 +97,23 @@ func migrateStagedOfflineAuthorized(
 	expectedVersion int,
 	migrate StagedMigration,
 	validate StagedValidation,
+	authority offlineProviderAuthority,
+	ops stagedMigrationOps,
+) (result MaintenanceResult, returnErr error) {
+	return migrateStagedOfflineAuthorizedWithLiveVerification(
+		ctx, source, target, busyTimeout, expectedVersion, migrate, validate, nil, authority, ops,
+	)
+}
+
+func migrateStagedOfflineAuthorizedWithLiveVerification(
+	ctx context.Context,
+	source ImmutableGenerationSource,
+	target string,
+	busyTimeout time.Duration,
+	expectedVersion int,
+	migrate StagedMigration,
+	validate StagedValidation,
+	liveVerification StagedLiveVerification,
 	authority offlineProviderAuthority,
 	ops stagedMigrationOps,
 ) (result MaintenanceResult, returnErr error) {
@@ -124,11 +150,26 @@ func migrateStagedOfflineAuthorized(
 		return result, err
 	}
 	discardWorking := ops.discard
+	identityManageWorking := discardWorking == nil
 	if discardWorking == nil {
 		discardWorking = discardStagedGeneration
 	}
+	var retainedWorking *retainedStagedGeneration
+	workingRetentionAttempted := false
+	workingValidated := false
 	defer func() {
-		cleanupErr := discardWorking(working, busyTimeout)
+		var cleanupErr error
+		if identityManageWorking && workingRetentionAttempted {
+			cleanupErr = cleanupRetainedStagedGeneration(
+				retainedWorking,
+				working,
+				requireNoGenerationSidecars,
+				busyTimeout,
+				workingValidated,
+			)
+		} else {
+			cleanupErr = discardWorking(working, busyTimeout)
+		}
 		if cleanupErr == nil {
 			return
 		}
@@ -145,7 +186,14 @@ func migrateStagedOfflineAuthorized(
 		}
 		returnErr = errors.Join(returnErr, cleanupErr)
 	}()
-	sourceExists, err := copyImmutableGenerationToStage(
+	if identityManageWorking {
+		workingRetentionAttempted = true
+	}
+	copySource := ops.copySource
+	if copySource == nil {
+		copySource = copyImmutableGenerationToRetainedStage
+	}
+	sourceExists, copiedWorking, err := copySource(
 		ctx,
 		immutableSourceOutsideLiveTarget(source, absoluteTarget),
 		working,
@@ -153,7 +201,21 @@ func migrateStagedOfflineAuthorized(
 	if err != nil {
 		return result, fmt.Errorf("copy immutable SQLite migration source: %w", err)
 	}
+	if copiedWorking != nil && !identityManageWorking {
+		if err := copiedWorking.Close(); err != nil {
+			return result, fmt.Errorf("release SQLite migration source retention: %w", err)
+		}
+		copiedWorking = nil
+	}
 	if sourceExists {
+		if identityManageWorking {
+			retainedWorking = copiedWorking
+			if retainedWorking == nil {
+				return result, errors.New(
+					"SQLite migration source retention is unavailable after copy",
+				)
+			}
+		}
 		result, err = maintainOfflineAuthorized(
 			ctx,
 			working,
@@ -174,13 +236,74 @@ func migrateStagedOfflineAuthorized(
 				expectedVersion,
 			)
 		}
+		if retainedWorking != nil {
+			if err := retainedWorking.Check(ctx, working); err != nil {
+				return result, fmt.Errorf(
+					"recheck retained SQLite migration source after normalization: %w",
+					err,
+				)
+			}
+		}
+		workingValidated = true
 	}
 	if err := authority.Check(ctx); err != nil {
 		return result, err
 	}
+	if retainedWorking != nil {
+		if err := retainedWorking.Check(ctx, working); err != nil {
+			return result, fmt.Errorf(
+				"recheck retained SQLite migration source before staging: %w",
+				err,
+			)
+		}
+	}
 
 	wrappedOps := stagedMigrationOps{
-		replace: func(stage, live string) (bool, error) {
+		replace: func(stage, live string) (complete bool, returnErr error) {
+			if err := validateTargetDerivedReplacementPath(live, stage); err != nil {
+				return false, err
+			}
+			seal, err := sealValidatedReplacementStage(ctx, stage)
+			if err != nil {
+				return false, err
+			}
+			defer func() { returnErr = errors.Join(returnErr, seal.close()) }()
+			targetExists, targetIdentity, err := captureStagedTargetIdentity(live)
+			if err != nil {
+				return false, err
+			}
+			if err := authority.Check(ctx); err != nil {
+				return false, err
+			}
+			if sourceExists {
+				var retirementErr error
+				if identityManageWorking {
+					if retainedWorking == nil {
+						retirementErr = errors.New(
+							"normalized SQLite migration source retirement is unavailable",
+						)
+					} else if sidecarErr := requireNoGenerationSidecars(working); sidecarErr != nil {
+						retirementErr = sidecarErr
+					} else {
+						retirementErr = retainedWorking.Retire(ctx)
+					}
+				} else {
+					retirementErr = discardWorking(working, busyTimeout)
+				}
+				if retirementErr != nil {
+					return false, fmt.Errorf(
+						"retire normalized SQLite migration source: %w",
+						retirementErr,
+					)
+				}
+				available, err := stagedGenerationNamespaceAvailable(working)
+				if err != nil || !available {
+					return false, errors.Join(
+						errors.New("normalized SQLite migration source was not retired"),
+						err,
+					)
+				}
+			}
 			if err := authority.Check(ctx); err != nil {
 				return false, err
 			}
@@ -195,31 +318,53 @@ func migrateStagedOfflineAuthorized(
 				}
 				return false, err
 			}
-			if err := authority.Check(ctx); err != nil {
+			discardPinned := func(cause error) (bool, error) {
 				discardErr := authority.DiscardReplacement(ctx)
 				if discardErr != nil {
 					return false, errors.Join(
-						err,
+						cause,
 						errStagedReplacementRemainsPinned,
 						discardErr,
 					)
 				}
-				return false, err
+				return false, cause
+			}
+			if err := authority.Check(ctx); err != nil {
+				return discardPinned(err)
+			}
+			if err := authority.CheckReplacement(ctx, stage); err != nil {
+				return discardPinned(err)
+			}
+			if err := seal.verify(ctx); err != nil {
+				return discardPinned(err)
+			}
+			if err := invokeStagedLiveVerification(
+				ctx,
+				source.storeID,
+				live,
+				seal,
+				liveVerification,
+			); err != nil {
+				return discardPinned(err)
+			}
+			if err := authority.Check(ctx); err != nil {
+				return discardPinned(err)
+			}
+			if err := authority.CheckReplacement(ctx, stage); err != nil {
+				return discardPinned(err)
+			}
+			if err := seal.verify(ctx); err != nil {
+				return discardPinned(err)
+			}
+			if err := recheckStagedTargetIdentity(live, targetExists, targetIdentity); err != nil {
+				return discardPinned(err)
 			}
 			complete, replaceErr := ops.replace(stage, live)
 			if !complete {
 				if replaceErr == nil {
 					replaceErr = errors.New("SQLite staged replacement did not complete")
 				}
-				discardErr := authority.DiscardReplacement(ctx)
-				if discardErr != nil {
-					return false, errors.Join(
-						replaceErr,
-						errStagedReplacementRemainsPinned,
-						discardErr,
-					)
-				}
-				return false, replaceErr
+				return discardPinned(replaceErr)
 			}
 			targetReplaced = true
 			result.installed = true
@@ -258,6 +403,59 @@ func migrateStagedOfflineAuthorized(
 	}
 	result.AfterVersion = expectedVersion
 	return result, nil
+}
+
+func captureStagedTargetIdentity(path string) (bool, os.FileInfo, error) {
+	exists, err := regularGenerationExists(path)
+	if err != nil {
+		return false, nil, err
+	}
+	if err := requireNoGenerationSidecars(path); err != nil {
+		return false, nil, err
+	}
+	if !exists {
+		return false, nil, nil
+	}
+	identity, err := os.Lstat(path)
+	if err != nil || identity == nil || !identity.Mode().IsRegular() ||
+		identity.Mode()&os.ModeSymlink != 0 {
+		return false, nil, errors.Join(
+			errors.New("SQLite migration target identity is unavailable"),
+			err,
+		)
+	}
+	return true, identity, nil
+}
+
+func recheckStagedTargetIdentity(
+	path string,
+	existed bool,
+	expected os.FileInfo,
+) error {
+	if err := requireNoGenerationSidecars(path); err != nil {
+		return err
+	}
+	if !existed {
+		appeared, err := regularGenerationExists(path)
+		if err != nil || appeared {
+			return errors.Join(
+				errors.New("SQLite migration target appeared during final verification"),
+				err,
+			)
+		}
+		return nil
+	}
+	current, err := os.Lstat(path)
+	if err != nil || current == nil || expected == nil ||
+		!current.Mode().IsRegular() || current.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(expected, current) || current.Size() != expected.Size() ||
+		current.Mode() != expected.Mode() || !current.ModTime().Equal(expected.ModTime()) {
+		return errors.Join(
+			errors.New("SQLite migration target changed during final verification"),
+			err,
+		)
+	}
+	return nil
 }
 
 func immutableSourceOutsideLiveTarget(
@@ -426,7 +624,8 @@ func migrateStagedOfflineWithFilesystem(
 		ctx = context.Background()
 	}
 	if expectedVersion <= 0 || migrate == nil || validate == nil ||
-		ops.replace == nil || ops.activate == nil {
+		ops.replace == nil || ops.activate == nil ||
+		(filesystem.prepare == nil) != (filesystem.retain == nil) {
 		return errors.New("SQLite staged migration is invalid")
 	}
 	if err := ctx.Err(); err != nil {
@@ -475,7 +674,30 @@ func migrateStagedOfflineWithFilesystem(
 		return err
 	}
 	installed := false
+	identityManagedStage := filesystem.retain != nil
+	stageValidated := false
+	var retainedStage *retainedStagedGeneration
 	defer func() {
+		if identityManagedStage {
+			if retainedStage == nil {
+				return
+			}
+			if installed || errors.Is(returnErr, errStagedReplacementRemainsPinned) {
+				returnErr = errors.Join(returnErr, retainedStage.Close())
+				return
+			}
+			returnErr = errors.Join(
+				returnErr,
+				cleanupRetainedStagedGeneration(
+					retainedStage,
+					stage,
+					filesystem.noSidecars,
+					busyTimeout,
+					stageValidated,
+				),
+			)
+			return
+		}
 		if !installed && !errors.Is(returnErr, errStagedReplacementRemainsPinned) {
 			returnErr = errors.Join(returnErr, discardStagedGeneration(stage, busyTimeout))
 		}
@@ -492,9 +714,24 @@ func migrateStagedOfflineWithFilesystem(
 		if err := filesystem.backup(ctx, absoluteSource, stage, busyTimeout); err != nil {
 			return fmt.Errorf("snapshot SQLite migration stage: %w", err)
 		}
+	} else if identityManagedStage {
+		if err := filesystem.prepare(stage); err != nil {
+			return fmt.Errorf("prepare empty SQLite migration stage: %w", err)
+		}
+	}
+	if identityManagedStage {
+		retainedStage, err = filesystem.retain(ctx, stage)
+		if err != nil {
+			return fmt.Errorf("retain SQLite migration stage: %w", err)
+		}
 	}
 	if err := callStagedCallback(ctx, stage, migrate, "migration"); err != nil {
 		return fmt.Errorf("apply staged SQLite migration: %w", sanitizePreCutoverError(err))
+	}
+	if retainedStage != nil {
+		if err := retainedStage.Check(ctx, stage); err != nil {
+			return fmt.Errorf("recheck retained SQLite stage after migration: %w", err)
+		}
 	}
 	if err := filesystem.validate(ctx, stage, busyTimeout, expectedVersion); err != nil {
 		return fmt.Errorf("validate staged SQLite migration: %w", err)
@@ -506,6 +743,11 @@ func migrateStagedOfflineWithFilesystem(
 	}
 	if err := callStagedCallback(ctx, stage, validate, "validation"); err != nil {
 		return fmt.Errorf("validate staged domain contract: %w", sanitizePreCutoverError(err))
+	}
+	if retainedStage != nil {
+		if err := retainedStage.Check(ctx, stage); err != nil {
+			return fmt.Errorf("recheck retained SQLite stage after domain validation: %w", err)
+		}
 	}
 	unchanged, identityErr := filesystem.same(stage, validatedStageIdentity)
 	if identityErr != nil || !unchanged {
@@ -539,8 +781,26 @@ func migrateStagedOfflineWithFilesystem(
 	if unchanged, identityErr := filesystem.same(stage, stageIdentity); identityErr != nil || !unchanged {
 		return errors.Join(errors.New("SQLite staged generation changed before cutover"), identityErr)
 	}
+	if retainedStage != nil {
+		if err := retainedStage.Check(ctx, stage); err != nil {
+			return fmt.Errorf("recheck retained SQLite stage before cutover: %w", err)
+		}
+	}
+	stageValidated = true
 	cutoverComplete, cutoverErr := ops.replace(stage, absoluteTarget)
 	installed = cutoverComplete
+	if cutoverComplete && retainedStage != nil {
+		if checkErr := retainedStage.Check(ctx, absoluteTarget); checkErr != nil {
+			return errors.Join(
+				dblayer.NewError(
+					dblayer.CodeOutcomeUnknown,
+					"installed database generation does not match its retained stage",
+				),
+				cutoverErr,
+				checkErr,
+			)
+		}
+	}
 	if cutoverErr != nil {
 		if cutoverComplete {
 			return errors.Join(
@@ -761,7 +1021,7 @@ func activateInstalledGenerationWithOps(
 
 func unusedStagedGenerationPath(path string) (string, error) {
 	for range 128 {
-		random := make([]byte, 16)
+		random := make([]byte, stagedReplacementRandomHexLength/2)
 		if _, err := rand.Read(random); err != nil {
 			return "", err
 		}
@@ -826,6 +1086,32 @@ func discardStagedGeneration(path string, busyTimeout time.Duration) error {
 		os.Remove,
 		syncStagedMigrationDirectory,
 	)
+}
+
+func cleanupRetainedStagedGeneration(
+	retained *retainedStagedGeneration,
+	path string,
+	noSidecars func(string) error,
+	busyTimeout time.Duration,
+	validated bool,
+) (returnErr error) {
+	if retained == nil {
+		return nil
+	}
+	defer func() { returnErr = errors.Join(returnErr, retained.Close()) }()
+	if !validated {
+		return errors.New("SQLite diagnostic migration stage was retained")
+	}
+	if noSidecars == nil {
+		return errors.New("SQLite staged retirement sidecar validation is unavailable")
+	}
+	if err := noSidecars(path); err != nil {
+		return errors.Join(errors.New("SQLite diagnostic migration stage was retained"), err)
+	}
+	cleanupTimeout := min(busyTimeout, maximumStagedCleanupDuration)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	return retained.Retire(cleanupCtx)
 }
 
 func discardStagedGenerationWithOps(

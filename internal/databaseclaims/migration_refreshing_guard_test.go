@@ -57,6 +57,10 @@ func TestMigrationRefreshingGuardPromotesExactReplacementWithoutReentry(t *testi
 				_ = guard.Release()
 				t.Fatal(err)
 			}
+			if err := guard.CheckReplacement("global/auth", stage); err != nil {
+				_ = guard.Release()
+				t.Fatalf("check exact replacement: %v", err)
+			}
 			if withMain {
 				if err := os.Rename(target, target+".old"); err != nil {
 					_ = guard.Release()
@@ -100,6 +104,220 @@ func TestMigrationRefreshingGuardPromotesExactReplacementWithoutReentry(t *testi
 			}
 		})
 	}
+}
+
+func TestMigrationRefreshingGuardCheckReplacementRejectsMissingAndDifferentPins(t *testing.T) {
+	t.Run("missing pin", func(t *testing.T) {
+		lease := acquireMigrationLease(t)
+		guard, err := lease.GuardStoresMigrating()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stage := writeReplacementStage(t, lease.home, "unpublished-stage.db")
+		if err := guard.CheckReplacement("global/auth", stage); database.CodeOf(err) != database.CodeIntegrity {
+			_ = guard.Release()
+			t.Fatalf("missing replacement check = %v", err)
+		}
+		if err := guard.Release(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("different path", func(t *testing.T) {
+		lease := acquireMigrationLease(t)
+		guard, err := lease.GuardStoresMigrating()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stage := writeReplacementStage(t, lease.home, "pinned-stage.db")
+		other := writeReplacementStage(t, lease.home, "other-stage.db")
+		if err := guard.PinReplacement("global/auth", stage); err != nil {
+			_ = guard.Release()
+			t.Fatal(err)
+		}
+		if err := guard.CheckReplacement("global/auth", other); database.CodeOf(err) != database.CodeIntegrity {
+			_ = guard.Release()
+			t.Fatalf("different replacement check = %v", err)
+		}
+		if err := guard.Release(); database.CodeOf(err) != database.CodeIntegrity {
+			t.Fatalf("poisoned replacement guard release = %v", err)
+		}
+	})
+
+	t.Run("superseded pin", func(t *testing.T) {
+		lease := acquireMigrationLease(t)
+		guard, err := lease.GuardStoresMigrating()
+		if err != nil {
+			t.Fatal(err)
+		}
+		first := writeReplacementStage(t, lease.home, "first-stage.db")
+		second := writeReplacementStage(t, lease.home, "second-stage.db")
+		if err := guard.PinReplacement("global/auth", first); err != nil {
+			_ = guard.Release()
+			t.Fatal(err)
+		}
+		if err := guard.PinReplacement("global/auth", second); err != nil {
+			_ = guard.Release()
+			t.Fatal(err)
+		}
+		if err := guard.CheckReplacement("global/auth", first); database.CodeOf(err) != database.CodeIntegrity {
+			_ = guard.Release()
+			t.Fatalf("superseded replacement check = %v", err)
+		}
+		if err := guard.Release(); database.CodeOf(err) != database.CodeIntegrity {
+			t.Fatalf("superseded replacement guard release = %v", err)
+		}
+	})
+
+	t.Run("discarded pin", func(t *testing.T) {
+		lease := acquireMigrationLease(t)
+		guard, err := lease.GuardStoresMigrating()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stage := writeReplacementStage(t, lease.home, "discarded-stage.db")
+		if err := guard.PinReplacement("global/auth", stage); err != nil {
+			_ = guard.Release()
+			t.Fatal(err)
+		}
+		if err := guard.DiscardReplacement("global/auth"); err != nil {
+			_ = guard.Release()
+			t.Fatal(err)
+		}
+		if err := guard.CheckReplacement("global/auth", stage); database.CodeOf(err) != database.CodeIntegrity {
+			_ = guard.Release()
+			t.Fatalf("discarded replacement check = %v", err)
+		}
+		if err := guard.Release(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("link-count drift", func(t *testing.T) {
+		lease := acquireMigrationLease(t)
+		guard, err := lease.GuardStoresMigrating()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stage := writeReplacementStage(t, lease.home, "linked-stage.db")
+		if err := guard.PinReplacement("global/auth", stage); err != nil {
+			_ = guard.Release()
+			t.Fatal(err)
+		}
+		if err := os.Link(stage, stage+".alias"); err != nil {
+			_ = guard.DiscardReplacement("global/auth")
+			_ = guard.Release()
+			t.Skipf("hardlinks unavailable: %v", err)
+		}
+		if err := guard.CheckReplacement("global/auth", stage); database.CodeOf(err) != database.CodeIntegrity {
+			_ = guard.Release()
+			t.Fatalf("linked replacement check = %v", err)
+		}
+		if err := guard.Release(); database.CodeOf(err) != database.CodeIntegrity {
+			t.Fatalf("linked replacement guard release = %v", err)
+		}
+	})
+}
+
+func TestReplacementCheckDefensiveCoverage(t *testing.T) {
+	var unavailable *MigrationRefreshingGuard
+	for _, test := range []struct {
+		name string
+		id   database.StoreID
+		path string
+	}{
+		{name: "nil guard", id: "global/auth", path: "/stage.db"},
+		{name: "invalid id", path: "/stage.db"},
+		{name: "empty path", id: "global/auth"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := unavailable.CheckReplacement(test.id, test.path); database.CodeOf(err) != database.CodeInvalid {
+				t.Fatalf("defensive guard check = %v", err)
+			}
+		})
+	}
+
+	if checkErr := (*Lease)(nil).checkReplacementLocked(
+		"global/auth",
+		"/stage.db",
+	); database.CodeOf(checkErr) != database.CodeInvalid {
+		t.Fatalf("nil lease replacement check = %v", checkErr)
+	}
+	empty := &Lease{replacementPins: make(map[database.StoreID]*replacementPin)}
+	if err := empty.checkReplacementLocked("global/auth", "/stage.db"); database.CodeOf(err) != database.CodeIntegrity {
+		t.Fatalf("missing direct replacement pin = %v", err)
+	}
+
+	lease := acquireMigrationLease(t)
+	guard, err := lease.GuardStoresMigrating()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := writeReplacementStage(t, lease.home, "missing-claim-stage.db")
+	if err := guard.PinReplacement("global/auth", stage); err != nil {
+		_ = guard.Release()
+		t.Fatal(err)
+	}
+	pin := lease.replacementPins["global/auth"]
+	if pin == nil {
+		_ = guard.Release()
+		t.Fatal("replacement pin was not published")
+	}
+	delete(lease.identities, pin.claimIdentity)
+	if err := lease.checkReplacementLocked("global/auth", stage); database.CodeOf(err) != database.CodeIntegrity ||
+		!strings.Contains(err.Error(), "claim is unavailable") {
+		_ = guard.Release()
+		t.Fatalf("missing replacement claim = %v", err)
+	}
+	if err := guard.Release(); database.CodeOf(err) != database.CodeIntegrity {
+		t.Fatalf("release poisoned replacement guard = %v", err)
+	}
+
+	t.Run("invalid expected main guard", func(t *testing.T) {
+		lease := acquireMigrationLease(t)
+		guard, err := lease.GuardStoresMigrating()
+		if err != nil {
+			t.Fatal(err)
+		}
+		delete(guard.state.expectedMain, "global/auth")
+		if err := guard.CheckReplacement("global/auth", "/stage.db"); database.CodeOf(err) != database.CodeIntegrity ||
+			!strings.Contains(err.Error(), "main-state guard") {
+			_ = guard.Release()
+			t.Fatalf("invalid expected-main guard = %v", err)
+		}
+		if err := guard.Release(); database.CodeOf(err) != database.CodeIntegrity {
+			t.Fatalf("release invalid expected-main guard = %v", err)
+		}
+	})
+
+	t.Run("direct identity drift", func(t *testing.T) {
+		lease := acquireMigrationLease(t)
+		guard, err := lease.GuardStoresMigrating()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stage := writeReplacementStage(t, lease.home, "direct-drift-stage.db")
+		if err := guard.PinReplacement("global/auth", stage); err != nil {
+			_ = guard.Release()
+			t.Fatal(err)
+		}
+		if err := os.Rename(stage, stage+".moved"); err != nil {
+			_ = guard.Release()
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stage, []byte("decoy"), 0o600); err != nil {
+			_ = guard.Release()
+			t.Fatal(err)
+		}
+		if err := lease.checkReplacementLocked("global/auth", stage); database.CodeOf(err) != database.CodeIntegrity ||
+			!strings.Contains(err.Error(), "identity changed") {
+			_ = guard.Release()
+			t.Fatalf("direct replacement identity drift = %v", err)
+		}
+		if err := guard.Release(); database.CodeOf(err) != database.CodeIntegrity {
+			t.Fatalf("release identity-drift guard = %v", err)
+		}
+	})
 }
 
 func TestMigrationRefreshingGuardRejectsMainMaterializedBeforeEntry(t *testing.T) {
