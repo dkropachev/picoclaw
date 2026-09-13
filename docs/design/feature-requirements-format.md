@@ -112,29 +112,23 @@ Owns: TEST pkg/example/*
 
 Auxiliary interfaces describe the contract in human-readable form. Ownership
 lines make the contract auditable by tooling. `Owns: CODE` maps production
-source files to the feature spec that must change when those files change, and
-it is also used to track per-feature Go test coverage deltas.
+source files to the feature spec that must change when those files change. It
+also scopes the optional coverage report when a developer chooses to run it.
 
-## Coverage Delta Contract
+## Optional Coverage Report
 
 `make coverage-delta` compares the PR base and head with a scoped Go coverage
-plan derived from changed files and `Owns: CODE` mappings. The gate runs tests
-with `-coverpkg` for impacted feature-owned packages, includes configured
-integration suites when an impacted feature owns them, and uses
-statement-weighted Go coverage blocks with exact integer-ratio comparisons;
-rounded display percentages never decide a result. Every distinct head coverage
-block that intersects one or more added or modified production Go lines is
-counted once as changed executable code, which must have at least 90% coverage.
-Scoped-global and impacted-feature base/head percentages and
-uncovered-statement debt (`total statements - covered statements`) remain
-informational and do not decide the gate; there is no separate new-feature
-minimum. Overlapping ownership does not duplicate changed blocks. Coverage
-commands, package enumeration, ref resolution, and coverage-profile/Git-diff
-parsing errors continue to fail closed. Rare cryptographic, cleanup, and
-uncertain-failure branches compiled for the active coverage target remain in
-the denominator; source-level coverage exclusions and waivers are not permitted.
-Target-specific builds remain mandatory for code excluded by the active
-target's build constraints.
+plan derived from changed files and `Owns: CODE` mappings. It runs tests with
+`-coverpkg` for impacted feature-owned packages, includes configured integration
+suites when an impacted feature owns them, and reports statement-weighted
+scoped-global, impacted-feature, and changed-code coverage. The command is an
+opt-in developer diagnostic: pull-request CI does not schedule it, and no
+percentage, uncovered-statement debt, or changed-code result decides acceptance.
+Overlapping ownership does not duplicate changed blocks. Command, package
+enumeration, ref resolution, and coverage-profile/Git-diff parsing errors still
+fail the optional report when it cannot produce trustworthy information.
+Target-specific builds remain mandatory for build-constrained code independently
+of coverage reporting.
 
 ## Why This Format
 

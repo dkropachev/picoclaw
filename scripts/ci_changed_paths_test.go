@@ -15,7 +15,6 @@ var ciOutputNames = []string{
 	"vuln_check",
 	"test",
 	"cross_compile",
-	"coverage",
 	"integration",
 }
 
@@ -46,18 +45,18 @@ func TestCIChangedPathsClassification(t *testing.T) {
 		{
 			name:    "Go",
 			fields:  []string{"M", "pkg/agent/agent.go"},
-			enabled: []string{"lint", "vuln_check", "test", "cross_compile", "coverage", "integration"},
+			enabled: []string{"lint", "vuln_check", "test", "cross_compile", "integration"},
 		},
 		{
 			name:    "integration Go",
 			fields:  []string{"M", "integration/fixtures/server/main.go"},
-			enabled: []string{"lint", "vuln_check", "test", "cross_compile", "coverage", "integration"},
+			enabled: []string{"lint", "vuln_check", "test", "cross_compile", "integration"},
 		},
 		{
 			name:   "launcher backend",
 			fields: []string{"M", "web/backend/api/server.go"},
 			enabled: []string{
-				"lint", "frontend", "vuln_check", "test", "cross_compile", "coverage", "integration",
+				"lint", "frontend", "vuln_check", "test", "cross_compile", "integration",
 			},
 		},
 		{
