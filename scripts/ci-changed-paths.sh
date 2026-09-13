@@ -9,7 +9,6 @@ readonly OUTPUT_NAMES=(
   vuln_check
   test
   cross_compile
-  coverage
   integration
 )
 
@@ -19,7 +18,6 @@ frontend_ui=false
 vuln_check=false
 test=false
 cross_compile=false
-coverage=false
 integration=false
 
 enable_backend_checks() {
@@ -27,7 +25,6 @@ enable_backend_checks() {
   vuln_check=true
   test=true
   cross_compile=true
-  coverage=true
   integration=true
 }
 

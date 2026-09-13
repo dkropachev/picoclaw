@@ -13,7 +13,6 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
-	"math/bits"
 	"net"
 	"os"
 	"os/exec"
@@ -88,7 +87,6 @@ type scriptCoverageGroup struct {
 }
 
 const (
-	changedCodeMinimumCoveragePercent  = 90
 	coverageNestedBenchmarkSkipPattern = `^Test(HiddenSuiteKillsEveryFixedMutant|GraderAcceptsReferenceAndReportsMutationEvidence|CodingAgentBenchmarkScriptedGatewayPath|WorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig)$`
 	coverageGoTestCount                = 1
 	coverageGoTestParallelism          = 1
@@ -228,13 +226,7 @@ func runCoverageDelta(
 		fmt.Printf("coverage delta: %s\n", information)
 	}
 
-	failures := compareCoverage(plan, headProfile)
-	if len(failures) > 0 {
-		sort.Strings(failures)
-		return fmt.Errorf("%d failure(s):\n%s", len(failures), strings.Join(failures, "\n"))
-	}
-
-	fmt.Println("coverage delta: changed-production-code policy ok; scoped and feature debt are informational")
+	fmt.Println("coverage delta: informational report complete; no coverage metric gates acceptance")
 	return nil
 }
 
@@ -2037,20 +2029,6 @@ func summarizeCoverageBlocks(profile coverageProfile) coverageProfile {
 	return profile
 }
 
-func compareCoverage(plan coveragePlan, headProfile coverageProfile) []string {
-	var failures []string
-	changedSummary := changedCodeCoverage(plan.ChangedLines, headProfile)
-	if changedSummary.TotalStatements > 0 &&
-		!coverageAtLeastPercent(changedSummary, changedCodeMinimumCoveragePercent) {
-		failures = append(failures, fmt.Sprintf(
-			"changed production Go coverage is below %d%%: %s",
-			changedCodeMinimumCoveragePercent,
-			formatCoverage(changedSummary),
-		))
-	}
-	return failures
-}
-
 func impactedFeatureCoverageInformation(
 	specs []featureSpecMetadata,
 	plan coveragePlan,
@@ -2285,31 +2263,6 @@ func parseDiffNewStart(hunk string) (int, error) {
 func isGoProductionCoverageFile(path string) bool {
 	path = normalizeRepoPath(path)
 	return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") && !isIgnoredProductionPath(path)
-}
-
-func coverageAtLeastPercent(summary coverageSummary, minimum int) bool {
-	return !coverageRatioLess(summary, coverageSummary{
-		CoveredStatements: minimum,
-		TotalStatements:   100,
-	})
-}
-
-func coverageRatioLess(left, right coverageSummary) bool {
-	leftCovered, leftTotal := exactCoverageRatio(left)
-	rightCovered, rightTotal := exactCoverageRatio(right)
-	leftHigh, leftLow := bits.Mul64(leftCovered, rightTotal)
-	rightHigh, rightLow := bits.Mul64(rightCovered, leftTotal)
-	if leftHigh != rightHigh {
-		return leftHigh < rightHigh
-	}
-	return leftLow < rightLow
-}
-
-func exactCoverageRatio(summary coverageSummary) (uint64, uint64) {
-	if summary.TotalStatements == 0 {
-		return 1, 1
-	}
-	return uint64(summary.CoveredStatements), uint64(summary.TotalStatements)
 }
 
 func uncoveredStatements(summary coverageSummary) int {

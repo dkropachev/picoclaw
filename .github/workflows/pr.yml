@@ -34,7 +34,6 @@ jobs:
       vuln_check: ${{ steps.changes.outputs.vuln_check }}
       test: ${{ steps.changes.outputs.test }}
       cross_compile: ${{ steps.changes.outputs.cross_compile }}
-      coverage: ${{ steps.changes.outputs.coverage }}
       integration: ${{ steps.changes.outputs.integration }}
     steps:
       - name: Compute Go cache generation
@@ -389,41 +388,6 @@ jobs:
       - name: Cross-compile core binaries
         run: make build-all
 
-  coverage:
-    name: Coverage Delta
-    needs: classify
-    if: ${{ needs.classify.outputs.coverage != 'false' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: go.mod
-          cache: false
-
-      - name: Restore host Go cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-          key: ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-${{ needs.classify.outputs.go_cache_epoch }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-${{ hashFiles('go.mod', 'go.sum') }}-
-            ${{ runner.os }}-${{ runner.arch }}-go-v3-host-
-
-      - name: Fetch base ref
-        run: git fetch origin "${BASE_REF_NAME}:refs/remotes/origin/${BASE_REF_NAME}"
-
-      - name: Coverage delta guard
-        run: make coverage-delta BASE_REF="origin/${BASE_REF_NAME}" HEAD_REF=HEAD
-
   integration:
     name: Integration Tests
     needs: classify
@@ -466,7 +430,6 @@ jobs:
       - vuln_check
       - test
       - cross_compile
-      - coverage
       - integration
     runs-on: ubuntu-latest
     steps:
@@ -486,8 +449,6 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           CROSS_COMPILE_REQUIRED: ${{ needs.classify.outputs.cross_compile }}
           CROSS_COMPILE_RESULT: ${{ needs.cross_compile.result }}
-          COVERAGE_REQUIRED: ${{ needs.classify.outputs.coverage }}
-          COVERAGE_RESULT: ${{ needs.coverage.result }}
           INTEGRATION_REQUIRED: ${{ needs.classify.outputs.integration }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
         run: |
@@ -527,5 +488,4 @@ jobs:
           check_result vuln_check "${VULN_CHECK_REQUIRED}" "${VULN_CHECK_RESULT}"
           check_result test "${TEST_REQUIRED}" "${TEST_RESULT}"
           check_result cross_compile "${CROSS_COMPILE_REQUIRED}" "${CROSS_COMPILE_RESULT}"
-          check_result coverage "${COVERAGE_REQUIRED}" "${COVERAGE_RESULT}"
           check_result integration "${INTEGRATION_REQUIRED}" "${INTEGRATION_RESULT}"

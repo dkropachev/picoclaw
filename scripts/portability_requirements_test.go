@@ -129,11 +129,21 @@ func TestPRScopesValidationBehindStableRequiredCheck(t *testing.T) {
       - vuln_check
       - test
       - cross_compile
-      - coverage
       - integration`,
 	} {
 		if !strings.Contains(workflow, snippet) {
 			t.Errorf("PR workflow is missing scoped-validation setting %q", snippet)
+		}
+	}
+	for _, forbidden := range []string{
+		"  coverage:\n",
+		"steps.changes.outputs.coverage",
+		"needs.classify.outputs.coverage",
+		"needs.coverage.result",
+		"Coverage Delta",
+	} {
+		if strings.Contains(workflow, forbidden) {
+			t.Errorf("PR workflow still contains coverage gating %q", forbidden)
 		}
 	}
 }
@@ -244,17 +254,17 @@ func TestGoCacheIsMainOwnedAndPRReadOnly(t *testing.T) {
 			t.Errorf("PR workflow is missing Go cache generation setting %q", snippet)
 		}
 	}
-	if got := strings.Count(prWorkflow, "uses: actions/cache/restore@"+cacheAction); got != 7 {
-		t.Errorf("PR workflow shared Go cache restore count = %d, want 7", got)
+	if got := strings.Count(prWorkflow, "uses: actions/cache/restore@"+cacheAction); got != 6 {
+		t.Errorf("PR workflow shared Go cache restore count = %d, want 6", got)
 	}
-	if got := strings.Count(prWorkflow, sharedPaths); got != 7 {
-		t.Errorf("PR workflow shared Go cache path count = %d, want 7", got)
+	if got := strings.Count(prWorkflow, sharedPaths); got != 6 {
+		t.Errorf("PR workflow shared Go cache path count = %d, want 6", got)
 	}
 	for _, cache := range []struct {
 		name string
 		want int
 	}{
-		{name: "host", want: 6},
+		{name: "host", want: 5},
 		{name: "cross", want: 1},
 	} {
 		consumerKey := "key: " + keyBase + cache.name + "-" + dependencyHash + "-" + consumerEpoch

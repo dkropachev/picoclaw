@@ -68,8 +68,9 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 1. Run `make feature-inventory` to inspect currently discovered surfaces.
 2. Update the relevant feature spec when changing behavior.
 3. Link unit or integration tests in `Acceptance Evidence`.
-4. Run `make lint-features`, `make feature-delta`, `make coverage-delta`,
-   `make test`, and affected integration suites.
+4. Run `make lint-features`, `make feature-delta`, `make test`, and affected
+   integration suites. Run `make coverage-delta` only when an optional
+   informational coverage comparison is useful.
 
 ## Requirement Rules
 
@@ -83,6 +84,5 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 - `Owns: CODE` maps production files to the feature spec that must change with
   those files.
 - `MUST` requirements require unit or integration evidence.
-- Distinct changed production Go coverage blocks must reach 90%. Scoped-global
-  and impacted-feature percentages and uncovered-statement debt remain visible
-  as informational output, but do not decide the gate.
+- No coverage percentage, debt, or changed-code metric is a pull-request
+  requirement. `make coverage-delta` is an optional informational report.

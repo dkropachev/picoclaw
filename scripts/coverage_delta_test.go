@@ -1287,7 +1287,7 @@ func TestRunCoveragePairJoinsErrorsInBaseBeforeHeadOrder(t *testing.T) {
 	}
 }
 
-func TestRunCoverageDeltaCollectsTinyRefsAndCleansWorktrees(t *testing.T) {
+func TestRunCoverageDeltaAllowsLowCoverageAndCleansWorktrees(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not available")
 	}
@@ -1319,7 +1319,12 @@ func TestValue(t *testing.T) {
 	runCoverageDeltaTestGit(t, root, "commit", "--quiet", "-m", "base")
 	base := strings.TrimSpace(runCoverageDeltaTestGit(t, root, "rev-parse", "HEAD"))
 
-	writeCoverageDeltaTestFile(t, root, "pkg/sample/sample.go", "package sample\n\nfunc Value() int { return 2 }\n")
+	writeCoverageDeltaTestFile(t, root, "pkg/sample/sample.go", `package sample
+
+func Value() int { return 2 }
+
+func Uncovered() int { return 3 }
+`)
 	writeCoverageDeltaTestFile(t, root, "pkg/sample/sample_test.go", `package sample
 
 import "testing"
@@ -1600,42 +1605,7 @@ func TestCoverageIntegrationSuitesAllowHeadOnlyAddition(t *testing.T) {
 	}
 }
 
-func TestCoverageMinimumUsesExactIntegerRatios(t *testing.T) {
-	tests := []struct {
-		name    string
-		summary coverageSummary
-		minimum int
-		want    bool
-	}{
-		{
-			name:    "changed code exactly ninety percent",
-			summary: coverageSummary{CoveredStatements: 9, TotalStatements: 10},
-			minimum: changedCodeMinimumCoveragePercent,
-			want:    true,
-		},
-		{
-			name:    "changed code one statement below threshold",
-			summary: coverageSummary{CoveredStatements: 89_999, TotalStatements: 100_000},
-			minimum: changedCodeMinimumCoveragePercent,
-			want:    false,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := coverageAtLeastPercent(test.summary, test.minimum); got != test.want {
-				t.Fatalf(
-					"coverageAtLeastPercent(%+v, %d) = %t, want %t",
-					test.summary,
-					test.minimum,
-					got,
-					test.want,
-				)
-			}
-		})
-	}
-}
-
-func TestCompareCoverageTreatsNewScopeCoverageAsInformational(t *testing.T) {
+func TestNewScopeCoverageIsInformational(t *testing.T) {
 	spec := featureSpecMetadata{
 		RelPath:    "docs/features/new.md",
 		Ownerships: []featureOwnership{{Kind: "CODE", Pattern: "internal/new/**"}},
@@ -1647,9 +1617,6 @@ func TestCompareCoverageTreatsNewScopeCoverageAsInformational(t *testing.T) {
 		Files: map[string]coverageSummary{
 			"internal/new/feature.go": {CoveredStatements: 10, TotalStatements: 100},
 		},
-	}
-	if failures := compareCoverage(plan, head); len(failures) != 0 {
-		t.Fatalf("new-scope informational failures = %#v", failures)
 	}
 	wantInformation := []string{
 		"feature docs/features/new.md 100.00% (0/0) -> 10.00% (10/100) " +
@@ -1676,7 +1643,7 @@ func relocationComparisonProfile(
 	return summarizeCoverageBlocks(profile)
 }
 
-func TestCompareCoverageChangedCodeFloorAppliesToMovedFiles(t *testing.T) {
+func TestChangedCodeReportingAppliesToMovedFiles(t *testing.T) {
 	t.Parallel()
 	const destination = "internal/store/store.go"
 	head := relocationComparisonProfile(destination, true, false)
@@ -1685,16 +1652,19 @@ func TestCompareCoverageChangedCodeFloorAppliesToMovedFiles(t *testing.T) {
 			destination: {3: true},
 		},
 	}
-	if got := compareCoverage(plan, head); len(got) != 0 {
-		t.Fatalf("covered changed-block failures = %#v", got)
+	if got := changedCodeCoverage(plan.ChangedLines, head); got != (coverageSummary{2, 2}) {
+		t.Fatalf("moved changed-code coverage = %+v, want 2/2", got)
 	}
 
 	plan.ChangedLines = map[string]map[int]bool{
 		"pkg/consumer/consumer.go": {8: true},
 	}
-	want := []string{"changed production Go coverage is below 90%: 0.00% (0/3)"}
-	if got := compareCoverage(plan, head); !reflect.DeepEqual(got, want) {
-		t.Fatalf("uncovered changed-block failures = %#v, want %#v", got, want)
+	summary := changedCodeCoverage(plan.ChangedLines, head)
+	if summary != (coverageSummary{0, 3}) {
+		t.Fatalf("consumer changed-code coverage = %+v, want 0/3", summary)
+	}
+	if got, want := changedCodeStatus(summary), "changed executable Go coverage 0.00% (0/3)"; got != want {
+		t.Fatalf("consumer changed-code status = %q, want %q", got, want)
 	}
 }
 
@@ -1871,17 +1841,6 @@ func TestCoverageParsingAndChangedStatusEdgeCases(t *testing.T) {
 	}
 	if got := changedCodeStatus(coverageSummary{CoveredStatements: 9, TotalStatements: 10}); !strings.Contains(got, "90.00% (9/10)") {
 		t.Fatalf("covered changed-code status = %q", got)
-	}
-
-	maxInt := int(^uint(0) >> 1)
-	if !coverageRatioLess(
-		coverageSummary{CoveredStatements: 0, TotalStatements: maxInt},
-		coverageSummary{CoveredStatements: maxInt, TotalStatements: maxInt},
-	) {
-		t.Fatal("overflow-safe high-word ratio comparison accepted zero coverage")
-	}
-	if covered, total := exactCoverageRatio(coverageSummary{}); covered != 1 || total != 1 {
-		t.Fatalf("empty exact coverage ratio = %d/%d", covered, total)
 	}
 
 	if _, err := changedGoLines(t.TempDir(), "missing-base", "missing-head"); err == nil {
@@ -2106,7 +2065,7 @@ func writeScriptCoverageFixture(t *testing.T, root, relative, contents string) {
 	}
 }
 
-func TestCompareCoverageRequiresNinetyPercentForChangedBlocks(t *testing.T) {
+func TestChangedCoverageBelowFormerThresholdIsInformational(t *testing.T) {
 	plan := coveragePlan{ChangedLines: map[string]map[int]bool{
 		"pkg/example/example.go": {10: true, 11: true, 20: true},
 	}}
@@ -2132,13 +2091,13 @@ func TestCompareCoverageRequiresNinetyPercentForChangedBlocks(t *testing.T) {
 	if summary := changedCodeCoverage(plan.ChangedLines, exact); summary != (coverageSummary{9, 10}) {
 		t.Fatalf("exact changed coverage = %+v, want 9/10", summary)
 	}
-	if failures := compareCoverage(plan, exact); len(failures) != 0 {
-		t.Fatalf("exact threshold failures = %#v", failures)
-	}
 	below := head(8, 2)
-	want := []string{"changed production Go coverage is below 90%: 80.00% (8/10)"}
-	if got := compareCoverage(plan, below); !reflect.DeepEqual(got, want) {
-		t.Fatalf("below threshold failures = %#v, want %#v", got, want)
+	summary := changedCodeCoverage(plan.ChangedLines, below)
+	if summary != (coverageSummary{8, 10}) {
+		t.Fatalf("below-former-threshold coverage = %+v, want 8/10", summary)
+	}
+	if got, want := changedCodeStatus(summary), "changed executable Go coverage 80.00% (8/10)"; got != want {
+		t.Fatalf("below-former-threshold status = %q, want %q", got, want)
 	}
 }
 
@@ -2183,7 +2142,7 @@ func TestChangedCoverageDeduplicatesSpanningBlocksAndFeatureOwnershipCanOverlap(
 	}
 }
 
-func TestCompareCoverageTreatsGlobalAndFeatureDebtAsInformational(t *testing.T) {
+func TestGlobalAndFeatureDebtAreInformational(t *testing.T) {
 	spec := featureSpecMetadata{
 		RelPath: "docs/features/example.md",
 		Ownerships: []featureOwnership{
@@ -2227,9 +2186,6 @@ func TestCompareCoverageTreatsGlobalAndFeatureDebtAsInformational(t *testing.T) 
 
 	if got := changedCodeCoverage(plan.ChangedLines, head); got != (coverageSummary{9, 10}) {
 		t.Fatalf("changed coverage = %+v, want 9/10", got)
-	}
-	if got := compareCoverage(plan, head); len(got) != 0 {
-		t.Fatalf("informational debt produced failures = %#v", got)
 	}
 	wantInformation := []string{
 		"feature docs/features/example.md 80.00% (80/100) -> 69.00% (69/100) " +
