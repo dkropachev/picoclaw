@@ -122,22 +122,19 @@ plan derived from changed files and `Owns: CODE` mappings. The gate runs tests
 with `-coverpkg` for impacted feature-owned packages, includes configured
 integration suites when an impacted feature owns them, and uses
 statement-weighted Go coverage blocks with exact integer-ratio comparisons;
-rounded display percentages never decide a result. An impacted feature with
-zero base statements and nonzero head statements is new and must have at least
-95% head coverage. Every distinct head coverage block that intersects one or
-more added or modified production Go lines is counted once as changed
-executable code, which must have at least 90% coverage. For the scoped global
-profile and every impacted feature with existing base statements, the change
-passes when uncovered-statement debt (`total statements - covered statements`)
-does not increase or the exact coverage ratio does not regress; it fails only
-when debt increases and the ratio regresses. Deleting covered legacy code
-therefore passes when debt does not grow, even if percentage or
-covered-statement count falls. Overlapping ownership evaluates every owning
-feature, while changed blocks are deduplicated. Rare cryptographic, cleanup,
-and uncertain-failure branches compiled for the active coverage target remain
-in the denominator; source-level coverage exclusions and waivers are not
-permitted. Target-specific builds remain mandatory for code excluded by the
-active target's build constraints.
+rounded display percentages never decide a result. Every distinct head coverage
+block that intersects one or more added or modified production Go lines is
+counted once as changed executable code, which must have at least 90% coverage.
+Scoped-global and impacted-feature base/head percentages and
+uncovered-statement debt (`total statements - covered statements`) remain
+informational and do not decide the gate; there is no separate new-feature
+minimum. Overlapping ownership does not duplicate changed blocks. Coverage
+commands, package enumeration, ref resolution, and coverage-profile/Git-diff
+parsing errors continue to fail closed. Rare cryptographic, cleanup, and
+uncertain-failure branches compiled for the active coverage target remain in
+the denominator; source-level coverage exclusions and waivers are not permitted.
+Target-specific builds remain mandatory for code excluded by the active
+target's build constraints.
 
 ## Why This Format
 
