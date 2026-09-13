@@ -29,7 +29,16 @@ type Inspection struct {
 	key        string
 	generation inspectedGeneration
 	released   *atomic.Bool
+	lifecycle  *atomic.Uint32
 }
+
+const (
+	inspectionLifecycleIdle uint32 = iota
+	inspectionLifecycleValidating
+	inspectionLifecycleInvalid
+	inspectionLifecycleAdopting
+	inspectionLifecycleTerminal
+)
 
 type inspectionOps struct {
 	canonicalize       func(string) (string, string, error)
@@ -72,6 +81,27 @@ func (inspection Inspection) Release() error {
 	if inspection.database == nil {
 		return nil
 	}
+	if inspection.lifecycle != nil {
+		for {
+			current := inspection.lifecycle.Load()
+			switch current {
+			case inspectionLifecycleIdle, inspectionLifecycleInvalid:
+				if !inspection.lifecycle.CompareAndSwap(
+					current,
+					inspectionLifecycleTerminal,
+				) {
+					continue
+				}
+			case inspectionLifecycleValidating, inspectionLifecycleAdopting:
+				return errors.New("SQLite provider inspection lifecycle transition is in progress")
+			case inspectionLifecycleTerminal:
+				return nil
+			default:
+				return errors.New("SQLite provider inspection lifecycle is invalid")
+			}
+			break
+		}
+	}
 	if inspection.released == nil || !inspection.released.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -88,7 +118,31 @@ func (inspection Inspection) Adopt() (*sql.DB, error) {
 		inspection.released == nil || inspection.released.Load() {
 		return nil, errors.New("SQLite provider inspection pool is unavailable")
 	}
-	return adoptInspectedPool(inspection.path, inspection.key, inspection.released)
+	claimedLifecycle := false
+	if inspection.lifecycle != nil {
+		if !inspection.lifecycle.CompareAndSwap(
+			inspectionLifecycleIdle,
+			inspectionLifecycleAdopting,
+		) {
+			return nil, errors.New("SQLite provider inspection lifecycle is unavailable")
+		}
+		claimedLifecycle = true
+	}
+	database, err := adoptInspectedPool(inspection.path, inspection.key, inspection.released)
+	if claimedLifecycle {
+		if err != nil {
+			inspection.lifecycle.CompareAndSwap(
+				inspectionLifecycleAdopting,
+				inspectionLifecycleIdle,
+			)
+		} else {
+			inspection.lifecycle.CompareAndSwap(
+				inspectionLifecycleAdopting,
+				inspectionLifecycleTerminal,
+			)
+		}
+	}
+	return database, err
 }
 
 // IsInspectionIntegrity distinguishes damaged generations from temporary
@@ -311,6 +365,7 @@ func inspectWithOps(
 	return Inspection{
 		Exists: true, Empty: objectCount == 0 && version == 0, Version: version,
 		database: database, path: path, key: key, generation: current, released: owner,
+		lifecycle: new(atomic.Uint32),
 	}, nil
 }
 

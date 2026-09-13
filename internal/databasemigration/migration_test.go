@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -103,6 +104,7 @@ func TestMigrationReportsMissingAdapterAfterDurableBackup(t *testing.T) {
 func TestFakeAdapterMigratesStagedGenerationAndRestartSkipsCallback(t *testing.T) {
 	home := migrationHome(t)
 	callbackCount := 0
+	validationCount := 0
 	contract := databaseadapter.Contract{
 		CurrentVersion: 1,
 		EmptyPolicy:    databaseadapter.EmptyMigrateOffline,
@@ -122,15 +124,39 @@ func TestFakeAdapterMigratesStagedGenerationAndRestartSkipsCallback(t *testing.T
 			}
 			return createMigratedTarget(ctx, target.GenerationPath, contract.CurrentVersion)
 		},
+		Validate: func(
+			_ context.Context,
+			generation databaseadapter.ExactReadOnlyGeneration,
+		) error {
+			if generation.StoreID() != "global/auth" || generation.Domain() != "auth" {
+				return errors.New("invalid exact-validation binding")
+			}
+			tables, err := generation.ReadScalar(
+				`SELECT COUNT(*) FROM sqlite_schema
+				  WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`,
+			)
+			if err != nil {
+				return err
+			}
+			if tables.Kind != databaseadapter.ValidationInt64 || tables.Int64 != 2 {
+				return errors.New("unexpected exact schema")
+			}
+			validationCount++
+			return nil
+		},
 	})
 	engine := migrationEngine(t, home, registry)
 	first, err := engine.Run(context.Background(), Options{Stores: []database.StoreID{"global/auth"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if callbackCount != 1 || len(first.Stores) != 1 || !first.Stores[0].Migrated ||
+	if callbackCount != 1 || validationCount != 1 || len(first.Stores) != 1 ||
+		!first.Stores[0].Migrated ||
 		first.Stores[0].BeforeVersion != 0 || first.Stores[0].AfterVersion != 1 {
-		t.Fatalf("first result = %#v, callbacks=%d", first, callbackCount)
+		t.Fatalf(
+			"first result = %#v, callbacks=%d validations=%d",
+			first, callbackCount, validationCount,
+		)
 	}
 	if readAndVerifyManifest(t, first.BackupDir).Outcome != "complete" {
 		t.Fatal("first backup not complete")
@@ -140,9 +166,215 @@ func TestFakeAdapterMigratesStagedGenerationAndRestartSkipsCallback(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if callbackCount != 1 || len(second.Stores) != 1 || second.Stores[0].Migrated ||
+	if callbackCount != 1 || validationCount != 3 || len(second.Stores) != 1 ||
+		second.Stores[0].Migrated ||
 		second.Stores[0].BeforeVersion != 1 || second.Stores[0].AfterVersion != 1 {
-		t.Fatalf("restart result = %#v, callbacks=%d", second, callbackCount)
+		t.Fatalf(
+			"restart result = %#v, callbacks=%d validations=%d",
+			second, callbackCount, validationCount,
+		)
+	}
+}
+
+func TestExactValidationBindsBaseAndProjectedRepositoryReviewMigrationStages(t *testing.T) {
+	home := migrationHome(t)
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = filepath.Join(home, "workspace")
+	cfg.Agents.List = []config.AgentConfig{{
+		ID: "secondary", Workspace: filepath.Join(home, "secondary-workspace"),
+	}}
+	options := storecatalog.Options{Home: home, Config: cfg, UserHome: home}
+	projected, err := storecatalog.Project(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storeIDs []database.StoreID
+	for _, spec := range projected.All() {
+		if spec.Domain == "repository-reviews" {
+			storeIDs = append(storeIDs, spec.ID)
+		}
+	}
+	foundBase := false
+	foundDynamic := false
+	for _, id := range storeIDs {
+		if id == "workspace/repository-reviews" {
+			foundBase = true
+			continue
+		}
+		if strings.HasPrefix(id.String(), "workspace/") &&
+			strings.HasSuffix(id.String(), "/repository-reviews") &&
+			len(id.String()) == len("workspace/")+16+len("/repository-reviews") {
+			foundDynamic = true
+		}
+	}
+	if len(storeIDs) != 2 || !foundBase || !foundDynamic {
+		t.Fatalf("base/projected repository-review StoreIDs = %#v", storeIDs)
+	}
+	contract := databaseadapter.Contract{
+		CurrentVersion: 1,
+		EmptyPolicy:    databaseadapter.EmptyMigrateOffline,
+		RequiredObjects: []databaseadapter.SchemaObject{
+			{Type: "table", Name: "items"},
+			{Type: "table", Name: "storage_import_horizons"},
+		},
+		RequiredColumns: []databaseadapter.ColumnSet{{
+			Table: "items", Columns: []string{"id"},
+		}},
+		ImportHorizon: "repository-reviews",
+	}
+	migrations := make(map[database.StoreID]int)
+	validations := make(map[database.StoreID]int)
+	registry := migrationRegistry(t, databaseadapter.Adapter{
+		Domain: "repository-reviews", Contract: contract,
+		Migrate: func(ctx context.Context, target databaseadapter.Target) error {
+			migrations[target.ID]++
+			return createMigratedTargetForComponent(
+				ctx,
+				target.GenerationPath,
+				contract.CurrentVersion,
+				"repository-reviews",
+			)
+		},
+		Validate: func(
+			_ context.Context,
+			generation databaseadapter.ExactReadOnlyGeneration,
+		) error {
+			if generation.Domain() != "repository-reviews" {
+				return errors.New("projected migration validation domain changed")
+			}
+			validations[generation.StoreID()]++
+			tables, readErr := generation.ReadScalar(
+				`SELECT COUNT(*) FROM sqlite_schema
+				  WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`,
+			)
+			if readErr != nil || tables.Kind != databaseadapter.ValidationInt64 ||
+				tables.Int64 != 2 {
+				return errors.Join(errors.New("projected migration exact schema changed"), readErr)
+			}
+			return nil
+		},
+	})
+	engine, err := New(options, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range storeIDs {
+		result, runErr := engine.Run(t.Context(), Options{Stores: []database.StoreID{id}})
+		if runErr != nil || len(result.Stores) != 1 || !result.Stores[0].Migrated {
+			t.Fatalf("projected migration %s result = %#v, %v", id, result, runErr)
+		}
+		if migrations[id] != 1 || validations[id] != 1 {
+			t.Errorf(
+				"projected migration %s calls = migrate:%d validate:%d",
+				id,
+				migrations[id],
+				validations[id],
+			)
+		}
+	}
+}
+
+func TestExactValidationRejectsContractReadyCurrentGenerationWithoutMigration(t *testing.T) {
+	home := migrationHome(t)
+	databasePath := filepath.Join(home, "auth.db")
+	contract := databaseadapter.Contract{
+		CurrentVersion: 1,
+		EmptyPolicy:    databaseadapter.EmptyMigrateOffline,
+		RequiredObjects: []databaseadapter.SchemaObject{
+			{Type: "table", Name: "items"},
+			{Type: "table", Name: "storage_import_horizons"},
+		},
+		RequiredColumns: []databaseadapter.ColumnSet{
+			{Table: "items", Columns: []string{"id"}},
+		},
+		ImportHorizon: "auth",
+	}
+	migrations := 0
+	validations := 0
+	registry := migrationRegistry(t, databaseadapter.Adapter{
+		Domain: "auth", Contract: contract,
+		Migrate: func(ctx context.Context, target databaseadapter.Target) error {
+			migrations++
+			return createMigratedTarget(ctx, target.GenerationPath, contract.CurrentVersion)
+		},
+		Validate: func(
+			_ context.Context,
+			generation databaseadapter.ExactReadOnlyGeneration,
+		) error {
+			validations++
+			tables, err := generation.ReadScalar(
+				`SELECT COUNT(*) FROM sqlite_schema
+				  WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`,
+			)
+			if err != nil {
+				return err
+			}
+			if tables.Kind != databaseadapter.ValidationInt64 || tables.Int64 != 2 {
+				return errors.New("exact schema object set changed")
+			}
+			return nil
+		},
+	})
+	engine := migrationEngine(t, home, registry)
+	if _, err := engine.Run(t.Context(), Options{Stores: []database.StoreID{"global/auth"}}); err != nil {
+		t.Fatal(err)
+	}
+	databaseHandle, err := sqliteprovider.OpenStore(databasePath, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := databaseHandle.ExecContext(
+		t.Context(), "CREATE TABLE unexpected (id INTEGER PRIMARY KEY)",
+	); err != nil {
+		_ = databaseHandle.Close()
+		t.Fatal(err)
+	}
+	if err := databaseHandle.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Run(t.Context(), Options{Stores: []database.StoreID{"global/auth"}})
+	if err == nil || !errors.Is(err, ErrIntegrity) || migrations != 1 || validations != 2 ||
+		len(result.Stores) != 1 || result.Stores[0].Migrated {
+		t.Fatalf(
+			"exact-invalid current generation = result:%#v migrations:%d validations:%d error:%v",
+			result, migrations, validations, err,
+		)
+	}
+}
+
+func TestExactValidationGoexitCannotCutOverStagedGeneration(t *testing.T) {
+	home := migrationHome(t)
+	contract := databaseadapter.Contract{
+		CurrentVersion: 1,
+		EmptyPolicy:    databaseadapter.EmptyMigrateOffline,
+		RequiredObjects: []databaseadapter.SchemaObject{
+			{Type: "table", Name: "items"},
+			{Type: "table", Name: "storage_import_horizons"},
+		},
+		RequiredColumns: []databaseadapter.ColumnSet{{
+			Table: "items", Columns: []string{"id"},
+		}},
+		ImportHorizon: "auth",
+	}
+	registry := migrationRegistry(t, databaseadapter.Adapter{
+		Domain: "auth", Contract: contract,
+		Migrate: func(ctx context.Context, target databaseadapter.Target) error {
+			return createMigratedTarget(ctx, target.GenerationPath, contract.CurrentVersion)
+		},
+		Validate: func(context.Context, databaseadapter.ExactReadOnlyGeneration) error {
+			runtime.Goexit()
+			return nil
+		},
+	})
+	result, err := migrationEngine(t, home, registry).Run(
+		t.Context(),
+		Options{Stores: []database.StoreID{"global/auth"}},
+	)
+	if err == nil || len(result.Stores) != 1 || result.Stores[0].Migrated {
+		t.Fatalf("Goexit exact validation result = %#v, %v", result, err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(home, "auth.db")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Goexit validation cut over live generation: %v", statErr)
 	}
 }
 
@@ -499,6 +731,15 @@ func migrationRegistry(t *testing.T, adapter databaseadapter.Adapter) *databasea
 }
 
 func createMigratedTarget(ctx context.Context, path string, version int) error {
+	return createMigratedTargetForComponent(ctx, path, version, "auth")
+}
+
+func createMigratedTargetForComponent(
+	ctx context.Context,
+	path string,
+	version int,
+	component string,
+) error {
 	db, err := sqliteprovider.OpenStore(path, time.Second)
 	if err != nil {
 		return err
@@ -520,7 +761,8 @@ func createMigratedTarget(ctx context.Context, path string, version int) error {
 	}
 	if _, err := db.ExecContext(
 		ctx,
-		"INSERT INTO storage_import_horizons(component, completed_at) VALUES ('auth', 1)",
+		"INSERT INTO storage_import_horizons(component, completed_at) VALUES (?, 1)",
+		component,
 	); err != nil {
 		return err
 	}

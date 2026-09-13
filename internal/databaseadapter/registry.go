@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/internal/databasevalidation"
 	"github.com/sipeed/picoclaw/pkg/database"
 )
 
@@ -77,12 +78,33 @@ type Target struct {
 // Callers establish migration fencing and backups before invoking it.
 type MigrateFunc func(context.Context, Target) error
 
+// ValidationScalarKind, ValidationScalar, and ExactReadOnlyGeneration expose
+// the restricted validation surface without making its lower-level package
+// part of adapter call sites.
+type (
+	ValidationScalarKind    = databasevalidation.ScalarKind
+	ValidationScalar        = databasevalidation.Scalar
+	ExactReadOnlyGeneration = databasevalidation.Generation
+)
+
+const (
+	ValidationNoRow = databasevalidation.ScalarNoRow
+	ValidationNull  = databasevalidation.ScalarNull
+	ValidationInt64 = databasevalidation.ScalarInt64
+	ValidationText  = databasevalidation.ScalarText
+)
+
+// ValidateFunc proves one provider-neutral contract-ready generation also
+// satisfies its domain's exact schema and aggregate invariants.
+type ValidateFunc func(context.Context, ExactReadOnlyGeneration) error
+
 // Adapter binds one domain name to its readiness contract and optional offline
 // migration callback.
 type Adapter struct {
 	Domain   string
 	Contract Contract
 	Migrate  MigrateFunc
+	Validate ValidateFunc
 }
 
 // Registry is an immutable, explicitly assembled adapter catalog.
@@ -114,7 +136,8 @@ func NewRegistry(adapters ...Adapter) (*Registry, error) {
 		}
 		result.domains = append(result.domains, adapter.Domain)
 		result.adapters[adapter.Domain] = Adapter{
-			Domain: adapter.Domain, Contract: contract, Migrate: adapter.Migrate,
+			Domain: adapter.Domain, Contract: contract,
+			Migrate: adapter.Migrate, Validate: adapter.Validate,
 		}
 	}
 	sort.Strings(result.domains)

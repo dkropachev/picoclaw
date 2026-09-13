@@ -242,7 +242,11 @@ func TestMigrationStoreRemainingProviderCallbacks(t *testing.T) {
 		t.Run("validation "+test.name, func(t *testing.T) {
 			ops := defaultMigrationStoreOps()
 			ops.inspect = test.inspect
-			ops.release = test.release
+			releases := 0
+			ops.release = func(inspection sqliteprovider.Inspection) error {
+				releases++
+				return test.release(inspection)
+			}
 			ops.provider = migrationProviderCallsValidation(filepath.Join(fixture.home, "stage.db"))
 			result := &StoreResult{providerRequired: true}
 			err := fixture.engine.migrateStoreWithOps(
@@ -258,6 +262,9 @@ func TestMigrationStoreRemainingProviderCallbacks(t *testing.T) {
 			)
 			if !errors.Is(err, test.want) {
 				t.Fatalf("validation %s error = %v, want %v", test.name, err, test.want)
+			}
+			if releases != 1 {
+				t.Fatalf("validation %s releases = %d, want 1", test.name, releases)
 			}
 		})
 	}

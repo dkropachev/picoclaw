@@ -59,7 +59,14 @@ type readinessProbeOps struct {
 	inspect        func(context.Context, string, time.Duration, func() error) (sqliteprovider.Inspection, error)
 	infrastructure func(error) bool
 	revalidate     func(context.Context, sqliteprovider.Inspection) error
-	classify       func(
+	validateDomain func(
+		context.Context,
+		database.StoreID,
+		string,
+		databaseadapter.ValidateFunc,
+		sqliteprovider.Inspection,
+	) error
+	classify func(
 		context.Context,
 		storecatalog.Spec,
 		databaseadapter.Contract,
@@ -87,6 +94,15 @@ func defaultReadinessProbeOps() readinessProbeOps {
 		infrastructure: sqliteprovider.IsInspectionInfrastructure,
 		revalidate: func(ctx context.Context, inspection sqliteprovider.Inspection) error {
 			return inspection.Revalidate(ctx)
+		},
+		validateDomain: func(
+			ctx context.Context,
+			id database.StoreID,
+			domain string,
+			validate databaseadapter.ValidateFunc,
+			inspection sqliteprovider.Inspection,
+		) error {
+			return inspection.ValidateDomain(ctx, id, domain, validate)
 		},
 		classify: func(
 			ctx context.Context,
@@ -249,6 +265,7 @@ func probeWithOps(
 	}
 	if ops.guardStores == nil || ops.preflight == nil || ops.exclusions == nil || ops.newBudget == nil ||
 		ops.inspect == nil || ops.infrastructure == nil || ops.revalidate == nil ||
+		ops.validateDomain == nil ||
 		ops.classify == nil ||
 		ops.release == nil || ops.validate == nil ||
 		ops.timeout <= 0 {
@@ -318,7 +335,7 @@ func probeWithOps(
 
 	type storeObservation struct {
 		spec       storecatalog.Spec
-		contract   databaseadapter.Contract
+		adapter    databaseadapter.Adapter
 		inspection sqliteprovider.Inspection
 		err        error
 	}
@@ -375,7 +392,7 @@ func probeWithOps(
 		}
 		cancelStore()
 		observations = append(observations, storeObservation{
-			spec: spec, contract: adapter.Contract, inspection: inspection, err: inspectErr,
+			spec: spec, adapter: adapter, inspection: inspection, err: inspectErr,
 		})
 	}
 	if contextErr := ctx.Err(); contextErr != nil {
@@ -415,19 +432,40 @@ func probeWithOps(
 		status := ops.classify(
 			storeCtx,
 			observation.spec,
-			observation.contract,
+			observation.adapter.Contract,
 			observation.inspection,
 			observation.err,
 			generationSet{},
 			nil,
 		)
+		var exactErr error
+		if observation.err == nil && status.Readiness == database.StoreReady &&
+			observation.inspection.Exists && !observation.inspection.Empty &&
+			observation.inspection.Version == observation.adapter.Contract.CurrentVersion &&
+			observation.adapter.Validate != nil {
+			exactErr = ops.validateDomain(
+				storeCtx,
+				observation.spec.ID,
+				observation.adapter.Domain,
+				observation.adapter.Validate,
+				observation.inspection,
+			)
+		}
+		var exactInfrastructureErr error
+		if ops.infrastructure(exactErr) {
+			exactInfrastructureErr = readinessInfrastructureError(exactErr)
+		}
 		if reconcileErr := reconcileLease(); reconcileErr != nil {
 			cancelStore()
-			return nil, reconcileErr
+			return nil, errors.Join(reconcileErr, exactInfrastructureErr)
 		}
 		if contextErr := ctx.Err(); contextErr != nil {
 			cancelStore()
-			return nil, contextErr
+			return nil, errors.Join(contextErr, exactInfrastructureErr)
+		}
+		if exactInfrastructureErr != nil {
+			cancelStore()
+			return nil, exactInfrastructureErr
 		}
 		if timeoutErr := storeCtx.Err(); timeoutErr != nil {
 			status = unavailableStatus(
@@ -435,6 +473,8 @@ func probeWithOps(
 				database.CodeUnavailable,
 				"database readiness classification timed out",
 			)
+		} else if exactErr != nil {
+			status = readinessDomainValidationStatus(observation.spec.ID, exactErr)
 		} else if observation.err == nil {
 			if revalidateErr := ops.revalidate(storeCtx, observation.inspection); revalidateErr != nil {
 				if ops.infrastructure(revalidateErr) {
@@ -509,7 +549,7 @@ func probeWithOps(
 		status := ops.classify(
 			storeCtx,
 			observation.spec,
-			observation.contract,
+			observation.adapter.Contract,
 			observation.inspection,
 			nil,
 			exclusions,
@@ -642,6 +682,28 @@ func readinessProviderErrorStatus(id database.StoreID, err error) database.Store
 		return unavailableStatus(id, database.CodeUnavailable, "database store is locked")
 	}
 	return unavailableStatus(id, database.CodeUnavailable, "database store is unavailable")
+}
+
+func readinessDomainValidationStatus(id database.StoreID, err error) database.StoreStatus {
+	if sqliteprovider.IsInspectionIntegrity(err) {
+		return unavailableStatus(
+			id,
+			database.CodeIntegrity,
+			"database exact domain validation failed",
+		)
+	}
+	if sqliteprovider.IsBusyOrLocked(err) {
+		return unavailableStatus(
+			id,
+			database.CodeUnavailable,
+			"database exact domain validation is locked",
+		)
+	}
+	return unavailableStatus(
+		id,
+		database.CodeUnavailable,
+		"database exact domain validation is unavailable",
+	)
 }
 
 func readinessFinalRevalidationError(err error) error {

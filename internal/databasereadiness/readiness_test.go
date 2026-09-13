@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,7 +95,20 @@ func TestProbeClassifiesGenerationStates(t *testing.T) {
 				test.prepare(t, home)
 			}
 			lease, fence := acquireReadinessLease(t, home)
-			registry := readinessRegistry(t, lease.Stores(), "auth", test.contract)
+			validationCalls := 0
+			registry := readinessRegistry(
+				t,
+				lease.Stores(),
+				"auth",
+				test.contract,
+				func(
+					context.Context,
+					databaseadapter.ExactReadOnlyGeneration,
+				) error {
+					validationCalls++
+					return nil
+				},
+			)
 			snapshot, err := Probe(context.Background(), lease, registry)
 			if err != nil {
 				t.Fatal(err)
@@ -110,6 +124,17 @@ func TestProbeClassifiesGenerationStates(t *testing.T) {
 				}
 			} else if status.Error == nil || status.Error.Code != test.code {
 				t.Fatalf("status error = %v, want code %s", status.Error, test.code)
+			}
+			wantValidations := 0
+			if test.name == "current" {
+				wantValidations = 1
+			}
+			if validationCalls != wantValidations {
+				t.Fatalf(
+					"exact validation calls = %d, want %d",
+					validationCalls,
+					wantValidations,
+				)
 			}
 			if test.name == "missing" {
 				if _, statErr := os.Lstat(filepath.Join(home, "auth.db")); !errors.Is(statErr, os.ErrNotExist) {
@@ -172,6 +197,246 @@ func TestProbePoolCanBeAdoptedAndSurvivesSnapshotClose(t *testing.T) {
 	var version int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
 		t.Fatalf("adopted pool after Snapshot.Close: version=%d error=%v", version, err)
+	}
+}
+
+func TestProbeExactDomainValidationControlsReadinessAndAdoption(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		validate  databaseadapter.ValidateFunc
+		readiness database.StoreReadiness
+		code      database.ErrorCode
+		adoptable bool
+		aborts    bool
+	}{
+		{
+			name: "valid",
+			validate: func(
+				_ context.Context,
+				generation databaseadapter.ExactReadOnlyGeneration,
+			) error {
+				if generation.StoreID() != "global/auth" || generation.Domain() != "auth" {
+					return errors.New("exact validation binding changed")
+				}
+				count, err := generation.ReadScalar("SELECT COUNT(*) FROM items")
+				if err != nil {
+					return err
+				}
+				if count.Kind != databaseadapter.ValidationInt64 || count.Int64 != 0 {
+					return errors.New("unexpected item rows")
+				}
+				return nil
+			},
+			readiness: database.StoreReady,
+			adoptable: true,
+		},
+		{
+			name: "invalid",
+			validate: func(
+				context.Context,
+				databaseadapter.ExactReadOnlyGeneration,
+			) error {
+				return errors.New("exact domain invariant failed")
+			},
+			readiness: database.StoreIntegrityFailed,
+			code:      database.CodeIntegrity,
+		},
+		{
+			name: "forged cancellation",
+			validate: func(
+				context.Context,
+				databaseadapter.ExactReadOnlyGeneration,
+			) error {
+				return context.Canceled
+			},
+			readiness: database.StoreIntegrityFailed,
+			code:      database.CodeIntegrity,
+		},
+		{
+			name: "query contract violation",
+			validate: func(
+				_ context.Context,
+				generation databaseadapter.ExactReadOnlyGeneration,
+			) error {
+				_, err := generation.ReadScalar("DELETE FROM items RETURNING id")
+				return err
+			},
+			aborts: true,
+		},
+		{
+			name: "query unavailable",
+			validate: func(
+				_ context.Context,
+				generation databaseadapter.ExactReadOnlyGeneration,
+			) error {
+				_, err := generation.ReadScalar("SELECT missing_column FROM items")
+				return err
+			},
+			readiness: database.StoreUnavailable,
+			code:      database.CodeUnavailable,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, "auth.db")
+			createReadinessDatabase(t, path, 2, true, true)
+			lease, _ := acquireReadinessLease(t, home)
+			registry := readinessRegistry(
+				t,
+				lease.Stores(),
+				"auth",
+				readinessContract(2, databaseadapter.EmptyInitializeOnline),
+				test.validate,
+			)
+			snapshot, err := Probe(t.Context(), lease, registry)
+			if test.aborts {
+				if snapshot != nil || database.CodeOf(err) != database.CodeUnavailable {
+					t.Fatalf("contract violation probe = %#v, %v", snapshot, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer snapshot.Close()
+			status := readinessStatus(t, snapshot.Statuses(), "global/auth")
+			if status.Readiness != test.readiness ||
+				test.code != "" && database.CodeOf(status.Error) != test.code {
+				t.Fatalf("exact validation readiness = %#v", status)
+			}
+			databaseHandle, adoptErr := snapshot.Adopt("global/auth")
+			if test.adoptable {
+				if adoptErr != nil || databaseHandle == nil {
+					t.Fatalf("validated inspection adoption = %#v, %v", databaseHandle, adoptErr)
+				}
+				defer databaseHandle.Close()
+				var queryOnly int
+				if err := databaseHandle.QueryRowContext(
+					t.Context(), "PRAGMA query_only",
+				).Scan(&queryOnly); err != nil || queryOnly != 0 {
+					t.Fatalf("adopted exact-validation query_only = %d, %v", queryOnly, err)
+				}
+			} else if adoptErr == nil || databaseHandle != nil {
+				t.Fatalf("invalid inspection was adoptable = %#v, %v", databaseHandle, adoptErr)
+			}
+		})
+	}
+
+	t.Run("validator panic aborts probe", func(t *testing.T) {
+		home := t.TempDir()
+		createReadinessDatabase(t, filepath.Join(home, "auth.db"), 2, true, true)
+		lease, _ := acquireReadinessLease(t, home)
+		registry := readinessRegistry(
+			t,
+			lease.Stores(),
+			"auth",
+			readinessContract(2, databaseadapter.EmptyInitializeOnline),
+			func(context.Context, databaseadapter.ExactReadOnlyGeneration) error {
+				panic("private panic")
+			},
+		)
+		snapshot, err := Probe(t.Context(), lease, registry)
+		if snapshot != nil || database.CodeOf(err) != database.CodeUnavailable ||
+			strings.Contains(err.Error(), "private panic") {
+			t.Fatalf("panicked exact validation = %#v, %v", snapshot, err)
+		}
+	})
+}
+
+func TestProbeExactValidationBindsBaseAndProjectedRepositoryReviewStores(t *testing.T) {
+	home := t.TempDir()
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = filepath.Join(home, "workspace")
+	cfg.Agents.List = []config.AgentConfig{{
+		ID: "secondary", Workspace: filepath.Join(home, "secondary-workspace"),
+	}}
+	options := storecatalog.Options{Home: home, Config: cfg, UserHome: home}
+	projected, err := storecatalog.Project(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reviewSpecs []storecatalog.Spec
+	for _, spec := range projected.All() {
+		if spec.Domain == "repository-reviews" {
+			reviewSpecs = append(reviewSpecs, spec)
+		}
+	}
+	if len(reviewSpecs) != 2 {
+		t.Fatalf("repository-review projected specs = %#v", reviewSpecs)
+	}
+	foundBase := false
+	foundDynamic := false
+	for _, spec := range reviewSpecs {
+		switch {
+		case spec.ID == "workspace/repository-reviews":
+			foundBase = true
+		case strings.HasPrefix(spec.ID.String(), "workspace/") &&
+			strings.HasSuffix(spec.ID.String(), "/repository-reviews") &&
+			len(spec.ID.String()) == len("workspace/")+16+len("/repository-reviews"):
+			foundDynamic = true
+		default:
+			t.Fatalf("unexpected repository-review StoreID %q", spec.ID)
+		}
+		createReadinessDatabase(t, spec.Path, 2, true, true)
+	}
+	if !foundBase || !foundDynamic {
+		t.Fatalf("base/dynamic repository-review IDs = %#v", reviewSpecs)
+	}
+	fence, err := database.AcquireOnlineFence(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fence.Close() })
+	claimRoot, err := databaseclaims.PrepareRootForTesting(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := databaseclaims.AcquireForTesting(options, projected, fence, claimRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lease.Close() })
+	validated := make(map[database.StoreID]int)
+	registry := readinessRegistry(
+		t,
+		lease.Stores(),
+		"repository-reviews",
+		readinessContract(2, databaseadapter.EmptyInitializeOnline),
+		func(_ context.Context, generation databaseadapter.ExactReadOnlyGeneration) error {
+			if generation.Domain() != "repository-reviews" {
+				return errors.New("projected exact validation domain changed")
+			}
+			validated[generation.StoreID()]++
+			count, readErr := generation.ReadScalar("SELECT COUNT(*) FROM items")
+			if readErr != nil || count.Kind != databaseadapter.ValidationInt64 || count.Int64 != 0 {
+				return errors.Join(errors.New("projected exact validation rows changed"), readErr)
+			}
+			return nil
+		},
+	)
+	snapshot, err := Probe(t.Context(), lease, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.Close()
+	for _, spec := range reviewSpecs {
+		if validated[spec.ID] != 1 {
+			t.Errorf("exact validations for %s = %d, want 1", spec.ID, validated[spec.ID])
+		}
+		status := readinessStatus(t, snapshot.Statuses(), spec.ID)
+		if status.Readiness != database.StoreReady || status.Error != nil {
+			t.Errorf("projected readiness for %s = %#v", spec.ID, status)
+		}
+		databaseHandle, adoptErr := snapshot.Adopt(spec.ID)
+		if adoptErr != nil || databaseHandle == nil {
+			t.Fatalf("adopt projected %s = %#v, %v", spec.ID, databaseHandle, adoptErr)
+		}
+		if err := databaseHandle.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -317,6 +582,7 @@ func readinessRegistry(
 	specs []storecatalog.Spec,
 	overrideDomain string,
 	override databaseadapter.Contract,
+	validators ...databaseadapter.ValidateFunc,
 ) *databaseadapter.Registry {
 	t.Helper()
 	seen := make(map[string]struct{})
@@ -332,7 +598,13 @@ func readinessRegistry(
 		if spec.Domain == overrideDomain {
 			contract = override
 		}
-		adapters = append(adapters, databaseadapter.Adapter{Domain: spec.Domain, Contract: contract})
+		var validate databaseadapter.ValidateFunc
+		if spec.Domain == overrideDomain && len(validators) == 1 {
+			validate = validators[0]
+		}
+		adapters = append(adapters, databaseadapter.Adapter{
+			Domain: spec.Domain, Contract: contract, Validate: validate,
+		})
 	}
 	registry, err := databaseadapter.NewRegistry(adapters...)
 	if err != nil {
