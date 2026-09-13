@@ -581,7 +581,25 @@ func (engine *Engine) preflight(
 				inspection,
 				legacyExists,
 			)
-			return errors.Join(stateErr, inspection.Release())
+			var exactErr error
+			if stateErr == nil && !needsAdapter && adapter.Validate != nil &&
+				inspection.Exists && !inspection.Empty &&
+				inspection.Version == adapter.Contract.CurrentVersion {
+				exactErr = inspection.ValidateDomain(
+					useCtx,
+					spec.ID,
+					adapter.Domain,
+					adapter.Validate,
+				)
+				if !sqliteprovider.IsInspectionInfrastructure(exactErr) &&
+					sqliteprovider.IsInspectionIntegrity(exactErr) {
+					exactErr = errors.Join(
+						ErrIntegrity,
+						errors.New("database domain validation failed during preflight"),
+					)
+				}
+			}
+			return errors.Join(stateErr, exactErr, inspection.Release())
 		})
 		cleanupErr := callMigrationCleanup(cleanup)
 		if useErr != nil || cleanupErr != nil {
@@ -746,12 +764,28 @@ func (engine *Engine) migrateStoreWithOps(
 			migrationBusyTimeout,
 		)
 		if validationErr != nil {
-			return validationErr
+			return errors.Join(validationErr, ops.release(staged))
 		}
 		ready, validationErr := contractReady(validationCtx, adapter.Contract, staged)
+		var exactErr error
+		if validationErr == nil && ready && adapter.Validate != nil {
+			exactErr = staged.ValidateDomain(
+				validationCtx,
+				spec.ID,
+				adapter.Domain,
+				adapter.Validate,
+			)
+			if !sqliteprovider.IsInspectionInfrastructure(exactErr) &&
+				sqliteprovider.IsInspectionIntegrity(exactErr) {
+				exactErr = errors.Join(
+					ErrIntegrity,
+					errors.New("database staged generation failed exact domain validation"),
+				)
+			}
+		}
 		releaseErr := ops.release(staged)
-		if validationErr != nil || releaseErr != nil {
-			return errors.Join(validationErr, releaseErr)
+		if validationErr != nil || exactErr != nil || releaseErr != nil {
+			return errors.Join(validationErr, exactErr, releaseErr)
 		}
 		if !ready {
 			return ErrAdapterRequired

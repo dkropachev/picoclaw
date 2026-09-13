@@ -63,6 +63,9 @@ func TestScopedStoreTargetHasOneWireAuthority(t *testing.T) {
 		"internal/databaseadapter/registry.go": {
 			scopedTargetExternalStoreID: 1,
 		},
+		"internal/databasevalidation/query.go": {
+			scopedTargetExternalStoreID: 1,
+		},
 		"internal/databaseclaims/claims.go": {
 			scopedTargetExternalStoreID: 35,
 		},
@@ -89,7 +92,10 @@ func TestScopedStoreTargetHasOneWireAuthority(t *testing.T) {
 			scopedTargetExternalStoreID: 3,
 		},
 		"internal/databasereadiness/readiness.go": {
-			scopedTargetExternalStoreID: 7,
+			scopedTargetExternalStoreID: 10,
+		},
+		"internal/sqliteprovider/inspection_validation.go": {
+			scopedTargetExternalStoreID: 4,
 		},
 		"internal/sqliteprovider/provider_offline.go": {
 			scopedTargetExternalStoreID: 2,

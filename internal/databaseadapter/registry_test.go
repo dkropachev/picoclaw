@@ -11,6 +11,14 @@ import (
 	"github.com/sipeed/picoclaw/pkg/database"
 )
 
+type registryValidationGeneration struct{}
+
+func (registryValidationGeneration) StoreID() database.StoreID { return "workspace/workflows" }
+func (registryValidationGeneration) Domain() string            { return "workflows" }
+func (registryValidationGeneration) ReadScalar(string, ...string) (ValidationScalar, error) {
+	return ValidationScalar{Kind: ValidationInt64, Int64: 1}, nil
+}
+
 func TestRegistryIsExplicitSortedAndImmutable(t *testing.T) {
 	objects := []SchemaObject{
 		{Type: "table", Name: "storage_imports"},
@@ -18,8 +26,14 @@ func TestRegistryIsExplicitSortedAndImmutable(t *testing.T) {
 	}
 	columns := []string{"component", "closed_at"}
 	called := false
+	validated := false
 	migrate := func(context.Context, Target) error {
 		called = true
+		return nil
+	}
+	validate := func(_ context.Context, generation ExactReadOnlyGeneration) error {
+		validated = generation.StoreID() == "workspace/workflows" &&
+			generation.Domain() == "workflows"
 		return nil
 	}
 	registry, err := NewRegistry(
@@ -32,7 +46,7 @@ func TestRegistryIsExplicitSortedAndImmutable(t *testing.T) {
 				RequiredColumns: []ColumnSet{{Table: "storage_import_horizons", Columns: columns}},
 				ImportHorizon:   "workflows",
 			},
-			Migrate: migrate,
+			Migrate: migrate, Validate: validate,
 		},
 		Adapter{
 			Domain:   "auth",
@@ -55,7 +69,8 @@ func TestRegistryIsExplicitSortedAndImmutable(t *testing.T) {
 	}
 
 	adapter, ok := registry.Lookup("workflows")
-	if !ok || adapter.Domain != "workflows" || adapter.Contract.CurrentVersion != 3 || adapter.Migrate == nil {
+	if !ok || adapter.Domain != "workflows" || adapter.Contract.CurrentVersion != 3 ||
+		adapter.Migrate == nil || adapter.Validate == nil {
 		t.Fatalf("Lookup(workflows) = %#v, %t", adapter, ok)
 	}
 	if adapter.Contract.RequiredObjects[0].Name != "storage_imports" ||
@@ -72,7 +87,11 @@ func TestRegistryIsExplicitSortedAndImmutable(t *testing.T) {
 	if err := fresh.Migrate(t.Context(), Target{ID: database.StoreID("workspace/workflows")}); err != nil || !called {
 		t.Fatalf("migration callback = %v, called %t", err, called)
 	}
-	if missing, found := registry.Lookup("missing"); found || missing.Domain != "" || missing.Migrate != nil {
+	if err := fresh.Validate(t.Context(), registryValidationGeneration{}); err != nil || !validated {
+		t.Fatalf("validation callback = %v, validated %t", err, validated)
+	}
+	if missing, found := registry.Lookup("missing"); found || missing.Domain != "" ||
+		missing.Migrate != nil || missing.Validate != nil {
 		t.Fatalf("Lookup(missing) = %#v, %t", missing, found)
 	}
 }
@@ -230,7 +249,8 @@ func TestNilAndEmptyRegistry(t *testing.T) {
 	if domains := nilRegistry.Domains(); domains != nil {
 		t.Fatalf("nil Domains() = %#v", domains)
 	}
-	if adapter, ok := nilRegistry.Lookup("auth"); ok || adapter.Domain != "" || adapter.Migrate != nil {
+	if adapter, ok := nilRegistry.Lookup("auth"); ok || adapter.Domain != "" ||
+		adapter.Migrate != nil || adapter.Validate != nil {
 		t.Fatalf("nil Lookup() = %#v, %t", adapter, ok)
 	}
 }

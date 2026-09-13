@@ -40,6 +40,16 @@ var validatedReplacementConsumers = map[string]map[string]bool{
 
 const validatedReplacementUseConsumer = "internal/databasemigration/backup_archive.go"
 
+var inspectionDomainValidationConsumers = map[string]bool{
+	"internal/databasemigration/migration.go": true,
+	"internal/databasereadiness/readiness.go": true,
+}
+
+var inspectionDomainValidationExpectedCalls = map[string]int{
+	"internal/databasemigration/migration.go": 2,
+	"internal/databasereadiness/readiness.go": 1,
+}
+
 func TestSQLiteProviderBoundaryVersionIsStable(t *testing.T) {
 	if providerBoundaryVersion != "picoclaw/sqlite-provider-boundary/v1" {
 		t.Fatalf("provider boundary version = %q", providerBoundaryVersion)
@@ -177,6 +187,95 @@ func TestSQLiteProviderValidatedReplacementBoundaryIsNarrow(t *testing.T) {
 	}
 }
 
+func TestSQLiteProviderInspectionDomainValidationConsumersAreNarrow(t *testing.T) {
+	t.Parallel()
+	violations, err := inspectionDomainValidationBoundaryViolations(
+		sqliteProviderRepositoryRoot(t),
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) != 0 {
+		t.Fatalf("SQLite inspection domain-validation boundary changed:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestSQLiteProviderInspectionDomainValidationGuardRejectsEscapeForms(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	files := map[string]string{
+		"internal/databasemigration/migration.go": `package databasemigration
+func allowed(inspection interface{ ValidateDomain() error }) error {
+    if err := inspection.ValidateDomain(); err != nil { return err }
+    return inspection.ValidateDomain()
+}
+`,
+		"internal/databasereadiness/readiness.go": `package databasereadiness
+func allowed(inspection interface{ ValidateDomain() error }) error {
+    return inspection.ValidateDomain()
+}
+`,
+		"internal/rogue/direct.go": `package rogue
+func denied(inspection interface{ ValidateDomain() error }) error {
+    return inspection.ValidateDomain()
+}
+`,
+		"internal/cache/direct.go": `package cache
+func denied(inspection interface{ ValidateDomain() error }) error {
+    return inspection.ValidateDomain()
+}
+`,
+		"internal/gen/direct.go": `package gen
+func denied(inspection interface{ ValidateDomain() error }) error {
+    return inspection.ValidateDomain()
+}
+`,
+		"internal/generated/direct.go": `package generated
+func denied(inspection interface{ ValidateDomain() error }) error {
+    return inspection.ValidateDomain()
+}
+`,
+		"internal/databasemigration/alias.go": `package databasemigration
+func deniedAlias(inspection interface{ ValidateDomain() error }) {
+    retained := inspection.ValidateDomain
+    _ = retained
+}
+`,
+		"internal/databasereadiness/async.go": `package databasereadiness
+func deniedAsync(inspection interface{ ValidateDomain() error }) {
+    go inspection.ValidateDomain()
+}
+`,
+	}
+	for relative, source := range files {
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	violations, err := inspectionDomainValidationBoundaryViolations(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(violations, "\n")
+	for _, expected := range []string{
+		"internal/rogue/direct.go",
+		"internal/cache/direct.go",
+		"internal/gen/direct.go",
+		"internal/generated/direct.go",
+		"internal/databasemigration/alias.go",
+		"internal/databasereadiness/async.go",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Errorf("inspection validation guard missing %q:\n%s", expected, joined)
+		}
+	}
+}
+
 func TestSQLiteProviderValidatedReplacementBoundaryRejectsUnauthorizedConsumers(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -201,6 +300,15 @@ func denied(ctx context.Context, replacement provider.ValidatedReplacement) erro
 var _ = provider.MigrateStagedOfflineFromWithLiveVerification
 var _ provider.ValidatedReplacementCheck
 var _ provider.ValidatedTargetParentCheck
+`,
+		"internal/rogue/domain_validation.go": `package rogue
+import (
+    "context"
+    provider "github.com/sipeed/picoclaw/internal/sqliteprovider"
+)
+func deniedDomainValidation(ctx context.Context, inspection provider.Inspection) error {
+    return inspection.ValidateDomain(ctx, "global/auth", "auth", nil)
+}
 `,
 		"internal/rogue/dot_import.go": `package rogue
 import . "github.com/sipeed/picoclaw/internal/sqliteprovider"
@@ -288,6 +396,7 @@ func deniedCrossFile(ctx context.Context) error {
 		{"internal/rogue/inferred.go", "cannot consume ValidatedReplacement.Use"},
 		{"internal/rogue/interface.go", "cannot consume ValidatedReplacement.Use"},
 		{"internal/rogue/cross_file.go", "cannot consume ValidatedReplacement.Use"},
+		{"internal/rogue/domain_validation.go", "cannot invoke Inspection.ValidateDomain"},
 	} {
 		found := false
 		for _, violation := range violations {
@@ -480,10 +589,109 @@ func validatedReplacementBoundaryViolations(repositoryRoot string) ([]string, er
 					))
 				}
 			}
+			if selector.Sel.Name == "ValidateDomain" &&
+				!inspectionDomainValidationConsumers[relative] {
+				violations = append(violations, fmt.Sprintf(
+					"%s:%d: cannot invoke Inspection.ValidateDomain",
+					relative, fileSet.Position(selector.Pos()).Line,
+				))
+			}
 			return true
 		})
 		return nil
 	})
+	sort.Strings(violations)
+	return violations, err
+}
+
+func inspectionDomainValidationBoundaryViolations(
+	repositoryRoot string,
+	requireExpected bool,
+) ([]string, error) {
+	actual := make(map[string]int)
+	var violations []string
+	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != repositoryRoot && sqliteProviderImportGuardSkipsDir(entry.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		relative, err := filepath.Rel(repositoryRoot, path)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		fileSet := token.NewFileSet()
+		parsed, err := parser.ParseFile(fileSet, path, nil, parser.AllErrors)
+		if err != nil {
+			return fmt.Errorf("parse production Go file %s: %w", relative, err)
+		}
+		direct := make(map[token.Pos]bool)
+		asynchronous := make(map[token.Pos]bool)
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			switch value := node.(type) {
+			case *ast.CallExpr:
+				if selector, ok := value.Fun.(*ast.SelectorExpr); ok &&
+					selector.Sel.Name == "ValidateDomain" {
+					direct[selector.Pos()] = true
+				}
+			case *ast.GoStmt:
+				ast.Inspect(value.Call, func(child ast.Node) bool {
+					if selector, ok := child.(*ast.SelectorExpr); ok &&
+						selector.Sel.Name == "ValidateDomain" {
+						asynchronous[selector.Pos()] = true
+					}
+					return true
+				})
+			case *ast.DeferStmt:
+				ast.Inspect(value.Call, func(child ast.Node) bool {
+					if selector, ok := child.(*ast.SelectorExpr); ok &&
+						selector.Sel.Name == "ValidateDomain" {
+						asynchronous[selector.Pos()] = true
+					}
+					return true
+				})
+			}
+			return true
+		})
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			selector, ok := node.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "ValidateDomain" {
+				return true
+			}
+			if !inspectionDomainValidationConsumers[relative] || !direct[selector.Pos()] ||
+				asynchronous[selector.Pos()] {
+				violations = append(violations, fmt.Sprintf(
+					"%s:%d cannot retain or asynchronously invoke Inspection.ValidateDomain",
+					relative,
+					fileSet.Position(selector.Pos()).Line,
+				))
+				return true
+			}
+			actual[relative]++
+			return true
+		})
+		return nil
+	})
+	if requireExpected {
+		for relative, expected := range inspectionDomainValidationExpectedCalls {
+			if actual[relative] != expected {
+				violations = append(violations, fmt.Sprintf(
+					"%s direct Inspection.ValidateDomain calls = %d, want %d",
+					relative,
+					actual[relative],
+					expected,
+				))
+			}
+		}
+	}
 	sort.Strings(violations)
 	return violations, err
 }
@@ -603,7 +811,7 @@ func sqliteProviderRepositoryRoot(t *testing.T) string {
 
 func sqliteProviderImportGuardSkipsDir(name string) bool {
 	switch strings.ToLower(name) {
-	case ".git", ".cache", "cache", "generated", "gen", "node_modules", "testdata", "vendor":
+	case ".git", ".cache", "node_modules", "testdata", "vendor":
 		return true
 	default:
 		return false

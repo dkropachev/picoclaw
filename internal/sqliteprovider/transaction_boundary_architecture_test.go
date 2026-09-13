@@ -16,6 +16,8 @@ import (
 
 const transactionBoundaryConsumer = "internal/sqlitestore/open.go"
 
+const transactionBoundaryInternalConsumer = "internal/sqliteprovider/inspection_validation.go"
+
 func TestTransactionBoundaryConsumptionAndHooksAreNarrow(t *testing.T) {
 	t.Parallel()
 	violations, err := transactionBoundaryArchitectureViolations(sqliteProviderRepositoryRoot(t))
@@ -40,6 +42,10 @@ func allowed(conn *sql.Conn) { _, _ = provider.NewTransactionBoundary(conn) }
 		"internal/rogue/direct.go": `package rogue
 import provider "github.com/sipeed/picoclaw/internal/sqliteprovider"
 type copied = provider.TransactionBoundary
+var _ = provider.NewTransactionBoundary
+`,
+		"internal/cache/direct.go": `package cache
+import provider "github.com/sipeed/picoclaw/internal/sqliteprovider"
 var _ = provider.NewTransactionBoundary
 `,
 		"internal/rogue/dot.go": `package rogue
@@ -79,11 +85,117 @@ func replaceHooks(value registrar) {
 		"cannot consume sqliteprovider.NewTransactionBoundary",
 		"cannot consume dot-imported sqliteprovider.TransactionBoundary",
 		"cannot control SQLite transaction hooks",
+		"internal/cache/direct.go",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Errorf("transaction architecture guard missing %q:\n%s", expected, joined)
 		}
 	}
+}
+
+func TestTransactionBoundaryProviderInternalConstructionIsNarrow(t *testing.T) {
+	t.Parallel()
+	violations, err := transactionBoundaryInternalConstructionViolations(
+		sqliteProviderRepositoryRoot(t),
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) != 0 {
+		t.Fatalf("SQLite provider transaction-boundary construction changed:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestTransactionBoundaryProviderInternalGuardRejectsUnauthorizedCall(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for relative, source := range map[string]string{
+		transactionBoundaryInternalConsumer: `package sqliteprovider
+func allowed() { _, _ = NewTransactionBoundary(nil) }
+`,
+		"internal/sqliteprovider/rogue.go": `package sqliteprovider
+func denied() { _, _ = NewTransactionBoundary(nil) }
+`,
+	} {
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	violations, err := transactionBoundaryInternalConstructionViolations(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) != 1 || !strings.Contains(violations[0], "rogue.go") {
+		t.Fatalf("internal constructor violations = %#v", violations)
+	}
+}
+
+func transactionBoundaryInternalConstructionViolations(
+	repositoryRoot string,
+	requireExpected bool,
+) ([]string, error) {
+	count := 0
+	var violations []string
+	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != repositoryRoot && sqliteProviderImportGuardSkipsDir(entry.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") ||
+			filepath.Clean(filepath.Dir(path)) != filepath.Join(repositoryRoot, "internal", "sqliteprovider") {
+			return nil
+		}
+		relative, err := filepath.Rel(repositoryRoot, path)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		fileSet := token.NewFileSet()
+		parsed, err := parser.ParseFile(fileSet, path, nil, parser.AllErrors)
+		if err != nil {
+			return fmt.Errorf("parse production Go file %s: %w", relative, err)
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			identifier, ok := call.Fun.(*ast.Ident)
+			if !ok || identifier.Name != "NewTransactionBoundary" {
+				return true
+			}
+			if relative == transactionBoundaryInternalConsumer {
+				count++
+				return true
+			}
+			violations = append(violations, fmt.Sprintf(
+				"%s:%d cannot construct SQLite transaction boundary",
+				relative,
+				fileSet.Position(call.Pos()).Line,
+			))
+			return true
+		})
+		return nil
+	})
+	if requireExpected && count != 1 {
+		violations = append(violations, fmt.Sprintf(
+			"%s NewTransactionBoundary calls = %d, want 1",
+			transactionBoundaryInternalConsumer,
+			count,
+		))
+	}
+	sort.Strings(violations)
+	return violations, err
 }
 
 func transactionBoundaryArchitectureViolations(repositoryRoot string) ([]string, error) {

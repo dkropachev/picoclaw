@@ -164,6 +164,107 @@ func TestProbeFailsClosedAcrossLifecycleTransitions(t *testing.T) {
 	})
 }
 
+func TestProbePreservesExactValidationInfrastructureAcrossExitRaces(t *testing.T) {
+	home := t.TempDir()
+	lease, _ := acquireReadinessLease(t, home)
+	spec := lease.Stores()[0]
+	registry := readinessRegistry(
+		t,
+		[]storecatalog.Spec{spec},
+		spec.Domain,
+		databaseadapter.Contract{
+			CurrentVersion: 1,
+			EmptyPolicy:    databaseadapter.EmptyInitializeOnline,
+		},
+		func(context.Context, databaseadapter.ExactReadOnlyGeneration) error { return nil },
+	)
+	exactInfrastructure := errors.New("exact validation infrastructure canary")
+	reconcileFailure := errors.New("exact validation reconcile canary")
+	base := func() readinessProbeOps {
+		ops := defaultReadinessProbeOps()
+		ops.preflight = func(*databaseclaims.Lease) []storecatalog.Spec { return []storecatalog.Spec{spec} }
+		ops.exclusions = func([]storecatalog.Spec) (generationSet, error) { return generationSet{}, nil }
+		ops.inspect = func(
+			context.Context,
+			string,
+			time.Duration,
+			func() error,
+		) (sqliteprovider.Inspection, error) {
+			return sqliteprovider.Inspection{Exists: true, Version: 1}, nil
+		}
+		ops.revalidate = func(context.Context, sqliteprovider.Inspection) error { return nil }
+		ops.classify = func(
+			context.Context,
+			storecatalog.Spec,
+			databaseadapter.Contract,
+			sqliteprovider.Inspection,
+			error,
+			generationSet,
+			*legacyDiscoveryBudget,
+		) database.StoreStatus {
+			return database.StoreStatus{ID: spec.ID, Readiness: database.StoreReady}
+		}
+		ops.infrastructure = func(err error) bool { return errors.Is(err, exactInfrastructure) }
+		ops.release = func(sqliteprovider.Inspection) error { return nil }
+		return ops
+	}
+
+	t.Run("reconciliation", func(t *testing.T) {
+		ops := base()
+		validated := false
+		ops.guardStores = func(
+			*databaseclaims.Lease,
+		) ([]storecatalog.Spec, func() error, func(), error) {
+			return []storecatalog.Spec{spec}, func() error {
+				if validated {
+					return reconcileFailure
+				}
+				return nil
+			}, func() {}, nil
+		}
+		ops.validateDomain = func(
+			context.Context,
+			database.StoreID,
+			string,
+			databaseadapter.ValidateFunc,
+			sqliteprovider.Inspection,
+		) error {
+			validated = true
+			return exactInfrastructure
+		}
+		snapshot, err := probeWithOps(t.Context(), lease, registry, ops)
+		if snapshot != nil || !errors.Is(err, exactInfrastructure) ||
+			!errors.Is(err, reconcileFailure) || database.CodeOf(err) != database.CodeUnavailable {
+			t.Fatalf("reconcile plus exact infrastructure = %#v, %v", snapshot, err)
+		}
+	})
+
+	t.Run("parent cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		ops := base()
+		ops.guardStores = func(
+			*databaseclaims.Lease,
+		) ([]storecatalog.Spec, func() error, func(), error) {
+			return []storecatalog.Spec{spec}, func() error { return nil }, func() {}, nil
+		}
+		ops.validateDomain = func(
+			context.Context,
+			database.StoreID,
+			string,
+			databaseadapter.ValidateFunc,
+			sqliteprovider.Inspection,
+		) error {
+			cancel()
+			return exactInfrastructure
+		}
+		snapshot, err := probeWithOps(ctx, lease, registry, ops)
+		if snapshot != nil || !errors.Is(err, exactInfrastructure) ||
+			!errors.Is(err, context.Canceled) || database.CodeOf(err) != database.CodeUnavailable {
+			t.Fatalf("cancellation plus exact infrastructure = %#v, %v", snapshot, err)
+		}
+	})
+}
+
 func TestClassifyInspectionMapsLegacyAndHorizonFailures(t *testing.T) {
 	spec := storecatalog.Spec{ID: "global/auth", Domain: "auth", LegacyRoots: []string{"legacy.json"}}
 	canceled, cancel := context.WithCancel(context.Background())
